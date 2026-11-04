@@ -13,6 +13,7 @@ mod lane_node;
 mod log_capture;
 mod wire_counter;
 
+use std::array;
 use std::sync::Arc;
 
 use iroh::{EndpointId, SecretKey};
@@ -69,6 +70,14 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
 /// should fail loudly at the assertion rather than be handled.
 pub(crate) fn nick(name: &str) -> Nickname {
     Nickname::try_new(name).expect("valid test nickname")
+}
+
+/// The author key that the roster fixtures give to `nickname`: the same text always gives the
+/// same key, and two texts give two keys.
+pub(crate) fn test_key(nickname: &str) -> AuthorKey {
+    let text = nickname.as_bytes();
+    let bytes: [u8; 32] = array::from_fn(|index| text[index % text.len()]);
+    AuthorKey::from_bytes(bytes)
 }
 
 /// A deterministic endpoint id from `seed`, so a test can name the same peer

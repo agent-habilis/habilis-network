@@ -6,7 +6,7 @@
 
 use crate::daemon::state::{EventLoopState, LiveRun, StepBack};
 use crate::lifecycle::heartbeat;
-use crate::protocol::{AuthorKey, MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
+use crate::protocol::{AuthorKey, MessageKind, PresenceSubtype, UnixSecs, Verified};
 use crate::util::clock::Instant;
 use crate::util::tuning::{self, ALIVE_INTERVAL};
 use std::time::Duration;
@@ -92,17 +92,13 @@ pub(crate) fn is_live_kind(kind: &MessageKind) -> bool {
 }
 
 /// Whether a frame stamped `timestamp` is stamped after the newest frame that we heard from the
-/// quiet `author`. A copy of a frame that a relay held carries the stamp of that frame or an older
+/// quiet peer `key`. A copy of a frame that a relay held carries the stamp of that frame or an older
 /// one, so it is not news. Both stamps come from the clock of the author, so a constant skew
 /// between that clock and ours cancels. With no stamp on record every frame is news.
-fn stamped_after_last_heard(
-    author: &Nickname,
-    timestamp: UnixSecs,
-    state: &EventLoopState,
-) -> bool {
+fn stamped_after_last_heard(key: AuthorKey, timestamp: UnixSecs, state: &EventLoopState) -> bool {
     state
         .peer_stamp
-        .get(author)
+        .get(&key)
         .is_none_or(|newest| timestamp > *newest)
 }
 
@@ -128,32 +124,25 @@ fn step_back_window() -> Duration {
     ALIVE_INTERVAL * 3
 }
 
-/// Count a frame of the quiet `author` that proves presence but is stamped at or below the newest
+/// Count a frame of the quiet peer `key` that proves presence but is stamped at or below the newest
 /// stamp on record. The clock of the author may have stepped back (a laptop that woke, a clock
 /// that was set right): then its stamps rise from a lower base and never pass the old stamp, which
 /// would hide a live peer. When [`STEP_BACK_FRAMES`] frames, each stamped after the one before
 /// and each arriving [`step_back_spacing`] after it, have counted, the old stamp is dropped and
 /// the next check lets the peer return. Returns whether the run is complete.
-fn note_step_back(
-    author: &Nickname,
-    key: AuthorKey,
-    timestamp: UnixSecs,
-    state: &mut EventLoopState,
-) -> bool {
+fn note_step_back(key: AuthorKey, timestamp: UnixSecs, state: &mut EventLoopState) -> bool {
     let now = Instant::now();
     let start = StepBack {
-        key,
         last: timestamp,
         at: now,
         count: 1,
     };
-    let Some(run) = state.clock_evidence.step_back.get_mut(author) else {
-        state.clock_evidence.step_back.insert(author.clone(), start);
+    let Some(run) = state.clock_evidence.step_back.get_mut(&key) else {
+        state.clock_evidence.step_back.insert(key, start);
         return false;
     };
-    // The run is the stream of one key, or the key of the frame that completes it takes the
-    // nickname. Frames that come far apart are not the stream of a live peer either.
-    if run.key != key || now.duration_since(run.at) > step_back_window() {
+    // Frames that come far apart are not the stream of a live peer.
+    if now.duration_since(run.at) > step_back_window() {
         *run = start;
         return false;
     }
@@ -165,7 +154,7 @@ fn note_step_back(
         run.count += 1;
     }
     if run.count >= STEP_BACK_FRAMES {
-        state.clock_evidence.step_back.remove(author);
+        state.clock_evidence.step_back.remove(&key);
         return true;
     }
     false
@@ -186,13 +175,13 @@ fn note_step_back(
 /// [`MembershipUpdate::stale`]).
 pub(crate) fn compute(
     kind: &MessageKind,
-    author: &Nickname,
+    key: AuthorKey,
     timestamp: UnixSecs,
     state: &EventLoopState,
 ) -> MembershipUpdate {
-    let quiet = state.quiet.contains(author.as_str());
+    let quiet = state.quiet.contains(&key);
     let proves_return =
-        proves_presence(kind, timestamp) && stamped_after_last_heard(author, timestamp, state);
+        proves_presence(kind, timestamp) && stamped_after_last_heard(key, timestamp, state);
     if quiet && !proves_return {
         return MembershipUpdate {
             returned: false,
@@ -200,7 +189,7 @@ pub(crate) fn compute(
             stale: true,
         };
     }
-    let known = state.peers.contains(author.as_str());
+    let known = state.peers.contains(&key);
     let unseen = match kind {
         // A `Left` is explicit departure; durable state events never mark a
         // peer present either — anti-entropy backfill replays historical state
@@ -233,10 +222,10 @@ pub(crate) fn compute(
     }
 }
 
-/// [`compute`] for a verified message, plus the one rule that needs the key: a message signed
-/// by a key that said goodbye is stale at any timestamp. That includes a second copy of the
-/// goodbye itself: the first one recorded the key, and a copy must not read as the return of
-/// whoever holds the nickname now.
+/// [`compute`] for a verified message, plus the one rule that needs the key's history: a message
+/// signed by a key that said goodbye is stale at any timestamp. That includes a second copy of the
+/// goodbye itself: the first one recorded the key. A key is minted per run, so a key that left never
+/// speaks again, and nothing else is needed to tell a replay of an old run from a new one.
 pub(crate) fn compute_for(message: &Verified, state: &EventLoopState) -> MembershipUpdate {
     if state.key_said_goodbye(message.key()) {
         return MembershipUpdate {
@@ -245,37 +234,14 @@ pub(crate) fn compute_for(message: &Verified, state: &EventLoopState) -> Members
             stale: true,
         };
     }
-    if is_replay_after_goodbye(message, state) {
-        return MembershipUpdate {
-            returned: false,
-            joined_new: false,
-            stale: true,
-        };
-    }
-    compute(&message.kind, &message.author, message.timestamp, state)
-}
-
-/// Whether `message` is a frame of an older run of a nickname that said goodbye and is gone: it
-/// is stamped at or before that goodbye, and nobody holds the nickname now. A frame of a killed
-/// run that a relay still holds is not an arrival. A stamp is whole seconds, so a frame in the
-/// second of the goodbye cannot be told from one before it. A new run that starts in that second,
-/// or with a clock behind the goodbye, proves itself by a run of frames (see [`note_live_run`]).
-fn is_replay_after_goodbye(message: &Verified, state: &EventLoopState) -> bool {
-    let author = message.author.as_str();
-    let gone = !state.peers.contains(author) && !state.quiet.contains(author);
-    gone && state
-        .clock_evidence
-        .goodbye_stamp
-        .get(&message.author)
-        .is_some_and(|said| message.timestamp <= *said)
+    compute(&message.kind, message.key(), message.timestamp, state)
 }
 
 /// How far the stamps of a run may drift from our clock, from one counted frame to the next. The
 /// stamps are whole seconds and a frame can wait in a queue, so a live peer is a few seconds off.
 const RUN_PACE_TOLERANCE: Duration = Duration::from_secs(5);
 
-/// Count a live frame that is stamped behind a reference: before our join, or before the goodbye
-/// of an older run of its nickname. Say whether its sender is sending now. One such frame looks
+/// Count a live frame that is stamped before our join. Say whether its sender is sending now. One such frame looks
 /// like backlog. A run does not: [`STEP_BACK_FRAMES`] frames of one key, each arriving
 /// [`step_back_spacing`] after the one before and no later than [`step_back_window`], with a
 /// stamp that is later by the time that passed on our clock (within [`RUN_PACE_TOLERANCE`]). A
@@ -292,20 +258,16 @@ pub(crate) fn note_live_run(message: &Verified, state: &mut EventLoopState) -> b
     let now = Instant::now();
     let key = message.key();
     let start = LiveRun {
-        key,
         last: message.timestamp,
         at: now,
         count: 1,
     };
-    let Some(run) = state.clock_evidence.live_run.get_mut(&message.author) else {
-        state
-            .clock_evidence
-            .live_run
-            .insert(message.author.clone(), start);
+    let Some(run) = state.clock_evidence.live_run.get_mut(&key) else {
+        state.clock_evidence.live_run.insert(key, start);
         return false;
     };
     let waited = now.duration_since(run.at);
-    if run.key != key || waited > step_back_window() {
+    if waited > step_back_window() {
         *run = start;
         return false;
     }
@@ -334,25 +296,13 @@ pub(crate) fn note_live_run(message: &Verified, state: &mut EventLoopState) -> b
 /// update is computed again. A key that said goodbye never returns this way.
 pub(crate) fn compute_observed(message: &Verified, state: &mut EventLoopState) -> MembershipUpdate {
     let update = compute_for(message, state);
-    // A frame stamped before the goodbye of an older run is a replay, unless its key sends now: a
-    // new run with a clock behind the old run. The run that proves it drops the old goodbye.
-    if update.stale
-        && is_replay_after_goodbye(message, state)
-        && !state.key_said_goodbye(message.key())
-        && note_live_run(message, state)
-    {
-        state.clock_evidence.goodbye_stamp.remove(&message.author);
-        // The new run is behind the stamps of the old one: those no longer hold it back, and its
-        // next frame takes the nickname.
-        state.peer_stamp.remove(&message.author);
-        return compute_for(message, state);
-    }
+    let key = message.key();
     let steps_back: bool = update.stale
-        && state.quiet.contains(message.author.as_str())
-        && !state.key_said_goodbye(message.key())
+        && state.quiet.contains(&key)
+        && !state.key_said_goodbye(key)
         && proves_presence(&message.kind, message.timestamp);
-    if steps_back && note_step_back(&message.author, message.key(), message.timestamp, state) {
-        state.peer_stamp.remove(message.author.as_str());
+    if steps_back && note_step_back(key, message.timestamp, state) {
+        state.peer_stamp.remove(&key);
         return compute_for(message, state);
     }
     update
@@ -361,21 +311,21 @@ pub(crate) fn compute_observed(message: &Verified, state: &mut EventLoopState) -
 /// Apply a membership update to the mutable state. Mirror of the
 /// pure `compute`: all side effects live here so tests of `compute`
 /// remain free of any mutation.
-pub(crate) fn apply(update: &MembershipUpdate, author: &Nickname, state: &mut EventLoopState) {
+pub(crate) fn apply(update: &MembershipUpdate, key: AuthorKey, state: &mut EventLoopState) {
     if update.returned {
-        state.quiet.remove(author.as_str());
+        state.quiet.remove(&key);
         // A peer that is back is not quiet any more: its old recency must not make the sweep read
         // it as a peer that outlived the quiet TTL.
-        state.quiet_since.remove(author.as_str());
-        state.peers.insert(author.clone());
+        state.quiet_since.remove(&key);
+        state.peers.insert(key);
     }
     if update.joined_new {
-        state.peers.insert(author.clone());
+        state.peers.insert(key);
     }
     if update.returned || update.joined_new {
         state.write_peer_count();
         tracing::debug!(
-            nickname = %author,
+            key = %key,
             returned = update.returned,
             joined_new = update.joined_new,
             peers = state.peers.len(),
@@ -388,10 +338,10 @@ pub(crate) fn apply(update: &MembershipUpdate, author: &Nickname, state: &mut Ev
 mod tests {
     use crate::daemon::state::EventLoopState;
     use crate::protocol::Nickname;
-    use crate::testing::{fresh_state, nick};
+    use crate::testing::{fresh_state, nick, test_key};
 
     use crate::protocol::identity::Identity;
-    use crate::protocol::{MeshId, Message, Verified};
+    use crate::protocol::{AuthorKey, MeshId, Message, Verified};
 
     use std::time::Duration;
 
@@ -408,7 +358,7 @@ mod tests {
         let state = fresh_state();
         let update = compute(
             &MessageKind::app_broadcast("app_msg"),
-            &nick("swift-cedar"),
+            test_key("swift-cedar"),
             UnixSecs::now(),
             &state,
         );
@@ -426,10 +376,10 @@ mod tests {
     fn known_author_is_not_joined_new() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.peers.insert(nick("swift-cedar"));
+        state.peer_for_test("swift-cedar");
         let update = compute(
             &MessageKind::app_broadcast("app_msg"),
-            &nick("swift-cedar"),
+            test_key("swift-cedar"),
             UnixSecs::from(0),
             &state,
         );
@@ -445,7 +395,7 @@ mod tests {
             &MessageKind::Presence {
                 subtype: PresenceSubtype::Left,
             },
-            &nick("swift-cedar"),
+            test_key("swift-cedar"),
             UnixSecs::from(0),
             &state,
         );
@@ -456,10 +406,10 @@ mod tests {
     fn quiet_peer_message_marks_returned() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.quiet.insert(nick("swift-cedar"));
+        state.quiet_for_test("swift-cedar");
         let update = compute(
             &MessageKind::app_broadcast("app_msg"),
-            &nick("swift-cedar"),
+            test_key("swift-cedar"),
             UnixSecs::now(),
             &state,
         );
@@ -482,7 +432,7 @@ mod tests {
             &MessageKind::Presence {
                 subtype: PresenceSubtype::Alive,
             },
-            &nick("swift-cedar"),
+            test_key("swift-cedar"),
             UnixSecs::now(),
             &state,
         );
@@ -501,9 +451,9 @@ mod tests {
             joined_new: true,
             stale: false,
         };
-        apply(&update, &nick("swift-cedar"), &mut state);
+        apply(&update, test_key("swift-cedar"), &mut state);
         assert!(
-            state.peers.contains("swift-cedar"),
+            state.peers.contains(&test_key("swift-cedar")),
             "applying a joined_new update inserts the peer"
         );
     }
@@ -512,36 +462,42 @@ mod tests {
     fn apply_removes_from_quiet_on_returned() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.quiet.insert(nick("swift-cedar"));
+        state.quiet_for_test("swift-cedar");
         let update = MembershipUpdate {
             returned: true,
             joined_new: false,
             stale: false,
         };
-        apply(&update, &nick("swift-cedar"), &mut state);
+        apply(&update, test_key("swift-cedar"), &mut state);
         assert!(
-            !state.quiet.contains("swift-cedar"),
+            !state.quiet.contains(&test_key("swift-cedar")),
             "applying a returned update removes the peer from quiet"
         );
         assert!(
-            state.peers.contains("swift-cedar"),
+            state.peers.contains(&test_key("swift-cedar")),
             "applying a returned update puts the peer in the roster"
         );
     }
 
     /// A quiet peer whose last frame we heard 100 s ago.
     fn quiet_since_100_secs() -> (EventLoopState, Nickname) {
+        quiet_since_100_secs_of(test_key("swift-cedar"))
+    }
+
+    /// [`quiet_since_100_secs`] for the quiet peer with the key `key`.
+    fn quiet_since_100_secs_of(key: AuthorKey) -> (EventLoopState, Nickname) {
         let who = nick("swift-cedar");
         let mut state = fresh_state();
-        state.quiet.insert(who.clone());
+        state.names.insert(key, who.clone());
+        state.quiet.insert(key);
         let heard = Instant::now()
             .checked_sub(Duration::from_secs(100))
             .expect("the monotonic clock has run past 100 s since boot");
-        state.quiet_since.insert(who.clone(), heard);
+        state.quiet_since.insert(key, heard);
         // The newest stamp of the peer is the one of its last frame, on its own clock.
         state
             .peer_stamp
-            .insert(who.clone(), UnixSecs::now() - Duration::from_secs(100));
+            .insert(key, UnixSecs::now() - Duration::from_secs(100));
         (state, who)
     }
 
@@ -566,12 +522,12 @@ mod tests {
             MessageKind::StateDigest,
             MessageKind::MetaDigest,
         ] {
-            let back = compute(&kind, &who, now, &state);
+            let back = compute(&kind, test_key(who.as_str()), now, &state);
             assert!(
                 back.returned && !back.stale,
                 "{kind:?} sent after the silence"
             );
-            let copy = compute(&kind, &who, before, &state);
+            let copy = compute(&kind, test_key(who.as_str()), before, &state);
             assert!(
                 copy.stale && !copy.returned && !copy.joined_new,
                 "{kind:?} sent before the silence"
@@ -598,8 +554,8 @@ mod tests {
             ("120 s behind", heard_at - Duration::from_secs(120)),
         ];
         for (clock, stamp) in stamps {
-            state.peer_stamp.insert(who.clone(), stamp);
-            let replay = compute(&alive, &who, stamp, &state);
+            state.peer_stamp.insert(test_key(who.as_str()), stamp);
+            let replay = compute(&alive, test_key(who.as_str()), stamp, &state);
             assert!(
                 replay.stale && !replay.returned,
                 "a replay of the last frame from a clock {clock}"
@@ -621,12 +577,12 @@ mod tests {
             MessageKind::MetaDigest,
             MessageKind::Digest,
         ] {
-            let stale_copy = compute(&kind, &who, old, &state);
+            let stale_copy = compute(&kind, test_key(who.as_str()), old, &state);
             assert!(
                 !stale_copy.joined_new,
                 "{kind:?} stamped 2 h ago made an arrival"
             );
-            let fresh = compute(&kind, &who, UnixSecs::now(), &state);
+            let fresh = compute(&kind, test_key(who.as_str()), UnixSecs::now(), &state);
             assert!(fresh.joined_new, "{kind:?} stamped now is an arrival");
         }
     }
@@ -644,18 +600,23 @@ mod tests {
         };
         state
             .peer_stamp
-            .insert(who.clone(), heard_at + Duration::from_secs(30));
-        let ahead = compute(&alive, &who, heard_at + Duration::from_secs(30), &state);
+            .insert(test_key(who.as_str()), heard_at + Duration::from_secs(30));
+        let ahead = compute(
+            &alive,
+            test_key(who.as_str()),
+            heard_at + Duration::from_secs(30),
+            &state,
+        );
         assert!(
             ahead.stale && !ahead.returned,
             "a replay from a clock 30 s ahead"
         );
         state
             .peer_stamp
-            .insert(who.clone(), heard_at - Duration::from_secs(30));
+            .insert(test_key(who.as_str()), heard_at - Duration::from_secs(30));
         let behind = compute(
             &MessageKind::Meta,
-            &who,
+            test_key(who.as_str()),
             UnixSecs::now() - Duration::from_secs(30),
             &state,
         );
@@ -677,8 +638,13 @@ mod tests {
         };
         state
             .peer_stamp
-            .insert(who.clone(), heard_at + Duration::from_secs(120));
-        let replay = compute(&alive, &who, heard_at + Duration::from_secs(120), &state);
+            .insert(test_key(who.as_str()), heard_at + Duration::from_secs(120));
+        let replay = compute(
+            &alive,
+            test_key(who.as_str()),
+            heard_at + Duration::from_secs(120),
+            &state,
+        );
         assert!(replay.stale && !replay.returned, "{replay:?}");
     }
 
@@ -691,12 +657,12 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, who) = quiet_since_100_secs();
         state.peer_stamp.insert(
-            who.clone(),
+            test_key(who.as_str()),
             UnixSecs::now() - Duration::from_secs(100) - Duration::from_secs(120),
         );
         let update = compute(
             &MessageKind::Meta,
-            &who,
+            test_key(who.as_str()),
             UnixSecs::now() - Duration::from_secs(120),
             &state,
         );
@@ -714,13 +680,13 @@ mod tests {
         let heard_at = UnixSecs::now() - Duration::from_secs(100);
         state
             .peer_stamp
-            .insert(who.clone(), heard_at - Duration::from_secs(120));
+            .insert(test_key(who.as_str()), heard_at - Duration::from_secs(120));
         let alive = MessageKind::Presence {
             subtype: PresenceSubtype::Alive,
         };
         let update = compute(
             &alive,
-            &who,
+            test_key(who.as_str()),
             UnixSecs::now() - Duration::from_secs(120),
             &state,
         );
@@ -748,9 +714,11 @@ mod tests {
     fn a_clock_that_stepped_back_returns_after_a_run_of_rising_frames() {
         let _guard = ::habilis_network_test_tracing::init();
         for step in [Duration::from_hours(1), Duration::from_secs(120)] {
-            let (mut state, who) = quiet_since_100_secs();
             let by = Identity::generate();
-            state.peer_stamp.insert(who.clone(), UnixSecs::now() + step);
+            let (mut state, who) = quiet_since_100_secs_of(by.author_key());
+            state
+                .peer_stamp
+                .insert(by.author_key(), UnixSecs::now() + step);
             for index in 0..STEP_BACK_FRAMES {
                 let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
                 let update = compute_observed(&live_frame(&who, &by, stamp), &mut state);
@@ -764,7 +732,7 @@ mod tests {
                     let run = state
                         .clock_evidence
                         .step_back
-                        .get_mut(who.as_str())
+                        .get_mut(&by.author_key())
                         .expect("the run is on record");
                     run.at = back_20_secs(run.at);
                 } else {
@@ -775,34 +743,9 @@ mod tests {
                 }
             }
             assert!(
-                !state.peer_stamp.contains_key(who.as_str()),
+                !state.peer_stamp.contains_key(&by.author_key()),
                 "the old newest stamp is dropped when the peer returns"
             );
-        }
-    }
-
-    /// The run of a step back is the stream of one key. Frames of two keys under one nickname (a
-    /// live run and a replayed run, or two keys that raced for the nickname) must not complete it:
-    /// the key of the frame that completes a run would take the nickname.
-    #[test]
-    fn a_step_back_run_of_two_keys_does_not_return_the_peer() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (mut state, who) = quiet_since_100_secs();
-        let keys = [Identity::generate(), Identity::generate()];
-        state
-            .peer_stamp
-            .insert(who.clone(), UnixSecs::now() + Duration::from_hours(1));
-        for index in 0..STEP_BACK_FRAMES + 3 {
-            let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
-            let by = &keys[usize::from(index % 2)];
-            let update = compute_observed(&live_frame(&who, by, stamp), &mut state);
-            assert!(
-                update.stale && !update.returned,
-                "frame {index} of a run that alternates between two keys returned the peer"
-            );
-            if let Some(run) = state.clock_evidence.step_back.get_mut(who.as_str()) {
-                run.at = back_20_secs(run.at);
-            }
         }
     }
 
@@ -820,7 +763,7 @@ mod tests {
         for kind in [alive, MessageKind::PeerInfo] {
             let far = compute(
                 &kind,
-                &who,
+                test_key(who.as_str()),
                 UnixSecs::now() + Duration::from_hours(2),
                 &state,
             );
@@ -830,7 +773,7 @@ mod tests {
             );
             let near = compute(
                 &kind,
-                &who,
+                test_key(who.as_str()),
                 UnixSecs::now() + Duration::from_mins(50),
                 &state,
             );
@@ -848,11 +791,11 @@ mod tests {
     #[test]
     fn a_replay_does_not_pass_for_a_step_back() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (mut state, who) = quiet_since_100_secs();
         let by = Identity::generate();
+        let (mut state, who) = quiet_since_100_secs_of(by.author_key());
         state
             .peer_stamp
-            .insert(who.clone(), UnixSecs::now() + Duration::from_hours(1));
+            .insert(by.author_key(), UnixSecs::now() + Duration::from_hours(1));
         let one = live_frame(&who, &by, UnixSecs::now());
         for repeat in 0..10 {
             let update = compute_observed(&one, &mut state);
@@ -878,11 +821,11 @@ mod tests {
     #[test]
     fn a_slow_series_of_replays_does_not_return_a_dead_peer() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (mut state, who) = quiet_since_100_secs();
         let by = Identity::generate();
+        let (mut state, who) = quiet_since_100_secs_of(by.author_key());
         state
             .peer_stamp
-            .insert(who.clone(), UnixSecs::now() + Duration::from_hours(1));
+            .insert(by.author_key(), UnixSecs::now() + Duration::from_hours(1));
         for index in 0..STEP_BACK_FRAMES + 3 {
             let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
             let update = compute_observed(&live_frame(&who, &by, stamp), &mut state);
@@ -890,7 +833,7 @@ mod tests {
                 update.stale && !update.returned,
                 "replay {index} of a slow series returned the peer"
             );
-            if let Some(run) = state.clock_evidence.step_back.get_mut(who.as_str()) {
+            if let Some(run) = state.clock_evidence.step_back.get_mut(&by.author_key()) {
                 // The next replay comes 5 min later on our clock.
                 run.at = run
                     .at
@@ -907,9 +850,10 @@ mod tests {
         let (mut state, who) = quiet_since_100_secs();
         let by = Identity::generate();
         state.note_left(by.author_key());
-        state
-            .peer_stamp
-            .insert(who.clone(), UnixSecs::now() + Duration::from_hours(1));
+        state.peer_stamp.insert(
+            test_key(who.as_str()),
+            UnixSecs::now() + Duration::from_hours(1),
+        );
         for index in 0..STEP_BACK_FRAMES + 2 {
             let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
             let update = compute_observed(&live_frame(&who, &by, stamp), &mut state);
@@ -917,7 +861,11 @@ mod tests {
                 update.stale && !update.returned,
                 "frame {index} of a key that said goodbye returned the peer"
             );
-            if let Some(run) = state.clock_evidence.step_back.get_mut(who.as_str()) {
+            if let Some(run) = state
+                .clock_evidence
+                .step_back
+                .get_mut(&test_key(who.as_str()))
+            {
                 run.at = back_20_secs(run.at);
             }
         }

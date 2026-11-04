@@ -739,7 +739,7 @@ async fn dispatch_infra(
             // that forges pongs from fabricated authors, and the probe id drops a
             // pong that answers a round that is over.
             if to == context.author
-                && state.peers.contains(message.author.as_str())
+                && state.peers.contains(&message.key())
                 && let Some(round) = state.ping_round.as_mut()
             {
                 let known = round.record_pong(message.author.clone(), probe, TokioInstant::now());
@@ -1534,18 +1534,15 @@ async fn handle_peer_info(
     // fresh endpoint replaces the old. The beacon gossips *as* the rendezvous,
     // so it advertises `rendezvous_id` here — record that too, so a joiner can
     // tell its rendezvous link belongs to the beacon's nickname.
-    // The hint belongs to the key that holds the nickname: a `PeerInfo` of another key (a frame of
-    // the same second that lost the nickname) binds nothing, or a directed send reaches a node
-    // that does not hold it. A nickname with no holder takes the first hint, unless the key
-    // already said goodbye: that frame is a replay.
-    let holds_or_free = state
-        .peer_keys
-        .get(&message.author)
-        .is_none_or(|held| *held == message.key());
-    let may_bind = holds_or_free && !state.key_said_goodbye(message.key());
+    // The hint belongs to the key that made it. A key that said goodbye never speaks again, so
+    // its `PeerInfo` is a replay and binds nothing. Another key under the same nickname binds
+    // nothing while the key that made the hint is still in the roster: a directed send must not
+    // reach a node that only borrowed the label.
+    let may_bind: bool = !state.key_said_goodbye(message.key())
+        && !state.hint_is_held_by_other(&message.author, message.key());
     let changed = may_bind && state.peer_endpoints.get(&message.author) != Some(&peer_addr);
     if may_bind {
-        state.bind_peer_endpoint(message.author.clone(), peer_addr.clone());
+        state.bind_peer_endpoint(message.key(), message.author.clone(), peer_addr.clone());
     }
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
@@ -2258,7 +2255,7 @@ mod first_contact_tests {
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::MeshSender;
 
     use crate::daemon::state::DirectState;
@@ -2374,7 +2371,7 @@ mod first_contact_tests {
                 state.standing.insert(Standing::Meshed);
                 state.unicast_pool = transport::UnicastPool::new(node.endpoint.clone(), false);
                 state.direct.insert(bob, DirectState::Direct);
-                state.peer_endpoints.insert(nick("bob"), bob_addr);
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob_addr);
                 let (failed_tx, mut failed_rx) = mpsc::unbounded_channel();
                 state.flush_failed = failed_tx;
                 let frame = Message::new_pong(
@@ -2597,7 +2594,7 @@ mod first_contact_tests {
                 lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob.addr());
                 let mut state = fresh_state();
                 state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
-                state.peer_endpoints.insert(nick("bob"), bob.addr());
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob.addr());
                 feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
                 feed(Event::NeighborDown(bob.id()), &mut state, &context).await;
                 assert!(
@@ -2876,9 +2873,9 @@ mod first_contact_tests {
             let silent = clock::Instant::now()
                 .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
                 .expect("a past instant");
-            state.last_seen.insert(nick("far-side"), silent);
-            state.peers.insert(nick("far-side"));
-            state.surfaced.insert(nick("far-side"));
+            state.last_seen.insert(test_key("far-side"), silent);
+            state.peer_for_test("far-side");
+            state.surfaced_for_test("far-side");
             heartbeat::tick_sweep(&mut state, &SilentSink);
 
             assert!(state.rendezvous_wanted(), "the sweep owes one return");
@@ -3070,7 +3067,8 @@ mod first_contact_tests {
                 &context,
             )
             .await;
-            state.peer_keys.insert(nick("bob"), holder.author_key());
+            state.names.insert(holder.author_key(), nick("bob"));
+            state.peers.insert(holder.author_key());
             assert!(!knows_relay().await, "no relay yet");
 
             let later = first.with_relay_url(relay.clone());
@@ -3157,7 +3155,8 @@ mod first_contact_tests {
                 Some(&held),
                 "a nickname with no holder takes the first hint"
             );
-            state.peer_keys.insert(nick("bob"), holder.author_key());
+            state.names.insert(holder.author_key(), nick("bob"));
+            state.peers.insert(holder.author_key());
 
             super::handle_peer_info(
                 &peer_info_signed_by(&node, &taken, &rival),
@@ -3535,7 +3534,7 @@ mod link_state_tests {
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
     use crate::protocol::{MeshId, Message};
-    use crate::testing::{fresh_state, nick};
+    use crate::testing::{fresh_state, nick, test_key};
 
     use crate::transport::PayloadPath;
     use crate::{gossip, lookup, protocol};
@@ -3601,18 +3600,22 @@ mod link_state_tests {
                 "no address learned for the author yet"
             );
 
-            state
-                .peer_endpoints
-                .insert(nick("mallory-mm"), EndpointAddr::new(bob.public()));
+            state.bind_peer_endpoint(
+                test_key("mallory-mm"),
+                nick("mallory-mm"),
+                EndpointAddr::new(bob.public()),
+            );
             super::handle_link_state(&message_from("mallory-mm"), &mut state);
             assert!(
                 ours.topology_view().edges.is_empty(),
                 "an author bound to another endpoint cannot speak for this origin"
             );
 
-            state
-                .peer_endpoints
-                .insert(nick("alice-aa"), EndpointAddr::new(alice.public()));
+            state.bind_peer_endpoint(
+                test_key("alice-aa"),
+                nick("alice-aa"),
+                EndpointAddr::new(alice.public()),
+            );
             super::handle_link_state(&message_from("alice-aa"), &mut state);
             assert_eq!(
                 ours.topology_view().edges.len(),
@@ -3706,12 +3709,10 @@ mod left_tests {
             let mut state = fresh_state();
             state.multihop = Some(handle.clone());
             let leaver = nick("leaver");
-            state.peers.insert(leaver.clone());
-            // A peer in the roster has a holder: its frames proved it alive under a key.
+            // The leaver is a peer of the roster under the key of its run.
             let leaver_run = Identity::generate();
-            state
-                .peer_keys
-                .insert(leaver.clone(), leaver_run.author_key());
+            state.names.insert(leaver_run.author_key(), leaver.clone());
+            state.peers.insert(leaver_run.author_key());
             state.note_peer_endpoint(
                 leaver.clone(),
                 EndpointAddr::new(leaver_handle.app_id().get()),
@@ -3949,7 +3950,7 @@ mod parked_link_state_tests {
 
     use crate::daemon::state::ParkedLinkStates;
     use crate::protocol::{MeshId, Message};
-    use crate::testing::{fresh_state, nick};
+    use crate::testing::{fresh_state, nick, test_key};
 
     use crate::transport::PayloadPath;
     use crate::{gossip, lookup};
@@ -4000,7 +4001,11 @@ mod parked_link_state_tests {
 
             let message = vector_message("mallory-mm", &theirs, vec![(bob.public(), 10)]);
             super::handle_link_state(&message, &mut state);
-            state.bind_peer_endpoint(nick("mallory-mm"), EndpointAddr::new(bob.public()));
+            state.bind_peer_endpoint(
+                test_key("mallory-mm"),
+                nick("mallory-mm"),
+                EndpointAddr::new(bob.public()),
+            );
             assert!(
                 ours.topology_view().edges.is_empty(),
                 "an author bound to another endpoint cannot speak for this origin"
@@ -4031,7 +4036,11 @@ mod parked_link_state_tests {
             );
             super::handle_link_state(&older, &mut state);
             super::handle_link_state(&newer, &mut state);
-            state.bind_peer_endpoint(nick("alice-aa"), EndpointAddr::new(alice.public()));
+            state.bind_peer_endpoint(
+                test_key("alice-aa"),
+                nick("alice-aa"),
+                EndpointAddr::new(alice.public()),
+            );
             assert_eq!(
                 ours.topology_view().edges.len(),
                 2,

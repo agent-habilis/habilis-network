@@ -44,6 +44,8 @@ use crate::util::tuning::{
 
 use crate::gossip::{antientropy, lan};
 use crate::protocol::{crypto, messages};
+#[cfg(test)]
+use crate::testing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::transport::redial;
 #[cfg(feature = "multihop")]
@@ -58,19 +60,16 @@ use tokio::sync::{mpsc, oneshot};
 /// our clock, and `count` is the number of frames that counted.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StepBack {
-    pub(crate) key: AuthorKey,
     pub(crate) last: UnixSecs,
     pub(crate) at: Instant,
     pub(crate) count: u8,
 }
 
-/// The run of live frames of one key that a peer sends with stamps behind a reference: before our
-/// join, or before the goodbye of an older run of its nickname. `last` is the stamp of the latest
+/// The run of live frames of one key that a peer sends with stamps before our join. `last` is the stamp of the latest
 /// frame that counted, `at` is when it arrived on our clock, and `count` is the number of frames
 /// that counted. See `membership_update::note_live_run`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LiveRun {
-    pub(crate) key: AuthorKey,
     pub(crate) last: UnixSecs,
     pub(crate) at: Instant,
     pub(crate) count: u8,
@@ -90,32 +89,25 @@ pub(crate) struct PendingSuspend {
 pub(crate) struct ClockEvidence {
     /// The run of frames of a quiet peer that rise from a stamp below `peer_stamp`, which says
     /// that its clock stepped back. See `membership_update::note_step_back`.
-    pub(crate) step_back: HashMap<Nickname, StepBack>,
+    pub(crate) step_back: HashMap<AuthorKey, StepBack>,
     /// The run of live frames of each peer whose stamps are behind our join, or behind the goodbye
     /// of an older run of its nickname. A backlog replay and a peer with a slow clock look the same
     /// in one frame. A run of frames of one key, each a time after the one before on both clocks
     /// and at the pace of our clock, shows that the peer sends now.
-    pub(crate) live_run: HashMap<Nickname, LiveRun>,
-    /// The stamp of the goodbye of each nickname that left the roster. A live frame stamped
-    /// before it is a replay of an older run, so it makes no arrival. Entries older than the quiet
-    /// TTL are pruned, because no live frame that old proves presence; at most `QUIET_CAP` stay.
-    pub(crate) goodbye_stamp: HashMap<Nickname, UnixSecs>,
+    pub(crate) live_run: HashMap<AuthorKey, LiveRun>,
     /// The peers that came back from quiet and are not shown yet, because every frame so far is
     /// stamped before our join. When the peer is shown, it is shown as returned.
-    pub(crate) returned_unshown: HashSet<Nickname>,
+    pub(crate) returned_unshown: HashSet<AuthorKey>,
     /// The real last-heard instant of each peer. The stall forgiveness moves the eviction mark
     /// (`last_seen`) and leaves this one, which the roster reports.
-    pub(crate) heard: HashMap<Nickname, Instant>,
+    pub(crate) heard: HashMap<AuthorKey, Instant>,
     /// Wall-clock time that the monotonic clock missed, until a live peer vouches for it.
     pub(crate) suspend: Option<PendingSuspend>,
     /// The peers that left `quiet` after the quiet TTL. Their dial hint stays, because a peer that
     /// is silent for an hour and then sends again has no reason to send a `PeerInfo`: its links did
     /// not change. Bounded FIFO (cap `QUIET_CAP`), so the hints of one-shot nicknames cannot grow
     /// the map. The sweep drops the hint of the oldest entry that the cap pushes out.
-    pub(crate) lapsed_quiet: BoundedFifoSet<Nickname>,
-    /// The key that held each nickname of `lapsed_quiet`, as far as the sweep knew it. A frame of
-    /// another key under that nickname does not inherit the dial hint.
-    pub(crate) lapsed_keys: HashMap<Nickname, AuthorKey>,
+    pub(crate) lapsed_quiet: BoundedFifoSet<AuthorKey>,
 }
 
 impl Default for ClockEvidence {
@@ -123,12 +115,10 @@ impl Default for ClockEvidence {
         Self {
             step_back: HashMap::new(),
             live_run: HashMap::new(),
-            goodbye_stamp: HashMap::new(),
             returned_unshown: HashSet::new(),
             heard: HashMap::new(),
             suspend: None,
             lapsed_quiet: BoundedFifoSet::new(QUIET_CAP),
-            lapsed_keys: HashMap::new(),
         }
     }
 }
@@ -282,7 +272,7 @@ pub struct EventLoopState {
     pub(crate) state_digest_serves: antientropy::ServeBudget,
     /// This node's own fast rounds of state digests while it backfills.
     pub(crate) fast_rounds: antientropy::FastRounds,
-    /// Membership layer: the peer roster. Nickname-keyed set of
+    /// Membership layer: the peer roster. Set of the author keys of
     /// other peers, feeding the state file's `peer_count`
     /// (`peers.len() + 1`). Excludes self. Driven by
     /// `joined`/`left` presence messages (they reach every peer
@@ -290,18 +280,22 @@ pub struct EventLoopState {
     /// bootstrap links), by implicit heartbeats from any received
     /// message (self-heal for a missed Joined), and by the sweeper's
     /// eviction of peers gone silent past `ALIVE_TIMEOUT`.
-    pub(crate) peers: HashSet<Nickname>,
-    /// Implicit-heartbeat tracker: nickname -> last time we heard
+    pub(crate) peers: HashSet<AuthorKey>,
+    /// Implicit-heartbeat tracker: author key -> last time we heard
     /// anything from that peer. Drives sweep-based eviction.
-    pub(crate) last_seen: HashMap<Nickname, Instant>,
-    /// The key that spoke last under each nickname. A nickname is a label that two runs can hold
-    /// in turn, so a `left` from another key is the goodbye of an older run and leaves the
-    /// roster entry of the newer run alone.
-    pub(crate) peer_keys: HashMap<Nickname, AuthorKey>,
+    pub(crate) last_seen: HashMap<AuthorKey, Instant>,
+    /// The nickname that each key of the roster last used. The roster is keyed by author key: a
+    /// nickname is a label, and two live keys can hold one, so each key is a peer of its own. A key
+    /// that is neither a peer, quiet nor lapsed drops its entry in the sweep.
+    pub(crate) names: HashMap<AuthorKey, Nickname>,
+    /// The key whose `PeerInfo` made each dial hint of `peer_endpoints`. A directed send by
+    /// nickname goes to the hint of the last `PeerInfo` under that nickname, whatever key sent it;
+    /// the hint leaves with that key, when the key is no longer a peer, quiet or lapsed.
+    pub(crate) hint_owner: HashMap<Nickname, AuthorKey>,
     /// The newest stamp that we heard from each peer in a frame that proved it was alive, on the
     /// clock of that peer. A quiet peer returns only on a frame stamped after it: two stamps of
     /// one clock compare at any skew between that clock and ours.
-    pub(crate) peer_stamp: HashMap<Nickname, UnixSecs>,
+    pub(crate) peer_stamp: HashMap<AuthorKey, UnixSecs>,
     /// The records of the stamps of the peers beyond `peer_stamp`: the step back of a clock, the
     /// live frames stamped before our join, and the goodbyes.
     pub(crate) clock_evidence: ClockEvidence,
@@ -327,14 +321,14 @@ pub struct EventLoopState {
     /// `peer_return` event and re-inclusion in `peers`. Bounded FIFO
     /// (cap `QUIET_CAP`): drained on return, so without the cap a churn /
     /// sybil stream of one-shot nicknames would grow it without bound.
-    pub(crate) quiet: BoundedFifoSet<Nickname>,
-    /// Recency companion to `quiet`: nickname -> the `last_seen` instant a
+    pub(crate) quiet: BoundedFifoSet<AuthorKey>,
+    /// Recency companion to `quiet`: author key -> the `last_seen` instant a
     /// quiet peer had when it was evicted, so `roster_snapshot` can still
     /// report how long ago it was last heard (the eviction drops its
     /// `last_seen` entry). Pruned to `quiet`'s membership on every sweep, so
     /// it stays bounded by `QUIET_CAP`; `roster_snapshot` only reads it for
     /// peers currently in `quiet`, so a stale entry never surfaces.
-    pub(crate) quiet_since: HashMap<Nickname, Instant>,
+    pub(crate) quiet_since: HashMap<AuthorKey, Instant>,
     /// The keys that said goodbye. A key is minted per run, so a key that left never speaks again:
     /// anything it signs afterwards is a replay, whatever its timestamp says. Keyed on the key
     /// and not on the nickname, which another run may take.
@@ -355,7 +349,7 @@ pub struct EventLoopState {
     /// governs what the operator/agent is shown: the rows of the roster
     /// snapshot hold the peers in `surfaced` and the quiet peers, and
     /// `member_count` counts only the peers in `surfaced`.
-    pub(crate) surfaced: HashSet<Nickname>,
+    pub(crate) surfaced: HashSet<AuthorKey>,
     /// Last time we broadcast anything. Lets idle daemons suppress
     /// their `Alive` keepalive when they're already chatty.
     pub(crate) last_sent_at: Instant,
@@ -670,7 +664,8 @@ impl EventLoopState {
             rendezvous_id: None,
             quiet: BoundedFifoSet::new(QUIET_CAP),
             quiet_since: HashMap::new(),
-            peer_keys: HashMap::new(),
+            names: HashMap::new(),
+            hint_owner: HashMap::new(),
             peer_stamp: HashMap::new(),
             clock_evidence: ClockEvidence::default(),
             left_keys: BoundedFifoSet::new(QUIET_CAP),
@@ -787,14 +782,16 @@ impl EventLoopState {
         }
     }
 
-    /// Every peer that is in the roster and not quiet, shown or not, in no set order. The rows
-    /// of [`Self::roster_snapshot`] list the peers whose arrival was shown, so a peer that is live
-    /// and not shown yet (known from the backlog, or from a slow clock) is in this list and not in
-    /// the rows. A reader that has to tell an absent peer from a live one that is not shown yet
-    /// reads this list. A quiet peer and a peer that left are not in it.
+    /// The nickname of every peer that is in the roster and not quiet, shown or not, in no set
+    /// order. Two live keys under one nickname are two peers, so a nickname can appear twice. The
+    /// rows of [`Self::roster_snapshot`] list the peers whose arrival was shown, so a peer that is
+    /// live and not shown yet (known from the backlog, or from a slow clock) is in this list and
+    /// not in the rows. A reader that has to tell an absent peer from a live one that is not shown
+    /// yet reads this list. A quiet peer and a peer that left are not in it.
     pub fn live_nicknames(&self) -> impl Iterator<Item = &Nickname> {
         let live = self.peers.iter();
-        live.filter(|peer| !self.quiet.contains(peer.as_str()))
+        live.filter(|key| !self.quiet.contains(key))
+            .filter_map(|key| self.names.get(key))
     }
 
     /// Snapshot the roster: the active peers whose arrival was shown, and the quiet evictees,
@@ -807,33 +804,37 @@ impl EventLoopState {
     pub fn roster_snapshot(&self) -> RosterSnapshot {
         let now = Instant::now();
         let secs_since = |seen: &Instant| now.duration_since(*seen).as_secs();
-        let heard_at = |nick: &Nickname| -> Option<&Instant> {
-            let heard = self.clock_evidence.heard.get(nick);
-            heard.or_else(|| self.last_seen.get(nick))
+        let heard_at = |key: &AuthorKey| -> Option<&Instant> {
+            let heard = self.clock_evidence.heard.get(key);
+            heard.or_else(|| self.last_seen.get(key))
         };
-        let shown = self
-            .peers
-            .iter()
-            .filter(|nick| self.surfaced.contains(*nick));
+        let shown = self.peers.iter().filter(|key| self.surfaced.contains(*key));
+        // One row per key: two live keys under one nickname are two rows.
         let mut peers: Vec<RosterEntry> = shown
-            .map(|nick| RosterEntry {
-                nickname: nick.clone(),
-                // Active peers: when they were really heard. A stall forgiveness moves
-                // `last_seen`, not `heard`.
-                last_seen_secs_ago: heard_at(nick).map(secs_since),
-                quiet: false,
-                reach: self.reach_of(nick),
-                transport: transport::lane_for(nick, self),
+            .filter_map(|key| {
+                let nick = self.names.get(key)?;
+                Some(RosterEntry {
+                    nickname: nick.clone(),
+                    // Active peers: when they were really heard. A stall forgiveness moves
+                    // `last_seen`, not `heard`.
+                    last_seen_secs_ago: heard_at(key).map(secs_since),
+                    quiet: false,
+                    reach: self.reach_of(key, nick),
+                    transport: transport::lane_for(nick, self),
+                })
             })
-            .chain(self.quiet.iter().map(|nick| RosterEntry {
-                nickname: nick.clone(),
-                // Quiet peers: their last-heard instant, retained in
-                // `quiet_since` (the eviction drops `last_seen`). A quiet
-                // peer has no live link, so it is always `Gossip`.
-                last_seen_secs_ago: self.quiet_since.get(nick).map(secs_since),
-                quiet: true,
-                reach: Reach::Gossip,
-                transport: transport::lane_for(nick, self),
+            .chain(self.quiet.iter().filter_map(|key| {
+                let nick = self.names.get(key)?;
+                Some(RosterEntry {
+                    nickname: nick.clone(),
+                    // Quiet peers: their last-heard instant, retained in
+                    // `quiet_since` (the eviction drops `last_seen`). A quiet
+                    // peer has no live link, so it is always `Gossip`.
+                    last_seen_secs_ago: self.quiet_since.get(key).map(secs_since),
+                    quiet: true,
+                    reach: Reach::Gossip,
+                    transport: transport::lane_for(nick, self),
+                })
             }))
             .collect();
         // Most-recently-seen first; unknown recency (no heartbeat yet) sorts last.
@@ -851,7 +852,13 @@ impl EventLoopState {
     /// beacon is that one. A peer we haven't yet seen a `PeerInfo` from (or
     /// whose link dropped) reads `Gossip` and flips to `Direct` once its next
     /// advertisement lands.
-    fn reach_of(&self, nick: &Nickname) -> Reach {
+    ///
+    /// The dial hint of a nickname belongs to the key that sent the last `PeerInfo` under it, so
+    /// only that key reads `Direct`. A second live key of the nickname has no hint of its own.
+    fn reach_of(&self, key: &AuthorKey, nick: &Nickname) -> Reach {
+        if self.hint_owner.get(nick) != Some(key) {
+            return Reach::Gossip;
+        }
         let linked: bool = self.peer_endpoints.get(nick).is_some_and(|endpoint| {
             self.linked_endpoints.contains(&endpoint.id)
                 || (self.rendezvous_id == Some(endpoint.id)
@@ -1086,6 +1093,7 @@ impl EventLoopState {
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let address = self.peer_endpoints.remove(nick)?;
+        self.hint_owner.remove(nick);
         // Another nickname can bind the same endpoint (a node that restarted under a new name).
         if !self.endpoint_is_bound(address.id) {
             self.forget_endpoint_state(address.id);
@@ -1112,24 +1120,66 @@ impl EventLoopState {
         self.unicast_pool.forget_addr(endpoint);
     }
 
+    /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
+    /// stamps and runs, its name, and the dial hint that its `PeerInfo` made. Returns that hint.
+    pub(crate) fn forget_key(&mut self, key: AuthorKey) -> Option<EndpointAddr> {
+        self.peers.remove(&key);
+        self.last_seen.remove(&key);
+        self.peer_stamp.remove(&key);
+        self.quiet.remove(&key);
+        self.quiet_since.remove(&key);
+        self.surfaced.remove(&key);
+        self.clock_evidence.step_back.remove(&key);
+        self.clock_evidence.live_run.remove(&key);
+        self.clock_evidence.heard.remove(&key);
+        self.clock_evidence.returned_unshown.remove(&key);
+        self.clock_evidence.lapsed_quiet.remove(&key);
+        let nickname = self.names.remove(&key)?;
+        if self.hint_owner.get(&nickname) == Some(&key) {
+            return self.forget_peer_endpoint(nickname.as_str());
+        }
+        None
+    }
+
+    /// Whether the dial hint of `nickname` was made by a key other than `key` that is live. A quiet
+    /// or gone owner does not hold it against a live key: the nickname answers there now.
+    pub(crate) fn hint_is_held_by_other(&self, nickname: &Nickname, key: AuthorKey) -> bool {
+        self.hint_owner
+            .get(nickname)
+            .is_some_and(|owner| *owner != key && self.peers.contains(owner))
+    }
+
+    /// The keys of the roster, live or quiet, that use `nickname`.
+    pub(crate) fn keys_named(&self, nickname: &Nickname) -> Vec<AuthorKey> {
+        let roster = self.peers.iter().chain(self.quiet.iter());
+        roster
+            .filter(|key| self.names.get(*key) == Some(nickname))
+            .copied()
+            .collect()
+    }
+
+    /// Whether a live peer of the roster uses `nickname`. Two live keys under one nickname are two
+    /// peers, so this asks whether at least one of them is there.
+    #[must_use]
+    pub fn is_peer(&self, nickname: &str) -> bool {
+        self.peers.iter().any(|key| {
+            self.names
+                .get(key)
+                .is_some_and(|name| name.as_str() == nickname)
+        })
+    }
+
+    /// Whether a key of the roster, live or quiet, uses `nickname`.
+    pub(crate) fn nickname_is_held(&self, nickname: &Nickname) -> bool {
+        let roster = self.peers.iter().chain(self.quiet.iter());
+        roster
+            .filter_map(|key| self.names.get(key))
+            .any(|name| name == nickname)
+    }
+
     /// Remember that `key` said goodbye. A key is minted per run, so it never speaks again.
     pub(crate) fn note_left(&mut self, key: AuthorKey) {
         self.left_keys.insert(key);
-    }
-
-    /// Remember the stamp of the goodbye of `who`, which left the roster. The newest stamp stays.
-    /// At the cap, the oldest goodbye makes room.
-    pub(crate) fn note_goodbye_stamp(&mut self, who: &Nickname, stamp: UnixSecs) {
-        let goodbyes = &mut self.clock_evidence.goodbye_stamp;
-        if !goodbyes.contains_key(who) && goodbyes.len() >= QUIET_CAP {
-            let by_age = goodbyes.iter().min_by_key(|(_, held)| **held);
-            let oldest: Option<Nickname> = by_age.map(|(nick, _)| nick.clone());
-            if let Some(nick) = oldest {
-                goodbyes.remove(&nick);
-            }
-        }
-        let held = goodbyes.entry(who.clone()).or_insert(stamp);
-        *held = (*held).max(stamp);
     }
 
     pub(crate) fn key_said_goodbye(&self, key: AuthorKey) -> bool {
@@ -1756,11 +1806,15 @@ impl EventLoopState {
         &self.address_book
     }
 
-    /// The roster, as a set of nicknames. See [`Self::roster_snapshot`] for the
-    /// richer per-peer view.
+    /// The roster, as a set of nicknames. Two live keys of one nickname are one nickname here;
+    /// [`Self::member_count`] counts the keys. See [`Self::roster_snapshot`] for the richer
+    /// per-peer view.
     #[must_use]
-    pub fn peers(&self) -> &HashSet<Nickname> {
-        &self.peers
+    pub fn peers(&self) -> HashSet<&Nickname> {
+        self.peers
+            .iter()
+            .filter_map(|key| self.names.get(key))
+            .collect()
     }
 
     /// A peer's last known endpoint id, if one has been learned.
@@ -1904,13 +1958,22 @@ impl EventLoopState {
     /// The whole address, not just the id: the retry pass has to know whether a
     /// peer advertises IP, and rebuilding a bare address from the id there made
     /// every native peer look like a browser.
+    ///
+    /// The card names a nickname and no key. The hint belongs to the one key that answers to the
+    /// nickname; with no such key yet it has no owner; with two live keys the card does not say
+    /// which one it is, so it binds no hint.
     pub fn note_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
+        let owner = match self.keys_named(&nickname).as_slice() {
+            [] => None,
+            [only] => Some(*only),
+            _ambiguous => return,
+        };
         let id = endpoint.id;
         let changed = self
             .peer_endpoints
             .get(&nickname)
             .is_some_and(|before| *before != endpoint);
-        self.bind_peer_endpoint(nickname, endpoint);
+        self.store_peer_endpoint(owner, nickname, endpoint);
         // A peer at a new address is not the peer that refused.
         if changed {
             self.graft_backoff.reset(id);
@@ -1920,11 +1983,30 @@ impl EventLoopState {
         }
     }
 
-    /// Write the binding of `nickname` to its endpoint. The one place that does: a `PeerInfo`
-    /// (`handle_peer_info`) and `note_peer_endpoint` both come here.
-    pub(crate) fn bind_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
+    /// Write the binding of `nickname` to its endpoint, made by `key`: a `PeerInfo`
+    /// (`handle_peer_info`) comes here.
+    pub(crate) fn bind_peer_endpoint(
+        &mut self,
+        key: AuthorKey,
+        nickname: Nickname,
+        endpoint: EndpointAddr,
+    ) {
+        self.store_peer_endpoint(Some(key), nickname, endpoint);
+    }
+
+    /// The one place that writes a dial hint. `owner` is the key that made it, if known.
+    fn store_peer_endpoint(
+        &mut self,
+        owner: Option<AuthorKey>,
+        nickname: Nickname,
+        endpoint: EndpointAddr,
+    ) {
         #[cfg(feature = "multihop")]
         let (parked, bound) = (self.parked_link_states.take(&nickname), endpoint.id);
+        match owner {
+            Some(key) => self.hint_owner.insert(nickname.clone(), key),
+            None => self.hint_owner.remove(&nickname),
+        };
         self.peer_endpoints.insert(nickname, endpoint);
         // The vector that came before this binding is fed now, not at the next tick.
         #[cfg(feature = "multihop")]
@@ -2004,3 +2086,55 @@ impl EventLoopState {
 #[cfg(all(feature = "multihop", not(feature = "host")))]
 const _: fn(&EventLoopState) -> Option<&habilis_network_iroh_multihop_transport::MultihopHandle> =
     EventLoopState::multihop;
+
+/// Roster fixtures for the tests. A nickname names one key: the key that a frame of the test
+/// already registered under it, or else the key of [`crate::testing::test_key`].
+#[cfg(test)]
+impl EventLoopState {
+    /// The key that `nickname` names in this state.
+    pub(crate) fn key_named(&self, nickname: &str) -> AuthorKey {
+        let named = self
+            .names
+            .iter()
+            .find(|(_, name)| name.as_str() == nickname);
+        named.map_or_else(|| testing::test_key(nickname), |(key, _)| *key)
+    }
+
+    /// [`Self::key_named`], and record the name of the key.
+    pub(crate) fn name_key(&mut self, nickname: &str) -> AuthorKey {
+        let key = self.key_named(nickname);
+        let name = Nickname::try_new(nickname).expect("a test nickname is valid");
+        self.names.insert(key, name);
+        key
+    }
+
+    pub(crate) fn peer_for_test(&mut self, nickname: &str) {
+        let key = self.name_key(nickname);
+        self.peers.insert(key);
+    }
+
+    pub(crate) fn surfaced_for_test(&mut self, nickname: &str) {
+        let key = self.name_key(nickname);
+        self.surfaced.insert(key);
+    }
+
+    pub(crate) fn quiet_for_test(&mut self, nickname: &str) {
+        let key = self.name_key(nickname);
+        self.quiet.insert(key);
+    }
+
+    pub(crate) fn last_seen_for_test(&mut self, nickname: &str, at: Instant) {
+        let key = self.name_key(nickname);
+        self.last_seen.insert(key, at);
+    }
+
+    pub(crate) fn quiet_since_for_test(&mut self, nickname: &str, at: Instant) {
+        let key = self.name_key(nickname);
+        self.quiet_since.insert(key, at);
+    }
+
+    pub(crate) fn peer_stamp_for_test(&mut self, nickname: &str, stamp: UnixSecs) {
+        let key = self.name_key(nickname);
+        self.peer_stamp.insert(key, stamp);
+    }
+}

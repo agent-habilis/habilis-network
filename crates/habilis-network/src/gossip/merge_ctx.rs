@@ -542,7 +542,11 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
     for (nick, endpoint_id) in &state.peer_endpoints {
         // The rendezvous pseudo-node is never a directed target, and a
         // quiet/ghost peer's stale hint isn't worth a dial at shutdown.
-        if state.rendezvous_id == Some(endpoint_id.id) || !state.peers.contains(nick) {
+        let owner_is_peer = state
+            .hint_owner
+            .get(nick)
+            .is_some_and(|key| state.peers.contains(key));
+        if state.rendezvous_id == Some(endpoint_id.id) || !owner_is_peer {
             continue;
         }
         let pool = state.unicast_pool.clone();
@@ -676,7 +680,7 @@ mod tests {
 
     use super::{mark_parked, peer_info_json};
     use crate::protocol::{MeshId, Message};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
 
     use crate::protocol;
     use crate::protocol::messages::AppFrameParams;
@@ -738,8 +742,8 @@ mod tests {
                 let mut state = fresh_state();
                 state.unicast_pool = UnicastPool::new(node.clone(), false);
                 lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
-                state.peer_endpoints.insert(nick("bob"), server.addr());
-                state.peers.insert(nick("bob"));
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), server.addr());
+                state.peer_for_test("bob");
 
                 let mesh = MeshId::from("test");
                 let author = nick("alice");
@@ -819,7 +823,8 @@ mod tests {
         state.standing.remove(&Standing::Meshed);
         state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
-        state.peer_endpoints.insert(
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url")),
@@ -850,9 +855,7 @@ mod tests {
         let mut state = fresh_state();
         state.standing.remove(&Standing::Meshed);
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         let frame = Message::new_app(
             &MeshId::from("test"),
             &nick("alice"),

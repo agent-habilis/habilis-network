@@ -1990,20 +1990,20 @@ mod tests {
     use crate::daemon::state::EventLoopState;
     use crate::gossip::event::SilentSink;
     use crate::lifecycle;
-    use crate::protocol::{Nickname, UnixSecs};
-    use crate::testing::{fresh_state, nick};
+    use crate::protocol::{AuthorKey, UnixSecs};
+    use crate::testing::{fresh_state, test_key};
     use crate::util::clock::Instant;
     use crate::util::tuning;
 
     /// A state with one peer that was last heard `alive_timeout() + 10 s` ago: due for eviction.
     fn state_with_a_silent_peer() -> EventLoopState {
         let mut state = fresh_state();
-        state.peers.insert(nick("swift-cedar"));
-        state.surfaced.insert(nick("swift-cedar"));
+        state.peer_for_test("swift-cedar");
+        state.surfaced_for_test("swift-cedar");
         let silent = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .expect("the monotonic clock has run past the alive timeout since boot");
-        state.last_seen.insert(nick("swift-cedar"), silent);
+        state.last_seen.insert(test_key("swift-cedar"), silent);
         state
     }
 
@@ -2017,7 +2017,8 @@ mod tests {
         super::sweep_arm(&mut anchors, &mut state, &SilentSink);
 
         assert!(
-            state.quiet.contains("swift-cedar") && !state.peers.contains("swift-cedar"),
+            state.quiet.contains(&test_key("swift-cedar"))
+                && !state.peers.contains(&test_key("swift-cedar")),
             "a punctual tick must evict a silent peer"
         );
     }
@@ -2037,7 +2038,8 @@ mod tests {
         super::sweep_arm(&mut anchors, &mut state, &SilentSink);
 
         assert!(
-            state.peers.contains("swift-cedar") && !state.quiet.contains("swift-cedar"),
+            state.peers.contains(&test_key("swift-cedar"))
+                && !state.quiet.contains(&test_key("swift-cedar")),
             "a stalled sweep evicted a peer whose silence is ours"
         );
     }
@@ -2054,8 +2056,8 @@ mod tests {
             .checked_sub(Duration::from_mins(30))
             .expect("the monotonic clock has run past 30 min since boot");
         for name in ["swift-cedar", "lost-heron"] {
-            state.quiet.insert(nick(name));
-            state.quiet_since.insert(nick(name), half_hour_ago);
+            state.quiet_for_test(name);
+            state.quiet_since.insert(test_key(name), half_hour_ago);
         }
         let mut anchors = TickAnchors::now();
         anchors.sweep_wall = anchors.sweep_wall - Duration::from_mins(40);
@@ -2065,7 +2067,7 @@ mod tests {
         lifecycle::heartbeat::confirm_suspend(&mut state, UnixSecs::now());
         lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
 
-        let kept: Vec<&Nickname> = state.quiet_since.keys().collect();
+        let kept: Vec<&AuthorKey> = state.quiet_since.keys().collect();
         assert!(
             state.quiet.is_empty() && kept.is_empty(),
             "a quiet peer survived 70 min of real silence: {kept:?}"
@@ -2082,8 +2084,10 @@ mod tests {
         let half_hour_ago = Instant::now()
             .checked_sub(Duration::from_mins(30))
             .expect("the monotonic clock has run past 30 min since boot");
-        state.quiet.insert(nick("swift-cedar"));
-        state.quiet_since.insert(nick("swift-cedar"), half_hour_ago);
+        state.quiet_for_test("swift-cedar");
+        state
+            .quiet_since
+            .insert(test_key("swift-cedar"), half_hour_ago);
         let mut anchors = TickAnchors::now();
         anchors.sweep_wall = anchors.sweep_wall - Duration::from_hours(2);
 
@@ -2095,7 +2099,7 @@ mod tests {
         lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
 
         assert!(
-            state.quiet.contains("swift-cedar"),
+            state.quiet.contains(&test_key("swift-cedar")),
             "a frame 2 h behind our clock vouched for a wall-clock step"
         );
     }
@@ -2110,8 +2114,10 @@ mod tests {
         let half_hour_ago = Instant::now()
             .checked_sub(Duration::from_mins(30))
             .expect("the monotonic clock has run past 30 min since boot");
-        state.quiet.insert(nick("swift-cedar"));
-        state.quiet_since.insert(nick("swift-cedar"), half_hour_ago);
+        state.quiet_for_test("swift-cedar");
+        state
+            .quiet_since
+            .insert(test_key("swift-cedar"), half_hour_ago);
         let mut anchors = TickAnchors::now();
         anchors.sweep_wall = anchors.sweep_wall - Duration::from_hours(2);
 
@@ -2129,7 +2135,7 @@ mod tests {
         lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
 
         assert!(
-            state.quiet.contains("swift-cedar"),
+            state.quiet.contains(&test_key("swift-cedar")),
             "a vouching frame after the wait aged a quiet peer"
         );
     }
@@ -2145,15 +2151,17 @@ mod tests {
         let half_hour_ago = Instant::now()
             .checked_sub(Duration::from_mins(30))
             .expect("the monotonic clock has run past 30 min since boot");
-        state.quiet.insert(nick("swift-cedar"));
-        state.quiet_since.insert(nick("swift-cedar"), half_hour_ago);
+        state.quiet_for_test("swift-cedar");
+        state
+            .quiet_since
+            .insert(test_key("swift-cedar"), half_hour_ago);
         let mut anchors = TickAnchors::now();
         anchors.sweep_wall = anchors.sweep_wall - Duration::from_hours(2);
 
         super::sweep_arm(&mut anchors, &mut state, &SilentSink);
 
         assert!(
-            state.quiet.contains("swift-cedar"),
+            state.quiet.contains(&test_key("swift-cedar")),
             "a wall-clock step of 2 h removed a peer that was quiet for 30 min"
         );
     }
@@ -2166,14 +2174,16 @@ mod tests {
         let half_hour_ago = Instant::now()
             .checked_sub(Duration::from_mins(30))
             .expect("the monotonic clock has run past 30 min since boot");
-        state.quiet.insert(nick("swift-cedar"));
-        state.quiet_since.insert(nick("swift-cedar"), half_hour_ago);
+        state.quiet_for_test("swift-cedar");
+        state
+            .quiet_since
+            .insert(test_key("swift-cedar"), half_hour_ago);
         let mut anchors = TickAnchors::now();
 
         super::sweep_arm(&mut anchors, &mut state, &SilentSink);
 
         assert!(
-            state.quiet.contains("swift-cedar"),
+            state.quiet.contains(&test_key("swift-cedar")),
             "a quiet peer of 30 min left the roster"
         );
     }
@@ -2191,7 +2201,8 @@ mod tests {
         super::sweep_arm(&mut anchors, &mut state, &SilentSink);
 
         assert!(
-            state.peers.contains("swift-cedar") && !state.quiet.contains("swift-cedar"),
+            state.peers.contains(&test_key("swift-cedar"))
+                && !state.quiet.contains(&test_key("swift-cedar")),
             "a suspended sweep evicted a peer whose silence is ours"
         );
     }

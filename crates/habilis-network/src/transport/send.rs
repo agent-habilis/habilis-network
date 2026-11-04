@@ -27,7 +27,7 @@ mod tests {
     use crate::daemon::state::Standing;
     use std::sync::Arc;
 
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::UdpTransport;
 
     use iroh::EndpointId;
@@ -66,9 +66,7 @@ mod tests {
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.direct.insert(bob, DirectState::Direct);
         (state, bob)
     }
@@ -102,7 +100,8 @@ mod tests {
         state.standing.insert(Standing::Meshed);
         state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
-        state.peer_endpoints.insert(
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url")),
@@ -136,7 +135,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.remove(&bob);
-        state.peer_endpoints.insert(
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
@@ -166,7 +166,8 @@ mod tests {
 
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
-        state.peer_endpoints.insert(
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
@@ -293,7 +294,7 @@ mod tests {
         state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
         state.direct.insert(bob_addr.id, DirectState::Direct);
         lookup::add_peer_addr(&lookup::address_book(endpoint), bob_addr.clone());
-        state.peer_endpoints.insert(nick("bob"), bob_addr);
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob_addr);
         state
     }
 
@@ -614,9 +615,11 @@ mod tests {
         let rendezvous = endpoint_id(9);
         state.rendezvous_id = Some(rendezvous);
         // bob's advertised endpoint *is* the rendezvous pseudo-node.
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(rendezvous));
+        state.bind_peer_endpoint(
+            test_key("bob"),
+            nick("bob"),
+            iroh::EndpointAddr::new(rendezvous),
+        );
         assert_eq!(
             route(&directed_msg(), &state),
             Route::Undeliverable,

@@ -85,7 +85,9 @@ mod tests {
     use crate::protocol::{
         AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, UnixSecs,
     };
-    use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
+    use crate::testing::{
+        author_of, endpoint_id, fresh_state, fresh_state_with_book, nick, test_key,
+    };
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
@@ -665,9 +667,7 @@ mod tests {
             },
             Instant::now(),
         );
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(low));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(low));
         state.forget_peer_endpoint("bob");
         assert!(
             !state.rival_holder_known(),
@@ -710,7 +710,7 @@ mod tests {
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         let node = |direct: Option<DirectState>, kind: PathKind| {
             let mut node = fresh_state();
-            node.peer_endpoints.insert(nick("bob"), address.clone());
+            node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
             node.direct.extend(direct.map(|verdict| (bob, verdict)));
             node.path_kinds.insert(bob, kind);
             node
@@ -759,7 +759,7 @@ mod tests {
         let address = iroh::EndpointAddr::new(bob)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         let mut node = fresh_state();
-        node.peer_endpoints.insert(nick("bob"), address.clone());
+        node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
         node.direct.insert(bob, DirectState::Direct);
         node.path_kinds.insert(bob, PathKind::Gossip);
 
@@ -1475,6 +1475,72 @@ mod tests {
         );
     }
 
+    /// A card names a nickname and no key. The hint goes to the one key that answers to the
+    /// nickname, to no key when none does, and nowhere when two live keys do: the card does not
+    /// say which of them it is.
+    #[test]
+    fn a_card_hint_goes_to_the_only_key_of_its_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let first = iroh::EndpointAddr::new(endpoint_id(1));
+        let second = iroh::EndpointAddr::new(endpoint_id(2));
+
+        state.note_peer_endpoint(nick("carol"), first.clone());
+        assert_eq!(
+            state.peer_endpoints.get("carol"),
+            Some(&first),
+            "a card before any frame of the peer binds the hint"
+        );
+        assert!(
+            !state.hint_owner.contains_key("carol"),
+            "a hint with no key has no owner"
+        );
+
+        state.peer_for_test("bob");
+        state.note_peer_endpoint(nick("bob"), first.clone());
+        assert_eq!(
+            state.hint_owner.get("bob"),
+            Some(&test_key("bob")),
+            "the one key of the nickname owns the hint"
+        );
+
+        let other = AuthorKey::from_bytes([77; 32]);
+        state.names.insert(other, nick("bob"));
+        state.peers.insert(other);
+        state.note_peer_endpoint(nick("bob"), second);
+        assert_eq!(
+            state.peer_endpoints.get("bob"),
+            Some(&first),
+            "a card moved the hint of a nickname that two live keys use"
+        );
+    }
+
+    /// The dial hint of a nickname has one owner. The roster has a row for each live key, and only
+    /// the owner reads `Direct`.
+    #[test]
+    fn only_the_key_that_owns_the_hint_reads_direct() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let linked = endpoint_id(1);
+        state.linked_endpoints.insert(linked);
+        let (owner, other) = (test_key("bob"), AuthorKey::from_bytes([77; 32]));
+        for key in [owner, other] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(linked));
+
+        let snapshot = state.roster_snapshot();
+        let mut reaches: Vec<Reach> = snapshot.peers.iter().map(|row| row.reach).collect();
+        reaches.sort_by_key(|reach| matches!(reach, Reach::Gossip));
+        assert_eq!(
+            reaches,
+            vec![Reach::Direct, Reach::Gossip],
+            "one row reads Direct (the owner) and the other reads Gossip: {snapshot:?}"
+        );
+    }
+
     #[test]
     fn roster_reach_tags_only_live_links_direct() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1482,23 +1548,27 @@ mod tests {
         let linked_ep = endpoint_id(1);
         let stale_ep = endpoint_id(2);
         // A peer whose advertised endpoint is a live link → direct.
-        state.peers.insert(nick("linked"));
-        state.surfaced.insert(nick("linked"));
-        state
-            .peer_endpoints
-            .insert(nick("linked"), iroh::EndpointAddr::new(linked_ep));
+        state.peer_for_test("linked");
+        state.surfaced_for_test("linked");
+        state.bind_peer_endpoint(
+            test_key("linked"),
+            nick("linked"),
+            iroh::EndpointAddr::new(linked_ep),
+        );
         state.linked_endpoints.insert(linked_ep);
         // Advertised, but the endpoint is not (any longer) a live link → gossip.
-        state.peers.insert(nick("unlinked"));
-        state.surfaced.insert(nick("unlinked"));
-        state
-            .peer_endpoints
-            .insert(nick("unlinked"), iroh::EndpointAddr::new(stale_ep));
+        state.peer_for_test("unlinked");
+        state.surfaced_for_test("unlinked");
+        state.bind_peer_endpoint(
+            test_key("unlinked"),
+            nick("unlinked"),
+            iroh::EndpointAddr::new(stale_ep),
+        );
         // No PeerInfo seen yet → no binding → gossip.
-        state.peers.insert(nick("unknown"));
-        state.surfaced.insert(nick("unknown"));
+        state.peer_for_test("unknown");
+        state.surfaced_for_test("unknown");
         // Quiet evictees are never live-linked → gossip.
-        state.quiet.insert(nick("quiet"));
+        state.quiet_for_test("quiet");
 
         let snapshot = state.roster_snapshot();
         let reach = |name: &str| {
@@ -1626,11 +1696,13 @@ mod tests {
         let mut state = fresh_state();
         let rendezvous_ep = endpoint_id(7);
         state.rendezvous_id = Some(rendezvous_ep);
-        state.peers.insert(nick("beacon"));
-        state.surfaced.insert(nick("beacon"));
-        state
-            .peer_endpoints
-            .insert(nick("beacon"), iroh::EndpointAddr::new(rendezvous_ep));
+        state.peer_for_test("beacon");
+        state.surfaced_for_test("beacon");
+        state.bind_peer_endpoint(
+            test_key("beacon"),
+            nick("beacon"),
+            iroh::EndpointAddr::new(rendezvous_ep),
+        );
 
         let reach = |current: &EventLoopState| {
             let roster = current.roster_snapshot();
@@ -1655,15 +1727,17 @@ mod tests {
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
         // Known endpoint while meshed → unicast (the send path would dial it).
-        state.peers.insert(nick("dialable"));
-        state.surfaced.insert(nick("dialable"));
-        state
-            .peer_endpoints
-            .insert(nick("dialable"), iroh::EndpointAddr::new(endpoint_id(1)));
+        state.peer_for_test("dialable");
+        state.surfaced_for_test("dialable");
+        state.bind_peer_endpoint(
+            test_key("dialable"),
+            nick("dialable"),
+            iroh::EndpointAddr::new(endpoint_id(1)),
+        );
         state.direct.insert(endpoint_id(1), DirectState::Direct);
         // No PeerInfo yet → nothing to dial → unreachable for directed frames.
-        state.peers.insert(nick("unknown"));
-        state.surfaced.insert(nick("unknown"));
+        state.peer_for_test("unknown");
+        state.surfaced_for_test("unknown");
 
         let lane = |current: &EventLoopState, name: &str| {
             let roster = current.roster_snapshot();
@@ -1704,7 +1778,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         for index in 0..(QUIET_CAP + 5) {
-            state.quiet.insert(nick(&format!("ghost-{index}")));
+            state.quiet_for_test(&format!("ghost-{index}"));
         }
         assert!(
             state.quiet.len() <= QUIET_CAP,
@@ -2244,9 +2318,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(
             state.forget_peer_endpoint("bob").map(|address| address.id),
@@ -2270,12 +2342,16 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let shared = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("old-bob"), iroh::EndpointAddr::new(shared));
-        state
-            .peer_endpoints
-            .insert(nick("new-bob"), iroh::EndpointAddr::new(shared));
+        state.bind_peer_endpoint(
+            test_key("old-bob"),
+            nick("old-bob"),
+            iroh::EndpointAddr::new(shared),
+        );
+        state.bind_peer_endpoint(
+            test_key("new-bob"),
+            nick("new-bob"),
+            iroh::EndpointAddr::new(shared),
+        );
         state.direct.insert(shared, DirectState::Direct);
 
         state.forget_peer_endpoint("old-bob");
@@ -2322,9 +2398,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.path_watchers.insert(bob, Some(7));
         state.path_kinds.insert(bob, PathKind::WebRtc);
         state.forget_peer_endpoint("bob");

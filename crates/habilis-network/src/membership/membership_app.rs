@@ -1454,7 +1454,7 @@ mod peer_count_tests {
     use super::{Inspect, MembershipApp};
     use crate::daemon::setup::LiveCount;
     use crate::daemon::state::EventLoopState;
-    use crate::testing::{fresh_state, nick};
+    use crate::testing::{fresh_state, test_key};
     use tokio::sync::oneshot;
 
     /// How many members the consumer reads for `Inspect::PeerCount`.
@@ -1471,9 +1471,9 @@ mod peer_count_tests {
     fn the_peer_count_leaves_out_quiet_peers() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.peers.insert(nick("swift-cedar"));
-        state.surfaced.insert(nick("swift-cedar"));
-        state.quiet.insert(nick("lost-heron"));
+        state.peer_for_test("swift-cedar");
+        state.surfaced_for_test("swift-cedar");
+        state.quiet_for_test("lost-heron");
 
         assert_eq!(
             peer_count_of(&mut state),
@@ -1481,8 +1481,8 @@ mod peer_count_tests {
             "a quiet peer counts as a member that is in the mesh"
         );
 
-        state.peers.remove("swift-cedar");
-        state.quiet.insert(nick("swift-cedar"));
+        state.peers.remove(&test_key("swift-cedar"));
+        state.quiet_for_test("swift-cedar");
         assert_eq!(
             peer_count_of(&mut state),
             1,
@@ -1510,11 +1510,11 @@ mod peer_count_tests {
         let mut state = fresh_state();
         let live = LiveCount::default();
         state.live_count = Some(live.clone());
-        state.peers.insert(nick("swift-cedar"));
-        state.surfaced.insert(nick("swift-cedar"));
-        state.surfaced.insert(nick("lost-heron"));
-        state.quiet.insert(nick("lost-heron"));
-        state.peers.insert(nick("calm-otter"));
+        state.peer_for_test("swift-cedar");
+        state.surfaced_for_test("swift-cedar");
+        state.surfaced_for_test("lost-heron");
+        state.quiet_for_test("lost-heron");
+        state.peer_for_test("calm-otter");
         state.write_peer_count();
 
         let roster = state.roster_snapshot();

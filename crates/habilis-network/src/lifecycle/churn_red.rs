@@ -54,7 +54,7 @@ fn h5_a_pre_join_backlog_frame_adds_no_ghost_to_the_count() {
     for ghost in ["swift-cedar", "lost-heron", "calm-otter"] {
         let frame = chat(ghost, &Identity::generate(), before_join);
         let update = compute_for(&frame, &state);
-        apply(&update, &frame.author, &mut state);
+        apply(&update, frame.key(), &mut state);
     }
 
     assert_eq!(
@@ -73,12 +73,13 @@ fn h6_a_peer_that_left_leaves_the_roster_after_an_hour() {
     let _guard = ::habilis_network_test_tracing::init();
     let mut state = fresh_state();
     let who = nick("swift-cedar");
+    let key = state.name_key("swift-cedar");
     let silent = Instant::now()
         .checked_sub(alive_timeout() + Duration::from_secs(10))
         .expect("the monotonic clock has run past the alive timeout since boot");
-    state.last_seen.insert(who.clone(), silent);
-    state.peers.insert(who.clone());
-    state.surfaced.insert(who.clone());
+    state.last_seen.insert(key, silent);
+    state.peers.insert(key);
+    state.surfaced.insert(key);
     heartbeat::tick_sweep(&mut state, &SilentSink);
     let listed = |held: &EventLoopState| {
         held.roster_snapshot()
@@ -92,7 +93,7 @@ fn h6_a_peer_that_left_leaves_the_roster_after_an_hour() {
     let long_ago = Instant::now()
         .checked_sub(Duration::from_mins(61))
         .expect("the monotonic clock has run past one hour since boot");
-    state.quiet_since.insert(who.clone(), long_ago);
+    state.quiet_since.insert(key, long_ago);
     heartbeat::tick_sweep(&mut state, &SilentSink);
 
     assert!(
@@ -122,19 +123,19 @@ fn a_link_gap_has_no_270_second_cycle() {
     state.known_endpoints.insert(endpoint_id(1));
     let t0 = Instant::now();
     state.note_inbound(t0);
-    let who = nick("swift-cedar");
-    state.peers.insert(who.clone());
-    state.surfaced.insert(who.clone());
+    let key = state.name_key("swift-cedar");
+    state.peers.insert(key);
+    state.surfaced.insert(key);
 
     // t0 + 95 s: the first sweep after the alive timeout evicts the peer.
     state.last_seen.insert(
-        who.clone(),
+        key,
         Instant::now()
             .checked_sub(timeout + Duration::from_secs(5))
             .expect("the monotonic clock has run past the alive timeout since boot"),
     );
     heartbeat::tick_sweep(&mut state, &SilentSink);
-    assert!(state.quiet.contains(who.as_str()), "timeout at about 90 s");
+    assert!(state.quiet.contains(&key), "timeout at about 90 s");
 
     // The starvation watchdog reads the same last inbound, not the eviction: it is due at 180 s.
     assert!(

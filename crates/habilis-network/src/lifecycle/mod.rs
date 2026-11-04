@@ -142,9 +142,10 @@ mod departed_tests {
             let mut state = fresh_state();
             let mut app = Inert;
 
-            // The first run leaves. A peer in the roster has a holder: its frames proved it alive.
-            state.peers.insert(who.clone());
-            state.peer_keys.insert(who.clone(), first_run.author_key());
+            // The first run leaves. Its key is a peer of the roster.
+            let first_key = first_run.author_key();
+            state.names.insert(first_key, who.clone());
+            state.peers.insert(first_key);
             let update = membership_update::compute_for(&left, &state);
             handle_presence(
                 PresenceEvent {
@@ -158,14 +159,13 @@ mod departed_tests {
                 &context,
             )
             .await;
-            assert!(!state.peers.contains(who.as_str()), "the first run left");
+            assert!(!state.peers.contains(&first_key), "the first run left");
 
             // A second run takes the nickname, then a copy of the first run's goodbye lands.
-            state.peers.insert(who.clone());
-            state
-                .peer_keys
-                .insert(who.clone(), Identity::generate().author_key());
-            state.surfaced.insert(who.clone());
+            let second_key = Identity::generate().author_key();
+            state.names.insert(second_key, who.clone());
+            state.peers.insert(second_key);
+            state.surfaced.insert(second_key);
             let replay = membership_update::compute_for(&left, &state);
             handle_presence(
                 PresenceEvent {
@@ -180,11 +180,11 @@ mod departed_tests {
             )
             .await;
             assert!(
-                state.peers.contains(who.as_str()),
+                state.peers.contains(&second_key),
                 "a replayed goodbye of the first run removed the second run"
             );
             assert!(
-                state.surfaced.contains(who.as_str()),
+                state.surfaced.contains(&second_key),
                 "a replayed goodbye of the first run un-surfaced the second run"
             );
             endpoint.close().await;
@@ -230,7 +230,8 @@ mod departed_tests {
             )
             .sign(&departed);
             let mut state = fresh_state();
-            state.peers.insert(who.clone());
+            state.names.insert(departed.author_key(), who.clone());
+            state.peers.insert(departed.author_key());
             state.message_log.push(joined.clone());
             state.message_log.push(chat.clone());
 
@@ -290,22 +291,25 @@ mod departed_tests {
             let mut state = fresh_state();
             state.note_left(first_run.author_key());
             // A second run took the nickname and went quiet.
-            state.quiet.insert(who.clone());
+            let second_key = Identity::generate().author_key();
+            state.names.insert(second_key, who.clone());
+            state.quiet.insert(second_key);
 
             let replay = Message::new_left(&mesh, &who).sign(&first_run);
             let observed = observe(&replay, &mut state, &context);
             assert!(observed.update.stale, "a copy of a goodbye is not stale");
             assert!(
-                !state.peers.contains(who.as_str()),
+                !state.peers.contains(&second_key),
                 "a replayed goodbye of the first run returned the quiet second run"
             );
             assert!(
-                state.quiet.contains(who.as_str()),
+                state.quiet.contains(&second_key),
                 "a replayed goodbye of the first run took the second run out of quiet"
             );
             assert!(
-                !state.last_seen.contains_key(who.as_str()),
-                "a replayed goodbye refreshed the nickname's liveness"
+                !state.last_seen.contains_key(&second_key)
+                    && !state.last_seen.contains_key(&first_run.author_key()),
+                "a replayed goodbye refreshed the liveness of a key"
             );
             endpoint.close().await;
         });
@@ -344,8 +348,8 @@ mod departed_tests {
                 "a stale frame of a departed key is stale"
             );
             assert!(
-                !state.last_seen.contains_key(who.as_str()),
-                "a stale frame refreshed the nickname's liveness"
+                !state.last_seen.contains_key(&departed.author_key()),
+                "a stale frame refreshed the liveness of the departed key"
             );
             endpoint.close().await;
         });

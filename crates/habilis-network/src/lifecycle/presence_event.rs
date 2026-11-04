@@ -38,44 +38,26 @@ pub(crate) async fn handle_presence(
         return;
     }
     if subtype == PresenceSubtype::Left {
-        // A key says goodbye once per run. A second copy is a replay that a peer still held, and
-        // the nickname may belong to a new key by now: the replay must not take it away.
-        if state.key_said_goodbye(message.key()) {
+        // A key says goodbye once per run. A second copy is a replay that a peer still held.
+        let key = message.key();
+        if state.key_said_goodbye(key) {
             return;
         }
-        state.note_left(message.key());
-        state.drop_departed_presence(&message.key());
-        // The nickname may belong to a newer run by now. The goodbye of an older key ends that
-        // key only, and the roster entry of the newer run stays.
-        let holder = state.peer_keys.get(&message.author).copied();
-        if holder.is_some_and(|held| held != message.key()) {
+        state.note_left(key);
+        state.drop_departed_presence(&key);
+        // The roster is keyed by author key, so a goodbye ends that key and no other: another key
+        // under the same nickname stays a peer. Any key can sign a goodbye under any nickname, and
+        // the goodbye of a key that is not in the roster removes nothing.
+        let was_peer = state.peers.contains(&key) || state.quiet.contains(&key);
+        if !was_peer {
             return;
         }
-        // A goodbye for a nickname with no holder on record authorizes no clean-up: any key can
-        // sign a goodbye under any nickname, and with no holder nothing says that this key owns
-        // the roster entry. The entry leaves with its own silence.
-        if holder.is_none() {
-            return;
-        }
-        state.peer_keys.remove(&message.author);
-        // The goodbye stamp guards against the replays of the run that ended. The newest stamp of
-        // that run is no ceiling for the next one: a clock that stepped back would leave the new
-        // run in the roster without a holder.
-        state.peer_stamp.remove(&message.author);
-        state.note_goodbye_stamp(&message.author, message.timestamp);
-        if state.peers.remove(message.author.as_str()) {
-            state.write_peer_count();
-        }
-        state
-            .clock_evidence
-            .returned_unshown
-            .remove(&message.author);
-        // A graceful goodbye, unlike a silence timeout, drops the dial hint —
-        // and with it the warm unicast connection and any dial cooldown, so a
-        // rejoin re-dials cold.
-        if let Some(endpoint_id) = state.forget_peer_endpoint(message.author.as_str())
+        let left_endpoint = state.forget_key(key);
+        if let Some(endpoint_id) = left_endpoint
             && !state.endpoint_is_bound(endpoint_id.id)
         {
+            // A graceful goodbye, unlike a silence timeout, drops the dial hint, and with it the
+            // warm unicast connection and any dial cooldown, so a rejoin re-dials cold.
             state.unicast_pool.forget(endpoint_id.id).await;
             // Its advertised links go too, or routes keep running through a peer
             // that said goodbye until its vector ages out.
@@ -86,24 +68,24 @@ pub(crate) async fn handle_presence(
                 ));
             }
         }
-        state.quiet.remove(message.author.as_str());
-        state.quiet_since.remove(message.author.as_str());
         // Only announce a departure for a peer whose arrival we
         // surfaced — keeps the join-horizon view symmetric. A `left`
         // for a peer known only through pre-join backlog (or one we
         // already showed going quiet) is dropped.
-        if state.surfaced.remove(message.author.as_str()) {
+        if state.surfaced.remove(&key) {
             context.sink.emit(NodeEvent::Presence {
                 message: Box::new(message.authored()),
-                peer: message.key(),
+                peer: key,
                 synthetic: false,
             });
             tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer left");
         }
-        // App cleanup last, with the roster already consistent. Gated on
-        // `surfaceable`: a relayed pre-join `Left` must never cancel live
-        // work — the same join-horizon symmetry as the announcement above.
-        if surfaceable {
+        state.write_peer_count();
+        // App cleanup last, with the roster already consistent. The app tracks peers by nickname,
+        // so it hears of the departure when no other key holds the nickname. Gated on
+        // `surfaceable`: a relayed pre-join `Left` must never cancel live work — the same
+        // join-horizon symmetry as the announcement above.
+        if surfaceable && !state.nickname_is_held(&message.author) {
             app.on_peer_left(&message.author, state, context).await;
         }
     } else if subtype == PresenceSubtype::Joined && !update.stale {
@@ -125,16 +107,9 @@ pub(crate) async fn handle_presence(
         // backlog, and not shown yet, is shown by its fresh `joined`: the roster entry is not an
         // arrival. A `joined` too old to prove presence does not put a peer in the roster, so it
         // shows none.
-        let in_roster = state.peers.contains(message.author.as_str());
-        if surfaceable
-            && !update.returned
-            && in_roster
-            && state.surfaced.insert(message.author.clone())
-        {
-            state
-                .clock_evidence
-                .returned_unshown
-                .remove(&message.author);
+        let in_roster = state.peers.contains(&message.key());
+        if surfaceable && !update.returned && in_roster && state.surfaced.insert(message.key()) {
+            state.clock_evidence.returned_unshown.remove(&message.key());
             state.write_peer_count();
             context.sink.emit(NodeEvent::Presence {
                 message: Box::new(message.authored()),

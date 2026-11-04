@@ -247,7 +247,10 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
         return;
     };
     // Only a few members answer one digest (see `answers_digest`).
-    let members = state.peers.iter().chain(iter::once(me));
+    // The rank is by nickname: two live keys of one nickname tie, and both answer. That costs a
+    // duplicate answer, which a digest tolerates (see `answers_digest`).
+    let names = state.peers();
+    let members = names.into_iter().chain(iter::once(me));
     if !answers_digest(me, &message.author, message.id.as_str(), members) {
         return;
     }
@@ -1203,7 +1206,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (me, asker) = (nick("holder"), nick("asker"));
         let mut state = fresh_state();
-        state.peers.insert(asker.clone());
+        state.peer_for_test(asker.as_str());
         for index in 0..100 {
             state
                 .message_log

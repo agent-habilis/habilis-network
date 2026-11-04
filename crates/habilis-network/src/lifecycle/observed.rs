@@ -31,72 +31,60 @@ pub(crate) fn observe(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) -> Observed {
+    let key = message.key();
     let update = membership_update::compute_observed(message, state);
     if !update.stale {
         let proves = membership_update::proves_presence(&message.kind, message.timestamp);
-        // The key of the newest frame that proved the peer alive holds the nickname. A frame
-        // that proves presence but is older than the newest one is an unseen copy of a killed
-        // run (a relay holds it): it holds nothing.
-        // At an equal stamp (whole seconds) only the holder, or a nickname with no holder, keeps
-        // the nickname: the stamp cannot tell which of two frames of one second came last.
-        let holder = state.peer_keys.get(&message.author).copied();
-        let newest_before: Option<UnixSecs> = state.peer_stamp.get(&message.author).copied();
-        let ties_to_holder: bool = holder.is_none_or(|held| held == message.key());
-        let is_newest = proves
-            && newest_before.is_none_or(|newest| {
-                message.timestamp > newest || (message.timestamp == newest && ties_to_holder)
-            });
-        // Only the holder, or a frame that takes the nickname, moves the last-heard mark. A copy of
-        // a frame of a killed run must not keep the live run in the roster. A nickname with no
-        // holder on record (a peer whose clock is far behind never proved presence) takes any key.
-        let from_holder = is_newest || holder.is_none_or(|held| held == message.key());
+        // The roster is keyed by author key. The nickname is the label that the key uses now.
+        if state.names.get(&key) != Some(&message.author) {
+            state.names.insert(key, message.author.clone());
+        }
         // A frame of a live kind from a peer that is in the roster refreshes it at any stamp: a
         // peer whose clock runs far behind still talks, and the sweep must not evict it. Only a
-        // frame that proves presence does more (the holder of the nickname, the newest stamp).
-        let known_and_live = state.peers.contains(message.author.as_str())
-            && membership_update::is_live_kind(&message.kind);
+        // frame that proves presence does more (the newest stamp).
+        let known_and_live =
+            state.peers.contains(&key) && membership_update::is_live_kind(&message.kind);
         // Implicit heartbeat: a frame that proves presence updates last_seen. Not a stale one: a
-        // copy of a departed key's frame says nothing about whoever holds the nickname now. Not a
-        // replayed frame of a durable kind either: it would keep a dead peer from its eviction. A
-        // peer that is new to us gets its first entry from any frame, or the sweep could never
-        // evict it.
+        // copy of a departed key's frame says nothing about the peers that are in the roster now.
+        // Not a replayed frame of a durable kind either: it would keep a dead peer from its
+        // eviction. A peer that is new to us gets its first entry from any frame, or the sweep
+        // could never evict it.
         let heard_now = Instant::now();
-        match state.last_seen.get_mut(message.author.as_str()) {
-            Some(seen) if from_holder && (proves || known_and_live) => {
+        match state.last_seen.get_mut(&key) {
+            Some(seen) if proves || known_and_live => {
                 *seen = heard_now;
-                state
-                    .clock_evidence
-                    .heard
-                    .insert(message.author.clone(), heard_now);
+                state.clock_evidence.heard.insert(key, heard_now);
             }
             Some(_) => {}
             None => {
-                state.last_seen.insert(message.author.clone(), heard_now);
-                state
-                    .clock_evidence
-                    .heard
-                    .insert(message.author.clone(), heard_now);
+                state.last_seen.insert(key, heard_now);
+                state.clock_evidence.heard.insert(key, heard_now);
             }
         }
         if proves {
-            settle_holder(message, holder, is_newest, state);
-            // The newest stamp of the author, on its own clock: the test of a return compares two
+            // The newest stamp of the key, on its own clock: the test of a return compares two
             // stamps of one clock, so a skew between that clock and ours cancels.
-            let newest = state
-                .peer_stamp
-                .entry(message.author.clone())
-                .or_insert(message.timestamp);
+            let newest = state.peer_stamp.entry(key).or_insert(message.timestamp);
             *newest = (*newest).max(message.timestamp);
             if membership_update::is_live_kind(&message.kind) {
                 heartbeat::confirm_suspend(state, message.timestamp);
             }
-            state
-                .clock_evidence
-                .step_back
-                .remove(message.author.as_str());
+            state.clock_evidence.step_back.remove(&key);
         }
     }
-    membership_update::apply(&update, &message.author, state);
+    if update.returned || update.joined_new {
+        // A key that enters the roster under a nickname whose dial hint was made by a key that is
+        // not live (quiet, lapsed or pruned) does not inherit the hint: a directed send would
+        // reach the old node.
+        let owner_gone = state
+            .hint_owner
+            .get(&message.author)
+            .is_some_and(|owner| *owner != key && !state.peers.contains(owner));
+        if owner_gone {
+            state.forget_peer_endpoint(message.author.as_str());
+        }
+    }
+    membership_update::apply(&update, key, state);
 
     // Join horizon: the node still relays/logs everything (anti-entropy
     // keeps the mesh's set uniform), but a message stamped before we
@@ -117,17 +105,11 @@ pub(crate) fn observe(
     // when a run of its frames proves that it sends now. It is shown as returned: the operator
     // read "timed out" for it.
     if update.returned && !shown_peer {
-        state
-            .clock_evidence
-            .returned_unshown
-            .insert(message.author.clone());
+        state.clock_evidence.returned_unshown.insert(key);
     }
     if update.returned && shown_peer {
-        state
-            .clock_evidence
-            .returned_unshown
-            .remove(&message.author);
-        state.surfaced.insert(message.author.clone());
+        state.clock_evidence.returned_unshown.remove(&key);
+        state.surfaced.insert(key);
         state.write_peer_count();
         context.sink.emit(NodeEvent::PeerReturn {
             nickname: message.author.clone(),
@@ -152,13 +134,13 @@ pub(crate) fn observe(
     // this exactly-once instead.
     // In the roster: a durable frame (state, meta) of a peer we have not seen does not put the
     // peer there, and an arrival for it would be a peer that the rows and the count omit.
-    let in_roster = state.peers.contains(message.author.as_str());
+    let in_roster = state.peers.contains(&key);
     if shown_peer
         && !update.returned
         && !update.stale
         && membership_update::proves_presence(&message.kind, message.timestamp)
         && in_roster
-        && !state.surfaced.contains(message.author.as_str())
+        && !state.surfaced.contains(&key)
         // A real `joined` is surfaced by `handle_presence`, with its own id. Any other frame is
         // not, an `alive` too: a peer whose `joined` was lost arrives on its first live frame.
         && !matches!(
@@ -168,13 +150,9 @@ pub(crate) fn observe(
             }
         )
     {
-        state.surfaced.insert(message.author.clone());
+        state.surfaced.insert(key);
         state.write_peer_count();
-        if state
-            .clock_evidence
-            .returned_unshown
-            .remove(&message.author)
-        {
+        if state.clock_evidence.returned_unshown.remove(&key) {
             context.sink.emit(NodeEvent::PeerReturn {
                 nickname: message.author.clone(),
             });
@@ -190,37 +168,6 @@ pub(crate) fn observe(
     Observed {
         surfaceable,
         update,
-    }
-}
-
-/// Apply a frame that proves presence to the holder of its nickname. The dial hint was made by the
-/// key that held the nickname, and another key that takes it does not inherit the hint: a directed
-/// send would reach the old node. A frame of another key than the lapsed holder clears the hint at
-/// any stamp, newest or not.
-fn settle_holder(
-    message: &Verified,
-    holder: Option<AuthorKey>,
-    is_newest: bool,
-    state: &mut EventLoopState,
-) {
-    let lapsed = state
-        .clock_evidence
-        .lapsed_keys
-        .get(&message.author)
-        .copied();
-    let lapsed_other = lapsed.is_some_and(|held| held != message.key());
-    if is_newest {
-        state.clock_evidence.lapsed_keys.remove(&message.author);
-        let before = holder.or(lapsed);
-        if before.is_some_and(|held| held != message.key()) {
-            state.forget_peer_endpoint(message.author.as_str());
-        }
-        state
-            .peer_keys
-            .insert(message.author.clone(), message.key());
-    } else if lapsed_other {
-        state.clock_evidence.lapsed_keys.remove(&message.author);
-        state.forget_peer_endpoint(message.author.as_str());
     }
 }
 
@@ -288,12 +235,13 @@ mod churn_red {
     use crate::protocol::meshes::LookupOpts;
     use crate::protocol::messages::Authored;
     use crate::protocol::{
-        Channel, MeshId, Message, MessageBody, Nickname, PresenceSubtype, UnixSecs, Verified,
+        AuthorKey, Channel, MeshId, Message, MessageBody, Nickname, PresenceSubtype, UnixSecs,
+        Verified,
     };
-    use crate::testing::{FrameClass, WireCounter, endpoint_id, fresh_state, nick};
+    use crate::testing::{FrameClass, WireCounter, endpoint_id, fresh_state, nick, test_key};
     use crate::transport::{MeshSender, PayloadPath};
     use crate::util::clock::Instant;
-    use crate::util::tuning::{QUIET_CAP, SEEN_IDS_CAP, alive_timeout};
+    use crate::util::tuning::{SEEN_IDS_CAP, alive_timeout};
     use crate::{gossip, protocol};
 
     struct Inert;
@@ -505,15 +453,21 @@ mod churn_red {
             receive(&beat, &mut state, &context),
             "the frame is new to the seen set"
         );
-        assert!(state.surfaced.contains(who.as_str()), "the victim arrived");
+        assert!(
+            state.surfaced.contains(&state.key_named(who.as_str())),
+            "the victim arrived"
+        );
 
         // SIGKILL: nothing more arrives. The sweep evicts the victim.
         let silent = Instant::now()
             .checked_sub(alive_timeout() + Duration::from_secs(10))
             .expect("the monotonic clock has run past the alive timeout since boot");
-        state.last_seen.insert(who.clone(), silent);
+        state.last_seen_for_test(who.as_str(), silent);
         tick_sweep(&mut state, &rig.sink);
-        assert!(state.quiet.contains(who.as_str()), "the victim is quiet");
+        assert!(
+            state.quiet.contains(&state.key_named(who.as_str())),
+            "the victim is quiet"
+        );
         assert!(
             !state.key_said_goodbye(victim.author_key()),
             "a SIGKILL sends no left"
@@ -870,7 +824,7 @@ mod churn_red {
             let silent = Instant::now()
                 .checked_sub(Duration::from_secs(60))
                 .expect("the monotonic clock has run past 60 s since boot");
-            state.last_seen.insert(who.clone(), silent);
+            state.last_seen_for_test(who.as_str(), silent);
 
             for make in [state_change, meta_change, peer_info] {
                 let old = make(&rig.mesh, &who, &peer, long_ago());
@@ -879,7 +833,8 @@ mod churn_red {
                     "the frame is new to the seen set"
                 );
             }
-            let age = Instant::now().duration_since(state.last_seen[&who]);
+            let age =
+                Instant::now().duration_since(state.last_seen[&state.key_named(who.as_str())]);
             assert!(
                 age >= Duration::from_secs(59),
                 "a replay moved the last-heard mark to {age:?} ago"
@@ -912,7 +867,7 @@ mod churn_red {
             let silent = Instant::now()
                 .checked_sub(Duration::from_secs(60))
                 .expect("the monotonic clock has run past 60 s since boot");
-            state.last_seen.insert(who.clone(), silent);
+            state.last_seen_for_test(who.as_str(), silent);
             let info = peer_info(
                 &rig.mesh,
                 &who,
@@ -923,7 +878,8 @@ mod churn_red {
                 receive(&info, &mut state, &context),
                 "the frame is new to the seen set"
             );
-            let age = Instant::now().duration_since(state.last_seen[&who]);
+            let age =
+                Instant::now().duration_since(state.last_seen[&state.key_named(who.as_str())]);
             assert!(
                 age < Duration::from_secs(5),
                 "a fresh peer info did not count as a sign of life: {age:?} ago"
@@ -932,9 +888,12 @@ mod churn_red {
             let gone_quiet = Instant::now()
                 .checked_sub(alive_timeout() + Duration::from_secs(10))
                 .expect("the monotonic clock has run past the alive timeout since boot");
-            state.last_seen.insert(who.clone(), gone_quiet);
+            state.last_seen_for_test(who.as_str(), gone_quiet);
             tick_sweep(&mut state, &rig.sink);
-            assert!(state.quiet.contains(who.as_str()), "the peer is quiet");
+            assert!(
+                state.quiet.contains(&state.key_named(who.as_str())),
+                "the peer is quiet"
+            );
             let change = meta_change(&rig.mesh, &who, &peer, UnixSecs::now());
             assert!(
                 receive(&change, &mut state, &context),
@@ -971,7 +930,7 @@ mod churn_red {
             }
             let lines = rig.sink.lines();
             assert!(
-                lines.is_empty() && !state.peers.contains(who.as_str()),
+                lines.is_empty() && !state.peers.contains(&state.key_named(who.as_str())),
                 "an old durable frame made an arrival: {lines:?}"
             );
 
@@ -981,7 +940,7 @@ mod churn_red {
                 "the frame is new to the seen set"
             );
             assert!(
-                state.peers.contains(who.as_str()) && !rig.sink.lines().is_empty(),
+                state.is_peer(who.as_str()) && !rig.sink.lines().is_empty(),
                 "a fresh peer info is an arrival"
             );
             rig.endpoint.close().await;
@@ -1029,7 +988,7 @@ mod churn_red {
                 );
                 let lines = rig.sink.lines();
                 assert!(
-                    lines.is_empty() && !state.peers.contains(who.as_str()),
+                    lines.is_empty() && !state.peers.contains(&state.key_named(who.as_str())),
                     "an old {name} frame made an arrival: {lines:?}"
                 );
             }
@@ -1227,11 +1186,14 @@ mod churn_red {
                 receive(&first, &mut state, &context),
                 "the frame is new to the seen set"
             );
-            assert!(state.surfaced.contains(who.as_str()), "the peer is shown");
+            assert!(
+                state.surfaced.contains(&state.key_named(who.as_str())),
+                "the peer is shown"
+            );
             let silent = Instant::now()
                 .checked_sub(Duration::from_secs(80))
                 .expect("the monotonic clock has run past 80 s since boot");
-            state.last_seen.insert(who.clone(), silent);
+            state.last_seen_for_test(who.as_str(), silent);
 
             let slow = alive(
                 &rig.mesh,
@@ -1243,7 +1205,8 @@ mod churn_red {
                 receive(&slow, &mut state, &context),
                 "the frame is new to the seen set"
             );
-            let age = Instant::now().duration_since(state.last_seen[&who]);
+            let age =
+                Instant::now().duration_since(state.last_seen[&state.key_named(who.as_str())]);
             assert!(
                 age < Duration::from_secs(5),
                 "a live frame of a shown peer did not refresh it: heard {age:?} ago"
@@ -1288,17 +1251,17 @@ mod churn_red {
                     "the frame is new to the seen set"
                 );
                 assert_eq!(
-                    state.peer_stamp.get(who.as_str()),
+                    state.peer_stamp.get(&state.key_named(who.as_str())),
                     Some(&last.timestamp),
                     "{name}: observe did not record the newest stamp"
                 );
                 let gone_quiet = Instant::now()
                     .checked_sub(alive_timeout() + Duration::from_secs(10))
                     .expect("the monotonic clock has run past the alive timeout since boot");
-                state.last_seen.insert(who.clone(), gone_quiet);
+                state.last_seen_for_test(who.as_str(), gone_quiet);
                 tick_sweep(&mut state, &rig.sink);
                 assert!(
-                    state.quiet.contains(who.as_str()),
+                    state.quiet.contains(&state.key_named(who.as_str())),
                     "{name}: the peer is quiet"
                 );
 
@@ -1392,7 +1355,8 @@ mod churn_red {
             let mut state = fresh_state();
             let live = LiveCount::default();
             state.live_count = Some(live.clone());
-            state.quiet.insert(who.clone());
+            state.names.insert(peer.author_key(), who.clone());
+            state.quiet_for_test(who.as_str());
             state.joined_at = UnixSecs::now();
 
             let first = alive(
@@ -1427,7 +1391,10 @@ mod churn_red {
                 receive(&third, &mut state, &context),
                 "the frame is new to the seen set"
             );
-            assert!(state.peers.contains(who.as_str()), "the peer is back");
+            assert!(
+                state.peers.contains(&state.key_named(who.as_str())),
+                "the peer is back"
+            );
             assert_eq!(
                 live.load(Ordering::Relaxed),
                 2,
@@ -1465,7 +1432,7 @@ mod churn_red {
                 );
             }
             assert!(
-                !state.surfaced.contains(who.as_str()),
+                !state.surfaced.contains(&state.key_named(who.as_str())),
                 "a burst of old frames showed a ghost: {:?}",
                 rig.sink.lines()
             );
@@ -1504,7 +1471,7 @@ mod churn_red {
                 heard_ago(&mut state, &who, Duration::from_secs(5));
             }
             assert!(
-                !state.surfaced.contains(who.as_str()),
+                !state.surfaced.contains(&state.key_named(who.as_str())),
                 "frames 5 s apart showed a ghost: {:?}",
                 rig.sink.lines()
             );
@@ -1550,7 +1517,7 @@ mod churn_red {
                 "the frame is new to the seen set"
             );
             assert!(
-                !state.surfaced.contains(who.as_str()),
+                !state.surfaced.contains(&state.key_named(who.as_str())),
                 "two keys under one nickname showed a ghost: {:?}",
                 rig.sink.lines()
             );
@@ -1595,7 +1562,7 @@ mod churn_red {
                 "the frame is new to the seen set"
             );
             assert!(
-                !state.surfaced.contains(who.as_str()),
+                !state.surfaced.contains(&state.key_named(who.as_str())),
                 "two replayed frames 15 s apart showed a ghost: {:?}",
                 rig.sink.lines()
             );
@@ -1633,7 +1600,7 @@ mod churn_red {
                 heard_ago(&mut state, &who, Duration::from_secs(15));
             }
             assert!(
-                !state.surfaced.contains(who.as_str()),
+                !state.surfaced.contains(&state.key_named(who.as_str())),
                 "stamps that outrun our clock showed a ghost: {:?}",
                 rig.sink.lines()
             );
@@ -1661,7 +1628,7 @@ mod churn_red {
             );
             say_goodbye(&old_run, &who, &rig, &mut state, &mut Inert).await;
             assert!(
-                !state.peers.contains(who.as_str()),
+                !state.peers.contains(&state.key_named(who.as_str())),
                 "the goodbye did not remove the peer"
             );
 
@@ -1679,47 +1646,8 @@ mod churn_red {
                 heard_ago(&mut state, &who, Duration::from_secs(30));
             }
             assert!(
-                state.peers.contains(who.as_str()),
+                state.peers.contains(&state.key_named(who.as_str())),
                 "a new run with a clock 5 min behind the old goodbye stays out of the roster"
-            );
-            rig.endpoint.close().await;
-        });
-    }
-
-    /// A replay of a killed run after a goodbye must stay stale when it comes as a stream that
-    /// does not follow our clock: three frames delivered in one burst.
-    #[test]
-    fn a_burst_of_frames_of_a_killed_run_after_a_goodbye_is_no_arrival() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let rig = Rig::new().await;
-            let context = rig.context();
-            let who = nick("swift-cedar");
-            let live_run = Identity::generate();
-            let killed_run = Identity::generate();
-            let mut state = fresh_state();
-            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
-            let hello = chat(&rig.mesh, &who, &live_run, UnixSecs::now());
-            assert!(
-                receive(&hello, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            say_goodbye(&live_run, &who, &rig, &mut state, &mut Inert).await;
-
-            for step in 0..6 {
-                let frame = alive(
-                    &rig.mesh,
-                    &who,
-                    &killed_run,
-                    UnixSecs::now() - Duration::from_secs(600 - 30 * step),
-                );
-                assert!(
-                    receive(&frame, &mut state, &context),
-                    "the frame is new to the seen set"
-                );
-            }
-            assert!(
-                !state.peers.contains(who.as_str()),
-                "a burst of frames of a killed run put a gone peer back in the roster"
             );
             rig.endpoint.close().await;
         });
@@ -1736,7 +1664,8 @@ mod churn_red {
             let who = nick("swift-cedar");
             let peer = Identity::generate();
             let mut state = fresh_state();
-            state.quiet.insert(who.clone());
+            state.names.insert(peer.author_key(), who.clone());
+            state.quiet_for_test(who.as_str());
             state.joined_at = UnixSecs::now();
 
             for step in 0..3 {
@@ -1760,40 +1689,6 @@ mod churn_red {
             assert!(
                 !lines.iter().any(|line| line.starts_with("presence")),
                 "a returned peer was shown as a new arrival: {lines:?}"
-            );
-            rig.endpoint.close().await;
-        });
-    }
-
-    /// The goodbye of the live run and a frame of an older run stamped in the same second: the
-    /// stamp cannot say which came first, so the frame is a replay. A new run proves itself by a
-    /// run of frames, not by one stamp.
-    #[test]
-    fn an_older_run_frame_in_the_second_of_a_goodbye_is_no_arrival() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let rig = Rig::new().await;
-            let context = rig.context();
-            let who = nick("swift-cedar");
-            let live_run = Identity::generate();
-            let killed_run = Identity::generate();
-            let mut state = fresh_state();
-            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
-            let hello = chat(&rig.mesh, &who, &live_run, UnixSecs::now());
-            assert!(
-                receive(&hello, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            say_goodbye(&live_run, &who, &rig, &mut state, &mut Inert).await;
-            let said = state.clock_evidence.goodbye_stamp[&who];
-
-            let relayed = alive(&rig.mesh, &who, &killed_run, said);
-            assert!(
-                receive(&relayed, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            assert!(
-                !state.peers.contains(who.as_str()),
-                "a frame of an older run in the second of the goodbye put a gone peer back"
             );
             rig.endpoint.close().await;
         });
@@ -1834,66 +1729,29 @@ mod churn_red {
                 tick_sweep(&mut state, &rig.sink);
             }
             assert!(
-                state.peers.contains(who.as_str()),
+                state.peers.contains(&state.key_named(who.as_str())),
                 "the sweep dropped the run of a replacement"
             );
             rig.endpoint.close().await;
         });
     }
 
-    /// A signed `Left` of any key must not remove a roster peer that has no recorded holder. The
-    /// peer stays until its own silence or its own goodbye.
+    /// A signed `Left` of any key removes that key only. A roster peer of another key under the
+    /// same nickname stays until its own silence or its own goodbye.
     #[test]
     fn a_left_with_no_recorded_holder_removes_no_roster_peer() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let rig = Rig::new().await;
             let who = nick("swift-cedar");
             let mut state = fresh_state();
-            state.peers.insert(who.clone());
-            state.surfaced.insert(who.clone());
+            state.peer_for_test(who.as_str());
+            state.surfaced_for_test(who.as_str());
 
             say_goodbye(&Identity::generate(), &who, &rig, &mut state, &mut Inert).await;
 
             assert!(
-                state.peers.contains(who.as_str()),
-                "a goodbye of a stranger key removed a peer that has no holder"
-            );
-            rig.endpoint.close().await;
-        });
-    }
-
-    /// Two frames of one second under two keys are not told apart by the stamp. The holder keeps
-    /// the nickname, so its own goodbye still removes the peer.
-    #[test]
-    fn an_equal_second_frame_of_another_key_does_not_take_the_holder() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let rig = Rig::new().await;
-            let context = rig.context();
-            let who = nick("swift-cedar");
-            let holder = Identity::generate();
-            let other = Identity::generate();
-            let mut state = fresh_state();
-            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
-            let stamp = UnixSecs::now();
-            let first = alive(&rig.mesh, &who, &holder, stamp);
-            assert!(
-                receive(&first, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            let copy = chat(&rig.mesh, &who, &other, stamp);
-            assert!(
-                receive(&copy, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            assert_eq!(
-                state.peer_keys.get(who.as_str()),
-                Some(&holder.author_key()),
-                "a frame of the same second under another key took the nickname"
-            );
-            say_goodbye(&holder, &who, &rig, &mut state, &mut Inert).await;
-            assert!(
-                !state.peers.contains(who.as_str()),
-                "the goodbye of the holder did not remove the peer"
+                state.peers.contains(&test_key(who.as_str())),
+                "a goodbye of a stranger key removed a peer of another key"
             );
             rig.endpoint.close().await;
         });
@@ -1919,18 +1777,20 @@ mod churn_red {
                     receive(&hello, &mut state, &context),
                     "the frame is new to the seen set"
                 );
-                state
-                    .peer_endpoints
-                    .insert(who.clone(), iroh::EndpointAddr::new(endpoint));
-                state.last_seen.insert(
+                state.bind_peer_endpoint(
+                    holder.author_key(),
                     who.clone(),
+                    iroh::EndpointAddr::new(endpoint),
+                );
+                state.last_seen_for_test(
+                    who.as_str(),
                     Instant::now()
                         .checked_sub(alive_timeout() + Duration::from_secs(5))
                         .expect("the monotonic clock has run past the alive timeout since boot"),
                 );
                 tick_sweep(&mut state, &rig.sink);
-                state.quiet_since.insert(
-                    who.clone(),
+                state.quiet_since_for_test(
+                    who.as_str(),
                     Instant::now()
                         .checked_sub(Duration::from_hours(2))
                         .expect("the monotonic clock has run past 2 h since boot"),
@@ -1982,18 +1842,20 @@ mod churn_red {
                 receive(&hello, &mut state, &context),
                 "the frame is new to the seen set"
             );
-            state
-                .peer_endpoints
-                .insert(who.clone(), iroh::EndpointAddr::new(endpoint));
-            state.last_seen.insert(
+            state.bind_peer_endpoint(
+                holder.author_key(),
                 who.clone(),
+                iroh::EndpointAddr::new(endpoint),
+            );
+            state.last_seen_for_test(
+                who.as_str(),
                 Instant::now()
                     .checked_sub(alive_timeout() + Duration::from_secs(5))
                     .expect("the monotonic clock has run past the alive timeout since boot"),
             );
             tick_sweep(&mut state, &rig.sink);
-            state.quiet_since.insert(
-                who.clone(),
+            state.quiet_since_for_test(
+                who.as_str(),
                 Instant::now()
                     .checked_sub(Duration::from_hours(2))
                     .expect("the monotonic clock has run past 2 h since boot"),
@@ -2005,7 +1867,7 @@ mod churn_red {
             );
             // The sweep drops the stamp record of a lapsed nickname, so any frame is the newest.
             // Put the record back: the rule must not depend on that prune.
-            state.peer_stamp.insert(who.clone(), UnixSecs::now());
+            state.peer_stamp_for_test(who.as_str(), UnixSecs::now());
 
             let behind = alive(
                 &rig.mesh,
@@ -2043,17 +1905,22 @@ mod churn_red {
                 receive(&hello, &mut state, &context),
                 "the frame is new to the seen set"
             );
-            state
-                .peer_endpoints
-                .insert(who.clone(), iroh::EndpointAddr::new(endpoint));
-            state.last_seen.insert(
+            state.bind_peer_endpoint(
+                holder.author_key(),
                 who.clone(),
+                iroh::EndpointAddr::new(endpoint),
+            );
+            state.last_seen_for_test(
+                who.as_str(),
                 Instant::now()
                     .checked_sub(alive_timeout() + Duration::from_secs(5))
                     .expect("the monotonic clock has run past the alive timeout since boot"),
             );
             tick_sweep(&mut state, &rig.sink);
-            assert!(state.quiet.contains(who.as_str()), "the peer is quiet");
+            assert!(
+                state.quiet.contains(&state.key_named(who.as_str())),
+                "the peer is quiet"
+            );
 
             let back = alive(
                 &rig.mesh,
@@ -2086,8 +1953,10 @@ mod churn_red {
             let half_hour_ago = Instant::now()
                 .checked_sub(Duration::from_mins(30))
                 .expect("the monotonic clock has run past 30 min since boot");
-            state.quiet.insert(nick("lost-heron"));
-            state.quiet_since.insert(nick("lost-heron"), half_hour_ago);
+            state.quiet_for_test("lost-heron");
+            state
+                .quiet_since
+                .insert(test_key("lost-heron"), half_hour_ago);
             heartbeat::note_suspend(&mut state, Duration::from_mins(40));
 
             let live = alive(
@@ -2103,25 +1972,24 @@ mod churn_red {
             tick_sweep(&mut state, &rig.sink);
 
             assert!(
-                !state.quiet.contains("lost-heron"),
+                !state.quiet.contains(&test_key("lost-heron")),
                 "a live frame on the receive path did not vouch for the suspend"
             );
             rig.endpoint.close().await;
         });
     }
 
-    /// The records of the join horizon and of the goodbyes stay bounded: the sweep drops the
-    /// record of a nickname that left the roster and a goodbye older than the quiet TTL, and the
-    /// goodbyes never pass `QUIET_CAP`.
+    /// The records of the join horizon stay bounded: the sweep drops the record of a key that
+    /// left the roster.
     #[test]
-    fn the_sweep_prunes_the_pre_join_record_and_the_old_goodbyes() {
+    fn the_sweep_prunes_the_pre_join_record() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let rig = Rig::new().await;
             let kept = nick("kept-peer");
             let gone = nick("gone-peer");
             let mut state = fresh_state();
             state.joined_at = UnixSecs::now();
-            state.peers.insert(kept.clone());
+            state.peer_for_test(kept.as_str());
             let frame = alive(
                 &rig.mesh,
                 &kept,
@@ -2129,51 +1997,34 @@ mod churn_red {
                 state.joined_at - Duration::from_secs(60),
             );
             let record = LiveRun {
-                key: frame.key(),
                 last: frame.timestamp,
                 at: Instant::now(),
                 count: 1,
             };
-            state.clock_evidence.live_run.insert(kept.clone(), record);
-            state.clock_evidence.live_run.insert(gone.clone(), record);
-            for who in [&kept, &gone] {
-                state
-                    .clock_evidence
-                    .heard
-                    .insert(who.clone(), Instant::now());
-                state.clock_evidence.returned_unshown.insert(who.clone());
+            let (kept_key, gone_key) = (
+                state.key_named(kept.as_str()),
+                state.key_named(gone.as_str()),
+            );
+            state.clock_evidence.live_run.insert(kept_key, record);
+            state.clock_evidence.live_run.insert(gone_key, record);
+            for key in [kept_key, gone_key] {
+                state.clock_evidence.heard.insert(key, Instant::now());
+                state.clock_evidence.returned_unshown.insert(key);
             }
-            state.note_goodbye_stamp(&gone, UnixSecs::now() - Duration::from_hours(2));
-            state.note_goodbye_stamp(&kept, UnixSecs::now());
 
             tick_sweep(&mut state, &rig.sink);
-            let pre_join_names: Vec<&Nickname> = state.clock_evidence.live_run.keys().collect();
-            let goodbye_names: Vec<&Nickname> = state.clock_evidence.goodbye_stamp.keys().collect();
+            let pre_join_keys: Vec<&AuthorKey> = state.clock_evidence.live_run.keys().collect();
             assert!(
-                state.clock_evidence.live_run.contains_key(&kept)
-                    && !state.clock_evidence.live_run.contains_key(&gone),
-                "the pre-join record does not follow the roster: {pre_join_names:?}"
+                state.clock_evidence.live_run.contains_key(&kept_key)
+                    && !state.clock_evidence.live_run.contains_key(&gone_key),
+                "the pre-join record does not follow the roster: {pre_join_keys:?}"
             );
             assert!(
-                state.clock_evidence.goodbye_stamp.contains_key(&kept)
-                    && !state.clock_evidence.goodbye_stamp.contains_key(&gone),
-                "the sweep kept a goodbye older than the quiet TTL: {goodbye_names:?}"
-            );
-            assert!(
-                state.clock_evidence.heard.contains_key(&kept)
-                    && !state.clock_evidence.heard.contains_key(&gone)
-                    && state.clock_evidence.returned_unshown.contains(&kept)
-                    && !state.clock_evidence.returned_unshown.contains(&gone),
+                state.clock_evidence.heard.contains_key(&kept_key)
+                    && !state.clock_evidence.heard.contains_key(&gone_key)
+                    && state.clock_evidence.returned_unshown.contains(&kept_key)
+                    && !state.clock_evidence.returned_unshown.contains(&gone_key),
                 "the heard marks and the unshown returns do not follow the roster"
-            );
-
-            for index in 0..(QUIET_CAP + 20) {
-                state.note_goodbye_stamp(&nick(&format!("peer-{index}")), UnixSecs::now());
-            }
-            assert!(
-                state.clock_evidence.goodbye_stamp.len() <= QUIET_CAP,
-                "the goodbye stamps passed the cap: {}",
-                state.clock_evidence.goodbye_stamp.len()
             );
             rig.endpoint.close().await;
         });
@@ -2210,11 +2061,14 @@ mod churn_red {
                 );
             }
             say_goodbye(&left_run, &left, &rig, &mut state, &mut Inert).await;
-            state.quiet.insert(quiet);
+            state.quiet_for_test(quiet.as_str());
 
+            let (shown_key, hidden_key) = (
+                state.key_named(shown.as_str()),
+                state.key_named(hidden.as_str()),
+            );
             assert!(
-                state.surfaced.contains(shown.as_str())
-                    && !state.surfaced.contains(hidden.as_str()),
+                state.surfaced.contains(&shown_key) && !state.surfaced.contains(&hidden_key),
                 "the setup needs one shown peer and one hidden peer"
             );
             let live = state.live_nicknames();
@@ -2319,8 +2173,8 @@ mod churn_red {
                     receive(&durable, &mut state, &context),
                     "the frame is new to the seen set"
                 );
-                let shown = state.surfaced.contains(who.as_str());
-                let in_roster = state.peers.contains(who.as_str());
+                let shown = state.surfaced.contains(&state.key_named(who.as_str()));
+                let in_roster = state.peers.contains(&state.key_named(who.as_str()));
                 assert!(
                     !shown,
                     "{name}: a durable frame of an unseen peer showed an arrival"
@@ -2349,8 +2203,9 @@ mod churn_red {
                     receive(&beat, &mut state, &context),
                     "the frame is new to the seen set"
                 );
+                let key = state.key_named(who.as_str());
                 assert!(
-                    state.surfaced.contains(who.as_str()) && state.peers.contains(who.as_str()),
+                    state.surfaced.contains(&key) && state.peers.contains(&key),
                     "{name}: the live frame did not show the peer"
                 );
             }
@@ -2371,33 +2226,37 @@ mod churn_red {
             let peer = Identity::generate();
             let mut state = fresh_state();
             state.joined_at = UnixSecs::now() - Duration::from_hours(3);
-            state.quiet.insert(who.clone());
+            state.names.insert(peer.author_key(), who.clone());
+            state.quiet_for_test(who.as_str());
             let long_gone = Instant::now()
                 .checked_sub(heartbeat::QUIET_TTL + Duration::from_secs(60))
                 .expect("the monotonic clock has run past the quiet TTL since boot");
-            state.quiet_since.insert(who.clone(), long_gone);
-            state.peer_keys.insert(who.clone(), peer.author_key());
-            state
-                .peer_stamp
-                .insert(who.clone(), UnixSecs::now() - Duration::from_hours(2));
+            state.quiet_since_for_test(who.as_str(), long_gone);
+            state.peer_stamp_for_test(who.as_str(), UnixSecs::now() - Duration::from_hours(2));
 
             let back = alive(&rig.mesh, &who, &peer, UnixSecs::now());
             assert!(
                 receive(&back, &mut state, &context),
                 "the frame is new to the seen set"
             );
+            let returned_key = state.key_named(who.as_str());
             assert!(
-                state.peers.contains(who.as_str()) && !state.quiet.contains(who.as_str()),
+                state.peers.contains(&returned_key) && !state.quiet.contains(&returned_key),
                 "the peer did not return"
             );
             tick_sweep(&mut state, &rig.sink);
 
             assert!(
-                !state.quiet_since.contains_key(who.as_str()),
+                !state
+                    .quiet_since
+                    .contains_key(&state.key_named(who.as_str())),
                 "a returned peer kept its quiet recency"
             );
             assert!(
-                !state.clock_evidence.lapsed_quiet.contains(who.as_str()),
+                !state
+                    .clock_evidence
+                    .lapsed_quiet
+                    .contains(&state.key_named(who.as_str())),
                 "a returned peer was read as lapsed"
             );
             rig.endpoint.close().await;
@@ -2412,18 +2271,21 @@ mod churn_red {
             let who = nick("swift-cedar");
             let peer = Identity::generate();
             let mut state = fresh_state();
-            state.quiet.insert(who.clone());
+            state.names.insert(peer.author_key(), who.clone());
+            state.quiet_for_test(who.as_str());
             let long_gone = Instant::now()
                 .checked_sub(heartbeat::QUIET_TTL + Duration::from_secs(60))
                 .expect("the monotonic clock has run past the quiet TTL since boot");
-            state.quiet_since.insert(who.clone(), long_gone);
-            state.peer_keys.insert(who.clone(), peer.author_key());
+            state.quiet_since_for_test(who.as_str(), long_gone);
 
             say_goodbye(&peer, &who, &rig, &mut state, &mut Inert).await;
             tick_sweep(&mut state, &rig.sink);
 
             assert!(
-                !state.clock_evidence.lapsed_quiet.contains(who.as_str()),
+                !state
+                    .clock_evidence
+                    .lapsed_quiet
+                    .contains(&state.key_named(who.as_str())),
                 "a peer that said goodbye was read as lapsed"
             );
             rig.endpoint.close().await;
@@ -2468,7 +2330,7 @@ mod churn_red {
             )
             .await;
             assert!(
-                !state.peers.contains(who.as_str()),
+                !state.peers.contains(&state.key_named(who.as_str())),
                 "the goodbye ended the run"
             );
 
@@ -2481,17 +2343,16 @@ mod churn_red {
             );
 
             assert!(
-                state.peers.contains(who.as_str()),
+                state.peers.contains(&state.key_named(who.as_str())),
                 "the new run is in the roster"
             );
-            assert_eq!(
-                state.peer_keys.get(who.as_str()),
-                Some(&new_run.author_key()),
-                "a peer in the roster has no holder: its own goodbye would remove nothing"
+            assert!(
+                state.peers.contains(&new_run.author_key()),
+                "the new run is not a peer under its own key"
             );
             say_goodbye(&new_run, &who, &rig, &mut state, &mut Inert).await;
             assert!(
-                !state.peers.contains(who.as_str()),
+                !state.peers.contains(&state.key_named(who.as_str())),
                 "the goodbye of the replacement run did not remove the peer"
             );
             rig.endpoint.close().await;
@@ -2499,8 +2360,9 @@ mod churn_red {
     }
 
     /// A frame of a killed run, copied by a relay, must not keep the live run in the roster: the
-    /// last-heard mark of a nickname moves only for frames of the key that holds it. If it moved
-    /// for any key, a relay that replays old frames of the dead run would hold a silent peer.
+    /// last-heard mark is kept per key and moves only for frames of that key. If it moved for any
+    /// key of the nickname, a relay that replays old frames of the dead run would hold a silent
+    /// peer.
     #[test]
     fn a_frame_of_a_killed_run_does_not_refresh_the_live_run() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -2520,7 +2382,7 @@ mod churn_red {
             let heard = Instant::now()
                 .checked_sub(Duration::from_secs(60))
                 .expect("the monotonic clock has run past 60 s since boot");
-            state.last_seen.insert(who.clone(), heard);
+            state.last_seen.insert(live_run.author_key(), heard);
 
             let relayed = alive(
                 &rig.mesh,
@@ -2533,7 +2395,7 @@ mod churn_red {
                 "the frame is new to the seen set"
             );
             assert_eq!(
-                state.last_seen.get(who.as_str()),
+                state.last_seen.get(&live_run.author_key()),
                 Some(&heard),
                 "a replayed frame of the killed run moved the last-heard mark of the live run"
             );
@@ -2546,7 +2408,7 @@ mod churn_red {
             assert!(
                 state
                     .last_seen
-                    .get(who.as_str())
+                    .get(&live_run.author_key())
                     .is_some_and(|seen| *seen > heard),
                 "a frame of the live run did not move its last-heard mark"
             );
@@ -2579,8 +2441,9 @@ mod churn_red {
                 receive(&backlog, &mut state, &context),
                 "the frame is new to the seen set"
             );
+            let known_key = state.key_named(who.as_str());
             assert!(
-                state.peers.contains(who.as_str()) && !state.surfaced.contains(who.as_str()),
+                state.peers.contains(&known_key) && !state.surfaced.contains(&known_key),
                 "the setup needs a peer that is known and not shown"
             );
 
@@ -2655,15 +2518,21 @@ mod churn_red {
             let gone_quiet = Instant::now()
                 .checked_sub(alive_timeout() + Duration::from_secs(10))
                 .expect("the monotonic clock has run past the alive timeout since boot");
-            state.last_seen.insert(who.clone(), gone_quiet);
+            state.last_seen_for_test(who.as_str(), gone_quiet);
             tick_sweep(&mut state, &rig.sink);
-            assert!(state.quiet.contains(who.as_str()), "the peer is quiet");
+            assert!(
+                state.quiet.contains(&state.key_named(who.as_str())),
+                "the peer is quiet"
+            );
             let long_gone = Instant::now()
                 .checked_sub(Duration::from_hours(2))
                 .expect("the monotonic clock has run past 2 h since boot");
-            state.quiet_since.insert(who.clone(), long_gone);
+            state.quiet_since_for_test(who.as_str(), long_gone);
             tick_sweep(&mut state, &rig.sink);
-            assert!(!state.quiet.contains(who.as_str()), "the quiet TTL passed");
+            assert!(
+                !state.quiet.contains(&state.key_named(who.as_str())),
+                "the quiet TTL passed"
+            );
 
             let again = chat(&rig.mesh, &who, &peer, UnixSecs::now());
             assert!(
@@ -2716,10 +2585,9 @@ mod churn_red {
         });
     }
 
-    /// H7. The roster is keyed by nickname. Two live keys with one nickname share one entry, so
-    /// the live count is too low.
+    /// H7. The roster is keyed by author key, and a nickname is a label. Two live keys with one
+    /// nickname are two peers: the count, the rows and the live list name both.
     #[test]
-    #[ignore = "open: the roster is keyed by nickname, so two live keys share one entry"]
     fn h7_two_live_keys_with_one_nickname_count_once() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let rig = Rig::new().await;
@@ -2741,6 +2609,145 @@ mod churn_red {
                 2,
                 "two live keys are one roster entry: {:?}",
                 state.peers
+            );
+            assert_eq!(
+                state.member_count(),
+                3,
+                "the count is this node and the two live keys"
+            );
+            let rows = state.roster_snapshot().peers;
+            assert!(
+                rows.len() == 2 && rows.iter().all(|row| row.nickname == who),
+                "the roster has one row for each live key: {rows:?}"
+            );
+            assert_eq!(
+                state.live_nicknames().count(),
+                2,
+                "the live list names each live key"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// H7. A graceful restart: the old run says goodbye, then the new run speaks. The old key is
+    /// gone at once, so the count is this node and the new key, and the rows name one peer.
+    #[test]
+    fn h7_a_graceful_restart_leaves_one_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let (old_run, new_run) = (Identity::generate(), Identity::generate());
+            let mut state = fresh_state();
+            let old_chat = chat(&rig.mesh, &who, &old_run, UnixSecs::now());
+            assert!(
+                receive(&old_chat, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(state.member_count(), 2, "this node and the old run");
+
+            say_goodbye(&old_run, &who, &rig, &mut state, &mut Inert).await;
+            let new_chat = chat(&rig.mesh, &who, &new_run, UnixSecs::now());
+            assert!(
+                receive(&new_chat, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+
+            assert_eq!(
+                state.member_count(),
+                2,
+                "this node and the new run: the old run said goodbye"
+            );
+            assert!(
+                state.peers.contains(&new_run.author_key())
+                    && !state.peers.contains(&old_run.author_key()),
+                "the roster holds the new key only: {:?}",
+                state.peers
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// H7. A crash restart: the old run sends no goodbye. Both keys are peers until the old key is
+    /// silent for one alive timeout, and then only the new key is. The old key goes quiet.
+    #[test]
+    fn h7_a_crash_restart_counts_two_until_the_old_key_times_out() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let (old_run, new_run) = (Identity::generate(), Identity::generate());
+            let mut state = fresh_state();
+            let old_chat = chat(&rig.mesh, &who, &old_run, UnixSecs::now());
+            let new_chat = chat(&rig.mesh, &who, &new_run, UnixSecs::now());
+            for frame in [&old_chat, &new_chat] {
+                assert!(
+                    receive(frame, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+            }
+            assert_eq!(
+                state.member_count(),
+                3,
+                "this node and both keys, until the old key times out"
+            );
+
+            let silent = Instant::now()
+                .checked_sub(alive_timeout() + Duration::from_secs(10))
+                .expect("the monotonic clock has run past the alive timeout since boot");
+            state.last_seen.insert(old_run.author_key(), silent);
+            tick_sweep(&mut state, &rig.sink);
+
+            assert_eq!(
+                state.member_count(),
+                2,
+                "this node and the new key: the old key timed out"
+            );
+            assert!(
+                state.quiet.contains(&old_run.author_key())
+                    && state.peers.contains(&new_run.author_key()),
+                "the old key is quiet and the new key is a peer"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The app tracks peers by nickname, so it hears of a departure when the last key of the
+    /// nickname leaves, not when the first one does. `is_peer` agrees: it holds while one key lives.
+    #[test]
+    fn h7_the_app_hears_of_a_departure_when_the_last_key_of_a_nickname_leaves() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let (first, second) = (Identity::generate(), Identity::generate());
+            let mut state = fresh_state();
+            let mut app = Leaves::default();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            for run in [&first, &second] {
+                let hello = chat(&rig.mesh, &who, run, UnixSecs::now());
+                assert!(
+                    receive(&hello, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+            }
+
+            say_goodbye(&first, &who, &rig, &mut state, &mut app).await;
+            assert!(
+                app.0.is_empty() && state.is_peer("swift-cedar"),
+                "the app heard of a departure while a key of the nickname lives: {:?}",
+                app.0
+            );
+
+            say_goodbye(&second, &who, &rig, &mut state, &mut app).await;
+            assert_eq!(
+                app.0,
+                vec!["swift-cedar".to_owned()],
+                "the app did not hear of the last key leaving"
+            );
+            assert!(
+                !state.is_peer("swift-cedar"),
+                "the nickname is still a peer after its last key left"
             );
             rig.endpoint.close().await;
         });
@@ -2797,23 +2804,25 @@ mod churn_red {
             )
             .await;
             assert!(
-                state.peers.contains(who.as_str()),
+                state.peers.contains(&new_run.author_key()),
                 "the late left of the old run removed the new run from the roster"
             );
             assert!(
-                state.surfaced.contains(who.as_str()),
+                state.surfaced.contains(&new_run.author_key()),
                 "the late left of the old run un-surfaced the new run"
+            );
+            assert!(
+                !state.peers.contains(&old_run.author_key()),
+                "the left of the old run did not remove the old run"
             );
             rig.endpoint.close().await;
         });
     }
 
-    /// A live frame of a peer in the roster refreshes it at any stamp, but only a frame that
-    /// proves presence changes who holds the nickname. An old frame of a killed run, re-sent by a
-    /// relay, must not make the dead key the holder: the `left` of the live run would then be read
-    /// as the goodbye of an older run and ignored.
+    /// An old frame of a killed run, re-sent by a relay, adds no peer: a frame older than the quiet
+    /// TTL proves no presence. The `left` of the live run then empties the roster.
     #[test]
-    fn an_old_frame_of_a_killed_run_does_not_take_the_nickname() {
+    fn an_old_frame_of_a_killed_run_adds_no_peer() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let rig = Rig::new().await;
             let context = rig.context();
@@ -2838,10 +2847,9 @@ mod churn_red {
                 receive(&relayed, &mut state, &context),
                 "the frame is new to the seen set"
             );
-            assert_eq!(
-                state.peer_keys.get(who.as_str()),
-                Some(&live_run.author_key()),
-                "an old frame of the killed run took the nickname"
+            assert!(
+                !state.peers.contains(&killed_run.author_key()),
+                "an old frame of the killed run added a peer"
             );
 
             let left = Message::new_left(&rig.mesh, &who).sign(&live_run);
@@ -2860,7 +2868,7 @@ mod churn_red {
             )
             .await;
             assert!(
-                !state.peers.contains(who.as_str()),
+                state.peers.is_empty(),
                 "the goodbye of the live run was ignored: the peer stays until the alive timeout"
             );
             rig.endpoint.close().await;
@@ -2870,7 +2878,8 @@ mod churn_red {
     /// Move the arrival of the last pre-join live frame of `who` back by `ago` on our clock, as
     /// if it had come that long ago. The tests cannot wait for the spacing.
     fn heard_ago(state: &mut EventLoopState, who: &Nickname, ago: Duration) {
-        if let Some(frame) = state.clock_evidence.live_run.get_mut(who) {
+        let key = state.key_named(who.as_str());
+        if let Some(frame) = state.clock_evidence.live_run.get_mut(&key) {
             frame.at = Instant::now()
                 .checked_sub(ago)
                 .expect("the monotonic clock has run past the spacing since boot");
@@ -2901,115 +2910,6 @@ mod churn_red {
             &context,
         )
         .await;
-    }
-
-    /// An unseen frame of a killed run that is younger than the quiet TTL still proves presence,
-    /// so the age of the frame cannot be what keeps it from the nickname. The live run holds the
-    /// nickname because its frame is the newest one, whatever the age of the other frame.
-    #[test]
-    fn a_recent_frame_of_a_killed_run_does_not_take_the_nickname() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let rig = Rig::new().await;
-            let context = rig.context();
-            let who = nick("swift-cedar");
-            let killed_run = Identity::generate();
-            let live_run = Identity::generate();
-            let mut state = fresh_state();
-            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
-            let hello = chat(&rig.mesh, &who, &live_run, UnixSecs::now());
-            assert!(
-                receive(&hello, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            let relayed = alive(
-                &rig.mesh,
-                &who,
-                &killed_run,
-                UnixSecs::now() - Duration::from_mins(10),
-            );
-            assert!(
-                receive(&relayed, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            assert_eq!(
-                state.peer_keys.get(who.as_str()),
-                Some(&live_run.author_key()),
-                "a 10 min old frame of the killed run took the nickname"
-            );
-
-            say_goodbye(&live_run, &who, &rig, &mut state, &mut Inert).await;
-            assert!(
-                !state.peers.contains(who.as_str()),
-                "the goodbye of the live run was ignored: the peer stays until the alive timeout"
-            );
-            rig.endpoint.close().await;
-        });
-    }
-
-    /// After the goodbye of the live run, a frame of a killed run that is younger than the quiet
-    /// TTL and older than the goodbye is no arrival: the user would read "has joined" for a peer
-    /// that is gone.
-    #[test]
-    fn a_recent_frame_of_a_killed_run_after_a_goodbye_is_no_arrival() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let rig = Rig::new().await;
-            let context = rig.context();
-            let who = nick("swift-cedar");
-            let killed_run = Identity::generate();
-            let live_run = Identity::generate();
-            let mut state = fresh_state();
-            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
-            let hello = chat(&rig.mesh, &who, &live_run, UnixSecs::now());
-            assert!(
-                receive(&hello, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            say_goodbye(&live_run, &who, &rig, &mut state, &mut Inert).await;
-            assert!(
-                !state.peers.contains(who.as_str()),
-                "the goodbye did not remove the peer"
-            );
-            let shown = arrival_ids(&rig, "swift-cedar").len();
-
-            let relayed = alive(
-                &rig.mesh,
-                &who,
-                &killed_run,
-                UnixSecs::now() - Duration::from_mins(10),
-            );
-            assert!(
-                receive(&relayed, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            assert_eq!(
-                arrival_ids(&rig, "swift-cedar").len(),
-                shown,
-                "a replayed frame of a killed run made a new arrival: {:?}",
-                rig.sink.lines()
-            );
-            assert!(
-                !state.peers.contains(who.as_str()),
-                "a replayed frame of a killed run put a gone peer back in the roster"
-            );
-
-            // A new run that starts after the goodbye is an arrival.
-            let next_run = Identity::generate();
-            let fresh = alive(
-                &rig.mesh,
-                &who,
-                &next_run,
-                UnixSecs::now() + Duration::from_secs(2),
-            );
-            assert!(
-                receive(&fresh, &mut state, &context),
-                "the frame is new to the seen set"
-            );
-            assert!(
-                state.peers.contains(who.as_str()),
-                "a new run after the goodbye is not in the roster"
-            );
-            rig.endpoint.close().await;
-        });
     }
 
     /// The id of a synthetic arrival is a UUID v4 by its bits, as `MessageId` says. It stays the
@@ -3058,9 +2958,8 @@ mod churn_red {
         );
     }
 
-    /// H7. A goodbye is kept by nickname with the resolution of one second. A new run that starts
-    /// in the second of the goodbye of the old run is stale from its first frame, although it is
-    /// another key.
+    /// H7. A goodbye is kept by key. A new run that starts in the second of the goodbye of the old
+    /// run is another key, so its first frame is not stale.
     #[test]
     fn h7_a_restart_in_the_second_of_a_goodbye_is_stale() {
         let mesh = MeshId::from("test");
@@ -3125,9 +3024,12 @@ mod churn_red {
             let silent = Instant::now()
                 .checked_sub(alive_timeout() + Duration::from_secs(10))
                 .expect("the monotonic clock has run past the alive timeout since boot");
-            live.last_seen.insert(dead.clone(), silent);
+            live.last_seen_for_test(dead.as_str(), silent);
             tick_sweep(&mut live, &rig.sink);
-            assert!(live.quiet.contains(dead.as_str()), "the peer is quiet");
+            assert!(
+                live.quiet.contains(&live.key_named(dead.as_str())),
+                "the peer is quiet"
+            );
             let talker = Identity::generate();
             for _ in 0..SEEN_IDS_CAP {
                 live.mark_seen(&alive(
@@ -3177,7 +3079,7 @@ mod churn_red {
         });
     }
 
-    fn victim_key(writer: &EventLoopState) -> protocol::AuthorKey {
+    fn victim_key(writer: &EventLoopState) -> AuthorKey {
         writer.identity.author_key()
     }
 }
