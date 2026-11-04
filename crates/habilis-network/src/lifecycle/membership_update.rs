@@ -173,15 +173,32 @@ fn note_step_back(key: AuthorKey, timestamp: UnixSecs, state: &mut EventLoopStat
 /// [`proves_presence`]) and is stamped after the newest frame heard from the peer (see
 /// [`stamped_after_last_heard`]). Any other frame of a quiet peer is stale (see
 /// [`MembershipUpdate::stale`]).
+#[cfg(test)]
 pub(crate) fn compute(
     kind: &MessageKind,
     key: AuthorKey,
     timestamp: UnixSecs,
     state: &EventLoopState,
 ) -> MembershipUpdate {
+    compute_proving(
+        proves_presence(kind, timestamp),
+        kind,
+        key,
+        timestamp,
+        state,
+    )
+}
+
+/// `compute` for a frame whose [`proves_presence`] the caller already read.
+fn compute_proving(
+    proves: bool,
+    kind: &MessageKind,
+    key: AuthorKey,
+    timestamp: UnixSecs,
+    state: &EventLoopState,
+) -> MembershipUpdate {
     let quiet = state.quiet.contains(&key);
-    let proves_return =
-        proves_presence(kind, timestamp) && stamped_after_last_heard(key, timestamp, state);
+    let proves_return = proves && stamped_after_last_heard(key, timestamp, state);
     if quiet && !proves_return {
         return MembershipUpdate {
             returned: false,
@@ -217,7 +234,7 @@ pub(crate) fn compute(
     // that a relay re-sends (a peer that left long ago, or after the quiet TTL) is no arrival.
     MembershipUpdate {
         returned: quiet,
-        joined_new: unseen && proves_presence(kind, timestamp),
+        joined_new: unseen && proves,
         stale: false,
     }
 }
@@ -226,7 +243,20 @@ pub(crate) fn compute(
 /// signed by a key that said goodbye is stale at any timestamp. That includes a second copy of the
 /// goodbye itself: the first one recorded the key. A key is minted per run, so a key that left never
 /// speaks again, and nothing else is needed to tell a replay of an old run from a new one.
+#[cfg(test)]
 pub(crate) fn compute_for(message: &Verified, state: &EventLoopState) -> MembershipUpdate {
+    let proves = proves_presence(&message.kind, message.timestamp);
+    compute_for_proving(proves, message, state)
+}
+
+/// `compute_for` for a frame whose [`proves_presence`] the caller already read: the receive path
+/// reads the clock once per frame, because two reads on either side of a stamp bound could
+/// disagree.
+fn compute_for_proving(
+    proves: bool,
+    message: &Verified,
+    state: &EventLoopState,
+) -> MembershipUpdate {
     if state.key_said_goodbye(message.key()) {
         return MembershipUpdate {
             returned: false,
@@ -234,7 +264,13 @@ pub(crate) fn compute_for(message: &Verified, state: &EventLoopState) -> Members
             stale: true,
         };
     }
-    compute(&message.kind, message.key(), message.timestamp, state)
+    compute_proving(
+        proves,
+        &message.kind,
+        message.key(),
+        message.timestamp,
+        state,
+    )
 }
 
 /// How far the stamps of a run may drift from our clock, from one counted frame to the next. The
@@ -251,8 +287,8 @@ const RUN_PACE_TOLERANCE: Duration = Duration::from_secs(5);
 /// Limit: a relay that replays at least [`STEP_BACK_FRAMES`] frames of a peer that stopped, one by
 /// one, in real time, shows that peer for up to one alive timeout. The step-back path has the
 /// same limit.
-pub(crate) fn note_live_run(message: &Verified, state: &mut EventLoopState) -> bool {
-    if !is_live_kind(&message.kind) || !proves_presence(&message.kind, message.timestamp) {
+pub(crate) fn note_live_run(message: &Verified, proves: bool, state: &mut EventLoopState) -> bool {
+    if !is_live_kind(&message.kind) || !proves {
         return false;
     }
     let now = Instant::now();
@@ -294,16 +330,25 @@ pub(crate) fn note_live_run(message: &Verified, state: &mut EventLoopState) -> b
 /// [`note_step_back`]): a live frame of a quiet peer, stale only because its stamp is not after
 /// the newest one on record, that closes a run of rising frames drops the old stamp, and the
 /// update is computed again. A key that said goodbye never returns this way.
+#[cfg(test)]
 pub(crate) fn compute_observed(message: &Verified, state: &mut EventLoopState) -> MembershipUpdate {
-    let update = compute_for(message, state);
+    let proves = proves_presence(&message.kind, message.timestamp);
+    compute_observed_proving(message, proves, state)
+}
+
+/// `compute_observed` for a frame whose [`proves_presence`] the receive path already read.
+pub(crate) fn compute_observed_proving(
+    message: &Verified,
+    proves: bool,
+    state: &mut EventLoopState,
+) -> MembershipUpdate {
+    let update = compute_for_proving(proves, message, state);
     let key = message.key();
-    let steps_back: bool = update.stale
-        && state.quiet.contains(&key)
-        && !state.key_said_goodbye(key)
-        && proves_presence(&message.kind, message.timestamp);
+    let steps_back: bool =
+        update.stale && state.quiet.contains(&key) && !state.key_said_goodbye(key) && proves;
     if steps_back && note_step_back(key, message.timestamp, state) {
         state.peer_stamp.remove(&key);
-        return compute_for(message, state);
+        return compute_for_proving(proves, message, state);
     }
     update
 }

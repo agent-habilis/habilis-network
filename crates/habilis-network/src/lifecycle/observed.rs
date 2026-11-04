@@ -32,9 +32,11 @@ pub(crate) fn observe(
     context: &HandlerCtx<'_>,
 ) -> Observed {
     let key = message.key();
-    let update = membership_update::compute_observed(message, state);
+    // The clock is read once for the frame: two reads on either side of a stamp bound could
+    // disagree about it.
+    let proves = membership_update::proves_presence(&message.kind, message.timestamp);
+    let update = membership_update::compute_observed_proving(message, proves, state);
     if !update.stale {
-        let proves = membership_update::proves_presence(&message.kind, message.timestamp);
         // The roster is keyed by author key. The nickname is the label that the key uses now.
         if state.names.get(&key) != Some(&message.author) {
             state.names.insert(key, message.author.clone());
@@ -98,7 +100,7 @@ pub(crate) fn observe(
     // the join horizon (`surfaceable`).
     let sends_now = !update.stale
         && message.timestamp < state.joined_at
-        && membership_update::note_live_run(message, state);
+        && membership_update::note_live_run(message, proves, state);
     let shown_peer = surfaceable || sends_now;
 
     // A peer that returns with frames stamped before our join is back in the roster, and shown
@@ -138,7 +140,7 @@ pub(crate) fn observe(
     if shown_peer
         && !update.returned
         && !update.stale
-        && membership_update::proves_presence(&message.kind, message.timestamp)
+        && proves
         && in_roster
         && !state.surfaced.contains(&key)
         // A real `joined` is surfaced by `handle_presence`, with its own id. Any other frame is
