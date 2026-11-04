@@ -591,6 +591,78 @@ mod departed_tests {
         });
     }
 
+    /// A key that outlived the quiet TTL keeps its name and its dial hint, because it can return
+    /// without a `PeerInfo`. It is still a peer of the roster, so its goodbye ends it like the
+    /// goodbye of a quiet peer: the hint, the dial address and the name go, and a directed send
+    /// no longer reaches its node.
+    #[test]
+    fn the_goodbye_of_a_key_that_outlived_the_quiet_ttl_removes_its_dial_hint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let lapsed = Identity::generate();
+            let recorded = nick("swift-cedar");
+            let address = iroh::EndpointAddr::new(endpoint_id(4));
+            let mut state = fresh_state();
+            state.names.insert(lapsed.author_key(), recorded.clone());
+            state
+                .clock_evidence
+                .lapsed_quiet
+                .insert(lapsed.author_key());
+            state.unicast_pool.note_addr(&address);
+            state.bind_peer_endpoint(lapsed.author_key(), recorded.clone(), address);
+
+            let left = Message::new_left(&mesh, &recorded).sign(&lapsed);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.peer_endpoints.contains_key(&recorded),
+                "the dial hint of a departed key survived its goodbye"
+            );
+            assert!(
+                !state.unicast_pool.has_addr(endpoint_id(4)),
+                "the dial address of a departed key survived its goodbye"
+            );
+            assert!(
+                !state.names.contains_key(&lapsed.author_key())
+                    && !state
+                        .clock_evidence
+                        .lapsed_quiet
+                        .contains(&lapsed.author_key()),
+                "a departed key stayed in the roster's memory"
+            );
+            endpoint.close().await;
+        });
+    }
+
     /// A departed key's `joined` frames serve nobody once it is gone, and the log never evicts a
     /// small author, so without this they stay resend subjects for the life of the node. Its chat
     /// stays: a node that missed it can still backfill it.

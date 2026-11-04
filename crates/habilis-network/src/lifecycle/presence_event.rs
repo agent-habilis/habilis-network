@@ -67,8 +67,11 @@ pub(crate) async fn handle_presence(
         // The roster is keyed by author key, so a goodbye ends that key and no other: another key
         // under the same nickname stays a peer. Any key can sign a goodbye under any nickname, and
         // the goodbye of a key that is not in the roster removes nothing. It is kept apart from
-        // the goodbyes of peers, so a flood of them cannot evict those.
-        let was_peer = state.peers.contains(&key) || state.quiet.contains(&key);
+        // the goodbyes of peers, so a flood of them cannot evict those. A key that outlived the
+        // quiet TTL is still in the roster: it keeps its name and its dial hint.
+        let was_peer = state.peers.contains(&key)
+            || state.quiet.contains(&key)
+            || state.clock_evidence.lapsed_quiet.contains(&key);
         if !was_peer {
             state.note_stranger_left(key);
             return;
