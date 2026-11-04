@@ -77,7 +77,6 @@ impl ProvenEndpoints {
     }
 
     /// The endpoint that `signer`, a key of the roster, proved.
-    #[cfg(feature = "multihop")]
     pub(crate) fn trusted(&self, signer: &AuthorKey) -> Option<EndpointId> {
         self.trusted.get(signer).copied()
     }

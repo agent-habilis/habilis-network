@@ -921,9 +921,12 @@ async fn auto_pong(message: &Verified, state: &EventLoopState, context: &Handler
 }
 
 /// The pong that answers `ping`, and where it goes: the endpoint that the signer of the ping proved
-/// in its `PeerInfo`, unless it is the rendezvous. The nickname on the ping is a label that any
-/// signer can take, so the dial hint under that nickname can name the endpoint of another key. A
-/// signer that has proved no endpoint gets no target, and so no pong.
+/// in its `PeerInfo`, unless it is the rendezvous. The roster's trust of the key comes first, because
+/// it has no cap, and the proof table is a FIFO that a roster key can fall out of. The nickname on
+/// the ping is a label that any signer can take, so the dial hint under that nickname can name the
+/// endpoint of another key. A signer that has proved no endpoint gets no target, and so no pong. A
+/// warm connection does not change that: it proves which endpoint it reaches, and nothing ties the
+/// key of a gossip ping to it.
 fn pong_for(
     request: &Verified,
     state: &EventLoopState,
@@ -936,9 +939,11 @@ fn pong_for(
         &request.id,
     )
     .sign(context.identity);
-    let target = state
-        .proven_endpoints
-        .get(&request.key())
+    let signer = request.key();
+    let proofs = &state.proven_endpoints;
+    let target: Option<iroh::EndpointId> = proofs
+        .trusted(&signer)
+        .or_else(|| proofs.get(&signer))
         .filter(|eid| Some(*eid) != state.rendezvous_id);
     (answer, target)
 }
@@ -2292,6 +2297,7 @@ mod first_contact_tests {
     use crate::gossip::split;
     use crate::lifecycle::heartbeat;
     use crate::protocol::messages::AppFrameParams;
+    use crate::transport::proven_endpoints::ProvenEndpoints;
     use crate::transport::{PayloadPath, webrtc};
     use crate::util::{clock, tuning};
     use crate::{lookup, protocol, transport};
@@ -2604,6 +2610,41 @@ mod first_contact_tests {
                 matches!(&answer.kind, MessageKind::Pong { to, probe } if *to == twin && *probe == request.id),
                 "the pong does not answer the probe of the pinger: {:?}",
                 answer.kind
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The proof table is a FIFO with a cap, and a roster key can fall out of it. The roster keeps
+    /// its own trust of each key it holds, with no cap, so a ping from a roster key still finds the
+    /// endpoint that the key proved.
+    #[test]
+    fn a_ping_from_a_roster_key_whose_proof_left_the_fifo_still_gets_its_pong() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let mut state = fresh_state();
+            state.proven_endpoints = ProvenEndpoints::new(2);
+            let pinger = Identity::generate();
+            let pinger_endpoint = endpoint_id(31);
+            state.peers.insert(pinger.author_key());
+            state.note_proven_endpoint(pinger.author_key(), pinger_endpoint, UnixSecs::from(1));
+            for byte in 0..2u8 {
+                let stranger = Identity::generate().author_key();
+                state.note_proven_endpoint(stranger, endpoint_id(40 + byte), UnixSecs::from(1));
+            }
+            assert_eq!(
+                state.proven_endpoints.get(&pinger.author_key()),
+                None,
+                "precondition: strangers pushed the proof of the roster key out of the FIFO"
+            );
+
+            let request = Message::new_ping(&node.mesh, &nick("pinger")).sign(&pinger);
+            let (_answer, target) = pong_for(&request, &state, &node.context());
+
+            assert_eq!(
+                target,
+                Some(pinger_endpoint),
+                "a ping from a roster key got no pong after its proof left the FIFO"
             );
             node.endpoint.close().await;
         });
