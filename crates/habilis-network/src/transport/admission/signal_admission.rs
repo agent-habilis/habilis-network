@@ -473,16 +473,19 @@ impl SignalAdmission {
     }
 
     /// The QUIC counters of every live connection of the endpoint, on any protocol and any path.
+    /// The stats are read after the table is unlocked: the lock covers the upgrade of the handles only.
     pub(crate) fn quic_readings(&self) -> Vec<QuicReading> {
-        let inner = self.lock();
-        let handles = inner.slots.values().flat_map(|slot| slot.conns.iter());
-        let live = handles.filter_map(WeakConnectionHandle::upgrade);
-        let reading = |connection: Connection| QuicReading {
+        let connections: Vec<Connection> = {
+            let inner = self.lock();
+            let handles = inner.slots.values().flat_map(|slot| slot.conns.iter());
+            handles.filter_map(WeakConnectionHandle::upgrade).collect()
+        };
+        let reading = |connection: &Connection| QuicReading {
             id: connection.stable_id(),
             kind: ConnKind::of_alpn(connection.alpn()),
             counts: QuicCounts::of(&connection.stats()),
         };
-        live.map(reading).collect()
+        connections.iter().map(reading).collect()
     }
 
     /// Put a connection under its peer, and start the sampler if it is not
