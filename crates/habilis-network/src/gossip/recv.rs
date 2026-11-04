@@ -526,6 +526,9 @@ fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Verified) -> boo
 /// both surfaces exactly once. The frame is a [`Verified`] from the first check on: a directed frame
 /// sealed to us is decrypted on a plain copy before surfacing (see `gate_and_decrypt`), and the log
 /// keeps the verified ciphertext.
+///
+/// This is the wrapper for the gossip plane: the census counts the frame as arrived by gossip. A
+/// caller on another plane must call [`ingest_from`] with its plane.
 pub(crate) async fn ingest(
     frame: Bytes,
     state: &mut EventLoopState,
@@ -4133,9 +4136,10 @@ mod dedup_counter_tests {
         );
     }
 
-    /// One first sighting of `frame`, then a repeat on each arrival: gossip, gossip with a resend
-    /// nonce, unicast, unicast with a resend nonce.
-    fn five_arrivals_of(frame: &Verified) -> Vec<(Plane, Bytes)> {
+    /// One first sighting of `frame`, then repeats that give each arrival its own count: 2 on
+    /// gossip, 1 on gossip with a resend nonce, 1 on unicast, 2 on unicast with a resend nonce. A
+    /// swap of two planes or of two names then moves bytes between cells of unequal value.
+    fn arrivals_of(frame: &Verified) -> Vec<(Plane, Bytes)> {
         let plain = || frame.serialize().expect("serialize").into_bytes();
         let resent = |nonce: u64| {
             let wire = frame.serialize().expect("serialize");
@@ -4144,15 +4148,17 @@ mod dedup_counter_tests {
         vec![
             (Plane::Gossip, plain()),
             (Plane::Gossip, plain()),
+            (Plane::Gossip, plain()),
             (Plane::Gossip, resent(1)),
             (Plane::Unicast, plain()),
             (Plane::Unicast, resent(2)),
+            (Plane::Unicast, resent(3)),
         ]
     }
 
     /// A repeat is counted by its kind and by how it arrived: on which plane, and with a resend
-    /// nonce or without. One first sighting and 4 repeats of each of 2 kinds, one repeat on each
-    /// arrival.
+    /// nonce or without. Each of 2 kinds has one first sighting, then 2 repeats on gossip, 1 on
+    /// gossip with a nonce, 1 on unicast, and 2 on unicast with a nonce, so no 2 cells are equal.
     #[test]
     fn a_repeat_is_counted_by_kind_and_by_the_plane_and_the_resend_it_came_on() {
         let writer = fresh_state();
@@ -4163,7 +4169,7 @@ mod dedup_counter_tests {
             .sign(&writer.identity);
         let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
         for frame in [&state, &meta] {
-            arrivals.extend(five_arrivals_of(frame));
+            arrivals.extend(arrivals_of(frame));
         }
         let reader = reader_after_on(arrivals);
 
@@ -4175,14 +4181,14 @@ mod dedup_counter_tests {
             .copy_with_resend_nonce(1);
         let trailer: u64 = resent.len() as u64 - one_state;
         let expected = [
-            format!("gossip.state:{one_state}"),
-            format!("gossip.meta:{one_meta}"),
+            format!("gossip.state:{}", 2 * one_state),
+            format!("gossip.meta:{}", 2 * one_meta),
             format!("gossip_resend.state:{}", one_state + trailer),
             format!("gossip_resend.meta:{}", one_meta + trailer),
             format!("unicast.state:{one_state}"),
             format!("unicast.meta:{one_meta}"),
-            format!("unicast_resend.state:{}", one_state + trailer),
-            format!("unicast_resend.meta:{}", one_meta + trailer),
+            format!("unicast_resend.state:{}", 2 * (one_state + trailer)),
+            format!("unicast_resend.meta:{}", 2 * (one_meta + trailer)),
         ]
         .join(",");
         assert_eq!(

@@ -61,8 +61,10 @@
 //   digest, statedigest, metadigest, state, meta, linkstate, pingpong, shard, other), largest first.
 //   tags_in / tags_out: the same for the tags of the app frames.
 // - dup_by_path: the repeats of bin_dup as `arrival.kind:bytes`. The arrival is gossip, gossip_resend, unicast or
-//   unicast_resend: the plane, and whether the frame carried a resend nonce. The overlay drops a repeat of one
-//   gossip message id before the engine reads it, so no eager or lazy copy is in it.
+//   unicast_resend: the plane, and whether the frame carried a resend nonce. The overlay keeps a gossip message id
+//   for 90 s (message_id_retention) per subscription and drops a repeat in that time, so a plain repeat on the
+//   gossip plane is a copy after the 90 s or after a resubscribe, which replays frames. No eager or lazy copy
+//   inside the 90 s is in it.
 // - ext_<arm>: the sums of the `idle_ext_<arm>` deltas, the wakes of each arm that is not a timer.
 //   Only the arms that woke.
 // - ahead_max: the largest `idle_ahead_peers` gauge of any census line.
