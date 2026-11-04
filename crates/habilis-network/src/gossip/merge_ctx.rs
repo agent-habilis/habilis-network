@@ -314,6 +314,44 @@ pub(crate) fn entry_merges<Fits: FnMut(&serde_json::Value) -> bool>(
     cuts.map(|cut| cut.map(|part| wrapped(&part))).collect()
 }
 
+/// Apply a local write to the entry that a waiting switch kept, so the write again does not bring
+/// back what the app deleted or changed between the switch and the sweep.
+fn follow_own_write(state: &mut EventLoopState, merge: &serde_json::Value, author: &Nickname) {
+    let Some(switch) = state.epoch_write.switch.as_mut() else {
+        return;
+    };
+    let peers = merge.get(&switch.map);
+    let patch = peers.and_then(|peers| peers.get(author.as_str()));
+    if let (Some(patch), Some(entry)) = (patch, switch.own_entry.as_mut()) {
+        apply_merge_patch(entry, patch);
+    }
+}
+
+/// RFC 7386: an object patch merges into `target` key by key, `null` deletes a key, and any other
+/// value replaces what is there.
+fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    let serde_json::Value::Object(fields) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = serde_json::json!({});
+    }
+    let Some(map) = target.as_object_mut() else {
+        return;
+    };
+    for (key, value) in fields {
+        if value.is_null() {
+            map.remove(key);
+        } else {
+            apply_merge_patch(
+                map.entry(key.clone()).or_insert(serde_json::Value::Null),
+                value,
+            );
+        }
+    }
+}
+
 /// The part of `entry` that `held` does not hold yet, or `None` when it holds all of it. A path that
 /// `held` has stays as it is, whatever its value: it is newer than the entry that a switch kept.
 fn unwritten(
@@ -578,6 +616,9 @@ pub async fn broadcast_state_merge(
             )));
         }
     };
+    if channel == Channel::Meta {
+        follow_own_write(state, &merge, author);
+    }
 
     // A departure is mirrored before gossip takes the frame: once gossip has it, the frame is
     // no longer ours to copy, and a leaver can exit before the overlay carries it.
@@ -1247,6 +1288,78 @@ mod tests {
         assert!(
             !state.retry_epoch_switch(switch()),
             "the switch is given up after {DOC_EPOCH_WRITE_ATTEMPTS} tries"
+        );
+    }
+
+    /// A path that the app deletes between the switch and the sweep must not come back from the
+    /// copy that the switch kept: the copy follows the local writes of that window.
+    #[test]
+    fn a_path_deleted_between_the_switch_and_the_sweep_does_not_come_back() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::endpoint::presets;
+                use iroh_gossip::{net, proto};
+
+                use crate::doc::{MeshDoc, SelfWriteGate};
+                use crate::gossip::event::SilentSink;
+                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
+                use crate::protocol::Channel;
+                use crate::transport::MeshSender;
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([12u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let write = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                let mut state = fresh_state();
+                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
+                let entry = serde_json::json!({
+                    "card": {"name": "alice"},
+                    "status": "idle",
+                    "graph": {"node": "worker", "instance": "i"},
+                });
+                state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(entry)));
+                // The agent leaves its graph before the sweep, and sets a new status.
+                for merge in [
+                    serde_json::json!({"peers": {"alice": {"graph": null}}}),
+                    serde_json::json!({"peers": {"alice": {"status": "busy"}}}),
+                ] {
+                    let params =
+                        StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
+                    broadcast_state_merge(&mut state, params)
+                        .await
+                        .expect("the write is taken");
+                }
+
+                write_entry_again(&mut state, &write).await;
+
+                let json = state.doc(Channel::Meta).to_json();
+                let written = &json["peers"]["alice"];
+                assert!(
+                    written.get("graph").is_none(),
+                    "the deleted graph stays deleted"
+                );
+                assert_eq!(written["status"], "busy", "the newer status stays");
+                assert_eq!(written["card"]["name"], "alice", "the card comes back");
+                node.close().await;
+            },
         );
     }
 
