@@ -20,6 +20,7 @@ use crate::protocol::meshes::LookupOpts;
 use crate::protocol::messages::Authored;
 use crate::protocol::{
     AppFrameParams, AppTag, MeshId, Message, MessageBody, PresenceSubtype, UnixSecs, Verified,
+    peer_addr_error,
 };
 use crate::testing::{FrameClass, WireCounter, endpoint_id, fresh_state, nick};
 use crate::transport::{MeshSender, PayloadPath};
@@ -60,9 +61,25 @@ fn data_frame(mesh: &MeshId, us: &protocol::Nickname, identity: &Identity, len: 
     message.sign(identity)
 }
 
-/// The unmeshed minute sends no membership, document or other frame, and its bytes are exact: 15
-/// runs gave the same line. A change to the wire form moves them.
-fn assert_no_other_frame_and_exact_bytes(counter: &WireCounter) {
+/// The bytes of one `PeerInfo` frame that do not depend on the address of the node: the envelope,
+/// the nickname, the stamp, the proof and the signature.
+const ANNOUNCE_FIXED_BYTES: usize = 549;
+
+/// The bytes that the address of the node adds to a `PeerInfo` frame. The body holds the address
+/// as a JSON string inside a JSON string, so the count is that of the escaped text. A port of 4
+/// digits or a second address on the host moves this count, and nothing else.
+fn announce_address_bytes(endpoint: &iroh::Endpoint) -> usize {
+    let address = peer_addr_error::endpoint_addr_to_json(&endpoint.addr()).to_string();
+    serde_json::to_string(&address)
+        .expect("a string serializes")
+        .len()
+}
+
+/// The unmeshed minute sends no membership, document or other frame. The bytes of the data frames
+/// and of the keepalives are exact: 15 runs gave the same line. The bytes of the 5 `PeerInfo` frames
+/// are the fixed part of the frame plus the address of the node, which the host decides. A change
+/// to the wire form moves them.
+fn assert_no_other_frame_and_exact_bytes(counter: &WireCounter, address_bytes: usize) {
     for class in [
         FrameClass::Membership,
         FrameClass::Document,
@@ -74,9 +91,10 @@ fn assert_no_other_frame_and_exact_bytes(counter: &WireCounter) {
             "the unmeshed minute sent a {class:?} frame: {counter}"
         );
     }
+    let announce = 5 * (ANNOUNCE_FIXED_BYTES + address_bytes);
     for (class, bytes) in [
         (FrameClass::Data, 4655),
-        (FrameClass::Announce, 3365),
+        (FrameClass::Announce, announce),
         (FrameClass::Alive, 852),
     ] {
         assert_eq!(
@@ -87,7 +105,7 @@ fn assert_no_other_frame_and_exact_bytes(counter: &WireCounter) {
     }
     assert_eq!(
         counter.total_bytes(),
-        8872,
+        4655 + announce + 852,
         "the bytes of the minute moved: {counter}"
     );
 }
@@ -207,7 +225,7 @@ fn wire_cost_of_one_minute_with_5_peers() {
             5,
             "the 5 data frames of the workload were not all counted: {counter}"
         );
-        assert_no_other_frame_and_exact_bytes(&counter);
+        assert_no_other_frame_and_exact_bytes(&counter, announce_address_bytes(&endpoint));
         assert_eq!(
             data_bodies,
             vec![512; 5],
