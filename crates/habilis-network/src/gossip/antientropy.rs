@@ -35,7 +35,6 @@ use std::collections::HashSet;
 use std::hash::{Hash as _, Hasher as _};
 
 use crate::transport::{MeshSender, Resend};
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +82,7 @@ fn decode_key(text: &str) -> Option<DedupKey> {
 
 impl WireWindow {
     fn encode(window: &DigestWindow) -> Self {
+        use base64::Engine as _;
         let mut packed = Vec::with_capacity(window.ids.len() * 16);
         for id in &window.ids {
             packed.extend_from_slice(id.as_bytes());
@@ -107,6 +107,7 @@ impl WireWindow {
     /// Decode the packed ids into a set, or `None` if the Base64 / length
     /// is malformed or the window holds more ids than a full one.
     fn decode_ids(&self) -> Option<HashSet<DedupKey>> {
+        use base64::Engine as _;
         if self.ids.len() > WINDOW_IDS_TEXT_MAX {
             return None;
         }
@@ -1901,8 +1902,6 @@ mod tests {
         );
     }
 
-    /// A malformed digest body must decode to `None` (so `handle_digest`
-    /// skips it) rather than panic or yield garbage ids.
     /// The window ids are the packed ids in Base64, so a peer that reads them
     /// as Base58 gets none back.
     #[test]
@@ -1919,6 +1918,8 @@ mod tests {
         assert_eq!(ids.len(), 2, "two distinct ids");
     }
 
+    /// A malformed digest body must decode to `None` (so `handle_digest`
+    /// skips it) rather than panic or yield garbage ids.
     #[test]
     fn decode_ids_rejects_malformed() {
         // Not valid Base64 (`*` is outside the alphabet).
