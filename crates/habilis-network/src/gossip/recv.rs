@@ -903,7 +903,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
 /// traffic waited with it, once per identity the pinger cared to mint. A pong
 /// nobody receives is the right outcome: the pinger's round misses us and
 /// tries again.
-async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerCtx<'_>) {
+async fn auto_pong(message: &Verified, state: &EventLoopState, context: &HandlerCtx<'_>) {
     let pong = Message::new_pong(
         context.mesh,
         context.author,
@@ -912,11 +912,7 @@ async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerC
     )
     .sign(context.identity);
     messages::log_out(&pong);
-    let author_endpoint = state.peer_endpoints.get(message.author.as_str());
-    let warm_endpoint = author_endpoint
-        .map(|address| address.id)
-        .filter(|eid| Some(*eid) != state.rendezvous_id);
-    match (warm_endpoint, pong.serialize()) {
+    match (pong_target(message, state), pong.serialize()) {
         (Some(eid), Ok(bytes)) => {
             if !transport::send_best_effort(eid, bytes, state).await {
                 tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no warm path");
@@ -926,6 +922,16 @@ async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerC
             tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no known endpoint");
         }
     }
+}
+
+/// Where the pong to `ping` goes: the endpoint that the signer of the ping proved in its
+/// `PeerInfo`, unless it is the rendezvous. The nickname on the ping is a label that any signer can
+/// take, so the dial hint under that nickname can name the endpoint of another key.
+fn pong_target(ping: &Verified, state: &EventLoopState) -> Option<iroh::EndpointId> {
+    state
+        .proven_endpoints
+        .get(&ping.key())
+        .filter(|eid| Some(*eid) != state.rendezvous_id)
 }
 
 struct InboundFrame<'message> {
@@ -2252,7 +2258,7 @@ mod first_contact_tests {
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
 
-    use super::{dispatch_infra, handle_gossip_event, ingest};
+    use super::{dispatch_infra, handle_gossip_event, ingest, pong_target};
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::{EventLoopState, PingRound};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
@@ -2276,6 +2282,7 @@ mod first_contact_tests {
     use iroh_gossip::proto;
     use n0_future::task;
     use n0_future::time::Instant as TokioInstant;
+    use std::collections::HashSet;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, atomic};
     use std::time::{Duration as std_Duration, Instant as std_Instant};
@@ -2494,6 +2501,38 @@ mod first_contact_tests {
                 answered,
                 Some(2),
                 "the second key of the nickname was dropped from the responders"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// Two live keys share a nickname, and each proved its own endpoint. The dial hint under the
+    /// nickname names the endpoint of one of them. The pong to a ping goes to the endpoint of the
+    /// key that signed the ping.
+    #[test]
+    fn a_pong_goes_to_the_endpoint_that_the_ping_signer_proved() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let mut state = fresh_state();
+            let twin = nick("twin");
+            let (first, second) = (Identity::generate(), Identity::generate());
+            let (first_endpoint, second_endpoint) = (endpoint_id(21), endpoint_id(22));
+            state
+                .peer_endpoints
+                .insert(twin.clone(), iroh::EndpointAddr::new(first_endpoint));
+            state
+                .proven_endpoints
+                .insert(first.author_key(), first_endpoint, &HashSet::new());
+            state
+                .proven_endpoints
+                .insert(second.author_key(), second_endpoint, &HashSet::new());
+
+            let ping = Message::new_ping(&node.mesh, &twin).sign(&second);
+
+            assert_eq!(
+                pong_target(&ping, &state),
+                Some(second_endpoint),
+                "the pong went to the endpoint under the nickname, not to the signer's"
             );
             node.endpoint.close().await;
         });
