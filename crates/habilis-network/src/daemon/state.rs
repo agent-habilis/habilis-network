@@ -83,7 +83,8 @@ mod tests {
     };
     use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
     use crate::protocol::{
-        AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, UnixSecs,
+        AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, Nickname,
+        UnixSecs,
     };
     use crate::testing::{
         author_of, endpoint_id, fresh_state, fresh_state_with_book, nick, test_key,
@@ -1538,6 +1539,47 @@ mod tests {
             reaches,
             vec![Reach::Direct, Reach::Gossip],
             "one row reads Direct (the owner) and the other reads Gossip: {snapshot:?}"
+        );
+    }
+
+    /// A directed send to a roster row needs a row that one live peer owns: a quiet row has a
+    /// dead endpoint, and a nickname of two live peers is refused by the engine.
+    #[test]
+    fn the_addressees_of_a_roster_are_the_live_nicknames_that_one_peer_uses() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peer_for_test("solo");
+        state.surfaced_for_test("solo");
+        for key in [test_key("twin#first"), test_key("twin#second")] {
+            state.names.insert(key, nick("twin"));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+        state.quiet_for_test("gone");
+        // One live key and one quiet key under one nickname are one member.
+        state.peer_for_test("mixed");
+        state.surfaced_for_test("mixed");
+        let quiet_twin = test_key("mixed#quiet");
+        state.names.insert(quiet_twin, nick("mixed"));
+        state.quiet.insert(quiet_twin);
+
+        let snapshot = state.roster_snapshot();
+        let mut addressed: Vec<&str> = snapshot.addressees().map(Nickname::as_str).collect();
+        addressed.sort_unstable();
+        let shared: Vec<&str> = snapshot
+            .ambiguous_nicknames()
+            .map(Nickname::as_str)
+            .collect();
+
+        assert_eq!(
+            addressed,
+            vec!["mixed", "solo"],
+            "a quiet row and a nickname of two live peers are no addressee: {snapshot:?}"
+        );
+        assert_eq!(
+            shared,
+            vec!["twin"],
+            "only the nickname of two live peers is ambiguous: {snapshot:?}"
         );
     }
 

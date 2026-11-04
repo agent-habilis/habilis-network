@@ -210,12 +210,16 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                 // gossip broadcast. Besides the resend hazard, `send_app`'s
                 // broadcast bodies are not mesh-key-sealed, so on a
                 // passworded mesh receivers drop them outright.
-                let peers: Vec<Nickname> = state
-                    .roster_snapshot()
-                    .peers
-                    .into_iter()
-                    .map(|peer| peer.nickname)
-                    .collect();
+                // A quiet member has a dead endpoint, and the engine refuses a nickname that two
+                // live members use. Neither is a roster member to address.
+                let roster = state.roster_snapshot();
+                for nickname in roster.ambiguous_nicknames() {
+                    tracing::debug!(
+                        %nickname,
+                        "lobby packet skipped: two live peers use this nickname"
+                    );
+                }
+                let peers: Vec<Nickname> = roster.addressees().cloned().collect();
                 let mut delivered = false;
                 for peer in peers {
                     let Some(frame) = frame_for(context, LOBBY_TAG, Some(peer), &payload) else {
