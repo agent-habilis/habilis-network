@@ -273,5 +273,22 @@ mod one_signer_tests {
             Some(attacker),
             "its latest signer"
         );
+
+        proven.insert(
+            AuthorKey::from([6; 32]),
+            attacker,
+            UnixSecs::from(5),
+            &linked,
+        );
+        assert_eq!(
+            proven.get(&AuthorKey::from([5; 32])),
+            Some(attacker),
+            "a signer with an equal stamp does not take the endpoint over"
+        );
+        assert_eq!(
+            proven.get(&AuthorKey::from([6; 32])),
+            None,
+            "the signer with the equal stamp holds nothing"
+        );
     }
 }
