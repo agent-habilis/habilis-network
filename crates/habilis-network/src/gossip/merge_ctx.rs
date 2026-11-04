@@ -316,6 +316,8 @@ pub(crate) fn entry_merges<Fits: FnMut(&serde_json::Value) -> bool>(
 
 /// Apply a local write to the entry that a waiting switch kept, so the write again does not bring
 /// back what the app deleted or changed between the switch and the sweep.
+/// It patches only when a switch waits and has kept an entry: with no switch, or a switch that kept
+/// none, it does nothing.
 fn follow_own_write(state: &mut EventLoopState, merge: &serde_json::Value, author: &Nickname) {
     let Some(switch) = state.epoch_write.switch.as_mut() else {
         return;
@@ -1087,13 +1089,12 @@ mod tests {
         use crate::protocol::Channel;
         use crate::transport::MeshSender;
 
-        // A sealed frame is about 1.4 times the JSON of its part, so the array leaf of a mesh with a
-        // password is smaller: it must fit a frame by itself, or no write can carry it.
-        let (params_len, pad_len) = if key.is_some() {
-            (60, 960)
-        } else {
-            (150, 1_800)
-        };
+        // The array leaf has the size of the real card on both meshes (the extensions of an
+        // agent-gossip card are about 1.1 KB of JSON, and it publishes whole and sealed). The pads are
+        // noise that automerge cannot squeeze; on a mesh with a password they are smaller, so that
+        // 2 of them do not fit one sealed frame and the cut must tell the two meshes apart.
+        let params_len = 150;
+        let pad_len = if key.is_some() { 960 } else { 1_800 };
 
         let node = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
