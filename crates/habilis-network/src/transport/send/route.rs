@@ -21,6 +21,9 @@ pub(super) enum Route {
     /// where the relay carries no payload: parked until a direct path is
     /// proven, never sent relayed.
     Held(EndpointId),
+    /// Directed to a nickname that two or more live peers use: an error. The engine never picks
+    /// one of the keys.
+    Ambiguous,
     /// Directed with no known endpoint: an error, never gossip.
     Undeliverable,
 }
@@ -29,6 +32,9 @@ pub(super) fn route(message: &Verified, state: &EventLoopState) -> Route {
     let Some(nick) = sole_addressee(&message.kind) else {
         return Route::Broadcast;
     };
+    if state.nickname_is_ambiguous(nick) {
+        return Route::Ambiguous;
+    }
     match directed_endpoint(nick, state) {
         Some(eid) if held(eid, state) => Route::Held(eid),
         Some(eid) => Route::Unicast(eid),
@@ -45,8 +51,12 @@ pub(super) fn held(eid: EndpointId, state: &EventLoopState) -> bool {
 
 /// The endpoint a directed message to `nick` can be sent to, or `None` for an
 /// addressee we hold no endpoint for or the rendezvous pseudo-node (never a
-/// directed target). Reachability is left to iroh's connect (direct or multihop).
+/// directed target), or a nickname that two live peers use. Reachability is left to iroh's connect
+/// (direct or multihop).
 pub(super) fn directed_endpoint(nick: &Nickname, state: &EventLoopState) -> Option<EndpointId> {
+    if state.nickname_is_ambiguous(nick) {
+        return None;
+    }
     let eid = state.peer_endpoints.get(nick)?.id;
     if state.rendezvous_id == Some(eid) {
         return None;

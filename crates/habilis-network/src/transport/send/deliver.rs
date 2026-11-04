@@ -83,6 +83,12 @@ pub(crate) fn resolve(
         Route::Broadcast => Ok(Resend::Broadcast(bytes)),
         Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
         Route::Held(eid) => Err(SendError::Held { eid }),
+        Route::Ambiguous => {
+            let name = sole_addressee(&message.kind).map_or("<none>", Nickname::as_str);
+            Err(SendError::Ambiguous(format!(
+                "directed message to {name} refused: two or more live peers use this nickname"
+            )))
+        }
         Route::Undeliverable => {
             let addressee = sole_addressee(&message.kind);
             let name = addressee.map_or("<none>", Nickname::as_str);

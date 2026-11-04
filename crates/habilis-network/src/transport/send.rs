@@ -579,6 +579,55 @@ mod tests {
         );
     }
 
+    // ── ambiguous addressee ───────────────────────────────────────────
+
+    /// Two live keys use one nickname and a nickname names one member, so the engine never picks a
+    /// key: a directed send to it is refused.
+    #[test]
+    fn a_directed_message_to_a_nickname_of_two_live_keys_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, _) = state_knowing_bob();
+        for key in [test_key("bob#first"), test_key("bob#second")] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+
+        let sent = resolve(
+            &directed_msg(),
+            directed_msg().serialize().expect("serialize"),
+            &state,
+        );
+
+        assert!(
+            matches!(sent, Err(transport::SendError::Ambiguous(_))),
+            "a directed send to a nickname of two live keys picked a key: {sent:?}"
+        );
+        assert_eq!(
+            lane_for(&nick("bob"), &state),
+            Lane::Unreachable,
+            "the roster offers no lane to a nickname that a send refuses"
+        );
+    }
+
+    /// Control. A quiet key does not make the nickname ambiguous: only live peers do.
+    #[test]
+    fn a_quiet_key_of_the_nickname_does_not_make_a_directed_send_ambiguous() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_bob();
+        let (live, quiet) = (test_key("bob#live"), test_key("bob#quiet"));
+        for key in [live, quiet] {
+            state.names.insert(key, nick("bob"));
+        }
+        state.peers.insert(live);
+        state.quiet.insert(quiet);
+
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Unicast(bob),
+            "one live key and one quiet key is one member"
+        );
+    }
+
     // ── the gossip plane (broadcasts only) ────────────────────────────
 
     #[test]

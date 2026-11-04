@@ -1213,6 +1213,16 @@ impl EventLoopState {
         })
     }
 
+    /// Whether two or more live peers use `nickname`. A directed send names a nickname, so it
+    /// cannot tell which of them it means.
+    pub(crate) fn nickname_is_ambiguous(&self, nickname: &Nickname) -> bool {
+        let mut users = self
+            .peers
+            .iter()
+            .filter(|key| self.names.get(*key) == Some(nickname));
+        users.nth(1).is_some()
+    }
+
     /// Whether a key of the roster, live or quiet, uses `nickname`.
     pub(crate) fn nickname_is_held(&self, nickname: &Nickname) -> bool {
         let roster = self.peers.iter().chain(self.quiet.iter());
