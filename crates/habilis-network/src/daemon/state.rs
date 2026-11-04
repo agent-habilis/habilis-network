@@ -1912,6 +1912,46 @@ mod tests {
         assert!(state.mark_seen(&message), "second sighting is a duplicate");
     }
 
+    /// A key that renamed owns a dial hint under each nickname it used. When it departs, every one
+    /// of them goes, and the endpoint of its current nickname is the one that the call gives back.
+    #[test]
+    fn a_departed_key_takes_every_dial_hint_it_owns() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("swift-cedar");
+        let (old_endpoint, new_endpoint) = (endpoint_id(31), endpoint_id(32));
+        state.peers.insert(key);
+        state.names.insert(key, nick("swift-cedar"));
+        state.bind_peer_endpoint(
+            key,
+            nick("swift-cedar"),
+            iroh::EndpointAddr::new(old_endpoint),
+        );
+        state.names.insert(key, nick("calm-otter"));
+        state.bind_peer_endpoint(
+            key,
+            nick("calm-otter"),
+            iroh::EndpointAddr::new(new_endpoint),
+        );
+
+        let given_back = state.forget_key(key);
+        let left: Vec<&Nickname> = state.peer_endpoints.keys().collect();
+
+        assert_eq!(
+            given_back,
+            Some(iroh::EndpointAddr::new(new_endpoint)),
+            "the endpoint of the current nickname is given back"
+        );
+        assert!(
+            state.peer_endpoints.is_empty(),
+            "a hint under a previous nickname of the departed key stayed: {left:?}"
+        );
+        assert!(
+            state.hint_owner.is_empty(),
+            "the owner of a hint that went stayed"
+        );
+    }
+
     /// A frame still in the message log has been processed. Anti-entropy re-sends any frame a
     /// peer holds, and `seen` alone forgets one under enough traffic of the kinds the log never
     /// keeps; the re-send would then be reprocessed and re-surfaced.
