@@ -663,6 +663,79 @@ mod departed_tests {
         });
     }
 
+    /// A key that renamed owns a dial hint under each nickname it used, and each hint names an
+    /// endpoint. Its goodbye ends the pooled connection and the dial cooldown of every one of
+    /// them, not only of the endpoint of its current nickname.
+    #[test]
+    fn the_goodbye_of_a_key_that_renamed_ends_the_pool_state_of_each_endpoint_it_used() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let renamed = Identity::generate();
+            let (old_endpoint, new_endpoint) = (endpoint_id(41), endpoint_id(42));
+            let mut state = fresh_state();
+            state.peers.insert(renamed.author_key());
+            state
+                .names
+                .insert(renamed.author_key(), nick("swift-cedar"));
+            state.bind_peer_endpoint(
+                renamed.author_key(),
+                nick("swift-cedar"),
+                iroh::EndpointAddr::new(old_endpoint),
+            );
+            state.names.insert(renamed.author_key(), nick("calm-otter"));
+            state.bind_peer_endpoint(
+                renamed.author_key(),
+                nick("calm-otter"),
+                iroh::EndpointAddr::new(new_endpoint),
+            );
+            for used in [old_endpoint, new_endpoint] {
+                state.unicast_pool.note_dial_failure(used).await;
+            }
+
+            let left = Message::new_left(&mesh, &nick("calm-otter")).sign(&renamed);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.unicast_pool.is_cooling(new_endpoint).await,
+                "the cooldown of the current endpoint survived the goodbye"
+            );
+            assert!(
+                !state.unicast_pool.is_cooling(old_endpoint).await,
+                "the cooldown of an endpoint of a previous nickname survived the goodbye"
+            );
+            endpoint.close().await;
+        });
+    }
+
     /// A departed key's `joined` frames serve nobody once it is gone, and the log never evicts a
     /// small author, so without this they stay resend subjects for the life of the node. Its chat
     /// stays: a node that missed it can still backfill it.

@@ -1166,8 +1166,8 @@ impl EventLoopState {
 
     /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
     /// stamps and runs, its name, and every dial hint that its `PeerInfo` made, under each
-    /// nickname it used. Returns the hint of its current nickname.
-    pub(crate) fn forget_key(&mut self, key: AuthorKey) -> Option<EndpointAddr> {
+    /// nickname it used. Returns the address of each hint that went.
+    pub(crate) fn forget_key(&mut self, key: AuthorKey) -> Vec<EndpointAddr> {
         self.peers.remove(&key);
         self.last_seen.remove(&key);
         self.peer_stamp.remove(&key);
@@ -1181,19 +1181,15 @@ impl EventLoopState {
         self.clock_evidence.returned_unshown.remove(&key);
         self.clock_evidence.lapsed_quiet.remove(&key);
         self.proven_endpoints.forget_trust(&key);
-        let current = self.names.remove(&key);
+        self.names.remove(&key);
         // A key that renamed owns a hint under each nickname it used. The owned nicknames are read
         // before any hint goes, since a removal changes the owner map.
         let owned_hints = self.hint_owner.iter().filter(|(_, owner)| **owner == key);
         let owned: Vec<Nickname> = owned_hints.map(|(nickname, _)| nickname.clone()).collect();
-        let mut current_endpoint = None;
-        for nickname in owned {
-            let removed = self.forget_peer_endpoint(nickname.as_str());
-            if current.as_ref() == Some(&nickname) {
-                current_endpoint = removed;
-            }
-        }
-        current_endpoint
+        owned
+            .iter()
+            .filter_map(|nickname| self.forget_peer_endpoint(nickname.as_str()))
+            .collect()
     }
 
     /// Whether `key` is not live and another live peer uses `nickname`. A late `PeerInfo` of a

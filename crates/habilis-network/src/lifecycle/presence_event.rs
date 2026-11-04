@@ -81,19 +81,24 @@ pub(crate) async fn handle_presence(
         // The roster knows the key by the nickname it recorded, and a goodbye can name any
         // nickname. `forget_key` drops the record, so read it first.
         let departed = state.names.get(&key).unwrap_or(&message.author).clone();
-        let left_endpoint = state.forget_key(key);
-        if let Some(endpoint_id) = left_endpoint
-            && !state.endpoint_is_bound(endpoint_id.id)
-        {
+        // A key that renamed left one endpoint for each nickname it used, and each one is torn down,
+        // unless another nickname still binds it.
+        let left_hints = state.forget_key(key);
+        let unbound: Vec<_> = left_hints
+            .iter()
+            .map(|hint| hint.id)
+            .filter(|endpoint_id| !state.endpoint_is_bound(*endpoint_id))
+            .collect();
+        for endpoint_id in unbound {
             // A graceful goodbye, unlike a silence timeout, drops the dial hint, and with it the
             // warm unicast connection and any dial cooldown, so a rejoin re-dials cold.
-            state.unicast_pool.forget(endpoint_id.id).await;
+            state.unicast_pool.forget(endpoint_id).await;
             // Its advertised links go too, or routes keep running through a peer
             // that said goodbye until its vector ages out.
             #[cfg(feature = "multihop")]
             if let Some(handle) = state.multihop.as_ref() {
                 let _ = handle.remove_origin(habilis_network_iroh_multihop_transport::AppId::new(
-                    endpoint_id.id,
+                    endpoint_id,
                 ));
             }
         }

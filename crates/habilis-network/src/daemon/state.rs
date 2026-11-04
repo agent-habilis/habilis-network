@@ -1913,7 +1913,7 @@ mod tests {
     }
 
     /// A key that renamed owns a dial hint under each nickname it used. When it departs, every one
-    /// of them goes, and the endpoint of its current nickname is the one that the call gives back.
+    /// of them goes, and the call gives back the address of each.
     #[test]
     fn a_departed_key_takes_every_dial_hint_it_owns() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1937,11 +1937,13 @@ mod tests {
         let given_back = state.forget_key(key);
         let left: Vec<&Nickname> = state.peer_endpoints.keys().collect();
 
-        assert_eq!(
-            given_back,
-            Some(iroh::EndpointAddr::new(new_endpoint)),
-            "the endpoint of the current nickname is given back"
-        );
+        assert_eq!(given_back.len(), 2, "one address for each hint that went");
+        for used in [old_endpoint, new_endpoint] {
+            assert!(
+                given_back.contains(&iroh::EndpointAddr::new(used)),
+                "the address of a hint that went was not given back"
+            );
+        }
         assert!(
             state.peer_endpoints.is_empty(),
             "a hint under a previous nickname of the departed key stayed: {left:?}"
