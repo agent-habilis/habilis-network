@@ -81,8 +81,11 @@ impl ProvenEndpoints {
         self.trusted.get(signer).copied()
     }
 
-    /// Keep the trust in `signer` at `endpoint`. The caller admits roster keys only.
+    /// Keep the trust in `signer` at `endpoint`, in place of the trust in any other signer of that
+    /// endpoint: an endpoint has one signer. The caller admits roster keys only.
     pub(crate) fn trust(&mut self, signer: AuthorKey, endpoint: EndpointId) {
+        self.trusted
+            .retain(|other, trusted| *other == signer || *trusted != endpoint);
         self.trusted.insert(signer, endpoint);
     }
 

@@ -2136,7 +2136,9 @@ impl EventLoopState {
         self.proven_endpoints
             .insert(signer, endpoint, stamp, &linked);
         // Anyone can mint keys, so only a key of the roster is trusted: the roster bounds the map.
-        if self.peers.contains(&signer) || self.quiet.contains(&signer) {
+        // The table must also hold the proof: it refuses a replay of an older stamp.
+        let in_roster = self.peers.contains(&signer) || self.quiet.contains(&signer);
+        if in_roster && self.proven_endpoints.get(&signer) == Some(endpoint) {
             self.proven_endpoints.trust(signer, endpoint);
         }
         #[cfg(feature = "multihop")]

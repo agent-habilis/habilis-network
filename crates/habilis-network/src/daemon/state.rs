@@ -1954,6 +1954,46 @@ mod tests {
         );
     }
 
+    /// A `PeerInfo` whose proof the table refuses (a replay of an older stamp, for an endpoint a
+    /// newer key holds) makes no trust, even for a key of the roster. An endpoint has one trusted
+    /// signer: the key that takes it over displaces the trust of the one before.
+    #[test]
+    fn only_an_accepted_proof_makes_a_signer_trusted_and_an_endpoint_has_one_trusted_signer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (older, newer) = (test_key("swift-cedar"), test_key("calm-otter"));
+        let endpoint = endpoint_id(34);
+        state.peers.insert(older);
+        state.peers.insert(newer);
+
+        state.note_proven_endpoint(newer, endpoint, UnixSecs::from(10));
+        state.note_proven_endpoint(older, endpoint, UnixSecs::from(3));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&older),
+            None,
+            "a refused replay made the older key trusted for the endpoint"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&newer),
+            Some(endpoint),
+            "the accepted proof of the newer key makes it trusted"
+        );
+
+        state.note_proven_endpoint(older, endpoint, UnixSecs::from(20));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&older),
+            Some(endpoint),
+            "a newer stamp takes the endpoint back"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&newer),
+            None,
+            "the key that lost the endpoint stayed trusted for it"
+        );
+    }
+
     /// A departed key makes no claim to the rendezvous any more. Another nickname can still bind
     /// its endpoint, and then the endpoint keeps its state, so the claim of the key goes with the
     /// key itself.
