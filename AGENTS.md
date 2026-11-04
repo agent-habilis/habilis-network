@@ -170,6 +170,12 @@ Arrival and departure are surfaced once each, as `joined` and `left`, keyed by n
 
 Each lookup bootstraps a mesh and runs it with no other lookup present. An added lookup adds reliability and never a feature.
 
+## Correctness
+
+Correctness is imperative. Choose the correct design, whatever the size of the refactor.
+Do not keep a workaround, a heuristic, or a smaller change when it hides a wrong model.
+If the correct fix is large, split it into small steps. Each step compiles and passes the tests.
+
 ## Compatibility
 
 Until version 1.0, we do not care about backward compatibility. Before 1.0, break compatibility when it gives a better design, better performance, or better reliability. Do not keep a shim, an alias, or a fallback only for old versions.
