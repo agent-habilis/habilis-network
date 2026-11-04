@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 
-use crate::protocol::Nickname;
+use crate::protocol::AuthorKey;
 
-/// Link vectors that arrived before the roster bound an endpoint to their author, one per
-/// author: a newer one replaces the older. The binding comes with the `PeerInfo` of the author,
-/// which can arrive a few milliseconds after its first vector, now that vectors go out when a link
+/// Link vectors that arrived before their signer proved an endpoint, one per signing key: a newer
+/// one replaces the older. The proof comes with the `PeerInfo` of the signer, which can arrive a few
+/// milliseconds after its first vector, now that vectors go out when a link
 /// comes up. A vector that is dropped there is waited for until the next tick, 15 s on, and the
 /// session that it makes possible comes too late for the route that it carries.
 #[cfg(feature = "multihop")]
 #[derive(Debug, Clone)]
 pub(crate) struct ParkedLinkStates {
-    by_author: HashMap<Nickname, habilis_network_iroh_multihop_transport::LinkVector>,
+    by_signer: HashMap<AuthorKey, habilis_network_iroh_multihop_transport::LinkVector>,
     cap: usize,
 }
 
@@ -18,31 +18,31 @@ pub(crate) struct ParkedLinkStates {
 impl ParkedLinkStates {
     pub(crate) fn new(cap: usize) -> Self {
         Self {
-            by_author: HashMap::new(),
+            by_signer: HashMap::new(),
             cap,
         }
     }
 
-    /// Park `vector` for `author`, in place of the one that waited. Whether it was kept: the
-    /// vector of an author that does not wait yet is refused at the cap.
+    /// Park `vector` for `signer`, in place of the one that waited. Whether it was kept: the
+    /// vector of a signer that does not wait yet is refused at the cap.
     pub(crate) fn park(
         &mut self,
-        author: Nickname,
+        signer: AuthorKey,
         vector: habilis_network_iroh_multihop_transport::LinkVector,
     ) -> bool {
-        if !self.by_author.contains_key(&author) && self.by_author.len() >= self.cap {
+        if !self.by_signer.contains_key(&signer) && self.by_signer.len() >= self.cap {
             return false;
         }
-        self.by_author.insert(author, vector);
+        self.by_signer.insert(signer, vector);
         true
     }
 
-    /// The vector that waits for `author`, if any.
+    /// The vector that waits for `signer`, if any.
     pub(crate) fn take(
         &mut self,
-        author: &Nickname,
+        signer: &AuthorKey,
     ) -> Option<habilis_network_iroh_multihop_transport::LinkVector> {
-        self.by_author.remove(author)
+        self.by_signer.remove(signer)
     }
 }
 

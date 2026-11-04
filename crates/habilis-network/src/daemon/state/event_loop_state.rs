@@ -2073,8 +2073,6 @@ impl EventLoopState {
         endpoint: EndpointAddr,
     ) {
         let bound_id = endpoint.id;
-        #[cfg(feature = "multihop")]
-        let (parked, bound) = (self.parked_link_states.take(&nickname), bound_id);
         match owner {
             Some(key) => self.hint_owner.insert(nickname.clone(), key),
             None => self.hint_owner.remove(&nickname),
@@ -2088,25 +2086,31 @@ impl EventLoopState {
         {
             self.release_unbound_endpoint(old.id);
         }
-        // The vector that came before this binding is fed now, not at the next tick.
-        #[cfg(feature = "multihop")]
-        if let Some(vector) = parked {
-            self.feed_parked_link_state(vector, bound);
-        }
     }
 
-    /// Feed the link vector that waited for its author's binding, with the check that a vector
-    /// that arrives after its binding goes through: the origin must be the bound endpoint. The
+    /// Record that `signer` proved `endpoint`, and feed the vector of `signer` that waited for the
+    /// proof, now and not at the next tick.
+    pub(crate) fn note_proven_endpoint(&mut self, signer: AuthorKey, endpoint: EndpointId) {
+        let linked = self.linked_endpoints.clone();
+        self.proven_endpoints.insert(signer, endpoint, &linked);
+        #[cfg(feature = "multihop")]
+        self.feed_parked_link_state(&signer);
+    }
+
+    /// Feed the link vector that waited for the proof of `signer`, with the check that a vector
+    /// that arrives after its proof goes through: the origin must be the proven endpoint. The
     /// underlay is ticked when the vector changed the topology, as at any other receipt.
     #[cfg(feature = "multihop")]
-    fn feed_parked_link_state(
-        &self,
-        vector: habilis_network_iroh_multihop_transport::LinkVector,
-        bound: EndpointId,
-    ) {
-        if vector.origin().get() != bound {
+    fn feed_parked_link_state(&mut self, signer: &AuthorKey) {
+        let (Some(vector), Some(proven)) = (
+            self.parked_link_states.take(signer),
+            self.proven_endpoints.get(signer),
+        ) else {
+            return;
+        };
+        if vector.origin().get() != proven {
             tracing::debug!(target: "habilis_network::gossip",
-                "dropping parked multihop link-state: its origin is not the endpoint bound to its author"
+                "dropping parked multihop link-state: its origin is not the endpoint its signer proved"
             );
             return;
         }

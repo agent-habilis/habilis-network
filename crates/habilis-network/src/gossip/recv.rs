@@ -819,7 +819,7 @@ async fn dispatch_infra(
 /// `LinkVector`) supersede the last vector we held for that origin. Dropped
 /// silently when the multihop transport is off or the body is malformed —
 /// plumbing like the digests, never logged or surfaced. Returns whether the topology changed.
-fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
+fn handle_link_state(message: &Verified, state: &mut EventLoopState) -> bool {
     #[cfg(not(feature = "multihop"))]
     {
         // No multihop transport off-host: nothing consumes a routing table.
@@ -837,37 +837,34 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
             Ok(vector) => {
                 // A signature proves who made the vector, not that the origin is
                 // a member: anyone holding the mesh id can mint keys. So the
-                // origin must be the endpoint the roster binds to the message's
-                // author, the same binding that routes a directed message. A
-                // peer whose address we have not learned yet is waited for: its
-                // next vector, one interval on, finds the binding.
-                let bound = state
-                    .peer_endpoints
-                    .get(&message.author)
-                    .map(|address| address.id);
-                // The `PeerInfo` of the author can be a few milliseconds behind its first
-                // vector: the vector waits for the binding, and is fed when it is written.
+                // origin must be the endpoint that the signer proved, the same
+                // proof that a point-to-point answer follows. A nickname is a
+                // label, so the dial hint under it is no proof. A signer that has
+                // proved none yet is waited for: its next vector, one interval
+                // on, finds the proof.
+                let signer = message.key();
+                let bound = state.proven_endpoints.get(&signer);
+                // The `PeerInfo` of the signer can be a few milliseconds behind its first
+                // vector: the vector waits for the proof, and is fed when it is recorded.
                 if bound.is_none() {
-                    let kept = state
-                        .parked_link_states
-                        .park(message.author.clone(), vector);
+                    let kept = state.parked_link_states.park(signer, vector);
                     tracing::debug!(target: "habilis_network::gossip",
                         author = %message.author,
                         kept,
-                        "parked multihop link-state: no endpoint is bound to its author yet"
+                        "parked multihop link-state: its signer has proved no endpoint yet"
                     );
                     return false;
                 }
                 if bound != Some(vector.origin().get()) {
                     tracing::debug!(target: "habilis_network::gossip",
                         author = %message.author,
-                        "dropping multihop link-state: its origin is not the endpoint bound to its author"
+                        "dropping multihop link-state: its origin is not the endpoint its signer proved"
                     );
                     return false;
                 }
                 let updated = handle.feed_topology(vector);
                 // A vector that waited for this author is older than the one just fed.
-                state.parked_link_states.take(&message.author);
+                state.parked_link_states.take(&signer);
                 tracing::debug!(target: "habilis_network::gossip",
                     author = %message.author,
                     updated,
@@ -1569,9 +1566,7 @@ async fn handle_peer_info(
         && state.proven_endpoints.get(&signer) != Some(peer_id)
         && proven_endpoints::verifies(peer_id, context.mesh, &signer, proof)
     {
-        state
-            .proven_endpoints
-            .insert(signer, peer_id, &state.linked_endpoints);
+        state.note_proven_endpoint(signer, peer_id);
     }
     // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
     // endpoint is believed.
@@ -3045,6 +3040,7 @@ mod first_contact_tests {
             use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
             use crate::protocol::peer_addr_error;
+            use crate::transport::proven_endpoints;
 
             async fn handle_for(secret: &SecretKey) -> MultihopHandle {
                 let underlay_builder = Endpoint::builder(presets::Minimal)
@@ -3073,27 +3069,33 @@ mod first_contact_tests {
                 10,
             )]))
             .expect("a vector serializes");
-            let vector = Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body)
-                .sign(&Identity::generate());
+            let signer = Identity::generate();
+            let vector =
+                Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body).sign(&signer);
             assert!(
                 !super::handle_link_state(&vector, &mut state),
-                "no binding yet: nothing is fed"
+                "no proof yet: nothing is fed"
             );
             assert!(
                 ours.topology_view().edges.is_empty(),
                 "a node with no peers has no topology edges"
             );
 
-            let address =
+            let mut address =
                 peer_addr_error::endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
+            address["proof"] = serde_json::Value::String(proven_endpoints::sign(
+                &author_key,
+                &node.mesh,
+                &signer.author_key(),
+            ));
             let address_body = MessageBody::try_new(&address.to_string()).expect("an address body");
-            let peer_info = Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body)
-                .sign(&Identity::generate());
+            let peer_info =
+                Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body).sign(&signer);
             super::handle_peer_info(&peer_info, &mut state, &context).await;
             assert_eq!(
                 ours.topology_view().edges.len(),
                 1,
-                "the PeerInfo that writes the binding feeds the vector that waited for it"
+                "the PeerInfo that proves the endpoint feeds the vector that waited for it"
             );
             node.endpoint.close().await;
             ours.close().await;
@@ -3619,13 +3621,14 @@ mod first_contact_tests {
 mod link_state_tests {
     use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
     use iroh::endpoint::presets;
-    use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+    use iroh::{Endpoint, RelayMode, SecretKey};
 
+    use crate::protocol::identity::Identity;
     use crate::protocol::{MeshId, Message};
-    use crate::testing::{fresh_state, nick, test_key};
+    use crate::testing::{fresh_state, nick};
 
     use crate::transport::PayloadPath;
-    use crate::{gossip, lookup, protocol};
+    use crate::{gossip, lookup};
     /// A handle over a loopback underlay on the key derived from `secret`.
     async fn handle_for(secret: &SecretKey) -> MultihopHandle {
         let underlay_builder = Endpoint::builder(presets::Minimal)
@@ -3652,7 +3655,7 @@ mod link_state_tests {
             let mut state = fresh_state();
             let body = gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
             let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body)
-                .sign(&protocol::Identity::generate());
+                .sign(&Identity::generate());
             super::retain_own_broadcast(&mut state, message);
             assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
             handle.close().await;
@@ -3660,9 +3663,9 @@ mod link_state_tests {
     }
 
     // A signature proves who made a vector, not that the maker is a member, and
-    // the roster binding is what ties an origin to an author.
+    // the endpoint that the signer proved is what ties an origin to a signer.
     #[test]
-    fn a_link_vector_is_taken_in_only_from_the_peer_the_roster_binds_to_its_origin() {
+    fn a_link_vector_is_taken_in_only_from_the_signer_that_proved_its_origin() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (alice, bob) = (
                 SecretKey::from_bytes(&[51; 32]),
@@ -3678,37 +3681,31 @@ mod link_state_tests {
                 10,
             )]))
             .expect("a vector serializes");
-            let message_from = |author: &str| {
+            let (alice_id, mallory_id) = (Identity::generate(), Identity::generate());
+            let message_from = |author: &str, signer: &Identity| {
                 Message::new_link_state(&MeshId::from("test"), &nick(author), body.clone())
+                    .sign(signer)
             };
 
-            super::handle_link_state(&message_from("alice-aa"), &mut state);
+            super::handle_link_state(&message_from("alice-aa", &alice_id), &mut state);
             assert!(
                 ours.topology_view().edges.is_empty(),
-                "no address learned for the author yet"
+                "no endpoint proved by the signer yet"
             );
 
-            state.bind_peer_endpoint(
-                test_key("mallory-mm"),
-                nick("mallory-mm"),
-                EndpointAddr::new(bob.public()),
-            );
-            super::handle_link_state(&message_from("mallory-mm"), &mut state);
+            state.note_proven_endpoint(mallory_id.author_key(), bob.public());
+            super::handle_link_state(&message_from("mallory-mm", &mallory_id), &mut state);
             assert!(
                 ours.topology_view().edges.is_empty(),
-                "an author bound to another endpoint cannot speak for this origin"
+                "a signer that proved another endpoint cannot speak for this origin"
             );
 
-            state.bind_peer_endpoint(
-                test_key("alice-aa"),
-                nick("alice-aa"),
-                EndpointAddr::new(alice.public()),
-            );
-            super::handle_link_state(&message_from("alice-aa"), &mut state);
+            state.note_proven_endpoint(alice_id.author_key(), alice.public());
+            super::handle_link_state(&message_from("alice-aa", &alice_id), &mut state);
             assert_eq!(
                 ours.topology_view().edges.len(),
                 1,
-                "the bound peer is heard"
+                "the signer that proved the origin is heard"
             );
             ours.close().await;
             theirs.close().await;
@@ -4036,7 +4033,11 @@ mod parked_link_state_tests {
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
+    use std::collections::HashSet;
+
     use crate::daemon::state::ParkedLinkStates;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::Verified;
     use crate::protocol::{MeshId, Message};
     use crate::testing::{fresh_state, nick, test_key};
 
@@ -4073,10 +4074,124 @@ mod parked_link_state_tests {
         Message::new_link_state(&MeshId::from("test"), &nick(author), body)
     }
 
-    // The trust rule is the one of a vector that arrives after its binding: the origin must be
-    // the endpoint that the roster binds to the author.
+    /// A vector of `nickname`, signed by `signer`.
+    fn signed_vector(
+        nickname: &str,
+        signer: &Identity,
+        handle: &MultihopHandle,
+        link: iroh::EndpointId,
+    ) -> Verified {
+        vector_message(nickname, handle, vec![(link, 10)]).sign(signer)
+    }
+
+    /// Two live keys of one nickname, each with its own origin: the keys, the secret keys of the
+    /// origins, and the dial hint under the nickname, which names the origin of the first key.
+    struct Twins {
+        first: Identity,
+        second: Identity,
+        first_origin: SecretKey,
+        second_origin: SecretKey,
+    }
+
+    impl Twins {
+        fn new(seed: u8) -> Self {
+            Self {
+                first: Identity::generate(),
+                second: Identity::generate(),
+                first_origin: SecretKey::from_bytes(&[seed; 32]),
+                second_origin: SecretKey::from_bytes(&[seed + 1; 32]),
+            }
+        }
+    }
+
+    // The nickname is a label that any signer can take. The dial hint under it names the endpoint
+    // of one key, and the other key proved its own: a vector of the second key is taken in from
+    // that proven endpoint.
     #[test]
-    fn a_parked_link_vector_whose_origin_is_not_the_bound_endpoint_is_dropped_at_the_binding() {
+    fn a_link_vector_is_taken_in_from_the_endpoint_its_signer_proved() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let twins = Twins::new(80);
+            let carol = SecretKey::from_bytes(&[90; 32]);
+            let ours = handle_for(&SecretKey::from_bytes(&[79; 32])).await;
+            let second = handle_for(&twins.second_origin).await;
+            let mut state = fresh_state();
+            state.multihop = Some(ours.clone());
+            state.peer_endpoints.insert(
+                nick("twin-tt"),
+                EndpointAddr::new(twins.first_origin.public()),
+            );
+            let linked = HashSet::new();
+            state.proven_endpoints.insert(
+                twins.first.author_key(),
+                twins.first_origin.public(),
+                &linked,
+            );
+            state.proven_endpoints.insert(
+                twins.second.author_key(),
+                twins.second_origin.public(),
+                &linked,
+            );
+
+            let vector = signed_vector("twin-tt", &twins.second, &second, carol.public());
+            assert!(
+                super::handle_link_state(&vector, &mut state),
+                "the vector of the second key, from the endpoint it proved, changes the topology"
+            );
+            assert_eq!(
+                ours.topology_view().edges.len(),
+                1,
+                "the one link of the vector is an edge"
+            );
+            ours.close().await;
+            second.close().await;
+        });
+    }
+
+    // One park slot per key: the vector of the second key of a nickname waits beside the vector of
+    // the first, and neither the park of the first nor its proof takes it away.
+    #[test]
+    fn the_parked_vector_of_one_key_survives_another_key_of_its_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let twins = Twins::new(83);
+            let carol = SecretKey::from_bytes(&[91; 32]);
+            let ours = handle_for(&SecretKey::from_bytes(&[82; 32])).await;
+            let (first, second) = (
+                handle_for(&twins.first_origin).await,
+                handle_for(&twins.second_origin).await,
+            );
+            let mut state = fresh_state();
+            state.multihop = Some(ours.clone());
+
+            super::handle_link_state(
+                &signed_vector("twin-tt", &twins.second, &second, carol.public()),
+                &mut state,
+            );
+            super::handle_link_state(
+                &signed_vector("twin-tt", &twins.first, &first, carol.public()),
+                &mut state,
+            );
+            state.note_proven_endpoint(twins.first.author_key(), twins.first_origin.public());
+            assert_eq!(
+                ours.topology_view().edges.len(),
+                1,
+                "the vector of the first key is fed at its proof"
+            );
+            state.note_proven_endpoint(twins.second.author_key(), twins.second_origin.public());
+            assert_eq!(
+                ours.topology_view().edges.len(),
+                2,
+                "the vector of the second key waited for its proof, and was fed there"
+            );
+            ours.close().await;
+            first.close().await;
+            second.close().await;
+        });
+    }
+
+    // The trust rule is the one of a vector that arrives after its proof: the origin must be the
+    // endpoint that the signer proved.
+    #[test]
+    fn a_parked_link_vector_whose_origin_is_not_the_proved_endpoint_is_dropped_at_the_proof() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (alice, bob) = (
                 SecretKey::from_bytes(&[64; 32]),
@@ -4087,16 +4202,14 @@ mod parked_link_state_tests {
             let mut state = fresh_state();
             state.multihop = Some(ours.clone());
 
-            let message = vector_message("mallory-mm", &theirs, vec![(bob.public(), 10)]);
+            let mallory = Identity::generate();
+            let message =
+                vector_message("mallory-mm", &theirs, vec![(bob.public(), 10)]).sign(&mallory);
             super::handle_link_state(&message, &mut state);
-            state.bind_peer_endpoint(
-                test_key("mallory-mm"),
-                nick("mallory-mm"),
-                EndpointAddr::new(bob.public()),
-            );
+            state.note_proven_endpoint(mallory.author_key(), bob.public());
             assert!(
                 ours.topology_view().edges.is_empty(),
-                "an author bound to another endpoint cannot speak for this origin"
+                "a signer that proved another endpoint cannot speak for this origin"
             );
             ours.close().await;
             theirs.close().await;
@@ -4116,19 +4229,17 @@ mod parked_link_state_tests {
             let mut state = fresh_state();
             state.multihop = Some(ours.clone());
 
-            let older = vector_message("alice-aa", &theirs, vec![(bob.public(), 10)]);
+            let signer = Identity::generate();
+            let older = vector_message("alice-aa", &theirs, vec![(bob.public(), 10)]).sign(&signer);
             let newer = vector_message(
                 "alice-aa",
                 &theirs,
                 vec![(bob.public(), 10), (carol.public(), 10)],
-            );
+            )
+            .sign(&signer);
             super::handle_link_state(&older, &mut state);
             super::handle_link_state(&newer, &mut state);
-            state.bind_peer_endpoint(
-                test_key("alice-aa"),
-                nick("alice-aa"),
-                EndpointAddr::new(alice.public()),
-            );
+            state.note_proven_endpoint(signer.author_key(), alice.public());
             assert_eq!(
                 ours.topology_view().edges.len(),
                 2,
@@ -4148,28 +4259,28 @@ mod parked_link_state_tests {
             let mut parked = ParkedLinkStates::new(2);
 
             assert!(
-                parked.park(nick("alice-aa"), vector.clone()),
+                parked.park(test_key("alice-aa"), vector.clone()),
                 "the first vector for alice is parked"
             );
             assert!(
-                parked.park(nick("bobby-bb"), vector.clone()),
+                parked.park(test_key("bobby-bb"), vector.clone()),
                 "the first vector for bobby is parked beside alice's"
             );
             assert!(
-                !parked.park(nick("carol-cc"), vector.clone()),
+                !parked.park(test_key("carol-cc"), vector.clone()),
                 "a third author is refused at the cap"
             );
             assert!(
-                parked.park(nick("alice-aa"), vector.clone()),
+                parked.park(test_key("alice-aa"), vector.clone()),
                 "an author that waits is replaced at the cap"
             );
             assert!(
-                parked.take(&nick("alice-aa")).is_some(),
+                parked.take(&test_key("alice-aa")).is_some(),
                 "alice's vector is taken from the park"
             );
-            assert!(parked.take(&nick("alice-aa")).is_none(), "taken once");
+            assert!(parked.take(&test_key("alice-aa")).is_none(), "taken once");
             assert!(
-                parked.park(nick("carol-cc"), vector),
+                parked.park(test_key("carol-cc"), vector),
                 "a taken vector frees its place"
             );
             theirs.close().await;
