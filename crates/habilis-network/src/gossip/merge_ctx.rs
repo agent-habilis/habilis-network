@@ -557,8 +557,8 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
     }
 }
 
-/// The endpoints that [`unicast_farewell`] dials: the dial hint of each live peer that made it. The
-/// rendezvous pseudo-node is never a directed target, and a quiet or ghost peer's stale hint
+/// The endpoints that [`unicast_farewell`] dials: the dial hint of each live peer that made it, once
+/// for each endpoint, whatever the nicknames that bind it. The rendezvous pseudo-node is never a directed target, and a quiet or ghost peer's stale hint
 /// isn't worth a dial at shutdown.
 fn farewell_targets(state: &EventLoopState) -> Vec<iroh::EndpointId> {
     let mut targets: Vec<iroh::EndpointId> = Vec::new();
@@ -567,7 +567,8 @@ fn farewell_targets(state: &EventLoopState) -> Vec<iroh::EndpointId> {
             .hint_owner
             .get(nick)
             .is_some_and(|key| state.peers.contains(key));
-        if state.rendezvous_id != Some(address.id) && owner_is_peer {
+        let new_target = !targets.contains(&address.id);
+        if state.rendezvous_id != Some(address.id) && owner_is_peer && new_target {
             targets.push(address.id);
         }
     }
@@ -745,6 +746,25 @@ mod tests {
             farewell_targets(&state),
             vec![owned],
             "the mirror dialed a hint that no live key made, or the rendezvous"
+        );
+    }
+
+    /// Two nicknames can bind one endpoint (a node that restarted under a new name, both keys
+    /// live). The mirror dials the endpoint once, not once per nickname.
+    #[test]
+    fn the_farewell_mirror_dials_an_endpoint_once_whatever_the_nicknames_that_bind_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(1);
+        for name in ["swift-cedar", "lost-heron"] {
+            state.peer_for_test(name);
+            state.bind_peer_endpoint(test_key(name), nick(name), iroh::EndpointAddr::new(shared));
+        }
+
+        assert_eq!(
+            farewell_targets(&state),
+            vec![shared],
+            "the mirror dialed the same endpoint once for each nickname that binds it"
         );
     }
 
