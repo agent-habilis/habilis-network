@@ -69,7 +69,10 @@ use tokio::sync::oneshot;
 ///
 /// # Errors
 /// Refuses a body too large for one frame, propagates a serialize/deliver
-/// failure, and errors if the unmeshed buffer is full.
+/// failure, and errors if the unmeshed buffer is full. A directed frame to a
+/// nickname that two or more live peers use fails with
+/// [`crate::transport::SendError::Ambiguous`]: the engine never picks one of
+/// the keys.
 ///
 /// # Examples
 ///
