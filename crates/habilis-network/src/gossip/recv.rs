@@ -4323,7 +4323,11 @@ mod requeue_tests {
 
 #[cfg(all(test, feature = "host"))]
 mod parked_link_state_tests {
+    use std::time::Duration;
+
     use crate::protocol::UnixSecs;
+    use crate::util::clock::Instant;
+    use crate::util::tuning::PARKED_LINK_STATE_TTL;
     use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
@@ -4621,6 +4625,36 @@ mod parked_link_state_tests {
                 "the newer vector, with two links, is the one that is fed"
             );
             ours.close().await;
+            theirs.close().await;
+        });
+    }
+
+    // A signer that never proves itself must not hold its slot for good: after the wait, the slot
+    // is free for a signer that will.
+    #[test]
+    fn the_park_frees_the_slots_of_signers_that_never_prove() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let theirs = handle_for(&SecretKey::from_bytes(&[73; 32])).await;
+            let vector = theirs.link_vector(Vec::new());
+            let mut parked = ParkedLinkStates::new(2);
+            parked.park(test_key("alice-aa"), vector.clone());
+            parked.park(test_key("bobby-bb"), vector.clone());
+            assert!(
+                !parked.park(test_key("carol-cc"), vector.clone()),
+                "the park is full of signers that wait"
+            );
+
+            parked.expire(Instant::now() + PARKED_LINK_STATE_TTL / 2);
+            assert!(
+                !parked.park(test_key("carol-cc"), vector.clone()),
+                "a signer that waits inside the window keeps its slot"
+            );
+
+            parked.expire(Instant::now() + PARKED_LINK_STATE_TTL + Duration::from_secs(1));
+            assert!(
+                parked.park(test_key("carol-cc"), vector),
+                "after the window the slot of a signer that never proved is free"
+            );
             theirs.close().await;
         });
     }

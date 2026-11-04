@@ -212,6 +212,8 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .retain(|key, _| quiet.contains(key));
     prune_per_key_state(state);
     prune_dial_hints(state);
+    #[cfg(feature = "multihop")]
+    state.parked_link_states.expire(now);
 }
 
 /// The per-key state follows the roster: a key that is neither a peer nor quiet drops it.

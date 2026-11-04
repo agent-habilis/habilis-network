@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use crate::protocol::AuthorKey;
+use crate::util::clock::Instant;
+use crate::util::tuning::PARKED_LINK_STATE_TTL;
 
 /// Link vectors that arrived before their signer proved an endpoint, one per signing key: a newer
 /// one replaces the older. The proof comes with the `PeerInfo` of the signer, which can arrive a few
@@ -10,8 +12,16 @@ use crate::protocol::AuthorKey;
 #[cfg(feature = "multihop")]
 #[derive(Debug, Clone)]
 pub(crate) struct ParkedLinkStates {
-    by_signer: HashMap<AuthorKey, habilis_network_iroh_multihop_transport::LinkVector>,
+    by_signer: HashMap<AuthorKey, Parked>,
     cap: usize,
+}
+
+/// A vector that waits, and when its signer first made it wait.
+#[cfg(feature = "multihop")]
+#[derive(Debug, Clone)]
+struct Parked {
+    vector: habilis_network_iroh_multihop_transport::LinkVector,
+    since: Instant,
 }
 
 #[cfg(feature = "multihop")]
@@ -33,8 +43,19 @@ impl ParkedLinkStates {
         if !self.by_signer.contains_key(&signer) && self.by_signer.len() >= self.cap {
             return false;
         }
-        self.by_signer.insert(signer, vector);
+        let since = self
+            .by_signer
+            .get(&signer)
+            .map_or_else(Instant::now, |parked| parked.since);
+        self.by_signer.insert(signer, Parked { vector, since });
         true
+    }
+
+    /// Drop the vectors that waited longer than `PARKED_LINK_STATE_TTL`, so the slot of a signer
+    /// that never proves goes to another. A signer that sends again parks anew.
+    pub(crate) fn expire(&mut self, now: Instant) {
+        self.by_signer
+            .retain(|_, parked| now.duration_since(parked.since) <= PARKED_LINK_STATE_TTL);
     }
 
     /// The vector that waits for `signer`, if any.
@@ -42,7 +63,7 @@ impl ParkedLinkStates {
         &mut self,
         signer: &AuthorKey,
     ) -> Option<habilis_network_iroh_multihop_transport::LinkVector> {
-        self.by_signer.remove(signer)
+        self.by_signer.remove(signer).map(|parked| parked.vector)
     }
 }
 
