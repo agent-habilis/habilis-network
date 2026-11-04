@@ -147,14 +147,9 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
             state.write_peer_count();
             let nick: Option<Nickname> = state.names.get(&key).cloned();
             // Remembered as a quiet peer, but no longer a holder: its flag was last said before it
-            // went silent, and a crashed holder never says it again.
-            let owned = nick
-                .as_ref()
-                .filter(|name| state.hint_owner.get(*name) == Some(&key));
-            let hint = owned.and_then(|name| state.peer_endpoints.get(name.as_str()));
-            if let Some(endpoint) = hint.map(|address| address.id) {
-                state.forget_rival_holder(endpoint);
-            }
+            // went silent, and a crashed holder never says it again. The claim is the key's own;
+            // another key on the same endpoint keeps its claim.
+            state.rival_holders.remove(&key);
             if state.surfaced.remove(&key) {
                 // A peer we knew went silent: a partition may have split the
                 // mesh, and the rendezvous is where its islands meet again. A
@@ -1062,6 +1057,40 @@ mod tests {
         );
     }
 
+    /// A claim is made by a key. When one key goes silent, only its claim is void: another live
+    /// key that holds the same endpoint keeps its own.
+    #[test]
+    fn the_sweep_drops_only_the_flag_of_the_key_that_expired() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let holder = testing::endpoint_id(7);
+        state.bind_peer_endpoint(
+            test_key("lost-heron"),
+            nick("lost-heron"),
+            iroh::EndpointAddr::new(holder),
+        );
+        state.rival_holders.insert(test_key("lost-heron"), holder);
+        state.rival_holders.insert(test_key("live-heron"), holder);
+        let expired_at = Instant::now()
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
+        state.last_seen.insert(test_key("lost-heron"), expired_at);
+        state.peer_for_test("lost-heron");
+        state.surfaced_for_test("lost-heron");
+        state.peer_for_test("live-heron");
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.rival_holders.contains_key(&test_key("lost-heron")),
+            "the claim of the expired key stays"
+        );
+        assert!(
+            state.rival_holders.contains_key(&test_key("live-heron")),
+            "the sweep dropped the claim of a live key"
+        );
+    }
+
     /// A holder that crashed or was killed never sends a `PeerInfo` without the flag. The sweep
     /// keeps its binding (a quiet peer returns), and must drop its claim to hold the rendezvous:
     /// a flag that stays known shuts every debt to a new holder for as long as it lives.
@@ -1075,9 +1104,7 @@ mod tests {
             nick("lost-heron"),
             iroh::EndpointAddr::new(holder),
         );
-        state
-            .rival_holders
-            .insert(AuthorKey::from([4u8; 32]), holder);
+        state.rival_holders.insert(test_key("lost-heron"), holder);
         assert!(
             state.rival_holder_known(),
             "the evicted holder's flag is known before the sweep"
