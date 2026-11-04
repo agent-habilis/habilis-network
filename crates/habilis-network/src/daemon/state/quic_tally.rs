@@ -205,7 +205,9 @@ impl QuicTally {
     /// What the live connections did since the last call. The first call only reads the marks, so
     /// it reports no movement: a connection that is older than the census has no window yet.
     /// What a connection did between the last call and its close is not counted. An id whose
-    /// counters went down is a new connection, which counts from zero.
+    /// counters went down is a new connection, which counts from zero. A new connection at the
+    /// same address whose counters pass the old marks in all 7 fields before the next call is not
+    /// seen: its window is the delta from the old marks, so the count is a lower bound.
     pub(crate) fn take(&mut self, readings: &[QuicReading]) -> QuicWindow {
         let mut window = QuicWindow::default();
         let mut marks: HashMap<usize, QuicCounts> = HashMap::with_capacity(readings.len());
