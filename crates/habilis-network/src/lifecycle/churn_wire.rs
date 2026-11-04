@@ -60,6 +60,38 @@ fn data_frame(mesh: &MeshId, us: &protocol::Nickname, identity: &Identity, len: 
     message.sign(identity)
 }
 
+/// The unmeshed minute sends no membership, document or other frame, and its bytes are exact: 15
+/// runs gave the same line. A change to the wire form moves them.
+fn assert_no_other_frame_and_exact_bytes(counter: &WireCounter) {
+    for class in [
+        FrameClass::Membership,
+        FrameClass::Document,
+        FrameClass::Other,
+    ] {
+        assert_eq!(
+            counter.frames(class),
+            0,
+            "the unmeshed minute sent a {class:?} frame: {counter}"
+        );
+    }
+    for (class, bytes) in [
+        (FrameClass::Data, 4655),
+        (FrameClass::Announce, 3365),
+        (FrameClass::Alive, 852),
+    ] {
+        assert_eq!(
+            counter.bytes(class),
+            bytes,
+            "the {class:?} bytes of the minute moved: {counter}"
+        );
+    }
+    assert_eq!(
+        counter.total_bytes(),
+        8872,
+        "the bytes of the minute moved: {counter}"
+    );
+}
+
 /// 5 peers join, this node sends 5 data frames of 512 bytes, then 60 s pass with nothing to send
 /// but the keepalive. Every broadcast byte that is not in a data frame is metadata. The fixture is
 /// not meshed and the idle loop calls only `heartbeat::tick_alive`: the minute excludes the
@@ -175,6 +207,7 @@ fn wire_cost_of_one_minute_with_5_peers() {
             5,
             "the 5 data frames of the workload were not all counted: {counter}"
         );
+        assert_no_other_frame_and_exact_bytes(&counter);
         assert_eq!(
             data_bodies,
             vec![512; 5],
