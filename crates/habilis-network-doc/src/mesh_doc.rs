@@ -8,7 +8,10 @@ use serde_json::{Map, Value};
 
 use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
-use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX};
+use habilis_network_util::consts::{
+    DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
+    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
+};
 
 use crate::{DocError, wire};
 
@@ -63,6 +66,38 @@ pub enum Ingested {
     /// The frame body is not a decodable automerge change (a legacy/foreign
     /// body) — a no-op.
     Ignored,
+    /// The frame starts a higher epoch and passed every check. The document keeps it as the
+    /// candidate and does not apply it yet: [`MeshDoc::adopt_if_alone`] and
+    /// [`MeshDoc::tick_epoch`] switch to it.
+    NewEpoch {
+        /// The epoch that the frame starts.
+        epoch: u64,
+    },
+}
+
+impl EpochSwitch {
+    /// A switch to `epoch` of the per-peer map `map`, with the entry of this node as it was.
+    #[must_use]
+    pub fn new(epoch: u64, map: String, own_entry: Option<Value>) -> Self {
+        Self {
+            epoch,
+            map,
+            own_entry,
+        }
+    }
+}
+
+/// A switch of the document to a new epoch: every frame of the old epoch is gone.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct EpochSwitch {
+    /// The epoch that the document is in now.
+    pub epoch: u64,
+    /// The root key of the per-peer map.
+    pub map: String,
+    /// The entry of this node in that map, as it was before the switch. The caller writes it
+    /// again, because only its owner can.
+    pub own_entry: Option<Value>,
 }
 
 /// Declares that a channel holds a **per-peer map** at the document root — one
@@ -128,10 +163,19 @@ struct Pending {
     arrival: u64,
 }
 
+/// The root frame of a higher epoch that the document keeps until it adopts the epoch.
+#[derive(Debug)]
+struct Candidate {
+    epoch: u64,
+    frame: Verified,
+}
+
 /// What a [`MeshDoc`] holds, as [`MeshDoc::census`] reads it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DocCensus {
+    /// The epoch of the history that the document holds. It counts the resets that this mesh went through.
+    pub epoch: u64,
     /// The changes applied, the genesis included.
     pub changes: usize,
     /// The signed frames kept to serve the changes again.
@@ -204,6 +248,22 @@ pub struct MeshDoc {
     /// it after each ingest, as the receive path does. A local write cannot
     /// orphan and never adds to it.
     dropped: Vec<DedupKey>,
+    /// The epoch of the history that the document holds. Epoch 0 is the history from before
+    /// epochs. A gated channel moves to a higher epoch to drop its frames: see
+    /// [`Self::tick_epoch`].
+    epoch: u64,
+    /// The best root frame of a higher epoch that passed every check, and the document has not
+    /// adopted. One frame at most, so it is bounded; a frame that does not take the place is
+    /// forgotten by the receive path.
+    candidate: Option<Candidate>,
+    /// The ticks since the candidate took its place.
+    candidate_ticks: u32,
+    /// The ticks since the epoch began.
+    epoch_ticks: u32,
+    /// The frame bytes of the epoch when it settled, 0 before. The live entries are back by then.
+    settled_bytes: usize,
+    /// The frame bytes that start a reset, before the settled size is known.
+    frame_cap: usize,
     /// This channel's per-peer write gate, when it has one (`meta` does; `state`
     /// is free-form and carries no per-peer identity, so it does not).
     gate: Option<SelfWriteGate>,
@@ -238,7 +298,7 @@ impl MeshDoc {
     pub fn new_gated(gate: SelfWriteGate) -> Self {
         let mut doc = Automerge::new();
         let mut applied = HashSet::new();
-        let genesis = peers_genesis(&gate.map);
+        let genesis = peers_genesis(&gate.map, 0);
         let hash = genesis.hash();
         let _ = doc.apply_changes([genesis]);
         applied.insert(hash);
@@ -255,6 +315,12 @@ impl MeshDoc {
             pending_arrivals: 0,
             refusals: HashMap::new(),
             dropped: Vec::new(),
+            epoch: 0,
+            candidate: None,
+            candidate_ticks: 0,
+            epoch_ticks: 0,
+            settled_bytes: 0,
+            frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
             gate,
             key: None,
         }
@@ -321,13 +387,13 @@ impl MeshDoc {
     /// `enc` body with this channel's key first. `None` for an opaque/foreign
     /// body (or, on a passworded mesh, an unsealed or unopenable body) — a
     /// no-op on the doc.
-    fn change_bytes(&self, frame: &Message) -> Option<Vec<u8>> {
+    fn change_bytes(&self, frame: &Message) -> Option<(Vec<u8>, u64)> {
         match self.key.as_ref() {
             // Passwordless: parse directly — no decrypt indirection, no clone.
-            None => wire::parse_change_body(frame.body.as_str()),
+            None => wire::parse_change(frame.body.as_str()),
             Some(key) => {
                 let plain = wire::decrypt_body(frame.body.as_str(), Some(key))?;
-                wire::parse_change_body(&plain)
+                wire::parse_change(&plain)
             }
         }
     }
@@ -353,7 +419,7 @@ impl MeshDoc {
         ),
         DocError,
     > {
-        let plain = wire::change_body(change, merge)?;
+        let plain = wire::change_body_at(change, merge, self.epoch)?;
         let wire = match self.key.as_ref() {
             Some(key) => wire::encrypt_body(&plain, key)?,
             None => plain.clone(),
@@ -395,6 +461,7 @@ impl MeshDoc {
             .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len()));
         let peer_nicks = json.as_ref().map(|json| self.gated_nicks(json));
         DocCensus {
+            epoch: self.epoch,
             changes: self.applied.len(),
             frames: self.frames.len(),
             frame_bytes: self.frame_bytes,
@@ -413,14 +480,126 @@ impl MeshDoc {
         entries.keys().cloned().collect()
     }
 
+    /// The epoch of the history that this document holds.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Set the frame bytes that start a reset, before the size of a settled epoch is known (the
+    /// default is `DOC_EPOCH_FRAME_CAP_BYTES`).
+    #[must_use]
+    pub fn epoch_cap(mut self, cap: usize) -> Self {
+        self.frame_cap = cap;
+        self
+    }
+
+    /// Adopt the candidate epoch at once when this node holds no frame of another author: it has
+    /// nothing to lose, so it need not wait. `None` when there is no candidate or the node holds
+    /// the frames of others.
+    pub fn adopt_if_alone(&mut self, me: &Nickname, own: &AuthorKey) -> Option<EpochSwitch> {
+        self.candidate.as_ref()?;
+        let alone = self.frames.values().all(|frame| frame.key() == *own);
+        if alone { self.adopt(me) } else { None }
+    }
+
+    /// One tick of 1 minute. Adopts the candidate epoch when it has waited for
+    /// `DOC_EPOCH_ADOPT_WAIT_TICKS`, jumping to the highest epoch that it saw. Else starts a new epoch
+    /// when the frame bytes reach the threshold: the larger of the cap and twice the bytes that the
+    /// epoch held when it settled. Until it settled, the threshold is twice the cap, so the live
+    /// entries that come back after a reset cannot start another one. Either way the frames of the
+    /// old epoch are dropped, and the caller writes the entry in the returned switch again.
+    ///
+    /// A node that holds the frames of others adopts after the wait, so for up to
+    /// `DOC_EPOCH_ADOPT_WAIT_TICKS` minutes after a reset the writes of the two epochs do not cross,
+    /// and a reader can see a peer with no entry. Only a gated channel has epochs: the free-form
+    /// `state` channel keeps every frame.
+    pub fn tick_epoch(&mut self, me: &Nickname, own: &AuthorKey) -> Option<EpochSwitch> {
+        let _ = own;
+        self.epoch_ticks = self.epoch_ticks.saturating_add(1);
+        if self.candidate.is_some() {
+            self.candidate_ticks = self.candidate_ticks.saturating_add(1);
+            if self.candidate_ticks >= DOC_EPOCH_ADOPT_WAIT_TICKS {
+                return self.adopt(me);
+            }
+        }
+        if self.epoch_ticks == DOC_EPOCH_ADOPT_WAIT_TICKS + 1 {
+            self.settled_bytes = self.frame_bytes;
+        }
+        let settled = self.epoch_ticks > DOC_EPOCH_ADOPT_WAIT_TICKS;
+        let threshold = if settled {
+            self.frame_cap.max(self.settled_bytes.saturating_mul(2))
+        } else {
+            self.frame_cap.saturating_mul(2)
+        };
+        if self.gate.is_some() && self.frame_bytes >= threshold {
+            return Some(self.switch_to(self.epoch.saturating_add(1), me));
+        }
+        None
+    }
+
+    /// Switch to the epoch of the candidate and apply its root frame.
+    fn adopt(&mut self, me: &Nickname) -> Option<EpochSwitch> {
+        let candidate = self.candidate.take()?;
+        let switch = self.switch_to(candidate.epoch, me);
+        let _ = self.ingest(&candidate.frame);
+        Some(switch)
+    }
+
+    /// Drop every frame and start `epoch`, and hand back the entry of `me`, which only `me` can
+    /// write again.
+    fn switch_to(&mut self, epoch: u64, me: &Nickname) -> EpochSwitch {
+        let gate_map = self.gate.as_ref().map(|gate| gate.map.clone());
+        let map: String = gate_map.unwrap_or_default();
+        let json = self.to_json();
+        let peers = json.get(&map);
+        let own_entry: Option<Value> = peers.and_then(|peers| peers.get(me.as_str())).cloned();
+        self.restart(epoch);
+        EpochSwitch {
+            epoch,
+            map,
+            own_entry,
+        }
+    }
+
+    /// Forget the history: a document of `epoch` that holds its genesis and nothing else. The
+    /// orphans go with it, and their dedup keys stay seen, because an old epoch is dead.
+    fn restart(&mut self, epoch: u64) {
+        let mut doc = Automerge::new();
+        let mut applied = HashSet::new();
+        if let Some(gate) = self.gate.as_ref() {
+            let genesis = peers_genesis(&gate.map, epoch);
+            applied.insert(genesis.hash());
+            let _ = doc.apply_changes([genesis]);
+        }
+        *self.doc = doc;
+        self.applied = applied;
+        self.frames = HashMap::new();
+        self.frame_bytes = 0;
+        self.pending = HashMap::new();
+        self.candidate = None;
+        self.candidate_ticks = 0;
+        self.epoch = epoch;
+        self.epoch_ticks = 0;
+        self.settled_bytes = 0;
+    }
+
+    /// The same document in `epoch`, with no change but its genesis.
+    #[must_use]
+    fn at_epoch(mut self, epoch: u64) -> Self {
+        self.restart(epoch);
+        self
+    }
+
     /// How many changes this document holds, the internal genesis included.
     #[must_use]
     pub fn change_count(&self) -> usize {
         self.applied.len()
     }
 
-    /// The signed frames for changes a peer with heads `have` is missing, newest
-    /// causal frontier first, capped at `max`. Undecodable heads are ignored (we
+    /// The signed frames for changes a peer with heads `have` is missing, oldest
+    /// first (the roots of a history come first, so a capped answer can start a
+    /// peer that holds none of it), capped at `max`. Undecodable heads are ignored (we
     /// then over-serve, never under-serve). The genesis change has no frame and
     /// is never sent — every replica constructs it locally.
     pub fn changes_since(&self, have: &[String], max: usize) -> impl Iterator<Item = Verified> {
@@ -503,7 +682,7 @@ impl MeshDoc {
     /// `Verified` proof means the signature was checked before the frame got here,
     /// so the signer is `frame.key()`, never a field of the body.
     pub fn ingest(&mut self, frame: &Verified) -> Ingested {
-        let Some(bytes) = self.change_bytes(frame) else {
+        let Some((bytes, epoch)) = self.change_bytes(frame) else {
             return Ingested::Ignored;
         };
         let Ok(change) = Change::from_bytes(bytes) else {
@@ -517,6 +696,9 @@ impl MeshDoc {
                 tracing::warn!(target: LOG_TARGET, changes, author = %frame.author, "dropping a channel change whose actor is not its signer's key");
             }
             return Ingested::Ignored;
+        }
+        if epoch != self.epoch {
+            return self.ingest_other_epoch(epoch, &change, frame);
         }
         let hash = change.hash();
         if self.applied.contains(&hash) {
@@ -545,6 +727,53 @@ impl MeshDoc {
             changed: before != after,
             doc: after,
         }
+    }
+
+    /// A frame of another epoch than the one that the document holds.
+    ///
+    /// A lower epoch is dead: ignored, and its dedup key stays seen, because it can never be of use
+    /// again. A higher epoch is never applied here. It becomes the candidate only if the frame is a
+    /// root of that epoch (its only dependency is the genesis of the epoch), is no further than
+    /// `DOC_EPOCH_JUMP_MAX` above, and passes the gate on a fresh document of that epoch. Every
+    /// other refusal forgets the dedup key, so the re-send of the frame is not dropped as a repeat
+    /// when it can be taken later.
+    fn ingest_other_epoch(&mut self, epoch: u64, change: &Change, frame: &Verified) -> Ingested {
+        if epoch < self.epoch {
+            return Ingested::Ignored;
+        }
+        let refuse = |doc: &mut Self| {
+            doc.dropped.push(frame.dedup_key());
+            Ingested::Ignored
+        };
+        let Some(gate) = self.gate.clone() else {
+            return refuse(self);
+        };
+        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX {
+            return refuse(self);
+        }
+        if change.deps() != [peers_genesis(&gate.map, epoch).hash()] {
+            return refuse(self);
+        }
+        let fresh = Self::new_gated(gate).at_epoch(epoch);
+        if fresh.forges_foreign_entry(change, &frame.author, None) {
+            return Ingested::Rejected;
+        }
+        match self.candidate.as_ref() {
+            Some(held) if held.epoch == epoch && held.frame.dedup_key() == frame.dedup_key() => {
+                return Ingested::Duplicate;
+            }
+            Some(held) if held.epoch >= epoch => return refuse(self),
+            _ => {}
+        }
+        let kept = Candidate {
+            epoch,
+            frame: frame.clone(),
+        };
+        match self.candidate.replace(kept) {
+            Some(beaten) => self.dropped.push(beaten.frame.dedup_key()),
+            None => self.candidate_ticks = 0,
+        }
+        Ingested::NewEpoch { epoch }
     }
 
     /// Apply a change and record it, or record nothing.
@@ -773,14 +1002,21 @@ fn doc_json(doc: &Automerge) -> Value {
 /// The deterministic genesis change that creates the shared per-peer `map`. Built
 /// from constants (fixed actor, `time = 0`) so its hash — and thus the map's
 /// object id — is identical on every replica configured with the same gate.
-fn peers_genesis(map: &str) -> Change {
+fn peers_genesis(map: &str, epoch: u64) -> Change {
     let mut doc = Automerge::new();
     doc.set_actor(automerge::ActorId::from(b"habilis-mesh/genesis".as_slice()));
     {
         let mut tx = doc.transaction();
         tx.put_object(&ROOT, map, ObjType::Map)
             .expect("root is a map");
-        tx.commit_with(transaction::CommitOptions::default().with_time(0));
+        let options = transaction::CommitOptions::default().with_time(0);
+        // Epoch 0 has no message, so its genesis is the one from before epochs.
+        let options = if epoch == 0 {
+            options
+        } else {
+            options.with_message(format!("epoch {epoch}"))
+        };
+        tx.commit_with(options);
     }
     doc.get_changes(&[])
         .pop()
@@ -1006,7 +1242,7 @@ mod tests {
     #[test]
     fn genesis_bytes_are_pinned() {
         let _guard = ::habilis_network_test_tracing::init();
-        let genesis = super::peers_genesis("peers");
+        let genesis = super::peers_genesis("peers", 0);
         assert_eq!(
             format!("{:?}", genesis.hash()),
             "ChangeHash(\"faf84e310070f1127948a680064551304e36a70d14ccff86f7ece64caf82908b\")",
@@ -1778,6 +2014,403 @@ mod tests {
         assert!(
             joiner.holds_heads(&heads),
             "the re-send converges the joiner"
+        );
+    }
+
+    /// The signer key of a test author: the actor seed, zero-padded, as `author` derives it.
+    fn signer(who: &Nickname) -> AuthorKey {
+        AuthorKey::from(pad_seed(who.as_str().as_bytes()))
+    }
+
+    /// A frame of `who` that writes `merge` on top of what `doc` holds, in the epoch of `doc`. The
+    /// doc is not changed.
+    fn frame_on(doc: &MeshDoc, who: &Nickname, merge: &Value) -> Verified {
+        let seed = pad_seed(who.as_str().as_bytes());
+        let bytes = doc
+            .build_change(merge, &seed)
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        let (wire, _plain) = doc.compose_wire_body(&bytes, None).expect("compose");
+        let key = signer(who);
+        Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), who, wire, Channel::Meta)
+                .unverified_key(key),
+            key,
+        )
+    }
+
+    /// [`frame_on`], applied to `doc`.
+    fn write(doc: &mut MeshDoc, who: &Nickname, merge: &Value) -> Verified {
+        let carrier = frame_on(doc, who, merge);
+        let outcome = doc.ingest(&carrier);
+        assert!(
+            matches!(outcome, Ingested::Applied { .. }),
+            "expected applied, got {outcome:?}"
+        );
+        carrier
+    }
+
+    fn entry(who: &str, card: &str) -> Value {
+        json!({ "peers": { who: { "card": card, "status": "idle" } } })
+    }
+
+    /// A write of `who` that adds one field of about 2 KB: one frame, below the size of a message.
+    fn filler(who: &str, field: &str) -> Value {
+        json!({ "peers": { who: { field: long(1_800) } } })
+    }
+
+    /// `len` characters that automerge cannot squeeze, so a frame is about as long as its entry.
+    fn long(len: usize) -> String {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let digits = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            char::from(digits[usize::try_from(state >> 33).unwrap_or(0) % digits.len()])
+        };
+        (0..len).map(|_| next()).collect()
+    }
+
+    /// The root frame of `epoch`: the first write of `who` in a fresh document of that epoch.
+    fn root_of(epoch: u64, who: &Nickname, card: &str) -> Verified {
+        let fresh = MeshDoc::new_gated(card_gate()).at_epoch(epoch);
+        frame_on(&fresh, who, &entry(who.as_str(), card))
+    }
+
+    fn dropped_keys(doc: &mut MeshDoc) -> Vec<DedupKey> {
+        doc.take_dropped().collect()
+    }
+
+    #[test]
+    fn a_reset_at_the_cap_drops_every_frame_and_hands_back_the_own_entry() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, ghost) = (nick("me"), nick("ghost"));
+        let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(2_000);
+        for field in ["a", "b", "c"] {
+            write(&mut doc, &ghost, &filler("ghost", field));
+        }
+        write(&mut doc, &me, &entry("me", "mine"));
+        let switch = doc
+            .tick_epoch(&me, &signer(&me))
+            .expect("over the cap: a reset");
+        assert_eq!(switch.epoch, 1, "the reset starts the next epoch");
+        assert_eq!(doc.epoch(), 1, "the document holds the new epoch");
+        assert_eq!(
+            switch.own_entry,
+            Some(json!({ "card": "mine", "status": "idle" })),
+            "the reset hands back the entry that only its owner can write"
+        );
+        let census = doc.census(true);
+        assert_eq!(
+            (census.frames, census.frame_bytes),
+            (0, 0),
+            "no frame stays"
+        );
+        assert_eq!(census.changes, 1, "only the genesis stays");
+        assert_eq!(
+            doc.to_json(),
+            json!({ "peers": {} }),
+            "the new epoch holds the genesis and no entry"
+        );
+    }
+
+    #[test]
+    fn under_the_cap_a_tick_changes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(1_000_000);
+        write(&mut doc, &me, &entry("me", "mine"));
+        assert_eq!(
+            doc.tick_epoch(&me, &signer(&me)),
+            None,
+            "a document under the cap does not reset"
+        );
+        assert_eq!(doc.epoch(), 0, "a document under the cap keeps its epoch");
+    }
+
+    #[test]
+    fn live_entries_over_the_cap_do_not_reset_in_a_loop() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, ann, bob, cat) = (nick("me"), nick("ann"), nick("bob"), nick("cat"));
+        let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(4_000);
+        write(&mut doc, &me, &entry("me", "mine"));
+        for _ in 0..=super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            assert!(doc.tick_epoch(&me, &signer(&me)).is_none(), "under the cap");
+        }
+        for field in ["a", "b"] {
+            write(&mut doc, &ann, &filler("ann", field));
+        }
+        let switch = doc.tick_epoch(&me, &signer(&me)).expect("over the cap");
+        assert_eq!(switch.epoch, 1, "the first reset starts epoch 1");
+        // The live entries come back, and they alone are over the cap.
+        for who in [&me, &ann, &bob, &cat] {
+            write(&mut doc, who, &entry(who.as_str(), &long(800)));
+        }
+        let live = doc.census(false).frame_bytes;
+        assert!(live > 4_000, "the live entries fill the cap: {live}");
+        for tick in 0..30 {
+            assert!(
+                doc.tick_epoch(&me, &signer(&me)).is_none(),
+                "no reset at tick {tick}"
+            );
+        }
+        assert_eq!(
+            doc.epoch(),
+            1,
+            "live entries over the cap do not start another epoch"
+        );
+    }
+
+    #[test]
+    fn ten_times_the_cap_of_writes_stays_inside_the_bound() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let cap = 4_000;
+        let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(cap);
+        write(&mut doc, &me, &entry("me", "mine"));
+        let (mut resets, mut peak) = (0, 0);
+        for round in 0..200 {
+            let merge = json!({ "peers": { "me": { "status": format!("{round}{}", long(300)) } } });
+            write(&mut doc, &me, &merge);
+            if let Some(switch) = doc.tick_epoch(&me, &signer(&me)) {
+                resets += 1;
+                let again = json!({ "peers": { "me": switch.own_entry } });
+                write(&mut doc, &me, &again);
+            }
+            peak = peak.max(doc.census(false).frame_bytes);
+        }
+        assert!(resets >= 10, "the store reset {resets} times");
+        assert!(
+            peak <= 4 * cap + 1_500,
+            "the peak of {peak} bytes is over 4 x the cap"
+        );
+    }
+
+    #[test]
+    fn a_node_with_no_frame_of_others_adopts_a_higher_epoch_at_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (joiner, live) = (nick("joiner"), nick("live"));
+        let root = root_of(1, &live, "live card");
+        let mut doc = MeshDoc::new_gated(card_gate());
+        write(&mut doc, &joiner, &entry("joiner", "joiner card"));
+        assert!(
+            matches!(doc.ingest(&root), Ingested::NewEpoch { epoch: 1 }),
+            "a root of a higher epoch becomes the candidate"
+        );
+        assert_eq!(doc.epoch(), 0, "the frame alone does not switch");
+        let switch = doc
+            .adopt_if_alone(&joiner, &signer(&joiner))
+            .expect("a node that holds nothing from others adopts");
+        assert_eq!(switch.epoch, 1, "the node adopts the epoch of the root");
+        assert_eq!(
+            switch.own_entry,
+            Some(json!({ "card": "joiner card", "status": "idle" })),
+            "the entry of the joiner is handed back to write again"
+        );
+        assert_eq!(doc.epoch(), 1, "the document holds the new epoch");
+        assert_eq!(
+            doc.to_json(),
+            json!({ "peers": { "live": { "card": "live card", "status": "idle" } } }),
+            "the root applies in the new epoch and nothing of the old one stays"
+        );
+    }
+
+    #[test]
+    fn a_node_that_holds_frames_of_others_waits_then_jumps_to_the_highest_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (quiet, other, live) = (nick("quiet"), nick("other"), nick("live"));
+        let mut doc = MeshDoc::new_gated(card_gate());
+        write(&mut doc, &other, &entry("other", "other card"));
+        write(&mut doc, &quiet, &entry("quiet", "quiet card"));
+        assert!(
+            matches!(
+                doc.ingest(&root_of(1, &live, "one")),
+                Ingested::NewEpoch { epoch: 1 }
+            ),
+            "the root of epoch 1 is the candidate"
+        );
+        assert!(
+            doc.adopt_if_alone(&quiet, &signer(&quiet)).is_none(),
+            "a node that holds frames of others does not adopt at once"
+        );
+        for tick in 1..5 {
+            assert!(
+                doc.tick_epoch(&quiet, &signer(&quiet)).is_none(),
+                "tick {tick} waits"
+            );
+        }
+        assert!(
+            matches!(
+                doc.ingest(&root_of(2, &live, "two")),
+                Ingested::NewEpoch { epoch: 2 }
+            ),
+            "the root of epoch 2 takes the place of the root of epoch 1"
+        );
+        let switch = doc
+            .tick_epoch(&quiet, &signer(&quiet))
+            .expect("the wait is over");
+        assert_eq!(switch.epoch, 2, "it jumps to the highest epoch that it saw");
+        assert_eq!(
+            switch.own_entry,
+            Some(json!({ "card": "quiet card", "status": "idle" })),
+            "the quiet peer keeps its entry for the write"
+        );
+        assert_eq!(
+            doc.to_json(),
+            json!({ "peers": { "live": { "card": "two", "status": "idle" } } }),
+            "the document holds the entry of the highest epoch only"
+        );
+    }
+
+    #[test]
+    fn a_higher_epoch_frame_that_fails_a_check_changes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, alice, mallory) = (nick("me"), nick("alice"), nick("mallory"));
+        let mut doc = MeshDoc::new_gated(card_gate());
+        write(&mut doc, &alice, &entry("alice", "alice card"));
+        // Not a root: it sits on top of another change of its epoch.
+        let mut ahead = MeshDoc::new_gated(card_gate()).at_epoch(1);
+        write(&mut ahead, &alice, &entry("alice", "first"));
+        let not_root = frame_on(&ahead, &alice, &entry("alice", "second"));
+        // A write of another peer's entry.
+        let fresh = MeshDoc::new_gated(card_gate()).at_epoch(1);
+        let forged = frame_on(&fresh, &mallory, &entry("alice", "forged"));
+        // A signer that is not the actor of the change.
+        let mut wrong_signer = root_of(1, &alice, "x");
+        let other_key = signer(&mallory);
+        wrong_signer = Verified::fixture_unchecked(
+            Message::new_channel_event(
+                &MeshId::from("test"),
+                &alice,
+                wrong_signer.body.clone(),
+                Channel::Meta,
+            )
+            .unverified_key(other_key),
+            other_key,
+        );
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "dropping a channel change whose actor is not its signer's key",
+        );
+        // Too far above the epoch of the node.
+        let too_far = root_of(super::DOC_EPOCH_JUMP_MAX + 1, &alice, "far");
+        for (name, frame) in [
+            ("not a root", &not_root),
+            ("a foreign entry", &forged),
+            ("an actor that is not the signer", &wrong_signer),
+            ("an epoch past the jump bound", &too_far),
+        ] {
+            let outcome = doc.ingest(frame);
+            assert!(
+                !matches!(
+                    outcome,
+                    Ingested::NewEpoch { .. } | Ingested::Applied { .. }
+                ),
+                "{name}: {outcome:?}"
+            );
+        }
+        for _ in 0..20 {
+            assert!(
+                doc.tick_epoch(&me, &signer(&me)).is_none(),
+                "a refused frame never starts a reset"
+            );
+        }
+        assert_eq!(doc.epoch(), 0, "no refused frame changes the epoch");
+        assert_eq!(
+            doc.to_json(),
+            json!({ "peers": { "alice": { "card": "alice card", "status": "idle" } } }),
+            "no refused frame changes the document"
+        );
+    }
+
+    #[test]
+    fn a_frame_of_a_lower_epoch_is_ignored_and_keeps_its_dedup_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, alice) = (nick("me"), nick("alice"));
+        let old = root_of(0, &alice, "old");
+        let mut doc = MeshDoc::new_gated(card_gate()).at_epoch(1);
+        write(&mut doc, &me, &entry("me", "mine"));
+        assert!(
+            matches!(doc.ingest(&old), Ingested::Ignored),
+            "a frame of a dead epoch is ignored"
+        );
+        assert!(dropped_keys(&mut doc).is_empty(), "a dead frame stays seen");
+        assert_eq!(
+            doc.to_json(),
+            json!({ "peers": { "me": { "card": "mine", "status": "idle" } } }),
+            "a frame of a dead epoch does not change the document"
+        );
+    }
+
+    #[test]
+    fn a_refused_candidate_frees_its_dedup_key_so_the_re_send_lands() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (alice, bob) = (nick("alice"), nick("bob"));
+        let mut doc = MeshDoc::new_gated(card_gate());
+        write(&mut doc, &alice, &entry("alice", "a"));
+        let two = root_of(2, &bob, "two");
+        let one = root_of(1, &bob, "one");
+        let late_one = root_of(1, &alice, "late");
+        assert!(
+            matches!(doc.ingest(&one), Ingested::NewEpoch { epoch: 1 }),
+            "the root of epoch 1 is the candidate"
+        );
+        assert!(
+            matches!(doc.ingest(&two), Ingested::NewEpoch { epoch: 2 }),
+            "the root of epoch 2 takes the place of the root of epoch 1"
+        );
+        assert_eq!(
+            dropped_keys(&mut doc),
+            vec![one.dedup_key()],
+            "the candidate that lost its place is forgotten"
+        );
+        assert!(
+            matches!(doc.ingest(&late_one), Ingested::Ignored),
+            "a lower candidate is refused"
+        );
+        assert_eq!(
+            dropped_keys(&mut doc),
+            vec![late_one.dedup_key()],
+            "a lower candidate is forgotten, so its re-send is not a repeat"
+        );
+    }
+
+    #[test]
+    fn each_epoch_has_its_own_genesis() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let hash = |epoch| super::peers_genesis("peers", epoch).hash();
+        assert_ne!(hash(1), hash(0), "epoch 1 has another genesis than epoch 0");
+        assert_ne!(hash(1), hash(2), "epoch 2 has another genesis than epoch 1");
+    }
+
+    #[test]
+    fn the_gate_still_rejects_a_foreign_entry_in_a_new_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (alice, mallory) = (nick("alice"), nick("mallory"));
+        let mut doc = MeshDoc::new_gated(card_gate()).at_epoch(1);
+        write(&mut doc, &alice, &entry("alice", "mine"));
+        let forged = frame_on(&doc, &mallory, &entry("alice", "forged"));
+        assert!(
+            matches!(doc.ingest(&forged), Ingested::Rejected),
+            "a foreign entry is rejected in a new epoch"
+        );
+    }
+
+    #[test]
+    fn a_capped_answer_holds_the_oldest_changes_first() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let alice = nick("alice");
+        let mut source = MeshDoc::new_ungated();
+        let frames: Vec<_> = (0..6)
+            .map(|index| author(&mut source, &alice, &json!({ format!("k{index}"): index })))
+            .collect();
+        let served: Vec<_> = source.changes_since(&[], 2).collect();
+        let first_two: Vec<_> = frames[..2].iter().map(|frame| frame.dedup_key()).collect();
+        let served_keys: Vec<_> = served.iter().map(|frame| frame.dedup_key()).collect();
+        assert_eq!(
+            served_keys, first_two,
+            "a capped answer starts at the roots"
         );
     }
 

@@ -1162,6 +1162,18 @@ struct ChannelEvent<'message> {
     surfaceable: bool,
 }
 
+/// A node that holds no frame of another author adopts at once the epoch that a frame started: it
+/// has nothing to lose. The sweep writes its entry again. A node that holds the frames of others
+/// waits for [`crate::util::consts::DOC_EPOCH_ADOPT_WAIT_TICKS`] ticks of the minute timer.
+fn adopt_new_epoch(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let adopted = state
+        .doc_mut(Channel::Meta)
+        .adopt_if_alone(context.author, &context.our_pubkey);
+    if let Some(switch) = adopted {
+        state.note_epoch_switch(switch);
+    }
+}
+
 fn dispatch_channel(
     event: ChannelEvent<'_>,
     state: &mut EventLoopState,
@@ -1176,6 +1188,9 @@ fn dispatch_channel(
         ChannelOutcome::Refused => state.idle.state_rejected += 1,
         ChannelOutcome::Repeat => state.idle.wire_in.note_content_dup(),
         ChannelOutcome::Taken => {}
+    }
+    if channel == Channel::Meta {
+        adopt_new_epoch(state, context);
     }
     let changed = state.doc(channel).change_count() > count_before;
     if changed {
@@ -4047,6 +4062,11 @@ mod dedup_counter_tests {
     }
 
     fn reader_after_on(arrivals: Vec<(Plane, Bytes)>) -> EventLoopState {
+        reader_with(fresh_state(), arrivals)
+    }
+
+    /// [`reader_after_on`] for a reader that starts as `initial`.
+    fn reader_with(initial: EventLoopState, arrivals: Vec<(Plane, Bytes)>) -> EventLoopState {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let mesh = MeshId::from("test");
             let endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -4075,7 +4095,7 @@ mod dedup_counter_tests {
                 external_msg_tx: None,
                 sink: &sink,
             };
-            let mut reader = fresh_state();
+            let mut reader = initial;
             let mut app = Inert;
             for (plane, bytes) in arrivals {
                 super::ingest_from(plane, bytes, &mut reader, &mut app, &context).await;
@@ -4087,6 +4107,52 @@ mod dedup_counter_tests {
 
     fn wire(frame: &Verified) -> u64 {
         frame.serialize().expect("serialize").len() as u64
+    }
+
+    /// A node that holds nothing from others adopts at once the epoch that a received frame
+    /// starts, and keeps the switch for the sweep to write its entry again.
+    #[test]
+    fn a_node_that_holds_nothing_from_others_adopts_the_epoch_of_a_received_frame() {
+        use crate::doc::{MeshDoc, SelfWriteGate};
+
+        let gate = SelfWriteGate::new("peers".to_owned(), "card");
+        let sender_identity = Identity::generate();
+        let sender_nick = nick("sender");
+        // A document that went through 1 reset: its first write is a root of epoch 1.
+        let mut writer = MeshDoc::new_gated(gate.clone()).epoch_cap(0);
+        let own = sender_identity.author_key();
+        assert!(writer.tick_epoch(&sender_nick, &own).is_some(), "the reset");
+        let seed = *sender_identity.public().as_bytes();
+        let change = writer
+            .build_change(
+                &json!({"peers": {"sender": {"card": "from epoch 1"}}}),
+                &seed,
+            )
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (body, _plain) = writer
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        let root =
+            Message::new_channel_event(&MeshId::from("test"), &sender_nick, body, Channel::Meta)
+                .sign(&sender_identity);
+        let bytes = root.serialize().expect("serialize").into_bytes();
+
+        let mut initial = fresh_state();
+        initial.meta_doc = MeshDoc::new_gated(gate);
+        let reader = reader_with(initial, vec![(Plane::Gossip, bytes)]);
+
+        let doc = reader.doc(Channel::Meta);
+        assert_eq!(doc.epoch(), 1, "the reader adopted the epoch");
+        assert_eq!(
+            doc.to_json(),
+            json!({"peers": {"sender": {"card": "from epoch 1"}}}),
+            "the document holds the root frame of the new epoch"
+        );
+        assert!(
+            reader.epoch_switch.is_some(),
+            "the sweep writes the entry again"
+        );
     }
 
     #[test]

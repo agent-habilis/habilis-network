@@ -1150,6 +1150,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.prune += 1;
         timers::tick_prune(&mut self.state, self.parts.sink);
         let context = self.parts.handler_ctx(&self.sender);
+        timers::tick_epoch(&mut self.state, context.author, &context.our_pubkey);
         timers::tick_doc_census(&mut self.state, context.author);
         timers::tick_collection_census(&self.state);
     }
@@ -1190,6 +1191,13 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         let context = self.parts.handler_ctx(&self.sender);
         probe::prove_routed_pairs(&mut self.state, &context).await;
         self.app.on_tick(&mut self.state, &context).await;
+        let write = gossip::MergeCtx {
+            mesh: context.mesh,
+            author: context.author,
+            sender: context.sender,
+            sink: context.sink,
+        };
+        gossip::write_entry_again(&mut self.state, &write).await;
     }
 
     /// The heal tick: heal the mesh while the gossip stream lives, else resubscribe the topic.
