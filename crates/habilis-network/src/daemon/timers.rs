@@ -21,7 +21,7 @@ use crate::util::{resident_memory, tuning, unix_secs};
 
 use crate::gossip::PathSummary;
 use crate::net;
-use crate::protocol::{Channel, Nickname};
+use crate::protocol::{Channel, DedupKey, Nickname};
 use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -356,7 +356,13 @@ fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: us
 /// its wait, or starts a new one when its frames reach the threshold. The sweep tick writes the
 /// entry of this node again.
 pub(crate) fn tick_epoch(state: &mut EventLoopState, me: &Nickname) {
-    if let Some(switch) = state.doc_mut(Channel::Meta).tick_epoch(me) {
+    let doc = state.doc_mut(Channel::Meta);
+    let switch = doc.tick_epoch(me);
+    let dropped: Vec<DedupKey> = doc.take_dropped().collect();
+    for key in dropped {
+        state.seen.remove(&key);
+    }
+    if let Some(switch) = switch {
         state.note_epoch_switch(switch);
     }
 }
@@ -503,6 +509,7 @@ fn log_wire_census(
 #[cfg(test)]
 mod tests {
     use crate::daemon::state::Latch;
+    use crate::protocol::messages::Verified;
     use crate::testing;
     use crate::util::unix_secs::UnixSecs;
     use std::collections::HashSet;
@@ -544,6 +551,55 @@ mod tests {
 
     /// The heavy part of the doc census runs on the first call and then once in
     /// `DOC_HEAVY_EVERY`, so that its cost is spread over many ticks.
+    /// A root frame of `epoch`, as a node that went through `epoch` resets sends it.
+    fn root_frame(epoch: u64, name: &str) -> Verified {
+        use crate::doc::{MeshDoc, SelfWriteGate};
+        use crate::protocol::identity::Identity;
+        use crate::protocol::{Channel, MeshId, Message};
+
+        let author = testing::nick(name);
+        let identity = Identity::generate();
+        let gate = SelfWriteGate::new("peers".to_owned(), "card");
+        let mut writer = MeshDoc::new_gated(gate).epoch_cap(0);
+        for _ in 0..epoch {
+            assert!(writer.tick_epoch(&author).is_some(), "a reset");
+        }
+        let seed = *identity.public().as_bytes();
+        let merge = serde_json::json!({"peers": {name: {"card": "mine"}}});
+        let change = writer
+            .build_change(&merge, &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (body, _plain) = writer
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        Message::new_channel_event(&MeshId::from("test"), &author, body, Channel::Meta)
+            .sign(&identity)
+    }
+
+    /// A candidate that a higher one beat goes to the dropped keys of the document. The tick that
+    /// follows must hand them to the receive path, or the re-send of that frame is a repeat.
+    #[test]
+    fn a_tick_of_the_epoch_forgets_the_keys_that_the_document_dropped() {
+        use crate::doc::{MeshDoc, SelfWriteGate};
+        use crate::protocol::Channel;
+
+        let mut state = testing::fresh_state();
+        state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
+        let first = root_frame(1, "alice");
+        let second = root_frame(2, "bob");
+        state.doc_mut(Channel::Meta).ingest(&first);
+        state.doc_mut(Channel::Meta).ingest(&second);
+        state.seen.insert(first.dedup_key());
+
+        super::tick_epoch(&mut state, &testing::nick("me"));
+
+        assert!(
+            !state.seen.contains(&first.dedup_key()),
+            "the key of the beaten candidate is forgotten"
+        );
+    }
+
     #[test]
     fn the_heavy_doc_census_runs_once_in_fifteen_ticks() {
         let heavy: Vec<u64> = (0..31).filter(|run| super::is_heavy_run(*run)).collect();
