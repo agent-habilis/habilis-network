@@ -906,15 +906,9 @@ fn handle_link_state(message: &Verified, state: &mut EventLoopState) -> bool {
 /// nobody receives is the right outcome: the pinger's round misses us and
 /// tries again.
 async fn auto_pong(message: &Verified, state: &EventLoopState, context: &HandlerCtx<'_>) {
-    let pong = Message::new_pong(
-        context.mesh,
-        context.author,
-        message.author.clone(),
-        &message.id,
-    )
-    .sign(context.identity);
-    messages::log_out(&pong);
-    match (pong_target(message, state), pong.serialize()) {
+    let (answer, target) = pong_for(message, state, context);
+    messages::log_out(&answer);
+    match (target, answer.serialize()) {
         (Some(eid), Ok(bytes)) => {
             if !transport::send_best_effort(eid, bytes, state).await {
                 tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no warm path");
@@ -926,14 +920,27 @@ async fn auto_pong(message: &Verified, state: &EventLoopState, context: &Handler
     }
 }
 
-/// Where the pong to `ping` goes: the endpoint that the signer of the ping proved in its
-/// `PeerInfo`, unless it is the rendezvous. The nickname on the ping is a label that any signer can
-/// take, so the dial hint under that nickname can name the endpoint of another key.
-fn pong_target(ping: &Verified, state: &EventLoopState) -> Option<iroh::EndpointId> {
-    state
+/// The pong that answers `ping`, and where it goes: the endpoint that the signer of the ping proved
+/// in its `PeerInfo`, unless it is the rendezvous. The nickname on the ping is a label that any
+/// signer can take, so the dial hint under that nickname can name the endpoint of another key. A
+/// signer that has proved no endpoint gets no target, and so no pong.
+fn pong_for(
+    request: &Verified,
+    state: &EventLoopState,
+    context: &HandlerCtx<'_>,
+) -> (Verified, Option<iroh::EndpointId>) {
+    let answer = Message::new_pong(
+        context.mesh,
+        context.author,
+        request.author.clone(),
+        &request.id,
+    )
+    .sign(context.identity);
+    let target = state
         .proven_endpoints
-        .get(&ping.key())
-        .filter(|eid| Some(*eid) != state.rendezvous_id)
+        .get(&request.key())
+        .filter(|eid| Some(*eid) != state.rendezvous_id);
+    (answer, target)
 }
 
 struct InboundFrame<'message> {
@@ -2258,7 +2265,7 @@ mod first_contact_tests {
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
 
-    use super::{dispatch_infra, handle_gossip_event, ingest, pong_target};
+    use super::{dispatch_infra, handle_gossip_event, ingest, pong_for};
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::{EventLoopState, PingRound};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
@@ -2266,7 +2273,7 @@ mod first_contact_tests {
     use crate::lifecycle::membership_update::MembershipUpdate;
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
-    use crate::protocol::{Channel, MeshId, Message, Nickname};
+    use crate::protocol::{Channel, MeshId, Message, MessageKind, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::MeshSender;
 
@@ -2569,12 +2576,42 @@ mod first_contact_tests {
                 .proven_endpoints
                 .insert(second.author_key(), second_endpoint, &HashSet::new());
 
-            let ping = Message::new_ping(&node.mesh, &twin).sign(&second);
+            let request = Message::new_ping(&node.mesh, &twin).sign(&second);
+
+            let (answer, target) = pong_for(&request, &state, &node.context());
 
             assert_eq!(
-                pong_target(&ping, &state),
+                target,
                 Some(second_endpoint),
                 "the pong went to the endpoint under the nickname, not to the signer's"
+            );
+            assert!(
+                matches!(&answer.kind, MessageKind::Pong { to, probe } if *to == twin && *probe == request.id),
+                "the pong does not answer the probe of the pinger: {:?}",
+                answer.kind
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A signer that has proved no endpoint gets no pong, whatever dial hint its nickname has: a
+    /// hint is a claim. The ping round of that signer misses us and tries again.
+    #[test]
+    fn a_ping_from_a_signer_with_no_proof_gets_no_pong() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let mut state = fresh_state();
+            let pinger = nick("pinger");
+            state
+                .peer_endpoints
+                .insert(pinger.clone(), iroh::EndpointAddr::new(endpoint_id(21)));
+            let request = Message::new_ping(&node.mesh, &pinger).sign(&Identity::generate());
+
+            let (_answer, target) = pong_for(&request, &state, &node.context());
+
+            assert_eq!(
+                target, None,
+                "a hint under the nickname was taken for a proof"
             );
             node.endpoint.close().await;
         });
