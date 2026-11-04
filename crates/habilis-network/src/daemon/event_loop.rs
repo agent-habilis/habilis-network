@@ -40,6 +40,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::doc::SelfWriteGate;
+use crate::gossip::antientropy::Plane;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::{Mesh, MeshName};
 use crate::protocol::messages::{Authored, Verified};
@@ -1134,7 +1135,14 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         // The digest handlers answer a unicast digest on the plane it came by, to the endpoint of
         // its connection.
         self.state.state_digest_serves.unicast.arrived_from = Some(frame.from);
-        gossip::ingest(frame.bytes, &mut self.state, &mut self.app, &context).await;
+        gossip::ingest_from(
+            Plane::Unicast,
+            frame.bytes,
+            &mut self.state,
+            &mut self.app,
+            &context,
+        )
+        .await;
         self.state.state_digest_serves.unicast.arrived_from = None;
     }
 

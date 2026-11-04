@@ -48,7 +48,7 @@ pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, s
 pub(crate) use state_init::StateInit;
 #[cfg(test)]
 pub(crate) use wire_out_tally::app_frame_with_tag;
-pub(crate) use wire_out_tally::{FrameShape, WireOut, WireOutTally, by_class};
+pub(crate) use wire_out_tally::{Arrival, FrameShape, WireOut, WireOutTally, by_arrival, by_class};
 
 pub(crate) use beacon_note::BeaconNote;
 pub(crate) use direct_counts::DirectCounts;
