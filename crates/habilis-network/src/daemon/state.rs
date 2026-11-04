@@ -1954,6 +1954,35 @@ mod tests {
         );
     }
 
+    /// A departed key makes no claim to the rendezvous any more. Another nickname can still bind
+    /// its endpoint, and then the endpoint keeps its state, so the claim of the key goes with the
+    /// key itself.
+    #[test]
+    fn a_departed_key_drops_its_rendezvous_claim_while_another_nickname_binds_its_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("swift-cedar");
+        let endpoint = endpoint_id(33);
+        state.peers.insert(key);
+        state.names.insert(key, nick("swift-cedar"));
+        state.bind_peer_endpoint(key, nick("swift-cedar"), iroh::EndpointAddr::new(endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("calm-otter"), iroh::EndpointAddr::new(endpoint));
+        state.rival_holders.insert(key, endpoint);
+
+        state.forget_key(key);
+
+        assert!(
+            state.endpoint_is_bound(endpoint),
+            "the other nickname still binds the endpoint"
+        );
+        assert!(
+            !state.rival_holders.contains_key(&key),
+            "the departed key still holds the rendezvous"
+        );
+    }
+
     /// A frame still in the message log has been processed. Anti-entropy re-sends any frame a
     /// peer holds, and `seen` alone forgets one under enough traffic of the kinds the log never
     /// keeps; the re-send would then be reprocessed and re-surfaced.

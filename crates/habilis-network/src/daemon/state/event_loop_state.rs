@@ -1169,8 +1169,8 @@ impl EventLoopState {
     }
 
     /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
-    /// stamps and runs, its name, and every dial hint that its `PeerInfo` made, under each
-    /// nickname it used. Returns the address of each hint that went.
+    /// stamps and runs, its claim to the rendezvous, its name, and every dial hint that its
+    /// `PeerInfo` made, under each nickname it used. Returns the address of each hint that went.
     pub(crate) fn forget_key(&mut self, key: AuthorKey) -> Vec<EndpointAddr> {
         self.peers.remove(&key);
         self.last_seen.remove(&key);
@@ -1185,6 +1185,7 @@ impl EventLoopState {
         self.clock_evidence.returned_unshown.remove(&key);
         self.clock_evidence.lapsed_quiet.remove(&key);
         self.proven_endpoints.forget_trust(&key);
+        self.rival_holders.remove(&key);
         self.names.remove(&key);
         // A key that renamed owns a hint under each nickname it used. The owned nicknames are read
         // before any hint goes, since a removal changes the owner map.
