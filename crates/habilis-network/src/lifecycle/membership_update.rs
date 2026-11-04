@@ -317,6 +317,7 @@ pub(crate) fn apply(update: &MembershipUpdate, key: AuthorKey, state: &mut Event
         // A peer that is back is not quiet any more: its old recency must not make the sweep read
         // it as a peer that outlived the quiet TTL.
         state.quiet_since.remove(&key);
+        state.clock_evidence.quiet_aged.remove(&key);
         state.peers.insert(key);
     }
     if update.joined_new {

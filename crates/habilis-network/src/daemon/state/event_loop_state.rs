@@ -101,6 +101,10 @@ pub(crate) struct ClockEvidence {
     /// The real last-heard instant of each peer. The stall forgiveness moves the eviction mark
     /// (`last_seen`) and leaves this one, which the roster reports.
     pub(crate) heard: HashMap<AuthorKey, Instant>,
+    /// The silence that the wall clock counted and the monotonic clock did not (a suspend), added
+    /// to each quiet peer. A span, not a moved `Instant`: an `Instant` cannot go back past the
+    /// origin of its clock, and a browser clock starts at the page load.
+    pub(crate) quiet_aged: HashMap<AuthorKey, Duration>,
     /// Wall-clock time that the monotonic clock missed, until a live peer vouches for it.
     pub(crate) suspend: Option<PendingSuspend>,
     /// The peers that left `quiet` after the quiet TTL. Their dial hint stays, because a peer that
@@ -117,6 +121,7 @@ impl Default for ClockEvidence {
             live_run: HashMap::new(),
             returned_unshown: HashSet::new(),
             heard: HashMap::new(),
+            quiet_aged: HashMap::new(),
             suspend: None,
             lapsed_quiet: BoundedFifoSet::new(QUIET_CAP),
         }
@@ -830,7 +835,9 @@ impl EventLoopState {
                     // Quiet peers: their last-heard instant, retained in
                     // `quiet_since` (the eviction drops `last_seen`). A quiet
                     // peer has no live link, so it is always `Gossip`.
-                    last_seen_secs_ago: self.quiet_since.get(key).map(secs_since),
+                    last_seen_secs_ago: self
+                        .quiet_silence(key, now)
+                        .map(|silence| silence.as_secs()),
                     quiet: true,
                     reach: Reach::Gossip,
                     transport: transport::lane_for(nick, self),
@@ -1128,6 +1135,7 @@ impl EventLoopState {
         self.peer_stamp.remove(&key);
         self.quiet.remove(&key);
         self.quiet_since.remove(&key);
+        self.clock_evidence.quiet_aged.remove(&key);
         self.surfaced.remove(&key);
         self.clock_evidence.step_back.remove(&key);
         self.clock_evidence.live_run.remove(&key);
@@ -1147,6 +1155,18 @@ impl EventLoopState {
         self.hint_owner
             .get(nickname)
             .is_some_and(|owner| *owner != key && self.peers.contains(owner))
+    }
+
+    /// How long the quiet peer `key` has been silent at `now`, suspends included.
+    pub(crate) fn quiet_silence(&self, key: &AuthorKey, now: Instant) -> Option<Duration> {
+        let since = self.quiet_since.get(key)?;
+        let aged = self
+            .clock_evidence
+            .quiet_aged
+            .get(key)
+            .copied()
+            .unwrap_or_default();
+        Some(now.duration_since(*since).saturating_add(aged))
     }
 
     /// The keys of the roster, live or quiet, that use `nickname`.

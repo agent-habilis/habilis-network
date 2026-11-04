@@ -116,10 +116,9 @@ pub(crate) fn confirm_suspend(state: &mut EventLoopState, stamp: UnixSecs) {
 /// clock did not, so a long sleep does not hold a quiet peer, or its endpoint binding, past one
 /// hour of real silence.
 fn age_quiet_peers(state: &mut EventLoopState, missed: Duration) {
-    for since in state.quiet_since.values_mut() {
-        if let Some(older) = since.checked_sub(missed) {
-            *since = older;
-        }
+    for key in state.quiet_since.keys() {
+        let aged = state.clock_evidence.quiet_aged.entry(*key).or_default();
+        *aged = aged.saturating_add(missed);
     }
 }
 
@@ -198,12 +197,13 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     // A quiet peer that did not come back within the TTL is gone for good.
     let too_old = state
         .quiet_since
-        .iter()
-        .filter(|(_, heard)| now.duration_since(**heard) > QUIET_TTL);
-    let gone: Vec<AuthorKey> = too_old.map(|(key, _)| *key).collect();
+        .keys()
+        .filter(|key| state.quiet_silence(key, now) > Some(QUIET_TTL));
+    let gone: Vec<AuthorKey> = too_old.copied().collect();
     for key in gone {
         state.quiet.remove(&key);
         state.quiet_since.remove(&key);
+        state.clock_evidence.quiet_aged.remove(&key);
         state.clock_evidence.lapsed_quiet.insert(key);
     }
     // Keep `quiet_since` bounded to current `quiet` membership: peers that
@@ -211,7 +211,16 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     // drop their stale recency here.
     let quiet = &state.quiet;
     state.quiet_since.retain(|key, _| quiet.contains(key));
-    // The per-key state follows the roster too: a key that is neither a peer nor quiet drops it.
+    state
+        .clock_evidence
+        .quiet_aged
+        .retain(|key, _| quiet.contains(key));
+    prune_per_key_state(state);
+    prune_dial_hints(state);
+}
+
+/// The per-key state follows the roster: a key that is neither a peer nor quiet drops it.
+fn prune_per_key_state(state: &mut EventLoopState) {
     let (roster, evicted) = (&state.peers, &state.quiet);
     let is_peer = |key: &AuthorKey| roster.contains(key);
     let is_quiet = |key: &AuthorKey| evicted.contains(key);
@@ -235,7 +244,6 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     state
         .names
         .retain(|key, _| is_peer(key) || is_quiet(key) || lapsed.contains(key));
-    prune_dial_hints(state);
 }
 
 /// Prune the dial hints and the state that is keyed by their endpoints.
@@ -334,7 +342,9 @@ mod tests {
     use crate::transport::probe::PathKind;
     use std::collections::HashSet;
 
-    use super::{AuthorKey, Instant, QUIET_TTL, forgive_stall, note_suspend, tick_sweep};
+    use super::{
+        AuthorKey, Instant, QUIET_TTL, confirm_suspend, forgive_stall, note_suspend, tick_sweep,
+    };
     use crate::gossip::event::SilentSink;
     use crate::util::tuning;
     use std::time::Duration;
@@ -627,6 +637,29 @@ mod tests {
         assert_eq!(
             pending.at, first_gap_at,
             "the second gap moved the start of the window"
+        );
+    }
+
+    /// A suspend longer than the monotonic clock has run (a browser clock counts from the page
+    /// load) cannot be taken off an `Instant`: `checked_sub` gives `None`. The quiet peer must
+    /// still be older by the whole suspend, so the aged silence is kept as a span.
+    #[test]
+    fn a_suspend_longer_than_the_clock_origin_still_ages_a_quiet_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.quiet_for_test("lost-heron");
+        state
+            .quiet_since
+            .insert(test_key("lost-heron"), Instant::now());
+        let longer_than_any_clock = Duration::MAX;
+
+        note_suspend(&mut state, longer_than_any_clock);
+        confirm_suspend(&mut state, protocol::UnixSecs::now());
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.quiet.contains(&test_key("lost-heron")),
+            "a quiet peer survived a suspend that the clock cannot subtract"
         );
     }
 
