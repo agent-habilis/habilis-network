@@ -258,8 +258,11 @@ fn prune_dial_hints(state: &mut EventLoopState) {
     let in_roster =
         |key: &AuthorKey| peers.contains(key) || quiet.contains(key) || lapsed.contains(key);
     // A hint made from a card has no owner: it stays while a key of the roster uses the nickname.
+    // A hint with an owner stays while that key is in the roster and still uses the nickname: a key
+    // that renames leaves the hint of its old nickname behind, and it goes.
+    let uses = |key: &AuthorKey, nick: &Nickname| names.get(key) == Some(nick);
     let is_kept = |nick: &Nickname| match owners.get(nick) {
-        Some(key) => in_roster(key),
+        Some(key) => in_roster(key) && uses(key, nick),
         None => names
             .iter()
             .any(|(key, name)| name == nick && in_roster(key)),
@@ -818,6 +821,35 @@ mod tests {
                 && state.path_watchers.contains_key(&endpoint)
                 && state.direct.contains_key(&endpoint),
             "the state of an endpoint that a kept nickname binds went with the pruned one"
+        );
+    }
+
+    /// A live key that renames leaves its old nickname behind. The hint under the old nickname
+    /// belongs to a nickname that the key no longer uses, and without this the map grows with each
+    /// nickname that a key has used.
+    #[test]
+    fn pruning_a_dial_hint_drops_the_old_nickname_of_a_key_that_renamed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("renamer");
+        let first = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        let second = iroh::SecretKey::from_bytes(&[9; 32]).public();
+        state.peers.insert(key);
+        state.last_seen.insert(key, Instant::now());
+        state.names.insert(key, nick("old-name"));
+        state.bind_peer_endpoint(key, nick("old-name"), iroh::EndpointAddr::new(first));
+        state.names.insert(key, nick("new-name"));
+        state.bind_peer_endpoint(key, nick("new-name"), iroh::EndpointAddr::new(second));
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.peer_endpoints.contains_key("new-name"),
+            "the hint under the current nickname of the key went"
+        );
+        assert!(
+            !state.peer_endpoints.contains_key("old-name"),
+            "the hint under a nickname that the key left stayed"
         );
     }
 
