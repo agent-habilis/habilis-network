@@ -598,6 +598,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn on_windows_a_warm_send_with_no_direct_path_waits_then_is_refused() {
+        use crate::transport::pool::timeouts;
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let pair = relay_only_warm_pair().await;
             let message = directed_msg();
@@ -619,7 +620,7 @@ mod tests {
                 "the bare refusal"
             );
             assert!(
-                started.elapsed() >= Duration::from_secs(5),
+                started.elapsed() >= timeouts::PATH_SELECT_TIMEOUT,
                 "the refusal came before the path-select budget: {:?}",
                 started.elapsed()
             );

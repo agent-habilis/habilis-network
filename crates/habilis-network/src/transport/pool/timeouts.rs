@@ -25,7 +25,7 @@ pub(crate) const COOLDOWN_REFUSED: &str = "unicast dial on cooldown after a rece
 /// itself, so it gets a dial-sized budget, not an accept-sized one — and a
 /// punch or a `WebRTC` path-open lands in single-digit seconds when it lands
 /// at all.
-pub(super) const PATH_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(in crate::transport) const PATH_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a connection stays busy after a send finished, if the peer has not read the frame. A
 /// reader that is slower than this is not protected: the connection can be evicted under its frame.
