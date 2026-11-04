@@ -1161,6 +1161,64 @@ mod tests {
         });
     }
 
+    /// A digest answer counts its bytes, and the bytes of the frames that a member signed who is
+    /// neither on the roster nor us. The two ghost frames are the only absent ones, and the
+    /// frames of `alice`, who is us, are not.
+    #[test]
+    fn a_digest_answer_counts_the_bytes_of_the_frames_of_the_dead() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            let context = net.context();
+            let seed = *state.identity.public().as_bytes();
+            let ghost_len: Vec<usize> = (0..2)
+                .map(|step| {
+                    let doc = state.doc(Channel::Meta);
+                    let change = doc
+                        .build_change(&serde_json::json!({ format!("ghost{step}"): step }), &seed)
+                        .expect("a JSON object merges")
+                        .expect("a non-empty merge yields a change");
+                    let (wire, _plain) = doc
+                        .compose_wire_body(&change, None)
+                        .expect("compose the wire body");
+                    let frame =
+                        Message::new_channel_event(&net.mesh, &nick("ghost"), wire, Channel::Meta)
+                            .sign(&state.identity);
+                    let _ = state.doc_mut(Channel::Meta).ingest(&frame);
+                    frame.serialize().expect("serialize").as_bytes().len()
+                })
+                .collect();
+            let asker = Identity::generate();
+            prove_identity(&mut state, &asker, bob_endpoint.id());
+            let empty = serde_json::json!([]);
+            let meta_digest = digest(&net.mesh, Channel::Meta, &empty, &asker);
+
+            let answered =
+                antientropy::handle_state_digest(Channel::Meta, &meta_digest, &mut state, &context)
+                    .await;
+
+            let ghost_total: usize = ghost_len.iter().sum();
+            let ghost_bytes = u64::try_from(ghost_total).expect("fits");
+            assert_eq!(
+                answered.broadcast, 5,
+                "3 frames of alice and 2 of the ghost"
+            );
+            assert_eq!(
+                state.idle.state_answer_absent_bytes, ghost_bytes,
+                "only the ghost is absent: alice is us"
+            );
+            assert!(
+                state.idle.state_answer_bytes > ghost_bytes,
+                "the total holds the frames of alice too"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
     /// Two answers in flight at once each end with the holder's heads, and our
     /// heads move with every frame of either. Asking again on each of them
     /// ran two chains of asks, and each round cost the holder two of its

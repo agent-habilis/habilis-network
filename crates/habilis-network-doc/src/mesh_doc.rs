@@ -146,6 +146,12 @@ pub struct DocCensus {
     /// The nicknames that have an entry in the per-peer map, when the caller asked for the heavy
     /// census. Empty for a document with no gate.
     pub peer_nicks: Option<Vec<String>>,
+    /// The bytes of each entry of the per-peer map as JSON, by owner, when the caller asked for
+    /// the heavy census. Empty for a document with no gate.
+    pub peer_entry_bytes: Option<HashMap<String, usize>>,
+    /// The wire bytes of the frames kept to serve again, by the nickname that signed them, when
+    /// the caller asked for the heavy census.
+    pub author_frame_bytes: Option<HashMap<String, usize>>,
 }
 
 /// The bytes of a frame on the wire, 0 for a frame that does not serialize.
@@ -394,6 +400,10 @@ impl MeshDoc {
             .as_ref()
             .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len()));
         let peer_nicks = json.as_ref().map(|json| self.gated_nicks(json));
+        let peer_entry_bytes: Option<HashMap<String, usize>> =
+            json.as_ref().map(|json| self.entry_bytes(json));
+        let author_frame_bytes: Option<HashMap<String, usize>> =
+            heavy.then(|| self.author_frame_bytes());
         DocCensus {
             changes: self.applied.len(),
             frames: self.frames.len(),
@@ -401,7 +411,33 @@ impl MeshDoc {
             save_bytes,
             json_bytes,
             peer_nicks,
+            peer_entry_bytes,
+            author_frame_bytes,
         }
+    }
+
+    /// The JSON bytes of each entry of the gated map of `json`, by owner. Empty for a document
+    /// with no gate.
+    fn entry_bytes(&self, json: &Value) -> HashMap<String, usize> {
+        let Some(gate) = self.gate.as_ref() else {
+            return HashMap::new();
+        };
+        let owners = gated_entries(json, gate);
+        let peers = json.get(&gate.map).and_then(Value::as_object);
+        let size = |entry: &Value| serde_json::to_vec(entry).map_or(0, |bytes| bytes.len());
+        let entries = peers.into_iter().flatten();
+        let owned = entries.filter(|(nick, _)| owners.contains_key(*nick));
+        let sized = owned.map(|(nick, entry)| (nick.clone(), size(entry)));
+        sized.collect()
+    }
+
+    /// The wire bytes of the frames kept to serve again, by the nickname that signed them.
+    fn author_frame_bytes(&self) -> HashMap<String, usize> {
+        let mut bytes: HashMap<String, usize> = HashMap::new();
+        for frame in self.frames.values() {
+            *bytes.entry(frame.author.to_string()).or_default() += wire_len(frame);
+        }
+        bytes
     }
 
     /// The nicknames with an entry in the gated map of `json`. Empty for a document with no gate.
@@ -961,7 +997,7 @@ mod tests {
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
     };
     use serde_json::{Value, json};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn nick(name: &str) -> Nickname {
         Nickname::from(name)
@@ -1170,6 +1206,29 @@ mod tests {
         let mut nicks = heavy.peer_nicks.expect("the heavy census lists the owners");
         nicks.sort();
         assert_eq!(nicks, ["alice", "bob"], "the owners of the peer map");
+        let entry_bytes: HashMap<String, usize> =
+            HashMap::from([("alice".to_owned(), 10), ("bob".to_owned(), 10)]);
+        assert_eq!(
+            heavy.peer_entry_bytes,
+            Some(entry_bytes),
+            "the bytes of each entry, `{{\"card\":1}}` is 10"
+        );
+        let first_len = hand_counted_wire_len(&first);
+        let second_len = hand_counted_wire_len(&second);
+        let frame_bytes: HashMap<String, usize> = HashMap::from([
+            ("alice".to_owned(), first_len),
+            ("bob".to_owned(), second_len),
+        ]);
+        assert_eq!(
+            heavy.author_frame_bytes,
+            Some(frame_bytes),
+            "the frame bytes by the nickname that signed them"
+        );
+        assert_eq!(
+            doc.census(false).author_frame_bytes,
+            None,
+            "the light census does not walk the frames"
+        );
         assert!(
             heavy.save_bytes.expect("a save was asked for") > 0,
             "the save has bytes"

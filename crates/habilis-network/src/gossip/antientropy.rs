@@ -670,6 +670,7 @@ pub(crate) async fn handle_state_digest(
     if frames.is_empty() {
         return answered;
     }
+    let (total, absent) = answer_bytes(&missing, &state.peers, context.author);
     let count = frames.len();
     // A point-to-point answer ends with our own heads: the asker compares them
     // with its document and asks again while it is behind (see `ask_back`).
@@ -719,6 +720,8 @@ pub(crate) async fn handle_state_digest(
             .note(serve(Plane::Unicast), heads, now);
     }
     state.idle.state_answers += 1;
+    state.idle.state_answer_bytes += total;
+    state.idle.state_answer_absent_bytes += absent;
     state.idle.state_frames_unicast += u64::try_from(answered.unicast).unwrap_or(u64::MAX);
     state.idle.state_frames_broadcast += u64::try_from(answered.broadcast).unwrap_or(u64::MAX);
     tracing::debug!(
@@ -732,6 +735,22 @@ pub(crate) async fn handle_state_digest(
         "state anti-entropy: resent frames a peer lacked"
     );
     answered
+}
+
+/// The wire bytes of the frames of an answer, and the part of them that a member signed who is
+/// neither on the roster nor `me`.
+fn answer_bytes(frames: &[Verified], roster: &HashSet<Nickname>, me: &Nickname) -> (u64, u64) {
+    let mut total = 0;
+    let mut absent = 0;
+    for frame in frames {
+        let wire_len: usize = frame.serialize().map_or(0, |wire| wire.as_bytes().len());
+        let len = u64::try_from(wire_len).unwrap_or(u64::MAX);
+        total += len;
+        if frame.author != *me && !roster.contains(&frame.author) {
+            absent += len;
+        }
+    }
+    (total, absent)
 }
 
 /// The signed change frames the author of `digest` lacks on `channel`, up to

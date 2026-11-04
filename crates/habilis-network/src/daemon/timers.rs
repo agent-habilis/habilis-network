@@ -4,7 +4,7 @@
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
 use crate::daemon::state::{CollectionSizes, Latch, Standing};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -187,6 +187,8 @@ pub(crate) async fn tick_state_refresh(
         idle_state_answers = idle.state_answers,
         idle_state_frames_unicast = idle.state_frames_unicast,
         idle_state_frames_broadcast = idle.state_frames_broadcast,
+        idle_state_answer_bytes = idle.state_answer_bytes,
+        idle_state_answer_absent_bytes = idle.state_answer_absent_bytes,
         idle_state_rejected = idle.state_rejected,
         // A gauge, not a delta: the peers that a fast round still counts as ahead of us.
         idle_ahead_peers = state.fast_rounds.ahead_count(),
@@ -307,14 +309,31 @@ fn in_join_phase(joined_at: unix_secs::UnixSecs, now: unix_secs::UnixSecs) -> bo
     now.since(joined_at) < JOIN_PHASE
 }
 
+/// Whether `nick` belongs to nobody on the roster and is not ours: a member that left.
+fn is_absent(nick: &str, roster: &HashSet<Nickname>, me: &Nickname) -> bool {
+    let owner = Nickname::try_new(nick);
+    owner.is_ok_and(|owner| owner != *me && !roster.contains(&owner))
+}
+
 /// The entries of the per-peer map that belong to nobody on the roster and are not ours: members
 /// that left and whose entry stays in the document for good.
 fn absent_entries(nicks: &[String], roster: &HashSet<Nickname>, me: &Nickname) -> usize {
-    let absent = |nick: &&String| {
-        let owner = Nickname::try_new(nick);
-        owner.is_ok_and(|owner| owner != *me && !roster.contains(&owner))
-    };
-    nicks.iter().filter(absent).count()
+    nicks
+        .iter()
+        .filter(|nick| is_absent(nick, roster, me))
+        .count()
+}
+
+/// The sum of the bytes that `by_nick` holds for the members that left.
+fn absent_bytes(
+    by_nick: &HashMap<String, usize>,
+    roster: &HashSet<Nickname>,
+    me: &Nickname,
+) -> usize {
+    let absent = by_nick
+        .iter()
+        .filter(|(nick, _)| is_absent(nick, roster, me));
+    absent.map(|(_, bytes)| bytes).sum()
 }
 
 /// Every how many doc censuses the heavy part runs: the JSON, the save and the per-peer map cost
@@ -354,9 +373,9 @@ fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: us
 
 /// The sizes of the meta and the state document, on a line of their own, once per call (the
 /// 1-minute tick): the changes and frames that the node keeps for good, their bytes, the JSON, the
-/// save, and the entries of the per-peer map of members that are gone, every
-/// [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read 0. A reader of the numbers can tell
-/// what a keyframe scheme would save.
+/// save, the entries of the per-peer map of members that are gone and their bytes in the document
+/// and in the frames, every [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read 0. A
+/// reader of the numbers can tell what a keyframe scheme would save.
 pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
     let run = DOC_CENSUS_RUNS.fetch_add(1, Ordering::Relaxed);
     let heavy = is_heavy_run(run);
@@ -365,6 +384,11 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
     let peer_nicks = meta.peer_nicks.as_deref().unwrap_or_default();
     let absent = absent_entries(peer_nicks, &state.peers, me);
     let peer_entries = peer_nicks.len();
+    let no_bytes = HashMap::new();
+    let entry_bytes = meta.peer_entry_bytes.as_ref().unwrap_or(&no_bytes);
+    let frame_bytes = meta.author_frame_bytes.as_ref().unwrap_or(&no_bytes);
+    let absent_entry_bytes = absent_bytes(entry_bytes, &state.peers, me);
+    let absent_frame_bytes = absent_bytes(frame_bytes, &state.peers, me);
     tracing::info!(
         target: "habilis_network::lifecycle",
         doc_meta_changes = meta.changes,
@@ -374,6 +398,8 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
         doc_meta_json_bytes = meta.json_bytes.unwrap_or(0),
         doc_meta_peer_entries = peer_entries,
         doc_meta_absent_entries = absent,
+        doc_meta_absent_entry_bytes = absent_entry_bytes,
+        doc_meta_absent_frame_bytes = absent_frame_bytes,
         doc_state_changes = shared.changes,
         doc_state_frames = shared.frames,
         doc_state_frame_bytes = shared.frame_bytes,
@@ -495,7 +521,7 @@ mod tests {
     use crate::daemon::state::Latch;
     use crate::testing;
     use crate::util::unix_secs::UnixSecs;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use crate::gossip::event::CountingSink;
 
@@ -529,6 +555,29 @@ mod tests {
             super::absent_entries(&[], &roster, &me),
             0,
             "no entry, none absent"
+        );
+    }
+
+    /// The bytes of the members that left are the sum over the owners who are neither on the
+    /// roster nor us.
+    #[test]
+    fn the_bytes_of_the_members_off_the_roster_are_summed() {
+        let me = testing::nick("me");
+        let roster: HashSet<_> = [testing::nick("alice")].into_iter().collect();
+        let bytes: HashMap<String, usize> =
+            [("me", 1), ("alice", 10), ("bob", 100), ("carol", 1000)]
+                .map(|(nick, len)| (nick.to_owned(), len))
+                .into();
+
+        assert_eq!(
+            super::absent_bytes(&bytes, &roster, &me),
+            1100,
+            "bob and carol"
+        );
+        assert_eq!(
+            super::absent_bytes(&HashMap::new(), &roster, &me),
+            0,
+            "no owner, no bytes"
         );
     }
 

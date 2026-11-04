@@ -86,6 +86,11 @@ pub(crate) struct IdleCounters {
     pub state_frames_unicast: u64,
     /// The frames of those answers that went out on gossip.
     pub state_frames_broadcast: u64,
+    /// The wire bytes of the frames of those answers.
+    pub state_answer_bytes: u64,
+    /// The part of `state_answer_bytes` that a member signed who is neither on the roster nor us:
+    /// the cost of the changes of the dead.
+    pub state_answer_absent_bytes: u64,
     /// State and meta frames that the document refused or ignored: a forged entry, a repeated
     /// `(actor, seq)` with other content, or a body that is no change.
     pub state_rejected: u64,
