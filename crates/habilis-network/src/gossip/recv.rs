@@ -1577,11 +1577,12 @@ async fn handle_peer_info(
         return;
     }
     // The only binding a digest's answer may follow: this signer proved it
-    // owns `peer_id`. A `PeerInfo` arrives many times, so a known pair is not
-    // checked again.
+    // owns `peer_id`. A `PeerInfo` arrives many times, so a pair that the roster trusts is not
+    // checked again. A proof that the table holds for a signer not yet in the roster is checked
+    // again, so the trust follows the roster.
     let signer = message.key();
     if let Some(proof) = parsed["proof"].as_str()
-        && state.proven_endpoints.get(&signer) != Some(peer_id)
+        && state.proven_endpoints.trusted(&signer) != Some(peer_id)
         && proven_endpoints::verifies(peer_id, context.mesh, &signer, proof)
     {
         state.note_proven_endpoint(signer, peer_id, message.timestamp);
@@ -3167,6 +3168,54 @@ mod first_contact_tests {
                 state.proven_endpoints.get(&bob_signer),
                 Some(bob_endpoint),
                 "bob's proof, bob's frame"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A `PeerInfo` can come before its signer is in the roster. The table then holds the proof
+    /// and the trust map does not, so the next `PeerInfo` with the same proof must still make the
+    /// trust once the signer is a peer.
+    #[test]
+    fn a_proof_recorded_before_the_signer_joined_the_roster_is_trusted_by_the_next_peer_info() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+            use crate::transport::proven_endpoints;
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob_endpoint_key = iroh::SecretKey::generate();
+            let bob_endpoint = bob_endpoint_key.public();
+            let bob = Identity::generate();
+            let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
+                .expect("a 32-byte key");
+            let proof = proven_endpoints::sign(&bob_endpoint_key, &node.mesh, &bob_signer);
+            let mut json =
+                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            json["proof"] = serde_json::Value::String(proof);
+            let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+            let peer_info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
+
+            let mut state = fresh_state();
+            super::handle_peer_info(&peer_info, &mut state, &context).await;
+            assert_eq!(
+                state.proven_endpoints.get(&bob_signer),
+                Some(bob_endpoint),
+                "the proof is recorded"
+            );
+            assert_eq!(
+                state.proven_endpoints.trusted(&bob_signer),
+                None,
+                "bob is not a peer yet, so nothing is trusted"
+            );
+
+            state.peers.insert(bob_signer);
+            super::handle_peer_info(&peer_info, &mut state, &context).await;
+            assert_eq!(
+                state.proven_endpoints.trusted(&bob_signer),
+                Some(bob_endpoint),
+                "bob is a peer now, and the same proof makes the trust"
             );
             node.endpoint.close().await;
         });
