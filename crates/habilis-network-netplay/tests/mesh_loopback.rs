@@ -331,13 +331,13 @@ fn a_peer_whose_nickname_two_live_peers_use_is_reported_unaddressable() {
                 spawn(&topic, "bob").await,
             ];
 
-            let twins_of = |players: &[Player]| -> Vec<AuthorKey> {
-                let transport = players[0]
+            let twins_of = |group: &[Player]| -> Vec<AuthorKey> {
+                let transport = group[0]
                     .transport
                     .as_ref()
                     .expect("alice has her transport");
-                transport
-                    .known_peers()
+                let peers = transport.known_peers();
+                peers
                     .filter(|(_, nickname)| nickname.as_str() == "bob")
                     .map(|(pubkey, _)| pubkey)
                     .collect()

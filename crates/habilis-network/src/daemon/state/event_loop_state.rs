@@ -1186,10 +1186,8 @@ impl EventLoopState {
         // before any hint goes, since a removal changes the owner map.
         let owned_hints = self.hint_owner.iter().filter(|(_, owner)| **owner == key);
         let owned: Vec<Nickname> = owned_hints.map(|(nickname, _)| nickname.clone()).collect();
-        owned
-            .iter()
-            .filter_map(|nickname| self.forget_peer_endpoint(nickname.as_str()))
-            .collect()
+        let forget = |nickname: &Nickname| self.forget_peer_endpoint(nickname.as_str());
+        owned.iter().filter_map(forget).collect()
     }
 
     /// Whether `key` is not live and another live peer uses `nickname`. A late `PeerInfo` of a

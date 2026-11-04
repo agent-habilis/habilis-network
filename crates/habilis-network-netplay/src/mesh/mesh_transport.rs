@@ -126,12 +126,9 @@ impl<T: Config> MeshTransport<T> {
     /// peer is addressable again when only one key uses the nickname. A frame loop reads this to
     /// say why a match does not start.
     pub fn unaddressable(&self) -> impl Iterator<Item = AuthorKey> {
-        let peers: Vec<AuthorKey> = self
-            .mailboxes
-            .unaddressable
-            .lock()
-            .map(|refused| refused.iter().copied().collect())
-            .unwrap_or_default();
+        let refused = self.mailboxes.unaddressable.lock();
+        let peers: Vec<AuthorKey> =
+            refused.map_or_else(|_| Vec::new(), |set| set.iter().copied().collect());
         peers.into_iter()
     }
 

@@ -84,9 +84,8 @@ pub(crate) async fn handle_presence(
         // A key that renamed left one endpoint for each nickname it used, and each one is torn down,
         // unless another nickname still binds it.
         let left_hints = state.forget_key(key);
-        let unbound: Vec<_> = left_hints
-            .iter()
-            .map(|hint| hint.id)
+        let endpoints = left_hints.iter().map(|hint| hint.id);
+        let unbound: Vec<_> = endpoints
             .filter(|endpoint_id| !state.endpoint_is_bound(*endpoint_id))
             .collect();
         for endpoint_id in unbound {
