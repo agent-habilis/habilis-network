@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use iroh::{EndpointId, SecretKey, Signature};
 
 use crate::protocol::identity::{decode_hex, encode_hex};
-use crate::protocol::{AuthorKey, MeshId};
+use crate::protocol::{AuthorKey, MeshId, UnixSecs};
 
 const DOMAIN: &[u8] = b"habilis-network/peerinfo-endpoint-proof/1";
 
@@ -61,6 +61,8 @@ pub(crate) struct ProvenEndpoints {
     /// The endpoint of each roster key whose proof was checked, for the trust in a link vector.
     /// It has no cap and no order: the roster bounds it, and the sweep drops a key that left.
     trusted: HashMap<AuthorKey, EndpointId>,
+    /// The stamp of the newest `PeerInfo` that proved each endpoint of `by_signer`.
+    stamps: HashMap<EndpointId, UnixSecs>,
 }
 
 impl ProvenEndpoints {
@@ -70,6 +72,7 @@ impl ProvenEndpoints {
             order: VecDeque::new(),
             cap,
             trusted: HashMap::new(),
+            stamps: HashMap::new(),
         }
     }
 
@@ -98,13 +101,31 @@ impl ProvenEndpoints {
         self.by_signer.get(signer).copied()
     }
 
-    /// Record that `signer` proved `endpoint`.
+    /// Record that `signer` proved `endpoint` in a `PeerInfo` stamped `stamp`. Another signer
+    /// takes an endpoint over only with a newer stamp: a restart keeps the key of the endpoint
+    /// and makes a new signing key, and a replay of the old `PeerInfo` must not put it back.
     pub(crate) fn insert(
         &mut self,
         signer: AuthorKey,
         endpoint: EndpointId,
+        stamp: UnixSecs,
         linked: &HashSet<EndpointId>,
     ) {
+        let held = self.stamps.get(&endpoint).copied();
+        if self.by_signer.get(&signer) != Some(&endpoint) && held.is_some_and(|held| stamp <= held)
+        {
+            return;
+        }
+        self.place(signer, endpoint, linked);
+        if self.by_signer.get(&signer) == Some(&endpoint) {
+            self.stamps
+                .insert(endpoint, stamp.max(held.unwrap_or(stamp)));
+        }
+        let live: HashSet<EndpointId> = self.by_signer.values().copied().collect();
+        self.stamps.retain(|eid, _| live.contains(eid));
+    }
+
+    fn place(&mut self, signer: AuthorKey, endpoint: EndpointId, linked: &HashSet<EndpointId>) {
         self.by_signer
             .retain(|other, eid| *other == signer || *eid != endpoint);
         let by_signer = &self.by_signer;
@@ -152,7 +173,7 @@ mod tests {
     use iroh::SecretKey;
 
     use super::{ProvenEndpoints, sign, verifies};
-    use crate::protocol::{AuthorKey, MeshId};
+    use crate::protocol::{AuthorKey, MeshId, UnixSecs};
 
     fn key(byte: u8) -> AuthorKey {
         AuthorKey::from([byte; 32])
@@ -190,9 +211,14 @@ mod tests {
         let mut proven = ProvenEndpoints::new(cap);
         let linked_one = SecretKey::generate().public();
         let linked: HashSet<_> = [linked_one].into_iter().collect();
-        proven.insert(key(0), linked_one, &linked);
+        proven.insert(key(0), linked_one, UnixSecs::from(1), &linked);
         for byte in 1..=u8::try_from(cap * 2).expect("small") {
-            proven.insert(key(byte), SecretKey::generate().public(), &linked);
+            proven.insert(
+                key(byte),
+                SecretKey::generate().public(),
+                UnixSecs::from(1),
+                &linked,
+            );
         }
         assert_eq!(
             proven.len(),
@@ -218,7 +244,7 @@ mod one_signer_tests {
     use iroh::SecretKey;
 
     use super::ProvenEndpoints;
-    use crate::protocol::AuthorKey;
+    use crate::protocol::{AuthorKey, UnixSecs};
 
     /// Many signers can prove one endpoint, since whoever holds that endpoint's
     /// key makes as many signing keys as it likes. Kept as separate pairs, a
@@ -231,10 +257,11 @@ mod one_signer_tests {
         let attacker = SecretKey::generate().public();
         let linked: HashSet<_> = [attacker].into_iter().collect();
         for byte in 1..=5u8 {
-            proven.insert(AuthorKey::from([byte; 32]), attacker, &linked);
+            let stamp = UnixSecs::from(i64::from(byte));
+            proven.insert(AuthorKey::from([byte; 32]), attacker, stamp, &linked);
         }
         let honest = SecretKey::generate().public();
-        proven.insert(AuthorKey::from([9; 32]), honest, &linked);
+        proven.insert(AuthorKey::from([9; 32]), honest, UnixSecs::from(1), &linked);
 
         assert_eq!(
             proven.get(&AuthorKey::from([9; 32])),

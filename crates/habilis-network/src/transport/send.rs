@@ -35,7 +35,9 @@ mod tests {
     use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified, WireFrame};
-    use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
+    use crate::protocol::{
+        AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId, UnixSecs,
+    };
 
     use crate::daemon::handler_ctx;
     use crate::daemon::state::DirectState;
@@ -888,7 +890,9 @@ mod tests {
     fn prove(state: &mut EventLoopState, pubkey: &str, endpoint: EndpointId) {
         let signer = protocol::AuthorKey::decode_hex(pubkey).expect("a 32-byte key");
         let linked = state.linked_endpoints.clone();
-        state.proven_endpoints.insert(signer, endpoint, &linked);
+        state
+            .proven_endpoints
+            .insert(signer, endpoint, UnixSecs::from(1), &linked);
     }
 
     /// [`prove`] for the key of `identity`.

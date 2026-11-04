@@ -2117,9 +2117,15 @@ impl EventLoopState {
 
     /// Record that `signer` proved `endpoint`, and feed the vector of `signer` that waited for the
     /// proof, now and not at the next tick.
-    pub(crate) fn note_proven_endpoint(&mut self, signer: AuthorKey, endpoint: EndpointId) {
+    pub(crate) fn note_proven_endpoint(
+        &mut self,
+        signer: AuthorKey,
+        endpoint: EndpointId,
+        stamp: UnixSecs,
+    ) {
         let linked = self.linked_endpoints.clone();
-        self.proven_endpoints.insert(signer, endpoint, &linked);
+        self.proven_endpoints
+            .insert(signer, endpoint, stamp, &linked);
         // Anyone can mint keys, so only a key of the roster is trusted: the roster bounds the map.
         if self.peers.contains(&signer) || self.quiet.contains(&signer) {
             self.proven_endpoints.trust(signer, endpoint);

@@ -1586,7 +1586,7 @@ async fn handle_peer_info(
         && state.proven_endpoints.get(&signer) != Some(peer_id)
         && proven_endpoints::verifies(peer_id, context.mesh, &signer, proof)
     {
-        state.note_proven_endpoint(signer, peer_id);
+        state.note_proven_endpoint(signer, peer_id, message.timestamp);
     }
     // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
     // endpoint is believed.
@@ -2268,6 +2268,7 @@ mod evicted_orphan_tests {
 #[cfg(test)]
 mod first_contact_tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
+    use crate::protocol::UnixSecs;
     use crate::transport::UdpTransport;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
@@ -2577,12 +2578,18 @@ mod first_contact_tests {
             state
                 .peer_endpoints
                 .insert(twin.clone(), iroh::EndpointAddr::new(first_endpoint));
-            state
-                .proven_endpoints
-                .insert(first.author_key(), first_endpoint, &HashSet::new());
-            state
-                .proven_endpoints
-                .insert(second.author_key(), second_endpoint, &HashSet::new());
+            state.proven_endpoints.insert(
+                first.author_key(),
+                first_endpoint,
+                UnixSecs::from(1),
+                &HashSet::new(),
+            );
+            state.proven_endpoints.insert(
+                second.author_key(),
+                second_endpoint,
+                UnixSecs::from(1),
+                &HashSet::new(),
+            );
 
             let request = Message::new_ping(&node.mesh, &twin).sign(&second);
 
@@ -3308,6 +3315,66 @@ mod first_contact_tests {
         Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(by)
     }
 
+    /// A `PeerInfo` that carries the proof of `signer` for `endpoint_key`, stamped `at`.
+    fn proving_peer_info(
+        node: &Node,
+        endpoint_key: &iroh::SecretKey,
+        signer: &Identity,
+        at: UnixSecs,
+    ) -> Verified {
+        use crate::protocol::messages::MessageBody;
+        use crate::protocol::peer_addr_error;
+        use crate::transport::proven_endpoints;
+
+        let mut address =
+            peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint_key.public()));
+        address["proof"] = serde_json::Value::String(proven_endpoints::sign(
+            endpoint_key,
+            &node.mesh,
+            &signer.author_key(),
+        ));
+        let body = MessageBody::try_new(&address.to_string()).expect("an address body");
+        let mut message = Message::new_peer_info(&node.mesh, &nick("bob"), body);
+        message.timestamp = at;
+        message.sign(signer)
+    }
+
+    /// A crash restart keeps the key of the endpoint and makes a new signing key. A `PeerInfo` of
+    /// the old key, replayed after the new key proved the endpoint, must not take the proof back:
+    /// the digests of the peer would be answered on gossip until its next `PeerInfo`.
+    #[test]
+    fn a_replayed_old_peer_info_does_not_take_the_proof_of_the_new_signer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let endpoint_key = iroh::SecretKey::generate();
+            let (old, new) = (Identity::generate(), Identity::generate());
+            state.peers.insert(old.author_key());
+            state.peers.insert(new.author_key());
+            let now = UnixSecs::now();
+            let earlier = now - std_Duration::from_secs(60);
+
+            let first = proving_peer_info(&node, &endpoint_key, &old, earlier);
+            super::handle_peer_info(&first, &mut state, &context).await;
+            let restarted = proving_peer_info(&node, &endpoint_key, &new, now);
+            super::handle_peer_info(&restarted, &mut state, &context).await;
+            super::handle_peer_info(&first, &mut state, &context).await;
+
+            assert_eq!(
+                state.proven_endpoints.get(&new.author_key()),
+                Some(endpoint_key.public()),
+                "the replay of the old signer took the proof of the new signer"
+            );
+            assert_eq!(
+                state.proven_endpoints.get(&old.author_key()),
+                None,
+                "an endpoint keeps its newest signer"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// The dial hint of a nickname belongs to the key that holds it. A `PeerInfo` of another key
     /// under the same nickname (a frame of one second that lost the nickname) must not move the
     /// hint, or a directed send reaches a node that does not hold the nickname. The holder may
@@ -3802,6 +3869,7 @@ mod first_contact_tests {
 
 #[cfg(all(test, feature = "host"))]
 mod link_state_tests {
+    use crate::protocol::UnixSecs;
     use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
     use iroh::endpoint::presets;
     use iroh::{Endpoint, RelayMode, SecretKey};
@@ -3878,14 +3946,14 @@ mod link_state_tests {
                 "no endpoint proved by the signer yet"
             );
 
-            state.note_proven_endpoint(mallory_id.author_key(), bob.public());
+            state.note_proven_endpoint(mallory_id.author_key(), bob.public(), UnixSecs::from(1));
             super::handle_link_state(&message_from("mallory-mm", &mallory_id), &mut state);
             assert!(
                 ours.topology_view().edges.is_empty(),
                 "a signer that proved another endpoint cannot speak for this origin"
             );
 
-            state.note_proven_endpoint(alice_id.author_key(), alice.public());
+            state.note_proven_endpoint(alice_id.author_key(), alice.public(), UnixSecs::from(1));
             super::handle_link_state(&message_from("alice-aa", &alice_id), &mut state);
             assert_eq!(
                 ours.topology_view().edges.len(),
@@ -4214,6 +4282,7 @@ mod requeue_tests {
 
 #[cfg(all(test, feature = "host"))]
 mod parked_link_state_tests {
+    use crate::protocol::UnixSecs;
     use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
@@ -4305,8 +4374,16 @@ mod parked_link_state_tests {
             );
             state.peers.insert(twins.first.author_key());
             state.peers.insert(twins.second.author_key());
-            state.note_proven_endpoint(twins.first.author_key(), twins.first_origin.public());
-            state.note_proven_endpoint(twins.second.author_key(), twins.second_origin.public());
+            state.note_proven_endpoint(
+                twins.first.author_key(),
+                twins.first_origin.public(),
+                UnixSecs::from(1),
+            );
+            state.note_proven_endpoint(
+                twins.second.author_key(),
+                twins.second_origin.public(),
+                UnixSecs::from(1),
+            );
 
             let vector = signed_vector("twin-tt", &twins.second, &second, carol.public());
             assert!(
@@ -4348,13 +4425,21 @@ mod parked_link_state_tests {
                 &signed_vector("twin-tt", &twins.first, &first, carol.public()),
                 &mut state,
             );
-            state.note_proven_endpoint(twins.first.author_key(), twins.first_origin.public());
+            state.note_proven_endpoint(
+                twins.first.author_key(),
+                twins.first_origin.public(),
+                UnixSecs::from(1),
+            );
             assert_eq!(
                 ours.topology_view().edges.len(),
                 1,
                 "the vector of the first key is fed at its proof"
             );
-            state.note_proven_endpoint(twins.second.author_key(), twins.second_origin.public());
+            state.note_proven_endpoint(
+                twins.second.author_key(),
+                twins.second_origin.public(),
+                UnixSecs::from(1),
+            );
             assert_eq!(
                 ours.topology_view().edges.len(),
                 2,
@@ -4378,11 +4463,15 @@ mod parked_link_state_tests {
         let mut state = fresh_state();
         state.multihop = Some(ours.clone());
         state.peers.insert(first.author_key());
-        state.note_proven_endpoint(first.author_key(), first_secret.public());
+        state.note_proven_endpoint(first.author_key(), first_secret.public(), UnixSecs::from(1));
         for _ in 0..others {
             let peer = Identity::generate();
             state.peers.insert(peer.author_key());
-            state.note_proven_endpoint(peer.author_key(), SecretKey::generate().public());
+            state.note_proven_endpoint(
+                peer.author_key(),
+                SecretKey::generate().public(),
+                UnixSecs::from(1),
+            );
         }
         (state, first, theirs)
     }
@@ -4418,6 +4507,7 @@ mod parked_link_state_tests {
                 state.note_proven_endpoint(
                     Identity::generate().author_key(),
                     SecretKey::generate().public(),
+                    UnixSecs::from(1),
                 );
             }
 
@@ -4449,7 +4539,7 @@ mod parked_link_state_tests {
             let message =
                 vector_message("mallory-mm", &theirs, vec![(bob.public(), 10)]).sign(&mallory);
             super::handle_link_state(&message, &mut state);
-            state.note_proven_endpoint(mallory.author_key(), bob.public());
+            state.note_proven_endpoint(mallory.author_key(), bob.public(), UnixSecs::from(1));
             assert!(
                 ours.topology_view().edges.is_empty(),
                 "a signer that proved another endpoint cannot speak for this origin"
@@ -4483,7 +4573,7 @@ mod parked_link_state_tests {
             .sign(&signer);
             super::handle_link_state(&older, &mut state);
             super::handle_link_state(&newer, &mut state);
-            state.note_proven_endpoint(signer.author_key(), alice.public());
+            state.note_proven_endpoint(signer.author_key(), alice.public(), UnixSecs::from(1));
             assert_eq!(
                 ours.topology_view().edges.len(),
                 2,
