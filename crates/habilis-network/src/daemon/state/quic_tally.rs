@@ -49,7 +49,10 @@ impl ConnKind {
 /// What one connection counted since it began, or what a set of them counted in a window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct QuicCounts {
+    /// The PING frames sent: the keep-alive, and also the probes of the path MTU and of the
+    /// loss timer, so this is an upper bound for the keep-alive.
     pub(crate) ping_tx: u64,
+    /// The PING frames received, with the same reach as `ping_tx`.
     pub(crate) ping_rx: u64,
     /// The ACK frames sent, those of a path included.
     pub(crate) ack_tx: u64,
