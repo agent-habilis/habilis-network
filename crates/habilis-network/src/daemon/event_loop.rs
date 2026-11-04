@@ -1990,15 +1990,38 @@ mod tests {
 
     use n0_future::time;
     use n0_future::time::Instant as TokioInstant;
+    use std::sync::Mutex;
 
     use super::TickAnchors;
     use crate::daemon::state::{EventLoopState, PingRound};
-    use crate::gossip::event::SilentSink;
+    use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
     use crate::lifecycle;
-    use crate::protocol::{AuthorKey, MeshId, Message, UnixSecs};
+    use crate::protocol::{AuthorKey, MeshId, Message, Nickname, UnixSecs};
     use crate::testing::{fresh_state, nick, test_key};
     use crate::util::clock::Instant;
     use crate::util::tuning;
+
+    /// One `PingReport` that the engine emitted: the rows and the `known` count.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Report {
+        peers: Vec<(Nickname, u64)>,
+        known: usize,
+    }
+
+    /// Keeps each `PingReport` that the engine emits.
+    #[derive(Default)]
+    struct ReportSink(Mutex<Vec<Report>>);
+
+    impl NodeSink for ReportSink {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::PingReport { peers, known } = event {
+                self.0
+                    .lock()
+                    .expect("the sink lock")
+                    .push(Report { peers, known });
+            }
+        }
+    }
 
     /// A state with one peer that was last heard `alive_timeout() + 10 s` ago: due for eviction.
     fn state_with_a_silent_peer() -> EventLoopState {
@@ -2038,14 +2061,23 @@ mod tests {
             );
         }
         state.arm_ping_round(round);
+        let sink = ReportSink::default();
 
-        super::finalize_ping_round(&mut state, &SilentSink);
+        super::finalize_ping_round(&mut state, &sink);
 
         let rows = report.try_recv().expect("the round delivers its report");
+        let expected = vec![(nick("twin"), 20), (nick("twin"), 30)];
         assert_eq!(
-            rows,
-            vec![(nick("twin"), 20), (nick("twin"), 30)],
+            rows, expected,
             "each key that answered is a row, in a fixed order"
+        );
+        assert_eq!(
+            *sink.0.lock().expect("the sink lock"),
+            vec![Report {
+                peers: expected,
+                known: 2
+            }],
+            "the event carries the same rows, and `known` is not below the rows that answered"
         );
     }
 
