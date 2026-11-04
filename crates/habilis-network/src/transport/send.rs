@@ -1195,6 +1195,11 @@ mod tests {
             prove_identity(&mut state, &asker, bob_endpoint.id());
             let empty = serde_json::json!([]);
             let meta_digest = digest(&net.mesh, Channel::Meta, &empty, &asker);
+            let held: Vec<_> = state.doc(Channel::Meta).changes_since(&[], 100).collect();
+            let held_lens = held
+                .iter()
+                .map(|frame| frame.serialize().expect("serialize"));
+            let held_total: usize = held_lens.map(|wire| wire.as_bytes().len()).sum();
 
             let answered =
                 antientropy::handle_state_digest(Channel::Meta, &meta_digest, &mut state, &context)
@@ -1210,9 +1215,10 @@ mod tests {
                 state.idle.state_answer_absent_bytes, ghost_bytes,
                 "only the ghost is absent: alice is us"
             );
-            assert!(
-                state.idle.state_answer_bytes > ghost_bytes,
-                "the total holds the frames of alice too"
+            assert_eq!(
+                state.idle.state_answer_bytes,
+                u64::try_from(held_total).expect("fits"),
+                "the total is the sum of the wire lengths of the 5 frames, no more"
             );
             bob_endpoint.close().await;
             net.endpoint.close().await;
