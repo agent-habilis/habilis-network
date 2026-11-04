@@ -1270,7 +1270,8 @@ fn ingest_channel_event(
         }
         Ingested::Ignored => return ChannelOutcome::Refused,
         Ingested::Duplicate => return ChannelOutcome::Repeat,
-        Ingested::Buffered | _ => {}
+        // A root of a higher epoch is kept as the candidate: `adopt_new_epoch` reads it next.
+        Ingested::Buffered | Ingested::NewEpoch { .. } | _ => {}
     }
     ChannelOutcome::Taken
 }
