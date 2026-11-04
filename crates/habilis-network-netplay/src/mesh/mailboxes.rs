@@ -1,6 +1,6 @@
 //! The mailboxes the frame loop and the event loop share.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use habilis_network::protocol::{AuthorKey, Nickname};
@@ -26,6 +26,9 @@ pub(crate) struct Mailboxes<T: Config> {
     /// filed by public key — the protocol treats nicknames as cosmetic and
     /// explicitly non-unique, so they cannot be the identity.
     pub(crate) directory: Mutex<HashMap<AuthorKey, Nickname>>,
+    /// The peers whose nickname two or more live peers use. The engine refuses a directed frame
+    /// to such a nickname, because it never picks one of the keys, and a resend cannot change that.
+    pub(crate) unaddressable: Mutex<HashSet<AuthorKey>>,
 }
 
 impl<T: Config> fmt::Debug for Mailboxes<T> {
@@ -41,6 +44,7 @@ impl<T: Config> Mailboxes<T> {
             lobby: Mutex::new(Vec::new()),
             local_pubkey: Mutex::new(None),
             directory: Mutex::new(HashMap::new()),
+            unaddressable: Mutex::new(HashSet::new()),
         }
     }
 }

@@ -21,8 +21,8 @@ use habilis_network::runtime::{
 use serde::{Deserialize, Serialize};
 
 use habilis_network_netplay::{
-    Config, Event, Lobby, MeshTransport, P2PSession, Request, RollbackDriver, RollbackError,
-    SessionState, Tick,
+    Config, Event, Lobby, MeshTransport, Outbound, P2PSession, Request, RollbackDriver,
+    RollbackError, SessionState, Tick,
 };
 
 use std::{process, thread};
@@ -307,6 +307,70 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
             // `iroh-gossip`'s actor loop `expect`s on its `JoinSet`, so a task
             // cancelled by runtime shutdown panics ("connection task panicked")
             // and fails an otherwise passing test.
+            for player in players {
+                player.node.leave().await.expect("leave the mesh cleanly");
+            }
+        },
+    );
+}
+
+/// The engine addresses a directed frame by nickname and never picks one of two live keys that use
+/// it. A rollback packet to such a peer is refused, and a resend cannot change that, so the
+/// transport reports the peer instead of losing every packet without a trace.
+#[test]
+fn a_peer_whose_nickname_two_live_peers_use_is_reported_unaddressable() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(
+        guard,
+        thread::available_parallelism().map_or(1, usize::from),
+        async {
+            let topic = format!("habilis-network-netplay-twins-{}", process::id());
+            let mut players = vec![
+                spawn(&topic, "alice").await,
+                spawn(&topic, "bob").await,
+                spawn(&topic, "bob").await,
+            ];
+
+            let twins_of = |players: &[Player]| -> Vec<AuthorKey> {
+                let transport = players[0]
+                    .transport
+                    .as_ref()
+                    .expect("alice has her transport");
+                transport
+                    .known_peers()
+                    .filter(|(_, nickname)| nickname.as_str() == "bob")
+                    .map(|(pubkey, _)| pubkey)
+                    .collect()
+            };
+            let heard: bool = drive(&mut players, Duration::from_secs(30), |players| {
+                twins_of(players).len() >= 2
+            })
+            .await;
+            assert!(heard, "alice never heard from both peers named bob");
+
+            let twin = *twins_of(&players).first().expect("two peers named bob");
+            let alice = &players[0];
+            alice
+                .node
+                .sender()
+                .try_send(Outbound::Rollback {
+                    to: twin,
+                    payload: "{}".to_owned(),
+                })
+                .expect("the outbound queue has room");
+            let reported: bool = drive(&mut players, Duration::from_secs(10), |players| {
+                let transport = players[0]
+                    .transport
+                    .as_ref()
+                    .expect("alice has her transport");
+                transport.unaddressable().any(|pubkey| pubkey == twin)
+            })
+            .await;
+            assert!(
+                reported,
+                "the refusal of a packet to a nickname of two live peers was never reported"
+            );
+
             for player in players {
                 player.node.leave().await.expect("leave the mesh cleanly");
             }
