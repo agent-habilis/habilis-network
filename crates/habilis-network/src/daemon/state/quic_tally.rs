@@ -330,9 +330,9 @@ mod tests {
         tally.take(&old);
 
         let reused = [reading(1, ConnKind::Gossip, 2)];
-        let window = tally.take(&reused);
+        let reused_window = tally.take(&reused);
         assert_eq!(
-            window.moved_of(ConnKind::Gossip),
+            reused_window.moved_of(ConnKind::Gossip),
             counts(2),
             "the new connection counts all it has, not 0"
         );
@@ -341,14 +341,14 @@ mod tests {
             bytes_rx: 1,
             ..counts(30)
         };
-        let reused = [QuicReading {
+        let one_down_readings = [QuicReading {
             id: 1,
             kind: ConnKind::Gossip,
             counts: one_down,
         }];
-        let window = tally.take(&reused);
+        let one_down_window = tally.take(&one_down_readings);
         assert_eq!(
-            window.moved_of(ConnKind::Gossip),
+            one_down_window.moved_of(ConnKind::Gossip),
             one_down,
             "1 counter below its mark is enough: the others count from zero too"
         );
