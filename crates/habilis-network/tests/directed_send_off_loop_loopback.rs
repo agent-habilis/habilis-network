@@ -31,6 +31,8 @@ const PREMISE: Duration = Duration::from_secs(1);
 /// How many times alice is asked to forget the connection of bob before the send. A probe of the
 /// direct path can pool one again, so one forget is not enough; the answer `false` says there is none.
 const FORGET_TRIES: usize = 20;
+/// How many times the setup runs, while the send is refused at once and waits on no dial.
+const ATTEMPTS: usize = 5;
 /// How long iroh may take to re-run path selection after the block. It reads the path list on its
 /// path-stat updates, which come within a few seconds.
 const BLOCK_TAKES_EFFECT: Duration = Duration::from_secs(30);
@@ -137,64 +139,84 @@ impl Member {
     }
 }
 
+/// One run of the setup: a fresh pair, the block, the cold send, and the local question. Returns what
+/// the send answered and when the send and the local answer came, counted from the send.
+async fn run_once() -> (Result<(), String>, Duration, Duration) {
+    let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+    let alice = Member::create("alice", &relay).await;
+    let bob = Member::join("bob", &alice).await;
+
+    let formation_ends = Instant::now() + FORMATION;
+    while !alice.knows("bob").await {
+        assert!(
+            Instant::now() < formation_ends,
+            "alice did not learn bob within {FORMATION:?}"
+        );
+        time::sleep(Duration::from_millis(250)).await;
+    }
+    alice
+        .block_ip_to(bob.membership.node.bound_ports().to_vec())
+        .await;
+    // `BlockIpTo` returns before iroh has re-run path selection, and a connection that is opened
+    // before it does rides the IP path that iroh still holds. Wait until the path to bob has left
+    // UDP, so that a new connection to bob finds no direct path.
+    let block_ends = Instant::now() + BLOCK_TAKES_EFFECT;
+    while alice.selected_rung("bob").await != Some("relay") {
+        assert!(
+            Instant::now() < block_ends,
+            "the path of alice to bob did not leave UDP within {BLOCK_TAKES_EFFECT:?}"
+        );
+        time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Forget the connection to bob, so that the send dials in the common case. A probe of the direct
+    // path can still pool one again before the send, so the send is `SendCold`: it never takes the
+    // warm fast path, and its wait does not depend on this race.
+    for _ in 0..FORGET_TRIES {
+        if !alice.forget_unicast("bob").await {
+            break;
+        }
+    }
+
+    let started = Instant::now();
+    let send = async {
+        let verdict = alice.send_cold("bob", "hello").await;
+        (verdict, started.elapsed())
+    };
+    let local = async {
+        time::sleep(ASK_AFTER).await;
+        let _ = alice.message_log_len().await;
+        started.elapsed()
+    };
+    let ((verdict, send_done), local_done) = tokio::join!(send, local);
+
+    let _ = bob.membership.node.leave().await;
+    let _ = alice.membership.node.leave().await;
+    (verdict, send_done, local_done)
+}
+
 #[test]
 fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
-        let alice = Member::create("alice", &relay).await;
-        let bob = Member::join("bob", &alice).await;
-
-        let formation_ends = Instant::now() + FORMATION;
-        while !alice.knows("bob").await {
-            assert!(
-                Instant::now() < formation_ends,
-                "alice did not learn bob within {FORMATION:?}"
-            );
-            time::sleep(Duration::from_millis(250)).await;
-        }
-        alice
-            .block_ip_to(bob.membership.node.bound_ports().to_vec())
-            .await;
-        // `BlockIpTo` returns before iroh has re-run path selection, and a connection that is opened
-        // before it does rides the IP path that iroh still holds. Wait until the path to bob has left
-        // UDP, so that a new connection to bob finds no direct path.
-        let block_ends = Instant::now() + BLOCK_TAKES_EFFECT;
-        while alice.selected_rung("bob").await != Some("relay") {
-            assert!(
-                Instant::now() < block_ends,
-                "the path of alice to bob did not leave UDP within {BLOCK_TAKES_EFFECT:?}"
-            );
-            time::sleep(Duration::from_millis(100)).await;
-        }
-
-        // Forget the connection to bob, so that the send dials in the common case. A probe of the direct
-        // path can still pool one again before the send, so the send is `SendCold`: it never takes the
-        // warm fast path, and its wait does not depend on this race.
-        for _ in 0..FORGET_TRIES {
-            if !alice.forget_unicast("bob").await {
-                break;
+        // Once the loop knows that the path left UDP, a send is refused at once and waits on no dial.
+        // The run proves nothing then, and the whole setup runs again with a fresh pair.
+        let mut attempt = 1;
+        let (verdict, send_done, local_done) = loop {
+            let run = run_once().await;
+            if run.1 >= PREMISE || attempt == ATTEMPTS {
+                break run;
             }
-        }
-
-        let started = Instant::now();
-        let send = async {
-            let verdict = alice.send_cold("bob", "hello").await;
-            (verdict, started.elapsed())
+            eprintln!(
+                "attempt {attempt}: the send took {:?} and waited on no dial",
+                run.1
+            );
+            attempt += 1;
         };
-        let local = async {
-            time::sleep(ASK_AFTER).await;
-            let _ = alice.message_log_len().await;
-            started.elapsed()
-        };
-        let ((verdict, send_done), local_done) = tokio::join!(send, local);
-
-        let _ = bob.membership.node.leave().await;
-        let _ = alice.membership.node.leave().await;
 
         assert!(
             send_done >= PREMISE,
-            "the send took {send_done:?} and returned {verdict:?}: it did not wait on a dial, so this run proves nothing"
+            "the send took {send_done:?} and returned {verdict:?} in each of {ATTEMPTS} attempts: it did not wait on a dial, so this run proves nothing"
         );
         assert!(
             verdict.is_err(),
