@@ -31,8 +31,6 @@ pub enum DocError {
     TooLarge {
         /// The bytes of the value as JSON.
         bytes: usize,
-        /// The budget of a frame.
-        budget: usize,
     },
 }
 

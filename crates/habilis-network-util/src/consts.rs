@@ -121,9 +121,10 @@ pub const DOC_PENDING_AUTHOR_MAX: usize = 128;
 /// stream flush a joiner's honest backfill.
 pub const DOC_PENDING_TOTAL_MAX: usize = 512;
 
-/// The bytes of JSON in one merge that writes an entry again after a reset. A quarter of a message,
-/// so that the frame fits on a mesh with a password too: the body is sealed and encoded twice there.
-pub const DOC_EPOCH_CHUNK_BYTES: usize = MAX_MESSAGE_SIZE / 4;
+/// The bytes that a frame that writes an entry again after a reset leaves free under a message. The
+/// frame is measured when the cut is made, and a later write carries more dependencies, so the
+/// margin keeps it inside the message.
+pub const DOC_EPOCH_FRAME_MARGIN: usize = 256;
 
 /// The frame bytes a gated channel keeps in one epoch before the node starts a new one (a tunable).
 /// A reset drops every frame of the epoch, then each owner writes its own entry again. The real

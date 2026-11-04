@@ -17,7 +17,7 @@ use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
-use crate::util::consts::{DOC_EPOCH_CHUNK_BYTES, MAX_MESSAGE_SIZE};
+use crate::util::consts::{DOC_EPOCH_FRAME_MARGIN, MAX_MESSAGE_SIZE};
 
 use crate::logging::messages;
 use crate::protocol::peer_addr_error;
@@ -297,39 +297,66 @@ impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
     }
 }
 
-/// The merges that write the entry of a switch to a new epoch again, each small enough for one frame,
-/// as `{ <map>: { <me>: <part> } }`.
-///
-/// # Errors
-/// [`DocError::TooLarge`] when one value of the entry cannot be cut to the budget of a frame.
-pub(crate) fn entry_merges(
+/// The merges that write the entry of a switch to a new epoch again, as
+/// `{ <map>: { <me>: <part> } }`, each one for a frame that `fits` accepts. An item is an error for a
+/// value that cannot be cut to a frame; the other items are still there.
+pub(crate) fn entry_merges<Fits: FnMut(&serde_json::Value) -> bool>(
     switch: &EpochSwitch,
     me: &Nickname,
-) -> Result<Vec<serde_json::Value>, DocError> {
+    mut fits: Fits,
+) -> Vec<Result<serde_json::Value, DocError>> {
     let Some(entry) = switch.own_entry.as_ref() else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
-    let parts = split_entry(entry, DOC_EPOCH_CHUNK_BYTES)?;
-    let wrap =
-        |part: serde_json::Value| serde_json::json!({ switch.map.as_str(): { me.as_str(): part } });
-    Ok(parts.map(wrap).collect())
+    let map = switch.map.as_str();
+    let wrapped = |part: &serde_json::Value| serde_json::json!({ map: { me.as_str(): part } });
+    let cuts = split_entry(entry, |part| fits(&wrapped(part)));
+    cuts.map(|cut| cut.map(|part| wrapped(&part))).collect()
+}
+
+/// Whether the frame of `merge`, built and signed and sealed as a write of this node would be, fits
+/// a message with a margin for the dependencies that a later write adds. A merge that makes no change
+/// has no frame, so it fits.
+fn frame_fits(state: &EventLoopState, context: &MergeCtx<'_>, merge: &serde_json::Value) -> bool {
+    let seed = *state.identity.public().as_bytes();
+    let doc = state.doc(Channel::Meta);
+    let Ok(built) = doc.build_change(merge, &seed) else {
+        return false;
+    };
+    let Some(change) = built else {
+        return true;
+    };
+    let Ok((body, _plain)) = doc.compose_wire_body(&change, None) else {
+        return false;
+    };
+    let frame = Message::new_channel_event(context.mesh, context.author, body, Channel::Meta)
+        .sign(&state.identity);
+    frame
+        .serialize()
+        .is_ok_and(|wire| wire.as_bytes().len() + DOC_EPOCH_FRAME_MARGIN <= MAX_MESSAGE_SIZE)
 }
 
 /// Write the entry of this node again after the meta document moved to a new epoch: the reset dropped
 /// the old frames, and only the owner can write its own entry. It runs on the sweep tick, so the
 /// entry is back within 10 s of the switch. The write stays quiet (it is no news for the operator).
+/// A value that cannot be cut to a frame is not written, with a warning for that one value, and the
+/// other fields are written.
 pub(crate) async fn write_entry_again(state: &mut EventLoopState, context: &MergeCtx<'_>) {
     let Some(switch) = state.epoch_switch.take() else {
         return;
     };
-    let merges = match entry_merges(&switch, context.author) {
-        Ok(merges) => merges,
-        Err(error) => {
-            tracing::warn!(target: "habilis_network::gossip", %error, "not writing the entry of this node again after a reset");
-            return;
-        }
-    };
-    for merge in merges {
+    let cuts: Vec<Result<serde_json::Value, DocError>> =
+        entry_merges(&switch, context.author, |merge| {
+            frame_fits(state, context, merge)
+        });
+    for cut in cuts {
+        let merge = match cut {
+            Ok(merge) => merge,
+            Err(error) => {
+                tracing::warn!(target: "habilis_network::gossip", %error, "a value of the entry of this node is too large for a frame, and is not written again after a reset");
+                continue;
+            }
+        };
         let params = StateMergeParams::new(context.clone(), Channel::Meta, merge).surface(false);
         if let Err(error) = broadcast_state_merge(state, params).await {
             tracing::warn!(target: "habilis_network::gossip", %error, "the entry of this node was not written again after a reset");
@@ -723,7 +750,6 @@ mod tests {
     use crate::doc::EpochSwitch;
     use crate::protocol::{MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
-    use crate::util::consts::DOC_EPOCH_CHUNK_BYTES;
 
     use crate::protocol;
     use crate::protocol::messages::AppFrameParams;
@@ -818,8 +844,8 @@ mod tests {
         );
     }
 
-    /// The merges that write an entry again each fit the budget of a frame, join into the entry,
-    /// and name the map and the owner.
+    /// The merges that write an entry again each fit the frame that `fits` measures, join into the
+    /// entry, and name the map and the owner.
     #[test]
     fn an_entry_is_written_again_in_merges_that_name_the_map_and_the_owner() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -829,26 +855,21 @@ mod tests {
             "status": "idle",
         });
         let mut switch = EpochSwitch::new(1, "peers".to_owned(), Some(entry));
-        let merges = entry_merges(&switch, &nick("alice")).expect("the entry is cut");
-        assert!(merges.len() >= 2, "{} merges", merges.len());
-        for merge in &merges {
+        let fits =
+            |merge: &serde_json::Value| serde_json::to_vec(merge).expect("json").len() <= 1_000;
+        let cuts = entry_merges(&switch, &nick("alice"), fits);
+        assert!(cuts.len() >= 2, "{} merges", cuts.len());
+        for cut in cuts {
+            let merge = cut.expect("every part fits");
             let fields = merge["peers"]["alice"]
                 .as_object()
                 .expect("the owner's fields");
             assert!(!fields.is_empty(), "each merge holds at least one field");
-            assert!(
-                serde_json::to_vec(&merge["peers"]["alice"])
-                    .expect("json")
-                    .len()
-                    <= DOC_EPOCH_CHUNK_BYTES,
-                "each merge fits the budget of a frame"
-            );
+            assert!(fits(&merge), "each merge fits the frame");
         }
         switch = EpochSwitch::new(1, "peers".to_owned(), None);
         assert!(
-            entry_merges(&switch, &nick("alice"))
-                .expect("no entry")
-                .is_empty(),
+            entry_merges(&switch, &nick("alice"), fits).is_empty(),
             "an entry of none gives no merge"
         );
     }
@@ -928,6 +949,93 @@ mod tests {
                     state.doc(Channel::Meta).to_json(),
                     before,
                     "the entry of this node is in the document again"
+                );
+                node.close().await;
+            },
+        );
+    }
+
+    /// An entry the size of an agent-gossip card (an array leaf of about 1.1 KB) comes back whole
+    /// after a reset, because the cut follows the measured length of the real frame.
+    #[test]
+    fn a_card_with_a_large_array_leaf_is_in_the_document_again_after_a_reset() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::endpoint::presets;
+                use iroh_gossip::{net, proto};
+
+                use crate::doc::{MeshDoc, SelfWriteGate};
+                use crate::gossip::event::SilentSink;
+                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
+                use crate::protocol::Channel;
+                use crate::transport::MeshSender;
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([9u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let write = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                let extension = |index: usize| {
+                    serde_json::json!({
+                        "uri": format!("https://example.invalid/extensions/{index}"),
+                        "params": format!("{index}").repeat(150),
+                    })
+                };
+                let extensions: Vec<serde_json::Value> = (0..5).map(extension).collect();
+                let pieces = [
+                    serde_json::json!({"card": {"capabilities": {"extensions": extensions}}}),
+                    serde_json::json!({"card": {"name": "alice", "skills": "s".repeat(900)}}),
+                    serde_json::json!({"status": "idle", "model": "m", "graph": {"node": "worker"}}),
+                ];
+
+                let mut state = fresh_state();
+                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
+                    .epoch_cap(1_000);
+                let mut writes = pieces.to_vec();
+                writes.extend(
+                    (0..3).map(
+                        |index| serde_json::json!({ "pad": format!("{index}").repeat(1_800) }),
+                    ),
+                );
+                for piece in writes {
+                    let merge = serde_json::json!({"peers": {"alice": piece}});
+                    let params =
+                        StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
+                    broadcast_state_merge(&mut state, params)
+                        .await
+                        .expect("the write is taken");
+                }
+                let before = state.doc(Channel::Meta).to_json();
+                let own = state.identity.author_key();
+                let switch = state
+                    .doc_mut(Channel::Meta)
+                    .tick_epoch(&author, &own)
+                    .expect("over the cap: a reset");
+                state.note_epoch_switch(switch);
+
+                write_entry_again(&mut state, &write).await;
+
+                assert_eq!(
+                    state.doc(Channel::Meta).to_json(),
+                    before,
+                    "the whole entry is back, the array leaf too"
                 );
                 node.close().await;
             },
