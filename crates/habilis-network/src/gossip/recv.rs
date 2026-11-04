@@ -1558,8 +1558,10 @@ async fn handle_peer_info(
     // its `PeerInfo` is a replay and binds nothing. Another key under the same nickname binds
     // nothing while the key that made the hint is still in the roster: a directed send must not
     // reach a node that only borrowed the label.
-    let may_bind: bool = !state.key_said_goodbye(message.key())
-        && !state.hint_is_held_by_other(&message.author, message.key());
+    let hinter = message.key();
+    let may_bind: bool = !state.key_said_goodbye(hinter)
+        && !state.hint_is_held_by_other(&message.author, hinter)
+        && !state.nickname_is_taken_by_live_other(&message.author, hinter);
     let changed = may_bind && state.peer_endpoints.get(&message.author) != Some(&peer_addr);
     if may_bind {
         state.bind_peer_endpoint(message.key(), message.author.clone(), peer_addr.clone());
@@ -3354,6 +3356,51 @@ mod first_contact_tests {
                 state.peer_endpoints.get("bob"),
                 Some(&restarted),
                 "the holder could not rebind its hint"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A key that is not in the roster (it lapsed, or it was pruned) can still send a late
+    /// `PeerInfo`. It must not bind a nickname that a live peer holds: a directed send would
+    /// reach the old node until the live peer sends its own `PeerInfo`.
+    #[test]
+    fn a_late_peer_info_of_a_key_outside_the_roster_does_not_take_a_nickname_a_live_peer_holds() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let (live, late) = (Identity::generate(), Identity::generate());
+            state.names.insert(live.author_key(), nick("bob"));
+            state.peers.insert(live.author_key());
+            let (old_id, current_id) = (
+                iroh::SecretKey::generate().public(),
+                iroh::SecretKey::generate().public(),
+            );
+            let old = iroh::EndpointAddr::new(old_id).with_ip_addr(test_ip());
+            let current = iroh::EndpointAddr::new(current_id).with_ip_addr(test_ip());
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &old, &late),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert!(
+                !state.peer_endpoints.contains_key("bob"),
+                "a key outside the roster took a nickname that a live peer holds"
+            );
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &current, &live),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.peer_endpoints.get("bob"),
+                Some(&current),
+                "the live peer could not bind its own hint"
             );
             node.endpoint.close().await;
         });

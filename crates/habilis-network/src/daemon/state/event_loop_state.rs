@@ -1186,6 +1186,18 @@ impl EventLoopState {
         None
     }
 
+    /// Whether `key` is not live and another live peer uses `nickname`. A late `PeerInfo` of a
+    /// lapsed or pruned key can pass the staleness test, and it must not bind a nickname that a
+    /// live peer holds: a directed send would reach the old node until that peer sends its own.
+    pub(crate) fn nickname_is_taken_by_live_other(
+        &self,
+        nickname: &Nickname,
+        key: AuthorKey,
+    ) -> bool {
+        let mut users = self.peers.iter().filter_map(|other| self.names.get(other));
+        !self.peers.contains(&key) && users.any(|name| name == nickname)
+    }
+
     /// Whether the dial hint of `nickname` was made by a key other than `key` that is live. A quiet
     /// or gone owner does not hold it against a live key: the nickname answers there now.
     pub(crate) fn hint_is_held_by_other(&self, nickname: &Nickname, key: AuthorKey) -> bool {
