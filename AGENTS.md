@@ -20,7 +20,7 @@ State: `linked_endpoints` in `daemon/state.rs`.
 
 Layer: membership. Keyed by author key.
 
-A member of the mesh other than yourself. One author key is one peer. A nickname is a label, so two live keys that use one nickname are two peers. The roster is the set of peers. The live count includes you, so it is `peers.len() + 1`.
+A member of the mesh other than yourself. One author key is one peer. A nickname is a label, so two live keys that use one nickname are two peers. The roster is the set of peers. The live count includes you and each peer whose arrival was shown, so it is the number of shown peers plus one. A roster peer whose arrival was not shown is not counted.
 
 State: `peers`. Code: `lifecycle/membership.rs`.
 
