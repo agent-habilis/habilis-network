@@ -90,8 +90,9 @@ pub(crate) struct IdleCounters {
     /// point-to-point answer is not counted, and neither is the resend nonce that a gossip answer
     /// adds to each frame.
     pub state_answer_bytes: u64,
-    /// The part of `state_answer_bytes` that a member signed who is neither on the roster nor us:
-    /// the cost of the changes of the dead.
+    /// The part of `state_answer_bytes` that a member signed who is neither on the roster now nor
+    /// us. A peer that is quiet for about 95 s is off the roster too, so this is not the cost of
+    /// the members that left for good.
     pub state_answer_absent_bytes: u64,
     /// State and meta frames that the document refused or ignored: a forged entry, a repeated
     /// `(actor, seq)` with other content, or a body that is no change.

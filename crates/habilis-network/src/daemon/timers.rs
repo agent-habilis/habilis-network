@@ -309,14 +309,15 @@ fn in_join_phase(joined_at: unix_secs::UnixSecs, now: unix_secs::UnixSecs) -> bo
     now.since(joined_at) < JOIN_PHASE
 }
 
-/// Whether `nick` belongs to nobody on the roster and is not ours: a member that left.
+/// Whether `nick` is off the roster now and is not ours. A peer that is quiet for about 95 s is off
+/// the roster too, so this is not a member that left for good.
 fn is_absent(nick: &str, roster: &HashSet<Nickname>, me: &Nickname) -> bool {
     let owner = Nickname::try_new(nick);
     owner.is_ok_and(|owner| owner != *me && !roster.contains(&owner))
 }
 
-/// The entries of the per-peer map that belong to nobody on the roster and are not ours: members
-/// that left and whose entry stays in the document for good.
+/// The entries of the per-peer map whose owner is off the roster now and is not us. The entry of a
+/// member that left stays in the document for good, and so does that of a peer that is quiet.
 fn absent_entries(nicks: &[String], roster: &HashSet<Nickname>, me: &Nickname) -> usize {
     nicks
         .iter()
@@ -324,7 +325,7 @@ fn absent_entries(nicks: &[String], roster: &HashSet<Nickname>, me: &Nickname) -
         .count()
 }
 
-/// The sum of the bytes that `by_nick` holds for the members that left.
+/// The sum of the bytes that `by_nick` holds for the owners that are off the roster now.
 fn absent_bytes(
     by_nick: &HashMap<String, usize>,
     roster: &HashSet<Nickname>,
@@ -373,7 +374,7 @@ fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: us
 
 /// The sizes of the meta and the state document, on a line of their own, once per call (the
 /// 1-minute tick): the changes and frames that the node keeps for good, their bytes, the JSON, the
-/// save, the entries of the per-peer map of members that are gone and their bytes in the document
+/// save, the entries of the per-peer map of members off the roster now and their bytes in the document
 /// and in the frames, every [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read 0. A
 /// reader of the numbers can tell what a keyframe scheme would save.
 pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
@@ -558,7 +559,7 @@ mod tests {
         );
     }
 
-    /// The bytes of the members that left are the sum over the owners who are neither on the
+    /// The bytes of the members off the roster now are the sum over the owners who are neither on the
     /// roster nor us.
     #[test]
     fn the_bytes_of_the_members_off_the_roster_are_summed() {
