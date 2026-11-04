@@ -364,7 +364,7 @@ fn frame_fits(state: &EventLoopState, context: &MergeCtx<'_>, merge: &serde_json
 /// other fields are written. A path that the document holds already is not written: it is a write of
 /// the app after the switch, newer than the entry that the switch kept.
 pub(crate) async fn write_entry_again(state: &mut EventLoopState, context: &MergeCtx<'_>) {
-    let Some(taken) = state.epoch_switch.take() else {
+    let Some(taken) = state.epoch_write.switch.take() else {
         return;
     };
     let json = state.doc(Channel::Meta).to_json();
@@ -387,10 +387,12 @@ pub(crate) async fn write_entry_again(state: &mut EventLoopState, context: &Merg
         };
         let params = StateMergeParams::new(context.clone(), Channel::Meta, merge).surface(false);
         if let Err(error) = broadcast_state_merge(state, params).await {
-            tracing::warn!(target: "habilis_network::gossip", %error, "the entry of this node was not written again after a reset");
+            let waits = state.retry_epoch_switch(taken);
+            tracing::warn!(target: "habilis_network::gossip", %error, waits, "the entry of this node was not written again after a reset");
             return;
         }
     }
+    state.epoch_write.attempts = 0;
 }
 
 /// Parameters for [`broadcast_state_merge`]. Agent-driven writes surface to the operator, so
@@ -778,6 +780,7 @@ mod tests {
     use crate::doc::EpochSwitch;
     use crate::protocol::{MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
 
     use crate::protocol;
     use crate::protocol::messages::AppFrameParams;
@@ -967,7 +970,7 @@ mod tests {
 
                 write_entry_again(&mut state, &write).await;
 
-                assert!(state.epoch_switch.is_none(), "the slot is empty");
+                assert!(state.epoch_write.switch.is_none(), "the slot is empty");
                 assert_eq!(
                     state.doc(Channel::Meta).epoch(),
                     1,
@@ -1153,6 +1156,103 @@ mod tests {
         );
     }
 
+    /// A write that fails after a reset is tried again on the next sweep. The merge that failed is
+    /// in the document already (the send failed after it), so each sweep writes what is left.
+    #[test]
+    fn a_failed_write_again_is_tried_on_the_next_sweep() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::endpoint::presets;
+                use iroh_gossip::{net, proto};
+
+                use crate::doc::{MeshDoc, SelfWriteGate};
+                use crate::gossip::MergeCtx;
+                use crate::gossip::event::SilentSink;
+                use crate::protocol::Channel;
+                use crate::transport::MeshSender;
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([11u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let write = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                let mut state = fresh_state();
+                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
+                // The overlay is up, so a write goes to gossip, and gossip is stopped below.
+                state.standing.insert(Standing::Meshed);
+                // Three fields of about 1.8 KB: each one is a merge of its own.
+                let entry = serde_json::json!({
+                    "a": "a".repeat(1_800), "b": "b".repeat(1_800), "c": "c".repeat(1_800),
+                });
+                drop(receiver);
+                gossip.shutdown().await.expect("the gossip stops");
+                ::habilis_network_test_tracing::expect_warn(
+                    "habilis_network::gossip",
+                    "the entry of this node was not written again after a reset",
+                );
+
+                state.note_epoch_switch(EpochSwitch::new(
+                    1,
+                    "peers".to_owned(),
+                    Some(entry.clone()),
+                ));
+                for sweep in 1..=3 {
+                    write_entry_again(&mut state, &write).await;
+                    assert!(
+                        state.epoch_write.switch.is_some(),
+                        "the switch waits for the next sweep after the failed write of sweep {sweep}"
+                    );
+                }
+                write_entry_again(&mut state, &write).await;
+                assert!(
+                    state.epoch_write.switch.is_none(),
+                    "nothing is left to write"
+                );
+                assert_eq!(
+                    state.doc(Channel::Meta).to_json(),
+                    serde_json::json!({ "peers": { "alice": entry } }),
+                    "each sweep wrote what was left, and the entry is whole"
+                );
+                node.close().await;
+            },
+        );
+    }
+
+    /// A send that never works does not keep the switch for ever.
+    #[test]
+    fn a_switch_whose_write_keeps_failing_is_given_up() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let switch = || EpochSwitch::new(1, "peers".to_owned(), Some(serde_json::json!({"a": 1})));
+        for attempt in 1..=DOC_EPOCH_WRITE_ATTEMPTS {
+            assert!(
+                state.retry_epoch_switch(switch()),
+                "attempt {attempt} waits"
+            );
+        }
+        assert!(
+            !state.retry_epoch_switch(switch()),
+            "the switch is given up after {DOC_EPOCH_WRITE_ATTEMPTS} tries"
+        );
+    }
+
     /// What is in the document already is not written again, at any depth.
     #[test]
     fn only_the_paths_that_the_document_does_not_hold_are_written_again() {
@@ -1185,7 +1285,7 @@ mod tests {
         let entry = serde_json::json!({"card": "mine"});
         state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(entry.clone())));
         state.note_epoch_switch(EpochSwitch::new(2, "peers".to_owned(), None));
-        let kept = state.epoch_switch.as_ref().expect("a switch waits");
+        let kept = state.epoch_write.switch.as_ref().expect("a switch waits");
         assert_eq!(
             (kept.epoch, kept.own_entry.as_ref()),
             (2, Some(&entry)),
