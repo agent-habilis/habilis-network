@@ -236,8 +236,11 @@ pub(crate) fn by_class(bytes: &[u64; CLASS_COUNT]) -> String {
 }
 
 /// How a frame reached `ingest`: on which plane, and whether it carries a resend nonce, so it is
-/// the copy of an anti-entropy answer. The overlay drops a repeat of one gossip message id before
-/// the engine reads it, so a repeat that gets here came as a resend or by the other plane.
+/// the copy of an anti-entropy answer. The overlay keeps each gossip message id it has seen for
+/// 90 s (`message_id_retention` of the pinned fork), per subscription, and drops a repeat in that
+/// time. So on the gossip plane a plain repeat gets here only after the 90 s, or after a resubscribe,
+/// when `drain_dead_receiver` and `drain_queued` replay frames. A resend, or a frame on the other
+/// plane, gets here at any time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Arrival {
     Gossip,
@@ -266,7 +269,7 @@ impl Arrival {
         }
     }
 
-    /// The name of the arrival in the census line.
+    /// The text that `scripts/perf/summarize.ts` reads from the census line: a rename breaks it.
     fn name(self) -> &'static str {
         match self {
             Self::Gossip => "gossip",
