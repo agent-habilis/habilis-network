@@ -117,6 +117,9 @@ pub(crate) struct ClockEvidence {
     pub(crate) quiet_aged: HashMap<AuthorKey, Duration>,
     /// Wall-clock time that the monotonic clock missed, until a live peer vouches for it.
     pub(crate) suspend: Option<PendingSuspend>,
+    /// The suspends that a live peer vouched for, kept for one quiet TTL. A peer that was active
+    /// then and goes quiet later is older by each suspend that came after it was last heard.
+    pub(crate) confirmed_suspends: Vec<PendingSuspend>,
     /// The peers that left `quiet` after the quiet TTL. Their dial hint stays, because a peer that
     /// is silent for an hour and then sends again has no reason to send a `PeerInfo`: its links did
     /// not change. Bounded FIFO (cap `QUIET_CAP`), so the hints of one-shot nicknames cannot grow
@@ -133,6 +136,7 @@ impl Default for ClockEvidence {
             heard: HashMap::new(),
             quiet_aged: HashMap::new(),
             suspend: None,
+            confirmed_suspends: Vec::new(),
             lapsed_quiet: BoundedFifoSet::new(QUIET_CAP),
         }
     }

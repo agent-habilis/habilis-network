@@ -108,6 +108,7 @@ pub(crate) fn confirm_suspend(state: &mut EventLoopState, stamp: UnixSecs) {
     let ahead: u64 = UnixSecs::now().as_secs().abs_diff(stamp.as_secs());
     if ahead <= alive_timeout().as_secs() {
         state.clock_evidence.suspend = None;
+        state.clock_evidence.confirmed_suspends.push(pending);
         age_quiet_peers(state, pending.missed);
     }
 }
@@ -120,6 +121,23 @@ fn age_quiet_peers(state: &mut EventLoopState, missed: Duration) {
         let aged = state.clock_evidence.quiet_aged.entry(*key).or_default();
         *aged = aged.saturating_add(missed);
     }
+}
+
+/// A peer that was active when a suspend began is not in `quiet_since`, so the suspend did not age
+/// it. When it goes quiet, its silence holds each confirmed suspend that came after it was last
+/// heard, once: a suspend that came while it was quiet aged it already, and one that came before
+/// it was heard is not part of its silence.
+fn age_by_suspends_since(state: &mut EventLoopState, key: AuthorKey, heard: Instant) {
+    let confirmed = &state.clock_evidence.confirmed_suspends;
+    let later = confirmed.iter().filter(|suspend| suspend.at > heard);
+    let missed: Duration = later.fold(Duration::ZERO, |sum, suspend| {
+        sum.saturating_add(suspend.missed)
+    });
+    if missed.is_zero() {
+        return;
+    }
+    let aged = state.clock_evidence.quiet_aged.entry(key).or_default();
+    *aged = aged.saturating_add(missed);
 }
 
 /// Sweep `last_seen` for peers we've not heard from past the
@@ -169,6 +187,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
                 // returned peer undeliverable for directed frames until its
                 // gossip link happens to bounce.
                 state.quiet_since.insert(key, seen);
+                age_by_suspends_since(state, key, seen);
                 if let Some(nickname) = nick {
                     tracing::debug!(nickname = %nickname, age_secs = age, "peer evicted (silence timeout)");
                     sink.emit(NodeEvent::PeerTimeout {
@@ -210,6 +229,10 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .clock_evidence
         .quiet_aged
         .retain(|key, _| quiet.contains(key));
+    state
+        .clock_evidence
+        .confirmed_suspends
+        .retain(|suspend| now.duration_since(suspend.at) <= QUIET_TTL);
     prune_per_key_state(state);
     prune_dial_hints(state);
     #[cfg(feature = "multihop")]
@@ -654,6 +677,36 @@ mod tests {
         assert!(
             !state.quiet.contains(&test_key("lost-heron")),
             "a quiet peer survived a suspend that the clock cannot subtract"
+        );
+    }
+
+    /// A suspend that a live peer vouched for is silence of every peer that was last heard before
+    /// it, active or quiet. A peer that was active then goes quiet later: its silence still holds
+    /// the suspend, once.
+    #[test]
+    fn a_suspend_ages_a_peer_that_was_active_when_it_began_and_went_quiet_later() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peer_for_test("swift-cedar");
+        state.surfaced_for_test("swift-cedar");
+        heard_ago(&mut state, "swift-cedar", Duration::from_secs(100));
+
+        note_suspend(&mut state, Duration::from_mins(30));
+        confirm_suspend(&mut state, protocol::UnixSecs::now());
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains(&test_key("swift-cedar")),
+            "the peer went quiet at the sweep"
+        );
+        let silence = state.quiet_silence(&test_key("swift-cedar"), Instant::now());
+        assert!(
+            silence >= Some(Duration::from_mins(31)),
+            "the silence holds the suspend and the 100 s before it: {silence:?}"
+        );
+        assert!(
+            silence < Some(Duration::from_mins(32)),
+            "the suspend counts once: {silence:?}"
         );
     }
 
