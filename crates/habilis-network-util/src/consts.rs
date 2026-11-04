@@ -123,8 +123,10 @@ pub const DOC_PENDING_TOTAL_MAX: usize = 512;
 
 /// The bytes that a frame that writes an entry again after a reset leaves free under a message. The
 /// frame is measured when the cut is made, and a later write carries more dependencies, so the
-/// margin keeps it inside the message.
-pub const DOC_EPOCH_FRAME_MARGIN: usize = 256;
+/// margin keeps it inside the message. It must be at most the margin of the application that
+/// publishes the entry (128 bytes in agent-gossip): with a larger margin the engine would refuse
+/// after a reset a value that the application writes.
+pub const DOC_EPOCH_FRAME_MARGIN: usize = 128;
 
 /// How many sweep ticks a node tries to write its entry again after a reset when a send fails. At
 /// the last one it gives up, so a send that never works does not make the slot wait for ever.

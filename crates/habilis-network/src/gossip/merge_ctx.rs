@@ -376,6 +376,11 @@ fn unwritten(
 /// Whether the frame of `merge`, built and signed and sealed as a write of this node would be, fits
 /// a message with a margin for the dependencies that a later write adds. A merge that makes no change
 /// has no frame, so it fits.
+///
+/// It builds, composes and signs one frame for each merge that it is asked about, and the cut asks
+/// about each field once for each open merge, so the cost grows with the square of the fields of one
+/// level. It is for the write again after a reset, which runs once on a node. Do not use it on a hot
+/// path.
 fn frame_fits(
     state: &EventLoopState,
     mesh: &MeshId,
@@ -429,8 +434,11 @@ pub(crate) async fn write_entry_again(state: &mut EventLoopState, context: &Merg
         };
         let params = StateMergeParams::new(context.clone(), Channel::Meta, merge).surface(false);
         if let Err(error) = broadcast_state_merge(state, params).await {
-            let waits = state.retry_epoch_switch(taken);
-            tracing::warn!(target: "habilis_network::gossip", %error, waits, "the entry of this node was not written again after a reset");
+            if state.retry_epoch_switch(taken) {
+                tracing::warn!(target: "habilis_network::gossip", %error, "the entry of this node was not written again after a reset, and the next sweep tries again");
+            } else {
+                tracing::warn!(target: "habilis_network::gossip", %error, "the entry of this node was not written again after a reset, and the writes are given up");
+            }
             return;
         }
     }
