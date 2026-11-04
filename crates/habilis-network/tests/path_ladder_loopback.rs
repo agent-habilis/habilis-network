@@ -221,6 +221,14 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
     }
 }
 
+/// On Windows the relay of the test logs a client that reset its connection while the nodes
+/// close as ERROR (`os error 10054`), which is no fault (#31). The fix is agent-habilis/iroh#5;
+/// remove this function and its calls when the pin of iroh moves to it.
+#[cfg(windows)]
+fn allow_the_relay_reset_of_31(guard: &habilis_network_test_tracing::Guard) {
+    guard.allow_error("iroh_relay::server::http_server", "ConnectionReset");
+}
+
 #[test]
 fn a_node_steps_down_the_ladder_and_climbs_back() {
     let guard = habilis_network_test_tracing::init();
@@ -292,6 +300,8 @@ fn a_node_steps_down_the_ladder_and_climbs_back() {
 #[test]
 fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     let guard = habilis_network_test_tracing::init();
+    #[cfg(windows)]
+    allow_the_relay_reset_of_31(&guard);
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
@@ -399,6 +409,8 @@ async fn cut_webrtc_between(first: &Member, second: &Member) {
 #[test]
 fn the_multihop_rung_forwards_through_a_third_member() {
     let guard = habilis_network_test_tracing::init();
+    #[cfg(windows)]
+    allow_the_relay_reset_of_31(&guard);
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];

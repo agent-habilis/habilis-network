@@ -333,16 +333,3 @@ strip = "none"
 # and why each pin lives where it does. Re-introducing a patch here would mean
 # every consumer had to restate it, since cargo honours a patch only in a
 # workspace root and never inherits one.
-#
-# One temporary exception, for the Windows port (PR #5): the patch below points
-# the iroh family at the fix of #31 (the relay logs a client that reset its
-# connection as ERROR on Windows). It holds only in this workspace: a consumer
-# of habilis-network gets e970dd25, the rev of the pins above, without the fix
-# of #31. The patch rev is that fix on top of e970dd25. It goes when the fix
-# is in agent-habilis/iroh and the pins above, and the three iroh-relay edges in
-# the crate manifests, move to it.
-[patch."https://github.com/agent-habilis/iroh"]
-iroh = { git = "https://github.com/saulraposo/iroh", rev = "a34f5646ee0a64c7000f4b53a5c65e4a929e221a" }
-iroh-base = { git = "https://github.com/saulraposo/iroh", rev = "a34f5646ee0a64c7000f4b53a5c65e4a929e221a" }
-iroh-dns = { git = "https://github.com/saulraposo/iroh", rev = "a34f5646ee0a64c7000f4b53a5c65e4a929e221a" }
-iroh-relay = { git = "https://github.com/saulraposo/iroh", rev = "a34f5646ee0a64c7000f4b53a5c65e4a929e221a" }
