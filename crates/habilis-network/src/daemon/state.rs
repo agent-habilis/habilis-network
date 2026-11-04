@@ -356,7 +356,7 @@ mod tests {
             now,
         );
 
-        for state in [no_flag, unproven, ourselves] {
+        for state in [&no_flag, &unproven, &ourselves] {
             assert!(
                 !state.beacon_notes.contains(&BeaconNote::YieldToLower),
                 "a flag that does not count does not make us yield"
