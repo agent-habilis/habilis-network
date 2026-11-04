@@ -21,7 +21,7 @@ use crate::util::{resident_memory, tuning, unix_secs};
 
 use crate::gossip::PathSummary;
 use crate::net;
-use crate::protocol::{Channel, DedupKey, Nickname};
+use crate::protocol::{Channel, Nickname};
 use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -358,8 +358,7 @@ fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: us
 pub(crate) fn tick_epoch(state: &mut EventLoopState, me: &Nickname) {
     let doc = state.doc_mut(Channel::Meta);
     let switch = doc.tick_epoch(me);
-    let dropped: Vec<DedupKey> = doc.take_dropped().collect();
-    for key in dropped {
+    for key in doc.take_dropped() {
         state.seen.remove(&key);
     }
     if let Some(switch) = switch {
@@ -577,8 +576,9 @@ mod tests {
             .sign(&identity)
     }
 
-    /// A candidate that a higher one beat goes to the dropped keys of the document. The tick that
-    /// follows must hand them to the receive path, or the re-send of that frame is a repeat.
+    /// The tick drains the dropped keys as a guard. No tick path pushes one today, and the receive
+    /// path drains after each frame, so this test fills the keys by hand: a candidate that a higher
+    /// one beat, with no frame between the two that would drain it.
     #[test]
     fn a_tick_of_the_epoch_forgets_the_keys_that_the_document_dropped() {
         use crate::doc::{MeshDoc, SelfWriteGate};

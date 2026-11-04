@@ -554,11 +554,13 @@ impl MeshDoc {
     fn adopt(&mut self, me: &Nickname) -> Option<EpochSwitch> {
         let candidate = self.candidate.take()?;
         let switch = self.switch_to(candidate.epoch, me);
-        let taken = self.ingest(&candidate.frame);
-        debug_assert!(
-            matches!(taken, Ingested::Applied { .. }),
-            "a candidate is a root that passed the gate, so its epoch takes it: {taken:?}"
-        );
+        if !matches!(self.ingest(&candidate.frame), Ingested::Applied { .. }) {
+            // Automerge can still refuse the change in `apply`, which only a crafted frame reaches.
+            self.dropped.push(candidate.frame.dedup_key());
+            if let Some(refused) = self.warn_due("the candidate of the new epoch was not applied") {
+                tracing::warn!(target: LOG_TARGET, refused, author = %candidate.frame.author, "the candidate of the new epoch was not applied");
+            }
+        }
         Some(switch)
     }
 
@@ -2439,6 +2441,34 @@ mod tests {
         assert!(
             holds_entry(&doc, "alice"),
             "the card of the candidate is in the new epoch"
+        );
+    }
+
+    #[test]
+    fn a_candidate_that_the_new_epoch_does_not_take_is_forgotten_and_reported() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            super::LOG_TARGET,
+            "the candidate of the new epoch was not applied",
+        );
+        let (alice, bob, mallory) = (nick("alice"), nick("bob"), nick("mallory"));
+        let mut doc = doc_over_the_cap(&bob);
+        let fresh = MeshDoc::new_gated(card_gate()).at_epoch(1);
+        let forged = frame_on(&fresh, &mallory, &entry(alice.as_str(), "forged"));
+        doc.candidate = Some(super::Candidate {
+            epoch: 1,
+            frame: forged.clone(),
+        });
+        let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
+        assert_eq!(switch.epoch, 1, "the node still goes to the epoch");
+        assert!(
+            !holds_entry(&doc, "alice"),
+            "a frame that fails the gate is not in the document"
+        );
+        assert_eq!(
+            dropped_keys(&mut doc),
+            vec![forged.dedup_key()],
+            "the key is forgotten, so the re-send is not a repeat"
         );
     }
 
