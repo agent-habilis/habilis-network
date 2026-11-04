@@ -43,15 +43,17 @@ pub(crate) async fn handle_presence(
         if state.key_said_goodbye(key) {
             return;
         }
-        state.note_left(key);
         state.drop_departed_presence(&key);
         // The roster is keyed by author key, so a goodbye ends that key and no other: another key
         // under the same nickname stays a peer. Any key can sign a goodbye under any nickname, and
-        // the goodbye of a key that is not in the roster removes nothing.
+        // the goodbye of a key that is not in the roster removes nothing. It is kept apart from
+        // the goodbyes of peers, so a flood of them cannot evict those.
         let was_peer = state.peers.contains(&key) || state.quiet.contains(&key);
         if !was_peer {
+            state.note_stranger_left(key);
             return;
         }
+        state.note_left(key);
         let was_surfaced = state.surfaced.contains(&key);
         let left_endpoint = state.forget_key(key);
         if let Some(endpoint_id) = left_endpoint

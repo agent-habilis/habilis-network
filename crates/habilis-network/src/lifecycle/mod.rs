@@ -72,6 +72,7 @@ mod departed_tests {
     use crate::protocol::{MeshId, Message, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::{MeshSender, PayloadPath};
+    use crate::util::tuning::QUIET_CAP;
 
     use super::{PresenceEvent, handle_presence, membership_update, observe};
 
@@ -238,6 +239,70 @@ mod departed_tests {
                 sink.count(),
                 1,
                 "the departure of a shown peer is not shown"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// Any key can sign a goodbye. A flood of goodbyes from keys that were never peers must not
+    /// push the tombstone of a real leaver out of the set, or a copy of its frames would bring it
+    /// back as an arrival. The goodbye of a stranger is still a replay the second time.
+    #[test]
+    fn a_flood_of_unknown_goodbyes_keeps_the_tombstone_of_a_departed_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let leaver = Identity::generate();
+            let mut state = fresh_state();
+            state.names.insert(leaver.author_key(), who.clone());
+            state.peers.insert(leaver.author_key());
+            let mut stranger = Identity::generate();
+            for round in 0..=QUIET_CAP {
+                let (key, name) = if round == 0 {
+                    (&leaver, who.clone())
+                } else {
+                    stranger = Identity::generate();
+                    (&stranger, nick("passer-by"))
+                };
+                let left = Message::new_left(&mesh, &name).sign(key);
+                let update = membership_update::compute_for(&left, &state);
+                handle_presence(
+                    PresenceEvent {
+                        message: &left,
+                        subtype: PresenceSubtype::Left,
+                        update: &update,
+                        surfaceable: true,
+                    },
+                    &mut state,
+                    &mut Inert,
+                    &context,
+                )
+                .await;
+            }
+            assert!(
+                state.key_said_goodbye(leaver.author_key()),
+                "a flood of unknown goodbyes evicted the tombstone of a departed peer"
+            );
+            assert!(
+                state.key_said_goodbye(stranger.author_key()),
+                "the latest unknown goodbye is not a replay the second time"
             );
             endpoint.close().await;
         });

@@ -74,6 +74,25 @@ pub(crate) struct PendingSuspend {
     pub(crate) at: Instant,
 }
 
+/// The keys that said goodbye, in two bounded sets. Any key can sign a goodbye, so the goodbyes of
+/// keys that were never peers of ours fill at the pace of the senders. They live apart from the
+/// goodbyes of peers, or a flood of them would push the tombstone of a real leaver out of its set.
+/// Same bound and same rule as `EventLoopState::quiet`.
+#[derive(Debug)]
+pub(crate) struct Goodbyes {
+    peers: BoundedFifoSet<AuthorKey>,
+    strangers: BoundedFifoSet<AuthorKey>,
+}
+
+impl Default for Goodbyes {
+    fn default() -> Self {
+        Self {
+            peers: BoundedFifoSet::new(QUIET_CAP),
+            strangers: BoundedFifoSet::new(QUIET_CAP),
+        }
+    }
+}
+
 /// What the lifecycle layer keeps about the clocks and the stamps of the peers, beyond
 /// `peer_stamp`. Each map follows the roster in the sweep.
 #[derive(Debug)]
@@ -335,7 +354,7 @@ pub struct EventLoopState {
     /// whatever this set holds. What the bound gives up is narrow: a frame of a key that left
     /// more than `QUIET_CAP` departures ago, that this node never held, counts as an arrival
     /// until its author goes quiet.
-    pub(crate) left_keys: BoundedFifoSet<AuthorKey>,
+    pub(crate) left_keys: Goodbyes,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
@@ -664,7 +683,7 @@ impl EventLoopState {
             hint_owner: HashMap::new(),
             peer_stamp: HashMap::new(),
             clock_evidence: ClockEvidence::default(),
-            left_keys: BoundedFifoSet::new(QUIET_CAP),
+            left_keys: Goodbyes::default(),
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
@@ -1190,11 +1209,16 @@ impl EventLoopState {
 
     /// Remember that `key` said goodbye. A key is minted per run, so it never speaks again.
     pub(crate) fn note_left(&mut self, key: AuthorKey) {
-        self.left_keys.insert(key);
+        self.left_keys.peers.insert(key);
+    }
+
+    /// Remember that `key`, which is no peer of ours, said goodbye.
+    pub(crate) fn note_stranger_left(&mut self, key: AuthorKey) {
+        self.left_keys.strangers.insert(key);
     }
 
     pub(crate) fn key_said_goodbye(&self, key: AuthorKey) -> bool {
-        self.left_keys.contains(&key)
+        self.left_keys.peers.contains(&key) || self.left_keys.strangers.contains(&key)
     }
 
     /// Drop a departed key's presence frames from the log and from the indexes kept beside it,
