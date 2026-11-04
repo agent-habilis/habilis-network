@@ -67,6 +67,11 @@ if (new Set(copies).size !== 1) {
   console.error(`expected one habilis-network copy, found: ${copies.join(" | ") || tree}`);
   process.exit(1);
 }
+// A git copy here means that cargo did not take the override: the binary has the engine that the app pins.
+if (engine && !copies.every((copy) => copy?.startsWith(path.join(engine, "crates")))) {
+  console.error(`the engine override was not applied: habilis-network comes from ${copies.join(" | ")}`);
+  process.exit(1);
+}
 
 const lockRewritten = run(["git", "status", "--porcelain", "--", "Cargo.lock"], app).out.trim() !== "";
 const record_app = { path: app, ...describe(app), lock_rewritten_by_override: lockRewritten };
