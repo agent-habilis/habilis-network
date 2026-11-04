@@ -61,9 +61,12 @@ fn data_frame(mesh: &MeshId, us: &protocol::Nickname, identity: &Identity, len: 
 }
 
 /// 5 peers join, this node sends 5 data frames of 512 bytes, then 60 s pass with nothing to send
-/// but the keepalive. Every broadcast byte that is not in a data frame is metadata. Directed
-/// (point-to-point) sends are not measured: the unicast pool of the fixture is detached and writes
-/// no frame. The numbers go to stderr, one line, for the table of the report.
+/// but the keepalive. Every broadcast byte that is not in a data frame is metadata. The fixture is
+/// not meshed and the idle loop calls only `heartbeat::tick_alive`: the minute excludes the
+/// link-state vector and the anti-entropy digests that a meshed node broadcasts while idle, so it
+/// is a lower bound for that node. Directed (point-to-point) sends are not measured: the unicast
+/// pool of the fixture is detached and writes no frame. The numbers go to stderr, one line, for
+/// the table of the report.
 #[test]
 fn wire_cost_of_one_minute_with_5_peers() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
