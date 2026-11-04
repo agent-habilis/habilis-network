@@ -1562,7 +1562,13 @@ async fn handle_peer_info(
     let may_bind: bool = !state.key_said_goodbye(hinter)
         && !state.hint_is_held_by_other(&message.author, hinter)
         && !state.nickname_is_taken_by_live_other(&message.author, hinter);
-    let changed = may_bind && state.peer_endpoints.get(&message.author) != Some(&peer_addr);
+    // Whether the address differs from the one we hold for this endpoint. It does not depend on
+    // `may_bind`: a rival key binds no hint, but its address is still a path to its node.
+    let known_address = state
+        .peer_endpoints
+        .values()
+        .find(|known| known.id == peer_id);
+    let changed = known_address != Some(&peer_addr);
     if may_bind {
         state.bind_peer_endpoint(message.key(), message.author.clone(), peer_addr.clone());
     }
@@ -3401,6 +3407,51 @@ mod first_contact_tests {
                 state.peer_endpoints.get("bob"),
                 Some(&current),
                 "the live peer could not bind its own hint"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A rival key does not bind the hint, but its address is still handed to the endpoint: the
+    /// binding is the roster's, the address is a path to a node. Until then a dial goes to the
+    /// stale address.
+    #[test]
+    fn a_rival_keys_changed_address_reaches_the_address_book() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let (owner, rival) = (Identity::generate(), Identity::generate());
+            for key in [owner.author_key(), rival.author_key()] {
+                state.names.insert(key, nick("bob"));
+                state.peers.insert(key);
+            }
+            let held = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+            state.bind_peer_endpoint(owner.author_key(), nick("bob"), held);
+            let rival_id = iroh::SecretKey::generate().public();
+            let first: net::SocketAddr = "127.0.0.1:4101".parse().expect("an address");
+            let second: net::SocketAddr = "127.0.0.1:4102".parse().expect("an address");
+
+            for address in [first, second] {
+                let moved = iroh::EndpointAddr::new(rival_id).with_ip_addr(address);
+                super::handle_peer_info(
+                    &peer_info_signed_by(&node, &moved, &rival),
+                    &mut state,
+                    &context,
+                )
+                .await;
+            }
+
+            let known = state
+                .address_book
+                .get_endpoint_info(rival_id)
+                .expect("the book holds the rival endpoint")
+                .into_endpoint_addr();
+            let ports: Vec<net::SocketAddr> = known.ip_addrs().copied().collect();
+            assert!(
+                ports.contains(&second),
+                "the changed address of a rival key never reached the address book: {ports:?}"
             );
             node.endpoint.close().await;
         });
