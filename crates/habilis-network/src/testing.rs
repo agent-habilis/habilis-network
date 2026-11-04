@@ -13,10 +13,10 @@ mod lane_node;
 mod log_capture;
 mod wire_counter;
 
-use std::array;
 use std::sync::Arc;
 
 use iroh::{EndpointId, SecretKey};
+use sha2::{Digest as _, Sha256};
 
 use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
 use crate::protocol::identity::Identity;
@@ -73,11 +73,10 @@ pub(crate) fn nick(name: &str) -> Nickname {
 }
 
 /// The author key that the roster fixtures give to `nickname`: the same text always gives the
-/// same key, and two texts give two keys.
+/// same key, and two texts give two keys. The key is the SHA-256 of the whole text, so a nickname
+/// of any valid length keeps its own key.
 pub(crate) fn test_key(nickname: &str) -> AuthorKey {
-    let text = nickname.as_bytes();
-    let bytes: [u8; 32] = array::from_fn(|index| text[index % text.len()]);
-    AuthorKey::from_bytes(bytes)
+    AuthorKey::from_bytes(Sha256::digest(nickname.as_bytes()).into())
 }
 
 /// A deterministic endpoint id from `seed`, so a test can name the same peer
@@ -154,5 +153,31 @@ mod log_capture_tests {
             .filter(|line| text.contains(**line))
             .count();
         assert_eq!(seen, 3, "the capture saw {seen} of 3 events: {text}");
+    }
+}
+
+/// Two valid nicknames must not share a key, or two fixture peers merge in the peer set and the
+/// name map. A nickname holds up to 32 characters, so the key is a digest of the whole text.
+#[cfg(test)]
+mod test_key_tests {
+    use super::test_key;
+
+    #[test]
+    fn a_nickname_that_repeats_another_gets_its_own_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let thirty_two = "x".repeat(32);
+        for (short, long) in [("a", "aa"), ("ab", "abab"), ("x", thirty_two.as_str())] {
+            assert_ne!(
+                test_key(short),
+                test_key(long),
+                "{short:?} and {long:?} share a key"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_nickname_always_gives_the_same_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(test_key("swift-cedar"), test_key("swift-cedar"));
     }
 }
