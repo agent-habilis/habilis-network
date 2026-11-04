@@ -2782,21 +2782,26 @@ mod tests {
 
         let at = t1 + Duration::from_secs(5) + Duration::from_millis(30);
         assert!(
-            round.record_pong(nick("bob"), &second.id, at),
+            round.record_pong(test_key("bob"), nick("bob"), &second.id, at),
             "a pong from bob is recorded against the probe it names"
         );
         assert!(
-            round.record_pong(nick("carol"), &first.id, t1 + Duration::from_millis(40)),
+            round.record_pong(
+                test_key("carol"),
+                nick("carol"),
+                &first.id,
+                t1 + Duration::from_millis(40)
+            ),
             "a pong from carol is recorded against the first probe"
         );
 
         assert_eq!(
-            round.pongs[&nick("bob")],
+            round.pongs[&test_key("bob")].rtt,
             Duration::from_millis(30),
             "bob's round trip reads 30 ms from its probe"
         );
         assert_eq!(
-            round.pongs[&nick("carol")],
+            round.pongs[&test_key("carol")].rtt,
             Duration::from_millis(40),
             "carol's round trip reads 40 ms from its probe"
         );
@@ -2816,15 +2821,21 @@ mod tests {
             .probes
             .insert(second.id.clone(), t1 + Duration::from_secs(5));
 
-        round.record_pong(nick("bob"), &first.id, t1 + Duration::from_millis(10));
         round.record_pong(
+            test_key("bob"),
+            nick("bob"),
+            &first.id,
+            t1 + Duration::from_millis(10),
+        );
+        round.record_pong(
+            test_key("bob"),
             nick("bob"),
             &second.id,
             t1 + Duration::from_secs(5) + Duration::from_millis(20),
         );
 
         assert_eq!(
-            round.pongs[&nick("bob")],
+            round.pongs[&test_key("bob")].rtt,
             Duration::from_millis(10),
             "the first pong from bob is kept against a later one"
         );
@@ -2841,6 +2852,7 @@ mod tests {
 
         assert!(
             !round.record_pong(
+                test_key("bob"),
                 nick("bob"),
                 &MessageId::random(),
                 t1 + Duration::from_millis(5)

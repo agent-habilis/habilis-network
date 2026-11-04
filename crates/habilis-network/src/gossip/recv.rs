@@ -742,7 +742,12 @@ async fn dispatch_infra(
                 && state.peers.contains(&message.key())
                 && let Some(round) = state.ping_round.as_mut()
             {
-                let known = round.record_pong(message.author.clone(), probe, TokioInstant::now());
+                let known = round.record_pong(
+                    message.key(),
+                    message.author.clone(),
+                    probe,
+                    TokioInstant::now(),
+                );
                 if !known {
                     tracing::debug!(target: "habilis_network::gossip", pong_from = %message.author, "pong names no probe of this round");
                 }
@@ -2247,11 +2252,12 @@ mod first_contact_tests {
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
 
-    use super::{handle_gossip_event, ingest};
+    use super::{dispatch_infra, handle_gossip_event, ingest};
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::EventLoopState;
+    use crate::daemon::state::{EventLoopState, PingRound};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
+    use crate::lifecycle::membership_update::MembershipUpdate;
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
@@ -2269,6 +2275,7 @@ mod first_contact_tests {
     use crate::{lookup, protocol, transport};
     use iroh_gossip::proto;
     use n0_future::task;
+    use n0_future::time::Instant as TokioInstant;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, atomic};
     use std::time::{Duration as std_Duration, Instant as std_Instant};
@@ -2445,6 +2452,48 @@ mod first_contact_tests {
             assert!(
                 state.pending_outbound.is_empty(),
                 "the parked frame waits for a PeerInfo that may not come"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The roster keys a peer by author key, so two live keys that share a nickname are two
+    /// peers, and each one that answers the ping is a responder.
+    #[test]
+    fn two_live_keys_of_one_nickname_both_answer_a_ping_round() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let twin = nick("twin");
+            let runs = [Identity::generate(), Identity::generate()];
+            for run in &runs {
+                state.names.insert(run.author_key(), twin.clone());
+                state.peers.insert(run.author_key());
+            }
+            let probe = Message::new_ping(&node.mesh, &node.author);
+            let started = TokioInstant::now();
+            let window = started + std_Duration::from_secs(10);
+            state.arm_ping_round(PingRound::new(&probe, started, window, None));
+            let update = MembershipUpdate {
+                returned: false,
+                joined_new: false,
+                stale: false,
+            };
+
+            for run in &runs {
+                let pong =
+                    Message::new_pong(&node.mesh, &twin, node.author.clone(), &probe.id).sign(run);
+                let flow =
+                    dispatch_infra(&pong, true, &update, &mut state, &mut Inert, &context).await;
+                assert!(flow.is_break(), "a pong is handled by the engine");
+            }
+
+            let answered = state.ping_round.as_ref().map(|round| round.pongs.len());
+            assert_eq!(
+                answered,
+                Some(2),
+                "the second key of the nickname was dropped from the responders"
             );
             node.endpoint.close().await;
         });

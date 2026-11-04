@@ -1838,10 +1838,14 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
     // multihop metric is a future enhancement.)
     let mut peers: Vec<(Nickname, u64)> = round
         .pongs
-        .into_iter()
-        .map(|(nickname, rtt)| (nickname, millis_saturating(rtt)))
+        .into_values()
+        .map(|pong| (pong.nickname, millis_saturating(pong.rtt)))
         .collect();
-    peers.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+    // Two keys of one nickname are two rows, so the RTT breaks the tie and the order is fixed.
+    peers.sort_by(|left, right| {
+        let by_nickname = left.0.as_str().cmp(right.0.as_str());
+        by_nickname.then(left.1.cmp(&right.1))
+    });
     // The in-process `ping` request waits on this channel (no event stream to
     // read the report from); the CLI/IPC path leaves it unset and consumes the
     // `ping_report` event below instead.
@@ -1985,13 +1989,14 @@ mod tests {
     use tokio::sync::oneshot;
 
     use n0_future::time;
+    use n0_future::time::Instant as TokioInstant;
 
     use super::TickAnchors;
-    use crate::daemon::state::EventLoopState;
+    use crate::daemon::state::{EventLoopState, PingRound};
     use crate::gossip::event::SilentSink;
     use crate::lifecycle;
-    use crate::protocol::{AuthorKey, UnixSecs};
-    use crate::testing::{fresh_state, test_key};
+    use crate::protocol::{AuthorKey, MeshId, Message, UnixSecs};
+    use crate::testing::{fresh_state, nick, test_key};
     use crate::util::clock::Instant;
     use crate::util::tuning;
 
@@ -2005,6 +2010,43 @@ mod tests {
             .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(test_key("swift-cedar"), silent);
         state
+    }
+
+    /// The report lists each peer that answered, and two live keys of one nickname are two peers.
+    /// The clamp keeps `known` at least as large as the rows.
+    #[test]
+    fn the_ping_report_has_a_row_for_each_key_that_answered() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let started = TokioInstant::now();
+        let probe = Message::new_ping(&MeshId::from("test"), &nick("us"));
+        let (reply, mut report) = oneshot::channel();
+        let mut round = PingRound::new(
+            &probe,
+            started,
+            started + Duration::from_secs(10),
+            Some(reply),
+        );
+        for (name, key, millis) in [
+            ("twin", test_key("twin#first"), 30),
+            ("twin", test_key("twin#second"), 20),
+        ] {
+            let arrival = started + Duration::from_millis(millis);
+            assert!(
+                round.record_pong(key, nick(name), &probe.id, arrival),
+                "a pong that names the probe is recorded"
+            );
+        }
+        state.arm_ping_round(round);
+
+        super::finalize_ping_round(&mut state, &SilentSink);
+
+        let rows = report.try_recv().expect("the round delivers its report");
+        assert_eq!(
+            rows,
+            vec![(nick("twin"), 20), (nick("twin"), 30)],
+            "each key that answered is a row, in a fixed order"
+        );
     }
 
     /// Control. A punctual sweep tick evicts the peer that is silent past the alive timeout.
