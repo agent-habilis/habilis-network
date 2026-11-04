@@ -52,7 +52,8 @@ impl ParkedLinkStates {
     }
 
     /// Drop the vectors that waited longer than `PARKED_LINK_STATE_TTL`, so the slot of a signer
-    /// that never proves goes to another. A signer that sends again parks anew.
+    /// that never proves goes to another. The wait counts from the first vector of the signer: a
+    /// vector that replaces it keeps that time, so a signer that sends again does not renew its slot.
     pub(crate) fn expire(&mut self, now: Instant) {
         self.by_signer
             .retain(|_, parked| now.duration_since(parked.since) <= PARKED_LINK_STATE_TTL);

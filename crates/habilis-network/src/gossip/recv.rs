@@ -4412,6 +4412,7 @@ mod requeue_tests {
 
 #[cfg(all(test, feature = "host"))]
 mod parked_link_state_tests {
+    use std::thread;
     use std::time::Duration;
 
     use crate::protocol::UnixSecs;
@@ -4743,6 +4744,28 @@ mod parked_link_state_tests {
             assert!(
                 parked.park(test_key("carol-cc"), vector),
                 "after the window the slot of a signer that never proved is free"
+            );
+            theirs.close().await;
+        });
+    }
+
+    // The policy: the wait counts from the first vector of a signer. A signer that never proves
+    // and keeps sending cannot renew its slot with each new vector.
+    #[test]
+    fn a_vector_that_replaces_a_parked_one_does_not_renew_the_wait() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let theirs = handle_for(&SecretKey::from_bytes(&[74; 32])).await;
+            let vector = theirs.link_vector(Vec::new());
+            let mut parked = ParkedLinkStates::new(1);
+            parked.park(test_key("alice-aa"), vector.clone());
+            thread::sleep(Duration::from_millis(20));
+            parked.park(test_key("alice-aa"), vector.clone());
+
+            let near_end = PARKED_LINK_STATE_TTL.saturating_sub(Duration::from_millis(5));
+            parked.expire(Instant::now() + near_end);
+            assert!(
+                parked.park(test_key("bobby-bb"), vector),
+                "alice waited longer than the window from her first vector, so her slot is free"
             );
             theirs.close().await;
         });
