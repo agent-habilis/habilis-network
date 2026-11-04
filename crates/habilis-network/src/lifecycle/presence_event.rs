@@ -52,6 +52,7 @@ pub(crate) async fn handle_presence(
         if !was_peer {
             return;
         }
+        let was_surfaced = state.surfaced.contains(&key);
         let left_endpoint = state.forget_key(key);
         if let Some(endpoint_id) = left_endpoint
             && !state.endpoint_is_bound(endpoint_id.id)
@@ -72,7 +73,7 @@ pub(crate) async fn handle_presence(
         // surfaced — keeps the join-horizon view symmetric. A `left`
         // for a peer known only through pre-join backlog (or one we
         // already showed going quiet) is dropped.
-        if state.surfaced.remove(&key) {
+        if was_surfaced {
             context.sink.emit(NodeEvent::Presence {
                 message: Box::new(message.authored()),
                 peer: key,

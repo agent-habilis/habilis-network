@@ -64,7 +64,7 @@ mod departed_tests {
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::SilentSink;
+    use crate::gossip::event::{CountingSink, SilentSink};
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;
     use crate::protocol::meshes::LookupOpts;
@@ -186,6 +186,58 @@ mod departed_tests {
             assert!(
                 state.surfaced.contains(&second_key),
                 "a replayed goodbye of the first run un-surfaced the second run"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// The goodbye of a peer that we showed is shown as a departure: the surfaced mark is read
+    /// before the key is forgotten, or the departure is never announced.
+    #[test]
+    fn a_surfaced_peer_that_says_goodbye_is_shown_leaving() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = CountingSink::new();
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let leaver = Identity::generate();
+            let mut state = fresh_state();
+            state.names.insert(leaver.author_key(), who.clone());
+            state.peers.insert(leaver.author_key());
+            state.surfaced.insert(leaver.author_key());
+            let left = Message::new_left(&mesh, &who).sign(&leaver);
+            let update = membership_update::compute_for(&left, &state);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut Inert,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                sink.count(),
+                1,
+                "the departure of a shown peer is not shown"
             );
             endpoint.close().await;
         });
