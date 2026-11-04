@@ -427,6 +427,11 @@ pub(crate) async fn flush_pending(
                 delivered += 1;
                 watch_flush(handle, message, bytes, state.flush_failed.clone());
             }
+            // Waiting does not end an ambiguity that two live peers keep on purpose, so the frame
+            // is dropped here and not kept in the buffer for ever.
+            Err(error @ transport::SendError::Ambiguous(_)) => {
+                tracing::warn!(target: "habilis_network::gossip", %error, "buffered outbound message dropped: its addressee is ambiguous");
+            }
             Err(error) => {
                 if requeue(state, context, message, bytes) {
                     requeued += 1;
@@ -2420,6 +2425,48 @@ mod first_contact_tests {
                 node.endpoint.close().await;
             },
         );
+    }
+
+    /// A directed frame that was parked to a nickname which two live peers now use cannot be
+    /// delivered by waiting: the engine never picks a key. The flush drops it and does not keep it
+    /// in the buffer for ever.
+    #[test]
+    fn a_buffered_frame_to_an_ambiguous_nickname_is_dropped_by_the_flush() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "its addressee is ambiguous",
+            );
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.insert(Standing::Meshed);
+            let twin = nick("twin");
+            for key in [test_key("twin#first"), test_key("twin#second")] {
+                state.names.insert(key, twin.clone());
+                state.peers.insert(key);
+            }
+            let frame = Message::new_pong(
+                &node.mesh,
+                &node.author,
+                twin,
+                &protocol::MessageId::random(),
+            )
+            .sign(&Identity::generate());
+            let bytes = frame.serialize().expect("serialize");
+            assert!(
+                state.pending_outbound.push((frame, bytes)),
+                "the frame is parked before the flush"
+            );
+
+            super::flush_pending(&mut state, &context, "test").await;
+
+            assert!(
+                state.pending_outbound.take().is_empty(),
+                "the flush kept a frame that waiting cannot deliver"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// Feed one gossip event to the handler, as the loop does.
