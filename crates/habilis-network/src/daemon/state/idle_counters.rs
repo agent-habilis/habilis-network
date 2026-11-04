@@ -86,7 +86,9 @@ pub(crate) struct IdleCounters {
     pub state_frames_unicast: u64,
     /// The frames of those answers that went out on gossip.
     pub state_frames_broadcast: u64,
-    /// The wire bytes of the frames of those answers.
+    /// The wire bytes of the change frames of those answers. The heads frame that ends a
+    /// point-to-point answer is not counted, and neither is the resend nonce that a gossip answer
+    /// adds to each frame.
     pub state_answer_bytes: u64,
     /// The part of `state_answer_bytes` that a member signed who is neither on the roster nor us:
     /// the cost of the changes of the dead.

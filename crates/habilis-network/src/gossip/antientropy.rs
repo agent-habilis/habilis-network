@@ -745,7 +745,9 @@ fn with_wire_frame(frame: &Verified) -> Option<(&Verified, WireFrame)> {
 }
 
 /// The wire bytes of the frames of an answer, and the part of them that a member signed who is
-/// neither on the roster nor `me`. Each frame is read as it was serialized for the answer.
+/// neither on the roster nor `me`. Each frame is read as it was serialized for the answer: the
+/// heads frame that ends a point-to-point answer and the resend nonce of a gossip answer are not
+/// in the sum.
 fn answer_bytes(
     frames: &[(&Verified, WireFrame)],
     roster: &HashSet<Nickname>,
