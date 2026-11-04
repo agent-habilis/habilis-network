@@ -308,6 +308,147 @@ mod departed_tests {
         });
     }
 
+    /// Records the nickname of each departure that the engine reports to the app.
+    struct Recorder(Vec<protocol::Nickname>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for Recorder {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+
+        async fn on_peer_left(
+            &mut self,
+            nickname: &protocol::Nickname,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) {
+            self.0.push(nickname.clone());
+        }
+    }
+
+    /// A goodbye removes the roster entry of its key, which the roster knows under the nickname
+    /// it recorded for that key. The app hears of that peer, not of whatever nickname the frame
+    /// names: a `Left` can carry any nickname.
+    #[test]
+    fn the_app_hears_the_recorded_nickname_of_the_key_that_left() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let run = Identity::generate();
+            let recorded = nick("swift-cedar");
+            let mut state = fresh_state();
+            state.names.insert(run.author_key(), recorded.clone());
+            state.peers.insert(run.author_key());
+
+            // The frame names another nickname than the one the roster holds for the key.
+            let left = Message::new_left(&mesh, &nick("lost-heron")).sign(&run);
+            let update = membership_update::compute_for(&left, &state);
+            let mut app = Recorder(Vec::new());
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert_eq!(
+                app.0,
+                vec![recorded],
+                "the app was told of a nickname that the departed key did not hold"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// The app tracks peers by nickname, so it hears of a departure only when no other key holds
+    /// the nickname that the departed key held.
+    #[test]
+    fn the_app_does_not_hear_of_a_nickname_that_another_key_still_holds() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let first_run = Identity::generate();
+            let second_key = Identity::generate().author_key();
+            let shared = nick("swift-cedar");
+            let mut state = fresh_state();
+            for key in [first_run.author_key(), second_key] {
+                state.names.insert(key, shared.clone());
+                state.peers.insert(key);
+            }
+
+            let left = Message::new_left(&mesh, &nick("lost-heron")).sign(&first_run);
+            let update = membership_update::compute_for(&left, &state);
+            let mut app = Recorder(Vec::new());
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert!(
+                app.0.is_empty(),
+                "the app heard of a nickname that the second key still holds: {:?}",
+                app.0
+            );
+            endpoint.close().await;
+        });
+    }
+
     /// A departed key's `joined` frames serve nobody once it is gone, and the log never evicts a
     /// small author, so without this they stay resend subjects for the life of the node. Its chat
     /// stays: a node that missed it can still backfill it.

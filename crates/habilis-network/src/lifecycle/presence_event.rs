@@ -55,6 +55,9 @@ pub(crate) async fn handle_presence(
         }
         state.note_left(key);
         let was_surfaced = state.surfaced.contains(&key);
+        // The roster knows the key by the nickname it recorded, and a goodbye can name any
+        // nickname. `forget_key` drops the record, so read it first.
+        let departed = state.names.get(&key).unwrap_or(&message.author).clone();
         let left_endpoint = state.forget_key(key);
         if let Some(endpoint_id) = left_endpoint
             && !state.endpoint_is_bound(endpoint_id.id)
@@ -88,8 +91,8 @@ pub(crate) async fn handle_presence(
         // so it hears of the departure when no other key holds the nickname. Gated on
         // `surfaceable`: a relayed pre-join `Left` must never cancel live work — the same
         // join-horizon symmetry as the announcement above.
-        if surfaceable && !state.nickname_is_held(&message.author) {
-            app.on_peer_left(&message.author, state, context).await;
+        if surfaceable && !state.nickname_is_held(&departed) {
+            app.on_peer_left(&departed, state, context).await;
         }
     } else if subtype == PresenceSubtype::Joined && !update.stale {
         // Every `joined` re-floods our `PeerInfo`, newcomer and rejoin
