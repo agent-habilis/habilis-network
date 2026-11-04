@@ -2150,10 +2150,11 @@ impl EventLoopState {
     /// underlay is ticked when the vector changed the topology, as at any other receipt.
     #[cfg(feature = "multihop")]
     fn feed_parked_link_state(&mut self, signer: &AuthorKey) {
-        let (Some(vector), Some(proven)) = (
-            self.parked_link_states.take(signer),
-            self.proven_endpoints.trusted(signer),
-        ) else {
+        // The vector stays parked until the signer is trusted: a proof can come before the roster.
+        let Some(proven) = self.proven_endpoints.trusted(signer) else {
+            return;
+        };
+        let Some(vector) = self.parked_link_states.take(signer) else {
             return;
         };
         if vector.origin().get() != proven {

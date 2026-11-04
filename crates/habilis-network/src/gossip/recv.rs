@@ -4809,6 +4809,39 @@ mod parked_link_state_tests {
         });
     }
 
+    // A proof can come before its signer is in the roster. The signer is not trusted yet, so the
+    // vector stays parked for the proof that comes with the roster.
+    #[test]
+    fn a_proof_of_a_key_outside_the_roster_leaves_its_vector_parked() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = SecretKey::from_bytes(&[75; 32]);
+            let theirs = handle_for(&secret).await;
+            let signer = test_key("alice-aa");
+            let mut state = fresh_state();
+            state
+                .parked_link_states
+                .park(signer, theirs.link_vector(Vec::new()));
+
+            state.note_proven_endpoint(signer, secret.public(), UnixSecs::from(1));
+            let waiting = state.parked_link_states.take(&signer);
+            assert!(
+                waiting.is_some(),
+                "a signer that is not trusted yet lost its parked vector"
+            );
+            if let Some(vector) = waiting {
+                state.parked_link_states.park(signer, vector);
+            }
+
+            state.peers.insert(signer);
+            state.note_proven_endpoint(signer, secret.public(), UnixSecs::from(1));
+            assert!(
+                state.parked_link_states.take(&signer).is_none(),
+                "once the signer is trusted, the vector that waited is fed and gone"
+            );
+            theirs.close().await;
+        });
+    }
+
     #[test]
     fn the_park_holds_one_vector_per_author_up_to_its_cap() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
