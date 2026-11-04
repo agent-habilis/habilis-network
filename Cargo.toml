@@ -179,6 +179,7 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = "0.3"
 bs58 = "0.5"
+base64 = "0.22"
 # The shared `state`/`meta` documents are automerge CRDTs: concurrent edits
 # merge without a bespoke ordered-log fold. `default-features` stays on (the
 # `storage-v2` on-disk format is unused — we carry changes on the wire).

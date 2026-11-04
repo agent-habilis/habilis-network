@@ -3,7 +3,7 @@
 //!
 //! The digest advertises a **window** of the message log: an inclusive
 //! `[lo, hi]` timestamp range plus the compact dedup keys the sender holds in
-//! it (`DedupKey`, 16 bytes each, Base58-packed, so ~10× more fit one gossip
+//! it (`DedupKey`, 16 bytes each, Base64-packed, so ~10× more fit one gossip
 //! message than the old 36-char ids). A log larger than one window is swept
 //! across rounds via a rolling cursor; the `[lo, hi]` bounds let a receiver
 //! re-send only **in-window** gaps, so advertising a sub-window never makes
@@ -35,6 +35,8 @@ use std::collections::HashSet;
 use std::hash::{Hash as _, Hasher as _};
 
 use crate::transport::{MeshSender, Resend};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::handler_ctx::HandlerCtx;
@@ -58,8 +60,9 @@ pub(crate) use serve_budget::ServeBudget;
 pub(crate) use unicast_digests::{ChatAsk, UnicastDigests};
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
 /// open-ended), each a timestamp and the id key of the message at that edge, plus
-/// its dedup keys packed as 16 bytes each, Base58-encoded. The key is what lets an
-/// edge fall inside a second that holds more messages than a window lists.
+/// its dedup keys packed as 16 bytes each, Base64-encoded. The edge keys (`lo_key`,
+/// `hi_key`) stay Base58. The key is what lets an edge fall inside a second that holds
+/// more messages than a window lists.
 #[derive(Serialize, Deserialize)]
 struct WireWindow {
     lo: i64,
@@ -89,7 +92,7 @@ impl WireWindow {
             lo_key: encode_key(&window.lo.1),
             hi: window.hi.0.as_secs(),
             hi_key: encode_key(&window.hi.1),
-            ids: bs58::encode(packed).into_string(),
+            ids: STANDARD.encode(packed),
         }
     }
 
@@ -101,11 +104,14 @@ impl WireWindow {
         })
     }
 
-    /// Decode the packed ids into a set, or `None` if the Base58 / length
-    /// is malformed.
+    /// Decode the packed ids into a set, or `None` if the Base64 / length
+    /// is malformed or the window holds more ids than a full one.
     fn decode_ids(&self) -> Option<HashSet<DedupKey>> {
-        let raw = bs58::decode(&self.ids).into_vec().ok()?;
-        if raw.len() % 16 != 0 {
+        if self.ids.len() > WINDOW_IDS_TEXT_MAX {
+            return None;
+        }
+        let raw = STANDARD.decode(&self.ids).ok()?;
+        if raw.len() % 16 != 0 || raw.len() > ANTIENTROPY_DIGEST_WINDOW_IDS * 16 {
             return None;
         }
         Some(
@@ -119,6 +125,9 @@ impl WireWindow {
         )
     }
 }
+
+/// The Base64 length of a full window's ids: 70 ids x 16 bytes, padded.
+const WINDOW_IDS_TEXT_MAX: usize = (ANTIENTROPY_DIGEST_WINDOW_IDS * 16).div_ceil(3) * 4;
 
 /// The on-the-wire digest body: up to two windows (open-ended newest +
 /// rolling closed older).
@@ -271,15 +280,20 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
         return;
     }
     let mut have: HashSet<DedupKey> = HashSet::new();
+    let mut readable: Vec<&WireWindow> = Vec::new();
     for window in &body.windows {
-        if let Some(ids) = window.decode_ids() {
-            have.extend(ids);
+        match window.decode_ids() {
+            Some(ids) => {
+                have.extend(ids);
+                readable.push(window);
+            }
+            None => report_unreadable_digest(message, state),
         }
     }
     let reply_to = unicast_reply_to(&message.key(), state);
     let mut budget = antientropy_max_resend();
     let mut resent = 0usize;
-    for window in &body.windows {
+    for window in readable {
         if budget == 0 {
             break;
         }
@@ -1260,6 +1274,8 @@ mod budget_tests {
 #[cfg(test)]
 mod tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     use std::collections::HashSet;
 
     use super::{
@@ -1357,6 +1373,61 @@ mod tests {
         })
         .expect("a digest serializes");
         Message::new_digest(&MeshId::from("test"), asker, body).sign(&Identity::generate())
+    }
+
+    /// A window of a peer that still writes Base58 ids does not decode, so the answer
+    /// skips it. Answering it used to resend every message of the window, because the
+    /// ids the window lists were not known to be held.
+    #[test]
+    fn an_unreadable_window_is_not_answered() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "digest from this peer could not be read",
+        );
+        let (me, asker) = (nick("holder"), nick("asker"));
+        let mut state = fresh_state();
+        state.peers.insert(asker.clone());
+        for index in 0..3 {
+            state
+                .message_log
+                .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
+        }
+        let (outbox, mut resends) = transport::ResendOutbox::new(256);
+        state.resend_outbox = outbox;
+        let base58_window = WireWindow {
+            lo: 0,
+            lo_key: encode_key(&DedupKey::MIN),
+            hi: i64::MAX,
+            hi_key: encode_key(&DedupKey::MAX),
+            ids: "1111111111111111".to_string(),
+        };
+        let body = gossip::json_body(&DigestBody {
+            windows: vec![base58_window],
+        })
+        .expect("a digest serializes");
+        let digest =
+            Message::new_digest(&MeshId::from("test"), &asker, body).sign(&Identity::generate());
+
+        super::handle_digest(&digest, &mut state, &me);
+
+        assert!(
+            drained(&mut resends).is_empty(),
+            "a window that does not decode is not answered"
+        );
+    }
+
+    /// The Base58 body of the wire before this change decodes to no ids.
+    #[test]
+    fn a_base58_window_decodes_to_no_ids() {
+        let window = WireWindow {
+            lo: 1_700_000_100,
+            lo_key: encode_key(&DedupKey::from([0x03; 16])),
+            hi: i64::MAX,
+            hi_key: encode_key(&DedupKey::MAX),
+            ids: "29d2S7vB453rNYFdR5YcwtA5PDEwQncRjCnc4eNvMtWM".to_string(),
+        };
+        assert!(window.decode_ids().is_none(), "Base58 ids are refused");
     }
 
     /// The event loop answers a digest without waiting on anything: the resends
@@ -1832,28 +1903,56 @@ mod tests {
 
     /// A malformed digest body must decode to `None` (so `handle_digest`
     /// skips it) rather than panic or yield garbage ids.
+    /// The window ids are the packed ids in Base64, so a peer that reads them
+    /// as Base58 gets none back.
+    #[test]
+    fn window_ids_are_base64_of_the_packed_ids() {
+        let packed = [[1u8; 16], [2u8; 16]].concat();
+        let window = WireWindow {
+            lo: 0,
+            lo_key: String::new(),
+            hi: 0,
+            hi_key: String::new(),
+            ids: STANDARD.encode(&packed),
+        };
+        let ids = window.decode_ids().expect("base64 window ids decode");
+        assert_eq!(ids.len(), 2, "two distinct ids");
+    }
+
     #[test]
     fn decode_ids_rejects_malformed() {
-        // Not valid Base58 (`0`, `O`, `I`, `l`, space are outside the alphabet).
+        // Not valid Base64 (`*` is outside the alphabet).
         let _guard = ::habilis_network_test_tracing::init();
         let bad_alphabet = WireWindow {
             lo: 0,
             lo_key: String::new(),
             hi: 0,
             hi_key: String::new(),
-            ids: "0OIl not base58".to_string(),
+            ids: "AAAA*AAA".to_string(),
         };
-        assert!(bad_alphabet.decode_ids().is_none(), "bad Base58 ⇒ None");
+        assert!(bad_alphabet.decode_ids().is_none(), "bad Base64 ⇒ None");
 
-        // Valid Base58 but not a whole number of 16-byte ids (5 bytes).
+        // Valid Base64 but not a whole number of 16-byte ids (5 bytes).
         let odd_length = WireWindow {
             lo: 0,
             lo_key: String::new(),
             hi: 0,
             hi_key: String::new(),
-            ids: bs58::encode([1u8; 5]).into_string(),
+            ids: STANDARD.encode([1u8; 5]),
         };
         assert!(odd_length.decode_ids().is_none(), "non-16-multiple ⇒ None");
+
+        let over_window = WireWindow {
+            lo: 0,
+            lo_key: String::new(),
+            hi: 0,
+            hi_key: String::new(),
+            ids: STANDARD.encode(vec![0u8; (ANTIENTROPY_DIGEST_WINDOW_IDS + 1) * 16]),
+        };
+        assert!(
+            over_window.decode_ids().is_none(),
+            "more ids than a window ⇒ None"
+        );
 
         // Empty is well-formed: zero ids.
         let empty = WireWindow {
@@ -2320,7 +2419,7 @@ mod tests {
                     lo_key: encode_key(&DedupKey::from([3; 16])),
                     hi: i64::MAX,
                     hi_key: encode_key(&DedupKey::MAX),
-                    ids: bs58::encode([7u8; 16]).into_string(),
+                    ids: STANDARD.encode([7u8; 16]),
                 },
                 WireWindow {
                     lo: 10,
@@ -2332,7 +2431,7 @@ mod tests {
                     ids: {
                         let mut raw = [0u8; 32];
                         raw[16..].fill(1);
-                        bs58::encode(raw).into_string()
+                        STANDARD.encode(raw)
                     },
                 },
             ],
@@ -2366,7 +2465,7 @@ mod tests {
 
     /// Golden: the whole digest body for a fixed pair of windows, as the wire carries it. The
     /// newest window is open-ended (`i64::MAX` and the all-ones key), the older one is closed.
-    /// The literal was captured at the base commit.
+    /// The literal was captured after the window ids moved from Base58 to Base64 (part T2a).
     #[test]
     fn a_digest_body_keeps_its_wire_form() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -2389,10 +2488,10 @@ mod tests {
         let wire = concat!(
             r#"{"windows":[{"lo":1700000100,"lo_key":"Na6EczbX5yvuS59hRb3JJ","#,
             r#""hi":9223372036854775807,"hi_key":"YcVfxkQb6JRzqk5kF2tNLv","#,
-            r#""ids":"29d2S7vB453rNYFdR5YcwtA5PDEwQncRjCnc4eNvMtWM"},"#,
+            r#""ids":"ERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiI="},"#,
             r#"{"lo":1700000000,"lo_key":"1111111111111111","#,
             r#""hi":1700000099,"hi_key":"Vm7ypzTh7eEsaRsGET44j","#,
-            r#""ids":"7KhXzYt7pTgoNMDYrCyg4z"}]}"#,
+            r#""ids":"MzMzMzMzMzMzMzMzMzMzMw=="}]}"#,
         );
         assert_eq!(body.as_str(), wire, "the digest body keeps its wire form");
 
