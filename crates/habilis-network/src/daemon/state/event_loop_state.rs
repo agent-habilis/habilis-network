@@ -55,17 +55,8 @@ use crate::util::tuning;
 use iroh::address_lookup::memory;
 use tokio::sync::{mpsc, oneshot};
 
-/// A run of frames of a quiet peer whose stamps rise from a base below the newest stamp that we
-/// heard from it: `last` is the stamp of the latest frame that counted, `at` is when it arrived on
-/// our clock, and `count` is the number of frames that counted.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct StepBack {
-    pub(crate) last: UnixSecs,
-    pub(crate) at: Instant,
-    pub(crate) count: u8,
-}
-
-/// The run of live frames of one key that a peer sends with stamps before our join. `last` is the stamp of the latest
+/// A run of live frames of one key, counted for a stamp that proves nothing alone: a stamp before
+/// our join (`live_run`) or a stamp at or below the newest on record of a quiet peer (`step_back`). `last` is the stamp of the latest
 /// frame that counted, `at` is when it arrived on our clock, and `count` is the number of frames
 /// that counted. See `membership_update::note_live_run`.
 #[derive(Debug, Clone, Copy)]
@@ -89,7 +80,7 @@ pub(crate) struct PendingSuspend {
 pub(crate) struct ClockEvidence {
     /// The run of frames of a quiet peer that rise from a stamp below `peer_stamp`, which says
     /// that its clock stepped back. See `membership_update::note_step_back`.
-    pub(crate) step_back: HashMap<AuthorKey, StepBack>,
+    pub(crate) step_back: HashMap<AuthorKey, LiveRun>,
     /// The run of live frames of each peer whose stamps are behind our join, or behind the goodbye
     /// of an older run of its nickname. A backlog replay and a peer with a slow clock look the same
     /// in one frame. A run of frames of one key, each a time after the one before on both clocks

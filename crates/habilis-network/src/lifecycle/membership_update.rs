@@ -4,11 +4,12 @@
 //! transport, presentation, or surfacing concern. See the Concept
 //! Glossary in AGENTS.md for the layer split.
 
-use crate::daemon::state::{EventLoopState, LiveRun, StepBack};
+use crate::daemon::state::{EventLoopState, LiveRun};
 use crate::lifecycle::heartbeat;
 use crate::protocol::{AuthorKey, MessageKind, PresenceSubtype, UnixSecs, Verified};
 use crate::util::clock::Instant;
 use crate::util::tuning::{self, ALIVE_INTERVAL};
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Summary of how a newly received message changes our view of the
@@ -124,40 +125,18 @@ fn step_back_window() -> Duration {
     ALIVE_INTERVAL * 3
 }
 
-/// Count a frame of the quiet peer `key` that proves presence but is stamped at or below the newest
-/// stamp on record. The clock of the author may have stepped back (a laptop that woke, a clock
-/// that was set right): then its stamps rise from a lower base and never pass the old stamp, which
-/// would hide a live peer. When [`STEP_BACK_FRAMES`] frames, each stamped after the one before
-/// and each arriving [`step_back_spacing`] after it, have counted, the old stamp is dropped and
-/// the next check lets the peer return. Returns whether the run is complete.
+/// Count a live frame of the quiet peer `key` that proves presence but is stamped at or below the
+/// newest stamp on record. The clock of the author may have stepped back (a laptop that woke, a
+/// clock that was set right): then its stamps rise from a lower base and never pass the old stamp,
+/// which would hide a live peer. The run is the one of [`note_live_run`], kept apart from it:
+/// when [`STEP_BACK_FRAMES`] paced frames have counted, the old stamp is dropped and the next
+/// check lets the peer return. Returns whether the run is complete.
 fn note_step_back(key: AuthorKey, timestamp: UnixSecs, state: &mut EventLoopState) -> bool {
-    let now = Instant::now();
-    let start = StepBack {
-        last: timestamp,
-        at: now,
-        count: 1,
-    };
-    let Some(run) = state.clock_evidence.step_back.get_mut(&key) else {
-        state.clock_evidence.step_back.insert(key, start);
-        return false;
-    };
-    // Frames that come far apart are not the stream of a live peer.
-    if now.duration_since(run.at) > step_back_window() {
-        *run = start;
+    if !advance_run(&mut state.clock_evidence.step_back, key, timestamp) {
         return false;
     }
-    let rises = timestamp > run.last;
-    let spaced = now.duration_since(run.at) >= step_back_spacing();
-    if rises && spaced {
-        run.last = timestamp;
-        run.at = now;
-        run.count += 1;
-    }
-    if run.count >= STEP_BACK_FRAMES {
-        state.clock_evidence.step_back.remove(&key);
-        return true;
-    }
-    false
+    state.clock_evidence.step_back.remove(&key);
+    true
 }
 
 /// Decide what a message from `author` means for our peer
@@ -291,15 +270,28 @@ pub(crate) fn note_live_run(message: &Verified, proves: bool, state: &mut EventL
     if !is_live_kind(&message.kind) || !proves {
         return false;
     }
+    advance_run(
+        &mut state.clock_evidence.live_run,
+        message.key(),
+        message.timestamp,
+    )
+}
+
+/// Count the live frame of `key` stamped `timestamp` in `runs`, and say whether the run has
+/// [`STEP_BACK_FRAMES`] frames at the pace of our clock.
+fn advance_run(
+    runs: &mut HashMap<AuthorKey, LiveRun>,
+    key: AuthorKey,
+    timestamp: UnixSecs,
+) -> bool {
     let now = Instant::now();
-    let key = message.key();
     let start = LiveRun {
-        last: message.timestamp,
+        last: timestamp,
         at: now,
         count: 1,
     };
-    let Some(run) = state.clock_evidence.live_run.get_mut(&key) else {
-        state.clock_evidence.live_run.insert(key, start);
+    let Some(run) = runs.get_mut(&key) else {
+        runs.insert(key, start);
         return false;
     };
     let waited = now.duration_since(run.at);
@@ -310,17 +302,14 @@ pub(crate) fn note_live_run(message: &Verified, proves: bool, state: &mut EventL
     if waited < step_back_spacing() {
         return run.count >= STEP_BACK_FRAMES;
     }
-    let advanced = message
-        .timestamp
-        .as_secs()
-        .saturating_sub(run.last.as_secs());
+    let advanced = timestamp.as_secs().saturating_sub(run.last.as_secs());
     let waited_secs: i64 = i64::try_from(waited.as_secs()).unwrap_or(i64::MAX);
     let at_our_pace = advanced.abs_diff(waited_secs) <= RUN_PACE_TOLERANCE.as_secs();
     if advanced < i64::try_from(step_back_spacing().as_secs()).unwrap_or(i64::MAX) || !at_our_pace {
         *run = start;
         return false;
     }
-    run.last = message.timestamp;
+    run.last = timestamp;
     run.at = now;
     run.count = run.count.saturating_add(1).min(STEP_BACK_FRAMES);
     run.count >= STEP_BACK_FRAMES
@@ -344,8 +333,11 @@ pub(crate) fn compute_observed_proving(
 ) -> MembershipUpdate {
     let update = compute_for_proving(proves, message, state);
     let key = message.key();
-    let steps_back: bool =
-        update.stale && state.quiet.contains(&key) && !state.key_said_goodbye(key) && proves;
+    let steps_back: bool = update.stale
+        && state.quiet.contains(&key)
+        && !state.key_said_goodbye(key)
+        && proves
+        && is_live_kind(&message.kind);
     if steps_back && note_step_back(key, message.timestamp, state) {
         state.peer_stamp.remove(&key);
         return compute_for_proving(proves, message, state);
@@ -387,7 +379,7 @@ mod tests {
     use crate::testing::{fresh_state, nick, test_key};
 
     use crate::protocol::identity::Identity;
-    use crate::protocol::{AuthorKey, MeshId, Message, Verified};
+    use crate::protocol::{AuthorKey, MeshId, Message, MessageBody, Verified};
 
     use std::time::Duration;
 
@@ -766,7 +758,7 @@ mod tests {
                 .peer_stamp
                 .insert(by.author_key(), UnixSecs::now() + step);
             for index in 0..STEP_BACK_FRAMES {
-                let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
+                let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 20);
                 let update = compute_observed(&live_frame(&who, &by, stamp), &mut state);
                 let counted = index + 1;
                 if counted < STEP_BACK_FRAMES {
@@ -859,6 +851,55 @@ mod tests {
                 "burst frame {index}, with no spacing, returned the peer"
             );
         }
+    }
+
+    /// Feed `frames` to a quiet peer whose newest stamp is 1 h ahead, one alive interval apart on
+    /// our clock, and say whether the peer returned.
+    fn run_returns_a_quiet_peer(
+        by: &Identity,
+        frames: impl Fn(&Nickname, u64) -> Verified,
+    ) -> bool {
+        let (mut state, who) = quiet_since_100_secs_of(by.author_key());
+        state
+            .peer_stamp
+            .insert(by.author_key(), UnixSecs::now() + Duration::from_hours(1));
+        for index in 0..STEP_BACK_FRAMES + 3 {
+            let update = compute_observed(&frames(&who, u64::from(index)), &mut state);
+            if update.returned {
+                return true;
+            }
+            if let Some(run) = state.clock_evidence.step_back.get_mut(&by.author_key()) {
+                run.at = back_20_secs(run.at);
+            }
+        }
+        false
+    }
+
+    /// A durable frame (a card, a state change) is not sent at the pace of a live peer: a relay
+    /// that replays durable frames of a stopped peer with rising stamps must not count as a run.
+    #[test]
+    fn a_run_of_durable_frames_is_no_step_back() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let by = Identity::generate();
+        let returned = run_returns_a_quiet_peer(&by, |who, index| {
+            let mut card =
+                Message::new_peer_info(&MeshId::from("test"), who, MessageBody::from("{}"));
+            card.timestamp = UnixSecs::now() + Duration::from_secs(index * 20);
+            card.sign(&by)
+        });
+        assert!(!returned, "a run of durable frames returned a quiet peer");
+    }
+
+    /// The stamps of a live run rise by the time that passed on our clock. A burst of frames whose
+    /// stamps rise much faster than our clock is a replay, not a peer that sends now.
+    #[test]
+    fn an_unpaced_run_of_live_frames_is_no_step_back() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let by = Identity::generate();
+        let returned = run_returns_a_quiet_peer(&by, |who, index| {
+            live_frame(who, &by, UnixSecs::now() + Duration::from_secs(index * 120))
+        });
+        assert!(!returned, "an unpaced run returned a quiet peer");
     }
 
     /// A slow series of replays is not a step back. A relay can re-send old frames of a dead peer

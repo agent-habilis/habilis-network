@@ -336,7 +336,7 @@ fn drop_orphaned_endpoint_state(state: &mut EventLoopState, kept_ids: &HashSet<E
 #[cfg(test)]
 mod tests {
     use crate::daemon::state::{
-        DirectState, EventLoopState, PendingSuspend, RendezvousFlag, StepBack,
+        DirectState, EventLoopState, LiveRun, PendingSuspend, RendezvousFlag,
     };
     use crate::testing::{fresh_state, nick, test_key};
     use crate::transport::probe::PathKind;
@@ -523,7 +523,7 @@ mod tests {
                 .insert(test_key(name), protocol::UnixSecs::now());
             state.clock_evidence.step_back.insert(
                 test_key(name),
-                StepBack {
+                LiveRun {
                     last: protocol::UnixSecs::now(),
                     at: Instant::now(),
                     count: 1,

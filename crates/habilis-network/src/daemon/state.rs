@@ -31,7 +31,7 @@ use crate::util::clock;
 use crate::util::tuning;
 
 pub use event_loop_state::EventLoopState;
-pub(crate) use event_loop_state::{LiveRun, PendingSuspend, StepBack};
+pub(crate) use event_loop_state::{LiveRun, PendingSuspend};
 
 pub(crate) use idle_counters::IdleCounters;
 pub(crate) use latch::Latch;
