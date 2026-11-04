@@ -1129,8 +1129,9 @@ impl EventLoopState {
         let address = self.peer_endpoints.remove(nick)?;
         self.hint_owner.remove(nick);
         // Another nickname can bind the same endpoint (a node that restarted under a new name).
+        // A linked endpoint keeps its proof for the regraft after a link loss.
         if !self.endpoint_is_bound(address.id) {
-            self.forget_endpoint_state(address.id);
+            self.release_unbound_endpoint(address.id);
         }
         Some(address)
     }

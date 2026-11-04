@@ -1239,6 +1239,52 @@ mod tests {
         );
     }
 
+    /// A ghost leaves the roster, and its dial hint goes with it. If its endpoint still has a gossip
+    /// link, the proof and the direct entry stay for the regraft after a link loss, as for a pruned
+    /// hint, and the sweep that follows the end of the link drops them.
+    #[test]
+    fn evicting_a_ghost_keeps_the_proof_of_an_endpoint_that_is_still_linked() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let ghost = test_key("ghost-oak");
+        let endpoint = iroh::SecretKey::from_bytes(&[11; 32]).public();
+        state.peer_for_test("ghost-oak");
+        heard_ago(&mut state, "ghost-oak", Duration::from_secs(600));
+        state.names.insert(ghost, nick("ghost-oak"));
+        state.bind_peer_endpoint(ghost, nick("ghost-oak"), iroh::EndpointAddr::new(endpoint));
+        state.linked_endpoints.insert(endpoint);
+        let linked = state.linked_endpoints.clone();
+        state
+            .proven_endpoints
+            .insert(ghost, endpoint, protocol::UnixSecs::from(1), &linked);
+        state.direct.insert(endpoint, DirectState::Direct);
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.endpoint_is_bound(endpoint),
+            "the dial hint of the ghost went"
+        );
+        assert_eq!(
+            state.proven_endpoints.get(&ghost),
+            Some(endpoint),
+            "the proof of a linked endpoint is kept for the regraft"
+        );
+        assert!(
+            state.direct.contains_key(&endpoint),
+            "the direct entry of a linked endpoint is kept"
+        );
+
+        state.linked_endpoints.remove(&endpoint);
+        tick_sweep(&mut state, &SilentSink);
+
+        assert_eq!(
+            state.proven_endpoints.get(&ghost),
+            None,
+            "the sweep after the end of the link drops the proof"
+        );
+    }
+
     /// Mark `who` as last heard `ago` ago, for the eviction mark and for the recency of the roster.
     fn heard_ago(state: &mut EventLoopState, who: &str, ago: Duration) {
         let seen = Instant::now()
