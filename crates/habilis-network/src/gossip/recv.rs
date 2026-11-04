@@ -1567,13 +1567,11 @@ async fn handle_peer_info(
     let may_bind: bool = !state.key_said_goodbye(hinter)
         && !state.hint_is_held_by_other(&message.author, hinter)
         && !state.nickname_is_taken_by_live_other(&message.author, hinter);
-    // Whether the address differs from the one we hold for this endpoint. It does not depend on
-    // `may_bind`: a rival key binds no hint, but its address is still a path to its node.
-    let known_address = state
-        .peer_endpoints
-        .values()
-        .find(|known| known.id == peer_id);
-    let changed = known_address != Some(&peer_addr);
+    // Whether the address differs from the one registered for this endpoint. A dial hint is no
+    // registration: a hint of another nickname can name the address that nothing put in the book.
+    // It does not depend on `may_bind`: a rival key binds no hint, but its address is still a
+    // path to its node.
+    let changed = !state.unicast_pool.remembers_address(&peer_addr);
     if may_bind {
         state.bind_peer_endpoint(message.key(), message.author.clone(), peer_addr.clone());
     }
@@ -3561,6 +3559,43 @@ mod first_contact_tests {
             assert!(
                 ports.contains(&second),
                 "the changed address of a rival key never reached the address book: {ports:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A dial hint that another nickname holds for the same endpoint is a claim, not a registered
+    /// address. When it names the advertised address, the address still has to reach the address
+    /// book and the unicast pool, because nothing else put it there.
+    #[test]
+    fn an_address_held_as_a_hint_of_another_nickname_still_reaches_the_address_book() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let (carol, bob) = (Identity::generate(), Identity::generate());
+            let endpoint_id = iroh::SecretKey::generate().public();
+            let advertised = iroh::EndpointAddr::new(endpoint_id).with_ip_addr(test_ip());
+            state.bind_peer_endpoint(carol.author_key(), nick("carol"), advertised.clone());
+            // Not the first sighting, and already linked, so no graft registers the address:
+            // only `changed` can.
+            state.known_endpoints.insert(endpoint_id);
+            state.linked_endpoints.insert(endpoint_id);
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &advertised, &bob),
+                &mut state,
+                &context,
+            )
+            .await;
+
+            assert!(
+                state.address_book.get_endpoint_info(endpoint_id).is_some(),
+                "the address was held as a hint of another nickname and never reached the book"
+            );
+            assert!(
+                state.unicast_pool.has_addr(endpoint_id),
+                "the address was held as a hint of another nickname and never reached the pool"
             );
             node.endpoint.close().await;
         });

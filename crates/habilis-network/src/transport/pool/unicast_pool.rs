@@ -281,6 +281,15 @@ impl UnicastPool {
         }
     }
 
+    /// Whether `address` is the dial address remembered for its endpoint. Only `note_addr` writes
+    /// it, next to the address book, so a dial hint that names the address does not count.
+    pub(crate) fn remembers_address(&self, address: &EndpointAddr) -> bool {
+        self.inner
+            .addrs
+            .lock()
+            .is_ok_and(|addrs| addrs.get(&address.id) == Some(address))
+    }
+
     /// Drop the remembered dial address of `eid`. The pooled connection stays open: the caller
     /// uses this when only the address has no owner left.
     pub(crate) fn forget_addr(&self, eid: EndpointId) {
