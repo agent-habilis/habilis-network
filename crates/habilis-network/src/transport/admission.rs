@@ -1618,6 +1618,63 @@ mod tests {
         );
     }
 
+    /// The counters of a live connection come through the table, on both ends, with the kind of its
+    /// ALPN, and they have moved: the handshake alone sent and received datagrams.
+    #[test]
+    fn the_table_reads_the_quic_counters_of_a_live_connection() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::daemon::state::ConnKind;
+                use habilis_network_iroh_gossip_transport::hub::Hub;
+                use iroh::EndpointAddr;
+
+                let hub = Hub::new();
+                let (alice, alice_table, _alice_handle) = ip_and_gossip_node(45, &hub, true).await;
+                let (bob, bob_table, _bob_handle) = ip_and_gossip_node(46, &hub, true).await;
+                let router = protocol::Router::builder(bob.clone())
+                    .accept(GOSSIP_TEST_ALPN, HoldConnections)
+                    .spawn();
+                let target = EndpointAddr::from_parts(bob.id(), bob.addr().addrs);
+                let _connection = alice
+                    .connect(target, GOSSIP_TEST_ALPN)
+                    .await
+                    .expect("connect");
+
+                let dialer = alice_table.quic_readings();
+                let deadline = tokio_Instant::now() + Duration::from_secs(10);
+                let mut acceptor = bob_table.quic_readings();
+                while acceptor.is_empty() && tokio_Instant::now() < deadline {
+                    time::sleep(Duration::from_millis(50)).await;
+                    acceptor = bob_table.quic_readings();
+                }
+
+                assert_eq!(dialer.len(), 1, "the one connection, at the dialer");
+                assert_eq!(acceptor.len(), 1, "the one connection, at the acceptor");
+                assert_eq!(
+                    dialer[0].kind,
+                    ConnKind::Other,
+                    "a test ALPN is no kind of ours"
+                );
+                assert!(
+                    dialer[0].counts.dgram_tx > 0,
+                    "the handshake sent datagrams"
+                );
+                assert!(
+                    dialer[0].counts.dgram_rx > 0,
+                    "the handshake received datagrams"
+                );
+                assert!(
+                    acceptor[0].counts.bytes_rx > 0,
+                    "the acceptor received bytes"
+                );
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
+        );
+    }
+
     /// A pair that only gossip carries is not blocked, and a peer whose connection is gone is
     /// established no more, and allowed again.
     #[test]

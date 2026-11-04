@@ -10,6 +10,7 @@ use iroh::EndpointId;
 use iroh::endpoint::{Connection, WeakConnectionHandle};
 use n0_future::task::AbortHandle;
 
+use crate::daemon::state::{ConnKind, QuicCounts, QuicReading};
 use crate::util::clock::Instant;
 use crate::util::tuning;
 
@@ -469,6 +470,19 @@ impl SignalAdmission {
 
     pub(crate) fn in_flight(&self) -> usize {
         self.lock().rounds_in_flight()
+    }
+
+    /// The QUIC counters of every live connection of the endpoint, on any protocol and any path.
+    pub(crate) fn quic_readings(&self) -> Vec<QuicReading> {
+        let inner = self.lock();
+        let handles = inner.slots.values().flat_map(|slot| slot.conns.iter());
+        let live = handles.filter_map(WeakConnectionHandle::upgrade);
+        let reading = |connection: Connection| QuicReading {
+            id: connection.stable_id(),
+            kind: ConnKind::of_alpn(connection.alpn()),
+            counts: QuicCounts::of(&connection.stats()),
+        };
+        live.map(reading).collect()
     }
 
     /// Put a connection under its peer, and start the sampler if it is not

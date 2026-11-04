@@ -6,6 +6,7 @@ mod idle_counters;
 mod latch;
 mod mesh_secrets;
 mod ping_round;
+mod quic_tally;
 mod socket_bytes;
 mod state_init;
 mod wire_out_tally;
@@ -44,6 +45,7 @@ pub(crate) use idle_counters::{IdleCounters, note_sampler_wake, top_requesters};
 pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
+pub(crate) use quic_tally::{ConnKind, QuicCounts, QuicReading};
 pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
 pub(crate) use state_init::StateInit;
 #[cfg(test)]

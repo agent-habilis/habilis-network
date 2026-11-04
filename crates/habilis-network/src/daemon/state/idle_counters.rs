@@ -10,6 +10,7 @@ use std::time::Duration;
 use iroh_gossip::api::{ApiError, Event};
 
 use super::gossip_msgs::GossipMsgs;
+use super::quic_tally::QuicTally;
 use super::socket_bytes::{GossipPathBytes, SocketBytes};
 use super::wire_out_tally::{WireIn, WireOut, WireOutTally};
 use crate::protocol::Nickname;
@@ -101,6 +102,8 @@ pub(crate) struct IdleCounters {
     /// They belong to this loop, whose endpoint they read, so two loops in one process do not
     /// take each other's bytes. `take` keeps them.
     pub(crate) socket_mark: SocketBytes,
+    /// The QUIC counters of each live connection at the last census. `take` keeps them.
+    pub(crate) quic: QuicTally,
     pub(crate) gossip_path_mark: GossipPathBytes,
     pub(crate) gossip_msgs_mark: Option<GossipMsgs>,
     /// The frames that the senders of this loop sent in the interval. The senders hold a clone.
@@ -192,6 +195,7 @@ impl IdleCounters {
         let mut loop_arms = mem::take(self);
         self.cpu_mark = cpu_now.unwrap_or(mark);
         self.socket_mark = mem::take(&mut loop_arms.socket_mark);
+        self.quic = mem::take(&mut loop_arms.quic);
         self.gossip_path_mark = mem::take(&mut loop_arms.gossip_path_mark);
         self.gossip_msgs_mark = loop_arms.gossip_msgs_mark.take();
         self.wire_out = mem::take(&mut loop_arms.wire_out);

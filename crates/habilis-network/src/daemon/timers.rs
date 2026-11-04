@@ -107,6 +107,8 @@ pub(crate) async fn tick_state_refresh(
     // double-counts the census iteration and inflates the total every interval.
     let reading = state.idle.take();
     let (socket, gossip_path, gossip_msgs) = read_deltas(state, endpoint, gossip);
+    let quic_readings = state.webrtc_admission.quic_readings();
+    let quic = state.idle.quic.take(&quic_readings).line();
     let idle = reading.loop_arms;
     let ext = idle.ext;
     let cpu = reading.cpu.unwrap_or_default();
@@ -177,6 +179,8 @@ pub(crate) async fn tick_state_refresh(
         idle_ext_other = ext.other,
         // Off the loop: their own tasks, so they are not in `idle_wakeups`.
         idle_ppid = reading.ppid,
+        // The QUIC counters of the live connections in the window: see `QuicLine`.
+        idle_quic = %quic,
         idle_sampler = reading.sampler,
         // Process CPU time of the interval, user and system together; 0 where it is unreadable.
         cpu_ms = millis_saturating(cpu),
