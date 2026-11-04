@@ -28,6 +28,10 @@ enum StateOp<'merge> {
         data: String,
         #[serde(rename = "m", default, skip_serializing_if = "Option::is_none")]
         merge: Option<Cow<'merge, Value>>,
+        /// The epoch of the history this change belongs to (wire key `e`). Left out at 0, so a
+        /// body of epoch 0 is the body from before epochs.
+        #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
     },
     /// The pre-automerge RFC 7386 merge shape. Retained only so a body still
     /// composes for the adversarial harness; the automerge engine ignores it (a
@@ -87,9 +91,24 @@ pub fn merge_body(merge: Value) -> Result<MessageBody, DocError> {
 /// assert_eq!(parse_change_body(body.as_str()), Some(vec![1, 2]));
 /// ```
 pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, DocError> {
+    change_body_at(change, merge, 0)
+}
+
+/// [`change_body`] for a change of `epoch`. Epoch 0 adds nothing to the body, so its bytes are
+/// those of a body from before the epoch existed.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_at(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+) -> Result<MessageBody, DocError> {
+    let tagged: Option<u64> = (epoch != 0).then_some(epoch);
     let json = serde_json::to_string(&StateOp::Change {
         data: bs58::encode(change).into_string(),
         merge: merge.map(Cow::Borrowed),
+        epoch: tagged,
     })
     .map_err(DocError::encode)?;
     Ok(MessageBody::try_new(&json)?)
@@ -112,9 +131,17 @@ pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, 
 /// ```
 #[must_use]
 pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
+    parse_change(body).map(|(bytes, _)| bytes)
+}
+
+/// [`parse_change_body`] with the epoch of the change. A body with no epoch reads as epoch 0.
+#[must_use]
+pub fn parse_change(body: &str) -> Option<(Vec<u8>, u64)> {
     let op: StateOp<'_> = serde_json::from_str(body).ok()?;
     match op {
-        StateOp::Change { data, .. } => bs58::decode(&data).into_vec().ok(),
+        StateOp::Change { data, epoch, .. } => {
+            Some((bs58::decode(&data).into_vec().ok()?, epoch.unwrap_or(0)))
+        }
         StateOp::Merge { .. } | StateOp::Enc { .. } => None,
     }
 }
@@ -191,11 +218,42 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{change_body, decrypt_body, encrypt_body, merge_body, parse_change_body};
+    use super::{
+        change_body, change_body_at, decrypt_body, encrypt_body, merge_body, parse_change,
+        parse_change_body,
+    };
     use habilis_network_protocol::SymmetricKey;
 
     fn key(byte: u8) -> SymmetricKey {
         SymmetricKey::from([byte; 32])
+    }
+
+    #[test]
+    fn an_epoch_above_zero_reads_back_and_epoch_zero_adds_nothing_to_the_body() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let before_epochs = r#"{"k":"change","c":"Ldp"}"#;
+        let epoch_zero = change_body(&[1, 2, 3], None).expect("a body");
+        assert_eq!(
+            epoch_zero.as_str(),
+            before_epochs,
+            "epoch 0 is the old body"
+        );
+        let epoch_seven = change_body_at(&[1, 2, 3], None, 7).expect("a body");
+        assert_eq!(
+            parse_change(epoch_seven.as_str()),
+            Some((vec![1, 2, 3], 7)),
+            "an epoch above 0 reads back"
+        );
+        assert_eq!(
+            parse_change(before_epochs),
+            Some((vec![1, 2, 3], 0)),
+            "a body with no epoch is epoch 0"
+        );
+        assert_eq!(
+            parse_change_body(epoch_seven.as_str()),
+            Some(vec![1, 2, 3]),
+            "the epoch does not change the change bytes"
+        );
     }
 
     #[test]

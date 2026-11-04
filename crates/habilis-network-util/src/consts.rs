@@ -121,6 +121,26 @@ pub const DOC_PENDING_AUTHOR_MAX: usize = 128;
 /// stream flush a joiner's honest backfill.
 pub const DOC_PENDING_TOTAL_MAX: usize = 512;
 
+/// The bytes of JSON in one merge that writes an entry again after a reset. A quarter of a message,
+/// so that the frame fits on a mesh with a password too: the body is sealed and encoded twice there.
+pub const DOC_EPOCH_CHUNK_BYTES: usize = MAX_MESSAGE_SIZE / 4;
+
+/// The frame bytes a gated channel keeps in one epoch before the node starts a new one (a tunable).
+/// A reset drops every frame of the epoch, then each owner writes its own entry again. The real
+/// threshold is the larger of this value and twice the frame bytes that the epoch held when it
+/// settled, so a mesh whose live entries fill the cap does not reset in a loop. The check runs once
+/// per minute, so the bound is the threshold plus one minute of writes.
+pub const DOC_EPOCH_FRAME_CAP_BYTES: usize = 1024 * 1024;
+
+/// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged
+/// epoch number cannot lock the channel: the forger raises the epoch by this much per adoption.
+pub const DOC_EPOCH_JUMP_MAX: u64 = 131_072;
+
+/// How many 1-minute ticks a node that holds the frames of others waits before it adopts a higher
+/// epoch (a tunable). At the end it jumps to the highest epoch that it saw. A forger can force
+/// at most 1 reset per wait on a node. A node that holds nothing from others adopts at once.
+pub const DOC_EPOCH_ADOPT_WAIT_TICKS: u32 = 5;
+
 /// Hard ceiling on a partial group's lifetime regardless of activity. The
 /// idle TTL alone lets a hostile stream pin its buffered bytes forever by
 /// trickling one shard per window; this bounds any single group's pin to an

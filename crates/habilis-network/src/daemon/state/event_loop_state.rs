@@ -519,6 +519,10 @@ pub struct EventLoopState {
     /// mesh, `derive_secret(mesh_key, "broadcast")` — domain-separated from
     /// the state/meta doc keys. `None` ⇒ chat stays plaintext. Wiped on drop.
     pub(crate) broadcast_key: Option<SymmetricKey>,
+    /// The switch of the meta document to a new epoch whose entry of this node is not written
+    /// again yet. One slot, so it is bounded. The sweep tick writes the entry and empties the
+    /// slot. A second switch before that keeps the entry of the first.
+    pub(crate) epoch_switch: Option<doc::EpochSwitch>,
     /// Where the event loop's wakeups went since the last census.
     pub(crate) idle: IdleCounters,
 }
@@ -649,11 +653,23 @@ impl EventLoopState {
             mesh_password,
             mint_mesh: None,
             broadcast_key,
+            epoch_switch: None,
             idle: IdleCounters::default(),
         }
     }
 
     /// The `meta` channel: gated by the application's per-peer map when it keeps one, free-form otherwise.
+    /// Keep `switch` until the sweep writes the entry of this node again. If a switch is waiting
+    /// already, its entry stays when the new switch has none: the document holds no entry of ours
+    /// since the first switch.
+    pub(crate) fn note_epoch_switch(&mut self, mut switch: doc::EpochSwitch) {
+        let waiting = self.epoch_switch.take().and_then(|held| held.own_entry);
+        if switch.own_entry.is_none() {
+            switch.own_entry = waiting;
+        }
+        self.epoch_switch = Some(switch);
+    }
+
     fn meta_channel(
         per_peer_gate: Option<doc::SelfWriteGate>,
         key: Option<SymmetricKey>,
