@@ -415,6 +415,64 @@ mod departed_tests {
         }
     }
 
+    /// The app reads the whole roster, so it holds state for a peer that is not shown yet. The
+    /// goodbye of such a peer, stamped after our join, reaches the hook, and shows no `left`.
+    #[test]
+    fn the_app_hears_the_goodbye_of_a_peer_that_was_never_shown() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = DepartureSink::default();
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let run = Identity::generate();
+            let hidden = nick("swift-cedar");
+            let mut state = fresh_state();
+            state.names.insert(run.author_key(), hidden.clone());
+            state.peers.insert(run.author_key());
+
+            let left = Message::new_left(&mesh, &hidden).sign(&run);
+            let observed = observe(&left, &mut state, &context);
+            let mut app = Recorder(Vec::new());
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert_eq!(
+                app.0,
+                vec![hidden],
+                "the app never heard that a peer it read from the roster left"
+            );
+            assert!(
+                sink.0.lock().expect("the sink lock").is_empty(),
+                "a departure was shown for a peer whose arrival was not shown"
+            );
+            endpoint.close().await;
+        });
+    }
+
     /// The whole path of a goodbye, `observe` first. A `Left` can name any nickname, so neither
     /// `observe` nor the departure may take the nickname of the key from the frame: the app and the
     /// operator hear of the peer that the roster removed.

@@ -75,9 +75,12 @@ pub trait NodeApp: Send {
     }
 
     /// A peer broadcast a graceful `Left` and was removed from the roster.
-    /// Fired only for a surfaced departure — never for a relayed pre-join
-    /// `Left`, and never from the silence-timeout sweep: a quiet peer may
-    /// return, so its app-side state must survive a mere timeout.
+    /// Fired for a `Left` stamped after our join, whether or not the arrival of
+    /// the peer was shown: an app that reads the whole roster (`live_nicknames`)
+    /// holds state for a peer that is not shown yet, and must release it. Never
+    /// fired for a relayed pre-join `Left`, and never from the silence-timeout
+    /// sweep: a quiet peer may return, so its app-side state must survive a
+    /// mere timeout.
     ///
     /// Defaults to a no-op — an app holding no per-peer state has nothing to
     /// release.
