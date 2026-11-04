@@ -725,7 +725,7 @@ async fn dispatch_infra(
             return ControlFlow::Break(());
         }
         MessageKind::Digest => {
-            antientropy::handle_digest(message, state, context.author);
+            antientropy::handle_digest(message, state, &context.our_pubkey);
             return ControlFlow::Break(());
         }
         MessageKind::Ping => {
