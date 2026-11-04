@@ -71,8 +71,9 @@ use tokio::sync::oneshot;
 /// Refuses a body too large for one frame, propagates a serialize/deliver
 /// failure, and errors if the unmeshed buffer is full. A directed frame to a
 /// nickname that two or more live peers use fails with
-/// [`crate::transport::SendError::Ambiguous`]: the engine never picks one of
-/// the keys.
+/// [`crate::transport::SendError::Ambiguous`], meshed or not, and the frame is not buffered: the
+/// engine never picks one of the keys. A frame that was buffered before the clash began waits for
+/// the flush.
 ///
 /// # Examples
 ///
@@ -98,6 +99,13 @@ pub async fn send_app(
         return Err(transport::SendError::Oversize(format!(
             "app frame too large: {} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit",
             frame.wire_len()
+        )));
+    }
+    if let Some(addressee) = sole_addressee(&frame.kind)
+        && state.nickname_is_ambiguous(addressee)
+    {
+        return Err(transport::SendError::Ambiguous(format!(
+            "directed message to {addressee} refused: two or more live peers use this nickname"
         )));
     }
     let bytes = frame

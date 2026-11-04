@@ -2495,6 +2495,43 @@ mod first_contact_tests {
         });
     }
 
+    /// The contract of `send_app` says that a directed frame to a nickname of two live peers
+    /// fails with `Ambiguous`. A node that is not meshed parked the frame and told the caller
+    /// `Ok`, so a caller that reads the result took the peer for one that it can address.
+    #[test]
+    fn an_unmeshed_send_to_an_ambiguous_nickname_fails_at_once_and_buffers_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.remove(&Standing::Meshed);
+            let twin = nick("twin");
+            for key in [test_key("twin#first"), test_key("twin#second")] {
+                state.names.insert(key, twin.clone());
+                state.peers.insert(key);
+            }
+            let frame = Message::new_pong(
+                &node.mesh,
+                &node.author,
+                twin,
+                &protocol::MessageId::random(),
+            )
+            .sign(&Identity::generate());
+
+            let sent = crate::ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+
+            assert!(
+                matches!(sent, Err(transport::SendError::Ambiguous(_))),
+                "the unmeshed send did not refuse the nickname of two live peers"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the refused frame was buffered"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// Feed one gossip event to the handler, as the loop does.
     async fn feed(event: Event, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
         handle_gossip_event(Some(Ok(event)), state, &mut Inert, context).await;
