@@ -35,6 +35,7 @@ use crate::protocol::{
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
+use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
@@ -520,11 +521,22 @@ pub struct EventLoopState {
     /// the state/meta doc keys. `None` ⇒ chat stays plaintext. Wiped on drop.
     pub(crate) broadcast_key: Option<SymmetricKey>,
     /// The switch of the meta document to a new epoch whose entry of this node is not written
-    /// again yet. One slot, so it is bounded. The sweep tick writes the entry and empties the
-    /// slot. A second switch before that keeps the entry of the first.
-    pub(crate) epoch_switch: Option<doc::EpochSwitch>,
+    /// again yet, and the sweeps that failed to write it. One slot, so it is bounded.
+    pub(crate) epoch_write: EpochWrite,
     /// Where the event loop's wakeups went since the last census.
     pub(crate) idle: IdleCounters,
+}
+
+/// The write of the entry of this node after the meta document moved to a new epoch. The sweep tick
+/// writes the entry and empties the slot. A second switch before that keeps the entry of the first. A
+/// failed write puts the switch back, and at `DOC_EPOCH_WRITE_ATTEMPTS` failures the switch is given
+/// up, so a send that never works cannot keep the slot for ever.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EpochWrite {
+    /// The switch whose entry waits to be written.
+    pub(crate) switch: Option<doc::EpochSwitch>,
+    /// How many sweeps failed to write it.
+    pub(crate) attempts: u8,
 }
 
 impl EventLoopState {
@@ -653,7 +665,7 @@ impl EventLoopState {
             mesh_password,
             mint_mesh: None,
             broadcast_key,
-            epoch_switch: None,
+            epoch_write: EpochWrite::default(),
             idle: IdleCounters::default(),
         }
     }
@@ -663,11 +675,28 @@ impl EventLoopState {
     /// already, its entry stays when the new switch has none: the document holds no entry of ours
     /// since the first switch.
     pub(crate) fn note_epoch_switch(&mut self, mut switch: doc::EpochSwitch) {
-        let waiting = self.epoch_switch.take().and_then(|held| held.own_entry);
+        self.epoch_write.attempts = 0;
+        let waiting = self
+            .epoch_write
+            .switch
+            .take()
+            .and_then(|held| held.own_entry);
         if switch.own_entry.is_none() {
             switch.own_entry = waiting;
         }
-        self.epoch_switch = Some(switch);
+        self.epoch_write.switch = Some(switch);
+    }
+
+    /// Put `switch` back in the slot after a failed write, for the next sweep to try again, unless
+    /// it failed `DOC_EPOCH_WRITE_ATTEMPTS` times. Returns whether the switch waits.
+    pub(crate) fn retry_epoch_switch(&mut self, switch: doc::EpochSwitch) -> bool {
+        self.epoch_write.attempts = self.epoch_write.attempts.saturating_add(1);
+        if self.epoch_write.attempts > DOC_EPOCH_WRITE_ATTEMPTS {
+            self.epoch_write.attempts = 0;
+            return false;
+        }
+        self.epoch_write.switch = Some(switch);
+        true
     }
 
     fn meta_channel(

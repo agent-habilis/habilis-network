@@ -126,6 +126,10 @@ pub const DOC_PENDING_TOTAL_MAX: usize = 512;
 /// margin keeps it inside the message.
 pub const DOC_EPOCH_FRAME_MARGIN: usize = 256;
 
+/// How many sweep ticks a node tries to write its entry again after a reset when a send fails. At
+/// the last one it gives up, so a send that never works does not make the slot wait for ever.
+pub const DOC_EPOCH_WRITE_ATTEMPTS: u8 = 6;
+
 /// The frame bytes a gated channel keeps in one epoch before the node starts a new one (a tunable).
 /// A reset drops every frame of the epoch, then each owner writes its own entry again. The real
 /// threshold is the larger of this value and twice the frame bytes that the epoch held when it

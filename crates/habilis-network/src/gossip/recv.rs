@@ -4150,7 +4150,7 @@ mod dedup_counter_tests {
             "the document holds the root frame of the new epoch"
         );
         assert!(
-            reader.epoch_switch.is_some(),
+            reader.epoch_write.switch.is_some(),
             "the sweep writes the entry again"
         );
     }
