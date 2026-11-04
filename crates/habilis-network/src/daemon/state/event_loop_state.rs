@@ -1179,6 +1179,7 @@ impl EventLoopState {
         self.clock_evidence.heard.remove(&key);
         self.clock_evidence.returned_unshown.remove(&key);
         self.clock_evidence.lapsed_quiet.remove(&key);
+        self.proven_endpoints.forget_trust(&key);
         let nickname = self.names.remove(&key)?;
         if self.hint_owner.get(&nickname) == Some(&key) {
             return self.forget_peer_endpoint(nickname.as_str());
@@ -2119,6 +2120,10 @@ impl EventLoopState {
     pub(crate) fn note_proven_endpoint(&mut self, signer: AuthorKey, endpoint: EndpointId) {
         let linked = self.linked_endpoints.clone();
         self.proven_endpoints.insert(signer, endpoint, &linked);
+        // Anyone can mint keys, so only a key of the roster is trusted: the roster bounds the map.
+        if self.peers.contains(&signer) || self.quiet.contains(&signer) {
+            self.proven_endpoints.trust(signer, endpoint);
+        }
         #[cfg(feature = "multihop")]
         self.feed_parked_link_state(&signer);
     }
@@ -2130,7 +2135,7 @@ impl EventLoopState {
     fn feed_parked_link_state(&mut self, signer: &AuthorKey) {
         let (Some(vector), Some(proven)) = (
             self.parked_link_states.take(signer),
-            self.proven_endpoints.get(signer),
+            self.proven_endpoints.trusted(signer),
         ) else {
             return;
         };

@@ -239,6 +239,9 @@ fn prune_per_key_state(state: &mut EventLoopState) {
     state
         .names
         .retain(|key, _| is_peer(key) || is_quiet(key) || lapsed.contains(key));
+    state
+        .proven_endpoints
+        .retain_trusted(|key| is_peer(key) || is_quiet(key) || lapsed.contains(key));
 }
 
 /// Prune the dial hints and the state that is keyed by their endpoints.

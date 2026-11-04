@@ -848,7 +848,7 @@ fn handle_link_state(message: &Verified, state: &mut EventLoopState) -> bool {
                 // proved none yet is waited for: its next vector, one interval
                 // on, finds the proof.
                 let signer = message.key();
-                let bound = state.proven_endpoints.get(&signer);
+                let bound = state.proven_endpoints.trusted(&signer);
                 // The `PeerInfo` of the signer can be a few milliseconds behind its first
                 // vector: the vector waits for the proof, and is fed when it is recorded.
                 if bound.is_none() {
@@ -3162,6 +3162,7 @@ mod first_contact_tests {
             )]))
             .expect("a vector serializes");
             let signer = Identity::generate();
+            state.peers.insert(signer.author_key());
             let vector =
                 Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body).sign(&signer);
             assert!(
@@ -3864,6 +3865,8 @@ mod link_state_tests {
             )]))
             .expect("a vector serializes");
             let (alice_id, mallory_id) = (Identity::generate(), Identity::generate());
+            state.peers.insert(alice_id.author_key());
+            state.peers.insert(mallory_id.author_key());
             let message_from = |author: &str, signer: &Identity| {
                 Message::new_link_state(&MeshId::from("test"), &nick(author), body.clone())
                     .sign(signer)
@@ -4215,9 +4218,7 @@ mod parked_link_state_tests {
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
-    use std::collections::HashSet;
-
-    use crate::daemon::state::ParkedLinkStates;
+    use crate::daemon::state::{EventLoopState, ParkedLinkStates};
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::Verified;
     use crate::protocol::{MeshId, Message};
@@ -4302,17 +4303,10 @@ mod parked_link_state_tests {
                 nick("twin-tt"),
                 EndpointAddr::new(twins.first_origin.public()),
             );
-            let linked = HashSet::new();
-            state.proven_endpoints.insert(
-                twins.first.author_key(),
-                twins.first_origin.public(),
-                &linked,
-            );
-            state.proven_endpoints.insert(
-                twins.second.author_key(),
-                twins.second_origin.public(),
-                &linked,
-            );
+            state.peers.insert(twins.first.author_key());
+            state.peers.insert(twins.second.author_key());
+            state.note_proven_endpoint(twins.first.author_key(), twins.first_origin.public());
+            state.note_proven_endpoint(twins.second.author_key(), twins.second_origin.public());
 
             let vector = signed_vector("twin-tt", &twins.second, &second, carol.public());
             assert!(
@@ -4344,6 +4338,8 @@ mod parked_link_state_tests {
             let mut state = fresh_state();
             state.multihop = Some(ours.clone());
 
+            state.peers.insert(twins.first.author_key());
+            state.peers.insert(twins.second.author_key());
             super::handle_link_state(
                 &signed_vector("twin-tt", &twins.second, &second, carol.public()),
                 &mut state,
@@ -4367,6 +4363,71 @@ mod parked_link_state_tests {
             ours.close().await;
             first.close().await;
             second.close().await;
+        });
+    }
+
+    /// The first peer of a roster proves its origin, then `others` more peers prove theirs: the
+    /// state, the first peer's signer and its handle.
+    async fn roster_of(
+        others: usize,
+        ours: &MultihopHandle,
+    ) -> (EventLoopState, Identity, MultihopHandle) {
+        let first_secret = SecretKey::from_bytes(&[100; 32]);
+        let first = Identity::generate();
+        let theirs = handle_for(&first_secret).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+        state.peers.insert(first.author_key());
+        state.note_proven_endpoint(first.author_key(), first_secret.public());
+        for _ in 0..others {
+            let peer = Identity::generate();
+            state.peers.insert(peer.author_key());
+            state.note_proven_endpoint(peer.author_key(), SecretKey::generate().public());
+        }
+        (state, first, theirs)
+    }
+
+    // The trust of a proof is the roster's to keep, not a FIFO's: a mesh of more than the FIFO cap
+    // (64) must hear the first peer that proved.
+    #[test]
+    fn a_roster_larger_than_the_proof_cap_keeps_the_trust_of_every_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let ours = handle_for(&SecretKey::from_bytes(&[99; 32])).await;
+            let carol = SecretKey::from_bytes(&[98; 32]);
+            let (mut state, first, theirs) = roster_of(69, &ours).await;
+
+            let vector = signed_vector("first-ff", &first, &theirs, carol.public());
+            assert!(
+                super::handle_link_state(&vector, &mut state),
+                "the first of 70 roster peers is still heard"
+            );
+            ours.close().await;
+            theirs.close().await;
+        });
+    }
+
+    // Keys that the roster does not hold are cheap to mint, and a proof of one must not push a
+    // roster peer out of the trust.
+    #[test]
+    fn proofs_of_keys_outside_the_roster_do_not_take_the_trust_of_a_roster_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let ours = handle_for(&SecretKey::from_bytes(&[97; 32])).await;
+            let carol = SecretKey::from_bytes(&[96; 32]);
+            let (mut state, first, theirs) = roster_of(0, &ours).await;
+            for _ in 0..70 {
+                state.note_proven_endpoint(
+                    Identity::generate().author_key(),
+                    SecretKey::generate().public(),
+                );
+            }
+
+            let vector = signed_vector("first-ff", &first, &theirs, carol.public());
+            assert!(
+                super::handle_link_state(&vector, &mut state),
+                "70 minted proofs outside the roster do not evict the roster peer"
+            );
+            ours.close().await;
+            theirs.close().await;
         });
     }
 
@@ -4412,6 +4473,7 @@ mod parked_link_state_tests {
             state.multihop = Some(ours.clone());
 
             let signer = Identity::generate();
+            state.peers.insert(signer.author_key());
             let older = vector_message("alice-aa", &theirs, vec![(bob.public(), 10)]).sign(&signer);
             let newer = vector_message(
                 "alice-aa",

@@ -58,6 +58,9 @@ pub(crate) struct ProvenEndpoints {
     by_signer: HashMap<AuthorKey, EndpointId>,
     order: VecDeque<AuthorKey>,
     cap: usize,
+    /// The endpoint of each roster key whose proof was checked, for the trust in a link vector.
+    /// It has no cap and no order: the roster bounds it, and the sweep drops a key that left.
+    trusted: HashMap<AuthorKey, EndpointId>,
 }
 
 impl ProvenEndpoints {
@@ -66,7 +69,29 @@ impl ProvenEndpoints {
             by_signer: HashMap::new(),
             order: VecDeque::new(),
             cap,
+            trusted: HashMap::new(),
         }
+    }
+
+    /// The endpoint that `signer`, a key of the roster, proved.
+    #[cfg(feature = "multihop")]
+    pub(crate) fn trusted(&self, signer: &AuthorKey) -> Option<EndpointId> {
+        self.trusted.get(signer).copied()
+    }
+
+    /// Keep the trust in `signer` at `endpoint`. The caller admits roster keys only.
+    pub(crate) fn trust(&mut self, signer: AuthorKey, endpoint: EndpointId) {
+        self.trusted.insert(signer, endpoint);
+    }
+
+    /// Drop the trust in each key that `keep` refuses.
+    pub(crate) fn retain_trusted(&mut self, keep: impl Fn(&AuthorKey) -> bool) {
+        self.trusted.retain(|signer, _| keep(signer));
+    }
+
+    /// Drop the trust in `signer`.
+    pub(crate) fn forget_trust(&mut self, signer: &AuthorKey) {
+        self.trusted.remove(signer);
     }
 
     pub(crate) fn get(&self, signer: &AuthorKey) -> Option<EndpointId> {
@@ -108,6 +133,7 @@ impl ProvenEndpoints {
     /// endpoint by nickname, which a signer can take over; a pair missed that
     /// way is no longer linked, so the cap evicts it later.
     pub(crate) fn forget_endpoint(&mut self, endpoint: EndpointId) {
+        self.trusted.retain(|_, eid| *eid != endpoint);
         self.by_signer.retain(|_, eid| *eid != endpoint);
         let by_signer = &self.by_signer;
         self.order.retain(|signer| by_signer.contains_key(signer));
