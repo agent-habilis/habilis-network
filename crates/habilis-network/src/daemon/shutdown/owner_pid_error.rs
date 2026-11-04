@@ -22,7 +22,8 @@ pub enum OwnerPidError {
     Reserved(u32),
     /// The pid is the calling process's own.
     OwnSelf(u32),
-    /// No live process has the pid.
+    /// No live process has the pid, or (on Windows) this process cannot read it:
+    /// an owner of another account.
     NotRunning(u32),
 }
 
@@ -35,7 +36,13 @@ impl fmt::Display for OwnerPidError {
                 "owner pid {pid} is init or invalid. Give a live process id greater than 1"
             ),
             Self::OwnSelf(pid) => write!(formatter, "owner pid {pid} is this process itself"),
+            #[cfg(not(windows))]
             Self::NotRunning(pid) => write!(formatter, "owner pid {pid} is not running"),
+            #[cfg(windows)]
+            Self::NotRunning(pid) => write!(
+                formatter,
+                "owner pid {pid} is not running or cannot be read"
+            ),
         }
     }
 }

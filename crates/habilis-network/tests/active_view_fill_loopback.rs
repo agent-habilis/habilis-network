@@ -167,9 +167,19 @@ async fn until_every_view_holds(
     }
 }
 
+/// On Windows the relay of the test logs a client that reset its connection while the nodes
+/// close as ERROR (`os error 10054`), which is no fault (#31). The fix is agent-habilis/iroh#5;
+/// remove this function and its calls when the pin of iroh moves to it.
+#[cfg(windows)]
+fn allow_the_relay_reset_of_31(guard: &habilis_network_test_tracing::Guard) {
+    guard.allow_error("iroh_relay::server::http_server", "ConnectionReset");
+}
+
 #[test]
 fn a_mesh_of_ten_links_every_member_to_every_other() {
     let guard = habilis_network_test_tracing::init();
+    #[cfg(windows)]
+    allow_the_relay_reset_of_31(&guard);
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         // Two members can claim the rendezvous a few milliseconds apart: a holder that is bound and
         // not serving yet answers the probe with a refusal, which the probe reads as silence. The
@@ -200,6 +210,8 @@ fn a_mesh_of_ten_links_every_member_to_every_other() {
 #[test]
 fn a_mesh_of_g_plus_one_links_every_member_to_every_other_the_beacon_holder_too() {
     let guard = habilis_network_test_tracing::init();
+    #[cfg(windows)]
+    allow_the_relay_reset_of_31(&guard);
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (members, keep) = mesh(VIEW_CAP + 1, VIEW_CAP).await;
 

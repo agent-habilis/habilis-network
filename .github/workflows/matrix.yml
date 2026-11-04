@@ -23,14 +23,32 @@ concurrency:
 
 jobs:
   matrix:
-    name: Send ladder matrix and D11 gate
-    runs-on: ubuntu-latest
+    name: Send ladder matrix and D11 gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     # Each cell bounds its own waits, so a healthy run ends well inside this; a
     # hang ends as a red check.
     timeout-minutes: 180
+    strategy:
+      # A red Windows leg must not hide the Linux result, nor the reverse.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v6
+
+      # The two steps below are the Windows leg only, so that the Linux leg
+      # resolves to the same steps and env as before. NASM is for `aws-lc-sys`.
+      # The variable goes to the steps after it: the debug build of the test
+      # executables did not fit on the disk of a developer machine, so the leg
+      # builds without debug info (see the `windows` job in ci.yml).
+      - uses: ilammy/setup-nasm@v1
+        if: runner.os == 'Windows'
+      - name: No debug info
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: Swatinem/rust-cache@v2
 

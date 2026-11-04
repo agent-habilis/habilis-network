@@ -6,7 +6,7 @@
 
 mod in_flight_dial;
 mod registration;
-mod timeouts;
+pub(super) mod timeouts;
 pub(crate) use timeouts::{COOLDOWN_REFUSED, DIAL_TIMEOUT};
 mod unicast_pool;
 pub(crate) use unicast_pool::UnicastPool;

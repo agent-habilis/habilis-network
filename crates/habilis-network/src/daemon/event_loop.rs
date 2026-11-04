@@ -18,7 +18,6 @@ use crate::util;
 use crate::{lookup, transport};
 use iroh_gossip::net;
 use n0_future::{task, time};
-#[cfg(feature = "host")]
 use serde::de;
 use std::{future, path, process};
 pub(super) mod ctx_parts;
@@ -137,7 +136,7 @@ async fn run_checked<Driver: NodeDriver>(
     } = config;
 
     // Every driver-derived fact in one place. Only the CLI exits the
-    // process on quit and binds the unix socket; in-process drivers
+    // process on quit and binds the IPC endpoint; in-process drivers
     // (in-process: library API or MCP) take typed requests on `session_rx` instead.
     let exit_on_quit = matches!(runtime.driver, DriverMode::Cli);
     #[cfg(feature = "host")]
@@ -185,22 +184,27 @@ async fn run_checked<Driver: NodeDriver>(
     .await;
     let (sender, receiver) = join_gossip(&mut state, endpoints.topic);
 
-    let ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>> = control_socket(
-        ipc_listener_disabled,
-        runtime.runtime_base.as_deref(),
-        &mesh.mesh,
-        &mesh.author,
-        &runtime.sink,
+    let (ipc_rx, quit_rx): ControlChannels<Driver::Ipc> = control_and_quit(
+        &mut state,
+        ControlChoice {
+            disabled: ipc_listener_disabled,
+            handle_signals,
+            exit_on_quit,
+            #[cfg(feature = "host")]
+            owner: runtime.owner,
+        },
+        ControlTarget {
+            mesh: &mesh.mesh,
+            author: &mesh.author,
+            base: runtime.runtime_base.as_deref(),
+            sink: &runtime.sink,
+        },
     );
 
     // Arrival announce is deferred to the first `NeighborUp` — see
     // `gossip::handle_gossip_event`.
 
     let intervals = build_maintenance_intervals().await;
-    #[cfg(feature = "host")]
-    let quit_rx = quit_channel(handle_signals, exit_on_quit, runtime.owner);
-    #[cfg(not(feature = "host"))]
-    let quit_rx = quit_channel(handle_signals, exit_on_quit);
 
     // Flip `ready` to `true` only once the daemon can actually serve, then
     // re-write the state file (the earlier write reported `ready: false`) and
@@ -278,6 +282,77 @@ async fn run_checked<Driver: NodeDriver>(
     .await
 }
 
+/// How the loop takes its control endpoint and its quit channel.
+#[derive(Clone, Copy)]
+struct ControlChoice {
+    /// No endpoint: an in-process driver takes requests on its own channel.
+    disabled: bool,
+    /// Whether this session registers the process-wide signal handlers.
+    handle_signals: SignalHandling,
+    /// Whether a quit exits the process: the CLI daemon.
+    exit_on_quit: bool,
+    /// The process the daemon lives for, in place of its parent.
+    #[cfg(feature = "host")]
+    owner: Option<shutdown::Owner>,
+}
+
+/// Where the control endpoint of the loop is bound, and who hears of its failure.
+#[derive(Clone, Copy)]
+struct ControlTarget<'config> {
+    mesh: &'config MeshId,
+    author: &'config Nickname,
+    base: Option<&'config path::Path>,
+    // The IPC task keeps a handle to the sink after the bind returns.
+    sink: &'config Arc<dyn NodeSink>,
+}
+
+/// What [`control_and_quit`] gives: the receiver of the IPC commands, when an endpoint was bound,
+/// and the quit channel of the loop.
+type ControlChannels<Ipc> = (Option<mpsc::Receiver<IpcMessage<Ipc>>>, mpsc::Receiver<()>);
+
+/// The control endpoint of the daemon and the quit channel of the loop. On Windows the quit
+/// channel is made before the IPC endpoint binds: the IPC `quit` feeds the same channel as the
+/// console events, so its sender goes to the accept loop, and the state keeps the marker of the
+/// endpoint, which the shutdown removes. A session that must not register process-wide handlers
+/// gets a channel that no event feeds.
+fn control_and_quit<Ipc: de::DeserializeOwned + Send + 'static>(
+    state: &mut EventLoopState,
+    choice: ControlChoice,
+    target: ControlTarget<'_>,
+) -> ControlChannels<Ipc> {
+    let ControlTarget {
+        mesh,
+        author,
+        base,
+        sink,
+    } = target;
+    #[cfg(all(windows, feature = "host"))]
+    {
+        let (quit_tx, quit_rx) =
+            quit_channel(choice.handle_signals, choice.exit_on_quit, choice.owner);
+        let control = ipc::EngineControl {
+            mesh: mesh.clone(),
+            quit_tx,
+        };
+        let spawned = control_socket(choice.disabled, base, control, author, sink);
+        let ipc_rx = spawned.map(|(rx, marker)| {
+            state.ipc_marker = Some(marker);
+            rx
+        });
+        (ipc_rx, quit_rx)
+    }
+    #[cfg(not(all(windows, feature = "host")))]
+    {
+        let _ = state;
+        let ipc_rx = control_socket(choice.disabled, base, mesh, author, sink);
+        #[cfg(feature = "host")]
+        let quit_rx = quit_channel(choice.handle_signals, choice.exit_on_quit, choice.owner);
+        #[cfg(not(feature = "host"))]
+        let quit_rx = quit_channel(choice.handle_signals, choice.exit_on_quit);
+        (ipc_rx, quit_rx)
+    }
+}
+
 /// What the driver hands the loop: its quit and message channels, whether the loop binds the unix
 /// socket, and how it handles signals.
 fn driver_channels(
@@ -300,7 +375,7 @@ fn driver_channels(
 
 /// The control socket of the daemon, bound here, before the caller marks the session ready. `None`
 /// when the driver has no socket: in-process drivers take requests on their own channel.
-#[cfg(feature = "host")]
+#[cfg(all(not(windows), feature = "host"))]
 fn control_socket<Ipc: de::DeserializeOwned + Send + 'static>(
     disabled: bool,
     runtime_base: Option<&path::Path>,
@@ -310,6 +385,20 @@ fn control_socket<Ipc: de::DeserializeOwned + Send + 'static>(
     sink: &Arc<dyn NodeSink>,
 ) -> Option<mpsc::Receiver<IpcMessage<Ipc>>> {
     spawn_ipc_rx(disabled, runtime_base, mesh_id, author, sink)
+}
+
+/// The control endpoint of a Windows daemon, with the marker that names it. `control` answers the
+/// engine's own `quit`, which feeds the quit channel of the loop.
+#[cfg(all(windows, feature = "host"))]
+fn control_socket<Ipc: de::DeserializeOwned + Send + 'static>(
+    disabled: bool,
+    runtime_base: Option<&path::Path>,
+    control: ipc::EngineControl,
+    author: &Nickname,
+    // The IPC task keeps a handle to the sink after this call returns.
+    sink: &Arc<dyn NodeSink>,
+) -> Option<SpawnedIpc<Ipc>> {
+    spawn_ipc_rx(disabled, runtime_base, control, author, sink)
 }
 
 /// A browser binds no control socket. The loop keeps its IPC `select!` arm — `IpcMessage` is
@@ -337,7 +426,7 @@ fn quit_channel(
     handle_signals: SignalHandling,
     exit_on_quit: bool,
     owner: Option<shutdown::Owner>,
-) -> mpsc::Receiver<()> {
+) -> shutdown::QuitChannel {
     if handle_signals == SignalHandling::Handle {
         shutdown::spawn_quit_signal_tasks(exit_on_quit, owner)
     } else {
@@ -1706,6 +1795,7 @@ async fn run_loop<Driver: NodeDriver>(
                 None => { lp.external_req_rx = None; },
                 Some(request) => { lp.session_request(request).await; },
             },
+            // The signals, the owner watch, and on Windows the IPC `quit` all land here.
             _ = lp.quit_rx.recv() => {
                 exit_after_release = lp.quit().await;
                 break;
@@ -1727,11 +1817,12 @@ async fn run_loop<Driver: NodeDriver>(
 fn spawn_ipc_rx<Cmd: de::DeserializeOwned + Send + 'static>(
     disabled: bool,
     runtime_base: Option<&path::Path>,
-    mesh: &MeshId,
+    #[cfg(windows)] control: ipc::EngineControl,
+    #[cfg(not(windows))] mesh: &MeshId,
     author: &Nickname,
     // the IPC server takes its own clone of the shared sink
     sink: &Arc<dyn NodeSink>,
-) -> Option<mpsc::Receiver<IpcMessage<Cmd>>> {
+) -> Option<SpawnedIpc<Cmd>> {
     // In-process mode (in-process: library API or MCP): no socket. Returning `None` leaves
     // the loop's IPC `select!` arm inert (it pends forever), so the
     // unix-socket listener is never bound — those drivers use the typed
@@ -1748,11 +1839,20 @@ fn spawn_ipc_rx<Cmd: de::DeserializeOwned + Send + 'static>(
     // failure is non-fatal — the daemon still gossips; it just can't take
     // IPC — matching the prior best-effort behavior, only now observed
     // before readiness rather than racing it.
-    let listener = match ipc::bind(base, mesh, author) {
-        Ok(listener) => listener,
+    #[cfg(windows)]
+    let mesh = &control.mesh;
+    let bound = match ipc::bind(base, mesh, author) {
+        Ok(bound) => bound,
         Err(error) => {
             sink.emit(NodeEvent::Error(format!("IPC: {error}")));
+            #[cfg(unix)]
             tracing::warn!(%error, "IPC: failed to bind socket");
+            #[cfg(windows)]
+            tracing::warn!(
+                target: "habilis_network::lifecycle",
+                %error,
+                "IPC: failed to bind socket"
+            );
             return None;
         }
     };
@@ -1760,9 +1860,27 @@ fn spawn_ipc_rx<Cmd: de::DeserializeOwned + Send + 'static>(
         mpsc::Sender<IpcMessage<Cmd>>,
         mpsc::Receiver<IpcMessage<Cmd>>,
     ) = mpsc::channel(32);
-    tokio::spawn(ipc::serve(listener, ipc_tx, Arc::clone(sink)));
-    Some(rx)
+    tokio::spawn(ipc::serve(
+        bound.listener,
+        ipc_tx,
+        #[cfg(windows)]
+        control,
+        Arc::clone(sink),
+    ));
+    #[cfg(windows)]
+    let spawned = (rx, bound.marker);
+    #[cfg(not(windows))]
+    let spawned = rx;
+    Some(spawned)
 }
+
+/// What [`spawn_ipc_rx`] gives: the receiver of the IPC commands, and on
+/// Windows the marker of the endpoint.
+#[cfg(all(windows, feature = "host"))]
+type SpawnedIpc<Cmd> = (mpsc::Receiver<IpcMessage<Cmd>>, ipc::IpcMarker);
+/// What [`spawn_ipc_rx`] gives off Windows: the receiver of the IPC commands.
+#[cfg(all(not(windows), feature = "host"))]
+type SpawnedIpc<Cmd> = mpsc::Receiver<IpcMessage<Cmd>>;
 
 /// Sleep until a ping round's deadline, or pend forever when no round
 /// is active. Lets the event loop's `select!` carry a ping-finalize arm

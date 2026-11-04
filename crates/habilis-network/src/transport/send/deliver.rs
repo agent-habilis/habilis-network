@@ -26,7 +26,9 @@ use n0_future::task;
 /// It returns at once: it never waits on a dial, on the wait for a direct path, or on a write.
 /// A broadcast, a frame held for a direct path, a refused frame, and a send to a warm connection
 /// give their verdict here. A directed message to a cold peer is sent by a task, and the verdict
-/// comes through [`Delivered::Pending`].
+/// comes through [`Delivered::Pending`]. On Windows, a warm connection with no direct path
+/// selected gives its verdict through [`Delivered::Pending`], after a wait of up to the
+/// path-select budget.
 ///
 /// # Errors
 /// Propagates a gossip broadcast failure, a refused path, or a cold peer on the dial-failure
@@ -117,7 +119,8 @@ pub(crate) fn resolve(
 ///   second never does, so a retry budget must not rely on it.
 /// - its only path is a relay that carries no payload. A connection dialed
 ///   moments ago reads the same way until its path is selected, for up to
-///   the path-select budget.
+///   the path-select budget. On Windows this case returns `true`: the send waits on a task, and
+///   a refusal at the end is only logged.
 /// - it is cold and on the per-peer dial-failure cooldown.
 /// - the gossip broadcast failed.
 ///
@@ -230,7 +233,14 @@ fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
 async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> Result<Delivered> {
     match pool.send_if_warm(eid, bytes.clone().into_bytes()).await {
         WarmSend::Sent => Ok(Delivered::Done),
+        #[cfg(not(windows))]
         WarmSend::Refused => Err(anyhow::anyhow!("{}", transport::RELAY_REFUSED)),
+        // Windows only (#45). A probe can pool a connection before iroh opens the selected path
+        // on it, and the connection then reads as no path selected. Here the send waits for a
+        // direct path as a cold send does, up to `PATH_SELECT_TIMEOUT`, and fails with the same
+        // refusal if none is selected.
+        #[cfg(windows)]
+        WarmSend::Refused => Ok(Delivered::Pending(send_after_path_wait(eid, bytes, pool))),
         WarmSend::Cold => {
             if pool.is_cooling(eid).await {
                 return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
@@ -253,6 +263,31 @@ async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> 
             Ok(Delivered::Pending(outcome))
         }
     }
+}
+
+/// The send of a warm connection that has no direct path selected yet, on a task. The guard of
+/// the dial is taken first, as for a cold send, so a second send to the peer that also finds no
+/// direct path waits for this one. A send that finds a direct path does not wait, so the order
+/// of the two is not guaranteed. The wait counts as a dial attempt. The error is not given a
+/// context: a send that finds no direct path fails with the bare refusal.
+#[cfg(windows)]
+fn send_after_path_wait(
+    eid: EndpointId,
+    bytes: WireFrame,
+    pool: &UnicastPool,
+) -> transport::PendingSend {
+    let registration = pool.register_dial(eid);
+    let (outcome_tx, outcome) = oneshot::channel();
+    let pool = pool.clone();
+    task::spawn(async move {
+        let sent = pool
+            .send_registered(registration, eid, bytes.into_bytes())
+            .await;
+        if let Err(Err(error)) = outcome_tx.send(sent) {
+            tracing::debug!(target: "habilis_network::gossip", %eid, %error, "background send not delivered");
+        }
+    });
+    outcome
 }
 
 /// Send a courtesy reply from the receive path, where a stall is not this

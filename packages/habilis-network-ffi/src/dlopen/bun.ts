@@ -15,7 +15,7 @@ function ffiType(type: CType): FFIType {
   switch (type) {
     case 'i32':
       return FFIType.i32
-    case 'isize':
+    case 'i64':
       return FFIType.i64
     case 'usize':
       return FFIType.u64
@@ -53,13 +53,13 @@ export function loadWithBun(path: string): NativeLibrary {
     // of the (blocking) call, the same keep-alive rule `encodeOpts` states.
     const holds: Uint8Array[] = []
     const lowered = args.map((arg, index) => {
-      // Widened: no ABI *argument* is an `isize` today, but the lowering is
+      // Widened: no ABI *argument* is an `i64` today, but the lowering is
       // written for the whole vocabulary so a header change cannot skew it.
       const type = signature.args[index] as CType | undefined
       switch (type) {
         case 'i32':
           return arg as number
-        case 'isize':
+        case 'i64':
         case 'usize':
           return arg as bigint
         case 'buf':
@@ -84,7 +84,7 @@ export function loadWithBun(path: string): NativeLibrary {
     switch (signature.returns) {
       case 'i32':
         return Number(result)
-      case 'isize':
+      case 'i64':
       case 'usize':
         return BigInt(result as number | bigint)
       default:

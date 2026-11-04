@@ -22,7 +22,9 @@ mod habilis_network_stream_opts;
 mod habilis_network_streams;
 
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char, c_int, c_long};
+#[cfg(not(windows))]
+use std::ffi;
+use std::ffi::{CStr, CString, c_char, c_int};
 use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -37,6 +39,14 @@ pub use habilis_network_producer::HabilisNetworkProducer;
 pub use habilis_network_reader::HabilisNetworkReader;
 pub use habilis_network_stream_opts::HabilisNetworkStreamOpts;
 pub use habilis_network_streams::HabilisNetworkStreams;
+
+/// `habilis_network_len` of the header: the return type of a call that returns
+/// a count or a length. `c_long` on every target but Windows, as before the
+/// port; `i64` on Windows, where `c_long` is 32 bits.
+#[cfg(not(windows))]
+type CLen = ffi::c_long;
+#[cfg(windows)]
+type CLen = i64;
 
 /// Capacity of [`HabilisNetworkMsg::nick`], including the NUL. A minted nickname is two
 /// short words; a longer chosen one is truncated to 63 bytes.
@@ -109,7 +119,7 @@ unsafe fn json_out(
     buffer: *mut c_char,
     cap: usize,
     render: impl FnOnce(&Mesh) -> anyhow::Result<String>,
-) -> c_long {
+) -> CLen {
     guard(-1, || {
         clear_error();
         // SAFETY: live handle or NULL, forwarded from this function's contract.
@@ -181,7 +191,7 @@ fn url_list(text: &str) -> Vec<String> {
 ///
 /// # Safety
 /// `buf` is NULL, or writable for `cap` bytes.
-unsafe fn copy_out(text: &str, buffer: *mut c_char, cap: usize) -> c_long {
+unsafe fn copy_out(text: &str, buffer: *mut c_char, cap: usize) -> CLen {
     let bytes = text.as_bytes();
     let needed = bytes.len();
     if !buffer.is_null() && needed < cap {
@@ -194,8 +204,8 @@ unsafe fn copy_out(text: &str, buffer: *mut c_char, cap: usize) -> c_long {
         }
     }
     // Lengths here are JSON documents bounded by the automerge doc / roster
-    // size, never anywhere near `c_long::MAX`.
-    c_long::try_from(needed).unwrap_or(c_long::MAX)
+    // size, never anywhere near `CLen::MAX`.
+    CLen::try_from(needed).unwrap_or(CLen::MAX)
 }
 
 /// Fill `HabilisNetworkMsg::nick`, truncating a pathologically long nickname rather than
@@ -379,7 +389,7 @@ pub unsafe extern "C" fn habilis_network_msg_recv(
     cap: usize,
     timeout_ms: c_int,
     out: *mut HabilisNetworkMsg,
-) -> c_long {
+) -> CLen {
     guard(-1, || {
         clear_error();
         // SAFETY: live, exclusively-owned handle per the contract above.
@@ -473,7 +483,7 @@ pub unsafe extern "C" fn habilis_network_mesh_state_json(
     handle: *mut HabilisNetworkMesh,
     buffer: *mut c_char,
     cap: usize,
-) -> c_long {
+) -> CLen {
     // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
     // the contract above.
     unsafe {
@@ -497,7 +507,7 @@ pub unsafe extern "C" fn habilis_network_mesh_peers_json(
     handle: *mut HabilisNetworkMesh,
     buffer: *mut c_char,
     cap: usize,
-) -> c_long {
+) -> CLen {
     // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
     // the contract above.
     unsafe {
@@ -517,9 +527,7 @@ pub unsafe extern "C" fn habilis_network_mesh_peers_json(
 /// # Safety
 /// `handle` must be a live handle from [`habilis_network_mesh_open`], or NULL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn habilis_network_mesh_peer_count(
-    handle: *mut HabilisNetworkMesh,
-) -> c_long {
+pub unsafe extern "C" fn habilis_network_mesh_peer_count(handle: *mut HabilisNetworkMesh) -> CLen {
     guard(-1, || {
         clear_error();
         // SAFETY: live handle or NULL, per the contract above.
@@ -529,7 +537,7 @@ pub unsafe extern "C" fn habilis_network_mesh_peer_count(
         };
         match handle.mesh.peer_count() {
             // A roster is bounded by the active-view cap; this cannot overflow.
-            Ok(count) => c_long::try_from(count).unwrap_or(c_long::MAX),
+            Ok(count) => CLen::try_from(count).unwrap_or(CLen::MAX),
             Err(error) => {
                 set_error(&format!("{error:#}"));
                 -1
@@ -801,7 +809,7 @@ pub unsafe extern "C" fn habilis_network_stream_read(
     buffer: *mut u8,
     cap: usize,
     timeout_ms: c_int,
-) -> c_long {
+) -> CLen {
     guard(-1, || {
         clear_error();
         // SAFETY: live, exclusively-owned handle per the contract above.
@@ -816,7 +824,7 @@ pub unsafe extern "C" fn habilis_network_stream_read(
         // SAFETY: writable for `cap` bytes per the contract above.
         let buffer = unsafe { slice::from_raw_parts_mut(buffer, cap) };
         match handle.reader.read(buffer, timeout_of(timeout_ms)) {
-            Ok(Read::Bytes(read)) => c_long::try_from(read).unwrap_or(c_long::MAX),
+            Ok(Read::Bytes(read)) => CLen::try_from(read).unwrap_or(CLen::MAX),
             Ok(Read::Timeout) => 0,
             Ok(Read::End) => -2,
             Err(error) => {

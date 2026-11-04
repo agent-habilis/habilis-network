@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use crate::util::file_name;
 use crate::{beacon, transport};
 use iroh_gossip::{api, net, proto};
 use std::{mem, sync};
@@ -627,6 +629,26 @@ fn validated_mesh_config(kind: &SetupKind) -> Result<&MeshConfig> {
     Ok(mesh_config)
 }
 
+/// The local nickname is the stem of every per-member file (state, log, IPC marker), so on
+/// Windows it must also be a valid file stem. Only the local name: a peer's name never becomes a
+/// file, and the wire rule of `Nickname` stays the same everywhere. Nothing to refuse elsewhere.
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the Windows version can refuse; one signature for every OS"
+    )
+)]
+fn refuse_a_local_nickname_this_os_cannot_store(author: &Nickname) -> Result<()> {
+    #[cfg(windows)]
+    if let Some(problem) = file_name::windows_file_stem_problem(author.as_str()) {
+        anyhow::bail!("the nickname '{author}' cannot be used on Windows: the name {problem}");
+    }
+    #[cfg(not(windows))]
+    let _ = author;
+    Ok(())
+}
+
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -642,6 +664,8 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         transports,
         per_peer_gate,
     } = params;
+    // Checked first, before any file or socket exists.
+    refuse_a_local_nickname_this_os_cannot_store(&author)?;
     let endpoint_owner = if injected.is_none() {
         EndpointOwner::Engine
     } else {
@@ -1102,6 +1126,8 @@ async fn setup_join(
 #[cfg(all(test, feature = "host"))]
 mod tests {
     use crate::daemon::node::SignalHandling;
+    #[cfg(windows)]
+    use crate::protocol;
     use crate::transport::PayloadPath;
     use crate::{embed, lookup, membership, transport};
     use tokio::time;
@@ -1215,6 +1241,32 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::testing::{errors_through_runtime_drop, silent_relay_rung};
+
+    // On Windows a local nickname that is no valid file stem stops the setup
+    // with a message that names the reason, before any endpoint binds.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_device_name_is_refused_as_the_local_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let nickname = protocol::Nickname::from("con");
+            let (kind, author) =
+                membership::resolve_kind(&membership::JoinOptions::default(), Some(nickname))
+                    .expect("a kind");
+            let result = super::setup_mesh(
+                kind,
+                super::SetupParams::new(author, embed::SilentSink).max_peers(8),
+            )
+            .await;
+            let Err(error) = result else {
+                panic!("the nickname 'con' must be refused on Windows");
+            };
+            let shown = error.to_string();
+            assert!(
+                shown.contains("cannot be used on Windows") && shown.contains("device"),
+                "{shown}"
+            );
+        });
+    }
 
     // The mesh policy decides multi-hop: the default list has it, a list that
     // leaves it out has none, and no flag says otherwise.

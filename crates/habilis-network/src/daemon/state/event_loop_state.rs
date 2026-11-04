@@ -15,7 +15,7 @@ use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
 use crate::doc;
 
-use crate::transport::UdpTransport;
+use crate::transport::{ResendOutbox, UdpTransport};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -180,7 +180,7 @@ pub struct EventLoopState {
     digest_unreadable: Cooldown<AuthorKey>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
-    pub(crate) resend_outbox: transport::ResendOutbox,
+    pub(crate) resend_outbox: ResendOutbox,
     /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
     /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -421,6 +421,11 @@ pub struct EventLoopState {
     pub(crate) pending_outbound: BoundedQueue<(Verified, WireFrame)>,
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
+    /// The marker that makes this daemon's IPC endpoint findable, on Windows.
+    /// Set once the endpoint is bound; `None` for an in-process node, which
+    /// binds none. The shutdown removes it, beside the state file.
+    #[cfg(all(windows, feature = "host"))]
+    pub(crate) ipc_marker: Option<transport::ipc::IpcMarker>,
     /// When advertising (`create --advertise`), the directory's
     /// re-broadcast task reads the live peer count from here.
     /// Mirrors `peer_count` (`peers.len() + 1`), refreshed
@@ -533,8 +538,7 @@ impl EventLoopState {
             password: mesh_password,
             key: mesh_key,
         } = init.secrets;
-        let (resend_outbox, resend_receiver) =
-            transport::ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
+        let (resend_outbox, resend_receiver) = ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
         // Per-channel encryption keys, domain-separated from each other and from
         // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
         // broadcast chat stay plaintext, exactly as before.
@@ -627,6 +631,8 @@ impl EventLoopState {
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
             state_file: init.state_file,
+            #[cfg(all(windows, feature = "host"))]
+            ipc_marker: None,
             live_count: None,
             message_log: MessageLog::new(MESSAGE_LOG_SIZE),
             reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),

@@ -135,19 +135,10 @@ pub fn clear_captured_logs() {
 ///
 /// Panics if the calling thread is not the thread of a live guard.
 pub fn expect_warn(target: &str, text: &str) {
-    let current = thread::current();
-    let name = current.name().unwrap_or_default();
-    let live = LIVE.lock();
-    let slot = live
-        .iter()
-        .find(|slot| slot.thread == name)
-        .unwrap_or_else(|| panic!("expect_warn outside a guarded test (thread {name})"));
-    slot.expected.lock().push(Expectation {
-        target: target.to_owned(),
-        text: text.to_owned(),
-        seen: false,
-        optional: false,
-    });
+    push_to_current(
+        "expect_warn",
+        Expectation::new(Level::WARN, target, text, false),
+    );
 }
 
 /// Like [`expect_warn`], but the WARN may also not come. For a scenario that can race, such as a
@@ -158,19 +149,37 @@ pub fn expect_warn(target: &str, text: &str) {
 ///
 /// Panics if the calling thread is not the thread of a live guard.
 pub fn allow_warn(target: &str, text: &str) {
+    push_to_current(
+        "allow_warn",
+        Expectation::new(Level::WARN, target, text, true),
+    );
+}
+
+/// Like [`allow_warn`], for an ERROR. Only for an ERROR of a dependency that the code under test
+/// cannot avoid, and that is no fault, such as a log of the relay of the test that a fix in the
+/// dependency removes. Name that fix next to the call, and remove the call with it.
+///
+/// # Panics
+///
+/// Panics if the calling thread is not the thread of a live guard.
+pub fn allow_error(target: &str, text: &str) {
+    push_to_current(
+        "allow_error",
+        Expectation::new(Level::ERROR, target, text, true),
+    );
+}
+
+/// Files `expectation` under the test of the calling thread. `caller` names the function in the
+/// panic.
+fn push_to_current(caller: &str, expectation: Expectation) {
     let current = thread::current();
     let name = current.name().unwrap_or_default();
     let live = LIVE.lock();
     let slot = live
         .iter()
         .find(|slot| slot.thread == name)
-        .unwrap_or_else(|| panic!("allow_warn outside a guarded test (thread {name})"));
-    slot.expected.lock().push(Expectation {
-        target: target.to_owned(),
-        text: text.to_owned(),
-        seen: false,
-        optional: true,
-    });
+        .unwrap_or_else(|| panic!("{caller} outside a guarded test (thread {name})"));
+    slot.expected.lock().push(expectation);
 }
 
 /// Whether the test of the calling thread has logged a WARN from `target` (a
@@ -366,22 +375,26 @@ impl Guard {
     /// module below it) whose message contains `text`. Use it only where the warning is the subject
     /// of the test; fix the code for every other warning.
     pub fn expect_warn(&self, target: &str, text: &str) {
-        self.slot.expected.lock().push(Expectation {
-            target: target.to_owned(),
-            text: text.to_owned(),
-            seen: false,
-            optional: false,
-        });
+        self.slot
+            .expected
+            .lock()
+            .push(Expectation::new(Level::WARN, target, text, false));
     }
 
     /// Like [`Self::expect_warn`], but the WARN may also not come, see [`allow_warn`].
     pub fn allow_warn(&self, target: &str, text: &str) {
-        self.slot.expected.lock().push(Expectation {
-            target: target.to_owned(),
-            text: text.to_owned(),
-            seen: false,
-            optional: true,
-        });
+        self.slot
+            .expected
+            .lock()
+            .push(Expectation::new(Level::WARN, target, text, true));
+    }
+
+    /// Like [`Self::allow_warn`], for an ERROR, see [`allow_error`].
+    pub fn allow_error(&self, target: &str, text: &str) {
+        self.slot
+            .expected
+            .lock()
+            .push(Expectation::new(Level::ERROR, target, text, true));
     }
 }
 
@@ -416,9 +429,7 @@ impl Slot {
         let mut expected = self.expected.lock();
         let mut problems = Vec::new();
         for logged in self.events.lock().iter() {
-            let hit = expected
-                .iter_mut()
-                .find(|want| logged.level == Level::WARN && want.matches(logged));
+            let hit = expected.iter_mut().find(|want| want.matches(logged));
             match hit {
                 Some(want) if logged.after.is_none() => want.seen = true,
                 _ if logged.after.is_some() => problems.push(late_line(logged)),
@@ -438,8 +449,8 @@ impl Slot {
                 continue;
             }
             problems.push(format!(
-                "  expected WARN {} containing {:?}, and it was not logged",
-                want.target, want.text
+                "  expected {} {} containing {:?}, and it was not logged",
+                want.level, want.target, want.text
             ));
         }
         problems
@@ -455,6 +466,8 @@ fn target_is_within(logged: &str, wanted: &str) -> bool {
 
 #[derive(Debug)]
 struct Expectation {
+    /// WARN or ERROR: an expectation of one level never excuses an event of the other.
+    level: Level,
     target: String,
     text: String,
     seen: bool,
@@ -463,8 +476,20 @@ struct Expectation {
 }
 
 impl Expectation {
+    fn new(level: Level, target: &str, text: &str, optional: bool) -> Self {
+        Self {
+            level,
+            target: target.to_owned(),
+            text: text.to_owned(),
+            seen: false,
+            optional,
+        }
+    }
+
     fn matches(&self, logged: &Logged) -> bool {
-        target_is_within(&logged.target, &self.target) && logged.text.contains(&self.text)
+        logged.level == self.level
+            && target_is_within(&logged.target, &self.target)
+            && logged.text.contains(&self.text)
     }
 }
 

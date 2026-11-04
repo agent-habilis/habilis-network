@@ -44,9 +44,10 @@ mod tests {
     use crate::transport::{PayloadPath, payload_path};
     use crate::util::{clock, tuning};
     use crate::{lookup, protocol, transport};
-    use iroh::endpoint::presets;
+    use iroh::endpoint::{self, presets};
     use iroh_gossip::net::Gossip;
     use iroh_gossip::proto;
+    use iroh_relay::server;
     use std::net::{UdpSocket, UdpSocket as std_UdpSocket};
     use std::time::{Duration, Duration as std_Duration, Instant as std_Instant};
     use tokio::sync::oneshot;
@@ -509,6 +510,144 @@ mod tests {
             );
             returned_endpoint.close().await;
             endpoint.close().await;
+        });
+    }
+
+    /// Alice holds a warm connection to bob whose only path is a local relay, on a mesh whose
+    /// relay is lookup only: no direct path can be selected on it. Bob holds the connection and
+    /// reports a frame if one ever arrives.
+    async fn relay_only_warm_pair() -> RelayOnlyPair {
+        let (relay_url, relay_server) = lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let bind = || {
+            let relay_url = relay_url.clone();
+            async move {
+                let builder: endpoint::Builder = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::custom([relay_url]))
+                    .clear_ip_transports();
+                builder
+                    .alpns(vec![transport::UNICAST_ALPN.to_vec()])
+                    .bind()
+                    .await
+                    .expect("bind an endpoint on the relay")
+            }
+        };
+        let bob_endpoint = bind().await;
+        let endpoint = bind().await;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let bob_addr = iroh::EndpointAddr::new(bob_endpoint.id()).with_relay_url(relay_url);
+        let state = state_with_pool(&endpoint, bob_addr);
+        let accepting = bob_endpoint.clone();
+        let received = tokio::spawn(async move {
+            let connection = accepting
+                .accept()
+                .await
+                .expect("an incoming connection")
+                .await
+                .expect("accept the connection");
+            match connection.accept_uni().await {
+                Ok(mut stream) => stream.read_to_end(64 * 1024).await.ok(),
+                Err(_) => None,
+            }
+        });
+        state
+            .unicast_pool
+            .warm_or_dial(endpoint_of_bob(&state))
+            .await
+            .expect("warm the pool over the relay");
+        RelayOnlyPair {
+            state,
+            endpoint,
+            sender: transport::MeshSender::new(gossip_sender),
+            bob_endpoint,
+            received,
+            _relay_server: relay_server,
+        }
+    }
+
+    struct RelayOnlyPair {
+        state: EventLoopState,
+        endpoint: iroh::Endpoint,
+        sender: transport::MeshSender,
+        bob_endpoint: iroh::Endpoint,
+        received: task::JoinHandle<Option<Vec<u8>>>,
+        _relay_server: server::Server,
+    }
+
+    impl RelayOnlyPair {
+        /// Whether bob read a frame within a short wait after the verdict.
+        async fn bob_read_a_frame(self) -> bool {
+            let got = time::timeout(Duration::from_millis(200), self.received).await;
+            self.bob_endpoint.close().await;
+            self.endpoint.close().await;
+            match got {
+                Err(_) => false,
+                Ok(joined) => joined.expect("bob's accept task").is_some(),
+            }
+        }
+    }
+
+    /// On Windows a warm connection with no direct path selected waits for one, as a cold send
+    /// does, and is refused with the bare refusal at the end of the path-select budget.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_warm_send_with_no_direct_path_waits_then_is_refused() {
+        use crate::transport::pool::timeouts;
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let pair = relay_only_warm_pair().await;
+            let message = directed_msg();
+            let bytes = message.serialize().expect("serialize");
+            let started = std_Instant::now();
+
+            let delivered = super::deliver(&message, bytes, &pair.state, &pair.sender).await;
+
+            let Ok(super::Delivered::Pending(outcome)) = delivered else {
+                panic!("the warm send must wait on a task, got {delivered:?}");
+            };
+            let error = outcome
+                .await
+                .expect("the task answers")
+                .expect_err("no direct path can come over the relay");
+            assert_eq!(
+                error.to_string(),
+                transport::RELAY_REFUSED,
+                "the bare refusal"
+            );
+            assert!(
+                started.elapsed() >= timeouts::PATH_SELECT_TIMEOUT,
+                "the refusal came before the path-select budget: {:?}",
+                started.elapsed()
+            );
+            assert!(!pair.bob_read_a_frame().await, "the refused frame arrived");
+        });
+    }
+
+    /// Elsewhere a warm connection with no direct path selected is refused at once.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_warm_send_with_no_direct_path_is_refused_at_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let pair = relay_only_warm_pair().await;
+            let message = directed_msg();
+            let bytes = message.serialize().expect("serialize");
+
+            let delivered = super::deliver(&message, bytes, &pair.state, &pair.sender).await;
+
+            let Err(error) = delivered else {
+                panic!("the warm send must be refused at once, got {delivered:?}");
+            };
+            assert_eq!(
+                error.to_string(),
+                transport::RELAY_REFUSED,
+                "the bare refusal"
+            );
+            assert!(!pair.bob_read_a_frame().await, "the refused frame arrived");
         });
     }
 
