@@ -35,6 +35,8 @@ const MEETING: Duration = Duration::from_mins(1);
 /// 30 s of the alive tick, whose deferred `PeerInfo` gives alice the proof of bob back and turns the
 /// answer point-to-point (seen at 29 s in the run without the nonce).
 const REPAIR_STATE: Duration = Duration::from_secs(20);
+/// How many runs the state digest answer test makes, while no answer goes on the connection.
+const STATE_ATTEMPTS: usize = 3;
 
 fn serial() -> &'static sync::Mutex<()> {
     static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
@@ -320,13 +322,13 @@ fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
     });
 }
 
-/// The answer goes to the connection of the digest, never on gossip, and the repair still works.
-/// The answer on gossip, where no unicast path exists, has unit tests in `antientropy.rs`.
-#[test]
-fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
-    let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
-    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+/// The state digest answer test, one run. A digest that came on the connection is answered on the
+/// connection, and the repair works. Returns whether an answer really went on the connection: under
+/// load a dial can be in flight, and then the answer falls back to gossip by design.
+async fn state_digest_answer_run() -> bool {
+    {
         let _one_at_a_time = serial().lock().await;
+        let first_line = logs().len();
         let nonce: u64 = rand::random();
         let topic = format!("resend-dedup-state-{nonce}");
 
@@ -343,7 +345,7 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
         // Alice must hold the proof of bob before she forgets it, or the first `PeerInfo` of bob, late,
         // would put it back after the forget. The line says that she took his `PeerInfo`.
         let waiting = Instant::now();
-        while !logs()
+        while !logs()[first_line..]
             .lines()
             .any(|line| line.contains("peerinfo received") && line.contains("author=bob"))
         {
@@ -378,23 +380,56 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
             started.elapsed()
         );
         let lines = lines_since(before);
-        let matching = lines
-            .lines()
-            .filter(|line| line.contains("state anti-entropy: resent frames a peer lacked"));
+        // Only a digest that came on the connection is answered on the connection. A digest that came on
+        // gossip, with the proof of bob forgotten, is answered on gossip by design.
+        let is_answer = |line: &&str| {
+            line.contains("state anti-entropy: resent frames a peer lacked")
+                && line.contains("arrived_unicast=true")
+        };
+        let matching = lines.lines().filter(is_answer);
         let answers: Vec<String> = matching.map(str::to_owned).collect();
         for line in &answers {
             eprintln!("state digest answer: {line}");
         }
-        let any_unicast = answers.iter().any(|line| !line.contains("unicast=0"));
-        let none_on_gossip = answers.iter().all(|line| line.contains("broadcast=0"));
+        // An answer whose send could not start (a dial in flight) goes on gossip by design. It was aimed
+        // at the connection of the digest, so it is no failure. It proves nothing about the connection.
+        let aimed = |line: &String| {
+            !line.contains("unicast=0") || line.contains("the send could not start")
+        };
+        let none_on_gossip = answers
+            .iter()
+            .all(|line| line.contains("broadcast=0") || aimed(line));
         assert!(
-            any_unicast && none_on_gossip,
+            none_on_gossip,
             "the answer goes to the connection of the digest, never on gossip\n{}",
             lines_since(before)
         );
+        let any_unicast = answers.iter().any(|line| !line.contains("unicast=0"));
 
         alice.leave().await.expect("alice leaves");
         bob.leave().await.expect("bob leaves");
+        any_unicast
+    }
+}
+
+/// A digest that came on the connection is answered on the connection, never on gossip, and the
+/// repair still works. The test does not judge an answer to a digest that came on gossip, nor an
+/// answer whose send could not start (a dial in flight): both go on gossip by design. A run with only
+/// such answers proves nothing about the connection, so the run is repeated. The answer on gossip,
+/// where no unicast path exists, has unit tests in `antientropy.rs`.
+#[test]
+fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
+    let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let mut attempt = 1;
+        while !state_digest_answer_run().await {
+            eprintln!("attempt {attempt} had no answer on the connection");
+            assert!(
+                attempt < STATE_ATTEMPTS,
+                "no answer went on the connection in {STATE_ATTEMPTS} attempts: the unicast path never started"
+            );
+            attempt += 1;
+        }
     });
 }
 
