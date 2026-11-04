@@ -1216,17 +1216,21 @@ impl EventLoopState {
             .is_some_and(|owner| *owner != key && self.peers.contains(owner))
     }
 
-    /// Whether the dial hint of `nickname` was made by a key that is not live, while another key
-    /// is live under the nickname. The hint names the endpoint of a peer that went quiet or left,
-    /// so a send must wait for the live key to rebind it. With no live key the quiet peer may
-    /// return, and its hint stays the target.
+    /// Whether the dial hint of `nickname` is no longer the way to reach whoever answers to it.
+    /// Two cases: the hint was made by a key that is not live, while another key is live under the
+    /// nickname (the hint names the endpoint of a peer that went quiet or left, so a send waits for
+    /// the live key to rebind it; with no live key the quiet peer may return, and its hint stays
+    /// the target); or the key that made the hint is live but renamed, so the old nickname no
+    /// longer names it.
     pub(crate) fn hint_is_stale(&self, nickname: &Nickname) -> bool {
-        let owner_gone = self
-            .hint_owner
-            .get(nickname)
-            .is_some_and(|owner| !self.peers.contains(owner));
+        let Some(owner) = self.hint_owner.get(nickname) else {
+            return false;
+        };
+        if self.peers.contains(owner) {
+            return self.names.get(owner).is_some_and(|name| name != nickname);
+        }
         let live = self.peers.iter().filter_map(|key| self.names.get(key));
-        owner_gone && live.into_iter().any(|name| name == nickname)
+        live.into_iter().any(|name| name == nickname)
     }
 
     /// How long the quiet peer `key` has been silent at `now`, suspends included.
