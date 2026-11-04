@@ -1675,6 +1675,46 @@ mod tests {
         );
     }
 
+    /// A connection that is closed and not yet swept from the table is not live: the sweep runs
+    /// once in 5 s, and the census reads in between.
+    #[test]
+    fn the_table_does_not_read_a_connection_that_is_closed() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use habilis_network_iroh_gossip_transport::hub::Hub;
+                use iroh::EndpointAddr;
+
+                let hub = Hub::new();
+                let (alice, alice_table, _alice_handle) = ip_and_gossip_node(47, &hub, true).await;
+                let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(48, &hub, true).await;
+                let router = protocol::Router::builder(bob.clone())
+                    .accept(GOSSIP_TEST_ALPN, HoldConnections)
+                    .spawn();
+                let target = EndpointAddr::from_parts(bob.id(), bob.addr().addrs);
+                let connection = alice
+                    .connect(target, GOSSIP_TEST_ALPN)
+                    .await
+                    .expect("connect");
+                assert_eq!(
+                    alice_table.quic_readings().len(),
+                    1,
+                    "the open connection is read"
+                );
+
+                connection.close(0u32.into(), b"done");
+
+                assert!(
+                    alice_table.quic_readings().is_empty(),
+                    "a closed connection is not read, though the sweep has not run"
+                );
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
+        );
+    }
+
     /// A pair that only gossip carries is not blocked, and a peer whose connection is gone is
     /// established no more, and allowed again.
     #[test]

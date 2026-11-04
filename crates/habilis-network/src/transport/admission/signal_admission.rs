@@ -478,7 +478,9 @@ impl SignalAdmission {
         let connections: Vec<Connection> = {
             let inner = self.lock();
             let handles = inner.slots.values().flat_map(|slot| slot.conns.iter());
-            handles.filter_map(WeakConnectionHandle::upgrade).collect()
+            let open = handles.filter_map(WeakConnectionHandle::upgrade);
+            open.filter(|connection| connection.close_reason().is_none())
+                .collect()
         };
         let reading = |connection: &Connection| QuicReading {
             id: connection.stable_id(),
