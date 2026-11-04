@@ -157,9 +157,10 @@ fn wire_cost_of_one_minute_with_5_peers() {
             0,
             "this node announced its own joined again for an arrival: {counter}"
         );
-        assert!(
-            counter.frames(FrameClass::Announce) <= 5,
-            "one PeerInfo per arrival is the bound: {counter}"
+        assert_eq!(
+            counter.frames(FrameClass::Announce),
+            5,
+            "each arrival needs exactly one PeerInfo dial hint: {counter}"
         );
         assert_eq!(
             counter.frames(FrameClass::Alive),

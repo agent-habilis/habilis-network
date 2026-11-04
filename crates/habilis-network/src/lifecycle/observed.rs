@@ -79,18 +79,7 @@ pub(crate) fn observe(
             }
         }
         if proves {
-            if is_newest {
-                // The dial hint was made by the key that held the nickname. Another key that takes
-                // it does not inherit the hint: a directed send would reach the old node.
-                let lapsed = state.clock_evidence.lapsed_keys.remove(&message.author);
-                let before = holder.or(lapsed);
-                if before.is_some_and(|held| held != message.key()) {
-                    state.forget_peer_endpoint(message.author.as_str());
-                }
-                state
-                    .peer_keys
-                    .insert(message.author.clone(), message.key());
-            }
+            settle_holder(message, holder, is_newest, state);
             // The newest stamp of the author, on its own clock: the test of a return compares two
             // stamps of one clock, so a skew between that clock and ours cancels.
             let newest = state
@@ -201,6 +190,37 @@ pub(crate) fn observe(
     Observed {
         surfaceable,
         update,
+    }
+}
+
+/// Apply a frame that proves presence to the holder of its nickname. The dial hint was made by the
+/// key that held the nickname, and another key that takes it does not inherit the hint: a directed
+/// send would reach the old node. A frame of another key than the lapsed holder clears the hint at
+/// any stamp, newest or not.
+fn settle_holder(
+    message: &Verified,
+    holder: Option<AuthorKey>,
+    is_newest: bool,
+    state: &mut EventLoopState,
+) {
+    let lapsed = state
+        .clock_evidence
+        .lapsed_keys
+        .get(&message.author)
+        .copied();
+    let lapsed_other = lapsed.is_some_and(|held| held != message.key());
+    if is_newest {
+        state.clock_evidence.lapsed_keys.remove(&message.author);
+        let before = holder.or(lapsed);
+        if before.is_some_and(|held| held != message.key()) {
+            state.forget_peer_endpoint(message.author.as_str());
+        }
+        state
+            .peer_keys
+            .insert(message.author.clone(), message.key());
+    } else if lapsed_other {
+        state.clock_evidence.lapsed_keys.remove(&message.author);
+        state.forget_peer_endpoint(message.author.as_str());
     }
 }
 
@@ -1938,6 +1958,69 @@ mod churn_red {
                     "the dial hint after a return (same key: {same_key}) is wrong"
                 );
             }
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A frame of another key under a lapsed nickname clears the dial hint at any stamp, also one
+    /// behind the last stamp of the old holder (review comment 4460873477). The sweep drops the stamp
+    /// record of a lapsed nickname, so the case is only reachable if that prune changes; the test
+    /// puts the record back to pin the rule on its own.
+    #[test]
+    fn a_lapsed_peers_dial_hint_does_not_go_to_a_key_with_an_older_stamp() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let holder = Identity::generate();
+            let stranger = Identity::generate();
+            let endpoint = iroh::SecretKey::from_bytes(&[3; 32]).public();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            let hello = alive(&rig.mesh, &who, &holder, UnixSecs::now());
+            assert!(
+                receive(&hello, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            state
+                .peer_endpoints
+                .insert(who.clone(), iroh::EndpointAddr::new(endpoint));
+            state.last_seen.insert(
+                who.clone(),
+                Instant::now()
+                    .checked_sub(alive_timeout() + Duration::from_secs(5))
+                    .expect("the monotonic clock has run past the alive timeout since boot"),
+            );
+            tick_sweep(&mut state, &rig.sink);
+            state.quiet_since.insert(
+                who.clone(),
+                Instant::now()
+                    .checked_sub(Duration::from_hours(2))
+                    .expect("the monotonic clock has run past 2 h since boot"),
+            );
+            tick_sweep(&mut state, &rig.sink);
+            assert!(
+                state.peer_endpoints.contains_key(who.as_str()),
+                "the hint did not outlive the quiet TTL"
+            );
+            // The sweep drops the stamp record of a lapsed nickname, so any frame is the newest.
+            // Put the record back: the rule must not depend on that prune.
+            state.peer_stamp.insert(who.clone(), UnixSecs::now());
+
+            let behind = alive(
+                &rig.mesh,
+                &who,
+                &stranger,
+                UnixSecs::now() - Duration::from_secs(30),
+            );
+            assert!(
+                receive(&behind, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                !state.peer_endpoints.contains_key(who.as_str()),
+                "a frame of another key stamped behind the old holder left its dial hint"
+            );
             rig.endpoint.close().await;
         });
     }
