@@ -94,8 +94,8 @@ mod tests {
     use n0_future::time::Instant as TokioInstant;
 
     use crate::protocol::messages;
-    use crate::transport::PayloadPath;
     use crate::transport::probe::PathKind;
+    use crate::transport::{Lane, PayloadPath};
     use crate::util::tuning;
     use crate::{lookup, protocol};
     use iroh::address_lookup::memory;
@@ -1539,6 +1539,39 @@ mod tests {
             reaches,
             vec![Reach::Direct, Reach::Gossip],
             "one row reads Direct (the owner) and the other reads Gossip: {snapshot:?}"
+        );
+    }
+
+    /// The dial hint of a nickname has one owner, and the lane of a row is the lane of that hint.
+    /// A quiet key under the same nickname owns no hint, so its row reads no lane.
+    #[test]
+    fn only_the_key_that_owns_the_hint_reads_its_lane() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let bob = endpoint_id(1);
+        let (owner, quiet) = (test_key("bob"), test_key("bob#quiet"));
+        for key in [owner, quiet] {
+            state.names.insert(key, nick("bob"));
+        }
+        state.peers.insert(owner);
+        state.surfaced.insert(owner);
+        state.quiet.insert(quiet);
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(bob));
+        state.direct.insert(bob, DirectState::Direct);
+
+        let snapshot = state.roster_snapshot();
+        let mut lanes: Vec<(bool, Lane)> = snapshot
+            .peers
+            .iter()
+            .map(|row| (row.quiet, row.transport))
+            .collect();
+        lanes.sort_by_key(|(is_quiet, _)| *is_quiet);
+
+        assert_eq!(
+            lanes,
+            vec![(false, Lane::Unicast), (true, Lane::Unreachable)],
+            "the quiet key read the lane of the hint that the live key owns: {snapshot:?}"
         );
     }
 

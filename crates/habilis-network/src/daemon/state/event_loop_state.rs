@@ -823,6 +823,7 @@ impl EventLoopState {
             let heard = self.clock_evidence.heard.get(key);
             heard.or_else(|| self.last_seen.get(key))
         };
+        let lane = |key: &AuthorKey, nick: &Nickname| self.lane_of(key, nick);
         let shown = self.peers.iter().filter(|key| self.surfaced.contains(*key));
         // One row per key: two live keys under one nickname are two rows.
         let mut peers: Vec<RosterEntry> = shown
@@ -835,7 +836,7 @@ impl EventLoopState {
                     last_seen_secs_ago: heard_at(key).map(secs_since),
                     quiet: false,
                     reach: self.reach_of(key, nick),
-                    transport: transport::lane_for(nick, self),
+                    transport: lane(key, nick),
                 })
             })
             .chain(self.quiet.iter().filter_map(|key| {
@@ -850,7 +851,7 @@ impl EventLoopState {
                         .map(|silence| silence.as_secs()),
                     quiet: true,
                     reach: Reach::Gossip,
-                    transport: transport::lane_for(nick, self),
+                    transport: lane(key, nick),
                 })
             }))
             .collect();
@@ -859,6 +860,17 @@ impl EventLoopState {
         RosterSnapshot {
             peers,
             count: self.member_count(),
+        }
+    }
+
+    /// The lane of the row of `key`. The lane is the lane of the dial hint of the nickname, and the
+    /// hint has one owner, so a key that another key owns it for reads no lane.
+    fn lane_of(&self, key: &AuthorKey, nick: &Nickname) -> transport::Lane {
+        let owned_by_other = self.hint_owner.get(nick).is_some_and(|owner| owner != key);
+        if owned_by_other {
+            transport::Lane::Unreachable
+        } else {
+            transport::lane_for(nick, self)
         }
     }
 
