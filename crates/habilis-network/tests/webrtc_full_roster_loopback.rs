@@ -215,7 +215,8 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
             assert!(
                 started.elapsed() < Duration::from_mins(3),
                 "{visits} members came back to the rendezvous after the crash and {holders} still \
-             hold it\n{}",
+             hold it\n{}\n{}",
+                holder_report(&logs()),
                 come_back_trace()
             );
             time::sleep(Duration::from_secs(1)).await;
@@ -264,6 +265,11 @@ fn rendezvous_visits() -> usize {
 /// and only the first logs a release. A member that held the link before the crash and logs no
 /// event after it is none of these: it did not come back.
 fn rendezvous_holders(log: &str) -> usize {
+    holder_names(log).len()
+}
+
+/// The members that [`rendezvous_holders`] counts, by name, in name order.
+fn holder_names(log: &str) -> Vec<&str> {
     let after_the_crash = log.split("member crashed").nth(1).unwrap_or_default();
     let mut last_is_up = HashMap::new();
     for line in after_the_crash.lines() {
@@ -280,7 +286,62 @@ fn rendezvous_holders(log: &str) -> usize {
         };
         last_is_up.insert(local, up);
     }
-    last_is_up.values().filter(|up| **up).count()
+    let mut names: Vec<&str> = last_is_up
+        .into_iter()
+        .filter(|(_, up)| *up)
+        .map(|(local, _)| local)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// For each member that still holds the rendezvous, its events about the rendezvous after the
+/// crash, in log order: when it came back and every release since.
+fn holder_report(log: &str) -> String {
+    let after_the_crash = log.split("member crashed").nth(1).unwrap_or_default();
+    let mut report: Vec<String> = Vec::new();
+    for local in holder_names(log) {
+        let mark = format!("local={local} ");
+        report.push(format!(
+            "{local} holds the rendezvous; its events after the crash:"
+        ));
+        for line in after_the_crash.lines() {
+            let about =
+                line.contains("is_rendezvous=true") || line.contains("released the rendezvous");
+            if about && line.contains(&mark) {
+                report.push(line.to_owned());
+            }
+        }
+    }
+    report.join("\n")
+}
+
+#[test]
+fn the_report_names_each_holder_with_its_rendezvous_events() {
+    let rendezvous = "endpoint_id=aa is_rendezvous=true";
+    let log: String = [
+        format!("gossip neighbor up local=before {rendezvous}"),
+        "member crashed".to_owned(),
+        format!("gossip neighbor up local=one {rendezvous}"),
+        format!("gossip neighbor up local=two {rendezvous}"),
+        "enough links to members: released the rendezvous local=two links=3".to_owned(),
+        format!("gossip neighbor down local=two {rendezvous}"),
+    ]
+    .join("\n");
+    let report = holder_report(&log);
+    assert!(report.starts_with("one holds the rendezvous"), "{report}");
+    assert!(
+        report.contains(&format!("gossip neighbor up local=one {rendezvous}")),
+        "{report}"
+    );
+    assert!(
+        !report.contains("two"),
+        "a member that let go is no holder: {report}"
+    );
+    assert!(
+        !report.contains("before"),
+        "a member that did not come back is no holder: {report}"
+    );
 }
 
 /// A member that the beacon dropped is gone from the rendezvous, though it logged no release: it
