@@ -12,8 +12,8 @@ use iroh::Endpoint;
 use iroh_gossip::net::Gossip;
 
 use super::state::{
-    EventLoopState, GossipMsgs, GossipPathBytes, IdleCounters, SocketBytes, WireOut, by_class,
-    by_variant, gossip_msgs_delta, gossip_path_delta, socket_delta, top_requesters,
+    EventLoopState, GossipMsgs, GossipPathBytes, IdleCounters, SocketBytes, WireOut, by_arrival,
+    by_class, by_variant, gossip_msgs_delta, gossip_path_delta, socket_delta, top_requesters,
 };
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
@@ -437,6 +437,7 @@ fn log_wire_census(
         idle_join_phase = join_phase,
         idle_bin_fresh = %by_class(&idle.wire_in.fresh),
         idle_bin_dup = %by_class(&idle.wire_in.dup),
+        idle_bin_dup_path = %by_arrival(&idle.wire_in.dup_by_arrival),
         idle_bin_cdup = %by_class(&idle.wire_in.cdup),
         idle_bin_tags = %idle.wire_in.tags.top(),
         idle_bout = %by_class(&sent.bytes),

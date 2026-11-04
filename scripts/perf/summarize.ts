@@ -60,6 +60,9 @@
 // - bin_fresh / bin_dup / bin_cdup / bout: `kind:bytes` sums, by kind of frame (app, presence, peerinfo,
 //   digest, statedigest, metadigest, state, meta, linkstate, pingpong, shard, other), largest first.
 //   tags_in / tags_out: the same for the tags of the app frames.
+// - dup_by_path: the repeats of bin_dup as `arrival.kind:bytes`. The arrival is gossip, gossip_resend, unicast or
+//   unicast_resend: the plane, and whether the frame carried a resend nonce. The overlay drops a repeat of one
+//   gossip message id before the engine reads it, so no eager or lazy copy is in it.
 // - ext_<arm>: the sums of the `idle_ext_<arm>` deltas, the wakes of each arm that is not a timer.
 //   Only the arms that woke.
 // - ahead_max: the largest `idle_ahead_peers` gauge of any census line.
@@ -179,6 +182,7 @@ function summarize(run: string): string {
     fresh: new Map<string, number>(),
     dup: new Map<string, number>(),
     cdup: new Map<string, number>(),
+    dupBy: new Map<string, number>(),
     out: new Map<string, number>(),
     tagsIn: new Map<string, number>(),
     tagsOut: new Map<string, number>(),
@@ -209,6 +213,7 @@ function summarize(run: string): string {
     addPairs(text, "idle_bin_fresh", kinds.fresh);
     addPairs(text, "idle_bin_dup", kinds.dup);
     addPairs(text, "idle_bin_cdup", kinds.cdup);
+    addPairs(text, "idle_bin_dup_path", kinds.dupBy);
     addPairs(text, "idle_bout", kinds.out);
     addPairs(text, "idle_bin_tags", kinds.tagsIn);
     addPairs(text, "idle_bout_tags", kinds.tagsOut);
@@ -271,7 +276,7 @@ function summarize(run: string): string {
     `d_share=${percent(total(kinds.dup) + total(kinds.cdup), received)} d_by_kind=${dByKind} ` +
     `env_in=${percent(wireIn - (totals.get("body_in") ?? 0), wireIn)} ` +
     `env_out=${percent(wireOut - (totals.get("body_out") ?? 0), wireOut)} ` +
-    `bin_fresh=${pairsText(kinds.fresh)} bin_dup=${pairsText(kinds.dup)} bout=${pairsText(kinds.out)} ` +
+    `bin_fresh=${pairsText(kinds.fresh)} bin_dup=${pairsText(kinds.dup)} dup_by_path=${pairsText(kinds.dupBy)} bout=${pairsText(kinds.out)} ` +
     `tags_in=${pairsText(kinds.tagsIn)} tags_out=${pairsText(kinds.tagsOut)}`;
   // The data tags are what users create; `msg` and `app_msg` are the tags of the engine example driver
   // and of the engine tests. The tags a2a_req and a2a_resp carry directed calls that

@@ -6,7 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use crate::daemon::state::{FrameShape, RendezvousFlag, Standing};
+use crate::daemon::state::{Arrival, FrameShape, RendezvousFlag, Standing};
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
@@ -26,7 +26,7 @@ use crate::{lifecycle, lookup};
 // `clock::Instant` off wasm32. See `daemon::state`.
 use n0_future::time::Instant as TokioInstant;
 
-use super::antientropy;
+use super::antientropy::{self, Plane};
 use super::app::{AppClass, InboundApp, NodeApp};
 use super::merge_ctx::{announce_arrival, broadcast_peer_info};
 use crate::net;
@@ -532,9 +532,20 @@ pub(crate) async fn ingest(
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
+    ingest_from(Plane::Gossip, frame, state, app, context).await;
+}
+
+/// [`ingest`] for a frame that came on `plane`: the census counts a repeat by it.
+pub(crate) async fn ingest_from(
+    plane: Plane,
+    frame: Bytes,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) {
     let shape = FrameShape::of(&frame);
     state.idle.wire_in.note_received(&shape);
-    let Ok((message, _resend_nonce)) = Message::parse_wire(&frame) else {
+    let Ok((message, resend_nonce)) = Message::parse_wire(&frame) else {
         context
             .sink
             .emit(NodeEvent::Error("Failed to parse message".to_owned()));
@@ -590,7 +601,10 @@ pub(crate) async fn ingest(
     // here. Only authenticated messages reach this gate.
     if state.mark_seen(&verified) {
         state.idle.duplicates += 1;
-        state.idle.wire_in.note_dup(&shape);
+        state
+            .idle
+            .wire_in
+            .note_dup(&shape, Arrival::of(plane, resend_nonce));
         return;
     }
     state.idle.fresh += 1;
@@ -3967,7 +3981,8 @@ mod dedup_counter_tests {
     use serde_json::json;
 
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::{EventLoopState, by_class};
+    use crate::daemon::state::{EventLoopState, by_arrival, by_class};
+    use crate::gossip::antientropy::Plane;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
@@ -3975,6 +3990,7 @@ mod dedup_counter_tests {
     use crate::protocol::{Channel, MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
+    use bytes::Bytes;
 
     struct Inert;
 
@@ -4015,6 +4031,19 @@ mod dedup_counter_tests {
     }
 
     fn reader_after(frames: &[&Verified]) -> EventLoopState {
+        let arrivals: Vec<(Plane, Bytes)> = frames
+            .iter()
+            .map(|frame| {
+                (
+                    Plane::Gossip,
+                    frame.serialize().expect("serialize").into_bytes(),
+                )
+            })
+            .collect();
+        reader_after_on(arrivals)
+    }
+
+    fn reader_after_on(arrivals: Vec<(Plane, Bytes)>) -> EventLoopState {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let mesh = MeshId::from("test");
             let endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -4045,9 +4074,8 @@ mod dedup_counter_tests {
             };
             let mut reader = fresh_state();
             let mut app = Inert;
-            for frame in frames {
-                let bytes = frame.serialize().expect("serialize").into_bytes();
-                super::ingest(bytes, &mut reader, &mut app, &context).await;
+            for (plane, bytes) in arrivals {
+                super::ingest_from(plane, bytes, &mut reader, &mut app, &context).await;
             }
             endpoint.close().await;
             reader
@@ -4102,6 +4130,65 @@ mod dedup_counter_tests {
             received.body,
             3 * body_on_the_wire,
             "the body of each of the 3 frames, without the envelope"
+        );
+    }
+
+    /// One first sighting of `frame`, then a repeat on each arrival: gossip, gossip with a resend
+    /// nonce, unicast, unicast with a resend nonce.
+    fn five_arrivals_of(frame: &Verified) -> Vec<(Plane, Bytes)> {
+        let plain = || frame.serialize().expect("serialize").into_bytes();
+        let resent = |nonce: u64| {
+            let wire = frame.serialize().expect("serialize");
+            wire.copy_with_resend_nonce(nonce).into_bytes()
+        };
+        vec![
+            (Plane::Gossip, plain()),
+            (Plane::Gossip, plain()),
+            (Plane::Gossip, resent(1)),
+            (Plane::Unicast, plain()),
+            (Plane::Unicast, resent(2)),
+        ]
+    }
+
+    /// A repeat is counted by its kind and by how it arrived: on which plane, and with a resend
+    /// nonce or without. One first sighting and 4 repeats of each of 2 kinds, one repeat on each
+    /// arrival.
+    #[test]
+    fn a_repeat_is_counted_by_kind_and_by_the_plane_and_the_resend_it_came_on() {
+        let writer = fresh_state();
+        let body = change_body(&writer);
+        let mesh = MeshId::from("test");
+        let state = state_frame(&writer, body.clone());
+        let meta = Message::new_channel_event(&mesh, &nick("writer"), body, Channel::Meta)
+            .sign(&writer.identity);
+        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        for frame in [&state, &meta] {
+            arrivals.extend(five_arrivals_of(frame));
+        }
+        let reader = reader_after_on(arrivals);
+
+        let (one_state, one_meta) = (wire(&state), wire(&meta));
+        // The resend trailer is on the wire, so a resend counts its bytes.
+        let resent = state
+            .serialize()
+            .expect("serialize")
+            .copy_with_resend_nonce(1);
+        let trailer: u64 = resent.len() as u64 - one_state;
+        let expected = [
+            format!("gossip.state:{one_state}"),
+            format!("gossip.meta:{one_meta}"),
+            format!("gossip_resend.state:{}", one_state + trailer),
+            format!("gossip_resend.meta:{}", one_meta + trailer),
+            format!("unicast.state:{one_state}"),
+            format!("unicast.meta:{one_meta}"),
+            format!("unicast_resend.state:{}", one_state + trailer),
+            format!("unicast_resend.meta:{}", one_meta + trailer),
+        ]
+        .join(",");
+        assert_eq!(
+            by_arrival(&reader.idle.wire_in.dup_by_arrival),
+            expected,
+            "each repeat is in the cell of its arrival and kind"
         );
     }
 

@@ -13,6 +13,8 @@ use std::{mem, str};
 
 use memchr::memmem;
 
+use crate::gossip::antientropy::Plane;
+
 /// The most distinct app tags kept per interval and direction. A peer can name any tag, so the
 /// rest are added to [`OTHER_TAGS`].
 const MAX_TAGS: usize = 32;
@@ -233,6 +235,70 @@ pub(crate) fn by_class(bytes: &[u64; CLASS_COUNT]) -> String {
     }
 }
 
+/// How a frame reached `ingest`: on which plane, and whether it carries a resend nonce, so it is
+/// the copy of an anti-entropy answer. The overlay drops a repeat of one gossip message id before
+/// the engine reads it, so a repeat that gets here came as a resend or by the other plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Arrival {
+    Gossip,
+    GossipResend,
+    Unicast,
+    UnicastResend,
+}
+
+pub(crate) const ARRIVAL_COUNT: usize = 4;
+
+impl Arrival {
+    const ALL: [Self; ARRIVAL_COUNT] = [
+        Self::Gossip,
+        Self::GossipResend,
+        Self::Unicast,
+        Self::UnicastResend,
+    ];
+
+    /// The arrival of a frame that came on `plane`, with the resend nonce that its trailer holds.
+    pub(crate) fn of(plane: Plane, resend_nonce: Option<u64>) -> Self {
+        match (plane, resend_nonce) {
+            (Plane::Gossip, None) => Self::Gossip,
+            (Plane::Gossip, Some(_)) => Self::GossipResend,
+            (Plane::Unicast, None) => Self::Unicast,
+            (Plane::Unicast, Some(_)) => Self::UnicastResend,
+        }
+    }
+
+    /// The name of the arrival in the census line.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Gossip => "gossip",
+            Self::GossipResend => "gossip_resend",
+            Self::Unicast => "unicast",
+            Self::UnicastResend => "unicast_resend",
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// `arrival.class:bytes` for each arrival and class with bytes, joined by `,`, or `-`.
+pub(crate) fn by_arrival(bytes: &[[u64; CLASS_COUNT]; ARRIVAL_COUNT]) -> String {
+    let mut named: Vec<String> = Vec::new();
+    for arrival in Arrival::ALL {
+        for class in FrameClass::ALL {
+            let held = bytes[arrival.index()][class.index()];
+            if held > 0 {
+                named.push(format!("{}.{}:{held}", arrival.name(), class.name()));
+            }
+        }
+    }
+    if named.is_empty() {
+        "-".to_owned()
+    } else {
+        named.join(",")
+    }
+}
+
 fn add_bytes(slot: &mut u64, bytes: usize) {
     *slot += u64::try_from(bytes).unwrap_or(u64::MAX);
 }
@@ -244,6 +310,8 @@ pub(crate) struct WireIn {
     pub(crate) fresh: [u64; CLASS_COUNT],
     /// Wire bytes of the frames that the dedup dropped as repeats, by class.
     pub(crate) dup: [u64; CLASS_COUNT],
+    /// The same repeats as `dup`, by how they arrived and then by class.
+    pub(crate) dup_by_arrival: [[u64; CLASS_COUNT]; ARRIVAL_COUNT],
     /// Every frame that reached `ingest`, fresh, repeat or dropped by a later check.
     pub(crate) wire: u64,
     pub(crate) body: u64,
@@ -272,8 +340,12 @@ impl WireIn {
         self.note_tag(shape);
     }
 
-    pub(crate) fn note_dup(&mut self, shape: &FrameShape<'_>) {
+    pub(crate) fn note_dup(&mut self, shape: &FrameShape<'_>, arrival: Arrival) {
         add_bytes(&mut self.dup[shape.class.index()], shape.wire);
+        add_bytes(
+            &mut self.dup_by_arrival[arrival.index()][shape.class.index()],
+            shape.wire,
+        );
         self.note_tag(shape);
     }
 
@@ -359,7 +431,9 @@ pub(crate) fn app_frame_with_tag(tag: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLASS_COUNT, FrameClass, FrameShape, TagBytes, WireIn, WireOut, by_class};
+    use super::{
+        Arrival, CLASS_COUNT, FrameClass, FrameShape, TagBytes, WireIn, WireOut, by_class,
+    };
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{AppFrameParams, AppTag};
     use crate::protocol::{Channel, MeshId, Message, MessageBody};
@@ -533,8 +607,8 @@ mod tests {
             received.note_received(&app);
         }
         received.note_fresh(&app);
-        received.note_dup(&app);
-        received.note_dup(&app);
+        received.note_dup(&app, Arrival::Gossip);
+        received.note_dup(&app, Arrival::Gossip);
         assert_eq!(received.frames, 3, "3 frames were received");
         assert_eq!(
             received.wire,
