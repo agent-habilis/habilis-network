@@ -1770,11 +1770,11 @@ impl EventLoopState {
             return;
         };
         let key = message.key();
-        // A key that said goodbye is dead; every other held session counts as live.
-        let left_keys = &self.left_keys;
+        // A member that left the roster is dead, whether it said goodbye or crashed.
+        let peers = &self.peers;
         self.proofs
-            .accept(&key, &message.author, mesh, proof, |held| {
-                !left_keys.contains(held)
+            .accept(&key, &message.author, mesh, proof, |nickname| {
+                peers.contains(nickname.as_str())
             });
     }
 

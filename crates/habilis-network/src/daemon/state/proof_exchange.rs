@@ -19,7 +19,7 @@ use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
 /// Between two proofs for one session, the one with the higher run wins. On a tie the first stays.
 #[derive(Debug)]
 pub(crate) struct ProofExchange {
-    book: ProofBook<AuthorKey, IdentityProof>,
+    book: ProofBook<AuthorKey, (Nickname, IdentityProof)>,
     // one request per session: a bound like the book, so a flood of new sessions cannot grow it
     asked: BoundedFifoSet<AuthorKey>,
     ties_refused: u64,
@@ -47,7 +47,7 @@ impl ProofExchange {
         nickname: &Nickname,
         mesh: &MeshId,
         proof: IdentityProof,
-        is_live: impl Fn(&AuthorKey) -> bool,
+        is_live: impl Fn(&Nickname) -> bool,
     ) -> bool {
         if !verify_proof(&proof, session, nickname.as_ref(), mesh.as_ref()) {
             return false;
@@ -55,12 +55,15 @@ impl ProofExchange {
         if self
             .book
             .get(session)
-            .is_some_and(|held| held.run >= proof.run)
+            .is_some_and(|(_, held)| held.run >= proof.run)
         {
             self.ties_refused += 1;
             return false;
         }
-        self.book.insert_evicting(*session, proof, is_live);
+        self.book
+            .insert_evicting(*session, (nickname.clone(), proof), |_, (held, _)| {
+                is_live(held)
+            });
         self.book.get(session).is_some()
     }
 
@@ -79,7 +82,7 @@ impl ProofExchange {
     }
 
     pub(crate) fn proof_of(&self, session: &AuthorKey) -> Option<&IdentityProof> {
-        self.book.get(session)
+        self.book.get(session).map(|(_, proof)| proof)
     }
 }
 

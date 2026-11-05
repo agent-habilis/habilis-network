@@ -52,9 +52,13 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
 
     /// Hold the proof of a session. At the cap, the oldest session that `is_live` denies goes first.
     /// If every held session is live, the proof is refused and counted.
-    pub(crate) fn insert_evicting(&mut self, key: K, value: V, is_live: impl Fn(&K) -> bool) {
+    pub(crate) fn insert_evicting(&mut self, key: K, value: V, is_live: impl Fn(&K, &V) -> bool) {
         let full = !self.held.contains_key(&key) && self.held.len() >= self.cap;
-        let mut dead_ones = self.order.iter().filter(|held| !is_live(held));
+        let held = &self.held;
+        let mut dead_ones = self
+            .order
+            .iter()
+            .filter(|key| held.get(*key).is_some_and(|value| !is_live(key, value)));
         if full && let Some(oldest_dead) = dead_ones.next().cloned() {
             self.remove(&oldest_dead);
         }
@@ -138,7 +142,7 @@ mod tests {
     fn dead_sessions_go_first_when_the_book_is_full() {
         let mut book: ProofBook<u8, u8> = ProofBook::with_cap(4);
         for member in 0..40u8 {
-            book.insert_evicting(member, member, |_| false);
+            book.insert_evicting(member, member, |_, _| false);
         }
         assert_eq!(book.get(&39), Some(&39), "the newest session verifies");
         assert_eq!(book.len(), 4, "the book holds its cap");
@@ -151,7 +155,7 @@ mod tests {
     fn a_live_session_is_never_evicted() {
         let mut book: ProofBook<u8, u8> = ProofBook::with_cap(4);
         for member in 0..40u8 {
-            book.insert_evicting(member, member, |_| true);
+            book.insert_evicting(member, member, |_, _| true);
         }
         assert_eq!(book.get(&0), Some(&0), "the oldest live session stays");
         assert_eq!(book.len(), 4, "the book holds its cap");
