@@ -424,3 +424,57 @@ fn a_packet_to_one_key_of_a_shared_nickname_reaches_that_key_only() {
         },
     );
 }
+
+/// The directory that maps a key to a nickname grows with each key that the node hears from, and a
+/// peer that restarts brings a new key. A key that leaves the mesh must leave the directory.
+#[test]
+fn a_peer_that_leaves_is_dropped_from_the_known_peers() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(
+        guard,
+        thread::available_parallelism().map_or(1, usize::from),
+        async {
+            let topic = format!("habilis-network-netplay-leaver-{}", process::id());
+            let mut players = vec![
+                spawn(&topic, "alice").await,
+                spawn(&topic, "bob").await,
+                spawn(&topic, "carol").await,
+            ];
+
+            let known = |group: &[Player]| -> Vec<String> {
+                let transport = group[0]
+                    .transport
+                    .as_ref()
+                    .expect("alice has her transport");
+                let mut names: Vec<String> = transport
+                    .known_peers()
+                    .map(|(_, nickname)| nickname.as_str().to_owned())
+                    .collect();
+                names.sort();
+                names
+            };
+            let heard: bool = drive(&mut players, Duration::from_secs(30), |players| {
+                known(players).len() >= 2
+            })
+            .await;
+            assert!(heard, "alice never heard from bob and carol");
+
+            let bob = players.remove(1);
+            bob.node.leave().await.expect("leave the mesh cleanly");
+
+            let dropped: bool = drive(&mut players, Duration::from_secs(20), |players| {
+                known(players) == ["carol"]
+            })
+            .await;
+            assert!(
+                dropped,
+                "alice still knows a peer that left: {:?}",
+                known(&players)
+            );
+
+            for player in players {
+                player.node.leave().await.expect("leave the mesh cleanly");
+            }
+        },
+    );
+}

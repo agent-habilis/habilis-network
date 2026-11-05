@@ -7,7 +7,7 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
 use habilis_network::protocol::messages::Verified;
-use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody};
+use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody, Nickname};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -154,6 +154,20 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
             _ => {}
         }
         false
+    }
+
+    /// A key that left the mesh leaves the directory. A peer that restarts brings a new key, so
+    /// the directory would otherwise keep one entry for each run of each peer.
+    async fn on_peer_left(
+        &mut self,
+        key: &AuthorKey,
+        _nickname: &Nickname,
+        _state: &mut EventLoopState,
+        _ctx: &HandlerCtx<'_>,
+    ) {
+        if let Ok(mut directory) = self.mailboxes.directory.lock() {
+            directory.remove(key);
+        }
     }
 }
 
