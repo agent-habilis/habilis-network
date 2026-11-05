@@ -149,18 +149,18 @@ mod tests {
             other.proofs.proof_of(&key).is_none(),
             "a proof of another nickname is not held"
         );
-        let replayer = fresh_state();
-        let replayed = Message::new_joined_with_proof(
+        let thief = fresh_state();
+        let stolen = Message::new_joined_with_proof(
             &mesh,
             &nick("alice"),
             &sender.own_proof(&nick("alice"), &mesh, 1),
         )
-        .sign(&replayer.identity);
-        other.note_joined_proof(&replayed, &mesh);
+        .sign(&thief.identity);
+        other.note_joined_proof(&stolen, &mesh);
         assert!(
             other
                 .proofs
-                .proof_of(&replayer.identity.author_key())
+                .proof_of(&thief.identity.author_key())
                 .is_none(),
             "a proof body of another session, replayed under a new key, is not held"
         );
@@ -235,9 +235,10 @@ mod tests {
             protocol::MessageKind::ProofRequest { to: nick("bob") },
             "the request names the member"
         );
+        state.note_proof_request_sent(&alive.key());
         assert!(
             state.proof_request_for(&alive, &me, &mesh).is_none(),
-            "the session is asked once"
+            "after a send the session waits for its back-off"
         );
     }
 

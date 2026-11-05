@@ -46,29 +46,26 @@ impl ProofExchange {
         }
     }
 
-    /// An alive frame came from `session`. True means: send the session one proof request now.
-    /// A request that got no answer is sent again, 3 times at most, with a doubling back-off.
-    pub(crate) fn wants_proof(&mut self, session: &AuthorKey, now: Instant) -> bool {
+    /// An alive frame came from `session`. True means: send the session a proof request now. A
+    /// request that got no answer is sent again, 3 times at most, with a doubling back-off. The
+    /// caller tells [`Self::note_asked`] when the request went out.
+    pub(crate) fn wants_proof(&self, session: &AuthorKey, now: Instant) -> bool {
         if self.book.get(session).is_some() {
             return false;
         }
-        let tries = match self.asked.get(session) {
-            None => 0,
-            Some(retry) if retry.tries <= RETRIES && now >= retry.next_at => retry.tries,
-            Some(_) => return false,
-        };
-        let wait = FIRST_RETRY_WAIT * 2u32.pow(u32::from(tries));
-        let retry = Retry {
-            tries: tries + 1,
-            next_at: now + wait,
-        };
-        self.asked.insert_evicting(*session, retry, |_, _| false);
-        true
+        self.asked
+            .get(session)
+            .is_none_or(|retry| retry.tries <= RETRIES && now >= retry.next_at)
     }
 
     /// The request for `session` went out at `now`: the retry clock of the session starts.
     pub(crate) fn note_asked(&mut self, session: &AuthorKey, now: Instant) {
-        let _ = (session, now);
+        let tries = self.asked.get(session).map_or(0, |retry| retry.tries);
+        let retry = Retry {
+            tries: tries.saturating_add(1),
+            next_at: now + FIRST_RETRY_WAIT * 2u32.pow(u32::from(tries.min(RETRIES))),
+        };
+        self.asked.insert_evicting(*session, retry, |_, _| false);
     }
 
     /// A proof came for `session`. It is held if it verifies for this nickname and mesh, and if it
@@ -137,10 +134,12 @@ mod tests {
         let proof = member.prove(&session, nickname.as_ref(), mesh.as_ref(), 1);
         let mut joiner = ProofExchange::with_cap(QUIET_CAP);
 
+        let now = Instant::now();
         assert!(
-            joiner.wants_proof(&session, Instant::now()),
+            joiner.wants_proof(&session, now),
             "an alive frame of a session with no proof asks for it"
         );
+        joiner.note_asked(&session, now);
         assert!(
             !joiner.wants_proof(&session, Instant::now()),
             "the session is asked once, not at each alive frame"
@@ -189,11 +188,13 @@ mod tests {
             joiner.wants_proof(&session, at(0)),
             "the first request goes at once"
         );
+        joiner.note_asked(&session, at(0));
         assert!(
             !joiner.wants_proof(&session, at(29)),
             "no retry before 30 s"
         );
         assert!(joiner.wants_proof(&session, at(30)), "retry 1 after 30 s");
+        joiner.note_asked(&session, at(30));
         assert!(
             !joiner.wants_proof(&session, at(89)),
             "no retry before 60 s more"
@@ -202,6 +203,7 @@ mod tests {
             joiner.wants_proof(&session, at(90)),
             "retry 2 after 60 s more"
         );
+        joiner.note_asked(&session, at(90));
         assert!(
             !joiner.wants_proof(&session, at(209)),
             "no retry before 120 s more"
@@ -210,6 +212,7 @@ mod tests {
             joiner.wants_proof(&session, at(210)),
             "retry 3 after 120 s more"
         );
+        joiner.note_asked(&session, at(210));
         assert!(
             !joiner.wants_proof(&session, at(100_000)),
             "no fourth retry"

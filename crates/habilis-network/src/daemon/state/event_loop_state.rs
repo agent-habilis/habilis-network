@@ -1736,7 +1736,7 @@ impl EventLoopState {
     /// once per session, and only for a member of the roster, so a flood of new keys buys no
     /// request.
     pub(crate) fn proof_request_for(
-        &mut self,
+        &self,
         alive: &Verified,
         own: &Nickname,
         mesh: &MeshId,
@@ -1747,6 +1747,12 @@ impl EventLoopState {
             return None;
         }
         Some(Message::new_proof_request(mesh, own, alive.author.clone()).sign(&self.identity))
+    }
+
+    /// The request for the proof of `session` went out: its retry clock starts. A request that
+    /// did not go out, for lack of a warm path, is not noted, so the next alive frame asks again.
+    pub(crate) fn note_proof_request_sent(&mut self, session: &AuthorKey) {
+        self.proofs.note_asked(session, Instant::now());
     }
 
     /// The answer to a proof request: a signed `joined` frame with the proof of this session, if

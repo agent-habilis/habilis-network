@@ -125,9 +125,9 @@ pub(crate) async fn handle_presence(
     }
 }
 
-/// Send the one proof request for a session that has no proof here, to that member alone over a
-/// warm path. No warm path means no request: the next alive frame of the session does not ask
-/// again, so the proof then comes with the next `joined` frame of the session.
+/// Send the proof request for a session that has no proof here, to that member alone over a warm
+/// path. The retry clock of the session starts only after a send that worked: with no warm path
+/// the next alive frame of the session asks again.
 async fn ask_for_proof(alive: &Verified, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let Some(request) = state.proof_request_for(alive, context.author, context.mesh) else {
         return;
@@ -136,10 +136,16 @@ async fn ask_for_proof(alive: &Verified, state: &mut EventLoopState, context: &H
     let warm_endpoint = member_endpoint
         .map(|address| address.id)
         .filter(|eid| Some(*eid) != state.rendezvous_id);
-    if let (Some(eid), Ok(bytes)) = (warm_endpoint, request.serialize()) {
-        messages::log_out(&request);
-        if !transport::send_best_effort(eid, bytes, state).await {
-            tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: no warm path");
-        }
+    let Some(eid) = warm_endpoint else {
+        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: no warm path");
+        return;
+    };
+    messages::log_out(&request);
+    if let Ok(bytes) = request.serialize()
+        && transport::send_best_effort(eid, bytes, state).await
+    {
+        state.note_proof_request_sent(&alive.key());
+    } else {
+        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: the send failed");
     }
 }
