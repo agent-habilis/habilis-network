@@ -291,6 +291,15 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// The identity key is the one a restarted member keeps: its seed round-trips, so the
+    /// same identity comes back from the state file.
+    #[test]
+    fn an_identity_round_trips_through_its_seed() {
+        let identity = Identity::generate();
+        let seed = identity.seed();
+        let back = Identity::from_seed(seed);
+        assert_eq!(back.author_key(), identity.author_key(), "the same key comes back");
+    }
     use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
     use crate::AuthorKey;
 
