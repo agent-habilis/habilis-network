@@ -31,9 +31,6 @@ pub enum SendError {
     },
     /// The addressee has no known path: a route that waits on `PeerInfo`, or the rendezvous.
     Undeliverable(String),
-    /// Two or more live peers use the nickname of the addressee. A nickname names one member, so
-    /// the engine never picks one of the keys.
-    Ambiguous(String),
     /// The message is larger than one frame carries.
     Oversize(String),
     /// The addressee is not a valid nickname.
@@ -61,7 +58,6 @@ impl fmt::Display for SendError {
                 "directed message held: {eid}'s only path is the relay, which is lookup only on this mesh"
             ),
             Self::Undeliverable(message)
-            | Self::Ambiguous(message)
             | Self::Oversize(message)
             | Self::InvalidAddressee(message) => f.write_str(message),
             Self::Stopped => f.write_str("mesh event loop has stopped"),
@@ -78,7 +74,6 @@ impl error::Error for SendError {
             Self::Internal(error) => error.source(),
             Self::Held { .. }
             | Self::Undeliverable(_)
-            | Self::Ambiguous(_)
             | Self::Oversize(_)
             | Self::InvalidAddressee(_)
             | Self::Stopped => None,
