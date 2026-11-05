@@ -1,5 +1,6 @@
 use crate::{beacon, transport};
 use iroh_gossip::{api, net, proto};
+use std::path::Path;
 use std::{mem, sync};
 #[cfg(feature = "host")]
 use tokio::task;
@@ -634,21 +635,23 @@ fn validated_mesh_config(kind: &SetupKind) -> Result<&MeshConfig> {
 
 /// The identity of this member, kept across restarts. Its seed lives in `<state>.key`, mode 0600.
 /// A key file of the wrong length is replaced, with a warning. No state file means a new key.
-fn load_or_create_identity(state: Option<&std::path::Path>) -> Result<identity::Identity> {
+#[cfg(all(unix, feature = "host"))]
+fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
+    use std::fs;
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let Some(state) = state else {
         return Ok(identity::Identity::generate());
     };
     let key_path = state.with_extension("key");
-    if let Ok(bytes) = std::fs::read(&key_path) {
+    if let Ok(bytes) = fs::read(&key_path) {
         if let Ok(seed) = <[u8; 32]>::try_from(bytes.as_slice()) {
-            return Ok(identity::Identity::from_seed(zeroize::Zeroizing::new(seed)));
+            return Ok(identity::Identity::from_seed(&seed));
         }
         tracing::warn!(target: "habilis_network::lifecycle", "identity key file has the wrong length; a new key replaces it");
     }
     let identity = identity::Identity::generate();
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
@@ -656,6 +659,16 @@ fn load_or_create_identity(state: Option<&std::path::Path>) -> Result<identity::
         .open(&key_path)?;
     file.write_all(identity.seed().as_slice())?;
     Ok(identity)
+}
+
+/// A target with no files (wasm, or a build without `host`) mints a new key, as it always did.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the file-backed version, so the caller is one call"
+)]
+fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> {
+    Ok(identity::Identity::generate())
 }
 
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
@@ -1132,12 +1145,13 @@ async fn setup_join(
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    use std::{env, fs, process};
     /// A restarted member keeps its identity: the same state file gives the same key, and a
     /// missing file gives a new one.
     #[test]
     fn a_restart_keeps_its_identity() {
-        let dir = std::env::temp_dir().join(format!("habilis-identity-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let dir = env::temp_dir().join(format!("habilis-identity-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
         let state = dir.join("session.json");
         let first = super::load_or_create_identity(Some(&state)).expect("first start");
         let second = super::load_or_create_identity(Some(&state)).expect("restart");
