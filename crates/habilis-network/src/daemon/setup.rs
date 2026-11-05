@@ -1215,7 +1215,31 @@ async fn setup_join(
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::{env, fs, process};
+
+    /// A temp dir that goes away when the test ends, also when an assert fails.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = env::temp_dir().join(format!("{name}-{}", process::id()));
+            drop(fs::remove_dir_all(&dir));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            drop(fs::remove_dir_all(&self.0));
+        }
+    }
+
     /// A restarted member keeps its identity: the same state file gives the same key, and a
     /// missing file gives a new one.
     #[test]
@@ -1242,10 +1266,8 @@ mod tests {
     /// never reads the clock.
     #[test]
     fn the_run_number_rises_at_each_start() {
-        let dir = env::temp_dir().join(format!("habilis-run-number-{}", process::id()));
-        drop(fs::remove_dir_all(&dir));
-        fs::create_dir_all(&dir).expect("a temp dir");
-        let state = dir.join("session.json");
+        let dir = TempDir::new("habilis-run-number");
+        let state = dir.path().join("session.json");
         let runs: Vec<u64> = (0..3)
             .map(|_| super::next_run(Some(&state)).expect("a run number"))
             .collect();
@@ -1262,7 +1284,6 @@ mod tests {
             1,
             "no file means run 1"
         );
-        fs::remove_dir_all(&dir).expect("remove the temp dir");
     }
 
     /// A counter file that a crash cut short must not restart the count at 1: a peer that kept a
@@ -1270,10 +1291,8 @@ mod tests {
     #[test]
     fn a_cut_short_counter_file_does_not_restart_the_count() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = env::temp_dir().join(format!("habilis-run-cut-{}", process::id()));
-        drop(fs::remove_dir_all(&dir));
-        fs::create_dir_all(&dir).expect("a temp dir");
-        let state = dir.join("session.json");
+        let dir = TempDir::new("habilis-run-cut");
+        let state = dir.path().join("session.json");
         fs::write(state.with_extension("run"), b"").expect("a cut short file");
         let run = super::next_run(Some(&state)).expect("a run number");
         assert!(
@@ -1293,7 +1312,6 @@ mod tests {
             !state.with_extension("run.tmp").exists(),
             "no temp file stays"
         );
-        fs::remove_dir_all(&dir).expect("remove the temp dir");
     }
 
     /// The member key survives a restart and the session key does not: the session key is the
