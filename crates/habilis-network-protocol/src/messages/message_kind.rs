@@ -74,8 +74,8 @@ pub enum MessageKind {
         /// The probe that this pong answers.
         probe: MessageId,
     },
-    /// Asks `to` for its identity proof: a receiver that holds no proof for this author's session
-    /// sends it. Unicast, never gossiped, empty body. Plumbing like `Ping`.
+    /// Sent to `to` alone by a member that holds no proof for the current session of `to`; it asks
+    /// `to` for that proof. Never gossiped, empty body. Routed like `Pong`, addressed by `to`.
     ProofRequest {
         /// The member whose proof is asked for.
         to: Nickname,
