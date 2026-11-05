@@ -1162,19 +1162,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     async fn seed_built(&mut self, outcome: Result<state_cut::SeedOutcome, JoinError>) {
         let context = self.parts.handler_ctx(&self.sender);
         let frames = state_cut::finish(&mut self.state, outcome, context.author, context.mesh);
-        for (signed, bytes) in frames {
-            // The cutter takes its own seed as a candidate, like every node, and adopts it after
-            // the wait.
-            let _ = self.state.doc_mut(protocol::Channel::State).ingest(&signed);
-            if self.state.overlay_reachable() {
-                if let Err(error) = self.sender.broadcast(bytes).await {
-                    state_cut::cut_failed(&mut self.state, &error);
-                    return;
-                }
-            } else {
-                self.state.pending_outbound.push((signed, bytes));
-            }
-        }
+        state_cut::send_frames(&mut self.state, &self.sender, frames).await;
     }
 
     async fn alive(&mut self) {

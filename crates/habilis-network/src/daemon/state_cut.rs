@@ -18,6 +18,7 @@ use crate::doc::{DocError, MeshDoc, SeedChain, SeedPlan, Stamp, wire};
 use crate::protocol::identity::Identity;
 use crate::protocol::messages::{Verified, WireFrame};
 use crate::protocol::{Channel, MeshId, Message, Nickname, SymmetricKey};
+use crate::transport::MeshSender;
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::consts::{DOC_EPOCH_FRAME_MARGIN, MAX_MESSAGE_SIZE};
 
@@ -191,6 +192,61 @@ pub(crate) fn signed_frames(
         frames.push((signed, wire_frame));
     }
     Ok(frames)
+}
+
+/// Send the frames of a seed, root first: each one is taken as a candidate by this node (it adopts
+/// its own seed after the wait, like every node) and then goes to the overlay, or waits in the
+/// buffer of a node that does not reach it yet. A send that fails stops the chain and holds the
+/// next cut back. Returns how many frames went out.
+pub(crate) async fn send_frames(
+    state: &mut EventLoopState,
+    sender: &MeshSender,
+    frames: Vec<(Verified, WireFrame)>,
+) -> usize {
+    let mut sent = 0;
+    for (signed, bytes) in frames {
+        let _ = state.doc_mut(Channel::State).ingest(&signed);
+        if state.overlay_reachable() {
+            if let Err(error) = sender.broadcast(bytes).await {
+                cut_failed(state, &error);
+                return sent;
+            }
+        } else {
+            state.pending_outbound.push((signed, bytes));
+        }
+        sent += 1;
+    }
+    sent
+}
+
+/// Cut the state channel now, on the calling thread, and send the seed: the plan, the build, the
+/// signing and the send of a cut, in one call. The loop does the same in pieces, with the build on
+/// another thread; this is for a test that measures the send, and for a tool.
+///
+/// # Errors
+/// When the document holds a candidate, or the seed does not build.
+pub(crate) async fn cut_now(
+    state: &mut EventLoopState,
+    me: &Nickname,
+    mesh: &MeshId,
+    sender: &MeshSender,
+) -> anyhow::Result<usize> {
+    let plan = state.doc(Channel::State).seed_plan()?;
+    let job = job_for(
+        state,
+        me,
+        mesh,
+        state.doc(Channel::State).epoch().saturating_add(1),
+    );
+    let started = Instant::now();
+    let chain = plan.build(job.epoch, &job.actor, |merge| seed_frame_fits(&job, merge))?;
+    let outcome = SeedOutcome {
+        epoch: job.epoch,
+        chain: Ok(chain),
+        took: started.elapsed(),
+    };
+    let frames = finish(state, Ok(outcome), me, mesh);
+    Ok(send_frames(state, sender, frames).await)
 }
 
 /// One tick of the state channel, on the minute timer: the document counts its epoch and the size

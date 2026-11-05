@@ -10,6 +10,25 @@ pub use crate::gossip::{
 };
 pub use crate::transport::{Delivered, MeshSender, PendingSend, deliver, deliver_in_background};
 
+use crate::daemon::state_cut;
+use crate::embed::{EventLoopState, HandlerCtx};
+use crate::transport::SendError;
+
+/// Cut the state channel now and send the seed, on the calling thread: the plan, the build, the
+/// signing and the send of a cut in one call, so a test can measure the send of a chain. The loop
+/// itself cuts in pieces, with the build on another thread. Returns the number of frames sent.
+///
+/// # Errors
+/// When the state document holds a candidate, or the seed does not build.
+pub async fn state_cut_now(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) -> Result<usize, SendError> {
+    state_cut::cut_now(state, context.author, context.mesh, context.sender)
+        .await
+        .map_err(SendError::internal)
+}
+
 /// The CRDT-backed `state` / `meta` channels.
 pub mod doc {
     pub use crate::doc::MeshDoc;

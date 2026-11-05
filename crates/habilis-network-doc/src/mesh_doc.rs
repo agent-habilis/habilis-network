@@ -1307,6 +1307,15 @@ impl MeshDoc {
         self.candidate.is_some()
     }
 
+    /// Whether the candidate seed that this document waits to adopt holds every frame of its chain,
+    /// so that the node can adopt it after the wait. False when there is no candidate.
+    #[must_use]
+    pub fn candidate_whole(&self) -> bool {
+        self.candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.chain().is_some())
+    }
+
     /// Hold the local writes of a state document until it has heard of another write. A node that
     /// restarts has a clock of 0, so a write now would get a time below the writes that the node
     /// made before, and lose to them. [`Self::compose_wire_body`] returns
@@ -7437,6 +7446,28 @@ mod tests {
             doc.unstamped_paths(),
             chain.unstamped,
             "the paths without a stamp are counted"
+        );
+    }
+
+    #[test]
+    fn a_candidate_is_whole_when_the_last_frame_of_its_chain_has_arrived() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        assert!(frames.len() > 2, "the chain has several frames");
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        assert!(!doc.candidate_whole(), "no candidate is not a whole one");
+        for frame in &frames[..frames.len() - 1] {
+            doc.ingest(frame);
+            assert!(
+                !doc.candidate_whole(),
+                "a chain that lacks its last frame is not whole"
+            );
+        }
+        doc.ingest(&frames[frames.len() - 1]);
+        assert!(
+            doc.candidate_whole(),
+            "the last frame makes the chain whole"
         );
     }
 
