@@ -2101,6 +2101,8 @@ impl MeshDoc {
     /// stamp on them, and the deletes that a replay undid: a merge and the stamp of each path, for
     /// [`Self::compose_replay_body`]. The live stamps are read again here, so a value that a
     /// newer write, or a delete of a higher stamp, has overtaken in the meantime is not written.
+    /// That read saves writes and is not needed for convergence: a node that writes an overtaken
+    /// value anyway lowers the stamp of the newer value on the nodes that hold it, and they restore it.
     /// `None` when there is nothing to write. The glue calls it on each tick.
     pub fn take_restores(&mut self) -> Option<Restores> {
         if self.epoch_ticks < self.restores_due {
