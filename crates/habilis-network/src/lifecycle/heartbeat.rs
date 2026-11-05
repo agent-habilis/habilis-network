@@ -264,9 +264,12 @@ fn prune_per_key_state(state: &mut EventLoopState) {
         .returned_unshown
         .retain(|key| is_peer(key));
     let lapsed = &state.clock_evidence.lapsed_quiet;
+    let in_roster = |key: &AuthorKey| is_peer(key) || is_quiet(key) || lapsed.contains(key);
+    state.names.retain(|key, _| in_roster(key));
     state
-        .names
-        .retain(|key, _| is_peer(key) || is_quiet(key) || lapsed.contains(key));
+        .clock_evidence
+        .name_stamp
+        .retain(|key, _| in_roster(key));
     state
         .proven_endpoints
         .retain_trusted(|key| is_peer(key) || is_quiet(key) || lapsed.contains(key));

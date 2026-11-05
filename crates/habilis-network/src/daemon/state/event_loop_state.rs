@@ -125,6 +125,10 @@ pub(crate) struct ClockEvidence {
     /// not change. Bounded FIFO (cap `QUIET_CAP`), so the hints of one-shot nicknames cannot grow
     /// the map. The sweep drops the hint of the oldest entry that the cap pushes out.
     pub(crate) lapsed_quiet: BoundedFifoSet<AuthorKey>,
+    /// The stamp of the newest frame that set the nickname of each key, on the clock of that key.
+    /// It is the watermark of the nickname alone: a frame that proves no presence moves it too,
+    /// and `peer_stamp` does not follow it.
+    pub(crate) name_stamp: HashMap<AuthorKey, UnixSecs>,
 }
 
 impl Default for ClockEvidence {
@@ -138,6 +142,7 @@ impl Default for ClockEvidence {
             suspend: None,
             confirmed_suspends: Vec::new(),
             lapsed_quiet: BoundedFifoSet::new(QUIET_CAP),
+            name_stamp: HashMap::new(),
         }
     }
 }
@@ -1193,6 +1198,7 @@ impl EventLoopState {
         self.proven_endpoints.forget_trust(&key);
         self.rival_holders.remove(&key);
         self.names.remove(&key);
+        self.clock_evidence.name_stamp.remove(&key);
         self.release_refused_endpoint(&key);
         let left_hints = self.forget_hints_of(key);
         self.rebind_refused_endpoints();

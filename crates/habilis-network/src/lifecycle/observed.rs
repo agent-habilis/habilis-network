@@ -46,16 +46,24 @@ pub(crate) fn observe(
                 subtype: PresenceSubtype::Left
             }
         );
-        // A frame that is not newer than the newest one of the key is a stored copy (a relay, an
-        // anti-entropy answer): it carries the nickname the key had then, and it must not give a
-        // nickname back that the key left.
+        // A frame that is not newer than the newest one that set the nickname is a stored copy (a
+        // relay, an anti-entropy answer): it carries the nickname the key had then, and it must
+        // not give a nickname back that the key left. The watermark is the one of the nickname
+        // alone, since a frame that proves no presence moves no `peer_stamp`.
         let unnamed = !state.names.contains_key(&key);
-        let newest_frame = state
-            .peer_stamp
+        let newer_than_name = state
+            .clock_evidence
+            .name_stamp
             .get(&key)
             .is_none_or(|newest| message.timestamp > *newest);
-        if !goodbye && (unnamed || newest_frame) && state.names.get(&key) != Some(&message.author) {
-            state.names.insert(key, message.author.clone());
+        if !goodbye && (unnamed || newer_than_name) {
+            state
+                .clock_evidence
+                .name_stamp
+                .insert(key, message.timestamp);
+            if state.names.get(&key) != Some(&message.author) {
+                state.names.insert(key, message.author.clone());
+            }
         }
         // A frame of a live kind from a peer that is in the roster refreshes it at any stamp: a
         // peer whose clock runs far behind still talks, and the sweep must not evict it. Only a
@@ -2642,6 +2650,59 @@ mod churn_red {
                 state.live_nicknames().count(),
                 2,
                 "the live list names each live key"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A durable frame (a meta change) of `by` under the nickname `who`, stamped `at`.
+    fn durable(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
+        let mut message =
+            Message::new_channel_event(mesh, who, MessageBody::from("{}"), Channel::Meta);
+        message.timestamp = at;
+        message.sign(by)
+    }
+
+    /// A durable frame older than one alive timeout proves no presence, so it leaves the stamp of
+    /// presence where it was. The nickname has its own stamp: after a rename by such a frame, a
+    /// replay of the older frame under the old nickname must not restore that nickname.
+    #[test]
+    fn a_replay_of_frames_that_prove_no_presence_does_not_restore_an_old_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let identity = Identity::generate();
+            let key = identity.author_key();
+            let now = UnixSecs::now();
+            let mut state = fresh_state();
+            let live = chat(
+                &rig.mesh,
+                &nick("first-name"),
+                &identity,
+                now - Duration::from_secs(300),
+            );
+            let renamed = durable(
+                &rig.mesh,
+                &nick("new-name"),
+                &identity,
+                now - Duration::from_secs(120),
+            );
+            let replay = durable(
+                &rig.mesh,
+                &nick("old-name"),
+                &identity,
+                now - Duration::from_secs(180),
+            );
+            for frame in [&live, &renamed, &replay] {
+                assert!(
+                    receive(frame, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+            }
+            assert_eq!(
+                state.names.get(&key),
+                Some(&nick("new-name")),
+                "the replay is older than the rename and does not undo it"
             );
             rig.endpoint.close().await;
         });
