@@ -55,10 +55,11 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
     pub(crate) fn insert_evicting(&mut self, key: K, value: V, is_live: impl Fn(&K, &V) -> bool) {
         let full = !self.held.contains_key(&key) && self.held.len() >= self.cap;
         let held = &self.held;
-        let mut dead_ones = self
-            .order
-            .iter()
-            .filter(|key| held.get(*key).is_some_and(|value| !is_live(key, value)));
+        let is_dead = |session: &&K| {
+            held.get(*session)
+                .is_some_and(|proof| !is_live(session, proof))
+        };
+        let mut dead_ones = self.order.iter().filter(is_dead);
         if full && let Some(oldest_dead) = dead_ones.next().cloned() {
             self.remove(&oldest_dead);
         }

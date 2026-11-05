@@ -228,12 +228,13 @@ mod tests {
         for index in 0..QUIET_CAP + 100 {
             let session = protocol::identity::Identity::generate();
             let name = nick(&format!("peer-{index}"));
-            let proof = member.prove(&session.author_key(), name.as_ref(), mesh.as_ref(), 1);
+            let proof: protocol::identity::IdentityProof =
+                member.prove(&session.author_key(), name.as_ref(), mesh.as_ref(), 1);
             let joined = Message::new_joined_with_proof(&mesh, &name, &proof).sign(&session);
             receiver.note_joined_proof(&joined, &mesh);
             newest = Some(session.author_key());
         }
-        let newest = newest.expect("the loop ran");
+        let newest: AuthorKey = newest.expect("the loop ran");
         assert!(
             receiver.proofs.proof_of(&newest).is_some(),
             "the newest session verifies after more crashes than the cap"
