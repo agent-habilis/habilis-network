@@ -1,7 +1,13 @@
 //! The wire version of the message envelope.
 
-/// Protocol version embedded in every message, `12.0` for the engine's
-/// de-branding. The crypto byte-domains are mixed into signature and
+/// Protocol version embedded in every message, `13.0` since the recipient of a directed frame
+/// (`to` of an `app` and of a `pong` frame) is an author key and no longer a nickname. A nickname
+/// is a label that two live keys can share, so a frame to a nickname reached both. A `12.0` peer
+/// reads a key as an invalid nickname, so the frames of the two versions must not meet silently:
+/// `parse` names the version of a frame that it refuses, also when the frame fails on a field
+/// that the version changed.
+///
+/// `12.0` was the engine's de-branding. The crypto byte-domains are mixed into signature and
 /// key-derivation transcripts, so any rebrand changes the bytes an older build
 /// derives and its signature verification fails *silently*. The exact-match gate
 /// in `parse` exists to turn that into a loud rejection rather than a frame that
@@ -31,6 +37,7 @@
 /// only because it lands inside the same interop break rather than needing one
 /// of its own.
 ///
+/// - `12.0` — the engine's de-branding, described above.
 /// - `11.0` — a product rebrand (the product's name was in the byte-domains).
 /// - `10.0` / `9.0` — the agent-mesh → agent-square and swarm → mesh renames.
 ///   `9.0` also moved the identity wire key to `"mesh"` and the JSON-RPC
@@ -46,4 +53,4 @@
 /// - `4.0` — the native application-payload port.
 /// - `3.0` — the application-payload migration.
 /// - `2.0` — RFC 6902 → RFC 7386 shared state.
-pub(crate) const VERSION: &str = "12.0";
+pub(crate) const VERSION: &str = "13.0";

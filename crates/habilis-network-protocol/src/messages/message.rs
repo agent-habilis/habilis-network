@@ -24,7 +24,7 @@ use super::{
 ///
 /// Wire format (compact JSON, one line):
 /// ```json
-/// {"v":"12.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
+/// {"v":"13.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
 /// ```
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
@@ -272,8 +272,21 @@ impl Message {
         if data.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge);
         }
-        let wire: WireIn = serde_json::from_slice(data)
-            .map_err(MessageError::with_step("failed to parse message JSON"))?;
+        let wire: WireIn = match serde_json::from_slice(data) {
+            Ok(wire) => wire,
+            Err(error) => {
+                // A frame of another version can fail on a field that the version changed. The
+                // cause to name is the version, not the field.
+                if let Some(version) = envelope_version(data)
+                    && version != VERSION
+                {
+                    return Err(MessageError::UnsupportedVersion(version));
+                }
+                return Err(MessageError::with_step("failed to parse message JSON")(
+                    error,
+                ));
+            }
+        };
         if wire.version != VERSION {
             return Err(MessageError::UnsupportedVersion(wire.version));
         }
@@ -455,7 +468,7 @@ impl Message {
     /// ```compile_fail,E0624
     /// use habilis_network_protocol::messages::Message;
     ///
-    /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+    /// const SIGNED: &str = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"c5281ce4ac05d99e044c97bc5acfd291c4861f17ac164c1b4b472c7bbe43386c71539a97090af6fb870886b6af51f6f8563abb5ffc0d290e5ad9e69e548c1b08","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
     ///
     /// let message = Message::parse(SIGNED.as_bytes()).unwrap();
     /// let canonical = message.canonical_bytes();
@@ -543,4 +556,11 @@ impl Message {
             ext: serde_json::json!({}),
         }
     }
+}
+
+/// The `v` of a JSON envelope, for a frame that does not parse as a whole.
+fn envelope_version(data: &[u8]) -> Option<String> {
+    let envelope: serde_json::Value = serde_json::from_slice(data).ok()?;
+    let version = envelope.get("v")?;
+    version.as_str().map(str::to_owned)
 }

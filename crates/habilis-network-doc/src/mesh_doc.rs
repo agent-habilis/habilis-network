@@ -935,7 +935,7 @@ mod tests {
     /// that can only ever happen on purpose.
     ///
     /// It last moved when the byte-domains dropped the product name for the
-    /// engine's, which is why `messages::VERSION` is `12.0`.
+    /// engine's, which is why `messages::VERSION` is `13.0`.
     #[test]
     fn genesis_bytes_are_pinned() {
         let _guard = ::habilis_network_test_tracing::init();
