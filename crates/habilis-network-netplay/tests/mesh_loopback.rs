@@ -446,8 +446,8 @@ fn a_peer_that_leaves_is_dropped_from_the_known_peers() {
                     .transport
                     .as_ref()
                     .expect("alice has her transport");
-                let mut names: Vec<String> = transport
-                    .known_peers()
+                let peers = transport.known_peers();
+                let mut names: Vec<String> = peers
                     .map(|(_, nickname)| nickname.as_str().to_owned())
                     .collect();
                 names.sort();
