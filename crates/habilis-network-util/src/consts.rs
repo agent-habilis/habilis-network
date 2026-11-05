@@ -160,6 +160,12 @@ pub const DOC_SEED_FRAMES_MAX: usize =
 /// author writes again the leaves of its own that the seed holds with another value.
 pub const DOC_SEED_CUT_MAX: usize = 96;
 
+/// The most paths that one frame of a seed or a replay can write, and so the most stamps that its
+/// `o` can carry. A frame holds 3840 bytes, so this bounds the work of a node that reads the stamps
+/// of one frame. The sender splits a longer replay into frames of at most this many paths, and a
+/// node refuses a frame that carries more.
+pub const DOC_REPLAY_ENTRIES_MAX: usize = 128;
+
 /// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged
 /// epoch number cannot lock the channel: the forger raises the epoch by this much per adoption.
 pub const DOC_EPOCH_JUMP_MAX: u64 = 131_072;
