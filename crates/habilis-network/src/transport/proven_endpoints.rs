@@ -61,6 +61,9 @@ pub(crate) struct ProvenEndpoints {
     /// The endpoint of each roster key whose proof was checked, for the trust in a link vector.
     /// It has no cap and no order: the roster bounds it, and the sweep drops a key that left.
     trusted: HashMap<AuthorKey, EndpointId>,
+    /// The roster key that each endpoint of `trusted` is trusted for: `trusted` read the other way,
+    /// so that the question "who holds this endpoint" is a lookup and not a scan of every key.
+    trusted_by_endpoint: HashMap<EndpointId, AuthorKey>,
     /// The stamp of the newest `PeerInfo` that proved each endpoint of `by_signer`.
     stamps: HashMap<EndpointId, UnixSecs>,
 }
@@ -72,6 +75,7 @@ impl ProvenEndpoints {
             order: VecDeque::new(),
             cap,
             trusted: HashMap::new(),
+            trusted_by_endpoint: HashMap::new(),
             stamps: HashMap::new(),
         }
     }
@@ -83,29 +87,35 @@ impl ProvenEndpoints {
 
     /// The roster key that `endpoint` is trusted for, if one is.
     pub(crate) fn trusted_signer(&self, endpoint: EndpointId) -> Option<AuthorKey> {
-        let mut holders = self
-            .trusted
-            .iter()
-            .filter(|(_, trusted)| **trusted == endpoint);
-        holders.next().map(|(signer, _)| *signer)
+        self.trusted_by_endpoint.get(&endpoint).copied()
     }
 
     /// Keep the trust in `signer` at `endpoint`, in place of the trust in any other signer of that
     /// endpoint: an endpoint has one signer. The caller admits roster keys only.
     pub(crate) fn trust(&mut self, signer: AuthorKey, endpoint: EndpointId) {
-        self.trusted
-            .retain(|other, trusted| *other == signer || *trusted != endpoint);
-        self.trusted.insert(signer, endpoint);
+        if let Some(displaced) = self.trusted_by_endpoint.insert(endpoint, signer)
+            && displaced != signer
+        {
+            self.trusted.remove(&displaced);
+        }
+        if let Some(previous) = self.trusted.insert(signer, endpoint)
+            && previous != endpoint
+        {
+            self.trusted_by_endpoint.remove(&previous);
+        }
     }
 
     /// Drop the trust in each key that `keep` refuses.
     pub(crate) fn retain_trusted(&mut self, keep: impl Fn(&AuthorKey) -> bool) {
         self.trusted.retain(|signer, _| keep(signer));
+        self.trusted_by_endpoint.retain(|_, signer| keep(signer));
     }
 
     /// Drop the trust in `signer`.
     pub(crate) fn forget_trust(&mut self, signer: &AuthorKey) {
-        self.trusted.remove(signer);
+        if let Some(endpoint) = self.trusted.remove(signer) {
+            self.trusted_by_endpoint.remove(&endpoint);
+        }
     }
 
     pub(crate) fn get(&self, signer: &AuthorKey) -> Option<EndpointId> {
@@ -168,7 +178,9 @@ impl ProvenEndpoints {
     /// endpoint by nickname, which a signer can take over; a pair missed that
     /// way is no longer linked, so the cap evicts it later.
     pub(crate) fn forget_endpoint(&mut self, endpoint: EndpointId) {
-        self.trusted.retain(|_, eid| *eid != endpoint);
+        if let Some(signer) = self.trusted_by_endpoint.remove(&endpoint) {
+            self.trusted.remove(&signer);
+        }
         self.by_signer.retain(|_, eid| *eid != endpoint);
         let by_signer = &self.by_signer;
         self.order.retain(|signer| by_signer.contains_key(signer));
@@ -304,6 +316,73 @@ mod one_signer_tests {
             proven.get(&AuthorKey::from([6; 32])),
             None,
             "the signer with the equal stamp holds nothing"
+        );
+    }
+
+    /// An endpoint has one trusted signer and a signer one trusted endpoint. The two directions of
+    /// the table agree after a takeover, a move, a forget and a retain.
+    #[test]
+    fn the_trust_of_an_endpoint_and_the_trust_of_a_signer_agree_in_both_directions() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (first, second) = (
+            AuthorKey::from_bytes([1; 32]),
+            AuthorKey::from_bytes([2; 32]),
+        );
+        let one = SecretKey::from_bytes(&[11; 32]).public();
+        let two = SecretKey::from_bytes(&[12; 32]).public();
+        let mut proven = ProvenEndpoints::new(8);
+
+        proven.trust(first, one);
+        proven.trust(second, one);
+        assert_eq!(
+            proven.trusted_signer(one),
+            Some(second),
+            "the endpoint has one signer"
+        );
+        assert_eq!(
+            proven.trusted(&first),
+            None,
+            "the displaced signer lost its trust"
+        );
+
+        proven.trust(second, two);
+        assert_eq!(
+            proven.trusted_signer(one),
+            None,
+            "the endpoint that the signer left"
+        );
+        assert_eq!(
+            proven.trusted_signer(two),
+            Some(second),
+            "the endpoint that it took"
+        );
+
+        proven.forget_trust(&second);
+        assert_eq!(
+            proven.trusted_signer(two),
+            None,
+            "a forgotten signer holds no endpoint"
+        );
+
+        proven.trust(first, one);
+        proven.trust(second, two);
+        proven.retain_trusted(|signer| *signer == first);
+        assert_eq!(
+            proven.trusted_signer(one),
+            Some(first),
+            "the kept signer holds its endpoint"
+        );
+        assert_eq!(
+            proven.trusted_signer(two),
+            None,
+            "the refused signer holds none"
+        );
+
+        proven.forget_endpoint(one);
+        assert_eq!(
+            proven.trusted(&first),
+            None,
+            "a forgotten endpoint has no signer"
         );
     }
 
