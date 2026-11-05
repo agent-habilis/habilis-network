@@ -5274,6 +5274,66 @@ mod tests {
         );
     }
 
+    /// The tombstones of a document that deleted `count` paths of 250 bytes (the longest path
+    /// that a tombstone keeps is 256 bytes), with growing stamps.
+    fn doc_with_long_tombstones(count: usize) -> MeshDoc {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for index in 0..count {
+            let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
+            doc.add_tombstone(vec![format!("{index:0250}")], stamp);
+        }
+        doc
+    }
+
+    #[test]
+    fn a_seed_with_the_full_cap_of_long_tombstones_is_adopted_whole_or_not_at_all() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "the seed of the candidate epoch was not complete",
+        );
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let doc = doc_with_long_tombstones(super::DOC_SEED_TOMBSTONES_MAX);
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let longest = frames
+            .iter()
+            .map(|frame| frame.body.as_str().len())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            longest <= super::DOC_SEED_TOMBSTONE_FRAME_BYTES + 400,
+            "the longest body stays near the budget of a frame: {longest} bytes in {} frames",
+            frames.len()
+        );
+        // Every frame arrives: the node holds all the tombstones.
+        let mut whole = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = whole.ingest(frame);
+        }
+        ticks(&mut whole, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(
+            whole.tombstones.len(),
+            super::DOC_SEED_TOMBSTONES_MAX,
+            "the node holds every tombstone"
+        );
+        // One frame of the middle is missing: the node does not switch and holds no half seed.
+        let mut broken = MeshDoc::new_ungated().state_epochs();
+        for (index, frame) in frames.iter().enumerate() {
+            if index != frames.len() / 2 {
+                let _ = broken.ingest(frame);
+            }
+        }
+        assert!(
+            ticks(&mut broken, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).is_none(),
+            "a seed with a frame missing is not adopted"
+        );
+        assert_eq!(broken.epoch(), 0, "the node keeps its epoch");
+        assert!(
+            broken.tombstones.is_empty(),
+            "and holds no tombstone of the seed"
+        );
+    }
+
     #[test]
     fn a_tombstone_body_that_is_not_canonical_is_refused() {
         let _guard = ::habilis_network_test_tracing::init();
