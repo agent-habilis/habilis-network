@@ -130,6 +130,24 @@ pub struct IdentityProof {
     pub signature: Signature,
 }
 
+impl IdentityProof {
+    /// The longest wire text of a proof: 64 hex digits of key, 20 digits of run, 128 of signature,
+    /// and 2 separators. A body longer than this is not a proof.
+    pub const MAX_TEXT_LEN: usize = 64 + 20 + 128 + 2;
+
+    /// The wire text of the proof, as `<identity hex>:<run>:<signature hex>`.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        String::new()
+    }
+
+    /// Parse the wire text of a proof. A wrong shape, length or digit gives `None`.
+    #[must_use]
+    pub fn decode(_text: &str) -> Option<Self> {
+        None
+    }
+}
+
 /// What the identity signs: a domain label, then the session key, the nickname, the mesh and the
 /// run, each field separated, so no two different claims share bytes.
 fn proof_bytes(session: &AuthorKey, nickname: &str, mesh: &str, run: u64) -> Vec<u8> {
@@ -370,6 +388,37 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// A proof goes to the wire text and back, and bad text is refused.
+    #[test]
+    fn a_proof_round_trips_through_its_wire_text() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let proof = identity.prove(&session, "alice", "mesh", 12);
+        let text = proof.encode();
+        assert!(
+            text.len() <= super::IdentityProof::MAX_TEXT_LEN,
+            "the text stays in its cap"
+        );
+        let back = super::IdentityProof::decode(&text).expect("the text parses");
+        assert!(
+            super::verify_proof(&back, &session, "alice", "mesh"),
+            "the parsed proof verifies"
+        );
+        assert_eq!(back.run, 12, "the run survives");
+        for bad in [
+            "",
+            "x",
+            "a:b:c",
+            &text[..text.len() - 2],
+            &format!("{text}00"),
+        ] {
+            assert!(
+                super::IdentityProof::decode(bad).is_none(),
+                "refused: {bad:?}"
+            );
+        }
+    }
+
     /// A proof names the session, the nickname, the mesh and the run: any other value fails.
     #[test]
     fn a_proof_binds_the_session_nickname_mesh_and_run() {
