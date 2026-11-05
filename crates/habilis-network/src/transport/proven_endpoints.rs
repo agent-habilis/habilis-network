@@ -123,12 +123,18 @@ impl ProvenEndpoints {
         self.by_signer.get(signer).copied()
     }
 
-    /// The signer that holds `endpoint`: the signer of its pair, else the signer that the roster
-    /// trusts for it.
-    fn holder_of(&self, endpoint: EndpointId) -> Option<AuthorKey> {
+    /// The signers that hold `endpoint`: the signer of its pair and the signer that the roster
+    /// trusts for it. They are two keys when a newer `PeerInfo` of a key that is not in the roster
+    /// yet took the pair and the roster still trusts the old key.
+    fn holders_of(&self, endpoint: EndpointId) -> Vec<AuthorKey> {
         let paired = self.by_signer.iter().find(|(_, eid)| **eid == endpoint);
-        let trusted = self.trusted.iter().find(|(_, eid)| **eid == endpoint);
-        paired.or(trusted).map(|(signer, _)| *signer)
+        let paired = paired.map(|(signer, _)| *signer);
+        let mut holders: Vec<AuthorKey> = paired.into_iter().collect();
+        holders.extend(
+            self.trusted_signer(endpoint)
+                .filter(|key| Some(*key) != paired),
+        );
+        holders
     }
 
     /// Record that `signer` proved `endpoint` in a `PeerInfo` stamped `stamp`. Another signer
@@ -150,17 +156,18 @@ impl ProvenEndpoints {
         holder_is_live: impl Fn(&AuthorKey) -> bool,
     ) {
         let held = self.stamps.get(&endpoint).copied();
-        let other_holder = self.holder_of(endpoint).filter(|holder| *holder != signer);
+        let mut other_holders = self.holders_of(endpoint);
+        other_holders.retain(|holder| *holder != signer);
         let outranked = held.is_some_and(|held| stamp <= held);
-        if outranked && other_holder.is_some_and(|holder| holder_is_live(&holder)) {
+        if outranked && other_holders.iter().any(holder_is_live) {
             return;
         }
         self.place(signer, endpoint, linked);
         if self.by_signer.get(&signer) == Some(&endpoint) {
-            let kept = if other_holder.is_some() {
-                stamp
-            } else {
+            let kept = if other_holders.is_empty() {
                 stamp.max(held.unwrap_or(stamp))
+            } else {
+                stamp
             };
             self.stamps.insert(endpoint, kept);
         }
@@ -429,6 +436,41 @@ mod one_signer_tests {
             proven.trusted(&first),
             None,
             "a forgotten endpoint has no signer"
+        );
+    }
+
+    /// The pair of an endpoint and the trust in it can name two signers: a newer `PeerInfo` of a
+    /// key that is not in the roster yet takes the pair, and the roster still trusts the old key.
+    /// The old key is live, so a `PeerInfo` that is not newer than the stamp held must not take
+    /// the endpoint from it, whoever holds the pair.
+    #[test]
+    fn a_live_trusted_key_keeps_its_endpoint_when_the_pair_names_a_key_that_is_not_live() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (trusted, newcomer, claimant) = (
+            AuthorKey::from([1; 32]),
+            AuthorKey::from([2; 32]),
+            AuthorKey::from([3; 32]),
+        );
+        let endpoint = SecretKey::generate().public();
+        let none = HashSet::new();
+        let only_trusted_is_live = |holder: &AuthorKey| *holder == trusted;
+        let mut proven = ProvenEndpoints::new(4);
+        proven.insert(trusted, endpoint, UnixSecs::from(10), &none, every_key);
+        proven.trust(trusted, endpoint);
+        proven.insert(newcomer, endpoint, UnixSecs::from(20), &none, every_key);
+
+        proven.insert(
+            claimant,
+            endpoint,
+            UnixSecs::from(20),
+            &none,
+            only_trusted_is_live,
+        );
+
+        assert_eq!(
+            proven.get(&claimant),
+            None,
+            "a stamp that is not newer took the endpoint from the live trusted key"
         );
     }
 
