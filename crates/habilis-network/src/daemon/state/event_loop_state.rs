@@ -1194,7 +1194,9 @@ impl EventLoopState {
         self.rival_holders.remove(&key);
         self.names.remove(&key);
         self.release_refused_endpoint(&key);
-        self.forget_hints_of(key)
+        let left_hints = self.forget_hints_of(key);
+        self.rebind_refused_endpoints();
+        left_hints
     }
 
     /// Drop every dial hint that `key` made, under each nickname it used, and return the address
@@ -2123,6 +2125,25 @@ impl EventLoopState {
             .any(|other| other.id == address.id);
         if !shared && !self.endpoint_is_bound(address.id) {
             self.release_unbound_endpoint(address.id);
+        }
+    }
+
+    /// Bind the retained endpoint of each key that is now the only live key of its nickname, with
+    /// the flow of a `PeerInfo`, and drop the retained value.
+    fn rebind_refused_endpoints(&mut self) {
+        let waiting: Vec<(AuthorKey, Nickname)> = self
+            .refused_endpoints
+            .keys()
+            .filter(|key| self.peers.contains(*key))
+            .filter_map(|key| Some((*key, self.names.get(key)?.clone())))
+            .collect();
+        for (key, nickname) in waiting {
+            if self.nickname_is_ambiguous(&nickname) || self.hint_is_held_by_other(&nickname, key) {
+                continue;
+            }
+            if let Some(address) = self.refused_endpoints.remove(&key) {
+                self.bind_peer_endpoint(key, nickname, address);
+            }
         }
     }
 

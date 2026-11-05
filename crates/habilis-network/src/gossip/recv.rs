@@ -3215,6 +3215,51 @@ mod first_contact_tests {
         });
     }
 
+    /// Two live keys use one nickname, and the second binds no dial hint. When the first leaves,
+    /// the second is the only key of the nickname, and its endpoint becomes the hint at once: a
+    /// directed send does not wait for its next `PeerInfo`.
+    #[test]
+    fn the_endpoint_a_rival_key_was_refused_becomes_the_hint_when_the_first_key_leaves() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::peer_addr_error;
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let twin = nick("twin");
+            let (first_endpoint, second_endpoint) = (endpoint_id(51), endpoint_id(52));
+            let (first, second) = (Identity::generate(), Identity::generate());
+            let mut state = fresh_state();
+            for (run, endpoint) in [(&first, first_endpoint), (&second, second_endpoint)] {
+                state.names.insert(run.author_key(), twin.clone());
+                state.peers.insert(run.author_key());
+                let json =
+                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+                let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+                let peer_info = Message::new_peer_info(&node.mesh, &twin, body).sign(run);
+                super::handle_peer_info(&peer_info, &mut state, &context).await;
+            }
+            assert_eq!(
+                state.peer_endpoints.get(&twin).map(|address| address.id),
+                Some(first_endpoint),
+                "the first key holds the hint"
+            );
+
+            state.forget_key(first.author_key());
+
+            assert_eq!(
+                state.peer_endpoints.get(&twin).map(|address| address.id),
+                Some(second_endpoint),
+                "the survivor's endpoint was not bound when the first key left"
+            );
+            assert!(
+                !state.refused_endpoints.contains_key(&second.author_key()),
+                "the retained endpoint stayed after the rebind"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// The roster trusts a key whose proof the capped table has dropped. Its beacon flag is
     /// believed: the trust is what a pong and a link vector follow too.
     #[test]
