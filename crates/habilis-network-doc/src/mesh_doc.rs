@@ -973,11 +973,10 @@ impl MeshDoc {
         if let Some(stamp) = named.and_then(|list| list.iter().find(|(held, _)| held == path)) {
             return Some(stamp.1.clone());
         }
-        let time: u64 = times
+        let known = times
             .entry(span.hash)
-            .or_insert_with(|| self.frame_time(&span.hash))
-            .as_ref()
-            .copied()?;
+            .or_insert_with(|| self.frame_time(&span.hash));
+        let time: u64 = (*known)?;
         Some(Stamp::new(time, actor_tag(&actor)))
     }
 
