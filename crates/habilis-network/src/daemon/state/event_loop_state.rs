@@ -1751,6 +1751,12 @@ impl EventLoopState {
         )
     }
 
+    /// The `joined` frame this node announces: signed by the session key, with the proof of the
+    /// session in the body.
+    pub(crate) fn own_joined(&self, mesh: &MeshId, nickname: &Nickname) -> Verified {
+        Message::new_joined(mesh, nickname).sign(&self.identity)
+    }
+
     /// The request to send for an `alive` frame whose session this node holds no proof for. It asks
     /// once per session, and only for a member of the roster, so a flood of new keys buys no
     /// request.

@@ -371,6 +371,24 @@ mod tests {
             "the retries of the refused askers are answered"
         );
     }
+
+    /// The `joined` frame a node announces carries the proof of its session, and a receiver holds
+    /// it: the first join needs no request.
+    #[test]
+    fn the_joined_frame_of_a_node_carries_its_proof() {
+        let sender = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let joined: messages::Verified = sender.own_joined(&mesh, &nick("alice"));
+        receiver.note_joined_proof(&joined, &mesh);
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&sender.identity.author_key())
+                .is_some(),
+            "the receiver holds the proof from the first frame"
+        );
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
