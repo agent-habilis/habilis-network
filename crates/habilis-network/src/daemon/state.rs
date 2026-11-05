@@ -265,6 +265,27 @@ mod tests {
             "the newest session verifies after more crashes than the cap"
         );
     }
+
+    /// A node that joins a mesh of 96 is asked by every peer in the same minute. Each asker gets
+    /// its answer: the node-wide cap grows with the roster.
+    #[test]
+    fn every_asker_of_a_mesh_of_96_is_answered() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        for index in 0..96 {
+            state.peers.insert(nick(&format!("peer-{index}")));
+        }
+        let now = Instant::now();
+        let mut answered = 0;
+        for index in 0..96u8 {
+            let asker = AuthorKey::from([index; 32]);
+            if state.proof_answer(&me, &asker, &me, &mesh, now).is_some() {
+                answered += 1;
+            }
+        }
+        assert_eq!(answered, 96, "every asker of a mesh of 96 gets its answer");
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
