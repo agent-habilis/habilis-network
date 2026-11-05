@@ -1183,7 +1183,7 @@ fn dispatch_channel(
     if channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
-        app.on_meta_applied(&message.author, state, context);
+        app.on_meta_applied(&message.key(), state, context);
     }
 }
 
@@ -2278,7 +2278,9 @@ mod first_contact_tests {
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
 
-    use super::{dispatch_infra, handle_gossip_event, ingest, pong_for};
+    use super::{
+        ChannelEvent, dispatch_channel, dispatch_infra, handle_gossip_event, ingest, pong_for,
+    };
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::{EventLoopState, PingRound};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
@@ -2307,7 +2309,7 @@ mod first_contact_tests {
     use n0_future::time::Instant as TokioInstant;
     use std::collections::HashSet;
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, atomic};
+    use std::sync::{Arc, Mutex, atomic};
     use std::time::{Duration as std_Duration, Instant as std_Instant};
     use std::{future, net};
     use tokio::sync::mpsc;
@@ -2911,6 +2913,81 @@ mod first_contact_tests {
                 reads.load(Ordering::Relaxed),
                 1,
                 "the first delivery reaches the app and the resend does not"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An app that records who the meta hook names.
+    // the app and the test share the record
+    struct MetaRecorder(Arc<Mutex<Vec<AuthorKey>>>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for MetaRecorder {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::NONE
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+
+        fn on_meta_applied(
+            &mut self,
+            author: &AuthorKey,
+            _state: &mut EventLoopState,
+            _context: &HandlerCtx<'_>,
+        ) {
+            if let Ok(mut record) = self.0.lock() {
+                record.push(*author);
+            }
+        }
+    }
+
+    /// Two keys can use one nickname, and the meta slot of each is its own. The hook that tells
+    /// the app which slot changed names the key of the author, so the app reads the slot of that
+    /// key and not the slot of the other key.
+    #[test]
+    fn the_meta_hook_tells_two_keys_of_one_nickname_apart() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the record
+            let record = Arc::new(Mutex::new(Vec::new()));
+            let mut app = MetaRecorder(Arc::clone(&record));
+            let twin = nick("twin");
+            let identities = [Identity::generate(), Identity::generate()];
+            for identity in &identities {
+                let frame = Message::new_channel_event(
+                    &node.mesh,
+                    &twin,
+                    MessageBody::from("{}"),
+                    Channel::Meta,
+                )
+                .sign(identity);
+                dispatch_channel(
+                    ChannelEvent {
+                        channel: Channel::Meta,
+                        message: &frame,
+                        surfaceable: true,
+                    },
+                    &mut state,
+                    &mut app,
+                    &context,
+                );
+            }
+
+            let heard = record.lock().expect("the record lock").clone();
+            let keys: Vec<AuthorKey> = identities.iter().map(Identity::author_key).collect();
+            assert_eq!(
+                heard, keys,
+                "the hook did not name the key of each author, in order"
             );
             node.endpoint.close().await;
         });
