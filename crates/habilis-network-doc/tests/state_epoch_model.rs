@@ -324,6 +324,32 @@ fn model_a_stale_node_does_not_revert_a_newer_value() {
     sim.assert_model("a stale node");
 }
 
+/// Two nodes cut the same epoch from different views. The seed of the lower key wins on every node,
+/// the other seed is dropped, and no write is lost: node n1 wrote `b` twice, and only the cutter
+/// that saw the second write has it in its seed.
+#[test]
+fn model_two_cutters_converge_to_one_seed_and_lose_no_write() {
+    let _guard = habilis_network_test_tracing::init();
+    for first in 0..NODES {
+        for second in 0..NODES {
+            if first == second {
+                continue;
+            }
+            let mut sim = Sim::new(31);
+            sim.write_exact(1, "b", Some(json!(0)));
+            sim.write_exact(0, "a", Some(json!("x")));
+            sim.settle();
+            sim.write_exact(1, "b", Some(json!(1)));
+            sim.deliver_to(1, first);
+            let _ = sim.cut(first);
+            let _ = sim.cut(second);
+            sim.write_exact(second, "c", Some(json!([1, 2])));
+            sim.settle();
+            sim.assert_model(&format!("cutters n{first} and n{second}"));
+        }
+    }
+}
+
 /// Seeds for the run in CI: 500 take about 25 s of a debug build. The environment variable
 /// `STATE_EPOCH_MODEL_SEEDS` sets the count, for a long run by hand.
 fn seed_count(default: u64) -> u64 {

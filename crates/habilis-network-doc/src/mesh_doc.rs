@@ -390,6 +390,18 @@ pub struct MeshDoc {
     settled_bytes: usize,
     /// The frame bytes that start a reset, before the settled size is known.
     frame_cap: usize,
+    /// Whether the document is applying the frames of the seed that it adopts, which the rule for
+    /// a rival seed must not see.
+    adopting: bool,
+    /// The author of the root of the seed that this document adopted for its epoch, `None` when
+    /// it holds no seed. A rival root of the same epoch with a lower key replaces that seed.
+    seed_author: Option<AuthorKey>,
+    /// The hashes of the changes of that seed. They are no write of the node, so a replay skips
+    /// them. At most `DOC_SEED_FRAMES_MAX`.
+    seed_hashes: HashSet<ChangeHash>,
+    /// The authors of rival roots that lost, so that the rest of their chains is refused at once.
+    /// At most 8, the oldest gives way.
+    refused_rivals: Vec<AuthorKey>,
     /// Whether an ungated document keeps the root of a higher epoch as a candidate. Off by
     /// default, so a state channel refuses such a frame, as it did before the state epochs, until
     /// the node ticks the state channel (see [`Self::state_epochs`]).
@@ -457,6 +469,10 @@ impl MeshDoc {
             frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
             state_epochs: false,
             owner: None,
+            adopting: false,
+            seed_author: None,
+            seed_hashes: HashSet::new(),
+            refused_rivals: Vec::new(),
             gate,
             key: None,
         }
@@ -727,11 +743,19 @@ impl MeshDoc {
             }
             return None;
         };
+        // A rival seed of the epoch that the document holds covers none of the writes made in
+        // this epoch, so the whole cut is out of it. A seed of a higher epoch covers what its
+        // cut vector says.
+        let rival = candidate.epoch == self.epoch;
         let leaves: Vec<(Vec<String>, Value)> = match candidate.mark.as_ref() {
-            Some(mark) => self.replay_leaves(&mark.cut),
+            Some(_) if rival => self.replay_leaves(&[], &self.seed_hashes),
+            Some(mark) => self.replay_leaves(&mark.cut, &self.seed_hashes),
             None => Vec::new(),
         };
+        let mut seed_hashes: HashSet<ChangeHash> = candidate.tail.keys().copied().collect();
+        seed_hashes.insert(candidate.root_hash);
         let mut switch = self.switch_to(candidate.epoch, me);
+        self.adopting = true;
         for frame in &frames {
             if !matches!(self.ingest(frame), Ingested::Applied { .. }) {
                 // Automerge can still refuse the change in `apply`, which only a crafted frame reaches.
@@ -742,6 +766,11 @@ impl MeshDoc {
                     tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "the candidate of the new epoch was not applied");
                 }
             }
+        }
+        self.adopting = false;
+        if candidate.mark.is_some() {
+            self.seed_author = Some(candidate.frame.key());
+            self.seed_hashes = seed_hashes;
         }
         switch.replay = self.replay_patch(leaves);
         Some(switch)
@@ -799,6 +828,9 @@ impl MeshDoc {
         self.epoch = epoch;
         self.epoch_ticks = 0;
         self.settled_bytes = 0;
+        self.seed_author = None;
+        self.seed_hashes = HashSet::new();
+        self.refused_rivals = Vec::new();
     }
 
     /// The seed of `epoch`: the live JSON of this document, cut by leaf path into merges that each
@@ -890,7 +922,11 @@ impl MeshDoc {
     /// The leaves that the changes above `cut` wrote, with the value that each holds now (`null`
     /// for a leaf that is gone). A leaf inside another leaf of the list is left out, because the
     /// outer one carries it.
-    fn replay_leaves(&self, cut: &[(String, u64)]) -> Vec<(Vec<String>, Value)> {
+    fn replay_leaves(
+        &self,
+        cut: &[(String, u64)],
+        skip: &HashSet<ChangeHash>,
+    ) -> Vec<(Vec<String>, Value)> {
         let Some(owner) = self.owner.as_ref() else {
             return Vec::new();
         };
@@ -900,7 +936,8 @@ impl MeshDoc {
         }
         let mut paths: Vec<Vec<String>> = Vec::new();
         for change in self.doc.get_changes(&[]) {
-            if change.actor_id().to_bytes() != owner.as_bytes().as_slice() {
+            let mine: bool = change.actor_id().to_bytes() == owner.as_bytes().as_slice();
+            if !mine || skip.contains(&change.hash()) {
                 continue;
             }
             let tag = actor_tag(change.actor_id());
@@ -1059,6 +1096,14 @@ impl MeshDoc {
         if epoch != self.epoch {
             return self.ingest_other_epoch(epoch, &change, frame, mark);
         }
+        if self.state_epochs
+            && !self.adopting
+            && self.gate.is_none()
+            && self.epoch > 0
+            && let Some(taken) = self.rival_seed_frame(&change, frame, mark)
+        {
+            return taken;
+        }
         let hash = change.hash();
         if self.applied.contains(&hash) {
             return Ingested::Duplicate;
@@ -1135,6 +1180,11 @@ impl MeshDoc {
             Some(held) if held.epoch == epoch && held.frame.dedup_key() == frame.dedup_key() => {
                 return Ingested::Duplicate;
             }
+            // Two seeds of one epoch: the root with the lowest key wins on every node.
+            Some(held)
+                if held.epoch == epoch
+                    && mark.is_some()
+                    && beats(&frame.key(), &held.frame.key()) => {}
             Some(held) if held.epoch >= epoch => return self.refuse_frame(frame),
             _ => {}
         }
@@ -1144,6 +1194,79 @@ impl MeshDoc {
             None => self.candidate_ticks = 0,
         }
         Ingested::NewEpoch { epoch }
+    }
+
+    /// A frame of the epoch that the document holds that belongs to a rival seed: another node cut
+    /// the same epoch from another view. `None` when the frame is no part of a rival seed.
+    fn rival_seed_frame(
+        &mut self,
+        change: &Change,
+        frame: &Verified,
+        mark: Option<SeedMark>,
+    ) -> Option<Ingested> {
+        let genesis: Change = state_genesis(self.epoch);
+        let is_root = change.deps() == [genesis.hash()];
+        if is_root && mark.is_some() {
+            if self.applied.contains(&change.hash()) {
+                return Some(Ingested::Duplicate);
+            }
+            return Some(self.take_rival_root(change, frame, mark));
+        }
+        if self.deps_satisfied(change.deps()) {
+            return None;
+        }
+        let rival_chain = self
+            .candidate
+            .as_ref()
+            .is_some_and(|held| held.epoch == self.epoch);
+        if rival_chain {
+            return Some(self.take_tail_frame(self.epoch, change, frame));
+        }
+        if self.refused_rivals.contains(&frame.key()) {
+            return Some(self.refuse_frame(frame));
+        }
+        None
+    }
+
+    /// The root of a rival seed of the epoch that the document holds. The seed whose root has the
+    /// lowest key wins on every node, so all nodes end in one seed. A lower root becomes the
+    /// candidate and the document switches to it after the wait, as for a higher epoch.
+    fn take_rival_root(
+        &mut self,
+        change: &Change,
+        frame: &Verified,
+        mark: Option<SeedMark>,
+    ) -> Ingested {
+        let named: usize = mark.as_ref().map_or(0, |mark| mark.frames as usize);
+        let Some(adopted) = self.seed_author else {
+            return self.refuse_frame(frame);
+        };
+        if named == 0 || named > DOC_SEED_FRAMES_MAX {
+            return self.refuse_frame(frame);
+        }
+        if let Some(held) = self.candidate.as_ref()
+            && held.epoch == self.epoch
+            && held.frame.dedup_key() == frame.dedup_key()
+        {
+            return Ingested::Duplicate;
+        }
+        let standing: AuthorKey = match self.candidate.as_ref() {
+            Some(held) if held.epoch == self.epoch => held.frame.key(),
+            _ => adopted,
+        };
+        if !beats(&frame.key(), &standing) {
+            if self.refused_rivals.len() >= 8 {
+                self.refused_rivals.remove(0);
+            }
+            self.refused_rivals.push(frame.key());
+            return self.refuse_frame(frame);
+        }
+        let kept = Candidate::new(self.epoch, frame.clone(), change, mark);
+        match self.candidate.replace(kept) {
+            Some(beaten) => self.dropped.extend(beaten.keys()),
+            None => self.candidate_ticks = 0,
+        }
+        Ingested::NewEpoch { epoch: self.epoch }
     }
 
     /// Forget the dedup key of a frame that the document does not take, so its re-send is not
@@ -1475,6 +1598,12 @@ fn peers_genesis(map: &str, epoch: u64) -> Change {
     doc.get_changes(&[])
         .pop()
         .expect("genesis produced exactly one change")
+}
+
+/// Whether the root of a seed from `rival` wins over the one from `held`: the lowest key wins on
+/// every node, so all nodes end in one seed.
+fn beats(rival: &AuthorKey, held: &AuthorKey) -> bool {
+    rival.as_bytes() < held.as_bytes()
 }
 
 /// A tag of the actor of a change for the cut vector: the first 8 bytes, in hex.
