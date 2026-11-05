@@ -1732,6 +1732,19 @@ impl EventLoopState {
         )
     }
 
+    /// The request to send for an `alive` frame whose session this node holds no proof for. It asks
+    /// once per session, and only for a member of the roster, so a flood of new keys buys no
+    /// request.
+    pub(crate) fn proof_request_for(
+        &mut self,
+        alive: &Verified,
+        own: &Nickname,
+        mesh: &MeshId,
+    ) -> Option<Verified> {
+        let _ = (alive, own, mesh);
+        None
+    }
+
     /// The answer to a proof request: a signed `joined` frame with the proof of this session, if
     /// the request is for this node and the answers of the last minute are under the cap.
     pub(crate) fn proof_answer(

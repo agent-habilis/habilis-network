@@ -187,6 +187,35 @@ mod tests {
             .count();
         assert_eq!(answered + 1, 30, "the answers stop at the per-minute cap");
     }
+
+    /// An alive frame from a roster member whose session has no proof asks once. An alive frame
+    /// from a stranger asks never, and a held proof asks never.
+    #[test]
+    fn an_alive_frame_without_a_proof_asks_once() {
+        let mut state = fresh_state();
+        let peer = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let alive: messages::Verified =
+            Message::new_alive(&mesh, &nick("bob")).sign(&peer.identity);
+        assert!(
+            state.proof_request_for(&alive, &me, &mesh).is_none(),
+            "a stranger gets no request"
+        );
+        state.peers.insert(nick("bob"));
+        let request = state
+            .proof_request_for(&alive, &me, &mesh)
+            .expect("a roster member without a proof is asked");
+        assert_eq!(
+            request.kind,
+            protocol::MessageKind::ProofRequest { to: nick("bob") },
+            "the request names the member"
+        );
+        assert!(
+            state.proof_request_for(&alive, &me, &mesh).is_none(),
+            "the session is asked once"
+        );
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
