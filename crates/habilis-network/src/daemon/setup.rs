@@ -632,6 +632,32 @@ fn validated_mesh_config(kind: &SetupKind) -> Result<&MeshConfig> {
     Ok(mesh_config)
 }
 
+/// The identity of this member, kept across restarts. Its seed lives in `<state>.key`, mode 0600.
+/// A key file of the wrong length is replaced, with a warning. No state file means a new key.
+fn load_or_create_identity(state: Option<&std::path::Path>) -> Result<identity::Identity> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Some(state) = state else {
+        return Ok(identity::Identity::generate());
+    };
+    let key_path = state.with_extension("key");
+    if let Ok(bytes) = std::fs::read(&key_path) {
+        if let Ok(seed) = <[u8; 32]>::try_from(bytes.as_slice()) {
+            return Ok(identity::Identity::from_seed(zeroize::Zeroizing::new(seed)));
+        }
+        tracing::warn!(target: "habilis_network::lifecycle", "identity key file has the wrong length; a new key replaces it");
+    }
+    let identity = identity::Identity::generate();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&key_path)?;
+    file.write_all(identity.seed().as_slice())?;
+    Ok(identity)
+}
+
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -724,7 +750,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             mint_mesh,
             author,
             // The mesh spec and the loop state both hold the signing identity, so it is shared.
-            identity: sync::Arc::new(identity::Identity::generate()),
+            identity: sync::Arc::new(load_or_create_identity(state_file.as_deref())?),
             mesh_password,
             mesh_key,
         },
@@ -1110,13 +1136,22 @@ mod tests {
     /// missing file gives a new one.
     #[test]
     fn a_restart_keeps_its_identity() {
-        let dir = tempfile::tempdir().expect("a temp dir");
-        let state = dir.path().join("session.json");
+        let dir = std::env::temp_dir().join(format!("habilis-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
         let first = super::load_or_create_identity(Some(&state)).expect("first start");
         let second = super::load_or_create_identity(Some(&state)).expect("restart");
-        assert_eq!(first.author_key(), second.author_key(), "the restart keeps the key");
+        assert_eq!(
+            first.author_key(),
+            second.author_key(),
+            "the restart keeps the key"
+        );
         let fresh = super::load_or_create_identity(None).expect("no state file");
-        assert_ne!(fresh.author_key(), first.author_key(), "no file means a new key");
+        assert_ne!(
+            fresh.author_key(),
+            first.author_key(),
+            "no file means a new key"
+        );
     }
 
     use crate::daemon::node::SignalHandling;
