@@ -17,7 +17,7 @@ use std::path::Path;
 use anyhow::Context;
 
 #[cfg(test)]
-use crate::util::consts::{MAX_BLOB_STORE_BYTES, MAX_BLOB_STORE_ENTRIES};
+use crate::util::consts::{MAX_BLOB_OWNERS, MAX_BLOB_STORE_BYTES, MAX_BLOB_STORE_ENTRIES};
 
 pub(crate) use blob_entry::BlobEntry;
 pub(crate) use blob_store::BlobStore;
@@ -361,6 +361,38 @@ mod tests {
             super::MAX_BLOB_STORE_ENTRIES,
             "an evicted blob loses its spool file"
         );
+
+        fs::remove_dir_all(&src_dir).ok();
+        Ok(())
+    }
+
+    /// One file attached to many timed-out calls shares one entry, so the
+    /// owner set must not grow with the calls.
+    #[test]
+    fn ten_times_the_owner_cap_of_claims_leaves_the_cap() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"x")?;
+
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let hash = BlobDigest::from([5u8; HASH_LEN]);
+        for index in 0..10 * super::MAX_BLOB_OWNERS {
+            let meta = ContentMeta {
+                sha256: hash,
+                size: 1,
+                content_id: ContentId::new(&format!("blob-test-group-{index}")),
+            };
+            store.snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))?;
+        }
+
+        let owners = store.get(&hash).expect("the blob stays").owners.len();
+        assert_eq!(
+            owners,
+            super::MAX_BLOB_OWNERS,
+            "the entry remembers the owner cap and no more"
+        );
+        assert_eq!(store.map.len(), 1, "one file stays one entry");
 
         fs::remove_dir_all(&src_dir).ok();
         Ok(())

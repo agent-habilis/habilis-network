@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::util::consts::{MAX_BLOB_STORE_BYTES, MAX_BLOB_STORE_ENTRIES};
+use crate::util::consts::{MAX_BLOB_OWNERS, MAX_BLOB_STORE_BYTES, MAX_BLOB_STORE_ENTRIES};
 
 use crate::blob::{BlobDigest, ContentId};
 
@@ -92,7 +92,7 @@ impl BlobStore {
     }
 
     /// For an already-spooled blob (a content-addressed dedup hit), add
-    /// `content_id` to its owners, make it the newest blob for disk-pressure
+    /// `content_id` to its owners (up to `MAX_BLOB_OWNERS`), make it the newest blob for disk-pressure
     /// eviction, and return its ticket fields; `None` when the blob is not
     /// spooled. Lets the producer skip the ~100ms password stretch
     /// when re-offloading content it already holds.
@@ -102,7 +102,9 @@ impl BlobStore {
         content_id: &ContentId,
     ) -> Option<Registered> {
         let entry = self.map.get_mut(hash)?;
-        entry.owners.insert(content_id.clone());
+        if entry.owners.len() < MAX_BLOB_OWNERS {
+            entry.owners.insert(content_id.clone());
+        }
         entry.seq = self.next_seq;
         self.next_seq += 1;
         Some(Registered {

@@ -208,6 +208,15 @@ pub const MAX_BLOB_STORE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 #[cfg(feature = "host")]
 pub const MAX_BLOB_STORE_ENTRIES: usize = 4096;
 
+/// Content groups that one blob entry remembers as owners. The same file
+/// offloaded for many calls shares one entry, so its owner set grows with each
+/// group. A group past the cap is not recorded: the blob stays served and its
+/// own bounds still apply, but the sweep of that group cannot release it, so
+/// the blob goes with the last recorded owner or with the byte or entry budget.
+/// 64 owners of about 60 bytes each hold about 4 `KiB` per entry.
+#[cfg(feature = "host")]
+pub const MAX_BLOB_OWNERS: usize = 64;
+
 /// Capacity of the unicast inbound channel — frames the `UNICAST_ALPN` acceptor
 /// forwards to the event loop for `gossip::ingest`. Bounded so a peer flooding a
 /// unicast stream can't back-pressure the loop; over the cap a frame is dropped
