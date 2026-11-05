@@ -12,7 +12,7 @@ mod direct_counts;
 mod direct_state;
 #[cfg(feature = "multihop")]
 mod parked_link_states;
-mod peerinfo_flood;
+mod peer_info_flood;
 mod reach;
 mod rendezvous_flag;
 mod rival_flag;
@@ -47,7 +47,7 @@ pub(crate) use direct_state::DirectState;
 pub use key_of_error::KeyOfError;
 #[cfg(feature = "multihop")]
 pub(crate) use parked_link_states::ParkedLinkStates;
-pub(crate) use peerinfo_flood::PeerInfoFlood;
+pub(crate) use peer_info_flood::PeerInfoFlood;
 pub use reach::Reach;
 pub(crate) use rendezvous_flag::RendezvousFlag;
 pub(crate) use rival_flag::RivalFlag;
