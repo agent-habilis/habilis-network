@@ -13,7 +13,8 @@ use habilis_network_util::consts::{
     DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
 };
 
-use crate::{DocError, wire};
+use crate::wire::SeedMark;
+use crate::{DocError, split_entry, wire};
 
 use automerge::transaction;
 use std::mem;
@@ -161,6 +162,17 @@ struct Pending {
     frame: Verified,
     change: Change,
     arrival: u64,
+}
+
+/// The changes of a state seed, in order, and the mark that its root carries. The first change
+/// depends on the genesis of the epoch, and each later one on the change before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SeedChain {
+    /// The automerge changes, root first.
+    pub changes: Vec<Vec<u8>>,
+    /// The mark for the body of the root.
+    pub mark: SeedMark,
 }
 
 /// The root frame of a higher epoch that the document keeps until it adopts the epoch.
@@ -600,6 +612,58 @@ impl MeshDoc {
         self.epoch = epoch;
         self.epoch_ticks = 0;
         self.settled_bytes = 0;
+    }
+
+    /// The seed of `epoch`: the live JSON of this document, cut by leaf path into merges that each
+    /// fit one frame, written as a chain of changes on the genesis of `epoch`. A node that starts
+    /// the epoch sends the chain, and a node that adopts it holds the same live values, with no
+    /// history. `fits` takes one merge and says whether its frame is small enough, as
+    /// [`split_entry`] does: the caller measures the real frame, signed and sealed.
+    /// `actor_seed` is the actor of the chain, the signing key of the cutter, as for
+    /// [`Self::build_change`]. An empty document gives a chain of 1 change that writes a key and
+    /// deletes it, so a seed always has a root.
+    ///
+    /// # Errors
+    /// [`DocError::TooLarge`] when one leaf does not fit a frame, and [`DocError::Encode`] when a
+    /// merge does not encode.
+    pub fn build_seed(
+        &self,
+        epoch: u64,
+        actor_seed: &[u8],
+        fits: impl FnMut(&Value) -> bool,
+    ) -> Result<SeedChain, DocError> {
+        let live = self.to_json();
+        let cuts: Result<Vec<Value>, DocError> = split_entry(&live, fits).collect();
+        let mut merges: Vec<Value> = cuts?;
+        merges.retain(|merge| !matches!(merge, Value::Object(map) if map.is_empty()));
+        let mut fork = Automerge::new();
+        fork.apply_changes([state_genesis(epoch)])
+            .map_err(DocError::encode)?;
+        fork.set_actor(actor_for(actor_seed));
+        let mut changes: Vec<Vec<u8>> = Vec::new();
+        if merges.is_empty() {
+            let mut tx = fork.transaction();
+            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
+            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
+            tx.commit();
+            let all: Vec<Vec<u8>> = raw_changes(&fork, &[]);
+            changes.extend(all.into_iter().skip(1));
+        }
+        for merge in &merges {
+            let heads: Vec<ChangeHash> = fork.get_heads();
+            let mut tx = fork.transaction();
+            write_map(&mut tx, &ROOT, merge).map_err(DocError::encode)?;
+            tx.commit();
+            changes.extend(raw_changes(&fork, &heads));
+        }
+        let tip: Vec<u8> = changes.last().cloned().unwrap_or_default();
+        let tip_change: Change = Change::from_bytes(tip).map_err(DocError::encode)?;
+        let last: String = tip_change.hash().to_string();
+        let frames = u32::try_from(changes.len()).unwrap_or(u32::MAX);
+        Ok(SeedChain {
+            changes,
+            mark: SeedMark::new(frames, last),
+        })
     }
 
     /// The genesis of `epoch` for this channel: the per-peer map of a gated channel (meta), the
@@ -1075,6 +1139,16 @@ fn peers_genesis(map: &str, epoch: u64) -> Change {
         .expect("genesis produced exactly one change")
 }
 
+/// The raw bytes of every change of `doc` that comes after `since`, in order.
+fn raw_changes(doc: &Automerge, since: &[ChangeHash]) -> Vec<Vec<u8>> {
+    let changes = doc.get_changes(since);
+    let mut raw: Vec<Vec<u8>> = Vec::with_capacity(changes.len());
+    for change in changes {
+        raw.push(change.raw_bytes().to_vec());
+    }
+    raw
+}
+
 /// Derive a stable automerge [`ActorId`](automerge::ActorId) from a
 /// per-session seed (the daemon passes its signing public key) so a member's
 /// concurrent same-key writes resolve deterministically. Authenticity is the
@@ -1243,6 +1317,7 @@ fn put_number(
 #[cfg(test)]
 mod tests {
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
+    use crate::DocError;
     use automerge::Change;
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
@@ -2552,6 +2627,121 @@ mod tests {
                 seen.remove(&key);
             }
         }
+    }
+
+    /// A `fits` for `build_seed`: a merge fits when its JSON text is at most `limit` bytes.
+    fn within(limit: usize) -> impl FnMut(&Value) -> bool {
+        move |merge| merge.to_string().len() <= limit
+    }
+
+    fn parse_changes(raw: &[Vec<u8>]) -> Vec<Change> {
+        let mut changes: Vec<Change> = Vec::with_capacity(raw.len());
+        for bytes in raw {
+            changes.push(Change::from_bytes(bytes.clone()).expect("a change"));
+        }
+        changes
+    }
+
+    fn state_doc_of(changes: &[Vec<u8>], epoch: u64) -> Value {
+        let mut doc = automerge::Automerge::new();
+        doc.apply_changes([super::state_genesis(epoch)])
+            .expect("the genesis applies");
+        for bytes in changes {
+            let change = Change::from_bytes(bytes.clone()).expect("a change");
+            doc.apply_changes([change]).expect("the change applies");
+        }
+        serde_json::to_value(automerge::AutoSerde::from(&doc)).expect("json")
+    }
+
+    fn live_state() -> Value {
+        json!({
+            "board": { "title": "t", "rows": [1, 2, {"a": [true, null]}], "empty": {}, "none": [] },
+            "notes": { "a": long(300), "b": long(300), "c": long(300) },
+            "n": 7,
+            "flag": false,
+        })
+    }
+
+    fn state_doc_with(live: &Value) -> MeshDoc {
+        let mut doc = MeshDoc::new_ungated();
+        let me = nick("me");
+        write(&mut doc, &me, live);
+        doc
+    }
+
+    #[test]
+    fn a_seed_chain_rebuilds_the_live_json_on_a_fresh_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let live = live_state();
+        let doc = state_doc_with(&live);
+        let chain = doc
+            .build_seed(5, b"cutter", within(400))
+            .expect("the live json splits");
+        assert!(
+            chain.changes.len() > 1,
+            "the live json needs more than 1 frame"
+        );
+        assert_eq!(
+            state_doc_of(&chain.changes, 5),
+            live,
+            "the chain on the genesis of epoch 5 gives the live json"
+        );
+    }
+
+    #[test]
+    fn a_seed_chain_is_linear_and_its_mark_names_the_last_change() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = state_doc_with(&live_state());
+        let chain = doc
+            .build_seed(5, b"cutter", within(400))
+            .expect("the live json splits");
+        let changes: Vec<Change> = parse_changes(&chain.changes);
+        assert_eq!(
+            changes[0].deps(),
+            [super::state_genesis(5).hash()],
+            "the root depends on the genesis of the epoch"
+        );
+        for pair in changes.windows(2) {
+            assert_eq!(
+                pair[1].deps(),
+                [pair[0].hash()],
+                "each change depends on the one before"
+            );
+        }
+        assert_eq!(
+            chain.mark.frames as usize,
+            changes.len(),
+            "the mark counts the frames"
+        );
+        let tip: &Change = changes.last().expect("a change");
+        let tip_hash: String = tip.hash().to_string();
+        assert_eq!(chain.mark.last, tip_hash, "the mark names the last change");
+    }
+
+    #[test]
+    fn an_empty_live_document_gives_a_seed_of_one_change() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated();
+        let chain = doc
+            .build_seed(2, b"cutter", within(400))
+            .expect("an empty json splits");
+        assert_eq!(chain.changes.len(), 1, "a seed has a root even when empty");
+        assert_eq!(
+            state_doc_of(&chain.changes, 2),
+            json!({}),
+            "the seed leaves no key"
+        );
+    }
+
+    #[test]
+    fn a_leaf_that_does_not_fit_one_frame_is_an_error() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = state_doc_with(&json!({ "big": long(500) }));
+        let result = doc.build_seed(2, b"cutter", within(100));
+        assert!(
+            matches!(result, Err(DocError::TooLarge { .. })),
+            "a leaf over the frame cannot be cut: {result:?}"
+        );
     }
 
     /// Golden: the hash of the genesis of state epochs 1, 2 and a large one. A replica of another

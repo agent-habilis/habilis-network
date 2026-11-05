@@ -47,4 +47,4 @@ pub use split::split_entry;
 
 mod mesh_doc;
 
-pub use mesh_doc::{DocCensus, EpochSwitch, Ingested, MeshDoc, SelfWriteGate};
+pub use mesh_doc::{DocCensus, EpochSwitch, Ingested, MeshDoc, SeedChain, SelfWriteGate};
