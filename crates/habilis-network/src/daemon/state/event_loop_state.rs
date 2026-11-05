@@ -1741,8 +1741,10 @@ impl EventLoopState {
         own: &Nickname,
         mesh: &MeshId,
     ) -> Option<Verified> {
-        let _ = (alive, own, mesh);
-        None
+        if !self.peers.contains(alive.author.as_str()) || !self.proofs.wants_proof(&alive.key()) {
+            return None;
+        }
+        Some(Message::new_proof_request(mesh, own, alive.author.clone()).sign(&self.identity))
     }
 
     /// The answer to a proof request: a signed `joined` frame with the proof of this session, if

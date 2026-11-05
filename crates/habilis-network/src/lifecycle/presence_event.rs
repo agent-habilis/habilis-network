@@ -2,8 +2,10 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
+use crate::logging::messages;
 use crate::protocol::messages::Verified;
 use crate::protocol::{Message, PresenceSubtype};
+use crate::transport;
 
 use super::membership_update;
 
@@ -35,6 +37,7 @@ pub(crate) async fn handle_presence(
         surfaceable,
     } = event;
     if subtype == PresenceSubtype::Alive {
+        ask_for_proof(message, state, context).await;
         return;
     }
     if subtype == PresenceSubtype::Joined {
@@ -118,6 +121,25 @@ pub(crate) async fn handle_presence(
                 });
                 tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
             }
+        }
+    }
+}
+
+/// Send the one proof request for a session that has no proof here, to that member alone over a
+/// warm path. No warm path means no request: the next alive frame of the session does not ask
+/// again, so the proof then comes with the next `joined` frame of the session.
+async fn ask_for_proof(alive: &Verified, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let Some(request) = state.proof_request_for(alive, context.author, context.mesh) else {
+        return;
+    };
+    let member_endpoint = state.peer_endpoints.get(alive.author.as_str());
+    let warm_endpoint = member_endpoint
+        .map(|address| address.id)
+        .filter(|eid| Some(*eid) != state.rendezvous_id);
+    if let (Some(eid), Ok(bytes)) = (warm_endpoint, request.serialize()) {
+        messages::log_out(&request);
+        if !transport::send_best_effort(eid, bytes, state).await {
+            tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: no warm path");
         }
     }
 }
