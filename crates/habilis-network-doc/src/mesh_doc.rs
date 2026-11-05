@@ -520,7 +520,8 @@ impl MeshDoc {
     /// capabilities of a card can land after its other fields. The size of the epoch is taken one
     /// tick after the wait: a node adopts at the end of the wait and writes its entry on the next
     /// sweep, so the entries are back in that margin, whatever the phase of the two timers. Only a
-    /// gated channel has epochs: the free-form `state` channel keeps every frame.
+    /// gated channel has epochs today: the free-form `state` channel keeps every frame until the
+    /// state epoch work lands (`state-epoch-design.md`).
     pub fn tick_epoch(&mut self, me: &Nickname) -> Option<EpochSwitch> {
         self.epoch_ticks = self.epoch_ticks.saturating_add(1);
         if self.candidate.is_some() {
@@ -1029,7 +1030,8 @@ fn doc_json(doc: &Automerge) -> Value {
 /// The deterministic genesis of a state epoch above 0, built from constants (fixed actor,
 /// `time = 0`, the epoch in the message) so every replica gets the same hash. It leaves no key in
 /// the document. A change with no operation is no change, so the genesis writes a key and deletes
-/// it.
+/// it. The hash depends on how automerge encodes that pair, so a bump of automerge must keep the
+/// pinned hashes: if it does not, the bump is a wire break and needs a frame version bump.
 fn state_genesis(epoch: u64) -> Change {
     let mut doc = Automerge::new();
     doc.set_actor(automerge::ActorId::from(
@@ -2552,16 +2554,33 @@ mod tests {
         }
     }
 
-    /// Golden: the hash of the genesis of state epoch 1. A replica of another build must reach the
-    /// same hash, or the epoch frames of the two builds do not meet.
+    /// Golden: the hash of the genesis of state epochs 1, 2 and a large one. A replica of another
+    /// build must reach the same hash, or the epoch frames of the two builds do not meet. The large
+    /// epoch pins the encoding of the `u64` that the genesis writes.
     #[test]
     fn state_genesis_bytes_are_pinned() {
         let _guard = ::habilis_network_test_tracing::init();
-        assert_eq!(
-            format!("{:?}", super::state_genesis(1).hash()),
-            "ChangeHash(\"bfb565389605341479209de04fbd2be2ba2d7831ab1fc4f0cf162293a8e8e1f5\")",
-            "the state genesis change hash is pinned"
-        );
+        let pinned = [
+            (
+                1,
+                "bfb565389605341479209de04fbd2be2ba2d7831ab1fc4f0cf162293a8e8e1f5",
+            ),
+            (
+                2,
+                "2938c155a12397b7bad436dba6ad3bde04358dbbdceca75a1b2c37906def0171",
+            ),
+            (
+                u64::MAX,
+                "b0c86ed12e33b25a1d80657a967aff0ce9650e223856399771c09484e13c00f1",
+            ),
+        ];
+        for (epoch, hex) in pinned {
+            assert_eq!(
+                super::state_genesis(epoch).hash().to_string(),
+                hex,
+                "the state genesis hash of epoch {epoch} is pinned"
+            );
+        }
     }
 
     #[test]
