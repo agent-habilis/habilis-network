@@ -286,6 +286,44 @@ mod tests {
         }
         assert_eq!(answered, 96, "every asker of a mesh of 96 gets its answer");
     }
+
+    /// Two nodes, end to end at state level: a joiner that missed the `joined` frame of a member
+    /// sees its alive frame, asks once, gets the answer, and holds a proof that verifies. The
+    /// restart half (a new session replaces the old one) waits for the gate.
+    #[test]
+    fn a_joiner_that_missed_the_joined_frame_ends_up_with_the_proof() {
+        let mut member = fresh_state();
+        let mut joiner = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let (member_name, joiner_name) = (nick("alice"), nick("bob"));
+        joiner.peers.insert(member_name.clone());
+        let alive: messages::Verified =
+            Message::new_alive(&mesh, &member_name).sign(&member.identity);
+
+        let request = joiner
+            .proof_request_for(&alive, &joiner_name, &mesh)
+            .expect("the joiner asks for the proof");
+        joiner.note_proof_request_sent(&alive.key());
+        let protocol::MessageKind::ProofRequest { to } = &request.kind else {
+            panic!("the joiner sent a proof request");
+        };
+        let answer: messages::Verified = member
+            .proof_answer(to, &request.key(), &member_name, &mesh, Instant::now())
+            .expect("the member answers the request for itself");
+        joiner.note_joined_proof(&answer, &mesh);
+
+        let held = joiner.proofs.proof_of(&member.identity.author_key());
+        assert!(
+            held.is_some(),
+            "the joiner holds the proof of the member session"
+        );
+        assert!(
+            joiner
+                .proof_request_for(&alive, &joiner_name, &mesh)
+                .is_none(),
+            "the next alive frame of the session asks for nothing"
+        );
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
