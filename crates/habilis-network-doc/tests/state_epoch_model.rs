@@ -67,6 +67,8 @@ struct Sim {
     /// Frames on the way: the target node, the step at which it arrives, the frame.
     wire: Vec<(usize, u64, Verified)>,
     step: u64,
+    /// The most bytes that a merge of a seed or of a replay can have to fit one frame.
+    fits: usize,
     /// The values of every node, written in order.
     model: Map<String, Value>,
     /// The stamp (time, tag) of the last change that a node composed.
@@ -103,6 +105,7 @@ impl Sim {
             dice: Dice(seed),
             wire: Vec::new(),
             step: 0,
+            fits: FRAME_FITS,
             model: Map::new(),
             last_stamp: None,
             last_frame: None,
@@ -281,7 +284,8 @@ impl Sim {
         let epoch = self.nodes[index].doc.epoch() + 1;
         let name = self.nodes[index].name.clone();
         let actor = pad(name.as_str());
-        let fits = |merge: &Value| merge.to_string().len() <= FRAME_FITS;
+        let limit = self.fits;
+        let fits = |merge: &Value| merge.to_string().len() <= limit;
         // A node that holds a candidate adopts it and cuts no epoch: the document says so.
         let built = self.nodes[index].doc.build_seed(epoch, &actor, fits);
         if matches!(built, Err(DocError::CandidateHeld)) {
@@ -371,7 +375,8 @@ impl Sim {
             }
         }
         for (index, patch, stamps) in replays {
-            let fits = |merge: &Value| merge.to_string().len() <= FRAME_FITS;
+            let limit = self.fits;
+            let fits = |merge: &Value| merge.to_string().len() <= limit;
             let chunks = self.nodes[index]
                 .doc
                 .split_replay(&patch, fits)
@@ -475,6 +480,35 @@ fn model_writes_during_the_wait_are_replayed() {
     sim.write_exact(2, "c", Some(json!([3, 4])));
     sim.settle();
     sim.assert_model("writes during the wait");
+}
+
+/// A replay of more leaves than one frame can name (128 paths) is split by the sender, and every
+/// leaf arrives. The bytes of a frame are no limit here, so only the cap of 128 paths splits.
+#[test]
+fn model_a_replay_of_more_than_128_leaves_arrives_whole() {
+    let _guard = habilis_network_test_tracing::init();
+    for count in [129usize, 300] {
+        let mut sim = Sim::new(70 + u64::try_from(count).expect("a seed"));
+        sim.fits = 1_000_000;
+        sim.write_exact(0, "a", Some(json!(1)));
+        sim.settle();
+        sim.cut(0);
+        // Node n1 writes `count` leaves of its own after the cut, in one change.
+        let mut leaves = Map::new();
+        for leaf in 0..count {
+            leaves.insert(format!("l{leaf:03}"), json!(leaf));
+        }
+        assert!(sim.commit(1, &json!({ "n1": Value::Object(leaves.clone()) })));
+        if let Value::Object(fields) = sim
+            .model
+            .entry("n1".to_owned())
+            .or_insert_with(|| json!({}))
+        {
+            fields.extend(leaves);
+        }
+        sim.settle();
+        sim.assert_model(&format!("a replay of {count} leaves"));
+    }
 }
 
 /// A delete that a node makes while the cut waits must not come back with the seed.
