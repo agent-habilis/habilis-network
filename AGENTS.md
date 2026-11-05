@@ -418,7 +418,6 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R15 | `SplitMix64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/split_mix64.rs` | a PRNG state: a Copy would fork its stream, so it derives Clone only |
 | R15 | `Fnv1a64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/round.rs` | a hasher state: a Copy would fork its stream, so it derives Clone only |
 | R13 | `BenchError` | `habilis-network-iroh-webrtc-transport/src/bench_error.rs` | holds error sources that are not Copy, such as `endpoint::BindError` | |
-| R13 | `LobbyError` | `habilis-network-netplay/src/mesh/lobby.rs` | holds a `Nickname`, which owns a `String` | |
 | R13 | `TestRelayError` | `habilis-network/src/lookup/test_relay/test_relay_error.rs` | holds error sources that are not Copy, such as `server::SpawnError` | |
 | R16 | `ChunkError` | `habilis-network-chunks/src/chunk_error.rs` | holds a field type that is not Clone |
 | R16 | `DiskOrigin` | `habilis-network-chunks/src/fs/disk_origin.rs` | holds a `Mutex` field, which is not Clone |

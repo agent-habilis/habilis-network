@@ -264,7 +264,7 @@ mod key_list {
 /// let error = lobby.propose().unwrap_err();
 /// assert!(matches!(error, LobbyError::NotEnoughPlayers));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]
 pub enum LobbyError {
