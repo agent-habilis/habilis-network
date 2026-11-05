@@ -174,9 +174,17 @@ impl Sim {
         for (position, bytes) in numbered {
             let mark = (position == 0).then_some(&chain.mark);
             let stamps = &chain.origins[position];
-            let body =
-                wire::change_body_stamped(bytes, None, epoch, mark, Some(chain.time), stamps)
-                    .expect("a body");
+            let dead = &chain.tombstones[position];
+            let body = wire::change_body_tombstoned(
+                bytes,
+                None,
+                epoch,
+                mark,
+                Some(chain.time),
+                stamps,
+                dead,
+            )
+            .expect("a body");
             frames.push(signed(&name, body));
         }
         for frame in &frames {

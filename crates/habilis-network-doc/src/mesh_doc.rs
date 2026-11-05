@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use automerge::transaction::Transactable;
 use automerge::{
@@ -11,7 +11,7 @@ use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, Symmetric
 use habilis_network_util::consts::{
     DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
     DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_SEED_FRAMES_MAX,
-    DOC_SEED_TOMBSTONES_MAX, DOC_TOMBSTONE_PATH_BYTES_MAX,
+    DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX, DOC_TOMBSTONE_PATH_BYTES_MAX,
 };
 
 use crate::wire::SeedMark;
@@ -190,8 +190,10 @@ pub struct SeedChain {
     /// For each change of the chain, the stamps of the paths that it writes, in the order of
     /// those paths: the stamp of the write that made the value in the document of the cutter.
     pub origins: Vec<Vec<Stamp>>,
-    /// The tombstones of the cutter, which the root frame of the seed carries.
-    pub tombstones: Vec<(Vec<String>, Stamp)>,
+    /// For each change of the chain, the tombstones of the cutter that its frame carries, in the
+    /// order of the paths: all of them together are the tombstones of the cutter, and each list
+    /// stays inside `DOC_SEED_TOMBSTONE_FRAME_BYTES` bytes.
+    pub tombstones: Vec<StampedPaths>,
 }
 
 /// What a seed names: the stamps of its changes, and the tombstones of its root.
@@ -203,6 +205,27 @@ type Watch = (Vec<Vec<String>>, Vec<Option<Stamp>>, Value);
 
 /// What a restore asks the glue to write: a merge and a stamp for each path.
 pub type Restores = (Value, StampedPaths);
+
+/// Take tombstones from the front of `queue` for one frame: at most `entries`, and as many as fit
+/// `DOC_SEED_TOMBSTONE_FRAME_BYTES` (the bytes of the paths and 32 for each entry). One entry is
+/// always taken when there is one, since a path is at most `DOC_TOMBSTONE_PATH_BYTES_MAX` bytes.
+fn take_tombstones(queue: &mut VecDeque<(Vec<String>, Stamp)>, entries: usize) -> StampedPaths {
+    let mut taken: StampedPaths = Vec::new();
+    let mut bytes: usize = 0;
+    while let Some((path, _)) = queue.front() {
+        let cost: usize = path.iter().map(String::len).sum::<usize>() + 32;
+        let full = taken.len() >= entries
+            || (!taken.is_empty() && bytes + cost > DOC_SEED_TOMBSTONE_FRAME_BYTES);
+        if full {
+            break;
+        }
+        bytes += cost;
+        if let Some(entry) = queue.pop_front() {
+            taken.push(entry);
+        }
+    }
+    taken
+}
 
 /// A path with a stamp each.
 pub type StampedPaths = Vec<(Vec<String>, Stamp)>;
@@ -1077,10 +1100,14 @@ impl MeshDoc {
         // seed holds the value: its tombstone has the higher stamp. A value that the document
         // still holds at that path is older than the delete (a newer write would have removed the
         // tombstone), so what is written is the delete.
-        if recorded.is_some() {
+        if let Some((found, _)) = recorded.as_ref() {
+            // Whether the seed holds a value that the delete outranks is a question about the
+            // values of the seed, not about its tombstones: a seed can hold a value and a tombstone
+            // of a higher stamp for it (its cutter had not yet written the delete again).
+            let held_by_seed = seed_stamp_map(found, &[]);
             for (path, stamp) in &self.tombstones {
                 let bar: Option<&Stamp> = (1..=path.len())
-                    .filter_map(|depth| theirs.get(&path[..depth]))
+                    .filter_map(|depth| held_by_seed.get(&path[..depth]))
                     .max();
                 if bar.is_none_or(|held| stamp > held) {
                     pending.push((path.clone(), Value::Null, stamp.clone()));
@@ -1248,7 +1275,7 @@ impl MeshDoc {
         if self.candidate.is_some() {
             return Err(DocError::CandidateHeld);
         }
-        let live = self.to_json();
+        let live = self.without_dead_values();
         let mut within_frame = fits;
         let cuts: Result<Vec<Value>, DocError> = split_entry(&live, |merge| {
             count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
@@ -1283,7 +1310,37 @@ impl MeshDoc {
             tx.commit();
             changes.extend(raw_changes(&fork, &heads));
         }
-        let origins: Vec<Vec<Stamp>> = self.seed_origins_of(&fork, &changes)?;
+        let mut origins: Vec<Vec<Stamp>> = self.seed_origins_of(&fork, &changes)?;
+        // The tombstones go on the frames in the order of their paths, as many as a frame holds
+        // inside its byte budget and its entry cap. If the frames of the seed are not enough,
+        // carrier changes (a key written and deleted, as for an empty seed) take the rest.
+        let mut queue: VecDeque<(Vec<String>, Stamp)> = self
+            .tombstones
+            .iter()
+            .map(|(path, stamp)| (path.clone(), stamp.clone()))
+            .collect();
+        let mut carried: Vec<StampedPaths> = Vec::with_capacity(changes.len());
+        for stamps in &origins {
+            carried.push(take_tombstones(
+                &mut queue,
+                DOC_REPLAY_ENTRIES_MAX - stamps.len(),
+            ));
+        }
+        while !queue.is_empty() {
+            let heads: Vec<ChangeHash> = fork.get_heads();
+            let mut tx = fork.transaction();
+            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
+            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
+            tx.commit();
+            changes.extend(raw_changes(&fork, &heads));
+            origins.push(Vec::new());
+            carried.push(take_tombstones(&mut queue, DOC_REPLAY_ENTRIES_MAX));
+            if changes.len() > DOC_SEED_FRAMES_MAX {
+                return Err(DocError::SeedTooLong {
+                    frames: changes.len(),
+                });
+            }
+        }
         let tip: Vec<u8> = changes.last().cloned().unwrap_or_default();
         let tip_change: Change = Change::from_bytes(tip).map_err(DocError::encode)?;
         let last: String = tip_change.hash().to_string();
@@ -1293,12 +1350,35 @@ impl MeshDoc {
             mark: SeedMark::new(frames, last),
             time: self.next_time(),
             origins,
-            tombstones: self
-                .tombstones
-                .iter()
-                .map(|(path, stamp)| (path.clone(), stamp.clone()))
-                .collect(),
+            tombstones: carried,
         })
+    }
+
+    /// The JSON of this document without the values that a tombstone of a higher stamp governs. A
+    /// replay of another node can bring such a value back for a while (the restore removes it
+    /// again), and a seed must not carry it: a node that adopts it would hold a value that the
+    /// seed itself says was deleted.
+    fn without_dead_values(&self) -> Value {
+        let mut live: Value = self.to_json();
+        if self.tombstones.is_empty() {
+            return live;
+        }
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_leaves(&live, &mut Vec::new(), &mut leaves);
+        let paths: Vec<Vec<String>> = leaves.into_iter().map(|(path, _)| path).collect();
+        let stamps = self.stamps_of(&paths);
+        let floors = self.tombstone_floors(&paths);
+        for ((path, stamp), floor) in paths.iter().zip(stamps).zip(floors) {
+            let dead = match (stamp, floor) {
+                (Some(held), Some(floor)) => held < floor,
+                (None, Some(_)) => true,
+                (_, None) => false,
+            };
+            if dead {
+                remove_path(&mut live, path);
+            }
+        }
+        live
     }
 
     /// The stamps that the frames of a seed name, checked against the changes: a scratch document
@@ -1311,14 +1391,17 @@ impl MeshDoc {
         scratch.apply_changes([state_genesis(epoch)]).ok()?;
         let mut found: SeedStamps = HashMap::new();
         let mut dead: Vec<(Vec<String>, Stamp)> = Vec::new();
-        for (position, frame) in frames.iter().enumerate() {
+        for frame in frames {
             let parsed = self.change_bytes(frame)?;
-            if position == 0 {
-                dead = parsed.tombstones;
-                if dead.len() > DOC_SEED_TOMBSTONES_MAX {
+            // The tombstones of the chain, frame after frame, are in the order of their paths with
+            // none twice, and no more than a node keeps.
+            for entry in parsed.tombstones {
+                if dead.last().is_some_and(|last| last.0 >= entry.0) {
                     return None;
                 }
-            } else if !parsed.tombstones.is_empty() {
+                dead.push(entry);
+            }
+            if dead.len() > DOC_SEED_TOMBSTONES_MAX {
                 return None;
             }
             let change = Change::from_bytes(parsed.bytes).ok()?;
@@ -1483,7 +1566,7 @@ impl MeshDoc {
             return Ingested::Ignored;
         };
         let (epoch, mark, time) = (parsed.epoch, parsed.seed, parsed.time);
-        if parsed.origins.len() > DOC_REPLAY_ENTRIES_MAX {
+        if parsed.origins.len() + parsed.tombstones.len() > DOC_REPLAY_ENTRIES_MAX {
             if let Some(refused) = self.warn_due("a frame carries more stamps than the cap") {
                 tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "a frame carries more stamps than the cap");
             }
@@ -1990,6 +2073,11 @@ impl MeshDoc {
         let Some(parsed) = self.change_bytes(frame) else {
             return Ok(None);
         };
+        // The tombstones belong to the frames of a seed, which an adoption applies and which do not
+        // come here. A normal write or a replay that carries some is refused.
+        if !parsed.tombstones.is_empty() {
+            return Err(());
+        }
         if parsed.origins.is_empty() {
             return Ok(None);
         }
@@ -2372,6 +2460,26 @@ fn seed_stamp_map(
     map
 }
 
+/// Remove the value at `path` from a JSON value, and the objects that this leaves empty.
+fn remove_path(value: &mut Value, path: &[String]) {
+    let Some((key, rest)) = path.split_first() else {
+        return;
+    };
+    let Value::Object(fields) = value else {
+        return;
+    };
+    if rest.is_empty() {
+        fields.remove(key);
+        return;
+    }
+    if let Some(inner) = fields.get_mut(key) {
+        remove_path(inner, rest);
+        if matches!(inner, Value::Object(left) if left.is_empty()) {
+            fields.remove(key);
+        }
+    }
+}
+
 /// The leaves of a JSON value with their paths: a scalar, a list, or an empty object is one leaf.
 fn collect_leaves(value: &Value, prefix: &mut Vec<String>, out: &mut Vec<(Vec<String>, Value)>) {
     match value {
@@ -2603,7 +2711,7 @@ mod tests {
         SeedMark, change_body_stamped, change_body_timed, change_body_tombstoned, encrypt_body,
         parse_change_full,
     };
-    use crate::{DocError, Stamp};
+    use crate::{DocError, Stamp, StampedPaths};
     use automerge::Change;
     use automerge::transaction::Transactable;
     use habilis_network_protocol::messages::Verified;
@@ -4085,7 +4193,8 @@ mod tests {
         for (index, bytes) in numbered {
             let mark = (index == 0).then_some(&chain.mark);
             let stamps: Vec<Stamp> = chain.origins.get(index).cloned().unwrap_or_default();
-            let dead: &[(Vec<String>, Stamp)] = if index == 0 { &chain.tombstones } else { &[] };
+            let dead: &[(Vec<String>, Stamp)] =
+                chain.tombstones.get(index).map_or(&[], Vec::as_slice);
             let plain =
                 change_body_tombstoned(bytes, None, epoch, mark, Some(chain.time), &stamps, dead)
                     .expect("a body");
@@ -4828,6 +4937,161 @@ mod tests {
             doc.tombstones.len(),
             super::DOC_SEED_TOMBSTONES_MAX,
             "and the map is unchanged"
+        );
+    }
+
+    /// The tombstones of a document that deleted `count` paths of 40 bytes, with growing stamps.
+    fn doc_with_tombstones(count: usize) -> MeshDoc {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for index in 0..count {
+            let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
+            doc.add_tombstone(vec![format!("{index:040}")], stamp);
+        }
+        doc
+    }
+
+    #[test]
+    fn a_seed_spreads_many_tombstones_over_its_frames_inside_a_byte_budget() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let doc = doc_with_tombstones(300);
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = doc
+            .build_seed(3, &actor, within(600))
+            .expect("a seed with many tombstones is built");
+        let total: usize = chain.tombstones.iter().map(Vec::len).sum();
+        assert_eq!(total, 300, "every tombstone is carried by some frame");
+        assert_eq!(
+            chain.tombstones.len(),
+            chain.changes.len(),
+            "one list for each frame"
+        );
+        assert!(
+            chain.changes.len() > 1,
+            "300 tombstones need more than 1 frame"
+        );
+        for (index, dead) in chain.tombstones.iter().enumerate() {
+            let bytes: usize = dead
+                .iter()
+                .map(|(path, _)| path.iter().map(String::len).sum::<usize>() + 32)
+                .sum();
+            assert!(
+                bytes <= super::DOC_SEED_TOMBSTONE_FRAME_BYTES,
+                "the tombstones of frame {index} fit the budget: {bytes}"
+            );
+            assert!(
+                dead.len() + chain.origins[index].len() <= super::DOC_REPLAY_ENTRIES_MAX,
+                "the stamps and the tombstones of a frame stay inside the entry cap"
+            );
+        }
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = adopter.ingest(frame);
+        }
+        ticks(&mut adopter, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(
+            adopter.tombstones.len(),
+            300,
+            "the node holds the 300 tombstones"
+        );
+    }
+
+    #[test]
+    fn a_tombstone_body_that_is_not_canonical_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let stamp = Stamp::new(9, "aa".to_owned());
+        let one = |path: Vec<&str>| {
+            (
+                path.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                stamp.clone(),
+            )
+        };
+        let cases: Vec<(StampedPaths, &str)> = vec![
+            (vec![one(vec!["a"]), one(vec!["a"])], "the same path twice"),
+            (vec![one(vec!["b"]), one(vec!["a"])], "paths out of order"),
+            (vec![one(vec![])], "an empty path"),
+            (
+                vec![one(vec![
+                    &"x".repeat(super::DOC_TOMBSTONE_PATH_BYTES_MAX + 1),
+                ])],
+                "a path over the cap",
+            ),
+        ];
+        for (tombstones, why) in cases {
+            let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &[], &tombstones)
+                .expect("a body");
+            assert!(parse_change_full(body.as_str()).is_none(), "refused: {why}");
+        }
+        let fine = vec![one(vec!["a"]), one(vec!["a", "b"]), one(vec!["b"])];
+        let body =
+            change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &[], &fine).expect("a body");
+        assert!(
+            parse_change_full(body.as_str()).is_some(),
+            "the control: a canonical list parses"
+        );
+    }
+
+    #[test]
+    fn tombstones_on_a_frame_that_is_not_a_seed_frame_are_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "the stamps of a frame do not match it",
+        );
+        let me = nick("me");
+        let timeless = MeshDoc::new_ungated();
+        let bytes = timeless
+            .build_change(&json!({ "a": 1 }), &pad_seed(me.as_str().as_bytes()))
+            .expect("applies")
+            .expect("a change");
+        let dead = vec![(vec!["k".to_owned()], Stamp::new(1, "aa".to_owned()))];
+        let body =
+            change_body_tombstoned(&bytes, None, 0, None, Some(1), &[], &dead).expect("a body");
+        let key = signer(&me);
+        let frame = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &me, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let taken = doc.ingest(&frame);
+        assert!(
+            matches!(taken, Ingested::Ignored),
+            "a normal write carries no tombstone: {taken:?}"
+        );
+        assert_eq!(doc.to_json(), json!({}), "nothing was applied");
+    }
+
+    #[test]
+    fn a_seed_leaves_out_a_value_that_a_tombstone_of_a_higher_stamp_governs() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write(
+            &mut doc,
+            &me,
+            &json!({ "gone": 1, "kept": 2, "o": { "gone": 3, "kept": 4 } }),
+        );
+        // A replay brought back `gone` and `o.gone`, but a delete of a higher stamp governs them.
+        let high = Stamp::new(99, "aa".to_owned());
+        doc.add_tombstone(vec!["gone".to_owned()], high.clone());
+        doc.add_tombstone(vec!["o".to_owned(), "gone".to_owned()], high);
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = adopter.ingest(frame);
+        }
+        ticks(
+            &mut adopter,
+            &nick("adopter"),
+            super::DOC_EPOCH_ADOPT_WAIT_TICKS,
+        )
+        .expect("adopted");
+        assert_eq!(
+            adopter.to_json(),
+            json!({ "kept": 2, "o": { "kept": 4 } }),
+            "the seed holds no value that a delete of a higher stamp governs"
         );
     }
 

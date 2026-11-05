@@ -169,6 +169,12 @@ pub const DOC_SEED_TOMBSTONES_MAX: usize = 1024;
 /// written and counted, and has no tombstone.
 pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;
 
+/// The bytes that the tombstones of one frame of a seed can take: the bytes of the paths and 32
+/// for each entry (the time, the tag index and the punctuation). A frame holds 3840 bytes, so the
+/// tombstones of a seed spread over its frames, and over carrier changes when there are more than
+/// its frames can hold. Each tombstone counts against `DOC_REPLAY_ENTRIES_MAX` with the stamps.
+pub const DOC_SEED_TOMBSTONE_FRAME_BYTES: usize = 1024;
+
 /// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged
 /// epoch number cannot lock the channel: the forger raises the epoch by this much per adoption.
 pub const DOC_EPOCH_JUMP_MAX: u64 = 131_072;

@@ -9,6 +9,8 @@ use std::borrow::Cow;
 
 use habilis_network_protocol::SymmetricKey;
 
+use habilis_network_util::consts::DOC_TOMBSTONE_PATH_BYTES_MAX;
+
 use crate::{DocError, Stamp};
 use habilis_network_protocol::messages::MessageBody;
 
@@ -295,6 +297,15 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
             }
             let mut dead: Vec<(Vec<String>, Stamp)> = Vec::with_capacity(tombstones.len());
             for (path, at, index) in tombstones {
+                // One body for one meaning: a tombstone names a real path of at most the bytes
+                // that a tombstone keeps, and the list is in the order of the paths, none twice.
+                let bytes: usize = path.iter().map(String::len).sum();
+                if path.is_empty()
+                    || bytes > DOC_TOMBSTONE_PATH_BYTES_MAX
+                    || dead.last().is_some_and(|last| last.0 >= path)
+                {
+                    return None;
+                }
                 dead.push((path, Stamp::new(at, resolve(index)?)));
             }
             if next_new != tags.len() {
