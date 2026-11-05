@@ -92,6 +92,21 @@ pub struct StateFile {
     write_failing: atomic::AtomicBool,
 }
 
+/// The keys of the state file that the daemon owns. A discovery field of the application never
+/// replaces one of them.
+const ENGINE_KEYS: [&str; 10] = [
+    "gossip",
+    "name",
+    "nickname",
+    "pubkey",
+    "topic",
+    "pid",
+    "owner_pid",
+    "ready",
+    "peer_count",
+    "last_updated",
+];
+
 impl StateFile {
     pub(crate) fn new(
         path: PathBuf,
@@ -148,7 +163,10 @@ impl StateFile {
     /// The engine never interprets these. It does not know that a consumer
     /// writes its own port/token keys here, only that whatever an app puts in
     /// may be secret, which is why the file is born 0o600. Keys are merged, not
-    /// replaced, so repeated calls accumulate.
+    /// replaced, so repeated calls accumulate. The keys of the daemon itself (`gossip`, `name`,
+    /// `nickname`, `pubkey`, `topic`, `pid`, `owner_pid`, `ready`, `peer_count`, `last_updated`)
+    /// cannot be replaced: the daemon writes its own value after the fields of the application,
+    /// and drops a field of the application under a key that it does not write.
     ///
     /// # Panics
     /// Panics if an internal invariant is violated.
@@ -201,7 +219,17 @@ impl StateFile {
         // `--state-file <base>/sessions/...`), and just creates
         // the parent for an override that points elsewhere.
         util::ensure_parent_private(self.base.as_deref(), &self.path)?;
-        let mut obj = serde_json::Map::new();
+        // The fields of the application go in first, and the fields of the daemon replace them:
+        // a discovery key can shadow no key of the daemon, and a key that the daemon does not
+        // write (no topic, no owner) is not the application's to write either.
+        let mut obj = self
+            .discovery
+            .lock()
+            .expect("state-file discovery mutex not poisoned")
+            .clone();
+        for key in ENGINE_KEYS {
+            obj.remove(key);
+        }
         obj.insert("gossip".into(), self.mesh.clone().into());
         obj.insert("name".into(), self.name.clone().into());
         obj.insert("nickname".into(), self.nickname.clone().into());
@@ -215,14 +243,6 @@ impl StateFile {
         }
         obj.insert("ready".into(), ready.into());
         obj.insert("peer_count".into(), peer_count.into());
-        for (key, value) in self
-            .discovery
-            .lock()
-            .expect("state-file discovery mutex not poisoned")
-            .iter()
-        {
-            obj.insert(key.clone(), value.clone());
-        }
         obj.insert(
             "last_updated".into(),
             unix_secs::UnixSecs::now().as_secs().into(),
@@ -660,6 +680,82 @@ mod tests {
             Some(hex.as_str()),
             "the identity reads the author key back"
         );
+        state_file.remove();
+    }
+
+    #[test]
+    fn the_fields_of_the_daemon_win_over_the_discovery_fields() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("shadow");
+        let mesh = MeshId::from("abcd");
+        let state_file = StateFile::new(
+            path.clone(),
+            &mesh,
+            &Nickname::from("treat-empire"),
+            &name("cool-team"),
+            &author(),
+        );
+        let mut fields = serde_json::Map::new();
+        for key in [
+            "gossip",
+            "name",
+            "nickname",
+            "pubkey",
+            "topic",
+            "pid",
+            "owner_pid",
+            "ready",
+            "peer_count",
+            "last_updated",
+        ] {
+            fields.insert(key.into(), serde_json::json!("from the app"));
+        }
+        fields.insert("a2a_port".into(), serde_json::json!(7));
+        state_file.set_discovery(fields);
+        state_file.write(3, true);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("the state file can be read"))
+                .expect("the state file the test wrote is json");
+        assert_eq!(
+            parsed["gossip"],
+            mesh.as_str(),
+            "a discovery field replaced the gossip"
+        );
+        assert_eq!(
+            parsed["name"], "cool-team",
+            "a discovery field replaced the name"
+        );
+        assert_eq!(
+            parsed["nickname"], "treat-empire",
+            "a discovery field replaced the nickname"
+        );
+        assert_eq!(
+            parsed["pubkey"],
+            "ab".repeat(32),
+            "a discovery field replaced the author key"
+        );
+        assert_eq!(
+            parsed["pid"],
+            process::id(),
+            "a discovery field replaced the pid"
+        );
+        assert_eq!(
+            parsed["ready"], true,
+            "a discovery field replaced the ready flag"
+        );
+        assert_eq!(
+            parsed["peer_count"], 3,
+            "a discovery field replaced the peer count"
+        );
+        assert!(
+            parsed["last_updated"].is_number(),
+            "a discovery field replaced the update time"
+        );
+        assert!(
+            parsed.get("topic").is_none() && parsed.get("owner_pid").is_none(),
+            "a discovery field stood in for a key that the daemon does not write"
+        );
+        assert_eq!(parsed["a2a_port"], 7, "a field of the application was lost");
         state_file.remove();
     }
 
