@@ -72,7 +72,7 @@ use tokio::sync::oneshot;
 /// failure, and errors if the unmeshed buffer is full. A directed frame names its recipient by
 /// author key, so two live peers that use one nickname are two addressees, and neither send is
 /// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. An unmeshed
-/// node refuses a directed frame to a key that no roster, quiet set or address book holds
+/// node refuses a directed frame to a key that no roster, quiet set or known address holds
 /// ([`crate::transport::SendError::Undeliverable`]), because nobody can deliver it later.
 ///
 /// # Examples
@@ -128,7 +128,7 @@ pub async fn send_app(
             && !state.knows_key(key)
         {
             return Err(transport::SendError::Undeliverable(format!(
-                "directed message to {key} undeliverable: no roster, quiet set or address holds this key"
+                "directed message to {key} undeliverable: no roster, quiet set or known address holds this key"
             )));
         }
         park_and_offer(state, context, &frame, &bytes);
