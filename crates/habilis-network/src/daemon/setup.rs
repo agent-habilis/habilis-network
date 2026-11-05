@@ -697,6 +697,13 @@ fn next_run(state: Option<&Path>) -> Result<u64> {
     file.write_all(&run.to_le_bytes())?;
     file.sync_all()?;
     std::fs::rename(&tmp_path, &run_path)?;
+    // Without this, a power loss can undo the rename, and the next start repeats a run that peers saw.
+    if let Some(folder) = run_path
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+    {
+        std::fs::File::open(folder)?.sync_all()?;
+    }
     Ok(run)
 }
 
