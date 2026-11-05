@@ -9,7 +9,6 @@
 use super::proof_book::ProofBook;
 use crate::protocol::identity::{IdentityProof, verify_proof};
 use crate::protocol::{AuthorKey, MeshId, Nickname};
-use crate::util::tuning::QUIET_CAP;
 use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
 
 /// The proofs this node holds, and the sessions it already asked for one. A proof comes in the
@@ -34,7 +33,7 @@ impl ProofExchange {
 
     /// An alive frame came from `session`. True means: send the session one proof request now.
     pub(crate) fn wants_proof(&mut self, session: &AuthorKey) -> bool {
-        self.book.get(session).is_none() && self.asked.insert(session.clone())
+        self.book.get(session).is_none() && self.asked.insert(*session)
     }
 
     /// A proof came for `session`. It is held if it verifies for this nickname and mesh, and if it
@@ -57,7 +56,7 @@ impl ProofExchange {
         {
             return false;
         }
-        self.book.insert_evicting(session.clone(), proof, is_live);
+        self.book.insert_evicting(*session, proof, is_live);
         self.book.get(session).is_some()
     }
 
@@ -72,9 +71,10 @@ impl ProofExchange {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProofExchange, QUIET_CAP, verify_proof};
+    use super::{ProofExchange, verify_proof};
     use crate::protocol::identity::Identity;
     use crate::protocol::{MeshId, Nickname};
+    use crate::util::tuning::QUIET_CAP;
 
     /// A joiner that missed the `joined` frame of a member gets the proof by one request.
     #[test]

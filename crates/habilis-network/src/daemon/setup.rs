@@ -675,13 +675,14 @@ fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> 
 /// run 1.
 #[cfg(all(unix, feature = "host"))]
 fn next_run(state: Option<&Path>) -> Result<u64> {
+    use std::fs::{self, File, OpenOptions};
     use std::io::{ErrorKind, Write as _};
     use std::os::unix::fs::OpenOptionsExt as _;
     let Some(state) = state else {
         return Ok(1);
     };
     let run_path = state.with_extension("run");
-    let run = match std::fs::read(&run_path) {
+    let run = match fs::read(&run_path) {
         Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_slice()) {
             Ok(last) => u64::from_le_bytes(last).saturating_add(1),
             Err(_) => counter_lost(),
@@ -691,18 +692,18 @@ fn next_run(state: Option<&Path>) -> Result<u64> {
     };
     // A crash after the write and before the rename leaves the old counter, never a cut short one.
     let tmp_path = state.with_extension("run.tmp");
-    let mut options = std::fs::OpenOptions::new();
+    let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true).mode(0o600);
     let mut file = options.open(&tmp_path)?;
     file.write_all(&run.to_le_bytes())?;
     file.sync_all()?;
-    std::fs::rename(&tmp_path, &run_path)?;
+    fs::rename(&tmp_path, &run_path)?;
     // Without this, a power loss can undo the rename, and the next start repeats a run that peers saw.
     if let Some(folder) = run_path
         .parent()
         .filter(|folder| !folder.as_os_str().is_empty())
     {
-        std::fs::File::open(folder)?.sync_all()?;
+        File::open(folder)?.sync_all()?;
     }
     Ok(run)
 }
