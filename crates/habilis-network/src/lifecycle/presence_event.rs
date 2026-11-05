@@ -37,6 +37,9 @@ pub(crate) async fn handle_presence(
     if subtype == PresenceSubtype::Alive {
         return;
     }
+    if subtype == PresenceSubtype::Joined {
+        state.note_joined_proof(message, context.mesh);
+    }
     if subtype == PresenceSubtype::Left {
         // A key says goodbye once per run. A second copy is a replay that a peer still held, and
         // the nickname may belong to a new key by now: the replay must not take it away.

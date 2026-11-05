@@ -1739,7 +1739,16 @@ impl EventLoopState {
     /// Hold the proof in the body of a `joined` frame, if it verifies for the author of the frame.
     /// A frame with an empty or bad body holds none.
     pub(crate) fn note_joined_proof(&mut self, message: &Verified, mesh: &MeshId) {
-        let _ = (message, mesh);
+        let Some(proof) = message.joined_proof() else {
+            return;
+        };
+        let key = message.key();
+        // A key that said goodbye is dead; every other held session counts as live.
+        let left_keys = &self.left_keys;
+        self.proofs
+            .accept(&key, &message.author, mesh, proof, |held| {
+                !left_keys.contains(held)
+            });
     }
 
     /// Stamp the next position on this author's hash chain, advancing it.
