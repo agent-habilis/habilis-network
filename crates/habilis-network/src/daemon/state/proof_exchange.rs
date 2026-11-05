@@ -106,6 +106,16 @@ impl ProofExchange {
         self.ties_refused
     }
 
+    /// How many proofs the full book refused because every held session was live.
+    pub(crate) fn refused(&self) -> u64 {
+        self.book.refused()
+    }
+
+    /// How many answers the per-asker limit and the node-wide cap refused.
+    pub(crate) fn answers_refused(&self) -> u64 {
+        self.book.answers_refused()
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.book.len()
     }
