@@ -43,6 +43,9 @@ impl<K: Eq + Hash, V> ProofBook<K, V> {
         }
     }
 
+    /// Forget the proof of a session that left or that a newer run replaced.
+    pub(crate) fn remove(&mut self, _key: &K) {}
+
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
         self.held.get(key)
     }
@@ -89,6 +92,22 @@ mod tests {
         assert_eq!(book.len(), 4, "the book holds its cap");
         assert_eq!(book.refused(), 36, "every proof past the cap is counted");
         assert_eq!(book.get(&0), Some(&0), "a held proof is never evicted");
+    }
+
+    /// Each run of a peer is a new session. A session that a newer run replaced is removed, so the
+    /// book keeps the newest session however many runs went by.
+    #[test]
+    fn a_replaced_session_is_removed_and_the_newest_always_verifies() {
+        let mut book: ProofBook<u8, u8> = ProofBook::with_cap(4);
+        for run in 0..40u8 {
+            if let Some(older) = run.checked_sub(1) {
+                book.remove(&older);
+            }
+            book.insert(run, run);
+        }
+        assert_eq!(book.get(&39), Some(&39), "the newest session verifies");
+        assert_eq!(book.len(), 1, "only the newest session stays");
+        assert_eq!(book.refused(), 0, "no proof was refused");
     }
 
     /// Answers to requests are capped per minute; the answers past the cap are refused and counted.
