@@ -118,6 +118,44 @@ mod tests {
             "the proof binds the session key, the nickname and the mesh"
         );
     }
+
+    /// A receiver holds the proof in a `joined` frame when it verifies for the author, and holds
+    /// nothing for a proof of another nickname or for an empty body.
+    #[test]
+    fn a_joined_frame_proof_is_held_when_it_verifies() {
+        let sender = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let key = sender.identity.author_key();
+        let own: Message = Message::new_joined_with_proof(
+            &mesh,
+            &nick("alice"),
+            &sender.own_proof(&nick("alice"), &mesh, 1),
+        );
+        receiver.note_joined_proof(&own.sign(&sender.identity), &mesh);
+        assert!(
+            receiver.proofs.proof_of(&key).is_some(),
+            "the proof is held"
+        );
+
+        let mut other = fresh_state();
+        let forged = Message::new_joined_with_proof(
+            &mesh,
+            &nick("bob"),
+            &sender.own_proof(&nick("alice"), &mesh, 1),
+        );
+        other.note_joined_proof(&forged.sign(&sender.identity), &mesh);
+        assert!(
+            other.proofs.proof_of(&key).is_none(),
+            "a proof of another nickname is not held"
+        );
+        let empty = Message::new_joined(&mesh, &nick("alice")).sign(&sender.identity);
+        other.note_joined_proof(&empty, &mesh);
+        assert!(
+            other.proofs.proof_of(&key).is_none(),
+            "an empty body holds no proof"
+        );
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;

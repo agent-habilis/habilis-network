@@ -1736,6 +1736,12 @@ impl EventLoopState {
         )
     }
 
+    /// Hold the proof in the body of a `joined` frame, if it verifies for the author of the frame.
+    /// A frame with an empty or bad body holds none.
+    pub(crate) fn note_joined_proof(&mut self, message: &Verified, mesh: &MeshId) {
+        let _ = (message, mesh);
+    }
+
     /// Stamp the next position on this author's hash chain, advancing it.
     /// `prev` is the content hash of the message just authored.
     pub fn advance_chain(&mut self, previous: ContentHash) {
