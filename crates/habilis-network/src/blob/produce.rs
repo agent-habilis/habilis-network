@@ -175,7 +175,7 @@ impl BlobServer {
         // paying the ~100ms Argon2 stretch again. (A benign race with a
         // concurrent offload of the same content is caught by `snapshot`'s own
         // dedup below.)
-        if let Some(existing) = self.store.lock().await.claim(&sha256, &content_id)? {
+        if let Some(existing) = self.store.lock().await.claim(&sha256, &content_id) {
             return Ok(ticket(existing));
         }
         let mut salt_bytes = Zeroizing::new([0u8; SECRET_LEN]);

@@ -208,13 +208,13 @@ pub const MAX_BLOB_STORE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 #[cfg(feature = "host")]
 pub const MAX_BLOB_STORE_ENTRIES: usize = 4096;
 
-/// Content groups that one blob entry remembers as owners. The same file
-/// offloaded for many calls shares one entry, so its owner set grows with each
-/// group. A group past the cap is refused with a reason: an owner that is not
-/// recorded would see the blob deleted when the recorded owners are released,
-/// and a count of such owners cannot be kept, because a release does not say
-/// which entry it was for. A group that is already an owner can claim again.
-/// 64 owners of about 60 bytes each hold about 4 `KiB` per entry.
+/// Content groups that one blob entry records as owners. The same file offloaded for many calls
+/// shares one entry, so its owner set would grow with each group. A group past the cap is not
+/// recorded and marks the entry overflowed: the blob then stays when the recorded owners are
+/// released, for the calls that are not recorded, and the store budget (`MAX_BLOB_STORE_ENTRIES`
+/// and `MAX_BLOB_STORE_BYTES`) removes it later, oldest first. The budget can also remove a blob
+/// that still has live owners when the store is full; a fetch of it then fails cleanly. 64 owners
+/// of about 60 bytes each hold about 4 `KiB` per entry.
 #[cfg(feature = "host")]
 pub const MAX_BLOB_OWNERS: usize = 64;
 

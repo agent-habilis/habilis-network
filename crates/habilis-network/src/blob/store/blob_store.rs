@@ -59,7 +59,7 @@ impl BlobStore {
             size,
             content_id,
         } = meta;
-        if let Some(registered) = self.claim(&sha256, &content_id)? {
+        if let Some(registered) = self.claim(&sha256, &content_id) {
             return Ok(registered);
         }
         let dest = self.spool_dir.join(sha256.to_string());
@@ -76,6 +76,7 @@ impl BlobStore {
                 ticket_secret: secret.ticket_secret.clone(),
                 password: secret.password,
                 owners: HashSet::from([content_id]),
+                overflowed: false,
                 seq,
             },
         );
@@ -97,30 +98,26 @@ impl BlobStore {
     /// spooled. Lets the producer skip the ~100ms password stretch
     /// when re-offloading content it already holds.
     ///
-    /// # Errors
-    /// The entry already has `MAX_BLOB_OWNERS` owners and `content_id` is not one of them. An
-    /// owner that is not recorded would see the blob deleted when the recorded owners are
-    /// released, so the offload is refused and the caller must tell the user.
+    /// An entry records at most `MAX_BLOB_OWNERS` owners. A group past the cap is not recorded and
+    /// marks the entry `overflowed`, so the blob stays when the recorded owners are released. The
+    /// claim never fails for want of room.
     pub(crate) fn claim(
         &mut self,
         hash: &BlobDigest,
         content_id: &ContentId,
-    ) -> Result<Option<Registered>> {
-        let Some(entry) = self.map.get_mut(hash) else {
-            return Ok(None);
-        };
-        if entry.owners.len() >= MAX_BLOB_OWNERS && !entry.owners.contains(content_id) {
-            anyhow::bail!(
-                "this file is already offloaded for {MAX_BLOB_OWNERS} other calls, so this call was not sent"
-            );
+    ) -> Option<Registered> {
+        let entry = self.map.get_mut(hash)?;
+        if entry.owners.len() < MAX_BLOB_OWNERS {
+            entry.owners.insert(content_id.clone());
+        } else if !entry.owners.contains(content_id) {
+            entry.overflowed = true;
         }
-        entry.owners.insert(content_id.clone());
         entry.seq = self.next_seq;
         self.next_seq += 1;
-        Ok(Some(Registered {
+        Some(Registered {
             ticket_secret: entry.ticket_secret.clone(),
             password: entry.password,
-        }))
+        })
     }
 
     /// Release `content_id`'s hold on every blob (called from the task
@@ -130,7 +127,8 @@ impl BlobStore {
             .map
             .iter_mut()
             .filter_map(|(hash, entry)| {
-                (entry.owners.remove(content_id) && entry.owners.is_empty()).then_some(*hash)
+                (entry.owners.remove(content_id) && entry.owners.is_empty() && !entry.overflowed)
+                    .then_some(*hash)
             })
             .collect();
         for hash in doomed {
