@@ -669,6 +669,18 @@ fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> 
     Ok(identity::Identity::generate())
 }
 
+/// The run number of this start, kept in `<state>.run`. It counts up by 1 at each start and never
+/// reads the clock, so a clock that went back cannot make a newer run look older. No state file
+/// means run 1.
+#[cfg(all(unix, feature = "host"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "run_keys carries the run in the next commit")
+)]
+fn next_run(_state: Option<&Path>) -> Result<u64> {
+    Ok(0)
+}
+
 /// The keys of this run. The member key comes from the state file. The session key is the one that
 /// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
 /// would start the same actor again at sequence 1.
@@ -1176,6 +1188,27 @@ mod tests {
             first.author_key(),
             "no file means a new key"
         );
+    }
+
+    /// The run number rises at each start, and a clock that went back cannot lower it: the counter
+    /// never reads the clock.
+    #[test]
+    fn the_run_number_rises_at_each_start() {
+        let dir = env::temp_dir().join(format!("habilis-run-number-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
+        let runs: Vec<u64> = (0..3)
+            .map(|_| super::next_run(Some(&state)).expect("a run number"))
+            .collect();
+        assert_eq!(runs, [1, 2, 3], "each start counts one more");
+        let ahead: u64 = 4_000_000_000_000;
+        fs::write(state.with_extension("run"), ahead.to_le_bytes()).expect("a counter ahead");
+        assert_eq!(
+            super::next_run(Some(&state)).expect("a run number"),
+            ahead + 1,
+            "a counter ahead of any clock still rises"
+        );
+        assert_eq!(super::next_run(None).expect("no state file"), 1, "no file means run 1");
     }
 
     /// The member key survives a restart and the session key does not: the session key is the
