@@ -153,6 +153,36 @@ fn test_pong_round_trip() {
 }
 
 #[test]
+fn a_joined_frame_carries_the_proof_in_its_body() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let member = identity::Identity::generate();
+    let session = identity::Identity::generate();
+    let author = nick("word-word");
+    let proof = member.prove(&session.author_key(), author.as_ref(), sid().as_ref(), 3);
+    let message = Message::new_joined_with_proof(&sid(), &author, &proof);
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    let held = parsed.joined_proof().expect("the body holds a proof");
+    assert!(
+        identity::verify_proof(
+            &held,
+            &session.author_key(),
+            author.as_ref(),
+            sid().as_ref()
+        ),
+        "the proof in the body verifies"
+    );
+    assert!(
+        Message::new_joined(&sid(), &author)
+            .joined_proof()
+            .is_none(),
+        "an empty body holds no proof"
+    );
+}
+
+#[test]
 fn test_proof_request_round_trip() {
     let _guard = ::habilis_network_test_tracing::init();
     let target = nick("calm-otter");
