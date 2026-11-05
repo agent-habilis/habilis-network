@@ -200,3 +200,47 @@ fn the_cost_of_a_replay_frame_and_of_a_burst() {
         );
     }
 }
+
+/// `part` as a share of `whole`, in tenths of a percent, as text.
+fn percent(part: usize, whole: usize) -> String {
+    let tenths = part * 1000 / whole;
+    format!("{}.{} percent", tenths / 10, tenths % 10)
+}
+
+/// The bytes that the time and the stamps add to the frame bodies on the wire.
+#[test]
+#[ignore = "a measurement: run it with --ignored --nocapture"]
+fn the_bytes_that_the_stamps_add_to_a_frame() {
+    let me = nick("me");
+    let doc = MeshDoc::new_ungated().state_epochs();
+    for (label, merge) in [
+        ("smallest write {a:1}", json!({ "a": 1 })),
+        (
+            "one nested leaf",
+            json!({ "board": { "title": "a title of 20 chars" } }),
+        ),
+        ("a text of 200 chars", json!({ "note": "x".repeat(200) })),
+    ] {
+        let change = doc
+            .build_change(&merge, &pad(me.as_str()))
+            .expect("applies")
+            .expect("a change");
+        let plain = wire::change_body_at(&change, None, 0).expect("a plain body");
+        let (timed, _) = doc.compose_wire_body(&change, None).expect("a timed body");
+        let (plain_len, timed_len) = (plain.as_str().len(), timed.as_str().len());
+        let added = timed_len - plain_len;
+        eprintln!(
+            "BYTES {label}: plain {plain_len} B, with the time {timed_len} B, +{added} B = {}",
+            percent(added, plain_len)
+        );
+    }
+    let plain = plain_frame(0);
+    let replay = replay_frame(0);
+    let (plain_len, replay_len) = (plain.body.as_str().len(), replay.body.as_str().len());
+    let added = replay_len - plain_len;
+    eprintln!(
+        "BYTES replay frame of 127 leaves: plain {plain_len} B, with the stamps {replay_len} B, +{added} B = {} B per leaf, {}",
+        added / 127,
+        percent(added, plain_len)
+    );
+}
