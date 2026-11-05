@@ -66,9 +66,9 @@ impl Identity {
 
     /// The identity a seed names (see [`Identity::seed`]).
     #[must_use]
-    pub fn from_seed(seed: zeroize::Zeroizing<[u8; 32]>) -> Self {
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
         Identity {
-            secret: SecretKey::from_bytes(&seed),
+            secret: SecretKey::from_bytes(seed),
         }
     }
 
@@ -305,13 +305,25 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// A proof names the session, the nickname, the mesh and the run: any other value fails.
+    #[test]
+    fn a_proof_binds_the_session_nickname_mesh_and_run() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let proof = identity.prove(&session, "alice", "mesh", 3);
+        assert!(super::verify_proof(&proof, &session, "alice", "mesh"), "the proof verifies");
+        assert!(!super::verify_proof(&proof, &session, "bob", "mesh"), "another nickname fails");
+        let other_run = super::IdentityProof { run: 4, ..proof.clone() };
+        assert!(!super::verify_proof(&other_run, &session, "alice", "mesh"), "another run fails");
+    }
+
     /// The identity key is the one a restarted member keeps: its seed round-trips, so the
     /// same identity comes back from the state file.
     #[test]
     fn an_identity_round_trips_through_its_seed() {
         let identity = Identity::generate();
         let seed = identity.seed();
-        let back = Identity::from_seed(seed);
+        let back = Identity::from_seed(&seed);
         assert_eq!(
             back.author_key(),
             identity.author_key(),
