@@ -530,9 +530,11 @@ mod tests {
     /// An entry of the per-peer map is absent when its owner is neither on the roster nor us.
     #[test]
     fn an_entry_of_a_member_off_the_roster_is_absent() {
-        let me = testing::nick("me");
-        let roster: HashSet<_> = [testing::nick("alice")].into_iter().collect();
-        let entries: Vec<String> = ["me", "alice", "bob", "carol"].map(str::to_owned).into();
+        let me = testing::test_key("me");
+        let roster: HashSet<_> = [testing::test_key("alice")].into_iter().collect();
+        let entries: Vec<String> = ["me", "alice", "bob", "carol"]
+            .map(|name| testing::test_key(name).to_string())
+            .into();
 
         assert_eq!(
             super::absent_entries(&entries, &roster, &me),
@@ -559,10 +561,14 @@ mod tests {
         let gate = SelfWriteGate::new("peers".to_owned(), "card");
         let mut writer = MeshDoc::new_gated(gate).epoch_cap(0);
         for _ in 0..epoch {
-            assert!(writer.tick_epoch(&author).is_some(), "a reset");
+            assert!(
+                writer.tick_epoch(&identity.author_key()).is_some(),
+                "a reset"
+            );
         }
         let seed = *identity.public().as_bytes();
-        let merge = serde_json::json!({"peers": {name: {"card": "mine"}}});
+        let slot = identity.author_key().to_string();
+        let merge = serde_json::json!({"peers": {slot: {"card": "mine"}}});
         let change = writer
             .build_change(&merge, &seed)
             .expect("a JSON object merges")
@@ -590,7 +596,7 @@ mod tests {
         state.doc_mut(Channel::Meta).ingest(&second);
         state.seen.insert(first.dedup_key());
 
-        super::tick_epoch(&mut state, &testing::nick("me"));
+        super::tick_epoch(&mut state, &testing::test_key("me"));
 
         assert!(
             !state.seen.contains(&first.dedup_key()),

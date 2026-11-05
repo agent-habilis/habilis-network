@@ -5286,11 +5286,15 @@ mod dedup_counter_tests {
         let sender_nick = nick("sender");
         // A document that went through 1 reset: its first write is a root of epoch 1.
         let mut writer = MeshDoc::new_gated(gate.clone()).epoch_cap(0);
-        assert!(writer.tick_epoch(&sender_nick).is_some(), "the reset");
+        assert!(
+            writer.tick_epoch(&sender_identity.author_key()).is_some(),
+            "the reset"
+        );
         let seed = *sender_identity.public().as_bytes();
+        let slot = sender_identity.author_key().to_string();
         let change = writer
             .build_change(
-                &json!({"peers": {"sender": {"card": "from epoch 1"}}}),
+                &json!({"peers": {slot.as_str(): {"card": "from epoch 1"}}}),
                 &seed,
             )
             .expect("a JSON object merges")
@@ -5311,7 +5315,7 @@ mod dedup_counter_tests {
         assert_eq!(doc.epoch(), 1, "the reader adopted the epoch");
         assert_eq!(
             doc.to_json(),
-            json!({"peers": {"sender": {"card": "from epoch 1"}}}),
+            json!({"peers": {slot.as_str(): {"card": "from epoch 1"}}}),
             "the document holds the root frame of the new epoch"
         );
         assert!(

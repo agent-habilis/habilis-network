@@ -658,12 +658,7 @@ pub(crate) async fn handle_state_digest(
     let arrived_from = state.state_digest_serves.unicast.arrived_from;
     if arrived_from.is_none() {
         let members = state.peers.iter().chain(iter::once(&context.our_pubkey));
-        if !answers_digest(
-            &context.our_pubkey,
-            &author,
-            message.id.as_str(),
-            members,
-        ) {
+        if !answers_digest(&context.our_pubkey, &author, message.id.as_str(), members) {
             return Answered::default();
         }
     }
@@ -1456,9 +1451,9 @@ mod tests {
             "habilis_network::gossip",
             "digest from this peer could not be read",
         );
-        let (me, asker) = (nick("holder"), nick("asker"));
+        let (me, asker) = (test_key("holder"), nick("asker"));
         let mut state = fresh_state();
-        state.peers.insert(asker.clone());
+        state.peers.insert(test_key("asker"));
         for index in 0..3 {
             state
                 .message_log
@@ -1553,7 +1548,7 @@ mod tests {
     ) -> (EventLoopState, mpsc::Receiver<Resend>) {
         let mut state = fresh_state();
         state.relay_transport = transport::PayloadPath::RelayAllowed;
-        state.peers.insert(nick("asker"));
+        state.peers.insert(asker.author_key());
         for index in 0..count {
             state
                 .message_log
@@ -1563,9 +1558,12 @@ mod tests {
         state.resend_outbox = outbox;
         state.linked_endpoints.insert(asker_endpoint);
         let linked = state.linked_endpoints.clone();
-        state
-            .proven_endpoints
-            .insert(asker.author_key(), asker_endpoint, &linked);
+        state.proven_endpoints.insert(
+            asker.author_key(),
+            asker_endpoint,
+            UnixSecs::from(1),
+            &linked,
+        );
         (state, resends)
     }
 
@@ -1591,7 +1589,7 @@ mod tests {
             Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
                 .sign(&asker_identity);
 
-        super::handle_digest(&digest, &mut state, &nick("holder"));
+        super::handle_digest(&digest, &mut state, &test_key("holder"));
 
         let answers = drained(&mut resends);
         assert_eq!(answers.len(), 3, "the 3 messages of the log are sent");
@@ -1612,18 +1610,23 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let asker_identity = Identity::generate();
         let asker_endpoint = endpoint_id(7);
-        let me = nick("holder");
+        let me = test_key("holder");
         // A digest that the rule leaves to other members: 30 members, and a digest id that ranks
         // this node last.
         let members: Vec<_> = (0..30)
-            .map(|index| nick(&format!("member-{index}")))
+            .map(|index| test_key(&format!("member-{index}")))
             .collect();
         let mut digests = (0..200).map(|_| {
             Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
                 .sign(&asker_identity)
         });
         let leaves_me_out = |digest: &Verified| {
-            !super::answers_digest(&me, &nick("asker"), digest.id.as_str(), members.iter())
+            !super::answers_digest(
+                &me,
+                &asker_identity.author_key(),
+                digest.id.as_str(),
+                members.iter(),
+            )
         };
         let skipped = digests
             .find(leaves_me_out)
@@ -1655,7 +1658,7 @@ mod tests {
                 .sign(&asker_identity);
 
         let (mut state, mut resends) = holder_for_unicast(2, &asker_identity, asker_endpoint);
-        super::handle_digest(&digest, &mut state, &nick("holder"));
+        super::handle_digest(&digest, &mut state, &test_key("holder"));
         let answers = drained(&mut resends);
         assert!(
             answers
@@ -1668,7 +1671,7 @@ mod tests {
         let (mut unlinked, mut unlinked_resends) =
             holder_for_unicast(2, &asker_identity, asker_endpoint);
         unlinked.linked_endpoints.clear();
-        super::handle_digest(&digest, &mut unlinked, &nick("holder"));
+        super::handle_digest(&digest, &mut unlinked, &test_key("holder"));
         let gossiped = drained(&mut unlinked_resends);
         assert_eq!(gossiped.len(), 2, "the gap is still answered");
         assert!(

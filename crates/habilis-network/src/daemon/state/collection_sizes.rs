@@ -76,7 +76,7 @@ impl CollectionSizes {
 #[cfg(test)]
 mod tests {
     use super::CollectionSizes;
-    use crate::testing::{fresh_state, nick};
+    use crate::testing::{fresh_state, test_key};
 
     #[test]
     fn a_new_node_holds_nothing_in_any_collection() {
@@ -90,9 +90,9 @@ mod tests {
     #[test]
     fn each_gauge_counts_the_items_that_were_put_in() {
         let mut state = fresh_state();
-        state.peers.insert(nick("ant"));
-        state.peers.insert(nick("bee"));
-        state.surfaced.insert(nick("ant"));
+        state.peers.insert(test_key("ant"));
+        state.peers.insert(test_key("bee"));
+        state.surfaced.insert(test_key("ant"));
         let key = state.identity.author_key();
         state.forked.insert(key);
 

@@ -437,10 +437,9 @@ pub(crate) async fn write_entry_again(state: &mut EventLoopState, context: &Merg
     let entry = taken.own_entry.as_ref();
     let rest: Option<serde_json::Value> = entry.and_then(|entry| unwritten(entry, held));
     let switch = EpochSwitch::new(taken.epoch, taken.map.clone(), rest);
-    let cuts: Vec<Result<serde_json::Value, DocError>> =
-        entry_merges(&switch, &own, |merge| {
-            frame_fits(state, context.mesh, context.author, merge)
-        });
+    let cuts: Vec<Result<serde_json::Value, DocError>> = entry_merges(&switch, &own, |merge| {
+        frame_fits(state, context.mesh, context.author, merge)
+    });
     for cut in cuts {
         let merge = match cut {
             Ok(merge) => merge,
@@ -1031,6 +1030,11 @@ mod tests {
 
     /// The merges that write an entry again each fit the frame that `fits` measures, join into the
     /// entry, and name the map and the owner.
+    /// The slot of the entry of this node: the hex of the key that signs for it.
+    fn own_slot(state: &crate::daemon::state::EventLoopState) -> String {
+        state.identity.author_key().to_string()
+    }
+
     #[test]
     fn an_entry_is_written_again_in_merges_that_name_the_map_and_the_owner() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1042,11 +1046,11 @@ mod tests {
         let mut switch = EpochSwitch::new(1, "peers".to_owned(), Some(entry));
         let fits =
             |merge: &serde_json::Value| serde_json::to_vec(merge).expect("json").len() <= 1_000;
-        let cuts = entry_merges(&switch, &nick("alice"), fits);
+        let cuts = entry_merges(&switch, &test_key("alice"), fits);
         assert!(cuts.len() >= 2, "{} merges", cuts.len());
         for cut in cuts {
             let merge = cut.expect("every part fits");
-            let fields = merge["peers"]["alice"]
+            let fields = merge["peers"][test_key("alice").to_string()]
                 .as_object()
                 .expect("the owner's fields");
             assert!(!fields.is_empty(), "each merge holds at least one field");
@@ -1054,7 +1058,7 @@ mod tests {
         }
         switch = EpochSwitch::new(1, "peers".to_owned(), None);
         assert!(
-            entry_merges(&switch, &nick("alice"), fits).is_empty(),
+            entry_merges(&switch, &test_key("alice"), fits).is_empty(),
             "an entry of none gives no merge"
         );
     }
@@ -1102,7 +1106,7 @@ mod tests {
                     .epoch_cap(1_000);
                 let fields = [("card", 'c'), ("host", 'h'), ("cwd", 'w')];
                 for (field, fill) in fields {
-                    let merge = serde_json::json!({"peers": {"alice": {field: fill.to_string().repeat(600)}}});
+                    let merge = serde_json::json!({"peers": {own_slot(&state): {field: fill.to_string().repeat(600)}}});
                     let params =
                         StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
                     broadcast_state_merge(&mut state, params)
@@ -1110,9 +1114,10 @@ mod tests {
                         .expect("the write is taken");
                 }
                 let before = state.doc(Channel::Meta).to_json();
+                let own = state.identity.author_key();
                 let switch = state
                     .doc_mut(Channel::Meta)
-                    .tick_epoch(&author)
+                    .tick_epoch(&own)
                     .expect("over the cap: a reset");
                 assert_eq!(
                     state.doc(Channel::Meta).to_json(),
@@ -1233,16 +1238,17 @@ mod tests {
         let mut writes = pieces.to_vec();
         writes.extend((0..3).map(|index| serde_json::json!({ "pad": noise(pad_len, index) })));
         for piece in writes {
-            let merge = serde_json::json!({"peers": {"alice": piece}});
+            let merge = serde_json::json!({"peers": {own_slot(&state): piece}});
             let params = StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
             broadcast_state_merge(&mut state, params)
                 .await
                 .expect("the write is taken");
         }
         let before = state.doc(Channel::Meta).to_json();
+        let own = state.identity.author_key();
         let switch = state
             .doc_mut(Channel::Meta)
-            .tick_epoch(&author)
+            .tick_epoch(&own)
             .expect("over the cap: a reset");
         state.note_epoch_switch(switch);
 
@@ -1303,20 +1309,21 @@ mod tests {
                     serde_json::json!({"pad3": "c".repeat(1_800)}),
                 ];
                 for piece in first {
-                    let merge = serde_json::json!({"peers": {"alice": piece}});
+                    let merge = serde_json::json!({"peers": {own_slot(&state): piece}});
                     let params =
                         StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
                     broadcast_state_merge(&mut state, params)
                         .await
                         .expect("the write is taken");
                 }
+                let own = state.identity.author_key();
                 let switch = state
                     .doc_mut(Channel::Meta)
-                    .tick_epoch(&author)
+                    .tick_epoch(&own)
                     .expect("over the cap: a reset");
                 state.note_epoch_switch(switch);
                 // The agent writes a new status before the sweep.
-                let newer = serde_json::json!({"peers": {"alice": {"status": "busy"}}});
+                let newer = serde_json::json!({"peers": {own_slot(&state): {"status": "busy"}}});
                 let params =
                     StateMergeParams::new(write.clone(), Channel::Meta, newer).surface(false);
                 broadcast_state_merge(&mut state, params)
@@ -1326,7 +1333,7 @@ mod tests {
                 write_entry_again(&mut state, &write).await;
 
                 let json = state.doc(Channel::Meta).to_json();
-                let entry = &json["peers"]["alice"];
+                let entry = &json["peers"][own_slot(&state)];
                 assert_eq!(entry["status"], "busy", "the newer write stays");
                 assert_eq!(
                     entry["model"], "m",
@@ -1409,7 +1416,7 @@ mod tests {
                 );
                 assert_eq!(
                     state.doc(Channel::Meta).to_json(),
-                    serde_json::json!({ "peers": { "alice": entry } }),
+                    serde_json::json!({ "peers": { own_slot(&state): entry } }),
                     "each sweep wrote what was left, and the entry is whole"
                 );
                 node.close().await;
@@ -1482,8 +1489,8 @@ mod tests {
                 state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(entry)));
                 // The agent leaves its graph before the sweep, and sets a new status.
                 for merge in [
-                    serde_json::json!({"peers": {"alice": {"graph": null}}}),
-                    serde_json::json!({"peers": {"alice": {"status": "busy"}}}),
+                    serde_json::json!({"peers": {own_slot(&state): {"graph": null}}}),
+                    serde_json::json!({"peers": {own_slot(&state): {"status": "busy"}}}),
                 ] {
                     let params =
                         StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
@@ -1495,7 +1502,7 @@ mod tests {
                 write_entry_again(&mut state, &write).await;
 
                 let json = state.doc(Channel::Meta).to_json();
-                let written = &json["peers"]["alice"];
+                let written = &json["peers"][own_slot(&state)];
                 assert!(
                     written.get("graph").is_none(),
                     "the deleted graph stays deleted"

@@ -1606,16 +1606,17 @@ mod tests {
             let (bob_endpoint, _bob_sender) = loopback_node().await;
             let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
             let members: Vec<_> = (0..30)
-                .map(|index| nick(&format!("member-{index}")))
+                .map(|index| test_key(&format!("member-{index}")))
                 .collect();
             state.peers.extend(members.iter().cloned());
             let asker = Identity::generate();
+            let holder_key = net.our_pubkey;
             let mut digests =
                 (0..200).map(|_| digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker));
             let leaves_holder_out = |digest: &Verified| {
                 !antientropy::answers_digest(
-                    &net.author,
-                    &nick("bob"),
+                    &holder_key,
+                    &asker.author_key(),
                     digest.id.as_str(),
                     members.iter(),
                 )
