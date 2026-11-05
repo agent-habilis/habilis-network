@@ -1276,6 +1276,13 @@ impl EventLoopState {
             .then_some(address)
     }
 
+    /// The keys of the live peers: not the quiet ones, and not a key that left. Two live keys
+    /// that share a nickname are two entries. An app that tracks peers by key reads the live set
+    /// here, as [`live_nicknames`](Self::live_nicknames) gives it by name.
+    pub fn live_keys(&self) -> impl Iterator<Item = &AuthorKey> {
+        self.peers.iter()
+    }
+
     /// The nickname that the roster holds for `key`, live or quiet. A quiet peer may return and a
     /// line about it still prints its name, so unlike [`nickname_of`](Self::nickname_of) this
     /// keeps answering for a quiet key. A key that left the roster has none: `forget_key` drops

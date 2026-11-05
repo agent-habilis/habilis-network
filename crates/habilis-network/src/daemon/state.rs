@@ -943,6 +943,33 @@ mod tests {
         );
     }
 
+    /// `live_keys` lists the keys that are live peers now: not the quiet ones, and not a key that
+    /// left. Two live keys that share a nickname are two entries.
+    #[test]
+    fn live_keys_lists_only_the_live_peers() {
+        let mut state = fresh_state();
+        let (first, second, quiet, gone) = (
+            test_key("twin#first"),
+            test_key("twin#second"),
+            test_key("quiet"),
+            test_key("gone"),
+        );
+        seat(&mut state, first, "twin", true);
+        seat(&mut state, second, "twin", true);
+        seat(&mut state, quiet, "quiet", false);
+        seat(&mut state, gone, "gone", true);
+        state.forget_key(gone);
+
+        let mut listed: Vec<AuthorKey> = state.live_keys().copied().collect();
+        listed.sort();
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(
+            listed, expected,
+            "the live set must hold the two live keys only"
+        );
+    }
+
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
     #[test]
