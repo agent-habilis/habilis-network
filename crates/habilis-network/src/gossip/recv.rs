@@ -827,7 +827,11 @@ async fn dispatch_infra(
             .await;
         }
         MessageKind::App { .. } => unreachable!("the app seam is handled by `ingest`"),
-        MessageKind::ProofRequest { .. } | _ => {}
+        MessageKind::ProofRequest { to } => {
+            answer_proof_request(to, message, state, context).await;
+            return ControlFlow::Break(());
+        }
+        _ => {}
     }
     ControlFlow::Continue(())
 }
@@ -942,6 +946,36 @@ async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerC
         }
         _ => {
             tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no known endpoint");
+        }
+    }
+}
+
+/// Answer a proof request that names this node with a `joined` frame that carries the proof of
+/// this session, sent to the asker alone over a warm path. No warm path means no answer: the asker
+/// asks again at no more than one request per session.
+async fn answer_proof_request(
+    to: &Nickname,
+    message: &Message,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
+    let now = Instant::now();
+    let Some(answer) = state.proof_answer(to, context.author, context.mesh, now) else {
+        return;
+    };
+    messages::log_out(&answer);
+    let asker_endpoint = state.peer_endpoints.get(message.author.as_str());
+    let warm_endpoint = asker_endpoint
+        .map(|address| address.id)
+        .filter(|eid| Some(*eid) != state.rendezvous_id);
+    match (warm_endpoint, answer.serialize()) {
+        (Some(eid), Ok(bytes)) => {
+            if !transport::send_best_effort(eid, bytes, state).await {
+                tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no warm path");
+            }
+        }
+        _ => {
+            tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no known endpoint");
         }
     }
 }

@@ -9,6 +9,7 @@
 use super::proof_book::ProofBook;
 use crate::protocol::identity::{IdentityProof, verify_proof};
 use crate::protocol::{AuthorKey, MeshId, Nickname};
+use crate::util::clock::Instant;
 use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
 
 /// The proofs this node holds, and the sessions it already asked for one. A proof comes in the
@@ -58,6 +59,11 @@ impl ProofExchange {
         }
         self.book.insert_evicting(*session, proof, is_live);
         self.book.get(session).is_some()
+    }
+
+    /// Whether one more answer may go out at `now`, within the per-minute cap.
+    pub(crate) fn may_answer(&mut self, now: Instant) -> bool {
+        self.book.allow_answer(now)
     }
 
     pub(crate) fn len(&self) -> usize {

@@ -169,7 +169,7 @@ mod tests {
             state.proof_answer(&nick("bob"), &me, &mesh, now).is_none(),
             "a request for another node gets no answer"
         );
-        let answer = state
+        let answer: messages::Verified = state
             .proof_answer(&me, &me, &mesh, now)
             .expect("a request for this node gets an answer");
         let proof = answer.joined_proof().expect("the answer holds a proof");
@@ -182,7 +182,7 @@ mod tests {
             ),
             "the proof in the answer verifies"
         );
-        let answered = (0..100)
+        let answered: usize = (0..100)
             .filter(|_| state.proof_answer(&me, &me, &mesh, now).is_some())
             .count();
         assert_eq!(answered + 1, 30, "the answers stop at the per-minute cap");

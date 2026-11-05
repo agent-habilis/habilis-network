@@ -31,7 +31,7 @@ use crate::protocol::identity::{Identity, IdentityProof};
 use crate::protocol::meshes::Mesh;
 use crate::protocol::messages::{Authored, Verified, WireFrame};
 use crate::protocol::{
-    AuthorKey, ContentHash, DedupKey, MeshId, Nickname, ShardGroup, SymmetricKey, UnixSecs,
+    AuthorKey, ContentHash, DedupKey, MeshId, Message, Nickname, ShardGroup, SymmetricKey, UnixSecs,
 };
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
@@ -264,6 +264,8 @@ pub struct EventLoopState {
     /// Bounded by `QUIET_CAP`: a full book drops its oldest dead session, and refuses a new proof
     /// when every held session is live.
     pub(crate) proofs: ProofExchange,
+    /// The run number of this start, which the proof of this session names.
+    run: u64,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
@@ -614,6 +616,7 @@ impl EventLoopState {
             left_at: HashMap::new(),
             left_keys: BoundedFifoSet::new(QUIET_CAP),
             proofs: ProofExchange::with_cap(QUIET_CAP),
+            run: init.keys.run,
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
@@ -1720,13 +1723,6 @@ impl EventLoopState {
 
     /// The proof that this session speaks as `nickname` on `mesh` in run `run`.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the joined message carries the proof in a later commit"
-        )
-    )]
     pub(crate) fn own_proof(&self, nickname: &Nickname, mesh: &MeshId, run: u64) -> IdentityProof {
         self.member_identity.prove(
             &self.identity.author_key(),
@@ -1745,8 +1741,11 @@ impl EventLoopState {
         mesh: &MeshId,
         now: Instant,
     ) -> Option<Verified> {
-        let _ = (request_to, own, mesh, now);
-        None
+        if request_to != own || !self.proofs.may_answer(now) {
+            return None;
+        }
+        let proof = self.own_proof(own, mesh, self.run);
+        Some(Message::new_joined_with_proof(mesh, own, &proof).sign(&self.identity))
     }
 
     /// Hold the proof in the body of a `joined` frame, if it verifies for the author of the frame.

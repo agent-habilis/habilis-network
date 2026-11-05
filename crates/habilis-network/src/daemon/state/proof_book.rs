@@ -8,7 +8,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::util::clock::Instant;
 
 /// The answers this node sends per minute. A request is cheap to send; an answer is one proof, so
 /// a flood of requests must not turn this node into a sender of proofs.
