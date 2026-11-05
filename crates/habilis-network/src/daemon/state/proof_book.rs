@@ -15,6 +15,8 @@ use crate::util::clock::Instant;
 /// The answers this node sends per minute. A request is cheap to send; an answer is one proof, so
 /// a flood of requests must not turn this node into a sender of proofs.
 pub(crate) const ANSWERS_PER_MINUTE: usize = 30;
+/// The most answers per minute at any roster size. It bounds the list of answer times in memory.
+pub(crate) const ANSWERS_PER_MINUTE_MAX: usize = 1024;
 const ANSWER_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
@@ -89,10 +91,10 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
     }
 
     /// Whether an answer may go out at `now`, within the per-minute cap. A refused answer is counted.
-    pub(crate) fn allow_answer(&mut self, now: Instant) -> bool {
+    pub(crate) fn allow_answer(&mut self, now: Instant, cap: usize) -> bool {
         self.answers
             .retain(|sent| now.saturating_duration_since(*sent) < ANSWER_WINDOW);
-        if self.answers.len() < ANSWERS_PER_MINUTE {
+        if self.answers.len() < cap.clamp(ANSWERS_PER_MINUTE, ANSWERS_PER_MINUTE_MAX) {
             self.answers.push(now);
             true
         } else {
@@ -102,15 +104,16 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
     }
 
     /// Whether an answer to `asker` may go out at `now`: one answer per asker in each window, and
-    /// the node-wide cap as the outer bound. A refused answer is counted.
-    pub(crate) fn allow_answer_to(&mut self, asker: &K, now: Instant) -> bool {
+    /// the node-wide cap as the outer bound. The node-wide cap is `cap`, kept between 30 and 1024 a
+    /// minute: a mesh of N peers asks N times when a node joins. A refused answer is counted.
+    pub(crate) fn allow_answer_to(&mut self, asker: &K, now: Instant, cap: usize) -> bool {
         self.askers
             .retain(|_, sent| now.saturating_duration_since(*sent) < ANSWER_WINDOW);
         if self.askers.contains_key(asker) || self.askers.len() >= self.cap {
             self.answers_refused += 1;
             return false;
         }
-        if !self.allow_answer(now) {
+        if !self.allow_answer(now, cap) {
             return false;
         }
         self.askers.insert(asker.clone(), now);
@@ -190,20 +193,20 @@ mod tests {
         let mut book: ProofBook<u8, u8> = ProofBook::with_cap(4);
         let now = Instant::now();
         assert!(
-            book.allow_answer_to(&1, now),
+            book.allow_answer_to(&1, now, 0),
             "the first request of an asker is answered"
         );
         assert!(
-            !book.allow_answer_to(&1, now),
+            !book.allow_answer_to(&1, now, 0),
             "its second request in the window is not"
         );
         assert!(
-            book.allow_answer_to(&2, now),
+            book.allow_answer_to(&2, now, 0),
             "another asker is still answered"
         );
         let later = now + Duration::from_secs(61);
         assert!(
-            book.allow_answer_to(&1, later),
+            book.allow_answer_to(&1, later, 0),
             "the next window answers the asker again"
         );
     }
@@ -213,7 +216,7 @@ mod tests {
     fn answers_are_capped_per_window() {
         let mut book: ProofBook<u8, u8> = ProofBook::with_cap(4);
         let now = Instant::now();
-        let allowed = (0..100).filter(|_| book.allow_answer(now)).count();
+        let allowed = (0..100).filter(|_| book.allow_answer(now, 0)).count();
         assert_eq!(
             allowed,
             super::ANSWERS_PER_MINUTE,

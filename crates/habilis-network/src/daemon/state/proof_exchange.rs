@@ -97,8 +97,8 @@ impl ProofExchange {
     }
 
     /// Whether one more answer to `asker` may go out at `now`: one per asker and window, and the per-minute cap of the node.
-    pub(crate) fn may_answer(&mut self, asker: &AuthorKey, now: Instant) -> bool {
-        self.book.allow_answer_to(asker, now)
+    pub(crate) fn may_answer(&mut self, asker: &AuthorKey, now: Instant, cap: usize) -> bool {
+        self.book.allow_answer_to(asker, now, cap)
     }
 
     /// How many proofs this node refused because their run did not beat the held run.

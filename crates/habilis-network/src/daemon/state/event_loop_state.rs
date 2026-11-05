@@ -1765,7 +1765,7 @@ impl EventLoopState {
         mesh: &MeshId,
         now: Instant,
     ) -> Option<Verified> {
-        if request_to != own || !self.proofs.may_answer(asker, now) {
+        if request_to != own || !self.proofs.may_answer(asker, now, self.peers.len()) {
             return None;
         }
         let proof = self.own_proof(own, mesh, self.run);
