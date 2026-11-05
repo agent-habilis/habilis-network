@@ -1589,7 +1589,8 @@ async fn handle_peer_info(
     }
     // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
     // endpoint is believed.
-    let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
+    let proven = state.proven_endpoints.get(&signer) == Some(peer_id)
+        || state.proven_endpoints.trusted(&signer) == Some(peer_id);
     state.note_rival_beacon_flag(
         context.endpoint.id(),
         signer,
@@ -3206,6 +3207,46 @@ mod first_contact_tests {
                 state.proven_endpoints.get(&bob_signer),
                 Some(bob_endpoint),
                 "bob's proof, bob's frame"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The roster trusts a key whose proof the capped table has dropped. Its beacon flag is
+    /// believed: the trust is what a pong and a link vector follow too.
+    #[test]
+    fn the_beacon_flag_of_a_trusted_key_whose_proof_left_the_table_is_believed() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob_endpoint = iroh::SecretKey::generate().public();
+            let bob = Identity::generate();
+            let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
+                .expect("a 32-byte key");
+            let mut json =
+                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            json["beacon"] = serde_json::Value::Bool(true);
+            let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+            let peer_info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
+
+            let mut state = fresh_state();
+            state.peers.insert(bob_signer);
+            state.proven_endpoints.trust(bob_signer, bob_endpoint);
+            assert_eq!(
+                state.proven_endpoints.get(&bob_signer),
+                None,
+                "the table holds no proof of bob"
+            );
+
+            super::handle_peer_info(&peer_info, &mut state, &context).await;
+
+            assert_eq!(
+                state.rival_holders.get(&bob_signer),
+                Some(&bob_endpoint),
+                "the flag of a key that the roster trusts was dropped"
             );
             node.endpoint.close().await;
         });
