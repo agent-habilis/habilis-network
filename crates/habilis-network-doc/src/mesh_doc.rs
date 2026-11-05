@@ -401,6 +401,9 @@ pub struct DocCensus {
     /// The restores that were dropped because the map of restores was full, since the document
     /// began.
     pub dropped_restores: u64,
+    /// The values that wait to be written again (see [`MeshDoc::take_restores`]): after a switch
+    /// it is 0 again within 3 ticks, so a value that stays means a write that did not settle.
+    pub replay_unsettled: u64,
 }
 
 /// The bytes of a frame on the wire, 0 for a frame that does not serialize.
@@ -471,6 +474,12 @@ pub struct MeshDoc {
     candidate_ticks: u32,
     /// The ticks since the epoch began.
     epoch_ticks: u32,
+    /// The tick of the epoch before which `take_restores` gives nothing: a node that is not the
+    /// author of a write that a seed lacks waits 1 to 3 ticks, so the author writes it first.
+    restores_due: u32,
+    /// The tag of the actor that this node wrote its last change with (the first 8 bytes), `0`
+    /// before its first write. A stamp with this tag is a write of this node.
+    own_tag: AtomicU64,
     /// The frame bytes of the epoch when it settled, 0 before. The live entries are back by then.
     settled_bytes: usize,
     /// The frame bytes that start a reset, before the settled size is known.
@@ -575,6 +584,8 @@ impl MeshDoc {
             candidate: None,
             candidate_ticks: 0,
             epoch_ticks: 0,
+            restores_due: 0,
+            own_tag: AtomicU64::new(0),
             settled_bytes: 0,
             frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
             state_epochs: false,
@@ -825,6 +836,7 @@ impl MeshDoc {
             refused_time: self.refused_time,
             unstamped_paths: self.unstamped.load(Ordering::Relaxed),
             dropped_restores: self.restores_dropped,
+            replay_unsettled: u64::try_from(self.restores.len()).unwrap_or(u64::MAX),
         }
     }
 
@@ -1158,13 +1170,40 @@ impl MeshDoc {
             self.seed_author = Some(candidate.frame.key());
             self.seed_hashes = seed_hashes;
         }
-        let leaves: Vec<(Vec<String>, Value)> = pending
+        // The author of a write writes it again at once. A node that holds a write of another node
+        // keeps it for 1 to 3 ticks: if the author's replay arrives first, the stamp that it
+        // names is the stamp that this node holds, and there is nothing left to write.
+        let own_tag = format!("{:016x}", self.own_tag.load(Ordering::Relaxed));
+        let (own, others): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|(_, _, stamp)| stamp.tag == own_tag);
+        let mut own_writes = own;
+        // The value of an object of this node holds the children that other nodes wrote. A child
+        // is written again with its own stamp when its wait is over, and not here, where it would
+        // get a fresh stamp that outranks a delete of the child.
+        for (path, value, _) in &mut own_writes {
+            for (child, _, _) in &others {
+                if child.len() > path.len() && child.starts_with(path) {
+                    remove_path(value, &child[path.len()..]);
+                }
+            }
+        }
+        // Only the leaves and the deletes wait: an object as a whole replaces the keys below it,
+        // and the leaves below it that have a write of another node are named on their own.
+        for (path, value, stamp) in others {
+            if !is_full_object(&value) {
+                self.keep_restore(path, (value, stamp));
+            }
+        }
+        let jitter = 1 + (self.own_tag.load(Ordering::Relaxed) ^ candidate.epoch) % 3;
+        self.restores_due = u32::try_from(jitter).unwrap_or(3);
+        let leaves: Vec<(Vec<String>, Value)> = own_writes
             .iter()
             .map(|(path, value, _)| (path.clone(), value.clone()))
             .collect();
         switch.replay = self.replay_patch(leaves);
         if switch.replay.is_some() {
-            switch.replay_stamps = pending
+            switch.replay_stamps = own_writes
                 .iter()
                 .map(|(path, _, stamp)| (path.clone(), stamp.clone()))
                 .collect();
@@ -1259,6 +1298,7 @@ impl MeshDoc {
         self.candidate_ticks = 0;
         self.epoch = epoch;
         self.epoch_ticks = 0;
+        self.restores_due = 0;
         self.settled_bytes = 0;
         self.seed_author = None;
         self.seed_hashes = HashSet::new();
@@ -1558,7 +1598,10 @@ impl MeshDoc {
             return Err(DocError::NotAnObject);
         };
         let mut fork = self.doc.fork();
-        fork.set_actor(actor_for(actor_seed));
+        let actor = actor_for(actor_seed);
+        self.own_tag
+            .store(actor_tag_number(&actor), Ordering::Relaxed);
+        fork.set_actor(actor);
         let heads = fork.get_heads();
         {
             let mut tx = fork.transaction();
@@ -2036,6 +2079,9 @@ impl MeshDoc {
     /// newer write, or a delete of a higher stamp, has overtaken in the meantime is not written.
     /// `None` when there is nothing to write. The glue calls it on each tick.
     pub fn take_restores(&mut self) -> Option<Restores> {
+        if self.epoch_ticks < self.restores_due {
+            return None;
+        }
         let held: Vec<(Vec<String>, (Value, Stamp))> =
             mem::take(&mut self.restores).into_iter().collect();
         let paths: Vec<Vec<String>> = held.iter().map(|(path, _)| path.clone()).collect();
@@ -2046,7 +2092,11 @@ impl MeshDoc {
         for (((path, (value, stamp)), now), floor) in held.into_iter().zip(live).zip(floors) {
             // A delete of a higher stamp governs the path: a value is not written over it.
             let deleted = !value.is_null() && floor.is_some_and(|dead| dead >= stamp);
+            // An empty object over an object that the document holds only wipes its keys.
+            let wipes = matches!(&value, Value::Object(fields) if fields.is_empty())
+                && json_at(&self.doc, &path).is_some_and(|there| there.is_object());
             let stale = deleted
+                || wipes
                 || match &now {
                     Some(current) => *current >= stamp,
                     None => value.is_null(),
@@ -2428,6 +2478,15 @@ fn replace_with(desired: &Value, held: Option<&Value>) -> Value {
 }
 
 /// A tag of the actor of a change for the cut vector: the first 8 bytes, in hex.
+/// The tag of `actor` as a number: the first 8 bytes, as [`actor_tag`] writes them in hex.
+fn actor_tag_number(actor: &automerge::ActorId) -> u64 {
+    let mut bytes = [0u8; 8];
+    let first = actor.to_bytes();
+    let len = first.len().min(8);
+    bytes[..len].copy_from_slice(&first[..len]);
+    u64::from_be_bytes(bytes)
+}
+
 fn actor_tag(actor: &automerge::ActorId) -> String {
     use std::fmt::Write as _;
 
@@ -5448,6 +5507,158 @@ mod tests {
             patch["obj"]["k599"],
             json!(7),
             "the last leaf, the newest write, is among them"
+        );
+    }
+
+    /// A node `other` that wrote the key `late` after the seed was cut, a node `me` that holds
+    /// the write and never wrote itself, and the seed of a third node that lacks the write. Each
+    /// node has the seed and has waited for it.
+    fn a_write_that_the_seed_lacks() -> (MeshDoc, MeshDoc, super::EpochSwitch, Nickname) {
+        let (me, other, cutter) = (nick("me"), nick("other"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut writer = MeshDoc::new_ungated().state_epochs();
+        let late = write(&mut writer, &other, &json!({ "late": 1 }));
+        let mut holder = MeshDoc::new_ungated().state_epochs();
+        holder.ingest(&late);
+        for frame in &frames {
+            writer.ingest(frame);
+            holder.ingest(frame);
+        }
+        let author_switch = ticks(&mut writer, &other, super::DOC_EPOCH_ADOPT_WAIT_TICKS)
+            .expect("the author adopts");
+        ticks(&mut holder, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("the holder adopts");
+        (writer, holder, author_switch, me)
+    }
+
+    #[test]
+    fn the_author_of_a_write_that_the_seed_lacks_writes_it_again_at_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (_writer, _holder, author_switch, _me) = a_write_that_the_seed_lacks();
+        let patch = author_switch.replay.expect("the author writes it again");
+        assert_eq!(patch["late"], json!(1), "the write is in the replay");
+    }
+
+    #[test]
+    fn a_holder_that_is_not_the_author_waits_up_to_three_ticks_before_it_writes_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (_writer, mut holder, _author_switch, me) = a_write_that_the_seed_lacks();
+        assert!(
+            holder.has_restores(),
+            "the holder keeps the write for later"
+        );
+        assert_eq!(holder.take_restores(), None, "it does not write at once");
+        let mut written = None;
+        for waited in 1..=3 {
+            let _ = holder.tick_epoch(&me);
+            written = holder.take_restores();
+            if written.is_some() {
+                assert!(waited <= 3, "it writes within 3 ticks");
+                break;
+            }
+        }
+        let (patch, _stamps) = written.expect("the holder writes the write again after the wait");
+        assert_eq!(patch["late"], json!(1));
+    }
+
+    #[test]
+    fn the_replay_of_an_object_leaves_out_a_child_that_another_node_wrote() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other, cutter) = (nick("me"), nick("other"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut holder = MeshDoc::new_ungated().state_epochs();
+        let made = write(&mut holder, &me, &json!({ "obj": { "mine": 1 } }));
+        let mut writer = MeshDoc::new_ungated().state_epochs();
+        writer.ingest(&made);
+        let child = write(&mut writer, &other, &json!({ "obj": { "late": 2 } }));
+        holder.ingest(&child);
+        for frame in &frames {
+            holder.ingest(frame);
+        }
+        let switch = ticks(&mut holder, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        let patch = switch.replay.expect("the node writes its own object again");
+        assert_eq!(patch["obj"]["mine"], json!(1), "its own leaf is written");
+        assert!(
+            patch["obj"].get("late").is_none(),
+            "the child of another node has its own stamp and its own wait: {patch}"
+        );
+        assert!(
+            switch
+                .replay_stamps
+                .iter()
+                .all(|(path, _)| path.last().map(String::as_str) != Some("late")),
+            "and it is not named in the stamps of this replay"
+        );
+    }
+
+    #[test]
+    fn a_holder_keeps_no_object_as_a_whole_for_later() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other, cutter) = (nick("me"), nick("other"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut writer = MeshDoc::new_ungated().state_epochs();
+        let made = write(&mut writer, &other, &json!({ "obj": { "late": 2 } }));
+        let mut holder = MeshDoc::new_ungated().state_epochs();
+        holder.ingest(&made);
+        for frame in &frames {
+            holder.ingest(frame);
+        }
+        ticks(&mut holder, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        let waits: Vec<Vec<String>> = holder.restores.keys().cloned().collect();
+        assert_eq!(
+            waits,
+            vec![vec!["obj".to_owned(), "late".to_owned()]],
+            "only the leaf waits: an object as a whole would replace the keys below it"
+        );
+    }
+
+    #[test]
+    fn a_restore_of_an_empty_object_does_not_replace_what_the_document_holds_there() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = doc_with_clock_at(9);
+        write(&mut doc, &me, &json!({ "obj": { "newer": 5 } }));
+        doc.restores.insert(
+            vec!["obj".to_owned()],
+            (json!({}), Stamp::new(50, "aa".to_owned())),
+        );
+        assert_eq!(
+            doc.take_restores(),
+            None,
+            "the object is there, and an empty object would only wipe its keys"
+        );
+    }
+
+    #[test]
+    fn a_holder_that_is_not_the_author_does_not_write_what_the_author_wrote_first() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (writer, mut holder, author_switch, me) = a_write_that_the_seed_lacks();
+        let (patch, stamps) = (
+            author_switch.replay.expect("the author writes it again"),
+            author_switch.replay_stamps,
+        );
+        let change = writer
+            .build_change(&patch, &pad_seed(b"other"))
+            .expect("applies")
+            .expect("a change");
+        let body = writer
+            .compose_replay_body(&change, &stamps)
+            .expect("a replay body");
+        let author = nick("other");
+        let key = signer(&author);
+        let frame = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &author, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        assert!(holder.has_restores(), "the holder waits with the write");
+        holder.ingest(&frame);
+        for _ in 0..3 {
+            let _ = holder.tick_epoch(&me);
+        }
+        assert_eq!(
+            holder.take_restores(),
+            None,
+            "the write of the author carries the same stamp, so the holder has nothing to write"
         );
     }
 
