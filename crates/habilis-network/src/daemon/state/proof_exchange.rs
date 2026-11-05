@@ -33,20 +33,31 @@ impl ProofExchange {
 
     /// An alive frame came from `session`. True means: send the session one proof request now.
     pub(crate) fn wants_proof(&mut self, session: &AuthorKey) -> bool {
-        let _ = (&self.asked, session);
-        false
+        self.book.get(session).is_none() && self.asked.insert(session.clone())
     }
 
-    /// A proof came for `session`. It is held if it verifies for this nickname and mesh.
+    /// A proof came for `session`. It is held if it verifies for this nickname and mesh, and if it
+    /// does not lower the run of a proof already held.
     pub(crate) fn accept(
         &mut self,
-        _session: &AuthorKey,
-        _nickname: &Nickname,
-        _mesh: &MeshId,
-        _proof: IdentityProof,
-        _is_live: impl Fn(&AuthorKey) -> bool,
+        session: &AuthorKey,
+        nickname: &Nickname,
+        mesh: &MeshId,
+        proof: IdentityProof,
+        is_live: impl Fn(&AuthorKey) -> bool,
     ) -> bool {
-        false
+        if !verify_proof(&proof, session, nickname.as_ref(), mesh.as_ref()) {
+            return false;
+        }
+        if self
+            .book
+            .get(session)
+            .is_some_and(|held| held.run >= proof.run)
+        {
+            return false;
+        }
+        self.book.insert_evicting(session.clone(), proof, is_live);
+        self.book.get(session).is_some()
     }
 
     pub(crate) fn proof_of(&self, session: &AuthorKey) -> Option<&IdentityProof> {
@@ -123,5 +134,34 @@ mod tests {
             "a proof of another nickname is refused"
         );
         assert!(receiver.proof_of(&session).is_none(), "nothing is held");
+    }
+
+    /// Of two proofs for one session, the higher run wins, and on a tie the first stays.
+    #[test]
+    fn the_higher_run_wins_and_a_tie_keeps_the_first() {
+        let mesh = MeshId::from("💬test");
+        let nickname = Nickname::from("alice");
+        let member = Identity::generate();
+        let session = Identity::generate().author_key();
+        let mut receiver = ProofExchange::with_cap(QUIET_CAP);
+        let at = |run| member.prove(&session, nickname.as_ref(), mesh.as_ref(), run);
+        assert!(
+            receiver.accept(&session, &nickname, &mesh, at(5), |_| true),
+            "run 5 is held"
+        );
+        assert!(
+            !receiver.accept(&session, &nickname, &mesh, at(5), |_| true),
+            "a tie is not held"
+        );
+        assert!(
+            !receiver.accept(&session, &nickname, &mesh, at(4), |_| true),
+            "a lower run is not held"
+        );
+        assert!(
+            receiver.accept(&session, &nickname, &mesh, at(6), |_| true),
+            "a higher run is held"
+        );
+        let held = receiver.proof_of(&session).expect("a proof is held");
+        assert_eq!(held.run, 6, "the held proof is the highest run");
     }
 }
