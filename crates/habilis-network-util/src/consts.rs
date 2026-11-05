@@ -210,9 +210,10 @@ pub const MAX_BLOB_STORE_ENTRIES: usize = 4096;
 
 /// Content groups that one blob entry remembers as owners. The same file
 /// offloaded for many calls shares one entry, so its owner set grows with each
-/// group. A group past the cap is not recorded: the blob stays served and its
-/// own bounds still apply, but the sweep of that group cannot release it, so
-/// the blob goes with the last recorded owner or with the byte or entry budget.
+/// group. A group past the cap is refused with a reason: an owner that is not
+/// recorded would see the blob deleted when the recorded owners are released,
+/// and a count of such owners cannot be kept, because a release does not say
+/// which entry it was for. A group that is already an owner can claim again.
 /// 64 owners of about 60 bytes each hold about 4 `KiB` per entry.
 #[cfg(feature = "host")]
 pub const MAX_BLOB_OWNERS: usize = 64;

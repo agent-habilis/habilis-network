@@ -59,7 +59,7 @@ impl BlobStore {
             size,
             content_id,
         } = meta;
-        if let Some(registered) = self.claim(&sha256, &content_id) {
+        if let Some(registered) = self.claim(&sha256, &content_id)? {
             return Ok(registered);
         }
         let dest = self.spool_dir.join(sha256.to_string());
@@ -96,21 +96,31 @@ impl BlobStore {
     /// eviction, and return its ticket fields; `None` when the blob is not
     /// spooled. Lets the producer skip the ~100ms password stretch
     /// when re-offloading content it already holds.
+    ///
+    /// # Errors
+    /// The entry already has `MAX_BLOB_OWNERS` owners and `content_id` is not one of them. An
+    /// owner that is not recorded would see the blob deleted when the recorded owners are
+    /// released, so the offload is refused and the caller must tell the user.
     pub(crate) fn claim(
         &mut self,
         hash: &BlobDigest,
         content_id: &ContentId,
-    ) -> Option<Registered> {
-        let entry = self.map.get_mut(hash)?;
-        if entry.owners.len() < MAX_BLOB_OWNERS {
-            entry.owners.insert(content_id.clone());
+    ) -> Result<Option<Registered>> {
+        let Some(entry) = self.map.get_mut(hash) else {
+            return Ok(None);
+        };
+        if entry.owners.len() >= MAX_BLOB_OWNERS && !entry.owners.contains(content_id) {
+            anyhow::bail!(
+                "this file is already offloaded for {MAX_BLOB_OWNERS} other calls, so this call was not sent"
+            );
         }
+        entry.owners.insert(content_id.clone());
         entry.seq = self.next_seq;
         self.next_seq += 1;
-        Some(Registered {
+        Ok(Some(Registered {
             ticket_secret: entry.ticket_secret.clone(),
             password: entry.password,
-        })
+        }))
     }
 
     /// Release `content_id`'s hold on every blob (called from the task
