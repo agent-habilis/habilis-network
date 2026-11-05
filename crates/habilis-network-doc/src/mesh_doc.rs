@@ -220,6 +220,27 @@ pub struct SeedPlan {
 }
 
 impl SeedPlan {
+    /// The stamps that a frame of this seed would carry for `merge`: one for each leaf and each
+    /// object that the merge writes, as the plan holds them (the stamp 0 for a path that it holds
+    /// none for). A caller that measures the frames of a seed uses them, so the frames come out as
+    /// full as they can be and not as full as the worst stamp lets them be.
+    #[must_use]
+    pub fn stamps_for(&self, merge: &Value) -> Vec<Stamp> {
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_leaves(merge, &mut Vec::new(), &mut leaves);
+        let mut objects: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_objects(merge, &mut Vec::new(), &mut objects);
+        let none = Stamp::new(0, "0000000000000000".to_owned());
+        let mut stamps: Vec<Stamp> = Vec::with_capacity(leaves.len() + objects.len());
+        for (path, _) in &leaves {
+            stamps.push(self.stamps.get(path).unwrap_or(&none).clone());
+        }
+        for (path, _) in &objects {
+            stamps.push(self.stamps.get(path).unwrap_or(&none).clone());
+        }
+        stamps
+    }
+
     /// Build the chain of the seed of `epoch` from this plan: the live JSON cut by leaf path into
     /// merges that each fit one frame, written as a chain of changes on the genesis of `epoch`.
     /// `fits` takes one merge and says whether its frame is small enough, as [`pack_entry`] does.
@@ -7397,6 +7418,42 @@ mod tests {
         assert_eq!(planned.origins, direct.origins, "the same stamps");
         assert_eq!(planned.tombstones, direct.tombstones, "the same tombstones");
         assert_eq!(planned.mark, direct.mark, "the same mark: count and tip");
+    }
+
+    #[test]
+    fn the_stamps_of_a_merge_are_the_stamps_that_the_plan_holds_for_its_paths() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other) = (nick("me"), nick("other"));
+        let mut doc = state_doc_with(&live_state());
+        write(&mut doc, &other, &json!({ "n": 8 }));
+        let plan = doc.seed_plan().expect("a plan");
+        let merge = json!({ "n": 8, "board": { "title": "t" } });
+        let stamps = plan.stamps_for(&merge);
+        let paths = vec![
+            vec!["board".to_owned()],
+            vec!["board".to_owned(), "title".to_owned()],
+            vec!["n".to_owned()],
+        ];
+        let held: Vec<Stamp> = doc
+            .stamps_of(&paths)
+            .into_iter()
+            .map(|stamp| stamp.expect("a stamp"))
+            .collect();
+        let mut expected = held;
+        expected.sort();
+        let mut got = stamps;
+        got.sort();
+        assert_eq!(
+            got, expected,
+            "the object, the leaf under it and the other leaf, each with the stamp of its write"
+        );
+        let unknown = plan.stamps_for(&json!({ "nowhere": 1 }));
+        assert_eq!(
+            unknown,
+            vec![Stamp::new(0, "0000000000000000".to_owned())],
+            "a path that the plan does not hold gets the stamp 0"
+        );
+        let _ = me;
     }
 
     #[test]

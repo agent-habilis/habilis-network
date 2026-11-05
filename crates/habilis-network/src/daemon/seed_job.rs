@@ -88,20 +88,23 @@ fn mix(nickname: &Nickname, epoch: u64) -> u64 {
     hash ^ epoch.wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
-/// Whether the frame of `merge`, as a seed would carry it (with the largest stamp of each path,
-/// sealed if the mesh has a key, signed and serialized), leaves the margin of the envelope under a
-/// message. It is the check of the daemon for a seed: a frame that fits here fits at the send.
-fn seed_frame_fits(job: &SeedJob, merge: &serde_json::Value) -> bool {
+/// Whether the frame of `merge`, as a seed would carry it (with the stamps of the plan for its
+/// paths, sealed if the mesh has a key, signed and serialized), leaves the margin of the envelope
+/// under a message. It is the check of the daemon for a seed: a frame that fits here fits at the
+/// send, and it is as full as the real stamps let it be.
+fn seed_frame_fits(job: &SeedJob, plan: &SeedPlan, merge: &serde_json::Value) -> bool {
+    let stamps = plan.stamps_for(merge);
+    frame_fits_with(job, merge, &stamps)
+}
+
+/// [`seed_frame_fits`] with the stamps given.
+fn frame_fits_with(job: &SeedJob, merge: &serde_json::Value, stamps: &[Stamp]) -> bool {
     let timeless = MeshDoc::new_ungated();
     let Ok(Some(change)) = timeless.build_change(merge, &job.actor) else {
         return true;
     };
-    let mut stamps: Vec<Stamp> = Vec::new();
-    for _ in 0..count_leaves(merge) {
-        stamps.push(Stamp::new(LARGEST_TIME, "ffffffffffffffff".to_owned()));
-    }
     let time = Some(LARGEST_TIME);
-    let plain = wire::change_body_tombstoned(&change, None, job.epoch, None, time, &stamps, &[]);
+    let plain = wire::change_body_tombstoned(&change, None, job.epoch, None, time, stamps, &[]);
     let Ok(plain) = plain else {
         return false;
     };
@@ -119,32 +122,15 @@ fn seed_frame_fits(job: &SeedJob, merge: &serde_json::Value) -> bool {
         .is_ok_and(|wire| wire.as_bytes().len() + DOC_EPOCH_FRAME_MARGIN <= MAX_MESSAGE_SIZE)
 }
 
-/// The leaves of a merge: a value that is not an object, or an empty object.
-fn count_leaves(merge: &serde_json::Value) -> usize {
-    match merge {
-        serde_json::Value::Object(fields) if !fields.is_empty() => {
-            let mut leaves = 0;
-            for field in fields.values() {
-                leaves += count_leaves(field);
-            }
-            leaves
-        }
-        serde_json::Value::Object(_)
-        | serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_)
-        | serde_json::Value::Array(_) => 1,
-    }
-}
-
 /// Build the chain from `plan` on a blocking thread, and give back a handle. The event loop keeps
 /// its timers and its sockets while the thread works. A browser has no thread to spare, so there
 /// the build runs as a task of the loop (a state document of a browser is small).
 pub(crate) fn spawn_build(plan: SeedPlan, job: SeedJob) -> JoinHandle<SeedOutcome> {
     let build = move || {
         let started = Instant::now();
-        let chain = plan.build(job.epoch, &job.actor, |merge| seed_frame_fits(&job, merge));
+        let chain = plan.build(job.epoch, &job.actor, |merge| {
+            seed_frame_fits(&job, &plan, merge)
+        });
         SeedOutcome {
             epoch: job.epoch,
             chain,
@@ -240,7 +226,9 @@ pub(crate) async fn cut_now(
         state.doc(Channel::State).epoch().saturating_add(1),
     );
     let started = Instant::now();
-    let chain = plan.build(job.epoch, &job.actor, |merge| seed_frame_fits(&job, merge))?;
+    let chain = plan.build(job.epoch, &job.actor, |merge| {
+        seed_frame_fits(&job, &plan, merge)
+    })?;
     let outcome = SeedOutcome {
         epoch: job.epoch,
         chain: Ok(chain),
@@ -393,13 +381,13 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        ClockInstant, SeedJob, SeedOutcome, finish, peer_heads_seen, rank_of, spawn_build,
-        sync_deadline, tick,
+        ClockInstant, LARGEST_TIME, SeedJob, SeedOutcome, finish, frame_fits_with, peer_heads_seen,
+        rank_of, spawn_build, sync_deadline, tick,
     };
     use tokio::time::interval;
 
     use crate::daemon::state::EventLoopState;
-    use crate::doc::{DocError, Ingested, Limits, MeshDoc};
+    use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp};
     use crate::protocol::identity::Identity;
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing;
@@ -713,6 +701,63 @@ mod tests {
         assert!(
             !state.doc(Channel::State).is_awaiting_first_sync(),
             "the daemon today: no wait, no warning"
+        );
+    }
+
+    /// The leaves of a merge: a value that is not an object, or an empty object.
+    fn count_leaves(merge: &Value) -> usize {
+        match merge {
+            Value::Object(fields) if !fields.is_empty() => {
+                let mut leaves = 0;
+                for field in fields.values() {
+                    leaves += count_leaves(field);
+                }
+                leaves
+            }
+            Value::Object(_)
+            | Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::Array(_) => 1,
+        }
+    }
+
+    /// The largest stamp for each leaf of a merge: the measure that the daemon used before it read
+    /// the stamps of the plan.
+    fn worst_stamps(merge: &Value) -> Vec<Stamp> {
+        let mut stamps: Vec<Stamp> = Vec::new();
+        for _ in 0..count_leaves(merge) {
+            stamps.push(Stamp::new(LARGEST_TIME, "ffffffffffffffff".to_owned()));
+        }
+        stamps
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_frames_of_a_seed_measured_with_the_real_stamps_are_fewer_than_with_the_worst_stamp()
+     {
+        // Shared with the job that builds on another thread.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let mut doc = MeshDoc::new_state(None);
+        doc.finish_sync();
+        write_leaves(&mut doc, &identity, &me, 3_000);
+        let plan = doc.seed_plan().expect("a plan");
+        let job = job_of(&identity, 1);
+        let worst = plan
+            .build(1, &job.actor, |merge| {
+                frame_fits_with(&job, merge, &worst_stamps(merge))
+            })
+            .expect("the worst case builds");
+        let real = spawn_build(plan, job_of(&identity, 1))
+            .await
+            .expect("the build ends");
+        let real = real.chain.expect("the real build works");
+        assert!(
+            real.changes.len() < worst.changes.len(),
+            "the real stamps give {} frames, the worst stamp gives {}",
+            real.changes.len(),
+            worst.changes.len()
         );
     }
 }
