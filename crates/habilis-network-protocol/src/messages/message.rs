@@ -141,6 +141,32 @@ impl Message {
         )
     }
 
+    /// A presence message for `author` joining `mesh`, with the identity proof of its session in
+    /// the body. An empty body stays valid: a node with no member key sends `new_joined`.
+    #[must_use]
+    pub fn new_joined_with_proof(
+        mesh: &MeshId,
+        author: &Nickname,
+        proof: &identity::IdentityProof,
+    ) -> Self {
+        // A proof text is hex digits and separators, so it is always a valid body.
+        let body = MessageBody::try_new(&proof.encode()).unwrap_or_else(|_| empty_body());
+        Self::new(
+            mesh,
+            author,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Joined,
+            },
+            body,
+        )
+    }
+
+    /// The identity proof in the body of a `joined` frame. An empty, cut or bad body gives `None`.
+    #[must_use]
+    pub fn joined_proof(&self) -> Option<identity::IdentityProof> {
+        identity::IdentityProof::decode(self.body.as_str())
+    }
+
     /// A presence message for `author` leaving `mesh`. It has no body.
     #[must_use]
     pub fn new_left(mesh: &MeshId, author: &Nickname) -> Self {
@@ -165,6 +191,12 @@ impl Message {
             },
             empty_body(),
         )
+    }
+
+    /// A request for the identity proof of `to`, sent to that member alone. It has no body.
+    #[must_use]
+    pub fn new_proof_request(mesh: &MeshId, author: &Nickname, to: Nickname) -> Self {
+        Self::new(mesh, author, MessageKind::ProofRequest { to }, empty_body())
     }
 
     /// A liveness probe (broadcast). Receivers auto-respond with a

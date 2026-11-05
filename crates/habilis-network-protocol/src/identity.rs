@@ -58,6 +58,20 @@ impl Identity {
         }
     }
 
+    /// The 32-byte seed of this identity, for the state file. It is secret: it never goes on the wire.
+    #[must_use]
+    pub fn seed(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.secret.to_bytes())
+    }
+
+    /// The identity a seed names (see [`Identity::seed`]).
+    #[must_use]
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        Identity {
+            secret: SecretKey::from_bytes(seed),
+        }
+    }
+
     /// The public half of the key.
     #[must_use]
     pub fn public(&self) -> PublicKey {
@@ -96,6 +110,107 @@ impl Identity {
     pub fn seal_public(&self) -> x25519_dalek::PublicKey {
         x25519_dalek::PublicKey::from(&self.seal_secret())
     }
+}
+
+impl From<&[u8; 32]> for Identity {
+    fn from(seed: &[u8; 32]) -> Self {
+        Self::from_seed(seed)
+    }
+}
+
+/// An identity's proof that a session (its session key) speaks as a nickname on a mesh, for a run.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct IdentityProof {
+    /// The identity key that signed the proof.
+    pub identity: PublicKey,
+    /// The run counter of the session. A newer run of an identity supersedes the older ones.
+    pub run: u64,
+    /// The identity's signature over the session, nickname, mesh and run.
+    pub signature: Signature,
+}
+
+impl IdentityProof {
+    /// The longest wire text of a proof: 64 hex digits of key, 20 digits of run, 128 of signature,
+    /// and 2 separators. A body longer than this is not a proof.
+    pub const MAX_TEXT_LEN: usize = 64 + 20 + 128 + 2;
+
+    /// The wire text of the proof, as `<identity hex>:<run>:<signature hex>`.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            to_hex(self.identity.as_bytes()),
+            self.run,
+            to_hex(&self.signature.to_bytes())
+        )
+    }
+
+    /// Parse the wire text of a proof. A wrong shape, length or digit gives `None`.
+    #[must_use]
+    pub fn decode(text: &str) -> Option<Self> {
+        if text.len() > Self::MAX_TEXT_LEN {
+            return None;
+        }
+        let mut parts = text.split(':');
+        let (identity, run, signature) = (parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() {
+            return None;
+        }
+        let identity: [u8; 32] = parse_hex(identity).ok()?.try_into().ok()?;
+        Some(Self {
+            identity: PublicKey::from_bytes(&identity).ok()?,
+            run: run.parse().ok()?,
+            signature: decode_sig(signature).ok()?,
+        })
+    }
+}
+
+/// What the identity signs: a domain label, then the session key, the nickname, the mesh and the
+/// run, each field separated, so no two different claims share bytes.
+fn proof_bytes(session: &AuthorKey, nickname: &str, mesh: &str, run: u64) -> Vec<u8> {
+    let mut bytes = b"habilis-mesh/identity-proof/v1".to_vec();
+    bytes.extend_from_slice(session.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(nickname.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(mesh.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&run.to_be_bytes());
+    bytes
+}
+
+impl Identity {
+    /// Prove that `session` speaks as `nickname` on `mesh`, in run `run`.
+    #[must_use]
+    pub fn prove(
+        &self,
+        session: &AuthorKey,
+        nickname: &str,
+        mesh: &str,
+        run: u64,
+    ) -> IdentityProof {
+        IdentityProof {
+            identity: self.public(),
+            run,
+            signature: self.sign(&proof_bytes(session, nickname, mesh, run)),
+        }
+    }
+}
+
+/// Whether `proof` is the identity's proof of `session` as `nickname` on `mesh`, for its run.
+#[must_use]
+pub fn verify_proof(
+    proof: &IdentityProof,
+    session: &AuthorKey,
+    nickname: &str,
+    mesh: &str,
+) -> bool {
+    verify(
+        &proof.identity,
+        &proof_bytes(session, nickname, mesh, proof.run),
+        &proof.signature,
+    )
 }
 
 /// KDF label deriving the X25519 encryption key from the Ed25519 identity seed —
@@ -291,6 +406,71 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// A proof goes to the wire text and back, and bad text is refused.
+    #[test]
+    fn a_proof_round_trips_through_its_wire_text() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let proof = identity.prove(&session, "alice", "mesh", 12);
+        let text = proof.encode();
+        assert!(
+            text.len() <= super::IdentityProof::MAX_TEXT_LEN,
+            "the text stays in its cap"
+        );
+        let back = super::IdentityProof::decode(&text).expect("the text parses");
+        assert!(
+            super::verify_proof(&back, &session, "alice", "mesh"),
+            "the parsed proof verifies"
+        );
+        assert_eq!(back.run, 12, "the run survives");
+        for bad in [
+            "",
+            "x",
+            "a:b:c",
+            &text[..text.len() - 2],
+            &format!("{text}00"),
+        ] {
+            assert!(
+                super::IdentityProof::decode(bad).is_none(),
+                "refused: {bad:?}"
+            );
+        }
+    }
+
+    /// A proof names the session, the nickname, the mesh and the run: any other value fails.
+    #[test]
+    fn a_proof_binds_the_session_nickname_mesh_and_run() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let proof = identity.prove(&session, "alice", "mesh", 3);
+        assert!(
+            super::verify_proof(&proof, &session, "alice", "mesh"),
+            "the proof verifies"
+        );
+        assert!(
+            !super::verify_proof(&proof, &session, "bob", "mesh"),
+            "another nickname fails"
+        );
+        let other_run = super::IdentityProof { run: 4, ..proof };
+        assert!(
+            !super::verify_proof(&other_run, &session, "alice", "mesh"),
+            "another run fails"
+        );
+    }
+
+    /// The identity key is the one a restarted member keeps: its seed round-trips, so the
+    /// same identity comes back from the state file.
+    #[test]
+    fn an_identity_round_trips_through_its_seed() {
+        let identity = Identity::generate();
+        let seed = identity.seed();
+        let back = Identity::from_seed(&seed);
+        assert_eq!(
+            back.author_key(),
+            identity.author_key(),
+            "the same key comes back"
+        );
+    }
     use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
     use crate::AuthorKey;
 

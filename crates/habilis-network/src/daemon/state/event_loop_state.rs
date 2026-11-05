@@ -4,6 +4,7 @@ use super::ParkedLinkStates;
 use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
+use super::proof_exchange::ProofExchange;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, Latch, MeshSecrets, PingRound, Reach,
     RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
@@ -26,11 +27,11 @@ use iroh::{EndpointAddr, EndpointId};
 use crate::daemon::message_log::MessageLog;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
-use crate::protocol::identity::Identity;
+use crate::protocol::identity::{Identity, IdentityProof};
 use crate::protocol::meshes::Mesh;
 use crate::protocol::messages::{Authored, Verified, WireFrame};
 use crate::protocol::{
-    AuthorKey, ContentHash, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs,
+    AuthorKey, ContentHash, DedupKey, MeshId, Message, Nickname, ShardGroup, SymmetricKey, UnixSecs,
 };
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
@@ -259,6 +260,12 @@ pub struct EventLoopState {
     /// more than `QUIET_CAP` departures ago, that this node never held, counts as an arrival
     /// until its author goes quiet.
     pub(crate) left_keys: BoundedFifoSet<AuthorKey>,
+    /// The identity proofs of the sessions this node verified, and the sessions it asked for one.
+    /// Bounded by `QUIET_CAP`: a full book drops its oldest dead session, and refuses a new proof
+    /// when every held session is live.
+    pub(crate) proofs: ProofExchange,
+    /// The run number of this start, which the proof of this session names.
+    run: u64,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
@@ -466,6 +473,8 @@ pub struct EventLoopState {
     /// The public key is the durable identity; the nickname is a
     /// non-unique display label (see `docs/history-integrity.md`).
     pub(crate) identity: Arc<Identity>,
+    /// The key that survives a restart. It signs the proof of this session and nothing else.
+    pub(crate) member_identity: Arc<Identity>,
     /// Our own per-author log cursor (Phase 2): `self_seq` is the next
     /// `Msg` sequence number to emit, `self_prev` the content hash of our
     /// last sent `Msg` (`None` until the first). Advanced on every send so
@@ -544,6 +553,10 @@ impl EventLoopState {
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
     /// per-channel keys are derived, rather than lingering in the caller.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the member key is one field over the limit; the constructor is split in a later commit"
+    )]
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
         let MeshSecrets {
             password: mesh_password,
@@ -602,6 +615,8 @@ impl EventLoopState {
             left: BoundedFifoSet::new(QUIET_CAP),
             left_at: HashMap::new(),
             left_keys: BoundedFifoSet::new(QUIET_CAP),
+            proofs: ProofExchange::with_cap(QUIET_CAP),
+            run: init.keys.run,
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
@@ -651,7 +666,8 @@ impl EventLoopState {
             state_doc: MeshDoc::new_ungated().key(state_key),
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
-            identity: init.identity,
+            identity: init.keys.session,
+            member_identity: init.keys.member,
             self_seq: 0,
             self_prev: None,
             author_seqs: HashMap::new(),
@@ -1703,6 +1719,72 @@ impl EventLoopState {
     #[must_use]
     pub fn mint_mesh(&self) -> Option<&Mesh> {
         self.mint_mesh.as_ref()
+    }
+
+    /// The proof that this session speaks as `nickname` on `mesh` in run `run`.
+    #[must_use]
+    pub(crate) fn own_proof(&self, nickname: &Nickname, mesh: &MeshId, run: u64) -> IdentityProof {
+        self.member_identity.prove(
+            &self.identity.author_key(),
+            nickname.as_ref(),
+            mesh.as_ref(),
+            run,
+        )
+    }
+
+    /// The request to send for an `alive` frame whose session this node holds no proof for. It asks
+    /// once per session, and only for a member of the roster, so a flood of new keys buys no
+    /// request.
+    pub(crate) fn proof_request_for(
+        &self,
+        alive: &Verified,
+        own: &Nickname,
+        mesh: &MeshId,
+    ) -> Option<Verified> {
+        if !self.peers.contains(alive.author.as_str())
+            || !self.proofs.wants_proof(&alive.key(), Instant::now())
+        {
+            return None;
+        }
+        Some(Message::new_proof_request(mesh, own, alive.author.clone()).sign(&self.identity))
+    }
+
+    /// The request for the proof of `session` went out: its retry clock starts. A request that
+    /// did not go out, for lack of a warm path, is not noted, so the next alive frame asks again.
+    pub(crate) fn note_proof_request_sent(&mut self, session: &AuthorKey) {
+        self.proofs.note_asked(session, Instant::now());
+    }
+
+    /// The answer to a proof request: a signed `joined` frame with the proof of this session, if
+    /// the request is for this node and the answers of the last minute are under the cap.
+    pub(crate) fn proof_answer(
+        &mut self,
+        request_to: &Nickname,
+        asker: &AuthorKey,
+        own: &Nickname,
+        mesh: &MeshId,
+        now: Instant,
+    ) -> Option<Verified> {
+        if request_to != own || !self.proofs.may_answer(asker, now, self.peers.len()) {
+            return None;
+        }
+        let proof = self.own_proof(own, mesh, self.run);
+        Some(Message::new_joined_with_proof(mesh, own, &proof).sign(&self.identity))
+    }
+
+    /// Hold the proof in the body of a `joined` frame, if it verifies for the author of the frame.
+    /// A frame with an empty or bad body holds none.
+    pub(crate) fn note_joined_proof(&mut self, message: &Verified, mesh: &MeshId) {
+        let Some(proof) = message.joined_proof() else {
+            return;
+        };
+        let key = message.key();
+        // A member that left the roster is dead, whether it said goodbye or crashed.
+        let peers = &self.peers;
+        self.proofs
+            .accept(&key, &message.author, mesh, proof, |nickname| {
+                peers.contains(nickname.as_str())
+            });
     }
 
     /// Stamp the next position on this author's hash chain, advancing it.

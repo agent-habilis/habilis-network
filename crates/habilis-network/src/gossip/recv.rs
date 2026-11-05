@@ -692,6 +692,7 @@ pub(crate) async fn ingest_from(
         | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
+        | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::StateDigest
         | MessageKind::Meta
@@ -826,6 +827,10 @@ async fn dispatch_infra(
             .await;
         }
         MessageKind::App { .. } => unreachable!("the app seam is handled by `ingest`"),
+        MessageKind::ProofRequest { to } => {
+            answer_proof_request(to, message, state, context).await;
+            return ControlFlow::Break(());
+        }
         _ => {}
     }
     ControlFlow::Continue(())
@@ -942,6 +947,43 @@ async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerC
         _ => {
             tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no known endpoint");
         }
+    }
+}
+
+/// Answer a proof request that names this node with a `joined` frame that carries the proof of
+/// this session, sent to the asker alone over a warm path. The path is checked before the answer
+/// takes a slot of the per-minute cap, so an answer that cannot go out costs no slot. No warm path
+/// means no answer, and the asker asks again by the retry rule of the proof exchange. A send that
+/// fails after the slot was taken keeps the slot and the 60 s window of the asker, so the first retry
+/// that can work is the one at 90 s: the one at 30 s is refused.
+async fn answer_proof_request(
+    to: &Nickname,
+    message: &Verified,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
+    let asker_endpoint = state.peer_endpoints.get(message.author.as_str());
+    let warm_endpoint = asker_endpoint
+        .map(|address| address.id)
+        .filter(|eid| Some(*eid) != state.rendezvous_id);
+    let Some(eid) = warm_endpoint else {
+        tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no warm path");
+        return;
+    };
+    let Some(answer) = state.proof_answer(
+        to,
+        &message.key(),
+        context.author,
+        context.mesh,
+        Instant::now(),
+    ) else {
+        return;
+    };
+    messages::log_out(&answer);
+    if let Ok(bytes) = answer.serialize()
+        && !transport::send_best_effort(eid, bytes, state).await
+    {
+        tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: the send failed");
     }
 }
 

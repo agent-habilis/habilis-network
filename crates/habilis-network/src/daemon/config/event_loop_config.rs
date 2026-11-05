@@ -21,7 +21,8 @@ use crate::protocol::{MeshId, Nickname};
 
 use crate::beacon;
 
-use crate::protocol::{crypto, identity};
+use crate::daemon::state::RunKeys;
+use crate::protocol::crypto;
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 use iroh::address_lookup::memory;
@@ -77,9 +78,9 @@ pub(crate) struct MeshSpec {
     /// joiner holds no issuer key, so it could never mint).
     pub(crate) mint_mesh: Option<Mesh>,
     pub(crate) author: Nickname,
-    /// This member's signing identity (Ed25519), minted in `setup_mesh`.
-    /// In-process / ephemeral for now (see [`crate::protocol::identity`]).
-    pub(crate) identity: sync::Arc<identity::Identity>,
+    /// The two keys of this run (Ed25519), made in `setup_mesh`: a session key that is new each
+    /// run, and a member key that a restart keeps (see [`crate::protocol::identity`]).
+    pub(crate) keys: RunKeys,
     /// The raw mesh password, retained for the process lifetime when the
     /// mesh is password-protected (`None` otherwise). Needed at blob-offload
     /// time to key blob tickets with the same password — the Argon2id stretch

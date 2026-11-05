@@ -1,5 +1,6 @@
 use crate::{beacon, transport};
 use iroh_gossip::{api, net, proto};
+use std::path::Path;
 use std::{mem, sync};
 #[cfg(feature = "host")]
 use tokio::task;
@@ -32,6 +33,7 @@ use crate::lifecycle;
 use super::config::{
     EndpointOwner, Endpoints, MeshSpec, RendezvousConfig, RuntimeConfig, TransportSet,
 };
+use super::state::RunKeys;
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
 use crate::gossip::split;
@@ -632,6 +634,113 @@ fn validated_mesh_config(kind: &SetupKind) -> Result<&MeshConfig> {
     Ok(mesh_config)
 }
 
+/// The identity of this member, kept across restarts. Its seed lives in `<state>.key`, mode 0600.
+/// A key file of the wrong length is replaced, with a warning. No state file means a new key.
+#[cfg(all(unix, feature = "host"))]
+fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
+    use std::fs;
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Some(state) = state else {
+        return Ok(identity::Identity::generate());
+    };
+    let key_path = state.with_extension("key");
+    if let Ok(bytes) = fs::read(&key_path) {
+        if let Ok(seed) = <[u8; 32]>::try_from(bytes.as_slice()) {
+            return Ok(identity::Identity::from_seed(&seed));
+        }
+        tracing::warn!(target: "habilis_network::lifecycle", "identity key file has the wrong length; a new key replaces it");
+    }
+    let identity = identity::Identity::generate();
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true).mode(0o600);
+    let mut file = options.open(&key_path)?;
+    file.write_all(identity.seed().as_slice())?;
+    Ok(identity)
+}
+
+/// A target with no files (wasm, or a build without `host`) mints a new key, as it always did.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the file-backed version, so the caller is one call"
+)]
+fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> {
+    Ok(identity::Identity::generate())
+}
+
+/// The run number of this start, kept in `<state>.run`. It counts up by 1 at each start and never
+/// reads the clock, so a clock that went back cannot make a newer run look older. The one exception
+/// is a lost file: then the count restarts from the clock (see `counter_lost`). No state file means
+/// run 1.
+#[cfg(all(unix, feature = "host"))]
+fn next_run(state: Option<&Path>) -> Result<u64> {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{ErrorKind, Write as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Some(state) = state else {
+        return Ok(1);
+    };
+    let run_path = state.with_extension("run");
+    let run = match fs::read(&run_path) {
+        Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_slice()) {
+            Ok(last) => u64::from_le_bytes(last).saturating_add(1),
+            Err(_) => counter_lost(),
+        },
+        Err(error) if error.kind() == ErrorKind::NotFound => 1,
+        Err(_) => counter_lost(),
+    };
+    // A crash after the write and before the rename leaves the old counter, never a cut short one.
+    let tmp_path = state.with_extension("run.tmp");
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true).mode(0o600);
+    let mut file = options.open(&tmp_path)?;
+    file.write_all(&run.to_le_bytes())?;
+    file.sync_all()?;
+    fs::rename(&tmp_path, &run_path)?;
+    // Without this, a power loss can undo the rename, and the next start repeats a run that peers saw.
+    if let Some(folder) = run_path
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+    {
+        File::open(folder)?.sync_all()?;
+    }
+    Ok(run)
+}
+
+/// The counter file is unreadable, so the count restarts from the unix seconds: the counter grows by
+/// 1 per start and the seconds grow faster, so the number is above any count that peers kept.
+#[cfg(all(unix, feature = "host"))]
+fn counter_lost() -> u64 {
+    use crate::protocol::UnixSecs;
+    let run = u64::try_from(UnixSecs::now().as_secs()).unwrap_or(1).max(1);
+    tracing::warn!(target: "habilis_network::lifecycle", new_run = run, "run counter file is unreadable, so its old run is unknown; the count restarts from the clock");
+    run
+}
+
+/// A target with no files has no state to count in, so each start is run 1.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the file-backed version, so the caller is one call"
+)]
+fn next_run(_state: Option<&Path>) -> Result<u64> {
+    Ok(1)
+}
+
+/// The keys of this run. The member key comes from the state file. The session key is the one that
+/// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
+/// would start the same actor again at sequence 1.
+fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
+    Ok(RunKeys {
+        // shared with the loop and its handlers, which hold clones
+        session: sync::Arc::new(identity::Identity::generate()),
+        // shared with the loop and its handlers, which hold clones
+        member: sync::Arc::new(load_or_create_identity(state)?),
+        run: next_run(state)?,
+    })
+}
+
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -723,8 +832,8 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             topic_string,
             mint_mesh,
             author,
-            // The mesh spec and the loop state both hold the signing identity, so it is shared.
-            identity: sync::Arc::new(identity::Identity::generate()),
+            // The mesh spec and the loop state both hold the keys, so they are shared.
+            keys: run_keys(state_file.as_deref())?,
             mesh_password,
             mesh_key,
         },
@@ -1106,6 +1215,174 @@ async fn setup_join(
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::{env, fs, process};
+
+    /// A temp dir that goes away when the test ends, also when an assert fails.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = env::temp_dir().join(format!("{name}-{}", process::id()));
+            drop(fs::remove_dir_all(&dir));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            drop(fs::remove_dir_all(&self.0));
+        }
+    }
+
+    /// A restarted member keeps its identity: the same state file gives the same key, and a
+    /// missing file gives a new one.
+    #[test]
+    fn a_restart_keeps_its_identity() {
+        let dir = env::temp_dir().join(format!("habilis-identity-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
+        let first = super::load_or_create_identity(Some(&state)).expect("first start");
+        let second = super::load_or_create_identity(Some(&state)).expect("restart");
+        assert_eq!(
+            first.author_key(),
+            second.author_key(),
+            "the restart keeps the key"
+        );
+        let fresh = super::load_or_create_identity(None).expect("no state file");
+        assert_ne!(
+            fresh.author_key(),
+            first.author_key(),
+            "no file means a new key"
+        );
+    }
+
+    /// The run number rises at each start, and a clock that went back cannot lower it: the counter
+    /// never reads the clock.
+    #[test]
+    fn the_run_number_rises_at_each_start() {
+        let dir = TempDir::new("habilis-run-number");
+        let state = dir.path().join("session.json");
+        let runs: Vec<u64> = (0..3)
+            .map(|_| super::next_run(Some(&state)).expect("a run number"))
+            .collect();
+        assert_eq!(runs, [1, 2, 3], "each start counts one more");
+        let ahead: u64 = 4_000_000_000_000;
+        fs::write(state.with_extension("run"), ahead.to_le_bytes()).expect("a counter ahead");
+        assert_eq!(
+            super::next_run(Some(&state)).expect("a run number"),
+            ahead + 1,
+            "a counter ahead of any clock still rises"
+        );
+        assert_eq!(
+            super::next_run(None).expect("no state file"),
+            1,
+            "no file means run 1"
+        );
+    }
+
+    /// A counter file that a crash cut short must not restart the count at 1: a peer that kept a
+    /// higher run would refuse the live session. The next run then starts above any count of starts.
+    #[test]
+    fn a_cut_short_counter_file_does_not_restart_the_count() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new("habilis-run-cut");
+        let state = dir.path().join("session.json");
+        fs::write(state.with_extension("run"), b"").expect("a cut short file");
+        let run = super::next_run(Some(&state)).expect("a run number");
+        assert!(
+            run > 1_000_000_000,
+            "the run after a cut short file is {run}"
+        );
+        let mode: u32 = fs::metadata(state.with_extension("run"))
+            .expect("the file")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the counter file is private, like the key file"
+        );
+        assert!(
+            !state.with_extension("run.tmp").exists(),
+            "no temp file stays"
+        );
+    }
+
+    /// The member key survives a restart and the session key does not: the session key is the
+    /// automerge actor, and a restart that kept it would start the same actor again.
+    #[test]
+    fn a_restart_keeps_the_member_key_and_changes_the_session_key() {
+        let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
+        let first = super::run_keys(Some(&state)).expect("first start");
+        let second = super::run_keys(Some(&state)).expect("restart");
+        assert_eq!(
+            first.member.author_key(),
+            second.member.author_key(),
+            "the restart keeps the member key"
+        );
+        assert_ne!(
+            first.session.author_key(),
+            second.session.author_key(),
+            "the restart makes a new session key"
+        );
+        assert_ne!(
+            first.session.author_key(),
+            first.member.author_key(),
+            "the session key is not the member key"
+        );
+        assert_eq!(
+            (first.run, second.run),
+            (1, 2),
+            "the run number counts the starts"
+        );
+    }
+
+    /// The failure this prevents: after a restart the session starts a new document at sequence 1.
+    /// Under the old actor, a replica that holds the first run refuses that change as a duplicate
+    /// sequence number, and every write of the restarted member is lost.
+    #[test]
+    fn a_restarted_session_writes_under_a_new_actor() {
+        use crate::daemon::state::RunKeys;
+        use crate::doc::{Ingested, MeshDoc};
+        use crate::protocol::{Channel, MeshId, Message};
+        use crate::testing;
+        let dir = env::temp_dir().join(format!("habilis-restart-actor-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
+        let mesh = MeshId::from("💬test");
+        let author = testing::nick("alice");
+        let write = |keys: &RunKeys, value: u8| {
+            let doc = MeshDoc::new_ungated();
+            let seed = *keys.session.public().as_bytes();
+            let change = doc
+                .build_change(&serde_json::json!({ "k": value }), &seed)
+                .expect("a JSON object merges")
+                .expect("a non-empty merge yields a change");
+            let (wire, _plain) = doc.compose_wire_body(&change, None).expect("wire body");
+            Message::new_channel_event(&mesh, &author, wire, Channel::State).sign(&keys.session)
+        };
+        let before = write(&super::run_keys(Some(&state)).expect("first start"), 1);
+        let after = write(&super::run_keys(Some(&state)).expect("restart"), 2);
+        let mut replica = MeshDoc::new_ungated();
+        assert!(
+            matches!(replica.ingest(&before), Ingested::Applied { .. }),
+            "the replica takes the first run"
+        );
+        let outcome = replica.ingest(&after);
+        assert!(
+            matches!(outcome, Ingested::Applied { .. }),
+            "the replica takes the restarted run, got {outcome:?}: the actor is new"
+        );
+    }
+
     use crate::daemon::node::SignalHandling;
     use crate::transport::PayloadPath;
     use crate::{embed, lookup, membership, transport};

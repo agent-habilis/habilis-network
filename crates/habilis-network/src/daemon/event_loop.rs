@@ -44,7 +44,7 @@ use crate::gossip::antientropy::Plane;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::{Mesh, MeshName};
 use crate::protocol::messages::{Authored, Verified};
-use crate::protocol::{MeshId, Nickname, UnixSecs, identity};
+use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
 // The timer-driver clock, distinct from `clock::Instant` off wasm32 (there it is
@@ -151,7 +151,7 @@ async fn run_checked<Driver: NodeDriver>(
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
     let mut state: EventLoopState = initial_state(
-        mesh.identity,
+        mesh.keys,
         MeshSecrets {
             password: mesh.mesh_password.take(),
             key: mesh.mesh_key.take(),
@@ -403,8 +403,8 @@ type StateFileSeed = Option<path::PathBuf>;
 /// The event loop's state, with the mesh's identity and secrets moved in. The state file goes
 /// with it, so the first write the loop makes lands in the right place.
 fn initial_state(
-    // The loop holds the identity across `&mut state`, so it keeps a shared handle.
-    identity: Arc<identity::Identity>,
+    // The loop holds the keys across `&mut state`, so it keeps shared handles.
+    keys: state::RunKeys,
     secrets: MeshSecrets,
     mint_mesh: Option<Mesh>,
     transports: &TransportSet,
@@ -418,7 +418,7 @@ fn initial_state(
         state::StateInit {
             #[cfg(feature = "host")]
             state_file,
-            identity,
+            keys,
             secrets,
             per_peer_gate,
             // The *same* table the Router's signal acceptor holds, not a fresh

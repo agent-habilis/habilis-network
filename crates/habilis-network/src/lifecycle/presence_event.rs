@@ -2,8 +2,10 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
+use crate::logging::messages;
 use crate::protocol::messages::Verified;
 use crate::protocol::{Message, PresenceSubtype};
+use crate::transport;
 
 use super::membership_update;
 
@@ -35,7 +37,11 @@ pub(crate) async fn handle_presence(
         surfaceable,
     } = event;
     if subtype == PresenceSubtype::Alive {
+        ask_for_proof(message, state, context).await;
         return;
+    }
+    if subtype == PresenceSubtype::Joined {
+        state.note_joined_proof(message, context.mesh);
     }
     if subtype == PresenceSubtype::Left {
         // A key says goodbye once per run. A second copy is a replay that a peer still held, and
@@ -116,5 +122,30 @@ pub(crate) async fn handle_presence(
                 tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
             }
         }
+    }
+}
+
+/// Send the proof request for a session that has no proof here, to that member alone over a warm
+/// path. The retry clock of the session starts only after a send that worked: with no warm path
+/// the next alive frame of the session asks again.
+async fn ask_for_proof(alive: &Verified, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let Some(request) = state.proof_request_for(alive, context.author, context.mesh) else {
+        return;
+    };
+    let member_endpoint = state.peer_endpoints.get(alive.author.as_str());
+    let warm_endpoint = member_endpoint
+        .map(|address| address.id)
+        .filter(|eid| Some(*eid) != state.rendezvous_id);
+    let Some(eid) = warm_endpoint else {
+        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: no warm path");
+        return;
+    };
+    messages::log_out(&request);
+    if let Ok(bytes) = request.serialize()
+        && transport::send_best_effort(eid, bytes, state).await
+    {
+        state.note_proof_request_sent(&alive.key());
+    } else {
+        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: the send failed");
     }
 }
