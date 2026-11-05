@@ -230,6 +230,14 @@ pub const DOC_CUT_BACKOFF_MAX: u32 = 64;
 /// frame that it named costs one more refusal if it comes again. The set is cleared at a cut.
 pub const DOC_REFUSED_FRAMES_MAX: usize = 4096;
 
+/// The bytes that the signed message of a frame adds to its body: the signature, the key, the
+/// nickname, the mesh id and the rest of the envelope. It was 259 bytes with a nickname of 2
+/// characters and a mesh id of 4 (`tests/seed_cost.rs`); a long nickname and a mesh id of 60
+/// characters add about 90 more, so 400 holds. A leaf of a write must fit a frame with this
+/// envelope, the margin of `DOC_EPOCH_FRAME_MARGIN`, and the largest stamp, or a seed could not
+/// carry it.
+pub const DOC_STATE_ENVELOPE_BYTES: usize = 400;
+
 /// The longest path (the bytes of its keys) that gets a tombstone. A delete of a longer path is
 /// written and counted, and has no tombstone.
 pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;

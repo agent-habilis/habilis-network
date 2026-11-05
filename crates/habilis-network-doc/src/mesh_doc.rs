@@ -14,8 +14,8 @@ use habilis_network_util::consts::{
     DOC_CUT_SPREAD_TICKS, DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES,
     DOC_EPOCH_FRAME_MARGIN, DOC_EPOCH_JUMP_MAX, DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
     DOC_REPLAY_ENTRIES_MAX, DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX, DOC_SEED_TOMBSTONE_FRAME_BYTES,
-    DOC_SEED_TOMBSTONES_MAX, DOC_STATE_DEPTH_MAX, DOC_STATE_EPOCH_FRAME_CAP_BYTES,
-    DOC_TOMBSTONE_PATH_BYTES_MAX,
+    DOC_SEED_TOMBSTONES_MAX, DOC_STATE_DEPTH_MAX, DOC_STATE_ENVELOPE_BYTES,
+    DOC_STATE_EPOCH_FRAME_CAP_BYTES, DOC_TOMBSTONE_PATH_BYTES_MAX, MAX_MESSAGE_SIZE,
 };
 
 use crate::wire::SeedMark;
@@ -1879,6 +1879,32 @@ impl MeshDoc {
         frames_after > line_bytes || ops_after > line_ops
     }
 
+    /// A leaf that this write adds must fit a frame of a seed, with the largest stamp, the margin
+    /// of the envelope and the envelope itself. If one did not, the write would pass the frame of
+    /// the write (which has no stamp) and every later cut would fail on it. Only a leaf of
+    /// `SEED_LEAF_CHECK_MIN` bytes or more is built and measured: a smaller one always fits.
+    fn check_seed_frames(merge: &Value) -> Result<(), DocError> {
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_leaves(merge, &mut Vec::new(), &mut leaves);
+        for (path, value) in &leaves {
+            if value.is_null() {
+                continue;
+            }
+            let path_bytes: usize = path.iter().map(String::len).sum();
+            let json_bytes: usize = serde_json::to_vec(value).map_or(0, |bytes| bytes.len());
+            if path_bytes + json_bytes < SEED_LEAF_CHECK_MIN {
+                continue;
+            }
+            let body = seed_frame_body_len(path, value);
+            if body + DOC_EPOCH_FRAME_MARGIN + DOC_STATE_ENVELOPE_BYTES > MAX_MESSAGE_SIZE {
+                return Err(DocError::TooLarge {
+                    bytes: path_bytes + json_bytes,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// The lines of a free-form state document, for a local write whose `change` was built from
     /// `merge`. A merge nested deeper than `DOC_STATE_DEPTH_MAX` that adds a value is refused. Any
     /// write is refused over the memory line, and a write that adds a value (a leaf that is not
@@ -1890,6 +1916,7 @@ impl MeshDoc {
         }
         let adds = adds_value(merge) && !restoring;
         if adds {
+            Self::check_seed_frames(merge)?;
             let depth = merge_depth(merge);
             if depth > DOC_STATE_DEPTH_MAX {
                 return Err(DocError::StateTooDeep {
@@ -3146,6 +3173,36 @@ fn collect_objects(value: &Value, prefix: &mut Vec<String>, out: &mut Vec<(Vec<S
 
 /// How many paths a merge writes: each key of each object counts once, and a list is one leaf. A
 /// frame stays inside `DOC_REPLAY_ENTRIES_MAX` paths, which also bounds its stamps.
+/// The bytes of a leaf (its keys and its value) from which `check_seed_frames` builds the frame that
+/// a seed would carry it in. A leaf of 1 500 bytes is about 2 100 bytes of body, which fits.
+const SEED_LEAF_CHECK_MIN: usize = 1_500;
+
+/// The bytes of the body of the frame of a seed that holds only the leaf `value` at `path`, with the
+/// largest stamp. The change is built on an empty document, so it holds the keys above the leaf as
+/// well, which is more than a later frame of the seed needs: the figure is an upper bound.
+fn seed_frame_body_len(path: &[String], value: &Value) -> usize {
+    let mut merge = value.clone();
+    let innermost_first = path.iter().rev();
+    for key in innermost_first {
+        merge = Value::Object(Map::from_iter([(key.clone(), merge)]));
+    }
+    let mut doc = Automerge::new();
+    let mut tx = doc.transaction();
+    if write_map(&mut tx, &ROOT, &merge).is_err() {
+        return usize::MAX;
+    }
+    tx.commit();
+    let mut changes = doc.get_changes(&[]);
+    let Some(change) = changes.pop() else {
+        return usize::MAX;
+    };
+    let time = DOC_TIME_MAX - 1;
+    let worst = [Stamp::new(time, "ffffffffffffffff".to_owned())];
+    let bytes = change.raw_bytes();
+    let body = wire::change_body_tombstoned(bytes, None, 1, None, Some(time), &worst, &[]);
+    body.map_or(usize::MAX, |body| body.as_str().len())
+}
+
 /// The error of a state document that is over a line.
 fn full(used: usize, limit: usize, what: &'static str) -> DocError {
     DocError::StateFull { used, limit, what }
@@ -6943,6 +7000,57 @@ mod tests {
         assert!(
             matches!(refused, Err(DocError::StateFull { .. })),
             "a restore over the memory line is refused"
+        );
+    }
+
+    /// The bytes of the body of the frame of a seed that holds only the leaf `value` at `path`, with
+    /// the largest stamp.
+    fn seed_body_of(path: &[&str], value: &Value) -> usize {
+        let mut merge = value.clone();
+        let innermost_first = path.iter().rev();
+        for key in innermost_first {
+            merge = json!({ *key: merge });
+        }
+        let timeless = MeshDoc::new_ungated();
+        let change = change_of(&timeless, &merge, &pad_seed(b"me"));
+        let time = super::DOC_TIME_MAX - 1;
+        let worst = Stamp::new(time, "ffffffffffffffff".to_owned());
+        let body = change_body_tombstoned(&change, None, 1, None, Some(time), &[worst], &[]);
+        body.map_or(usize::MAX, |body| body.as_str().len())
+    }
+
+    #[test]
+    fn a_leaf_that_a_frame_of_a_seed_could_not_carry_is_refused_when_it_is_written() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated().state_epochs();
+        let fits_a_seed = |value: &Value| {
+            let body = seed_body_of(&["a", "b"], value);
+            body + super::DOC_EPOCH_FRAME_MARGIN + super::DOC_STATE_ENVELOPE_BYTES
+                <= super::MAX_MESSAGE_SIZE
+        };
+        let mut length = 1_000;
+        let mut largest_fitting = 0;
+        while length <= 3_200 {
+            let value = json!("x".repeat(length));
+            let refused = write_error(&doc, &json!({ "a": { "b": value.clone() } }));
+            let too_large = matches!(refused, Some(DocError::TooLarge { .. }));
+            assert_eq!(
+                too_large,
+                !fits_a_seed(&value),
+                "a leaf of {length} bytes: the write is refused exactly when its seed frame does not fit"
+            );
+            if !too_large {
+                largest_fitting = length;
+            }
+            length += 50;
+        }
+        assert!(
+            (2_000..3_000).contains(&largest_fitting),
+            "the largest leaf that is written is about 2 KB: {largest_fitting}"
+        );
+        assert!(
+            write_error(&doc, &json!({ "a": { "b": Value::Null } })).is_none(),
+            "a delete has no leaf to carry"
         );
     }
 
