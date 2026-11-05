@@ -249,7 +249,14 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_
     // Only a few members answer one digest (see `answers_digest`). The rank is by author key, so
     // two live keys of one nickname are two members.
     let members = state.peers.iter().chain(iter::once(our_key));
-    if !answers_digest(our_key, &message.key(), message.id.as_str(), members) {
+    if !answers_digest(
+        Exchange {
+            answerer: our_key,
+            asker: &message.key(),
+        },
+        message.id.as_str(),
+        members,
+    ) {
         return;
     }
     // One serve per author per window. Answering costs up to
@@ -355,7 +362,17 @@ fn answer_rank(digest_id: &str, member: &AuthorKey) -> (u64, AuthorKey) {
     (u64::from_be_bytes(head), *member)
 }
 
-/// Whether `me` is one of the [`ANTIENTROPY_ANSWERERS`] members that answer this
+/// The two keys of one digest: the member that may answer it and the member that asked. Both are
+/// author keys, so named fields keep a swap from compiling.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Exchange<'key> {
+    /// The member that decides whether it is among the answerers.
+    pub(crate) answerer: &'key AuthorKey,
+    /// The member that sent the digest. It never answers its own digest.
+    pub(crate) asker: &'key AuthorKey,
+}
+
+/// Whether `exchange.answerer` is one of the [`ANTIENTROPY_ANSWERERS`] members that answer this
 /// digest: the first of the members in the order of [`answer_rank`], the asker
 /// left out.
 ///
@@ -366,14 +383,14 @@ fn answer_rank(digest_id: &str, member: &AuthorKey) -> (u64, AuthorKey) {
 /// rosters can pick slightly different sets, and that costs a duplicate or a
 /// missing answer, which the next digest repairs: a new digest id picks again.
 pub(crate) fn answers_digest<'a>(
-    me: &AuthorKey,
-    asker: &AuthorKey,
+    exchange: Exchange<'_>,
     digest_id: &str,
     members: impl Iterator<Item = &'a AuthorKey>,
 ) -> bool {
-    let mine = answer_rank(digest_id, me);
+    let Exchange { answerer, asker } = exchange;
+    let mine = answer_rank(digest_id, answerer);
     let ahead = members
-        .filter(|member| *member != asker && *member != me)
+        .filter(|member| *member != asker && *member != answerer)
         .filter(|member| answer_rank(digest_id, member) < mine)
         .count();
     ahead < ANTIENTROPY_ANSWERERS
@@ -1101,7 +1118,7 @@ mod tests {
     use std::iter;
 
     use super::{
-        ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, HeadsBody, WireWindow,
+        ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, Exchange, HeadsBody, WireWindow,
         digest_windows, encode_key, missing_frames, state_digest,
     };
     use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
@@ -1138,7 +1155,16 @@ mod tests {
             let id = format!("digest-{round}");
             let others = fleet.iter().skip(1);
             let answering: usize = others
-                .filter(|me| super::answers_digest(me, &asker, &id, fleet.iter()))
+                .filter(|me| {
+                    super::answers_digest(
+                        Exchange {
+                            answerer: me,
+                            asker: &asker,
+                        },
+                        &id,
+                        fleet.iter(),
+                    )
+                })
                 .count();
             if answering != tuning::ANTIENTROPY_ANSWERERS {
                 wrong.push((round, answering));
@@ -1162,8 +1188,14 @@ mod tests {
         for _ in 0..100 {
             let digest = digest_of_an_empty_log(&nick("asker"));
             let members = roster.iter().chain(iter::once(&our_key));
-            let expected =
-                super::answers_digest(&our_key, &digest.key(), digest.id.as_str(), members);
+            let expected = super::answers_digest(
+                Exchange {
+                    answerer: &our_key,
+                    asker: &digest.key(),
+                },
+                digest.id.as_str(),
+                members,
+            );
             let mut state = fresh_state();
             state.peers.extend(roster.iter().copied());
             state.message_log.push(chat_at("kept", 1_700_000_000));
@@ -1199,7 +1231,16 @@ mod tests {
         let asker = &members[0];
         let others = members.iter().filter(|me| *me != asker);
         let answering: usize = others
-            .filter(|me| super::answers_digest(me, asker, "digest-1", members.iter()))
+            .filter(|me| {
+                super::answers_digest(
+                    Exchange {
+                        answerer: me,
+                        asker,
+                    },
+                    "digest-1",
+                    members.iter(),
+                )
+            })
             .count();
         assert_eq!(
             answering,
@@ -1222,7 +1263,14 @@ mod tests {
                 if me == asker {
                     continue;
                 }
-                if super::answers_digest(me, asker, &id, members.iter()) {
+                if super::answers_digest(
+                    Exchange {
+                        answerer: me,
+                        asker,
+                    },
+                    &id,
+                    members.iter(),
+                ) {
                     had_a_turn.insert(*me);
                 }
             }
@@ -1241,7 +1289,14 @@ mod tests {
                 continue;
             }
             assert!(
-                super::answers_digest(me, asker, "digest-1", members.iter()),
+                super::answers_digest(
+                    Exchange {
+                        answerer: me,
+                        asker
+                    },
+                    "digest-1",
+                    members.iter()
+                ),
                 "a small mesh answers the digest from every member"
             );
         }
