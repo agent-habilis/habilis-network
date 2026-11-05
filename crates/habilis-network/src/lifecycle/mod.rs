@@ -752,10 +752,11 @@ mod departed_tests {
         });
     }
 
-    /// A directed frame waits in the buffer while two live keys use its nickname. When the goodbye
-    /// of one key ends the clash, the frame goes at once, not at the next unrelated event.
+    /// A directed frame to one of two live keys that use a nickname waits in the buffer. The
+    /// goodbye of the other key is a flush edge, so the frame goes at once, not at the next
+    /// unrelated event, and the goodbye does not drop the frame of the key that stays.
     #[test]
-    fn the_goodbye_that_ends_a_nickname_clash_flushes_the_frames_that_waited() {
+    fn the_goodbye_of_the_other_key_of_a_nickname_flushes_the_frames_that_waited() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (endpoint, sender) = endpoint_and_sender().await;
             let identity = Identity::generate();
@@ -823,7 +824,7 @@ mod departed_tests {
 
             assert!(
                 state.pending_outbound.is_empty(),
-                "the frame still waits after the clash ended"
+                "the frame still waits after the goodbye of the other key"
             );
             endpoint.close().await;
         });

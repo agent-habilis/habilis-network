@@ -28,7 +28,7 @@ use crate::daemon::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::meshes::Mesh;
-use crate::protocol::messages::{Authored, Verified, WireFrame};
+use crate::protocol::messages::{Authored, Verified, WireFrame, sole_addressee};
 use crate::protocol::{
     AuthorKey, ContentHash, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs,
 };
@@ -1191,9 +1191,21 @@ impl EventLoopState {
         self.names.remove(&key);
         self.clock_evidence.name_stamp.remove(&key);
         self.release_refused_endpoint(&key);
+        self.drop_buffered_frames_to(&key);
         let left_hints = self.forget_hints_of(key);
         self.rebind_refused_endpoints();
         left_hints
+    }
+
+    /// Drop the buffered directed frames whose recipient is `key`, and keep the others in order.
+    /// A key that left the roster has no endpoint to wait for, so a frame to it would be requeued
+    /// at every flush until the buffer is full.
+    fn drop_buffered_frames_to(&mut self, key: &AuthorKey) {
+        for entry in self.pending_outbound.take() {
+            if sole_addressee(&entry.0.kind) != Some(key) {
+                self.pending_outbound.push(entry);
+            }
+        }
     }
 
     /// Drop every dial hint that `key` made, under each nickname it used, and return the address

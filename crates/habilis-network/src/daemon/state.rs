@@ -820,6 +820,49 @@ mod tests {
         );
     }
 
+    /// A directed frame waits in the buffer for the endpoint of its key. When that key leaves the
+    /// roster nothing can deliver it, and it would be requeued at every flush until the buffer
+    /// is full. It goes with the key. The frames of other keys and the broadcasts stay, in order.
+    #[test]
+    fn a_buffered_frame_to_a_key_that_left_goes_with_the_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (gone, stays) = (test_key("gone"), test_key("stays"));
+        let mesh = MeshId::from("test");
+        let identity = protocol::Identity::generate();
+        let directed = |to: AuthorKey| {
+            Message::new_pong(&mesh, &nick("us"), to, &MessageId::random()).sign(&identity)
+        };
+        let broadcast = Message::new_ping(&mesh, &nick("us")).sign(&identity);
+        let queued = [
+            directed(stays),
+            directed(gone),
+            broadcast,
+            directed(gone),
+            directed(stays),
+        ];
+        let expected_ids: Vec<_> = [&queued[0], &queued[2], &queued[4]]
+            .iter()
+            .map(|frame| frame.id.clone())
+            .collect();
+        for frame in queued {
+            let bytes = frame.serialize().expect("serialize");
+            assert!(state.pending_outbound.push((frame, bytes)), "room");
+        }
+
+        state.forget_key(gone);
+
+        let left_in_buffer = state.pending_outbound.take();
+        let kept: Vec<_> = left_in_buffer
+            .into_iter()
+            .map(|(frame, _)| frame.id.clone())
+            .collect();
+        assert_eq!(
+            kept, expected_ids,
+            "the buffer must keep the other frames, in order, and lose those of the key that left"
+        );
+    }
+
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
     #[test]
