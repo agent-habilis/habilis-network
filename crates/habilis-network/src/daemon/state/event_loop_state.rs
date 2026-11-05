@@ -85,6 +85,13 @@ pub(crate) struct Goodbyes {
     strangers: BoundedFifoSet<AuthorKey>,
 }
 
+impl Goodbyes {
+    /// The keys held in both sets.
+    pub(crate) fn len(&self) -> usize {
+        self.peers.len() + self.strangers.len()
+    }
+}
+
 impl Default for Goodbyes {
     fn default() -> Self {
         Self {

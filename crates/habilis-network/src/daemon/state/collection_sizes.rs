@@ -13,7 +13,6 @@ pub(crate) struct CollectionSizes {
     pub(crate) seen: usize,
     pub(crate) known_endpoints: usize,
     pub(crate) quiet: usize,
-    pub(crate) left: usize,
     pub(crate) left_keys: usize,
     pub(crate) reassembled_groups: usize,
     pub(crate) pending_outbound: usize,
@@ -31,7 +30,6 @@ pub(crate) struct CollectionSizes {
     pub(crate) peers: usize,
     pub(crate) last_seen: usize,
     pub(crate) peer_endpoints: usize,
-    pub(crate) left_at: usize,
     pub(crate) quiet_since: usize,
     pub(crate) surfaced: usize,
     pub(crate) direct: usize,
@@ -56,7 +54,6 @@ impl CollectionSizes {
         sizes.seen = state.seen.len();
         sizes.known_endpoints = state.known_endpoints.len();
         sizes.quiet = state.quiet.len();
-        sizes.left = state.left.len();
         sizes.left_keys = state.left_keys.len();
         sizes.reassembled_groups = state.reassembled_groups.len();
         sizes.pending_outbound = state.pending_outbound.len();
@@ -68,7 +65,6 @@ impl CollectionSizes {
         sizes.peers = state.peers.len();
         sizes.last_seen = state.last_seen.len();
         sizes.peer_endpoints = state.peer_endpoints.len();
-        sizes.left_at = state.left_at.len();
         sizes.quiet_since = state.quiet_since.len();
         sizes.surfaced = state.surfaced.len();
         sizes.direct = state.direct.len();
