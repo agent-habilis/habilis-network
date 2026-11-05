@@ -6,7 +6,7 @@
     )
 )]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -18,16 +18,19 @@ const ANSWER_WINDOW: Duration = Duration::from_secs(60);
 pub(crate) struct ProofBook<K, V> {
     cap: usize,
     held: HashMap<K, V>,
+    // the sessions in the order their proofs came, oldest first; as long as `held`, so bounded by the cap
+    order: VecDeque<K>,
     refused: u64,
     answers: Vec<Instant>,
     answers_refused: u64,
 }
 
-impl<K: Eq + Hash, V> ProofBook<K, V> {
+impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
     pub(crate) fn with_cap(cap: usize) -> Self {
         Self {
             cap,
             held: HashMap::new(),
+            order: VecDeque::new(),
             refused: 0,
             answers: Vec::new(),
             answers_refused: 0,
@@ -36,7 +39,9 @@ impl<K: Eq + Hash, V> ProofBook<K, V> {
 
     pub(crate) fn insert(&mut self, key: K, value: V) {
         if self.held.contains_key(&key) || self.held.len() < self.cap {
-            self.held.insert(key, value);
+            if self.held.insert(key.clone(), value).is_none() {
+                self.order.push_back(key);
+            }
         } else {
             self.refused += 1;
         }
@@ -44,13 +49,20 @@ impl<K: Eq + Hash, V> ProofBook<K, V> {
 
     /// Hold the proof of a session. At the cap, the oldest session that `is_live` denies goes first.
     /// If every held session is live, the proof is refused and counted.
-    pub(crate) fn insert_evicting(&mut self, key: K, value: V, _is_live: impl Fn(&K) -> bool) {
+    pub(crate) fn insert_evicting(&mut self, key: K, value: V, is_live: impl Fn(&K) -> bool) {
+        if !self.held.contains_key(&key) && self.held.len() >= self.cap {
+            if let Some(dead) = self.order.iter().find(|held| !is_live(held)).cloned() {
+                self.remove(&dead);
+            }
+        }
         self.insert(key, value);
     }
 
     /// Forget the proof of a session that left or that a newer run replaced.
     pub(crate) fn remove(&mut self, key: &K) {
-        self.held.remove(key);
+        if self.held.remove(key).is_some() {
+            self.order.retain(|held| held != key);
+        }
     }
 
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
