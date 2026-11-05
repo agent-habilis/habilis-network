@@ -58,6 +58,20 @@ impl Identity {
         }
     }
 
+    /// The 32-byte seed of this identity, for the state file. It is secret: it never goes on the wire.
+    #[must_use]
+    pub fn seed(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.secret.to_bytes())
+    }
+
+    /// The identity a seed names (see [`Identity::seed`]).
+    #[must_use]
+    pub fn from_seed(seed: zeroize::Zeroizing<[u8; 32]>) -> Self {
+        Identity {
+            secret: SecretKey::from_bytes(&seed),
+        }
+    }
+
     /// The public half of the key.
     #[must_use]
     pub fn public(&self) -> PublicKey {
@@ -298,7 +312,11 @@ mod tests {
         let identity = Identity::generate();
         let seed = identity.seed();
         let back = Identity::from_seed(seed);
-        assert_eq!(back.author_key(), identity.author_key(), "the same key comes back");
+        assert_eq!(
+            back.author_key(),
+            identity.author_key(),
+            "the same key comes back"
+        );
     }
     use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
     use crate::AuthorKey;
