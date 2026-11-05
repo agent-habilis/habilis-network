@@ -1,6 +1,8 @@
 //! The wire version of the message envelope.
 
-/// Protocol version embedded in every message, `13.0` since the recipient of a directed frame
+/// Protocol version embedded in every message.
+///
+/// The version is `13.0` since the recipient of a directed frame
 /// (`to` of an `app` and of a `pong` frame) is an author key and no longer a nickname. A nickname
 /// is a label that two live keys can share, so a frame to a nickname reached both. A `12.0` peer
 /// reads a key as an invalid nickname, so the frames of the two versions must not meet silently:
