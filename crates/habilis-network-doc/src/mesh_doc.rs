@@ -12,7 +12,6 @@ use habilis_network_util::consts::{
     DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
     DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_SEED_FRAMES_MAX,
     DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX, DOC_TOMBSTONE_PATH_BYTES_MAX,
-    DOC_WATCH_PATHS_MAX,
 };
 
 use crate::wire::SeedMark;
@@ -200,10 +199,6 @@ pub struct SeedChain {
 /// What a seed names: the stamps of its changes, and the tombstones of its root.
 type SeedRead = (SeedStamps, StampedPaths);
 
-/// The paths that a replay frame names with what this node knew of them before: the paths, the
-/// live stamp of each, and the JSON of the document.
-type Watch = (Vec<Vec<String>>, Vec<Option<Stamp>>, Value);
-
 /// What a restore asks the glue to write: a merge and a stamp for each path.
 pub type Restores = (Value, StampedPaths);
 
@@ -233,6 +228,16 @@ pub type StampedPaths = Vec<(Vec<String>, Stamp)>;
 
 /// The stamps that the changes of a seed name: for each change, its paths with a stamp each.
 type SeedStamps = HashMap<ChangeHash, StampedPaths>;
+
+/// A leaf that a replay frame changes, hides or names: its value before (`None` when the leaf had
+/// none), the stamp that this node held for it, and the stamp that the replay leaves on it (`None`
+/// when the leaf is hidden).
+struct Lowered {
+    path: Vec<String>,
+    value: Option<Value>,
+    before: Option<Stamp>,
+    after: Option<Stamp>,
+}
 
 /// The stamps that stored frames name, read once for each call of `stamps_of`.
 type RebuiltStamps = HashMap<ChangeHash, Option<Vec<(Vec<String>, Stamp)>>>;
@@ -488,8 +493,6 @@ pub struct MeshDoc {
     restores: BTreeMap<Vec<String>, (Value, Stamp)>,
     /// The restores that were dropped because the map was full (see [`Self::dropped_restores`]).
     restores_dropped: u64,
-    /// The replay frames whose watch was cut at `DOC_WATCH_PATHS_MAX` paths.
-    watch_truncated: u64,
     /// Whether local writes wait for the end of the first sync (see [`Self::awaiting_first_sync`]).
     awaiting_sync: bool,
     /// The stamps that the changes of the adopted seed name, for each change and each path that it
@@ -581,7 +584,6 @@ impl MeshDoc {
             unstamped: AtomicU64::new(0),
             restores: BTreeMap::new(),
             restores_dropped: 0,
-            watch_truncated: 0,
             awaiting_sync: false,
             origins: HashMap::new(),
             tombstones: BTreeMap::new(),
@@ -1861,26 +1863,25 @@ impl MeshDoc {
         // A frame of a replay names the stamp of each path that its change writes. The stamps are
         // checked on a fork before the change is applied, so a frame that names them wrongly is
         // refused as a whole, and the node records them after it is applied.
-        let named: Option<StampedPaths> = if self.state_epochs && !self.adopting {
-            let Ok(named) = self.stamped_paths(&change, &frame) else {
+        let stamped: Option<(StampedPaths, Automerge)> = if self.state_epochs && !self.adopting {
+            let Ok(stamped) = self.stamped_paths(&change, &frame) else {
                 if let Some(refused) = self.warn_due("the stamps of a frame do not match it") {
                     tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "the stamps of a frame do not match it");
                 }
                 return false;
             };
-            named
+            stamped
         } else {
             None
         };
-        // A frame of a replay names stamps. The live stamps of its paths are read before it is
-        // applied, and again after: if a live stamp went down, the replay won in automerge with a
-        // lower stamp than the value that this node held, and the node writes its value again.
-        let watch: Option<Watch> = named.as_ref().map(|list| {
-            let json: Value = self.to_json();
-            let paths = self.watched_paths(list, &json);
-            let before = self.stamps_of(&paths);
-            (paths, before, json)
-        });
+        // A frame of a replay names stamps. Before it is applied, the node finds the leaves that
+        // it holds with a stamp, and that the replay changes or hides (the fork that checked the
+        // stamps shows how the document will look). If the replay won in automerge with a lower
+        // stamp than the value that this node held, the node writes its value again.
+        let watch: Option<Vec<Lowered>> = stamped
+            .as_ref()
+            .map(|(named, after)| self.lowered_leaves(after, named));
+        let named: Option<StampedPaths> = stamped.map(|(named, _)| named);
         let seen: Option<Change> = (self.state_epochs && !self.adopting).then(|| change.clone());
         if let Err(error) = self.doc.apply_changes([change]) {
             if let Some(changes) = self.warn_due("dropping a channel change automerge refused") {
@@ -1895,8 +1896,8 @@ impl MeshDoc {
         if let Some(named) = named {
             self.origins.insert(hash, named);
         }
-        if let Some((paths, before, json)) = watch {
-            self.note_lowered(&paths, &before, &json);
+        if let Some(lowered) = watch {
+            self.note_lowered(&lowered);
         }
         self.frame_bytes += wire_len(&frame);
         if let Some(replaced) = self.frames.insert(hash, frame) {
@@ -1919,81 +1920,76 @@ impl MeshDoc {
             .collect()
     }
 
-    /// The paths whose stamps a node reads when it applies a replay frame that names `named`: those
-    /// paths, and every leaf below an object that the frame names, since a replay can make that
-    /// object again beside the one that this node holds and hide the keys that it wrote below it.
-    /// At most `DOC_WATCH_PATHS_MAX`: the leaves over it are not watched, and are counted
-    /// (`MeshDoc::watch_truncated`) and warned.
-    fn watched_paths(&mut self, named: &[(Vec<String>, Stamp)], json: &Value) -> Vec<Vec<String>> {
-        let mut paths: Vec<Vec<String>> = named.iter().map(|(path, _)| path.clone()).collect();
-        let named_paths: Vec<Vec<String>> = paths.clone();
-        let mut over = false;
-        for path in named_paths {
-            let Some(below) = lookup(json, &path).filter(|held| held.is_object()) else {
-                continue;
-            };
-            let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
-            collect_leaves(below, &mut path.clone(), &mut leaves);
-            for (leaf, _) in leaves {
-                if paths.len() >= DOC_WATCH_PATHS_MAX {
-                    over = true;
-                    break;
+    /// The leaves that a replay frame changes or hides, that this node holds with a stamp, and the
+    /// leaves that the frame names (for a delete that the frame undoes). `after` is the document as
+    /// it will look once the frame is applied. Only the leaves below the objects that the frame
+    /// names are compared, and a stamp is read only for a leaf that differs, so the work follows what
+    /// the replay changes and not the size of the document.
+    fn lowered_leaves(&self, after: &Automerge, named: &[(Vec<String>, Stamp)]) -> Vec<Lowered> {
+        let named_stamps: HashMap<&Vec<String>, &Stamp> =
+            named.iter().map(|(path, stamp)| (path, stamp)).collect();
+        let mut held: BTreeMap<Vec<String>, Option<Value>> = BTreeMap::new();
+        for (path, _) in named {
+            if let Some(before) = json_at(&self.doc, path) {
+                let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+                collect_leaves(&before, &mut path.clone(), &mut leaves);
+                for (leaf, value) in leaves {
+                    if json_at(after, &leaf).as_ref() != Some(&value) {
+                        held.insert(leaf, Some(value));
+                    }
                 }
-                paths.push(leaf);
+            }
+            // A leaf that the frame names: a delete that the frame undoes shows here.
+            if json_at(after, path).is_some_and(|value| !is_full_object(&value)) {
+                held.entry(path.clone()).or_insert(None);
             }
         }
-        if over {
-            self.watch_truncated = self.watch_truncated.saturating_add(1);
-            if let Some(truncated) =
-                self.warn_due("a replay names an object with more leaves than a node watches")
-            {
-                tracing::warn!(target: LOG_TARGET, truncated, "a replay names an object with more leaves than a node watches");
-            }
-        }
-        paths.sort();
-        paths.dedup();
+        let paths: Vec<Vec<String>> = held.keys().cloned().collect();
+        let before = self.stamps_of(&paths);
         paths
-    }
-
-    /// How many replay frames named an object with more leaves below it than a node watches, since
-    /// the document began.
-    #[must_use]
-    pub fn watch_truncated(&self) -> u64 {
-        self.watch_truncated
+            .into_iter()
+            .zip(before)
+            .map(|(path, before_stamp)| {
+                let value = held.get(&path).cloned().flatten();
+                let after_stamp = json_at(after, &path)
+                    .and_then(|_| named_stamps.get(&path).map(|stamp| (*stamp).clone()));
+                Lowered {
+                    path,
+                    value,
+                    before: before_stamp,
+                    after: after_stamp,
+                }
+            })
+            .collect()
     }
 
     /// Keep what this node must write again after a replay was applied: a value that it held with
-    /// a stamp above the live stamp that the replay left (`before` and the value in `json`), and a
-    /// delete that governed a path (a tombstone above the live stamp of a value that the replay
-    /// brought back). The deletes are kept as `null`.
-    fn note_lowered(&mut self, paths: &[Vec<String>], before: &[Option<Stamp>], json: &Value) {
-        let live = self.stamps_of(paths);
-        let floor = self.tombstone_floors(paths);
-        for (at, path) in paths.iter().enumerate() {
-            let value_lowered = match (&before[at], &live[at]) {
-                (Some(held), Some(now)) => now < held,
-                (Some(_), None) => floor[at].as_ref() < before[at].as_ref(),
-                (None, _) => false,
-            };
-            let delete_lost = match (&live[at], &floor[at]) {
-                (Some(now), Some(dead)) => before[at].is_none() && now < dead,
+    /// a stamp above the stamp that the replay left (or with the leaf hidden), and a delete that
+    /// governed a path (a tombstone above the stamp of a value that the replay brought back). The
+    /// deletes are kept as `null`.
+    fn note_lowered(&mut self, lowered: &[Lowered]) {
+        let paths: Vec<Vec<String>> = lowered.iter().map(|leaf| leaf.path.clone()).collect();
+        let floors = self.tombstone_floors(&paths);
+        for (leaf, floor) in lowered.iter().zip(floors) {
+            let value_lowered = match (&leaf.before, &leaf.after, &leaf.value) {
+                (Some(held), Some(now), Some(_)) => now < held,
+                (Some(held), None, Some(_)) => floor.as_ref() < Some(held),
                 _ => false,
             };
-            // An object is not restored as a whole: its keys hold writes of other nodes that the
-            // restored value would overwrite. Each of its leaves is restored on its own.
-            let is_object = lookup(json, path)
-                .is_some_and(|held| matches!(held, Value::Object(fields) if !fields.is_empty()));
-            let kept: Option<(Value, Stamp)> = if is_object {
-                None
-            } else if value_lowered {
-                lookup(json, path).cloned().zip(before[at].clone())
+            let delete_lost = match (&leaf.value, &leaf.after, &floor) {
+                (None, Some(now), Some(dead)) => now < dead,
+                _ => false,
+            };
+            let kept: Option<(Value, Stamp)> = if value_lowered {
+                leaf.value.clone().zip(leaf.before.clone())
             } else if delete_lost {
-                floor[at].clone().map(|dead| (Value::Null, dead))
+                floor.map(|dead| (Value::Null, dead))
             } else {
                 None
             };
-            let Some(kept) = kept else { continue };
-            self.keep_restore(path.clone(), kept);
+            if let Some(kept) = kept {
+                self.keep_restore(leaf.path.clone(), kept);
+            }
         }
     }
 
@@ -2132,9 +2128,14 @@ impl MeshDoc {
         }
     }
 
-    /// The paths of `change` with the stamps that its `frame` names, `None` when the frame names
-    /// none, and `Err` when the stamps do not match the paths of the change.
-    fn stamped_paths(&self, change: &Change, frame: &Verified) -> Result<Option<StampedPaths>, ()> {
+    /// The paths of `change` with the stamps that its `frame` names, and the document as it will
+    /// look when the change is applied (a fork that has applied it). `None` when the frame names no
+    /// stamps, and `Err` when they do not match the paths of the change.
+    fn stamped_paths(
+        &self,
+        change: &Change,
+        frame: &Verified,
+    ) -> Result<Option<(StampedPaths, Automerge)>, ()> {
         let Some(parsed) = self.change_bytes(frame) else {
             return Ok(None);
         };
@@ -2152,7 +2153,10 @@ impl MeshDoc {
         if paths.len() != parsed.origins.len() {
             return Err(());
         }
-        Ok(Some(paths.into_iter().zip(parsed.origins).collect()))
+        Ok(Some((
+            paths.into_iter().zip(parsed.origins).collect(),
+            fork,
+        )))
     }
 
     fn deps_satisfied(&self, deps: &[ChangeHash]) -> bool {
@@ -2523,6 +2527,73 @@ fn seed_stamp_map(
             .or_insert_with(|| stamp.clone());
     }
     map
+}
+
+/// Whether a JSON value is an object with keys: a leaf is anything else.
+fn is_full_object(value: &Value) -> bool {
+    matches!(value, Value::Object(fields) if !fields.is_empty())
+}
+
+/// The value at `path` in `doc`, read from the path and the subtree below it, without hydrating
+/// the rest of the document.
+fn json_at(doc: &Automerge, path: &[String]) -> Option<Value> {
+    let mut object: ObjId = ROOT;
+    for (position, key) in path.iter().enumerate() {
+        let (value, id) = doc.get(&object, key.as_str()).ok()??;
+        if position + 1 == path.len() {
+            return Some(subtree_json(doc, &value, &id));
+        }
+        if !matches!(value, automerge::Value::Object(_)) {
+            return None;
+        }
+        object = id;
+    }
+    None
+}
+
+/// The JSON of one value of `doc` and of everything below it. The state JSON holds numbers,
+/// strings, booleans, `null`, lists and objects, so any other scalar reads as `null`.
+fn subtree_json(doc: &Automerge, value: &automerge::Value<'_>, id: &ObjId) -> Value {
+    match value {
+        automerge::Value::Object(ObjType::List) => {
+            let mut items: Vec<Value> = Vec::new();
+            for position in 0..doc.length(id) {
+                if let Ok(Some((inner, inner_id))) = doc.get(id, position) {
+                    items.push(subtree_json(doc, &inner, &inner_id));
+                }
+            }
+            Value::Array(items)
+        }
+        automerge::Value::Object(ObjType::Text) => Value::String(doc.text(id).unwrap_or_default()),
+        automerge::Value::Object(ObjType::Map | ObjType::Table) => {
+            let mut fields: Map<String, Value> = Map::new();
+            for key in doc.keys(id) {
+                if let Ok(Some((inner, inner_id))) = doc.get(id, key.as_str()) {
+                    fields.insert(key, subtree_json(doc, &inner, &inner_id));
+                }
+            }
+            Value::Object(fields)
+        }
+        automerge::Value::Scalar(scalar) => scalar_json(scalar),
+    }
+}
+
+/// The JSON of a scalar of the state document.
+fn scalar_json(scalar: &automerge::ScalarValue) -> Value {
+    match scalar {
+        automerge::ScalarValue::Str(text) => Value::String(text.to_string()),
+        automerge::ScalarValue::Int(number) => Value::from(*number),
+        automerge::ScalarValue::Uint(number) => Value::from(*number),
+        automerge::ScalarValue::F64(number) => {
+            serde_json::Number::from_f64(*number).map_or(Value::Null, Value::Number)
+        }
+        automerge::ScalarValue::Boolean(flag) => Value::Bool(*flag),
+        automerge::ScalarValue::Bytes(_)
+        | automerge::ScalarValue::Counter(_)
+        | automerge::ScalarValue::Timestamp(_)
+        | automerge::ScalarValue::Null
+        | automerge::ScalarValue::Unknown { .. } => Value::Null,
+    }
 }
 
 /// Remove the value at `path` from a JSON value, and the objects that this leaves empty.
@@ -5302,34 +5373,59 @@ mod tests {
     }
 
     #[test]
-    fn a_replay_that_names_a_large_object_is_watched_inside_the_bound_and_counted() {
+    fn a_replay_that_hides_a_large_object_restores_every_leaf_that_it_hid() {
         let _guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::expect_warn(
-            "habilis_network::gossip",
-            "a replay names an object with more leaves than a node watches",
-        );
-        let mut doc = MeshDoc::new_ungated().state_epochs();
-        let mut wide = Map::new();
-        for index in 0..10 * super::DOC_WATCH_PATHS_MAX {
-            wide.insert(format!("k{index:05}"), json!(index));
+        let (mine, other) = (nick("aaa"), nick("zzz"));
+        // This node holds an object of 600 leaves, and wrote the last one at a high stamp.
+        let mut doc = doc_with_clock_at(99);
+        for round in 0..6 {
+            let mut part = Map::new();
+            for leaf in 0..100 {
+                part.insert(format!("k{:03}", round * 100 + leaf), json!(leaf));
+            }
+            write(&mut doc, &mine, &json!({ "obj": Value::Object(part) }));
         }
-        let live = json!({ "o": Value::Object(wide) });
-        let named = vec![(vec!["o".to_owned()], Stamp::new(1, "aa".to_owned()))];
-        let paths = doc.watched_paths(&named, &live);
-        assert_eq!(
-            paths.len(),
-            super::DOC_WATCH_PATHS_MAX,
-            "the watch stops at the bound"
+        write(&mut doc, &mine, &json!({ "obj": { "k599": 7 } }));
+        // A replay of another node makes `obj` again and wins in automerge (its actor is the higher
+        // one), so every leaf of this node is hidden, the 600th included.
+        let replayer = MeshDoc::new_ungated().state_epochs();
+        let change = replayer
+            .build_change(
+                &json!({ "obj": { "x": 1 } }),
+                &pad_seed(other.as_str().as_bytes()),
+            )
+            .expect("applies")
+            .expect("a change");
+        let stamps = vec![(
+            vec!["obj".to_owned(), "x".to_owned()],
+            Stamp::new(5, "7a7a7a7a00000000".to_owned()),
+        )];
+        let body = replayer
+            .compose_replay_body(&change, &stamps)
+            .expect("a replay body");
+        let key = signer(&other);
+        let replay = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &other, body, Channel::State)
+                .unverified_key(key),
+            key,
         );
-        assert_eq!(doc.watch_truncated(), 1, "and the cut is counted");
-        let small = json!({ "o": { "a": 1, "b": 2 } });
-        let kept = doc.watched_paths(&named, &small);
+        assert!(matches!(doc.ingest(&replay), Ingested::Applied { .. }));
         assert_eq!(
-            kept.len(),
-            3,
-            "a small object is watched whole: itself and its 2 leaves"
+            doc.to_json(),
+            json!({ "obj": { "x": 1 } }),
+            "the replay hid every leaf"
         );
-        assert_eq!(doc.watch_truncated(), 1, "and no cut is counted");
+        let (patch, written) = doc.take_restores().expect("the leaves are written again");
+        assert_eq!(
+            written.len(),
+            600,
+            "all 600 leaves come back, the object is not written as a whole"
+        );
+        assert_eq!(
+            patch["obj"]["k599"],
+            json!(7),
+            "the last leaf, the newest write, is among them"
+        );
     }
 
     #[test]
