@@ -216,6 +216,29 @@ mod tests {
             "the session is asked once"
         );
     }
+
+    /// A member that crashed never says goodbye, so its session must not stay live for ever: when
+    /// the book is full, the sessions of members that left the roster make room for new ones.
+    #[test]
+    fn crashed_members_do_not_fill_the_proof_book() {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let member = protocol::identity::Identity::generate();
+        let mut newest = None;
+        for index in 0..QUIET_CAP + 100 {
+            let session = protocol::identity::Identity::generate();
+            let name = nick(&format!("peer-{index}"));
+            let proof = member.prove(&session.author_key(), name.as_ref(), mesh.as_ref(), 1);
+            let joined = Message::new_joined_with_proof(&mesh, &name, &proof).sign(&session);
+            receiver.note_joined_proof(&joined, &mesh);
+            newest = Some(session.author_key());
+        }
+        let newest = newest.expect("the loop ran");
+        assert!(
+            receiver.proofs.proof_of(&newest).is_some(),
+            "the newest session verifies after more crashes than the cap"
+        );
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
