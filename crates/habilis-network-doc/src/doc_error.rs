@@ -32,6 +32,11 @@ pub enum DocError {
         /// The bytes of the value as JSON.
         bytes: usize,
     },
+    /// The seed would have more frames than a node accepts.
+    SeedTooLong {
+        /// The number of frames that the seed would have.
+        frames: usize,
+    },
 }
 
 impl DocError {
@@ -55,6 +60,7 @@ impl fmt::Display for DocError {
             Self::Body(_) => "the change body is not a valid message body",
             Self::Encode(_) => "the change could not be encoded",
             Self::TooLarge { .. } => "one value is larger than a frame and cannot be cut",
+            Self::SeedTooLong { .. } => "the seed would have more frames than a node accepts",
         })
     }
 }
@@ -62,7 +68,7 @@ impl fmt::Display for DocError {
 impl error::Error for DocError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Self::NotAnObject | Self::TooLarge { .. } => None,
+            Self::NotAnObject | Self::TooLarge { .. } | Self::SeedTooLong { .. } => None,
             Self::Body(error) => Some(error),
             Self::Encode(error) => Some(&**error),
         }

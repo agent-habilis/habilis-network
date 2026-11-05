@@ -770,6 +770,13 @@ impl MeshDoc {
         let cuts: Result<Vec<Value>, DocError> = split_entry(&live, fits).collect();
         let mut merges: Vec<Value> = cuts?;
         merges.retain(|merge| !matches!(merge, Value::Object(map) if map.is_empty()));
+        if merges.len() > DOC_SEED_FRAMES_MAX {
+            // A node refuses the root of such a seed, so the cutter does not send it. The live
+            // state is then over what a reset can carry: the bound of the channel is its live size.
+            return Err(DocError::SeedTooLong {
+                frames: merges.len(),
+            });
+        }
         let mut fork = Automerge::new();
         fork.apply_changes([state_genesis(epoch)])
             .map_err(DocError::encode)?;
@@ -1532,7 +1539,7 @@ mod tests {
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
     };
-    use serde_json::{Value, json};
+    use serde_json::{Map, Value, json};
     use std::collections::HashSet;
 
     fn nick(name: &str) -> Nickname {
@@ -2068,7 +2075,7 @@ mod tests {
 
     /// The number of chain changes that landed in `doc`.
     fn landed(doc: &MeshDoc) -> usize {
-        doc.to_json().as_object().map_or(0, serde_json::Map::len)
+        doc.to_json().as_object().map_or(0, Map::len)
     }
 
     /// Feed `order` into a fresh sink, then the root prefix `0..root_len`.
@@ -2941,6 +2948,22 @@ mod tests {
             state_doc_of(&chain.changes, 2),
             json!({}),
             "the seed leaves no key"
+        );
+    }
+
+    #[test]
+    fn a_seed_that_would_pass_the_frame_max_is_not_built() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut live: Map<String, Value> = Map::new();
+        for index in 0..=DOC_SEED_FRAMES_MAX {
+            live.insert(format!("k{index}"), json!(1));
+        }
+        let mut doc = MeshDoc::new_ungated();
+        write(&mut doc, &nick("me"), &Value::Object(live));
+        let result = doc.build_seed(2, b"cutter", within(14));
+        assert!(
+            matches!(result, Err(DocError::SeedTooLong { .. })),
+            "a seed over the max that a node accepts is not cut: {result:?}"
         );
     }
 
