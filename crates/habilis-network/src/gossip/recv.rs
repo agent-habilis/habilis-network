@@ -953,7 +953,9 @@ async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerC
 /// Answer a proof request that names this node with a `joined` frame that carries the proof of
 /// this session, sent to the asker alone over a warm path. The path is checked before the answer
 /// takes a slot of the per-minute cap, so an answer that cannot go out costs no slot. No warm path
-/// means no answer, and the asker asks again by the retry rule of the proof exchange.
+/// means no answer, and the asker asks again by the retry rule of the proof exchange. A send that
+/// fails after the slot was taken keeps the slot and the 60 s window of the asker, so the first retry
+/// that can work is the one at 90 s: the one at 30 s is refused.
 async fn answer_proof_request(
     to: &Nickname,
     message: &Verified,

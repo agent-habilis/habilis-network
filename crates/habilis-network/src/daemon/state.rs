@@ -324,6 +324,53 @@ mod tests {
             "the next alive frame of the session asks for nothing"
         );
     }
+
+    /// A joiner starts with a small roster, so its answer cap starts at 30. The askers it refused
+    /// ask again 30 s later, when the roster has grown, and every one of the 96 is answered.
+    #[test]
+    fn askers_refused_in_the_first_seconds_are_answered_after_the_roster_grows() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let askers: Vec<AuthorKey> = (0..96u8)
+            .map(|index| AuthorKey::from([index; 32]))
+            .collect();
+        let start = Instant::now();
+        let mut answered = Vec::new();
+        for other in &askers {
+            if state.proof_answer(&me, other, &me, &mesh, start).is_some() {
+                answered.push(*other);
+            }
+        }
+        assert_eq!(
+            answered.len(),
+            30,
+            "a small roster answers 30 in the first minute"
+        );
+        for index in 0..96 {
+            state.peers.insert(nick(&format!("peer-{index}")));
+        }
+        let retry_at = start + Duration::from_secs(30);
+        let mut refused: Vec<AuthorKey> = Vec::new();
+        for other in &askers {
+            if !answered.contains(other) {
+                refused.push(*other);
+            }
+        }
+        for other in &refused {
+            if state
+                .proof_answer(&me, other, &me, &mesh, retry_at)
+                .is_some()
+            {
+                answered.push(*other);
+            }
+        }
+        assert_eq!(
+            answered.len(),
+            96,
+            "the retries of the refused askers are answered"
+        );
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
