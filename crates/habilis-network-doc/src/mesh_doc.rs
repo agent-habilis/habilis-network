@@ -5245,7 +5245,7 @@ mod tests {
             0,
             "nothing was dropped while there was room"
         );
-        doc.keep_restore(vec!["one-more".to_owned()], (json!(0), stamp.clone()));
+        doc.keep_restore(vec!["one-more".to_owned()], (json!(0), stamp));
         assert_eq!(
             doc.dropped_restores(),
             1,
