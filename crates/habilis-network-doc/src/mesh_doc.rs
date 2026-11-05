@@ -2119,7 +2119,7 @@ mod tests {
             write(&mut doc, &ghost, &filler("ghost", field));
         }
         write(&mut doc, &me, &entry("me", "mine"));
-        let switch = doc.tick_epoch(&me).expect("over the cap: a reset");
+        let switch = doc.tick_epoch(&signer(&me)).expect("over the cap: a reset");
         assert_eq!(switch.epoch, 1, "the reset starts the next epoch");
         assert_eq!(doc.epoch(), 1, "the document holds the new epoch");
         assert_eq!(
@@ -2148,7 +2148,7 @@ mod tests {
         let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(1_000_000);
         write(&mut doc, &me, &entry("me", "mine"));
         assert_eq!(
-            doc.tick_epoch(&me),
+            doc.tick_epoch(&signer(&me)),
             None,
             "a document under the cap does not reset"
         );
@@ -2162,12 +2162,12 @@ mod tests {
         let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(4_000);
         write(&mut doc, &me, &entry("me", "mine"));
         for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS + 2 {
-            assert!(doc.tick_epoch(&me).is_none(), "under the cap");
+            assert!(doc.tick_epoch(&signer(&me)).is_none(), "under the cap");
         }
         for field in ["a", "b"] {
             write(&mut doc, &ann, &filler("ann", field));
         }
-        let switch = doc.tick_epoch(&me).expect("over the cap");
+        let switch = doc.tick_epoch(&signer(&me)).expect("over the cap");
         assert_eq!(switch.epoch, 1, "the first reset starts epoch 1");
         // The live entries come back, and they alone are over the cap.
         for who in [&me, &ann, &bob, &cat] {
@@ -2176,7 +2176,7 @@ mod tests {
         let live = doc.census(false).frame_bytes;
         assert!(live > 4_000, "the live entries fill the cap: {live}");
         for tick in 0..30 {
-            assert!(doc.tick_epoch(&me).is_none(), "no reset at tick {tick}");
+            assert!(doc.tick_epoch(&signer(&me)).is_none(), "no reset at tick {tick}");
         }
         assert_eq!(
             doc.epoch(),
@@ -2196,7 +2196,7 @@ mod tests {
         for round in 0..200 {
             let merge = json!({ "peers": { "me": { "status": format!("{round}{}", long(300)) } } });
             write(&mut doc, &me, &merge);
-            if let Some(switch) = doc.tick_epoch(&me) {
+            if let Some(switch) = doc.tick_epoch(&signer(&me)) {
                 resets += 1;
                 let again = json!({ "peers": { "me": switch.own_entry } });
                 write(&mut doc, &me, &again);
@@ -2223,7 +2223,7 @@ mod tests {
         );
         assert_eq!(doc.epoch(), 0, "the frame alone does not switch");
         let switch = doc
-            .adopt_if_alone(&joiner, &signer(&joiner))
+            .adopt_if_alone(&signer(&joiner))
             .expect("a node that holds nothing from others adopts");
         assert_eq!(switch.epoch, 1, "the node adopts the epoch of the root");
         assert_eq!(
@@ -2254,11 +2254,11 @@ mod tests {
             "the root of epoch 1 is the candidate"
         );
         assert!(
-            doc.adopt_if_alone(&quiet, &signer(&quiet)).is_none(),
+            doc.adopt_if_alone(&signer(&quiet)).is_none(),
             "a node that holds frames of others does not adopt at once"
         );
         for tick in 1..5 {
-            assert!(doc.tick_epoch(&quiet).is_none(), "tick {tick} waits");
+            assert!(doc.tick_epoch(&signer(&quiet)).is_none(), "tick {tick} waits");
         }
         assert!(
             matches!(
@@ -2267,7 +2267,7 @@ mod tests {
             ),
             "the root of epoch 2 takes the place of the root of epoch 1"
         );
-        let switch = doc.tick_epoch(&quiet).expect("the wait is over");
+        let switch = doc.tick_epoch(&signer(&quiet)).expect("the wait is over");
         assert_eq!(switch.epoch, 2, "it jumps to the highest epoch that it saw");
         assert_eq!(
             switch.own_entry,
@@ -2330,7 +2330,7 @@ mod tests {
         }
         for _ in 0..20 {
             assert!(
-                doc.tick_epoch(&me).is_none(),
+                doc.tick_epoch(&signer(&me)).is_none(),
                 "a refused frame never starts a reset"
             );
         }
@@ -2419,7 +2419,7 @@ mod tests {
             matches!(doc.ingest(&from_alice), Ingested::NewEpoch { epoch: 1 }),
             "the root of epoch 1 is the candidate of a node that is still at epoch 0"
         );
-        doc.tick_epoch(&bob)
+        doc.tick_epoch(&signer(&bob))
             .expect("over the cap: a reset to epoch 1");
         let forgotten = dropped_keys(&mut doc).contains(&from_alice.dedup_key());
         assert!(
@@ -2438,7 +2438,7 @@ mod tests {
             matches!(doc.ingest(&from_alice), Ingested::NewEpoch { epoch: 3 }),
             "the root of epoch 3 is the candidate"
         );
-        let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
+        let switch = doc.tick_epoch(&signer(&bob)).expect("over the cap: a switch");
         assert_eq!(
             switch.epoch, 3,
             "the switch goes to the epoch of the candidate"
@@ -2469,7 +2469,7 @@ mod tests {
             epoch: 1,
             frame: forged.clone(),
         });
-        let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
+        let switch = doc.tick_epoch(&signer(&bob)).expect("over the cap: a switch");
         assert_eq!(switch.epoch, 1, "the node still goes to the epoch");
         assert!(
             !holds_entry(&doc, "alice"),
@@ -2493,7 +2493,7 @@ mod tests {
         let mut sent: Vec<Verified> = Vec::new();
         for first in 0..names.len() {
             docs[first]
-                .tick_epoch(&names[first])
+                .tick_epoch(&signer(&names[first]))
                 .expect("over the cap: a reset");
             let card = entry(names[first].as_str(), "mine");
             sent.push(write(&mut docs[first], &names[first], &card));
