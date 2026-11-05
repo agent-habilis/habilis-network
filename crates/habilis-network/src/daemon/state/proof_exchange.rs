@@ -229,6 +229,37 @@ mod tests {
         );
     }
 
+    /// After the 3 fast retries a session is asked once per 10 minutes, 6 more times at most, so a
+    /// long time with no warm path does not lose the proof for good.
+    #[test]
+    fn a_slow_retry_follows_the_fast_ones_and_stops_after_six() {
+        let session = Identity::generate().author_key();
+        let mut joiner = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        for secs in [0, 30, 90, 210] {
+            assert!(
+                joiner.wants_proof(&session, at(secs)),
+                "a fast ask at {secs} s"
+            );
+            joiner.note_asked(&session, at(secs));
+        }
+        assert!(
+            !joiner.wants_proof(&session, at(809)),
+            "no slow retry before 10 minutes"
+        );
+        let mut last = 210;
+        for round in 1..=6 {
+            last += 600;
+            assert!(joiner.wants_proof(&session, at(last)), "slow retry {round}");
+            joiner.note_asked(&session, at(last));
+        }
+        assert!(
+            !joiner.wants_proof(&session, at(last + 100_000)),
+            "no seventh slow retry"
+        );
+    }
+
     /// In a calm mesh every receiver holds the proof of each session, so no alive frame asks for
     /// one: 0 bytes of proof traffic besides the `joined` frames.
     #[test]
