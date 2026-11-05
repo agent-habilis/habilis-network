@@ -7,6 +7,7 @@ mod latch;
 mod mesh_secrets;
 mod ping_round;
 mod proof_book;
+mod proof_exchange;
 mod socket_bytes;
 mod state_init;
 mod wire_out_tally;
