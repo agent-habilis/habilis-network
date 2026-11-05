@@ -32,7 +32,7 @@ impl Axis {
     /// the memory line at 1.0, the room of a remote frame 0.05 above it, and a growth of 1/16 for a
     /// cut (below the tenth of the break-even that a delete has above the seed).
     #[must_use]
-    pub fn from_break_even(break_even: usize) -> Self {
+    pub fn with_break_even(break_even: usize) -> Self {
         Self {
             break_even,
             ceiling: break_even * 75 / 100,
@@ -66,7 +66,7 @@ impl Limits {
     /// The lines for a seed of at most `seed_frames_max` frames. The real constants give
     /// [`Self::real`]; a test passes a small number and gets the same shape.
     #[must_use]
-    pub fn from_seed_frames(seed_frames_max: usize) -> Self {
+    pub fn with_seed_frames(seed_frames_max: usize) -> Self {
         let frame = MAX_MESSAGE_SIZE - DOC_EPOCH_FRAME_MARGIN;
         // Each axis may take half of the frames of a seed, so the two together fit. A merge that
         // the byte limit closes holds at least half a frame, so the bytes of a seed are at most a
@@ -82,8 +82,8 @@ impl Limits {
                 .max(1),
             restores_max: (DOC_RESTORES_MAX * seed_frames_max / DOC_SEED_FRAMES_MAX).max(1),
             refused_max: (DOC_REFUSED_FRAMES_MAX * seed_frames_max / DOC_SEED_FRAMES_MAX).max(8),
-            bytes: Axis::from_break_even(bytes_break_even),
-            ops: Axis::from_break_even(ops_break_even),
+            bytes: Axis::with_break_even(bytes_break_even),
+            ops: Axis::with_break_even(ops_break_even),
         }
     }
 
@@ -113,7 +113,7 @@ impl Limits {
     /// The lines for the real constants.
     #[must_use]
     pub fn real() -> Self {
-        Self::from_seed_frames(DOC_SEED_FRAMES_MAX)
+        Self::with_seed_frames(DOC_SEED_FRAMES_MAX)
     }
 }
 
@@ -236,7 +236,7 @@ mod tests {
         // Below about 30 frames the 2 frames of rounding and the last frame are a large part of a
         // seed, so a small seed for a test has at least 40 frames.
         for frames in [40, 200, 1_000, DOC_SEED_FRAMES_MAX] {
-            let limits = Limits::from_seed_frames(frames);
+            let limits = Limits::with_seed_frames(frames);
             assert_order(&limits.bytes, "bytes");
             assert_order(&limits.ops, "ops");
             assert!(
@@ -252,7 +252,7 @@ mod tests {
                 "{frames} frames: {needed} needed at the refusal line of both axes"
             );
         }
-        let small = Limits::from_seed_frames(40);
+        let small = Limits::with_seed_frames(40);
         let real = Limits::real();
         assert!(
             small.tombstones_max < real.tombstones_max

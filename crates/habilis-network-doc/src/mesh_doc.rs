@@ -198,10 +198,123 @@ pub struct SeedChain {
     /// order of the paths: all of them together are the tombstones of the cutter, and each list
     /// stays inside `DOC_SEED_TOMBSTONE_FRAME_BYTES` bytes.
     pub tombstones: Vec<StampedPaths>,
+    /// The paths of the chain that got the stamp 0 for want of a time: the cutter adds them to its
+    /// count with [`MeshDoc::note_seed_built`].
+    pub unstamped: u64,
 }
 
 /// What a seed names: the stamps of its changes, and the tombstones of its root.
 type SeedRead = (SeedStamps, StampedPaths);
+
+/// What a cut needs from a document, copied out of it: the live JSON, the stamp of each live leaf,
+/// the tombstones and the time of the seed. A cut that is large takes seconds, so the node takes
+/// this plan on its event loop (a read of the document, in proportion to its size) and builds the
+/// chain from it on another thread (see [`SeedPlan::build`]), while the document goes on taking
+/// frames. The chain is the seed of the document as it was when the plan was taken.
+#[derive(Debug)]
+pub struct SeedPlan {
+    live: Value,
+    stamps: HashMap<Vec<String>, Stamp>,
+    tombstones: Vec<(Vec<String>, Stamp)>,
+    time: u64,
+}
+
+impl SeedPlan {
+    /// Build the chain of the seed of `epoch` from this plan: the live JSON cut by leaf path into
+    /// merges that each fit one frame, written as a chain of changes on the genesis of `epoch`.
+    /// `fits` takes one merge and says whether its frame is small enough, as [`pack_entry`] does.
+    /// `actor_seed` is the actor of the chain, the signing key of the cutter. An empty document
+    /// gives a chain of 1 change that writes a key and deletes it, so a seed always has a root.
+    /// The plan reads nothing from the document, so this runs on any thread.
+    ///
+    /// # Errors
+    /// [`DocError::TooLarge`] when one leaf does not fit a frame, [`DocError::SeedTooLong`] when
+    /// the seed needs more frames than a node accepts, and [`DocError::Encode`] when a merge does
+    /// not encode.
+    pub fn build(
+        &self,
+        epoch: u64,
+        actor_seed: &[u8],
+        fits: impl FnMut(&Value) -> bool,
+    ) -> Result<SeedChain, DocError> {
+        let mut within_frame = fits;
+        let cuts: Result<Vec<Value>, DocError> = pack_entry(&self.live, |merge| {
+            count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
+        })
+        .collect();
+        let mut merges: Vec<Value> = cuts?;
+        merges.retain(|merge| !matches!(merge, Value::Object(map) if map.is_empty()));
+        if merges.len() > DOC_SEED_FRAMES_MAX {
+            // A node refuses the root of such a seed, so the cutter does not send it. The live
+            // state is then over what a reset can carry: the bound of the channel is its live size.
+            return Err(DocError::SeedTooLong {
+                frames: merges.len(),
+            });
+        }
+        let mut fork = Automerge::new();
+        fork.apply_changes([state_genesis(epoch)])
+            .map_err(DocError::encode)?;
+        fork.set_actor(actor_for(actor_seed));
+        let mut changes: Vec<Vec<u8>> = Vec::new();
+        if merges.is_empty() {
+            let mut tx = fork.transaction();
+            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
+            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
+            tx.commit();
+            let all: Vec<Vec<u8>> = raw_changes(&fork, &[]);
+            changes.extend(all.into_iter().skip(1));
+        }
+        for merge in &merges {
+            let heads: Vec<ChangeHash> = fork.get_heads();
+            let mut tx = fork.transaction();
+            write_map(&mut tx, &ROOT, merge).map_err(DocError::encode)?;
+            tx.commit();
+            changes.extend(raw_changes(&fork, &heads));
+        }
+        let (mut origins, unstamped) = seed_origins_from(&self.stamps, &fork, &changes)?;
+        // The tombstones go on the frames in the order of their paths, as many as a frame holds
+        // inside its byte budget and its entry cap. If the frames of the seed are not enough,
+        // carrier changes (a key written and deleted, as for an empty seed) take the rest.
+        let mut queue: VecDeque<(Vec<String>, Stamp)> = VecDeque::new();
+        for (path, stamp) in &self.tombstones {
+            queue.push_back((path.clone(), stamp.clone()));
+        }
+        let mut carried: Vec<StampedPaths> = Vec::with_capacity(changes.len());
+        for stamps in &origins {
+            carried.push(take_tombstones(
+                &mut queue,
+                DOC_REPLAY_ENTRIES_MAX - stamps.len(),
+            ));
+        }
+        while !queue.is_empty() {
+            let heads: Vec<ChangeHash> = fork.get_heads();
+            let mut tx = fork.transaction();
+            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
+            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
+            tx.commit();
+            changes.extend(raw_changes(&fork, &heads));
+            origins.push(Vec::new());
+            carried.push(take_tombstones(&mut queue, DOC_REPLAY_ENTRIES_MAX));
+            if changes.len() > DOC_SEED_FRAMES_MAX {
+                return Err(DocError::SeedTooLong {
+                    frames: changes.len(),
+                });
+            }
+        }
+        let tip: Vec<u8> = changes.last().cloned().unwrap_or_default();
+        let tip_change: Change = Change::from_bytes(tip).map_err(DocError::encode)?;
+        let last: String = tip_change.hash().to_string();
+        let frames = u32::try_from(changes.len()).unwrap_or(u32::MAX);
+        Ok(SeedChain {
+            changes,
+            mark: SeedMark::new(frames, last),
+            time: self.time,
+            origins,
+            tombstones: carried,
+            unstamped,
+        })
+    }
+}
 
 /// What a restore asks the glue to write: a merge and a stamp for each path.
 pub type Restores = (Value, StampedPaths);
@@ -1194,6 +1307,22 @@ impl MeshDoc {
         self.candidate.is_some()
     }
 
+    /// Whether the local writes of this document still wait for the end of the first sync (see
+    /// [`Self::awaiting_first_sync`]).
+    #[must_use]
+    pub fn is_awaiting_first_sync(&self) -> bool {
+        self.awaiting_sync
+    }
+
+    /// Whether the candidate seed that this document waits to adopt holds every frame of its chain,
+    /// so that the node can adopt it after the wait. False when there is no candidate.
+    #[must_use]
+    pub fn candidate_whole(&self) -> bool {
+        self.candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.chain().is_some())
+    }
+
     /// Hold the local writes of a state document until it has heard of another write. A node that
     /// restarts has a clock of 0, so a write now would get a time below the writes that the node
     /// made before, and lose to them. [`Self::compose_wire_body`] returns
@@ -1525,6 +1654,62 @@ impl MeshDoc {
         self.origins = HashMap::new();
     }
 
+    /// The plan of a cut of this document: its live JSON, the stamp of each live leaf, its
+    /// tombstones and the time of the seed (it takes one from the clock). The read costs in
+    /// proportion to the size of the document; the chain is built from the plan with
+    /// [`SeedPlan::build`], on another thread if the caller wants the loop free, and the cutter
+    /// calls [`Self::note_seed_built`] with the chain.
+    ///
+    /// # Errors
+    /// [`DocError::CandidateHeld`] when the document waits to adopt a candidate seed.
+    pub fn seed_plan(&self) -> Result<SeedPlan, DocError> {
+        if self.candidate.is_some() {
+            return Err(DocError::CandidateHeld);
+        }
+        let live = self.without_dead_values();
+        // The paths that a change of the seed writes are its leaves and the objects that it makes,
+        // so the plan holds the stamp of both.
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_leaves(&live, &mut Vec::new(), &mut leaves);
+        let mut objects: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_objects(&live, &mut Vec::new(), &mut objects);
+        let mut paths: Vec<Vec<String>> = Vec::with_capacity(leaves.len() + objects.len());
+        for (path, _) in leaves {
+            paths.push(path);
+        }
+        for (path, _) in objects {
+            paths.push(path);
+        }
+        let found = self.stamps_of(&paths);
+        let mut stamps: HashMap<Vec<String>, Stamp> = HashMap::with_capacity(paths.len());
+        let named = paths.into_iter().zip(found);
+        for (path, stamp) in named {
+            if let Some(stamp) = stamp {
+                stamps.insert(path, stamp);
+            }
+        }
+        let mut tombstones: Vec<(Vec<String>, Stamp)> = Vec::with_capacity(self.tombstones.len());
+        for (path, stamp) in &self.tombstones {
+            tombstones.push((path.clone(), stamp.clone()));
+        }
+        Ok(SeedPlan {
+            live,
+            stamps,
+            tombstones,
+            time: self.next_time(),
+        })
+    }
+
+    /// Count the paths of a built seed that got the stamp 0 for want of a time, and warn: a value
+    /// that gets 0 loses to every replay.
+    pub fn note_seed_built(&self, chain: &SeedChain) {
+        if chain.unstamped > 0 {
+            self.unstamped.fetch_add(chain.unstamped, Ordering::Relaxed);
+            let zeros = chain.unstamped;
+            tracing::warn!(target: LOG_TARGET, zeros, "a seed path got the stamp 0 for want of a time");
+        }
+    }
+
     /// The seed of `epoch`: the live JSON of this document, cut by leaf path into merges that each
     /// fit one frame, written as a chain of changes on the genesis of `epoch`. A node that starts
     /// the epoch sends the chain, and a node that adopts it holds the same live values, with no
@@ -1532,7 +1717,8 @@ impl MeshDoc {
     /// [`pack_entry`] does: the caller measures the real frame, signed and sealed.
     /// `actor_seed` is the actor of the chain, the signing key of the cutter, as for
     /// [`Self::build_change`]. An empty document gives a chain of 1 change that writes a key and
-    /// deletes it, so a seed always has a root.
+    /// deletes it, so a seed always has a root. This is [`Self::seed_plan`], [`SeedPlan::build`]
+    /// and [`Self::note_seed_built`] on the calling thread.
     ///
     /// # Errors
     /// [`DocError::TooLarge`] when one leaf does not fit a frame, [`DocError::Encode`] when a
@@ -1544,85 +1730,10 @@ impl MeshDoc {
         actor_seed: &[u8],
         fits: impl FnMut(&Value) -> bool,
     ) -> Result<SeedChain, DocError> {
-        if self.candidate.is_some() {
-            return Err(DocError::CandidateHeld);
-        }
-        let live = self.without_dead_values();
-        let mut within_frame = fits;
-        let cuts: Result<Vec<Value>, DocError> = pack_entry(&live, |merge| {
-            count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
-        })
-        .collect();
-        let mut merges: Vec<Value> = cuts?;
-        merges.retain(|merge| !matches!(merge, Value::Object(map) if map.is_empty()));
-        if merges.len() > DOC_SEED_FRAMES_MAX {
-            // A node refuses the root of such a seed, so the cutter does not send it. The live
-            // state is then over what a reset can carry: the bound of the channel is its live size.
-            return Err(DocError::SeedTooLong {
-                frames: merges.len(),
-            });
-        }
-        let mut fork = Automerge::new();
-        fork.apply_changes([state_genesis(epoch)])
-            .map_err(DocError::encode)?;
-        fork.set_actor(actor_for(actor_seed));
-        let mut changes: Vec<Vec<u8>> = Vec::new();
-        if merges.is_empty() {
-            let mut tx = fork.transaction();
-            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
-            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
-            tx.commit();
-            let all: Vec<Vec<u8>> = raw_changes(&fork, &[]);
-            changes.extend(all.into_iter().skip(1));
-        }
-        for merge in &merges {
-            let heads: Vec<ChangeHash> = fork.get_heads();
-            let mut tx = fork.transaction();
-            write_map(&mut tx, &ROOT, merge).map_err(DocError::encode)?;
-            tx.commit();
-            changes.extend(raw_changes(&fork, &heads));
-        }
-        let mut origins: Vec<Vec<Stamp>> = self.seed_origins_of(&fork, &changes)?;
-        // The tombstones go on the frames in the order of their paths, as many as a frame holds
-        // inside its byte budget and its entry cap. If the frames of the seed are not enough,
-        // carrier changes (a key written and deleted, as for an empty seed) take the rest.
-        let mut queue: VecDeque<(Vec<String>, Stamp)> = VecDeque::new();
-        for (path, stamp) in &self.tombstones {
-            queue.push_back((path.clone(), stamp.clone()));
-        }
-        let mut carried: Vec<StampedPaths> = Vec::with_capacity(changes.len());
-        for stamps in &origins {
-            carried.push(take_tombstones(
-                &mut queue,
-                DOC_REPLAY_ENTRIES_MAX - stamps.len(),
-            ));
-        }
-        while !queue.is_empty() {
-            let heads: Vec<ChangeHash> = fork.get_heads();
-            let mut tx = fork.transaction();
-            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
-            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
-            tx.commit();
-            changes.extend(raw_changes(&fork, &heads));
-            origins.push(Vec::new());
-            carried.push(take_tombstones(&mut queue, DOC_REPLAY_ENTRIES_MAX));
-            if changes.len() > DOC_SEED_FRAMES_MAX {
-                return Err(DocError::SeedTooLong {
-                    frames: changes.len(),
-                });
-            }
-        }
-        let tip: Vec<u8> = changes.last().cloned().unwrap_or_default();
-        let tip_change: Change = Change::from_bytes(tip).map_err(DocError::encode)?;
-        let last: String = tip_change.hash().to_string();
-        let frames = u32::try_from(changes.len()).unwrap_or(u32::MAX);
-        Ok(SeedChain {
-            changes,
-            mark: SeedMark::new(frames, last),
-            time: self.next_time(),
-            origins,
-            tombstones: carried,
-        })
+        let plan = self.seed_plan()?;
+        let chain = plan.build(epoch, actor_seed, fits)?;
+        self.note_seed_built(&chain);
+        Ok(chain)
     }
 
     /// The JSON of this document without the values that a tombstone of a higher stamp governs. A
@@ -1686,42 +1797,6 @@ impl MeshDoc {
             found.insert(change.hash(), named);
         }
         Some((found, dead))
-    }
-
-    /// The stamps for the changes of a seed that `fork` holds: for each change, one stamp for each
-    /// path that it writes, in the order of the paths. The stamp is the one that this document
-    /// holds for the path, so a node that adopts the seed learns who wrote each value and when. A
-    /// path that this document holds no stamp for (a change with no time) gets the stamp 0.
-    fn seed_origins_of(
-        &self,
-        fork: &Automerge,
-        changes: &[Vec<u8>],
-    ) -> Result<Vec<Vec<Stamp>>, DocError> {
-        let mut per_change: Vec<Vec<Vec<String>>> = Vec::with_capacity(changes.len());
-        for bytes in changes {
-            let change = Change::from_bytes(bytes.clone()).map_err(DocError::encode)?;
-            per_change.push(change_leaves(fork, &change));
-        }
-        let all: Vec<Vec<String>> = per_change.iter().flatten().cloned().collect();
-        let mut found = self.stamps_of(&all).into_iter();
-        let none = Stamp::new(0, "0000000000000000".to_owned());
-        let mut zeros: u64 = 0;
-        let mut origins: Vec<Vec<Stamp>> = Vec::with_capacity(per_change.len());
-        for paths in &per_change {
-            let mut stamps: Vec<Stamp> = Vec::with_capacity(paths.len());
-            for _ in paths {
-                stamps.push(found.next().flatten().unwrap_or_else(|| {
-                    zeros += 1;
-                    none.clone()
-                }));
-            }
-            origins.push(stamps);
-        }
-        if zeros > 0 {
-            self.unstamped.fetch_add(zeros, Ordering::Relaxed);
-            tracing::warn!(target: LOG_TARGET, zeros, "a seed path got the stamp 0 for want of a time");
-        }
-        Ok(origins)
     }
 
     /// The genesis of `epoch` for this channel: the per-peer map of a gated channel (meta), the
@@ -3171,8 +3246,6 @@ fn collect_objects(value: &Value, prefix: &mut Vec<String>, out: &mut Vec<(Vec<S
     }
 }
 
-/// How many paths a merge writes: each key of each object counts once, and a list is one leaf. A
-/// frame stays inside `DOC_REPLAY_ENTRIES_MAX` paths, which also bounds its stamps.
 /// The bytes of a leaf (its keys and its value) from which `check_seed_frames` builds the frame that
 /// a seed would carry it in. A leaf of 1 500 bytes is about 2 100 bytes of body, which fits.
 const SEED_LEAF_CHECK_MIN: usize = 1_500;
@@ -3201,6 +3274,34 @@ fn seed_frame_body_len(path: &[String], value: &Value) -> usize {
     let bytes = change.raw_bytes();
     let body = wire::change_body_tombstoned(bytes, None, 1, None, Some(time), &worst, &[]);
     body.map_or(usize::MAX, |body| body.as_str().len())
+}
+
+/// The stamps for the changes of a seed that `fork` holds: for each change, one stamp for each path
+/// that it writes, in the order of the paths. The stamp is the one that the cutter's document holds
+/// for the path (`stamps`), so a node that adopts the seed learns who wrote each value and when. A
+/// path that the document holds no stamp for (a change with no time) gets the stamp 0, and the
+/// count of those paths comes back with the stamps.
+fn seed_origins_from(
+    stamps: &HashMap<Vec<String>, Stamp>,
+    fork: &Automerge,
+    changes: &[Vec<u8>],
+) -> Result<(Vec<Vec<Stamp>>, u64), DocError> {
+    let none = Stamp::new(0, "0000000000000000".to_owned());
+    let mut zeros: u64 = 0;
+    let mut origins: Vec<Vec<Stamp>> = Vec::with_capacity(changes.len());
+    for bytes in changes {
+        let change = Change::from_bytes(bytes.clone()).map_err(DocError::encode)?;
+        let paths = change_leaves(fork, &change);
+        let mut named: Vec<Stamp> = Vec::with_capacity(paths.len());
+        for path in &paths {
+            named.push(stamps.get(path).cloned().unwrap_or_else(|| {
+                zeros += 1;
+                none.clone()
+            }));
+        }
+        origins.push(named);
+    }
+    Ok((origins, zeros))
 }
 
 /// The error of a state document that is over a line.
@@ -3242,6 +3343,8 @@ fn merge_depth(merge: &Value) -> usize {
     if fields.is_empty() { 0 } else { 1 + deepest }
 }
 
+/// How many paths a merge writes: each key of each object counts once, and a list is one leaf. A
+/// frame stays inside `DOC_REPLAY_ENTRIES_MAX` paths, which also bounds its stamps.
 fn count_paths(merge: &Value) -> usize {
     match merge {
         Value::Object(fields) => fields.values().map(|value| 1 + count_paths(value)).sum(),
@@ -3429,7 +3532,7 @@ mod tests {
     use super::{
         DOC_CUT_BACKOFF_FIRST, DOC_CUT_BACKOFF_MAX, DOC_CUT_RANKS_SLOTTED, DOC_CUT_SLOT_TICKS,
         DOC_CUT_SPREAD_TICKS, DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_FRAMES_MAX,
-        Ingested, Limits, MeshDoc, SelfWriteGate,
+        Ingested, Limits, MeshDoc, SeedChain, SelfWriteGate,
     };
     use crate::wire::{
         SeedMark, change_body_stamped, change_body_timed, change_body_tombstoned, encrypt_body,
@@ -4944,6 +5047,20 @@ mod tests {
         let chain = doc
             .build_seed(epoch, &actor, within(600))
             .expect("the live json splits");
+        seed_frames_with_key(&chain, cutter, epoch, key)
+    }
+
+    /// The frames of a chain that `cutter` cuts in `epoch`.
+    fn seed_frames_from(chain: &SeedChain, cutter: &Nickname, epoch: u64) -> Vec<Verified> {
+        seed_frames_with_key(chain, cutter, epoch, None)
+    }
+
+    fn seed_frames_with_key(
+        chain: &SeedChain,
+        cutter: &Nickname,
+        epoch: u64,
+        key: Option<&SymmetricKey>,
+    ) -> Vec<Verified> {
         let who = signer(cutter);
         let mut frames: Vec<Verified> = Vec::new();
         let numbered: Vec<(usize, &Vec<u8>)> = chain.changes.iter().enumerate().collect();
@@ -6703,7 +6820,7 @@ mod tests {
     fn small_state_doc(leaves: usize) -> MeshDoc {
         let mut doc = MeshDoc::new_ungated().state_epochs();
         write_leaves(&mut doc, &nick("me"), 0, leaves);
-        doc.limits(Limits::from_seed_frames(40))
+        doc.limits(Limits::with_seed_frames(40))
     }
 
     /// Write the leaves `first` to `first + count` of the map `live`, 100 in each frame.
@@ -6731,7 +6848,7 @@ mod tests {
             !doc.cut_due(0),
             "{} operations are below the ceiling of {}",
             doc.ops_held(),
-            Limits::from_seed_frames(40).ops.ceiling
+            Limits::with_seed_frames(40).ops.ceiling
         );
     }
 
@@ -6794,7 +6911,7 @@ mod tests {
         let frames = seed_frames_of(&big, &cutter, 3, None);
         let mut doc = MeshDoc::new_ungated()
             .state_epochs()
-            .limits(Limits::from_seed_frames(40));
+            .limits(Limits::with_seed_frames(40));
         for frame in &frames {
             doc.ingest(frame);
         }
@@ -6803,7 +6920,7 @@ mod tests {
         }
         assert_eq!(doc.epoch(), 3, "the document adopted the seed");
         assert!(
-            doc.seed_ops() >= Limits::from_seed_frames(40).ops.ceiling,
+            doc.seed_ops() >= Limits::with_seed_frames(40).ops.ceiling,
             "the seed itself is above the ceiling: {} operations",
             doc.seed_ops()
         );
@@ -6821,7 +6938,7 @@ mod tests {
         assert!(
             doc.cut_due(0),
             "200 operations of growth are above the growth of {}",
-            Limits::from_seed_frames(40).ops.growth
+            Limits::with_seed_frames(40).ops.growth
         );
     }
 
@@ -6878,7 +6995,7 @@ mod tests {
     fn full_state_doc(leaves: usize) -> MeshDoc {
         let mut doc = MeshDoc::new_ungated().state_epochs();
         write_leaves(&mut doc, &nick("me"), 0, leaves);
-        doc.limits(Limits::from_seed_frames(40))
+        doc.limits(Limits::with_seed_frames(40))
     }
 
     #[test]
@@ -7057,7 +7174,7 @@ mod tests {
     #[test]
     fn a_document_with_no_state_epochs_has_no_lines() {
         let _guard = ::habilis_network_test_tracing::init();
-        let plain = MeshDoc::new_ungated().limits(Limits::from_seed_frames(40));
+        let plain = MeshDoc::new_ungated().limits(Limits::with_seed_frames(40));
         let merge = {
             let mut deep = json!(1);
             for level in 0..20 {
@@ -7096,7 +7213,7 @@ mod tests {
             refuser.ingest(frame);
             holder.ingest(frame);
         }
-        let refuser = refuser.limits(Limits::from_seed_frames(40));
+        let refuser = refuser.limits(Limits::with_seed_frames(40));
         (author, refuser, holder)
     }
 
@@ -7144,7 +7261,7 @@ mod tests {
             "a frame was refused: the state document is over its remote line",
         );
         let (author, mut refuser, _holder) = trio_with_a_refuser_over_the_remote_line();
-        let cap = Limits::from_seed_frames(40).refused_max;
+        let cap = Limits::with_seed_frames(40).refused_max;
         for index in 0..(10 * cap) {
             // Each frame follows the history that the refuser holds, not the frame before it, so
             // none of them waits for a dependency that it refused.
@@ -7256,6 +7373,108 @@ mod tests {
                 .and_then(|patch| patch.pointer("/live/l00005")),
             Some(&Value::Null),
             "the holder writes the delete again, so the value of the seed is removed: {patch:?}"
+        );
+    }
+
+    /// Compiles only for a value that can cross to another thread.
+    fn is_send(_value: &impl Send) {}
+
+    #[test]
+    fn a_chain_built_from_a_plan_has_the_content_of_the_chain_that_build_seed_gives() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = state_doc_with(&live_state());
+        let cutter = pad_seed(b"cutter");
+        let direct = doc
+            .build_seed(3, &cutter, within(600))
+            .expect("the live json splits");
+        let plan = doc.seed_plan().expect("a plan");
+        is_send(&plan);
+        let planned = plan
+            .build(3, &cutter, within(600))
+            .expect("the plan builds");
+        is_send(&planned);
+        assert_eq!(planned.changes, direct.changes, "the same changes");
+        assert_eq!(planned.origins, direct.origins, "the same stamps");
+        assert_eq!(planned.tombstones, direct.tombstones, "the same tombstones");
+        assert_eq!(planned.mark, direct.mark, "the same mark: count and tip");
+    }
+
+    #[test]
+    fn a_plan_is_the_seed_of_the_document_as_it_was_when_the_plan_was_taken() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let mut doc = state_doc_with(&live_state());
+        let before = doc.to_json();
+        let plan = doc.seed_plan().expect("a plan");
+        write(&mut doc, &me, &json!({ "later": 1 }));
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = plan.build(3, &actor, within(600)).expect("the plan builds");
+        let frames = seed_frames_from(&chain, &cutter, 3);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            adopter.ingest(frame);
+        }
+        ticks(
+            &mut adopter,
+            &nick("joiner"),
+            super::DOC_EPOCH_ADOPT_WAIT_TICKS,
+        );
+        assert_eq!(
+            adopter.to_json(),
+            before,
+            "the seed holds what the document held at the plan, not the write after it"
+        );
+    }
+
+    #[test]
+    fn a_seed_that_could_not_stamp_a_path_is_counted_when_it_is_noted() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a seed path got the stamp 0 for want of a time",
+        );
+        let mut doc = MeshDoc::new_ungated();
+        write(&mut doc, &nick("me"), &json!({ "a": 1, "b": 2 }));
+        let plan = doc.seed_plan().expect("a plan");
+        let chain = plan
+            .build(3, &pad_seed(b"cutter"), within(600))
+            .expect("the plan builds");
+        assert!(
+            chain.unstamped > 0,
+            "a document with no state epochs has no stamp to give"
+        );
+        assert_eq!(
+            doc.unstamped_paths(),
+            0,
+            "nothing is counted before it is noted"
+        );
+        doc.note_seed_built(&chain);
+        assert_eq!(
+            doc.unstamped_paths(),
+            chain.unstamped,
+            "the paths without a stamp are counted"
+        );
+    }
+
+    #[test]
+    fn a_candidate_is_whole_when_the_last_frame_of_its_chain_has_arrived() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        assert!(frames.len() > 2, "the chain has several frames");
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        assert!(!doc.candidate_whole(), "no candidate is not a whole one");
+        for frame in &frames[..frames.len() - 1] {
+            doc.ingest(frame);
+            assert!(
+                !doc.candidate_whole(),
+                "a chain that lacks its last frame is not whole"
+            );
+        }
+        doc.ingest(&frames[frames.len() - 1]);
+        assert!(
+            doc.candidate_whole(),
+            "the last frame makes the chain whole"
         );
     }
 

@@ -587,7 +587,7 @@ pub async fn broadcast_state_merge(
     let fork_doc = state.doc(channel);
     let built = fork_doc
         .build_change(&merge, &actor_seed)
-        .map_err(|error| transport::SendError::Internal(error.into()))?;
+        .map_err(transport::SendError::of_doc)?;
     let Some(change_bytes) = built else {
         return Ok(());
     };
@@ -599,8 +599,7 @@ pub async fn broadcast_state_merge(
     //    `plain_body` keeps the plaintext for our own surfacing below.
     let channel_doc = state.doc(channel);
     let composed = channel_doc.compose_wire_body(&change_bytes, surface.then_some(&merge));
-    let (wire_body, plain_body) =
-        composed.map_err(|error| transport::SendError::Internal(error.into()))?;
+    let (wire_body, plain_body) = composed.map_err(transport::SendError::of_doc)?;
     let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
     let bytes = signed
         .serialize()

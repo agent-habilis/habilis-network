@@ -238,6 +238,13 @@ pub const DOC_REFUSED_FRAMES_MAX: usize = 4096;
 /// carry it.
 pub const DOC_STATE_ENVELOPE_BYTES: usize = 400;
 
+/// How long a state document with epochs holds its local writes at the start, waiting for the
+/// first sync, before it writes anyway (`MeshDoc::finish_sync`). A node that restarts has a Lamport
+/// clock of 0, so a write before it heard of another write could get a time below its own earlier
+/// writes and lose to them. A lone node, or a mesh whose peers are all down, would wait for ever
+/// without this limit, so it counts from the start of the node and not from the first peer.
+pub const DOC_STATE_SYNC_WAIT: Duration = Duration::from_secs(30);
+
 /// The longest path (the bytes of its keys) that gets a tombstone. A delete of a longer path is
 /// written and counted, and has no tombstone.
 pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;
