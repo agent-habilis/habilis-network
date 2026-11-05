@@ -46,7 +46,15 @@ pub(crate) fn observe(
                 subtype: PresenceSubtype::Left
             }
         );
-        if !goodbye && state.names.get(&key) != Some(&message.author) {
+        // A frame that is not newer than the newest one of the key is a stored copy (a relay, an
+        // anti-entropy answer): it carries the nickname the key had then, and it must not give a
+        // nickname back that the key left.
+        let unnamed = !state.names.contains_key(&key);
+        let newest_frame = state
+            .peer_stamp
+            .get(&key)
+            .is_none_or(|newest| message.timestamp > *newest);
+        if !goodbye && (unnamed || newest_frame) && state.names.get(&key) != Some(&message.author) {
             state.names.insert(key, message.author.clone());
         }
         // A frame of a live kind from a peer that is in the roster refreshes it at any stamp: a
@@ -2634,6 +2642,42 @@ mod churn_red {
                 state.live_nicknames().count(),
                 2,
                 "the live list names each live key"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A relay or an anti-entropy answer re-sends a stored frame of a key. The frame carries the
+    /// nickname the key had when it made the frame, so an older frame must not give the key back a
+    /// nickname that it left.
+    #[test]
+    fn an_older_frame_does_not_give_a_key_back_a_nickname_it_left() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let identity = Identity::generate();
+            let key = identity.author_key();
+            let now = UnixSecs::now();
+            let mut state = fresh_state();
+            let newer = chat(&rig.mesh, &nick("new-name"), &identity, now);
+            let older = chat(
+                &rig.mesh,
+                &nick("old-name"),
+                &identity,
+                now - Duration::from_secs(120),
+            );
+            assert!(
+                receive(&newer, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                receive(&older, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                state.names.get(&key),
+                Some(&nick("new-name")),
+                "the key keeps the nickname of its newest frame"
             );
             rig.endpoint.close().await;
         });
