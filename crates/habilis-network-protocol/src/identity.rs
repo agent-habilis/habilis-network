@@ -112,6 +112,12 @@ impl Identity {
     }
 }
 
+impl From<&[u8; 32]> for Identity {
+    fn from(seed: &[u8; 32]) -> Self {
+        Self::from_seed(seed)
+    }
+}
+
 /// An identity's proof that a session (its session key) speaks as a nickname on a mesh, for a run.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
