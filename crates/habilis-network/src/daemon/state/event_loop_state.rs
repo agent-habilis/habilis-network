@@ -4,6 +4,7 @@ use super::ParkedLinkStates;
 use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
+use super::peerinfo_flood::PeerInfoFlood;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshSecrets, PingRound,
     Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
@@ -246,9 +247,10 @@ pub struct EventLoopState {
     /// stops one bad node's flap from amplifying into a mesh-wide connection
     /// storm. Bounded by construction (see [`Cooldown`]).
     pub(crate) relink: Cooldown<EndpointId>,
-    /// When we last flooded our `PeerInfo`, whatever triggered it. Stamped by
-    /// `broadcast_peer_info`; read by the `joined` and `NeighborUp` re-flood gates.
-    pub(crate) peerinfo_flooded_at: Option<Instant>,
+    /// The last flood of our `PeerInfo`, whatever triggered it. Stamped by
+    /// `broadcast_peer_info`; read by the `joined` and `NeighborUp` re-flood gates and by the
+    /// periodic refresh.
+    pub(crate) peerinfo_flood: Option<PeerInfoFlood>,
     /// The latches that this member has set and not yet cleared, see [`Latch`].
     pub(crate) latches: BTreeSet<Latch>,
     /// The address our last `PeerInfo` carried. `None` until the first flood.
@@ -665,7 +667,7 @@ impl EventLoopState {
             proven_endpoints: proven_endpoints::ProvenEndpoints::new(KNOWN_ENDPOINTS_CAP),
             peer_info_proof: None,
             relink: Cooldown::new(RELINK_COOLDOWN),
-            peerinfo_flooded_at: None,
+            peerinfo_flood: None,
             latches: BTreeSet::new(),
             last_flooded_addr: None,
             below_target_since: None,
@@ -1107,6 +1109,24 @@ impl EventLoopState {
             .is_some_and(|flooded| flooded != current)
     }
 
+    /// Whether our `PeerInfo` is due for a refresh at `now`: a meshed node that has flooded
+    /// before, and has flooded for no reason during the refresh period of its roster. A
+    /// `PeerInfo` is not in the message log, so a member that missed one is not repaired by any
+    /// digest, and the flood of its sender is the only repair. The period is the time of
+    /// [`tuning::peerinfo_refresh_period`] for the live members, spread by
+    /// the spread of the last flood.
+    pub(crate) fn peerinfo_refresh_due(&self, now: Instant) -> bool {
+        if !self.standing.contains(&Standing::Meshed) {
+            return false;
+        }
+        let Some(flood) = self.peerinfo_flood else {
+            return false;
+        };
+        let members = self.peers.len().saturating_add(1);
+        let period = tuning::peerinfo_refresh_period(members).mul_f64(flood.spread);
+        now.duration_since(flood.at) >= period
+    }
+
     /// Whether a `joined` received at `now` re-floods our `PeerInfo`. A first
     /// sighting (`joined_new`) always does: the newcomer linked to the
     /// rendezvous, so no `NeighborUp` on this loop will send it our address.
@@ -1116,8 +1136,8 @@ impl EventLoopState {
     pub(crate) fn joined_refloods_peerinfo(&self, joined_new: bool, now: Instant) -> bool {
         joined_new
             || self
-                .peerinfo_flooded_at
-                .is_none_or(|at| now.duration_since(at) >= RELINK_COOLDOWN)
+                .peerinfo_flood
+                .is_none_or(|flood| now.duration_since(flood.at) >= RELINK_COOLDOWN)
     }
 
     /// Drop `nick`'s dial hint and, with it, the path verdict keyed on that
@@ -2314,6 +2334,14 @@ impl EventLoopState {
     #[must_use]
     pub fn inbound_drops_fired(&self) -> u32 {
         self.test_drops_fired
+    }
+
+    /// Tests only: whether the roster trusts the endpoint that `peer` proved in its `PeerInfo`.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn endpoint_is_proven(&self, peer: &Nickname) -> bool {
+        let named = self.names.iter().find(|(_, name)| *name == peer);
+        named.is_some_and(|(key, _)| self.proven_endpoints.trusted(key).is_some())
     }
 
     /// Tests only: forget the proof that `peer` signs for its endpoint (the `PeerInfo` proof of

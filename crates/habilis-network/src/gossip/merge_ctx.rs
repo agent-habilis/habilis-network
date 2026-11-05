@@ -5,7 +5,7 @@
 //! carries the generic transport primitives the app rides. Inbound dispatch
 //! lives in [`super::recv`].
 
-use crate::daemon::state::{Latch, RendezvousFlag, Standing};
+use crate::daemon::state::{Latch, PeerInfoFlood, RendezvousFlag, Standing};
 use std::fmt;
 
 use crate::transport::MeshSender;
@@ -604,10 +604,11 @@ pub(crate) fn peer_info_json(
 /// dial us directly. Unlike `joined`, `PeerInfo` never enters the
 /// message log (`handle_peer_info` returns before the log push), so
 /// re-sending it is invisible to `poll`/`fetch_messages` consumers —
-/// safe to repeat on every new neighbor. Stamps `peerinfo_flooded_at`, the
-/// window the `joined` re-flood gate reads.
+/// safe to repeat on every new neighbor. Stamps `peerinfo_flood`, the
+/// window the `joined` re-flood gate and the periodic refresh read, and draws the spread of the
+/// next refresh period.
 pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    state.peerinfo_flooded_at = Some(clock::Instant::now());
+    state.peerinfo_flood = Some(PeerInfoFlood::at(clock::Instant::now()));
     state.latches.remove(&Latch::PeerInfoDeferred);
     let our_addr = context.endpoint.addr();
     state.last_flooded_addr = Some(our_addr.clone());

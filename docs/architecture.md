@@ -233,6 +233,12 @@ On a mesh whose relay is lookup only, the beacon reads nothing from the joiner's
 A joiner that never punches one never links.
 On the first gossip link the joiner announces itself once.
 Later links only re-send `PeerInfo`, behind a cooldown, so a flapping link cannot re-flood the mesh.
+A `PeerInfo` is in no message log, so no digest repairs one that a member missed.
+Without it, a member trusts no endpoint of the sender: it sends no pong to the sender, and it drops the link-state vectors of the sender.
+So a meshed node also floods its `PeerInfo` again when no flood has gone out for a refresh period.
+The period is the larger of 5 minutes and 5 seconds for each live member, so the whole mesh sends at most 1 refresh per 5 seconds.
+Each flood draws a random factor between 0.75 and 1.25, so the members do not flood together.
+A lost `PeerInfo` is back within one period.
 
 ### 5.3 The relay ladder
 

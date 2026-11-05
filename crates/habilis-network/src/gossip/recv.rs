@@ -4316,7 +4316,7 @@ mod first_contact_tests {
                     .sign(&newcomer);
             ingest(wire(&digest), &mut digest_first, &mut app, &context).await;
             assert!(
-                digest_first.peerinfo_flooded_at.is_some(),
+                digest_first.peerinfo_flood.is_some(),
                 "a newcomer's digest arrived first, and we never told it our address"
             );
 
@@ -4326,7 +4326,7 @@ mod first_contact_tests {
                     .sign(&newcomer);
             ingest(wire(&change), &mut change_first, &mut app, &context).await;
             assert!(
-                change_first.peerinfo_flooded_at.is_none(),
+                change_first.peerinfo_flood.is_none(),
                 "a state frame does not mark its author present"
             );
             node.endpoint.close().await;

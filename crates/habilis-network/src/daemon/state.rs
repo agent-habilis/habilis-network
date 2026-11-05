@@ -12,6 +12,7 @@ mod direct_counts;
 mod direct_state;
 #[cfg(feature = "multihop")]
 mod parked_link_states;
+mod peerinfo_flood;
 mod reach;
 mod rendezvous_flag;
 mod rival_flag;
@@ -46,6 +47,7 @@ pub(crate) use direct_state::DirectState;
 pub use key_of_error::KeyOfError;
 #[cfg(feature = "multihop")]
 pub(crate) use parked_link_states::ParkedLinkStates;
+pub(crate) use peerinfo_flood::PeerInfoFlood;
 pub use reach::Reach;
 pub(crate) use rendezvous_flag::RendezvousFlag;
 pub(crate) use rival_flag::RivalFlag;
@@ -83,7 +85,7 @@ mod tests {
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, KeyOfError, PingRound,
         Reach, RivalFlag,
     };
-    use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
+    use crate::daemon::state::{BeaconNote, PeerInfoFlood, RendezvousFlag, Standing};
     use crate::protocol::{
         AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, Nickname,
         UnixSecs,
@@ -2616,7 +2618,7 @@ mod tests {
         for index in 0..100u32 {
             let now = start + Duration::from_millis(u64::from(index) * 10);
             if flapping.neighbor_up_refloods_peerinfo(now) {
-                flapping.peerinfo_flooded_at = Some(now);
+                flapping.peerinfo_flood = Some(PeerInfoFlood::at(now));
                 flapping_refloods += 1;
             }
         }
@@ -2630,7 +2632,7 @@ mod tests {
         for index in 0..5u64 {
             let now = start + Duration::from_millis(index * 10);
             if state.neighbor_up_refloods_peerinfo(now) {
-                state.peerinfo_flooded_at = Some(now);
+                state.peerinfo_flood = Some(PeerInfoFlood::at(now));
                 refloods += 1;
             }
         }
@@ -2652,7 +2654,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut state = fresh_state();
-        state.peerinfo_flooded_at = Some(start);
+        state.peerinfo_flood = Some(PeerInfoFlood::at(start));
 
         assert!(
             !state.neighbor_up_refloods_peerinfo(start + Duration::from_secs(1)),
@@ -2677,7 +2679,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut state = fresh_state();
-        state.peerinfo_flooded_at = Some(start);
+        state.peerinfo_flood = Some(PeerInfoFlood::at(start));
         assert!(
             !state.take_deferred_peerinfo(start + RELINK_COOLDOWN + Duration::from_secs(1)),
             "an empty deferral yields no flood"
@@ -2695,7 +2697,7 @@ mod tests {
         for index in 0..20u64 {
             let now = start + Duration::from_millis(index * 10);
             if state.joined_refloods_peerinfo(false, now) {
-                state.peerinfo_flooded_at = Some(now);
+                state.peerinfo_flood = Some(PeerInfoFlood::at(now));
                 refloods += 1;
             }
         }
@@ -3147,7 +3149,7 @@ mod tests {
             let peer = peers[index as usize % peers.len()];
             // NeighborUp → PeerInfo reflood gate + (via handle_peer_info) link.
             if state.neighbor_up_refloods_peerinfo(now) {
-                state.peerinfo_flooded_at = Some(now);
+                state.peerinfo_flood = Some(PeerInfoFlood::at(now));
             }
             if !state.relink_on_cooldown(peer, now) {
                 state.note_relink(peer, now);
@@ -3503,6 +3505,74 @@ mod tests {
         assert!(
             round.pongs.is_empty(),
             "no pong is recorded for an unknown probe"
+        );
+    }
+
+    /// A `PeerInfo` is in no message log, so a member that missed one is repaired by no digest. A
+    /// meshed node floods its own again once the refresh period has passed since its last flood:
+    /// at least 5 min, and 5 s for each live member, spread by a factor drawn with each flood.
+    #[test]
+    fn the_peerinfo_refresh_is_due_after_the_period_of_the_roster_and_not_before() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let flooded = Instant::now();
+        let after = |wait: Duration| flooded + wait;
+        assert!(
+            !state.peerinfo_refresh_due(after(Duration::from_hours(9))),
+            "a refresh was due before the first flood"
+        );
+
+        // The spread is fixed, so that the period is the same in every run.
+        let flood = PeerInfoFlood {
+            at: flooded,
+            spread: 1.0,
+        };
+        state.peerinfo_flood = Some(flood);
+        let least = tuning::PEERINFO_REFRESH_MIN;
+        assert!(
+            !state.peerinfo_refresh_due(after(least.saturating_sub(Duration::from_secs(1)))),
+            "a refresh was due before the period"
+        );
+        assert!(
+            state.peerinfo_refresh_due(after(least)),
+            "no refresh was due at the period"
+        );
+
+        state.peerinfo_flood = Some(PeerInfoFlood {
+            spread: 1.25,
+            ..flood
+        });
+        assert!(
+            !state.peerinfo_refresh_due(after(least)),
+            "the spread of 1.25 did not delay the refresh"
+        );
+        assert!(
+            state.peerinfo_refresh_due(after(least.mul_f64(1.25))),
+            "no refresh was due at the spread period"
+        );
+
+        state.peerinfo_flood = Some(PeerInfoFlood {
+            spread: 1.0,
+            ..flood
+        });
+        for index in 0..100 {
+            state.peers.insert(test_key(&format!("member-{index}")));
+        }
+        let grown = tuning::PEERINFO_REFRESH_PER_PEER * 101;
+        assert!(
+            !state.peerinfo_refresh_due(after(least)),
+            "a roster of 101 members refreshed at the least period"
+        );
+        assert!(
+            state.peerinfo_refresh_due(after(grown)),
+            "no refresh was due at the period of 101 members"
+        );
+
+        state.standing.remove(&Standing::Meshed);
+        assert!(
+            !state.peerinfo_refresh_due(after(grown)),
+            "a node that is not meshed refreshed"
         );
     }
 }
