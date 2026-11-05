@@ -1752,11 +1752,12 @@ impl EventLoopState {
     pub(crate) fn proof_answer(
         &mut self,
         request_to: &Nickname,
+        asker: &AuthorKey,
         own: &Nickname,
         mesh: &MeshId,
         now: Instant,
     ) -> Option<Verified> {
-        if request_to != own || !self.proofs.may_answer(now) {
+        if request_to != own || !self.proofs.may_answer(asker, now) {
             return None;
         }
         let proof = self.own_proof(own, mesh, self.run);

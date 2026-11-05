@@ -67,9 +67,9 @@ impl ProofExchange {
         self.book.get(session).is_some()
     }
 
-    /// Whether one more answer may go out at `now`, within the per-minute cap.
-    pub(crate) fn may_answer(&mut self, now: Instant) -> bool {
-        self.book.allow_answer(now)
+    /// Whether one more answer to `asker` may go out at `now`: one per asker and window, and the per-minute cap of the node.
+    pub(crate) fn may_answer(&mut self, asker: &AuthorKey, now: Instant) -> bool {
+        self.book.allow_answer_to(asker, now)
     }
 
     /// How many proofs this node refused because their run did not beat the held run.

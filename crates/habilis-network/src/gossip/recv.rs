@@ -956,7 +956,7 @@ async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerC
 /// means no answer, and the asker asks again by the retry rule of the proof exchange.
 async fn answer_proof_request(
     to: &Nickname,
-    message: &Message,
+    message: &Verified,
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
@@ -968,7 +968,13 @@ async fn answer_proof_request(
         tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no warm path");
         return;
     };
-    let Some(answer) = state.proof_answer(to, context.author, context.mesh, Instant::now()) else {
+    let Some(answer) = state.proof_answer(
+        to,
+        &message.key(),
+        context.author,
+        context.mesh,
+        Instant::now(),
+    ) else {
         return;
     };
     messages::log_out(&answer);

@@ -164,13 +164,16 @@ mod tests {
         let mut state = fresh_state();
         let mesh = MeshId::from("💬test");
         let me = nick("alice");
+        let asker = AuthorKey::from([200u8; 32]);
         let now = Instant::now();
         assert!(
-            state.proof_answer(&nick("bob"), &me, &mesh, now).is_none(),
+            state
+                .proof_answer(&nick("bob"), &asker, &me, &mesh, now)
+                .is_none(),
             "a request for another node gets no answer"
         );
         let answer: messages::Verified = state
-            .proof_answer(&me, &me, &mesh, now)
+            .proof_answer(&me, &asker, &me, &mesh, now)
             .expect("a request for this node gets an answer");
         let proof = answer.joined_proof().expect("the answer holds a proof");
         assert!(
@@ -182,9 +185,15 @@ mod tests {
             ),
             "the proof in the answer verifies"
         );
-        let answered: usize = (0..100)
-            .filter(|_| state.proof_answer(&me, &me, &mesh, now).is_some())
-            .count();
+        let askers: Vec<AuthorKey> = (1..=100u8)
+            .map(|index| AuthorKey::from([index; 32]))
+            .collect();
+        let mut answered = 0;
+        for other in &askers {
+            if state.proof_answer(&me, other, &me, &mesh, now).is_some() {
+                answered += 1;
+            }
+        }
         assert_eq!(answered + 1, 30, "the answers stop at the per-minute cap");
     }
 

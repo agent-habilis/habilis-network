@@ -25,6 +25,8 @@ pub(crate) struct ProofBook<K, V> {
     order: VecDeque<K>,
     refused: u64,
     answers: Vec<Instant>,
+    // the askers answered in the last window, as many as the cap at most; as long as `answers` is bounded by the rate
+    askers: HashMap<K, Instant>,
     answers_refused: u64,
 }
 
@@ -36,6 +38,7 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
             order: VecDeque::new(),
             refused: 0,
             answers: Vec::new(),
+            askers: HashMap::new(),
             answers_refused: 0,
         }
     }
@@ -101,8 +104,17 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
     /// Whether an answer to `asker` may go out at `now`: one answer per asker in each window, and
     /// the node-wide cap as the outer bound. A refused answer is counted.
     pub(crate) fn allow_answer_to(&mut self, asker: &K, now: Instant) -> bool {
-        let _ = asker;
-        self.allow_answer(now)
+        self.askers
+            .retain(|_, sent| now.saturating_duration_since(*sent) < ANSWER_WINDOW);
+        if self.askers.contains_key(asker) || self.askers.len() >= self.cap {
+            self.answers_refused += 1;
+            return false;
+        }
+        if !self.allow_answer(now) {
+            return false;
+        }
+        self.askers.insert(asker.clone(), now);
+        true
     }
 
     pub(crate) fn answers_refused(&self) -> u64 {
@@ -113,7 +125,8 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
 #[cfg(test)]
 mod tests {
     use super::ProofBook;
-    use std::time::Instant;
+    use crate::util::clock::Instant;
+    use std::time::Duration;
 
     /// The book holds at most its cap of proofs: a proof past the cap is refused and counted, and a
     /// proof already held is never evicted.
@@ -188,7 +201,7 @@ mod tests {
             book.allow_answer_to(&2, now),
             "another asker is still answered"
         );
-        let later = now + std::time::Duration::from_secs(61);
+        let later = now + Duration::from_secs(61);
         assert!(
             book.allow_answer_to(&1, later),
             "the next window answers the asker again"
