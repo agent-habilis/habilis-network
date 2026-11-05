@@ -448,6 +448,7 @@ pub(crate) async fn send_replays(
 
 /// A cut that failed: the document holds the next one back, and the node warns once.
 pub(crate) fn cut_failed(state: &mut EventLoopState, error: &impl Display) {
+    state.state_cuts_failed = state.state_cuts_failed.saturating_add(1);
     state.doc_mut(Channel::State).note_cut_failed();
     tracing::warn!(target: "habilis_network::gossip", %error, "the cut of the state channel failed, and the next one waits");
 }
@@ -494,6 +495,7 @@ pub(crate) fn finish(
     let job = job_for(state, me, mesh, outcome.epoch);
     match signed_frames(&chain, &job) {
         Ok(frames) => {
+            state.state_cuts = state.state_cuts.saturating_add(1);
             tracing::info!(target: "habilis_network::gossip", epoch = outcome.epoch, frames = frames.len(), built_ms = u64::try_from(outcome.took.as_millis()).unwrap_or(u64::MAX), "the seed of the state channel is built");
             frames
         }
@@ -684,6 +686,8 @@ mod tests {
             "the chain has several frames: {}",
             frames.len()
         );
+        assert_eq!(state.state_cuts, 1, "the cut is counted");
+        assert_eq!(state.state_cuts_failed, 0, "and no cut failed");
         let mut joiner = MeshDoc::new_state(None);
         joiner.finish_sync();
         for (signed, _bytes) in &frames {
@@ -737,6 +741,8 @@ mod tests {
             !state.doc(Channel::State).cut_due(0),
             "the failed cut holds the next one back"
         );
+        assert_eq!(state.state_cuts_failed, 1, "the failed cut is counted");
+        assert_eq!(state.state_cuts, 0, "and it is no cut");
     }
 
     /// The tick starts a build when a cut is due and none runs, and not before.

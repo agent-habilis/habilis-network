@@ -468,6 +468,10 @@ pub struct EventLoopState {
     /// loop drains it after each tick and sends the frames. Bounded by `REPLAY_QUEUE_CAP`: when it
     /// is full the new item is refused and counted, and the node warns.
     pub(crate) replay_queue: BoundedQueue<(serde_json::Value, StampedPaths)>,
+    /// The cuts of the state channel that this node made (a seed built, signed and sent), and the
+    /// cuts that failed, since the node started: one integer each, for the census line.
+    pub(crate) state_cuts: u64,
+    pub(crate) state_cuts_failed: u64,
     /// When the state document stops waiting for its first sync and writes with the clock that it
     /// has (see `DOC_STATE_SYNC_WAIT`): counted from the start of the node, so a node with no peer
     /// is not held for ever.
@@ -689,6 +693,8 @@ impl EventLoopState {
             }),
             seed_job: None,
             replay_queue: BoundedQueue::new(REPLAY_QUEUE_CAP),
+            state_cuts: 0,
+            state_cuts_failed: 0,
             state_sync_deadline: Instant::now() + DOC_STATE_SYNC_WAIT,
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
