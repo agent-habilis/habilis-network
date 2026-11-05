@@ -21,7 +21,7 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::lookup;
 use crate::protocol::crypto::Password;
 use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, MeshName, Transport};
-use crate::protocol::{MeshId, Nickname, UnixSecs};
+use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{RELAY_RUNG_PROBE, SETUP_RUNG_READ};
 use lookup::{
     ProbeAnswer, StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
@@ -670,8 +670,9 @@ fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> 
 }
 
 /// The run number of this start, kept in `<state>.run`. It counts up by 1 at each start and never
-/// reads the clock, so a clock that went back cannot make a newer run look older. No state file
-/// means run 1.
+/// reads the clock, so a clock that went back cannot make a newer run look older. The one exception
+/// is a lost file: then the count restarts from the clock (see `counter_lost`). No state file means
+/// run 1.
 #[cfg(all(unix, feature = "host"))]
 fn next_run(state: Option<&Path>) -> Result<u64> {
     use std::io::{ErrorKind, Write as _};
@@ -703,6 +704,7 @@ fn next_run(state: Option<&Path>) -> Result<u64> {
 /// 1 per start and the seconds grow faster, so the number is above any count that peers kept.
 #[cfg(all(unix, feature = "host"))]
 fn counter_lost() -> u64 {
+    use crate::protocol::UnixSecs;
     tracing::warn!(target: "habilis_network::lifecycle", "run counter file is unreadable; the count restarts from the clock");
     u64::try_from(UnixSecs::now().as_secs()).unwrap_or(1).max(1)
 }
