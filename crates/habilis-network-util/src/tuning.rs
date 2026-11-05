@@ -158,9 +158,9 @@ pub const RESIDENT_MEMORY_WARN_MB: u64 = 1024;
 pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a link vector waits for the endpoint proof of its signer. The next vector of the
-/// signer comes one tick on and finds the proof or parks again, so a vector older than two
-/// intervals is of no use, and its slot goes to another signer.
-pub const PARKED_LINK_STATE_TTL: Duration = ALIVE_INTERVAL.saturating_mul(2);
+/// signer comes one `LINKSTATE_INTERVAL` on and finds the proof or parks again, so a vector older
+/// than two of those intervals is of no use, and its slot goes to another signer.
+pub const PARKED_LINK_STATE_TTL: Duration = LINKSTATE_INTERVAL.saturating_mul(2);
 
 /// How long a peer can go unheard before the sweeper evicts it.
 /// Must exceed `ALIVE_INTERVAL` comfortably — 3x absorbs one or

@@ -74,3 +74,17 @@ impl Default for ParkedLinkStates {
         Self::new(super::MAX_PARKED_LINK_STATES)
     }
 }
+
+#[cfg(all(test, feature = "multihop"))]
+mod tests {
+    use crate::util::tuning::{LINKSTATE_INTERVAL, PARKED_LINK_STATE_TTL};
+
+    #[test]
+    fn a_parked_vector_waits_for_the_next_vector_tick_of_its_signer_and_one_more() {
+        assert_eq!(
+            PARKED_LINK_STATE_TTL,
+            LINKSTATE_INTERVAL.saturating_mul(2),
+            "the wait is counted in vector ticks, so the base is LINKSTATE_INTERVAL"
+        );
+    }
+}
