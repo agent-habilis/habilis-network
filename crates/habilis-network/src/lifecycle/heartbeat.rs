@@ -10,7 +10,6 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::{AuthorKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use iroh::EndpointId;
-use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::util::tuning::{ALIVE_INTERVAL, alive_timeout};
@@ -321,26 +320,18 @@ fn prune_dial_hints(state: &mut EventLoopState) {
         pruned.push(endpoint);
     }
     // The state of a pruned endpoint goes with it, or the maps that it keys grow with each
-    // endpoint that ever bound a nickname. An endpoint that a kept nickname still binds, or that
-    // has a live link, keeps its state.
-    let kept_ids: HashSet<EndpointId> = state
-        .peer_endpoints
-        .values()
-        .map(|address| address.id)
-        .collect();
-    forget_pruned_endpoints(state, pruned, &kept_ids);
-    drop_orphaned_endpoint_state(state, &kept_ids);
+    // endpoint that ever bound a nickname. An endpoint that a kept nickname or a retained endpoint
+    // still names, or that has a live link, keeps its state.
+    forget_pruned_endpoints(state, pruned);
+    drop_orphaned_endpoint_state(state);
 }
 
-/// Drop the state of each pruned endpoint that no kept nickname binds. A linked endpoint keeps its
-/// proof, direct path and backoff for the regraft after the link loss, and a later sweep drops them.
-fn forget_pruned_endpoints(
-    state: &mut EventLoopState,
-    pruned: Vec<EndpointId>,
-    kept_ids: &HashSet<EndpointId>,
-) {
+/// Drop the state of each pruned endpoint that no nickname binds and no refused key retains. A
+/// linked endpoint keeps its proof, direct path and backoff for the regraft after the link loss,
+/// and a later sweep drops them.
+fn forget_pruned_endpoints(state: &mut EventLoopState, pruned: Vec<EndpointId>) {
     for endpoint in pruned {
-        if kept_ids.contains(&endpoint) {
+        if state.endpoint_is_bound(endpoint) {
             continue;
         }
         state.release_unbound_endpoint(endpoint);
@@ -348,15 +339,15 @@ fn forget_pruned_endpoints(
 }
 
 /// Drop the state of each orphaned endpoint whose link has ended. An endpoint that a nickname
-/// binds again keeps its state, and so does one that is still linked.
-fn drop_orphaned_endpoint_state(state: &mut EventLoopState, kept_ids: &HashSet<EndpointId>) {
+/// binds again or a refused key retains keeps its state, and so does one that is still linked.
+fn drop_orphaned_endpoint_state(state: &mut EventLoopState) {
     let orphans: Vec<EndpointId> = state.orphaned_endpoints.iter().copied().collect();
     for endpoint in orphans {
         if state.linked_endpoints.contains(&endpoint) {
             continue;
         }
         state.orphaned_endpoints.remove(&endpoint);
-        if !kept_ids.contains(&endpoint) {
+        if !state.endpoint_is_bound(endpoint) {
             state.forget_endpoint_state(endpoint);
         }
     }
@@ -1012,6 +1003,45 @@ mod tests {
             !state.path_kinds.contains_key(&endpoint)
                 && !state.path_watchers.contains_key(&endpoint),
             "the path watch of a pruned linked endpoint stays and nudges it on each tick"
+        );
+    }
+
+    /// The sweep prunes the last dial hint that names an endpoint, and a live key still retains
+    /// that endpoint for the day it holds its nickname alone. The state of the endpoint stays, in
+    /// the sweep that prunes the hint and in the later one that follows the end of its link.
+    #[test]
+    fn the_sweep_keeps_the_state_of_a_pruned_endpoint_that_a_refused_key_retains() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (pruned, orphaned) = (testing::endpoint_id(61), testing::endpoint_id(62));
+        state.peer_for_test("rival-oak");
+        state.bind_peer_endpoint(
+            test_key("gone-fern"),
+            nick("gone-fern"),
+            iroh::EndpointAddr::new(pruned),
+        );
+        state.retain_refused_endpoint(test_key("rival-oak"), iroh::EndpointAddr::new(pruned));
+        state.retain_refused_endpoint(test_key("rival-elm"), iroh::EndpointAddr::new(orphaned));
+        state.peer_for_test("rival-elm");
+        state
+            .unicast_pool
+            .note_addr(&iroh::EndpointAddr::new(pruned));
+        state.direct.insert(pruned, DirectState::Direct);
+        state.orphaned_endpoints.insert(orphaned);
+        state.direct.insert(orphaned, DirectState::Direct);
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.direct.contains_key(&pruned)
+                && state
+                    .unicast_pool
+                    .remembers_address(&iroh::EndpointAddr::new(pruned)),
+            "the sweep dropped the state of a pruned endpoint that a refused key retains"
+        );
+        assert!(
+            state.direct.contains_key(&orphaned),
+            "the sweep dropped the state of an orphaned endpoint that a refused key retains"
         );
     }
 
