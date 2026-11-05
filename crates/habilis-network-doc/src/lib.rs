@@ -57,6 +57,10 @@ pub use stamp::Stamp;
 
 pub use split::{pack_entry, split_entry};
 
+mod limits;
+
+pub use limits::{Axis, Limits};
+
 mod mesh_doc;
 
 pub use mesh_doc::{

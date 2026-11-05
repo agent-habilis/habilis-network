@@ -176,6 +176,32 @@ pub const DOC_SEED_TOMBSTONES_MAX: usize = 1024;
 /// warned, never silent.
 pub const DOC_RESTORES_MAX: usize = 65_536;
 
+/// The bytes that the stamp of one path adds to a frame of a seed, besides the digits of its time:
+/// the index of the tag, the syntax, and a share of the table of tags. The stamp costs the digits
+/// of the clock plus this number (`Limits::stamp_bytes`): 16 bytes for times of 7 digits, which is
+/// what `tests/seed_cost.rs` measured (13 to 16), and 25 at the bound of the clock.
+pub const DOC_STATE_STAMP_BYTES_BASE: usize = 9;
+
+/// The most bytes that the stamp of one path can take in a frame of a seed: a time of 16 digits (the
+/// bound `2^53` of the Lamport time), 3 digits of tag index, 4 of syntax and a new tag of 19 bytes.
+/// A writer that sends such stamps can make a cut fail: it is a flood, not a case that the lines
+/// cover.
+pub const DOC_STATE_STAMP_BYTES_MAX: usize = 46;
+
+/// The bytes of the content of a seed (its changes, with no stamp) for 100 bytes of the history that
+/// made it. Measured at 83 to 95; 105 holds the margin of 10 percent.
+pub const DOC_STATE_SEED_RATIO_PERCENT: usize = 105;
+
+/// The deepest merge that a local write adds to a state document, counting the key of the leaf. A
+/// seed frame repeats the keys above its first leaf, so the depth bounds how many leaves a seed
+/// frame holds (`130 - 2 x depth` new paths).
+pub const DOC_STATE_DEPTH_MAX: usize = 12;
+
+/// The break-even of the paths of a state document: the cut ceiling is 0.75 of it (20 000 paths).
+/// Every ingest reads the whole document, so a frame at this size costs about 130 ms; the largest
+/// real document that was measured has 1 204 paths.
+pub const DOC_STATE_PATHS_BREAK_EVEN: usize = 26_667;
+
 /// The longest path (the bytes of its keys) that gets a tombstone. A delete of a longer path is
 /// written and counted, and has no tombstone.
 pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;

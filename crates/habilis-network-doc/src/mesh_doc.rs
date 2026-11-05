@@ -16,7 +16,7 @@ use habilis_network_util::consts::{
 };
 
 use crate::wire::SeedMark;
-use crate::{DocError, Stamp, pack_entry, wire};
+use crate::{DocError, Limits, Stamp, pack_entry, wire};
 
 use automerge::transaction;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -505,6 +505,16 @@ pub struct MeshDoc {
     /// The tag of the actor that this node wrote its last change with (the first 8 bytes), `0`
     /// before its first write. A stamp with this tag is a write of this node.
     own_tag: AtomicU64,
+    /// The operations of the changes that this document holds in this epoch: an upper bound of its
+    /// live paths, because every live key has at least the operation that made it.
+    ops_held: usize,
+    /// The frame bytes and the operations right after the seed that this node adopted was applied,
+    /// 0 in an epoch that began with no seed. What the document grew by since is the growth that
+    /// the lines of `Limits` measure.
+    seed_bytes: usize,
+    seed_ops: usize,
+    /// The lines of this document.
+    limits: Limits,
     /// The frame bytes of the epoch when it settled, 0 before. The live entries are back by then.
     settled_bytes: usize,
     /// The frame bytes that start a reset, before the settled size is known.
@@ -611,6 +621,10 @@ impl MeshDoc {
             epoch_ticks: 0,
             restores_due: 0,
             own_tag: AtomicU64::new(0),
+            ops_held: 0,
+            seed_bytes: 0,
+            seed_ops: 0,
+            limits: Limits::real(),
             settled_bytes: 0,
             frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
             state_epochs: false,
@@ -876,6 +890,31 @@ impl MeshDoc {
         };
         let entries = gated_entries(json, gate);
         entries.keys().cloned().collect()
+    }
+
+    /// The operations of the changes that this document holds in this epoch.
+    #[must_use]
+    pub fn ops_held(&self) -> usize {
+        self.ops_held
+    }
+
+    /// The frame bytes right after the seed of this epoch was applied.
+    #[must_use]
+    pub fn seed_bytes(&self) -> usize {
+        self.seed_bytes
+    }
+
+    /// The operations right after the seed of this epoch was applied.
+    #[must_use]
+    pub fn seed_ops(&self) -> usize {
+        self.seed_ops
+    }
+
+    /// Set the lines of this document, for a test that wants a small seed.
+    #[must_use]
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// The epoch of the history that this document holds.
@@ -1202,6 +1241,8 @@ impl MeshDoc {
             }
         }
         self.adopting = false;
+        self.seed_bytes = self.frame_bytes;
+        self.seed_ops = self.ops_held;
         if let Some((found, dead)) = recorded {
             self.origins = found;
             // The tombstones of the seed join ours. A tombstone that the seed beats with a live
@@ -1340,6 +1381,9 @@ impl MeshDoc {
         self.applied = applied;
         self.frames = HashMap::new();
         self.frame_bytes = 0;
+        self.ops_held = 0;
+        self.seed_bytes = 0;
+        self.seed_ops = 0;
         self.pending = HashMap::new();
         self.candidate = None;
         self.candidate_ticks = 0;
@@ -1985,6 +2029,7 @@ impl MeshDoc {
             .map(|(named, after)| self.lowered_leaves(after, named));
         let named: Option<StampedPaths> = stamped.map(|(named, _)| named);
         let seen: Option<Change> = (self.state_epochs && !self.adopting).then(|| change.clone());
+        let ops = change.len();
         if let Err(error) = self.doc.apply_changes([change]) {
             if let Some(changes) = self.warn_due("dropping a channel change automerge refused") {
                 tracing::warn!(target: LOG_TARGET, changes, %error, author = %frame.author, "dropping a channel change automerge refused");
@@ -2002,8 +2047,9 @@ impl MeshDoc {
             self.note_lowered(&lowered);
         }
         self.frame_bytes += wire_len(&frame);
-        if let Some(replaced) = self.frames.insert(hash, frame) {
-            self.frame_bytes -= wire_len(&replaced);
+        match self.frames.insert(hash, frame) {
+            Some(replaced) => self.frame_bytes -= wire_len(&replaced),
+            None => self.ops_held += ops,
         }
         true
     }
@@ -6251,6 +6297,65 @@ mod tests {
             .expect("the complete seed is adopted");
         assert_eq!(switch.epoch, 3, "the switch names the epoch");
         assert_eq!(doc.to_json(), live, "the joiner holds the live json");
+    }
+
+    #[test]
+    fn the_operations_of_the_applied_changes_are_counted_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        assert_eq!(doc.ops_held(), 0, "a new document holds no operation");
+        let first = write(&mut doc, &me, &json!({ "a": 1, "b": { "c": 2 } }));
+        assert_eq!(
+            doc.ops_held(),
+            3,
+            "a leaf, a map and a leaf are 3 operations"
+        );
+        write(&mut doc, &me, &json!({ "a": 5 }));
+        assert_eq!(doc.ops_held(), 4, "an overwrite is one more operation");
+        let again = doc.ingest(&first);
+        assert!(
+            matches!(again, Ingested::Duplicate),
+            "the same frame is a duplicate: {again:?}"
+        );
+        assert_eq!(doc.ops_held(), 4, "a duplicate adds no operation");
+    }
+
+    #[test]
+    fn the_cutter_and_an_adopter_hold_the_same_seed_counts_and_drop_the_old_ones() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter, joiner) = (nick("me"), nick("cutter"), nick("joiner"));
+        let mut doc = state_doc_with(&live_state());
+        let history_ops = doc.ops_held();
+        assert!(history_ops > 0, "the history of the cutter has operations");
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            doc.ingest(frame);
+            adopter.ingest(frame);
+        }
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            doc.tick_epoch(&me);
+            adopter.tick_epoch(&joiner);
+        }
+        assert_eq!(doc.epoch(), 3, "the cutter adopts its own seed");
+        assert_eq!(adopter.epoch(), 3, "the joiner adopts the seed");
+        assert!(
+            doc.seed_bytes() > 0 && doc.seed_ops() > 0,
+            "the cutter counts its seed: {} bytes, {} operations",
+            doc.seed_bytes(),
+            doc.seed_ops()
+        );
+        assert_eq!(
+            (doc.seed_bytes(), doc.seed_ops()),
+            (adopter.seed_bytes(), adopter.seed_ops()),
+            "the cutter and the adopter hold equal seed counts"
+        );
+        assert_eq!(
+            doc.ops_held(),
+            doc.seed_ops(),
+            "the operations of the old epoch are gone: the document holds the seed"
+        );
     }
 
     #[test]
