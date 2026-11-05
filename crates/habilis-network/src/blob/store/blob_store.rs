@@ -93,7 +93,7 @@ impl BlobStore {
     }
 
     /// For an already-spooled blob (a content-addressed dedup hit), add
-    /// `content_id` to its owners (up to `MAX_BLOB_OWNERS`), make it the newest blob for disk-pressure
+    /// `content_id` to its owners, make it the newest blob for disk-pressure
     /// eviction, and return its ticket fields; `None` when the blob is not
     /// spooled. Lets the producer skip the ~100ms password stretch
     /// when re-offloading content it already holds.
@@ -121,7 +121,8 @@ impl BlobStore {
     }
 
     /// Release `content_id`'s hold on every blob (called from the task
-    /// idle-timeout sweep), unlinking each spool file no group owns any more.
+    /// idle-timeout sweep), unlinking each spool file no group owns any more, unless the entry is
+    /// overflowed: then the store budget removes it.
     pub(crate) fn evict_content(&mut self, content_id: &ContentId) {
         let doomed: Vec<BlobDigest> = self
             .map

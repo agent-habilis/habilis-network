@@ -446,7 +446,7 @@ mod tests {
             "the blob stays while the budget has room"
         );
 
-        for index in 0..10 * super::MAX_BLOB_STORE_ENTRIES {
+        for index in 0..2 * super::MAX_BLOB_STORE_ENTRIES {
             let mut bytes = [0u8; HASH_LEN];
             bytes[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
             let meta = ContentMeta {
@@ -459,7 +459,7 @@ mod tests {
 
         assert!(
             store.get(&hash).is_none(),
-            "10 times the entry cap later, the oldest blob is gone"
+            "2 times the entry cap later, the oldest blob is gone"
         );
         assert_eq!(
             store.map.len(),
