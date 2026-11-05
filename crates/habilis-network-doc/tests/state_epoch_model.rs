@@ -406,6 +406,24 @@ fn model_a_rival_seed_does_not_cover_a_write_by_its_cut_vector() {
     sim.assert_model("a rival seed with a vector above the writes of the node");
 }
 
+/// A node that cut its own seed holds the values of that seed as no write of its own. If a lower
+/// rival seed wins, the node writes those values again from what it carried.
+#[test]
+fn model_a_cutter_whose_seed_loses_to_a_rival_writes_its_values_again() {
+    let _guard = habilis_network_test_tracing::init();
+    let mut sim = Sim::new(7);
+    // No other node holds this write when n2 cuts, and n2 adopts its own seed first.
+    sim.write_exact(2, "a", Some(json!(5)));
+    let _ = sim.cut(2);
+    for _ in 0..=WAIT {
+        sim.tick_all();
+    }
+    // The rival of n1 lacks `a`, and its key is lower, so it wins on every node.
+    let _ = sim.cut(1);
+    sim.settle();
+    sim.assert_model("the seed of a cutter loses to a lower rival");
+}
+
 /// Seeds for the run in CI: 500 take about 25 s of a debug build. The environment variable
 /// `STATE_EPOCH_MODEL_SEEDS` sets the count, for a long run by hand.
 fn seed_count(default: u64) -> u64 {
