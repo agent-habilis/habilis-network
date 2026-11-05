@@ -44,7 +44,9 @@ impl<K: Eq + Hash, V> ProofBook<K, V> {
     }
 
     /// Forget the proof of a session that left or that a newer run replaced.
-    pub(crate) fn remove(&mut self, _key: &K) {}
+    pub(crate) fn remove(&mut self, key: &K) {
+        self.held.remove(key);
+    }
 
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
         self.held.get(key)
