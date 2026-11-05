@@ -78,47 +78,50 @@ fn measured<Out>(step: impl FnOnce() -> Out) -> (Out, Duration, usize) {
 /// A replay frame of 127 leaves under `rep{index}`, written by a node whose actor is above all
 /// the others, so it wins the conflicts, as the worst case.
 fn replay_frame(index: usize) -> Verified {
-    let who = nick("zzz");
-    let replayer = MeshDoc::new_ungated().state_epochs();
-    let mut leaves = Map::new();
-    let mut stamps: Vec<(Vec<String>, Stamp)> = Vec::new();
-    let object = format!("rep{index:03}");
-    for leaf in 0..127 {
-        leaves.insert(format!("r{leaf:03}"), json!(leaf));
-        stamps.push((
-            vec![object.clone(), format!("r{leaf:03}")],
-            Stamp::new(5, "7a7a7a7a00000000".to_owned()),
-        ));
-    }
-    let merge = json!({ object: Value::Object(leaves) });
-    let change = replayer
-        .build_change(&merge, &pad(who.as_str()))
-        .expect("applies")
-        .expect("a change");
-    let body = replayer
-        .compose_replay_body(&change, &stamps)
-        .expect("a replay body");
-    signed(&who, body)
+    frame_of("zzz", &format!("rep{index:03}"), 5, true)
 }
 
 /// The same change as a plain frame, for a document with no state epochs.
 fn plain_frame(index: usize) -> Verified {
-    let who = nick("zzz");
-    let replayer = MeshDoc::new_ungated();
+    frame_of("zzz", &format!("rep{index:03}"), 5, false)
+}
+
+/// The frame of one writer for the object `object` with 127 leaves: a replay frame with the stamp
+/// time `time`, or the same change as a plain frame.
+fn frame_of(writer: &str, object: &str, time: u64, replay: bool) -> Verified {
+    let who = nick(writer);
+    let author = MeshDoc::new_ungated();
     let mut leaves = Map::new();
-    let object = format!("rep{index:03}");
+    let mut stamps: Vec<(Vec<String>, Stamp)> = Vec::new();
     for leaf in 0..127 {
         leaves.insert(format!("r{leaf:03}"), json!(leaf));
+        stamps.push((
+            vec![object.to_owned(), format!("r{leaf:03}")],
+            Stamp::new(time, "7a7a7a7a00000000".to_owned()),
+        ));
     }
     let merge = json!({ object: Value::Object(leaves) });
-    let change = replayer
+    let change = author
         .build_change(&merge, &pad(who.as_str()))
         .expect("applies")
         .expect("a change");
-    signed(
-        &who,
-        wire::change_body_at(&change, None, 0).expect("a plain body"),
-    )
+    let body = if replay {
+        MeshDoc::new_ungated()
+            .state_epochs()
+            .compose_replay_body(&change, &stamps)
+            .expect("a replay body")
+    } else {
+        wire::change_body_at(&change, None, 0).expect("a plain body")
+    };
+    signed(&who, body)
+}
+
+/// The frames of the same-leaf burst: 96 writers, and every frame names the same object and the
+/// same 127 leaves, with a stamp time that rises with the writer.
+fn same_leaf_burst(replay: bool) -> Vec<Verified> {
+    (1..=96u64)
+        .map(|writer| frame_of(&format!("w{writer:03}"), "shared", 5 + writer, replay))
+        .collect()
 }
 
 fn fill(doc: &mut MeshDoc, base: &mut MeshDoc, leaves: usize) {
@@ -177,6 +180,23 @@ fn the_cost_of_a_replay_frame_and_of_a_burst() {
         });
         eprintln!(
             "COST leaves={leaves} burst of 96 replay frames: {burst_time:?}/{burst_bytes}B, the same as plain frames: {plain_burst_time:?}/{plain_burst_bytes}B"
+        );
+        // The same-leaf burst: the real switch with 96 writers, where every frame names the same
+        // object, so every frame hides the leaves of the frames before it.
+        let same = same_leaf_burst(true);
+        let same_plain = same_leaf_burst(false);
+        let ((), same_time, same_bytes) = measured(|| {
+            for frame in &same {
+                doc.ingest(frame);
+            }
+        });
+        let ((), same_plain_time, same_plain_bytes) = measured(|| {
+            for frame in &same_plain {
+                base.ingest(frame);
+            }
+        });
+        eprintln!(
+            "COST leaves={leaves} same-leaf burst of 96 replay frames: {same_time:?}/{same_bytes}B, the same as plain frames: {same_plain_time:?}/{same_plain_bytes}B"
         );
     }
 }
