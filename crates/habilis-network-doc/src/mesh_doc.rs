@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use automerge::transaction::Transactable;
 use automerge::{
@@ -10,7 +10,7 @@ use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
 use habilis_network_util::consts::{
     DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
-    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_FRAMES_MAX,
+    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_CUT_MAX, DOC_SEED_FRAMES_MAX,
 };
 
 use crate::wire::SeedMark;
@@ -84,6 +84,7 @@ impl EpochSwitch {
             epoch,
             map,
             own_entry,
+            replay: None,
         }
     }
 }
@@ -99,6 +100,10 @@ pub struct EpochSwitch {
     /// The entry of this node in that map, as it was before the switch. The caller writes it
     /// again, because only its owner can.
     pub own_entry: Option<Value>,
+    /// A merge of the values that this node wrote, or that it holds from the old epoch with no
+    /// seed behind them, and that the seed of the new epoch lacks. The caller writes it on top of
+    /// the seed. `None` for a gated channel and when nothing is lacking.
+    pub replay: Option<Value>,
 }
 
 /// Declares that a channel holds a **per-peer map** at the document root — one
@@ -385,6 +390,10 @@ pub struct MeshDoc {
     /// default, so a state channel refuses such a frame, as it did before the state epochs, until
     /// the node ticks the state channel (see [`Self::state_epochs`]).
     state_epochs: bool,
+    /// The key of the node that holds this document, when it is set. Only the changes that it
+    /// signed are written again after a state epoch switch: a write of another node, written
+    /// again by every holder, would come after a newer write of its author and take its place.
+    owner: Option<AuthorKey>,
     /// This channel's per-peer write gate, when it has one (`meta` does; `state`
     /// is free-form and carries no per-peer identity, so it does not).
     gate: Option<SelfWriteGate>,
@@ -443,6 +452,7 @@ impl MeshDoc {
             settled_bytes: 0,
             frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
             state_epochs: false,
+            owner: None,
             gate,
             key: None,
         }
@@ -505,6 +515,14 @@ impl MeshDoc {
     #[must_use]
     pub fn state_epochs(mut self) -> Self {
         self.state_epochs = true;
+        self
+    }
+
+    /// Name the node that holds this document, so that a switch to a state epoch writes again the
+    /// changes that the node signed and the seed lacks.
+    #[must_use]
+    pub fn owner(mut self, key: AuthorKey) -> Self {
+        self.owner = Some(key);
         self
     }
 
@@ -705,7 +723,11 @@ impl MeshDoc {
             }
             return None;
         };
-        let switch = self.switch_to(candidate.epoch, me);
+        let leaves: Vec<(Vec<String>, Value)> = match candidate.mark.as_ref() {
+            Some(mark) => self.replay_leaves(&mark.cut),
+            None => Vec::new(),
+        };
+        let mut switch = self.switch_to(candidate.epoch, me);
         for frame in &frames {
             if !matches!(self.ingest(frame), Ingested::Applied { .. }) {
                 // Automerge can still refuse the change in `apply`, which only a crafted frame reaches.
@@ -717,7 +739,29 @@ impl MeshDoc {
                 }
             }
         }
+        switch.replay = self.replay_patch(leaves);
         Some(switch)
+    }
+
+    /// The merge that writes again the `leaves` that the document does not hold yet. A leaf that
+    /// the new epoch already holds with the same value is left out, so a write that every node
+    /// holds is not sent again by every node.
+    fn replay_patch(&self, leaves: Vec<(Vec<String>, Value)>) -> Option<Value> {
+        let now: Value = self.to_json();
+        let mut merge: Map<String, Value> = Map::new();
+        let mut lacking = false;
+        for (path, value) in leaves {
+            let holds: Option<&Value> = lookup(&now, &path);
+            let same = match holds {
+                Some(held) => *held == value,
+                None => value.is_null(),
+            };
+            if !same {
+                set_path(&mut merge, &path, value);
+                lacking = true;
+            }
+        }
+        lacking.then_some(Value::Object(merge))
     }
 
     /// Drop every frame and start `epoch`, and hand back the entry of `me`, which only `me` can
@@ -729,11 +773,7 @@ impl MeshDoc {
         let peers = json.get(&map);
         let own_entry: Option<Value> = peers.and_then(|peers| peers.get(me.as_str())).cloned();
         self.restart(epoch);
-        EpochSwitch {
-            epoch,
-            map,
-            own_entry,
-        }
+        EpochSwitch::new(epoch, map, own_entry)
     }
 
     /// Forget the history: a document of `epoch` that holds its genesis and nothing else. The
@@ -775,6 +815,7 @@ impl MeshDoc {
         actor_seed: &[u8],
         fits: impl FnMut(&Value) -> bool,
     ) -> Result<SeedChain, DocError> {
+        let cut: Vec<(String, u64)> = self.cut_vector()?;
         let live = self.to_json();
         let cuts: Result<Vec<Value>, DocError> = split_entry(&live, fits).collect();
         let mut merges: Vec<Value> = cuts?;
@@ -812,8 +853,72 @@ impl MeshDoc {
         let frames = u32::try_from(changes.len()).unwrap_or(u32::MAX);
         Ok(SeedChain {
             changes,
-            mark: SeedMark::new(frames, last),
+            mark: SeedMark::new(frames, last).with_cut(cut),
         })
+    }
+
+    /// The cut vector of a seed built from this document: for each writer, the tag of its actor
+    /// and the highest sequence number of its changes that this document holds.
+    fn cut_vector(&self) -> Result<Vec<(String, u64)>, DocError> {
+        let mut highest: BTreeMap<String, u64> = BTreeMap::new();
+        for change in self.doc.get_changes(&[]) {
+            if change.actor_id().to_bytes() == STATE_GENESIS_ACTOR {
+                continue;
+            }
+            let seen = highest.entry(actor_tag(change.actor_id())).or_insert(0);
+            *seen = (*seen).max(change.seq());
+        }
+        if highest.len() > DOC_SEED_CUT_MAX {
+            return Err(DocError::TooManyWriters {
+                writers: highest.len(),
+            });
+        }
+        Ok(highest.into_iter().collect())
+    }
+
+    /// The leaves that the changes above `cut` wrote, with the value that each holds now (`null`
+    /// for a leaf that is gone). A leaf inside another leaf of the list is left out, because the
+    /// outer one carries it.
+    fn replay_leaves(&self, cut: &[(String, u64)]) -> Vec<(Vec<String>, Value)> {
+        let Some(owner) = self.owner.as_ref() else {
+            return Vec::new();
+        };
+        let mut covered: HashMap<&str, u64> = HashMap::new();
+        for (tag, seq) in cut {
+            covered.insert(tag.as_str(), *seq);
+        }
+        let mut paths: Vec<Vec<String>> = Vec::new();
+        for change in self.doc.get_changes(&[]) {
+            if change.actor_id().to_bytes() != owner.as_bytes().as_slice() {
+                continue;
+            }
+            let tag = actor_tag(change.actor_id());
+            let held: u64 = covered.get(tag.as_str()).copied().unwrap_or(0);
+            if change.seq() <= held {
+                continue;
+            }
+            let deps: Vec<ChangeHash> = change.deps().to_vec();
+            for patch in self.doc.diff(&deps, &[change.hash()]) {
+                let path = leaf_path(&patch);
+                if !path.is_empty() && !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        paths.sort_by_key(Vec::len);
+        let mut kept: Vec<Vec<String>> = Vec::new();
+        for path in paths {
+            if !kept.iter().any(|outer| path.starts_with(outer)) {
+                kept.push(path);
+            }
+        }
+        let now: Value = self.to_json();
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        for path in kept {
+            let value: Value = lookup(&now, &path).cloned().unwrap_or(Value::Null);
+            leaves.push((path, value));
+        }
+        leaves
     }
 
     /// The genesis of `epoch` for this channel: the per-peer map of a gated channel (meta), the
@@ -1315,6 +1420,9 @@ fn doc_json(doc: &Automerge) -> Value {
 /// the document. A change with no operation is no change, so the genesis writes a key and deletes
 /// it. The hash depends on how automerge encodes that pair, so a bump of automerge must keep the
 /// pinned hashes: if it does not, the bump is a wire break and needs a frame version bump.
+/// The actor of the genesis of a state epoch. It is no writer, so a cut vector leaves it out.
+const STATE_GENESIS_ACTOR: &[u8] = b"habilis-state/genesis";
+
 fn state_genesis(epoch: u64) -> Change {
     let mut doc = Automerge::new();
     doc.set_actor(automerge::ActorId::from(
@@ -1356,6 +1464,70 @@ fn peers_genesis(map: &str, epoch: u64) -> Change {
     doc.get_changes(&[])
         .pop()
         .expect("genesis produced exactly one change")
+}
+
+/// A tag of the actor of a change for the cut vector: the first 8 bytes, in hex.
+fn actor_tag(actor: &automerge::ActorId) -> String {
+    use std::fmt::Write as _;
+
+    let bytes: &[u8] = actor.to_bytes();
+    let first: &[u8] = &bytes[..bytes.len().min(8)];
+    let mut tag = String::with_capacity(16);
+    for byte in first {
+        let _ = write!(tag, "{byte:02x}");
+    }
+    tag
+}
+
+/// The value at `path` in `json`, `None` when a key on the way is missing.
+fn lookup<'json>(json: &'json Value, path: &[String]) -> Option<&'json Value> {
+    let mut here: &Value = json;
+    for key in path {
+        here = here.get(key.as_str())?;
+    }
+    Some(here)
+}
+
+/// Put `value` at `path` inside the nested merge `root`.
+fn set_path(root: &mut Map<String, Value>, path: &[String], value: Value) {
+    let Some((first, rest)) = path.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        root.insert(first.clone(), value);
+        return;
+    }
+    let child = root
+        .entry(first.clone())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Value::Object(fields) = child {
+        set_path(fields, rest, value);
+    }
+}
+
+/// The path of the leaf that a patch of one change touched. A patch inside a list gives the path
+/// of the list, because a list is written whole.
+fn leaf_path(patch: &automerge::Patch) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for (_, prop) in &patch.path {
+        match prop {
+            automerge::Prop::Map(key) => keys.push(key.clone()),
+            automerge::Prop::Seq(_) => return keys,
+        }
+    }
+    match &patch.action {
+        automerge::PatchAction::PutMap { key, .. } | automerge::PatchAction::DeleteMap { key } => {
+            keys.push(key.clone());
+        }
+        automerge::PatchAction::PutSeq { .. }
+        | automerge::PatchAction::Insert { .. }
+        | automerge::PatchAction::SpliceText { .. }
+        | automerge::PatchAction::Increment { .. }
+        | automerge::PatchAction::Conflict { .. }
+        | automerge::PatchAction::DeleteSeq { .. }
+        | automerge::PatchAction::Mark { .. } => {}
+    }
+    keys
 }
 
 /// The raw bytes of every change of `doc` that comes after `since`, in order.
@@ -1536,8 +1708,8 @@ fn put_number(
 #[cfg(test)]
 mod tests {
     use super::{
-        DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_FRAMES_MAX, Ingested, MeshDoc,
-        SelfWriteGate,
+        DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_CUT_MAX, DOC_SEED_FRAMES_MAX,
+        Ingested, MeshDoc, SelfWriteGate,
     };
     use crate::DocError;
     use crate::wire::{SeedMark, change_body_seed, encrypt_body, parse_change_full};
@@ -2966,6 +3138,21 @@ mod tests {
     }
 
     #[test]
+    fn a_seed_is_not_built_for_more_writers_than_the_cut_vector_lists() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut doc = MeshDoc::new_ungated();
+        for index in 0..=DOC_SEED_CUT_MAX {
+            let writer = nick(&format!("w{index}"));
+            write(&mut doc, &writer, &json!({ format!("w{index}"): 1 }));
+        }
+        let result = doc.build_seed(2, b"cutter", within(600));
+        assert!(
+            matches!(result, Err(DocError::TooManyWriters { .. })),
+            "a seed that cannot say which writes it covers is not cut: {result:?}"
+        );
+    }
+
+    #[test]
     fn a_seed_that_would_pass_the_frame_max_is_not_built() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut live: Map<String, Value> = Map::new();
@@ -3450,6 +3637,10 @@ mod tests {
             "a state switch has no entry to write again"
         );
         assert_eq!(switch.map, "", "a state switch names no per-peer map");
+        assert_eq!(
+            switch.replay, None,
+            "a node with no owner key writes nothing again"
+        );
     }
 
     #[test]

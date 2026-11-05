@@ -37,6 +37,11 @@ pub enum DocError {
         /// The number of frames that the seed would have.
         frames: usize,
     },
+    /// The document has more writers than the cut vector of a seed can list.
+    TooManyWriters {
+        /// The number of writers of the document.
+        writers: usize,
+    },
 }
 
 impl DocError {
@@ -61,6 +66,7 @@ impl fmt::Display for DocError {
             Self::Encode(_) => "the change could not be encoded",
             Self::TooLarge { .. } => "one value is larger than a frame and cannot be cut",
             Self::SeedTooLong { .. } => "the seed would have more frames than a node accepts",
+            Self::TooManyWriters { .. } => "the document has more writers than a seed can list",
         })
     }
 }
@@ -68,7 +74,10 @@ impl fmt::Display for DocError {
 impl error::Error for DocError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Self::NotAnObject | Self::TooLarge { .. } | Self::SeedTooLong { .. } => None,
+            Self::NotAnObject
+            | Self::TooLarge { .. }
+            | Self::SeedTooLong { .. }
+            | Self::TooManyWriters { .. } => None,
             Self::Body(error) => Some(error),
             Self::Encode(error) => Some(&**error),
         }

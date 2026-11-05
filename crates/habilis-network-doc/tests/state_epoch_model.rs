@@ -7,8 +7,9 @@
 //! node the frames of the others that it lacks. When all is quiet, every node must hold the model.
 //!
 //! The quiet scenario cuts only when no write is in flight. The free scenario writes while a cut
-//! is in the wait, and a write of the old epoch that is not in the seed is lost until the replay
-//! of the cut vector exists, so that scenario is ignored until then.
+//! is in the wait: a write of the old epoch that the seed lacks is written again by its author
+//! after the switch, from the cut vector of the seed. One cut runs at a time in both; two cutters
+//! of one epoch have their own test.
 
 use std::{env, mem};
 
@@ -80,7 +81,9 @@ impl Sim {
         for index in 0..NODES {
             nodes.push(Node {
                 name: nick(&format!("n{index}")),
-                doc: MeshDoc::new_ungated().state_epochs(),
+                doc: MeshDoc::new_ungated()
+                    .state_epochs()
+                    .owner(AuthorKey::from(pad(&format!("n{index}")))),
             });
         }
         Self {
@@ -101,40 +104,58 @@ impl Sim {
         }
     }
 
-    /// Node `index` sets or deletes one key inside its own key.
-    fn write(&mut self, index: usize) {
-        let key: &str = KEYS[self.dice.below(KEYS.len())];
-        let kind = self.dice.below(4);
-        let value: Value = match kind {
-            0 => Value::Null,
-            1 => json!(self.dice.below(1000)),
-            2 => json!(vec![self.dice.below(10), self.dice.below(10)]),
-            _ => json!(format!("v{}", self.dice.below(1000))),
-        };
-        let own = format!("n{index}");
-        let merge: Value = json!({ own.clone(): { key: value } });
+    /// Node `index` writes `merge`, and sends the frame. `false` when the merge changes nothing.
+    fn commit(&mut self, index: usize, merge: &Value) -> bool {
         let node = &mut self.nodes[index];
         let actor = pad(node.name.as_str());
         let built = node
             .doc
-            .build_change(&merge, &actor)
+            .build_change(merge, &actor)
             .expect("the merge applies");
         let Some(change) = built else {
-            // A delete of a key that is not there changes nothing, and neither does the model.
-            return;
+            return false;
         };
         let (wire, _plain) = node.doc.compose_wire_body(&change, None).expect("compose");
         let frame = signed(&node.name, wire);
         node.doc.ingest(&frame);
+        self.send_to_others(index, &frame);
+        true
+    }
+
+    /// Node `index` sets (`Some`) or deletes (`None`) `key` inside its own key, and the model
+    /// follows.
+    fn write_exact(&mut self, index: usize, key: &str, value: Option<Value>) {
+        let own = format!("n{index}");
+        let leaf: Value = value.clone().unwrap_or(Value::Null);
+        let merge: Value = json!({ own.clone(): { key: leaf } });
+        if !self.commit(index, &merge) {
+            // A delete of a key that is not there changes nothing, and neither does the model.
+            return;
+        }
         let namespace = self.model.entry(own).or_insert_with(|| json!({}));
         if let Value::Object(fields) = namespace {
-            if value.is_null() {
-                fields.remove(key);
-            } else {
-                fields.insert(key.to_owned(), value);
+            match value {
+                Some(present) => {
+                    fields.insert(key.to_owned(), present);
+                }
+                None => {
+                    fields.remove(key);
+                }
             }
         }
-        self.send_to_others(index, &frame);
+    }
+
+    /// Node `index` sets or deletes one random key inside its own key.
+    fn write(&mut self, index: usize) {
+        let key: &str = KEYS[self.dice.below(KEYS.len())];
+        let kind = self.dice.below(4);
+        let value: Option<Value> = match kind {
+            0 => None,
+            1 => Some(json!(self.dice.below(1000))),
+            2 => Some(json!(vec![self.dice.below(10), self.dice.below(10)])),
+            _ => Some(json!(format!("v{}", self.dice.below(1000)))),
+        };
+        self.write_exact(index, key, value);
     }
 
     /// Node `index` cuts the next epoch: it builds the seed of its live values and sends it to
@@ -175,10 +196,31 @@ impl Sim {
         self.wire = waiting;
     }
 
+    /// Deliver every frame that waits for `target`, so that the third node stays behind.
+    fn deliver_to(&mut self, from: usize, target: usize) {
+        let _ = from;
+        let mut waiting: Vec<(usize, u64, Verified)> = Vec::new();
+        for (to, at, frame) in mem::take(&mut self.wire) {
+            if to == target {
+                self.nodes[to].doc.ingest(&frame);
+            } else {
+                waiting.push((to, at, frame));
+            }
+        }
+        self.wire = waiting;
+    }
+
     fn tick_all(&mut self) {
-        for node in &mut self.nodes {
+        let mut replays: Vec<(usize, Value)> = Vec::new();
+        for (index, node) in self.nodes.iter_mut().enumerate() {
             let me = node.name.clone();
-            node.doc.tick_epoch(&me);
+            let switched = node.doc.tick_epoch(&me);
+            if let Some(patch) = switched.and_then(|switch| switch.replay) {
+                replays.push((index, patch));
+            }
+        }
+        for (index, patch) in replays {
+            self.commit(index, &patch);
         }
     }
 
@@ -240,6 +282,48 @@ impl Sim {
     }
 }
 
+/// A write that a node makes after the cut and before it adopts the seed must survive the switch.
+#[test]
+fn model_writes_during_the_wait_are_replayed() {
+    let _guard = habilis_network_test_tracing::init();
+    let mut sim = Sim::new(7);
+    sim.write_exact(0, "a", Some(json!(1)));
+    sim.settle();
+    sim.cut(0);
+    sim.write_exact(1, "b", Some(json!(2)));
+    sim.write_exact(2, "c", Some(json!([3, 4])));
+    sim.settle();
+    sim.assert_model("writes during the wait");
+}
+
+/// A delete that a node makes while the cut waits must not come back with the seed.
+#[test]
+fn model_a_delete_in_flight_stays_deleted() {
+    let _guard = habilis_network_test_tracing::init();
+    let mut sim = Sim::new(8);
+    sim.write_exact(1, "x", Some(json!("keep me not")));
+    sim.write_exact(1, "y", Some(json!("keep me")));
+    sim.settle();
+    sim.cut(0);
+    sim.write_exact(1, "x", None);
+    sim.settle();
+    sim.assert_model("a delete in the wait");
+}
+
+/// A node that lacks the newer value of a key at the cut must not write its older value again.
+#[test]
+fn model_a_stale_node_does_not_revert_a_newer_value() {
+    let _guard = habilis_network_test_tracing::init();
+    let mut sim = Sim::new(9);
+    sim.write_exact(0, "a", Some(json!("old")));
+    sim.settle();
+    sim.write_exact(0, "a", Some(json!("new")));
+    sim.deliver_to(0, 1);
+    sim.cut(0);
+    sim.settle();
+    sim.assert_model("a stale node");
+}
+
 /// Seeds for the run in CI: 500 take about 25 s of a debug build. The environment variable
 /// `STATE_EPOCH_MODEL_SEEDS` sets the count, for a long run by hand.
 fn seed_count(default: u64) -> u64 {
@@ -274,12 +358,19 @@ fn model_cuts_with_no_write_in_flight_converge_to_the_model() {
 }
 
 #[test]
-#[ignore = "red until the replay of step 3: a write made while a cut waits is not in the seed"]
 fn model_random_writes_cuts_and_adopts_converge_to_the_model() {
     let _guard = habilis_network_test_tracing::init();
+    // A seed that is not whole when the wait ends is dropped, and a node says so. With random delay
+    // that happens, and the sync rounds bring the frames again.
+    habilis_network_test_tracing::expect_warn(
+        "habilis_network::gossip",
+        "the seed of the candidate epoch was not complete",
+    );
     for seed in 0..seed_count(1000) {
         let mut sim = Sim::new(seed);
-        let mut cut_pending = false;
+        // The epoch that a cut started and not every node holds yet. One cut at a time: two nodes
+        // that cut the same epoch are the case of two cutters, which has its own test.
+        let mut cut_pending: Option<u64> = None;
         for _ in 0..60 {
             sim.step += 1;
             match sim.dice.below(8) {
@@ -288,10 +379,11 @@ fn model_random_writes_cuts_and_adopts_converge_to_the_model() {
                     sim.write(index);
                 }
                 4 => {
-                    if !cut_pending {
+                    if cut_pending.is_none() {
                         let cutter = sim.dice.below(NODES);
+                        let epoch = sim.nodes[cutter].doc.epoch() + 1;
                         let _ = sim.cut(cutter);
-                        cut_pending = true;
+                        cut_pending = Some(epoch);
                     }
                 }
                 5 => sim.tick_all(),
@@ -299,12 +391,10 @@ fn model_random_writes_cuts_and_adopts_converge_to_the_model() {
                 _ => {}
             }
             sim.deliver_due();
-            if sim
-                .nodes
-                .iter()
-                .all(|node| node.doc.epoch() == sim.nodes[0].doc.epoch())
+            if let Some(epoch) = cut_pending
+                && sim.nodes.iter().all(|node| node.doc.epoch() >= epoch)
             {
-                cut_pending = false;
+                cut_pending = None;
             }
         }
         sim.settle();
