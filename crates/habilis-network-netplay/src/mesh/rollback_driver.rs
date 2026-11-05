@@ -8,7 +8,6 @@ use habilis_network::embed::{
 };
 use habilis_network::protocol::messages::Verified;
 use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody};
-use habilis_network::runtime::SendError;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -133,8 +132,7 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
         let pubkey = frame.message.key();
 
         // Learn the pubkey -> nickname pairing from any frame. The signed
-        // pubkey is the identity; the nickname is only how `send_app`
-        // addresses it.
+        // pubkey is the identity; the nickname is a label to show.
         if let Ok(mut directory) = self.mailboxes.directory.lock() {
             directory.insert(pubkey, frame.message.author.clone());
         }
@@ -183,45 +181,21 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
     ) -> bool {
         match request {
             Outbound::Rollback { to, payload } => {
-                // Resolve and release the lock *before* awaiting: holding a
-                // `std::sync::Mutex` guard across an await is denied
-                // workspace-wide, and rightly so.
-                let known: bool = {
-                    let book = self.mailboxes.directory.lock().ok();
-                    book.is_some_and(|directory| directory.contains_key(&to))
-                };
-                if !known {
-                    // We have never heard from this peer, so we cannot
-                    // address it. The lobby only admits peers we have heard
-                    // from, so this means they left mid-match.
-                    tracing::debug!(
-                        peer = %to,
-                        "dropped a rollback packet for a peer with no known nickname"
-                    );
-                    return false;
-                }
+                // The engine routes by key and answers a key that is not live with an error, which
+                // `send` swallows: a peer that left mid-match is a lost packet, as on any other loss.
                 let Some(frame) = frame_for(context, ROLLBACK_TAG, Some(to), &payload) else {
                     return false;
                 };
                 let class = self.classify(&frame.authored());
-                let sent = ops::send_app(state, context, frame, class).await;
-                self.note_addressable(to, !matches!(sent, Err(SendError::Ambiguous(_))));
-                sent.is_ok()
+                send(state, context, frame, class).await
             }
             Outbound::Lobby { payload } => {
                 // Addressed to every roster member individually — never a
                 // gossip broadcast. Besides the resend hazard, `send_app`'s
                 // broadcast bodies are not mesh-key-sealed, so on a
                 // passworded mesh receivers drop them outright.
-                // A quiet member has a dead endpoint, and the engine refuses a nickname that two
-                // live members use. Neither is a roster member to address.
+                // A quiet member has a dead endpoint, so it is not a roster member to address.
                 let roster = state.roster_snapshot();
-                for nickname in roster.ambiguous_nicknames() {
-                    tracing::debug!(
-                        %nickname,
-                        "lobby packet skipped: two live peers use this nickname"
-                    );
-                }
                 let peers: Vec<AuthorKey> = roster.addressee_keys().copied().collect();
                 let mut delivered = false;
                 for peer in peers {
@@ -233,27 +207,6 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                 }
                 delivered
             }
-        }
-    }
-}
-
-impl<T: Config> RollbackDriver<T> {
-    /// Record whether the engine can address `peer`, and log the change once. A packet is sent
-    /// many times a second, so the log line is for the change and not for each packet.
-    fn note_addressable(&self, peer: AuthorKey, addressable: bool) {
-        let Ok(mut refused) = self.mailboxes.unaddressable.lock() else {
-            return;
-        };
-        let changed = if addressable {
-            refused.remove(&peer)
-        } else {
-            refused.insert(peer)
-        };
-        if changed && !addressable {
-            tracing::debug!(
-                %peer,
-                "rollback packets refused: two live peers use the nickname of this peer"
-            );
         }
     }
 }

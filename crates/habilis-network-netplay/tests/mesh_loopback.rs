@@ -21,8 +21,8 @@ use habilis_network::runtime::{
 use serde::{Deserialize, Serialize};
 
 use habilis_network_netplay::{
-    Config, Event, Lobby, MeshTransport, Outbound, P2PSession, Request, RollbackDriver,
-    RollbackError, SessionState, Tick,
+    Body, Config, Event, Lobby, MeshTransport, Outbound, P2PSession, Request, RollbackDriver,
+    RollbackError, SessionState, Tick, Transport,
 };
 
 use std::{process, thread};
@@ -314,11 +314,10 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
     );
 }
 
-/// The engine addresses a directed frame by author key, so a nickname that two live peers use
-/// does not make either of them unaddressable. A rollback packet to one of them is sent, and the
-/// transport does not report the peer as refused.
+/// A nickname is a label, so two live keys can use one. A rollback packet is addressed to a key,
+/// so the key it names gets it and the other key does not.
 #[test]
-fn a_peer_whose_nickname_two_live_peers_use_is_addressable_by_its_key() {
+fn a_packet_to_one_key_of_a_shared_nickname_reaches_that_key_only() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(
         guard,
@@ -348,27 +347,48 @@ fn a_peer_whose_nickname_two_live_peers_use_is_addressable_by_its_key() {
             .await;
             assert!(heard, "alice never heard from both peers named bob");
 
-            let twin = *twins_of(&players).first().expect("two peers named bob");
-            let alice = &players[0];
-            alice
-                .node
-                .sender()
-                .try_send(Outbound::Rollback {
-                    to: twin,
-                    payload: "{}".to_owned(),
-                })
-                .expect("the outbound queue has room");
-            let reported: bool = drive(&mut players, Duration::from_secs(5), |players| {
-                let transport = players[0]
+            // The token names the key that the packet is for: 1 for the first bob, 2 for the second.
+            for (bob, token) in [(1_usize, 1_u32), (2, 2)] {
+                let to = players[bob]
                     .transport
                     .as_ref()
-                    .expect("alice has her transport");
-                transport.unaddressable().any(|pubkey| pubkey == twin)
+                    .and_then(MeshTransport::local_pubkey)
+                    .expect("a bob that alice heard from has a key");
+                let payload =
+                    format!(r#"{{"magic":7,"body":{{"SyncRequest":{{"token":{token}}}}}}}"#);
+                players[0]
+                    .node
+                    .sender()
+                    .try_send(Outbound::Rollback { to, payload })
+                    .expect("the outbound queue has room");
+            }
+            let mut tokens: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+            let delivered: bool = drive(&mut players, Duration::from_secs(20), |players| {
+                // Player 0 is alice, so the bob of slot `n` is player `n + 1`.
+                let slots = tokens.iter_mut().enumerate();
+                for (slot, got) in slots {
+                    let bob = slot + 1;
+                    let mut inbox = players[bob]
+                        .transport
+                        .clone()
+                        .expect("a bob has his transport");
+                    for (_, message) in inbox.receive_all() {
+                        if let Body::SyncRequest { token } = message.body {
+                            got.push(token);
+                        }
+                    }
+                }
+                tokens.iter().all(|got| !got.is_empty())
             })
             .await;
             assert!(
-                !reported,
-                "a packet to one key of a nickname that two live peers use was refused"
+                delivered,
+                "a key of the shared nickname got no packet: {tokens:?}"
+            );
+            assert_eq!(
+                tokens,
+                [vec![1], vec![2]],
+                "each key must get the packet that names it, and only that one"
             );
 
             for player in players {
