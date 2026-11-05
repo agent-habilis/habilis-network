@@ -56,7 +56,8 @@ pub(crate) fn observe(
             .name_stamp
             .get(&key)
             .is_none_or(|newest| message.timestamp > *newest);
-        if !goodbye && (unnamed || newer_than_name) {
+        let in_bounds = !membership_update::is_far_ahead(message.timestamp);
+        if !goodbye && in_bounds && (unnamed || newer_than_name) {
             state
                 .clock_evidence
                 .name_stamp
@@ -2717,6 +2718,62 @@ mod churn_red {
                 state.names.get(&key),
                 Some(&nick("new-name")),
                 "a run of paced frames from the new base shows the step back, and the name follows"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A frame stamped further ahead of our clock than the quiet TTL proves nothing, and it must
+    /// not set a nickname either: its stamp would become the watermark of the nickname, and every
+    /// real rename after it would look older.
+    #[test]
+    fn a_frame_stamped_far_ahead_sets_no_nickname_and_moves_no_watermark() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let identity = Identity::generate();
+            let key = identity.author_key();
+            let now = UnixSecs::now();
+            let mut state = fresh_state();
+            let real = alive(&rig.mesh, &nick("real-name"), &identity, now);
+            let future = alive(
+                &rig.mesh,
+                &nick("bad-name"),
+                &identity,
+                now + Duration::from_hours(2),
+            );
+            let renamed = alive(
+                &rig.mesh,
+                &nick("renamed"),
+                &identity,
+                now + Duration::from_secs(20),
+            );
+            assert!(
+                receive(&real, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                receive(&future, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                state.names.get(&key),
+                Some(&nick("real-name")),
+                "the future frame sets no nickname"
+            );
+            assert_eq!(
+                state.clock_evidence.name_stamp.get(&key),
+                Some(&now),
+                "the future frame moves no watermark"
+            );
+            assert!(
+                receive(&renamed, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                state.names.get(&key),
+                Some(&nick("renamed")),
+                "a real rename after the future frame still works"
             );
             rig.endpoint.close().await;
         });

@@ -31,6 +31,13 @@ pub(crate) struct MembershipUpdate {
     pub stale: bool,
 }
 
+/// Whether `timestamp` is ahead of our clock by more than the quiet TTL. That is no clock skew of an
+/// honest peer: a signed frame like that would pass the lower bound of [`proves_presence`] for as
+/// long as its stamp stays above it, and it would freeze any watermark that it moves.
+pub(crate) fn is_far_ahead(timestamp: UnixSecs) -> bool {
+    timestamp > UnixSecs::now() + heartbeat::QUIET_TTL
+}
+
 /// Whether a frame proves that its author is alive now. A `left` never does. A frame of a live
 /// kind does when it was stamped within the quiet TTL: after that time nothing remembers a silent
 /// peer, so a relay can re-send its last frame as if it were news, and that frame is older than
@@ -42,9 +49,7 @@ pub(crate) struct MembershipUpdate {
 /// that the timeout asks.
 pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
     let now = UnixSecs::now();
-    // A stamp ahead of our clock by more than the quiet TTL is no clock skew of an honest peer: a
-    // signed frame like that would pass the lower bound for as long as its stamp stays above it.
-    if timestamp > now + heartbeat::QUIET_TTL {
+    if is_far_ahead(timestamp) {
         return false;
     }
     match kind {
