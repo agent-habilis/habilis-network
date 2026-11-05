@@ -39,9 +39,17 @@ pub mod wire;
 
 mod doc_error;
 
+mod parsed_change;
+
+mod seed_mark;
+
 mod split;
 
 pub use doc_error::DocError;
+
+pub use parsed_change::ParsedChange;
+
+pub use seed_mark::SeedMark;
 
 pub use split::split_entry;
 
