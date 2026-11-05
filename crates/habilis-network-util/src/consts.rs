@@ -153,10 +153,11 @@ pub const DOC_STATE_EPOCH_FRAME_CAP_BYTES: usize = 4 * 1024 * 1024;
 pub const DOC_SEED_FRAMES_MAX: usize =
     4 * DOC_STATE_EPOCH_FRAME_CAP_BYTES / (MAX_MESSAGE_SIZE - DOC_EPOCH_FRAME_MARGIN);
 
-/// The most writers that a state seed can list in its cut vector. The root frame holds the vector,
+/// The most writers that a state seed lists in its cut vector. The root frame holds the vector,
 /// at about 30 bytes for each writer (a tag of 8 bytes of the actor and a sequence number), and a
-/// frame holds 3840 bytes. A cutter with more writers than this in its epoch refuses to cut, so
-/// that no node adopts a seed that cannot say which writes it covers.
+/// frame holds 3840 bytes. A cutter with more writers than this keeps the busiest ones and says so
+/// (`SeedChain::truncated`): a writer that is left out is read as covering nothing, so its
+/// author writes again the leaves of its own that the seed holds with another value.
 pub const DOC_SEED_CUT_MAX: usize = 96;
 
 /// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged

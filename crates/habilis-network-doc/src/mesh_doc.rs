@@ -178,6 +178,10 @@ pub struct SeedChain {
     pub changes: Vec<Vec<u8>>,
     /// The mark for the body of the root.
     pub mark: SeedMark,
+    /// Whether the cut vector of the mark lists fewer writers than the document has. A writer
+    /// that is not listed has its changes counted as not in the seed, so its author writes again
+    /// the leaves of its own that differ. The caller warns once and counts it.
+    pub truncated: bool,
 }
 
 /// The root frame of a higher epoch that the document keeps until it adopts the epoch.
@@ -815,7 +819,7 @@ impl MeshDoc {
         actor_seed: &[u8],
         fits: impl FnMut(&Value) -> bool,
     ) -> Result<SeedChain, DocError> {
-        let cut: Vec<(String, u64)> = self.cut_vector()?;
+        let (cut, truncated) = self.cut_vector();
         let live = self.to_json();
         let cuts: Result<Vec<Value>, DocError> = split_entry(&live, fits).collect();
         let mut merges: Vec<Value> = cuts?;
@@ -854,12 +858,17 @@ impl MeshDoc {
         Ok(SeedChain {
             changes,
             mark: SeedMark::new(frames, last).with_cut(cut),
+            truncated,
         })
     }
 
     /// The cut vector of a seed built from this document: for each writer, the tag of its actor
-    /// and the highest sequence number of its changes that this document holds.
-    fn cut_vector(&self) -> Result<Vec<(String, u64)>, DocError> {
+    /// and the highest sequence number of its changes that this document holds, and whether the
+    /// vector is cut short. With more writers than `DOC_SEED_CUT_MAX` it keeps the ones with the
+    /// highest numbers, the busiest. A writer that is left out is read as covering nothing, so
+    /// its author writes again the leaves of its own that the seed holds with another value, and
+    /// a writer that left writes nothing, so a left out writer costs a few writes, no value.
+    fn cut_vector(&self) -> (Vec<(String, u64)>, bool) {
         let mut highest: BTreeMap<String, u64> = BTreeMap::new();
         for change in self.doc.get_changes(&[]) {
             if change.actor_id().to_bytes() == STATE_GENESIS_ACTOR {
@@ -868,12 +877,14 @@ impl MeshDoc {
             let seen = highest.entry(actor_tag(change.actor_id())).or_insert(0);
             *seen = (*seen).max(change.seq());
         }
-        if highest.len() > DOC_SEED_CUT_MAX {
-            return Err(DocError::TooManyWriters {
-                writers: highest.len(),
-            });
+        let mut cut: Vec<(String, u64)> = highest.into_iter().collect();
+        let truncated = cut.len() > DOC_SEED_CUT_MAX;
+        if truncated {
+            cut.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+            cut.truncate(DOC_SEED_CUT_MAX);
+            cut.sort();
         }
-        Ok(highest.into_iter().collect())
+        (cut, truncated)
     }
 
     /// The leaves that the changes above `cut` wrote, with the value that each holds now (`null`
@@ -3138,17 +3149,35 @@ mod tests {
     }
 
     #[test]
-    fn a_seed_is_not_built_for_more_writers_than_the_cut_vector_lists() {
+    fn a_seed_for_more_writers_than_the_cut_vector_lists_is_cut_with_the_busiest() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut doc = MeshDoc::new_ungated();
         for index in 0..=DOC_SEED_CUT_MAX {
             let writer = nick(&format!("w{index}"));
             write(&mut doc, &writer, &json!({ format!("w{index}"): 1 }));
         }
-        let result = doc.build_seed(2, b"cutter", within(600));
+        let busy = nick("w0");
+        write(&mut doc, &busy, &json!({ "w0": 2 }));
+        let chain = doc
+            .build_seed(2, b"cutter", within(600))
+            .expect("a seed with more writers than the vector lists is still cut");
         assert!(
-            matches!(result, Err(DocError::TooManyWriters { .. })),
-            "a seed that cannot say which writes it covers is not cut: {result:?}"
+            chain.truncated,
+            "the seed says that its cut vector is cut short"
+        );
+        assert_eq!(
+            chain.mark.cut.len(),
+            DOC_SEED_CUT_MAX,
+            "the vector holds the most it can"
+        );
+        let busiest = super::actor_tag(&automerge::ActorId::from(pad_seed(b"w0").as_slice()));
+        assert!(
+            chain
+                .mark
+                .cut
+                .iter()
+                .any(|(tag, seq)| *tag == busiest && *seq == 2),
+            "the writer with the most changes is in the vector"
         );
     }
 
