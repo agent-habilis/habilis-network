@@ -782,7 +782,10 @@ impl MeshDoc {
             None => Vec::new(),
         };
         if rival {
+            // A carried leaf is older than a write of this epoch to the same leaf or to a leaf that
+            // holds it, so the write wins and the carried value is not applied above it.
             let mut merged: Vec<(Vec<String>, Value)> = mem::take(&mut self.carried);
+            merged.retain(|(carried, _)| !leaves.iter().any(|(path, _)| carried.starts_with(path)));
             merged.extend(leaves);
             merged.sort_by_key(|(path, _)| path.len());
             leaves = merged;

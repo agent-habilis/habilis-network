@@ -352,6 +352,34 @@ fn model_two_cutters_converge_to_one_seed_and_lose_no_write() {
     }
 }
 
+/// A node that adopted a seed and then rewrote an object keeps the newer object when a lower rival
+/// seed of the same epoch wins. The carried value of an inner leaf must not come back above the
+/// newer write of its outer leaf.
+#[test]
+fn model_a_rival_seed_keeps_the_newer_object_of_a_node() {
+    let _guard = habilis_network_test_tracing::init();
+    let mut sim = Sim::new(5);
+    // The seed of epoch 1 holds `obj`, so a later write of `obj.k` is an inner leaf.
+    sim.write_exact(0, "obj", Some(json!({ "x": 0 })));
+    sim.settle();
+    let _ = sim.cut(2);
+    sim.settle();
+    // No other node holds this write of `k`.
+    sim.write_exact(0, "obj", Some(json!({ "k": 1 })));
+    // Only the seed of n2 reaches n0 first, so n0 adopts it and carries `k = 1`.
+    let _ = sim.cut(2);
+    sim.deliver_to(2, 0);
+    for _ in 0..=WAIT {
+        sim.tick_all();
+    }
+    sim.write_exact(0, "obj", None);
+    sim.write_exact(0, "obj", Some(json!({ "k": 2 })));
+    // The lower rival of n1 comes after, and wins on every node.
+    let _ = sim.cut(1);
+    sim.settle();
+    sim.assert_model("a rival seed after a rewrite of an object");
+}
+
 /// Seeds for the run in CI: 500 take about 25 s of a debug build. The environment variable
 /// `STATE_EPOCH_MODEL_SEEDS` sets the count, for a long run by hand.
 fn seed_count(default: u64) -> u64 {
