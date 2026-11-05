@@ -147,15 +147,23 @@ pub fn status_line(s: &Snapshot) -> String {
     }
     match sim::outcome(&s.world) {
         Outcome::InProgress => String::new(),
-        Outcome::Winner(i) => {
-            format!(
-                "{} WINS",
-                s.roster
-                    .get(i)
-                    .map_or("?".to_owned(), |(_, nick)| nick.to_uppercase())
-            )
-        }
+        Outcome::Winner(i) => format!("{} WINS", player_label(&s.roster, i).to_uppercase()),
         Outcome::Draw => "DRAW".to_owned(),
+    }
+}
+
+/// The name of the player at `slot`, or `?` for a slot that the roster does not hold. A nickname
+/// is a label that two live keys can share, so a nickname that the roster holds twice carries the
+/// slot too.
+fn player_label(roster: &[(String, String)], slot: usize) -> String {
+    let Some((_, nick)) = roster.get(slot) else {
+        return "?".to_owned();
+    };
+    let users = roster.iter().filter(|(_, other)| other == nick).count();
+    if users > 1 {
+        format!("{nick} #{}", slot + 1)
+    } else {
+        nick.clone()
     }
 }
 
@@ -327,6 +335,73 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
 
 #[cfg(test)]
 mod tests {
+    use crate::cycle::Cycle;
+    use crate::dir::Dir;
+    use crate::snapshot::Snapshot;
+    use crate::world::World;
+
+    /// A finished match: only the cycle at `survivor` is alive, and the roster lists `nicks`.
+    fn finished_match(nicks: &[&str], survivor: usize) -> Snapshot {
+        let cycles = (0..nicks.len())
+            .map(|index| Cycle {
+                x: 0,
+                y: 0,
+                dir: Dir::Up,
+                alive: index == survivor,
+            })
+            .collect();
+        let roster = nicks
+            .iter()
+            .enumerate()
+            .map(|(index, nick)| (format!("key-{index}"), (*nick).to_owned()))
+            .collect();
+        Snapshot {
+            match_number: 1,
+            room: String::new(),
+            world: World {
+                cycles,
+                ..World::default()
+            },
+            roster,
+            my_pubkey: String::new(),
+            present: nicks.len(),
+            waiting: false,
+            desynced: false,
+            syncing: false,
+        }
+    }
+
+    /// Two live keys can use one nickname, so a winner line with the nickname alone does not say
+    /// which of the two won. The slot of the roster tells them apart, and it is the same on every
+    /// peer because the roster is sorted.
+    #[test]
+    fn the_winner_line_tells_two_players_of_one_nickname_apart() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let second = finished_match(&["bob", "bob", "alice"], 1);
+        assert_eq!(
+            super::status_line(&second),
+            "BOB #2 WINS",
+            "the second bob wins, and the line says which bob"
+        );
+        let first = finished_match(&["bob", "bob", "alice"], 0);
+        assert_eq!(
+            super::status_line(&first),
+            "BOB #1 WINS",
+            "the first bob wins, and the line says which bob"
+        );
+    }
+
+    /// A nickname that one player uses needs no slot: the line stays as it was.
+    #[test]
+    fn the_winner_line_keeps_a_nickname_that_one_player_uses() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let winner = finished_match(&["bob", "bob", "alice"], 2);
+        assert_eq!(
+            super::status_line(&winner),
+            "ALICE WINS",
+            "a nickname of one player is shown alone"
+        );
+    }
 
     /// Regression: the room code used to be uppercased for display, but
     /// `crypto::topic_seed` hashes the topic byte-for-byte. A player who
