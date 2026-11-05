@@ -12,7 +12,6 @@
 //! so a wait can hold several epochs and two cutters of one epoch.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::{env, mem};
 
 use habilis_network_doc::{DocError, Ingested, MeshDoc, Stamp, StampedPaths, wire};
@@ -139,8 +138,10 @@ impl Sim {
         };
         let (wire, _plain) = node.doc.compose_wire_body(&change, None).expect("compose");
         let time = wire::parse_change_full(wire.as_str()).and_then(|parsed| parsed.time);
+        use std::fmt::Write as _;
         let mut tag = String::new();
-        for byte in actor.iter().take(8) {
+        let first_bytes = actor.iter().take(8);
+        for byte in first_bytes {
             let _ = write!(tag, "{byte:02x}");
         }
         self.last_stamp = time.map(|stamped| (stamped, tag));
@@ -178,12 +179,10 @@ impl Sim {
         if let Some(frame) = self.last_frame.clone() {
             self.shared_frames.insert(key.clone(), frame);
         }
-        let newer = self
-            .oracle
-            .get(&key)
-            .is_none_or(|(held_time, held_tag, _)| {
-                (time, tag.as_str()) > (*held_time, held_tag.as_str())
-            });
+        let held = self.oracle.get(&key);
+        let newer: bool = held.is_none_or(|(held_time, held_tag, _)| {
+            (time, tag.as_str()) > (*held_time, held_tag.as_str())
+        });
         if newer {
             self.oracle.insert(key, (time, tag, value));
         }
@@ -349,11 +348,12 @@ impl Sim {
 
     /// The value that each node holds at the top-level key `key`.
     fn held(&self, key: &str) -> Vec<Option<Value>> {
-        let values = self
-            .nodes
-            .iter()
-            .map(|node| node.doc.to_json().get(key).cloned());
-        values.collect()
+        let mut values: Vec<Option<Value>> = Vec::new();
+        for node in &self.nodes {
+            let json = node.doc.to_json();
+            values.push(json.get(key).cloned());
+        }
+        values
     }
 
     /// Lose the frames on the wire that wait for `target`: a partition for the moment.
@@ -381,11 +381,9 @@ impl Sim {
         for (index, patch, stamps) in replays {
             let limit = self.fits;
             let fits = |merge: &Value| merge.to_string().len() <= limit;
-            let chunks = self.nodes[index]
-                .doc
-                .split_replay(&patch, fits)
-                .expect("the replay splits");
+            let chunks = self.nodes[index].doc.split_replay(&patch, fits);
             for chunk in chunks {
+                let chunk = chunk.expect("the replay splits");
                 self.commit_replay(index, &chunk, &stamps);
             }
         }
@@ -513,7 +511,10 @@ fn model_a_waiting_restore_that_a_newer_write_overtook_is_not_written() {
     );
     // The replay of the author reaches node n1, and then node n2 writes `s0` again.
     sim.deliver_to(2, 1);
-    assert!(sim.commit(2, &json!({ "s0": "new" })));
+    assert!(
+        sim.commit(2, &json!({ "s0": "new" })),
+        "node n2 writes `s0` again"
+    );
     let (time, tag) = sim.last_stamp.clone().expect("a stamp");
     sim.oracle
         .insert(vec!["s0".to_owned()], (time, tag, Some(json!("new"))));
@@ -544,7 +545,10 @@ fn model_a_replay_of_more_than_128_leaves_arrives_whole() {
         for leaf in 0..count {
             leaves.insert(format!("l{leaf:03}"), json!(leaf));
         }
-        assert!(sim.commit(1, &json!({ "n1": Value::Object(leaves.clone()) })));
+        assert!(
+            sim.commit(1, &json!({ "n1": Value::Object(leaves.clone()) })),
+            "node n1 writes its leaves"
+        );
         if let Value::Object(fields) = sim
             .model
             .entry("n1".to_owned())

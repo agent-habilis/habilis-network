@@ -210,7 +210,8 @@ fn take_tombstones(queue: &mut VecDeque<(Vec<String>, Stamp)>, entries: usize) -
     let mut taken: StampedPaths = Vec::new();
     let mut bytes: usize = 0;
     while let Some((path, _)) = queue.front() {
-        let cost: usize = path.iter().map(String::len).sum::<usize>() + 32;
+        let path_bytes: usize = path.iter().map(String::len).sum();
+        let cost = path_bytes + 32;
         let full = taken.len() >= entries
             || (!taken.is_empty() && bytes + cost > DOC_SEED_TOMBSTONE_FRAME_BYTES);
         if full {
@@ -781,20 +782,16 @@ impl MeshDoc {
 
     /// Split a replay merge into merges of at most `DOC_REPLAY_ENTRIES_MAX` paths that each fit a
     /// frame (`fits` measures the real frame, as for [`Self::build_seed`]). A sender that has more
-    /// leaves to write again than one frame names sends one frame for each merge.
-    ///
-    /// # Errors
+    /// leaves to write again than one frame names sends one frame for each merge. An item is
     /// [`DocError::TooLarge`] when one leaf does not fit a frame.
-    pub fn split_replay(
+    pub fn split_replay<Fits: FnMut(&Value) -> bool>(
         &self,
         replay: &Value,
-        fits: impl FnMut(&Value) -> bool,
-    ) -> Result<Vec<Value>, DocError> {
-        let mut within_frame = fits;
-        split_entry(replay, |merge| {
-            count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
+        mut fits: Fits,
+    ) -> impl Iterator<Item = Result<Value, DocError>> + use<Fits> {
+        split_entry(replay, move |merge| {
+            count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && fits(merge)
         })
-        .collect()
     }
 
     /// The plaintext body string to surface for `frame`, decrypting an `enc`
@@ -830,6 +827,8 @@ impl MeshDoc {
             .as_ref()
             .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len()));
         let peer_nicks = json.as_ref().map(|json| self.gated_nicks(json));
+        let unstamped_paths: u64 = self.unstamped.load(Ordering::Relaxed);
+        let replay_unsettled: u64 = u64::try_from(self.restores.len()).unwrap_or(u64::MAX);
         DocCensus {
             epoch: self.epoch,
             changes: self.applied.len(),
@@ -839,9 +838,9 @@ impl MeshDoc {
             json_bytes,
             peer_nicks,
             refused_time: self.refused_time,
-            unstamped_paths: self.unstamped.load(Ordering::Relaxed),
+            unstamped_paths,
             dropped_restores: self.restores_dropped,
-            replay_unsettled: u64::try_from(self.restores.len()).unwrap_or(u64::MAX),
+            replay_unsettled,
         }
     }
 
@@ -871,17 +870,18 @@ impl MeshDoc {
     /// no value, and for a value whose change has no time (a change of a channel with no state
     /// epochs, or the genesis). One scan of the history builds the index for all the paths.
     #[must_use]
-    pub fn stamps_of(&self, paths: &[Vec<String>]) -> Vec<Option<Stamp>> {
+    pub(crate) fn stamps_of(&self, paths: &[Vec<String>]) -> Vec<Option<Stamp>> {
         let mut index: OpIndex = HashMap::new();
         for change in self.doc.get_changes(&[]) {
-            index
-                .entry(change.actor_id().to_bytes().to_vec())
-                .or_default()
-                .push(OpSpan {
-                    start: change.start_op().get(),
-                    len: u64::try_from(change.len()).unwrap_or(u64::MAX),
-                    hash: change.hash(),
-                });
+            let start: u64 = change.start_op().get();
+            let len: u64 = u64::try_from(change.len()).unwrap_or(u64::MAX);
+            let span = OpSpan {
+                start,
+                len,
+                hash: change.hash(),
+            };
+            let actor: Vec<u8> = change.actor_id().to_bytes().to_vec();
+            index.entry(actor).or_default().push(span);
         }
         for spans in index.values_mut() {
             spans.sort_by_key(|span| span.start);
@@ -905,8 +905,10 @@ impl MeshDoc {
         }
         let change = Change::from_bytes(parsed.bytes).ok()?;
         let paths = change_leaves(&self.doc, &change);
-        (paths.len() == parsed.origins.len())
-            .then(|| paths.into_iter().zip(parsed.origins).collect())
+        if paths.len() != parsed.origins.len() {
+            return None;
+        }
+        Some(paths.into_iter().zip(parsed.origins).collect())
     }
 
     /// The stamp of the value at `path`, from the op that holds it.
@@ -1211,16 +1213,15 @@ impl MeshDoc {
         }
         let jitter = 1 + (self.own_tag.load(Ordering::Relaxed) ^ candidate.epoch) % 3;
         self.restores_due = u32::try_from(jitter).unwrap_or(3);
-        let leaves: Vec<(Vec<String>, Value)> = own_writes
-            .iter()
-            .map(|(path, value, _)| (path.clone(), value.clone()))
-            .collect();
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        let mut stamped: StampedPaths = Vec::new();
+        for (path, value, stamp) in &own_writes {
+            leaves.push((path.clone(), value.clone()));
+            stamped.push((path.clone(), stamp.clone()));
+        }
         switch.replay = self.replay_patch(leaves);
         if switch.replay.is_some() {
-            switch.replay_stamps = own_writes
-                .iter()
-                .map(|(path, _, stamp)| (path.clone(), stamp.clone()))
-                .collect();
+            switch.replay_stamps = stamped;
         }
         Some(switch)
     }
@@ -1244,7 +1245,8 @@ impl MeshDoc {
         let mine = self.stamps_of(&paths);
         let floors = self.tombstone_floors(&paths);
         let mut pending: Vec<(Vec<String>, Value, Stamp)> = Vec::new();
-        for (((path, value), stamp), floor) in objects.into_iter().zip(mine).zip(floors) {
+        let rows = objects.into_iter().zip(mine).zip(floors);
+        for (((path, value), stamp), floor) in rows {
             let Some(stamp) = stamp else { continue };
             // A value below a delete of a higher stamp is dead: the delete is what is written.
             if floor.is_some_and(|dead| dead >= stamp) {
@@ -1381,11 +1383,10 @@ impl MeshDoc {
         // The tombstones go on the frames in the order of their paths, as many as a frame holds
         // inside its byte budget and its entry cap. If the frames of the seed are not enough,
         // carrier changes (a key written and deleted, as for an empty seed) take the rest.
-        let mut queue: VecDeque<(Vec<String>, Stamp)> = self
-            .tombstones
-            .iter()
-            .map(|(path, stamp)| (path.clone(), stamp.clone()))
-            .collect();
+        let mut queue: VecDeque<(Vec<String>, Stamp)> = VecDeque::new();
+        for (path, stamp) in &self.tombstones {
+            queue.push_back((path.clone(), stamp.clone()));
+        }
         let mut carried: Vec<StampedPaths> = Vec::with_capacity(changes.len());
         for stamps in &origins {
             carried.push(take_tombstones(
@@ -1435,7 +1436,8 @@ impl MeshDoc {
         let paths: Vec<Vec<String>> = leaves.into_iter().map(|(path, _)| path).collect();
         let stamps = self.stamps_of(&paths);
         let floors = self.tombstone_floors(&paths);
-        for ((path, stamp), floor) in paths.iter().zip(stamps).zip(floors) {
+        let rows = paths.iter().zip(stamps).zip(floors);
+        for ((path, stamp), floor) in rows {
             let dead = match (stamp, floor) {
                 (Some(held), Some(floor)) => held < floor,
                 (None, Some(_)) => true,
@@ -1477,10 +1479,8 @@ impl MeshDoc {
             if paths.len() != parsed.origins.len() || paths.len() > DOC_REPLAY_ENTRIES_MAX {
                 return None;
             }
-            found.insert(
-                change.hash(),
-                paths.into_iter().zip(parsed.origins).collect(),
-            );
+            let named: StampedPaths = paths.into_iter().zip(parsed.origins).collect();
+            found.insert(change.hash(), named);
         }
         Some((found, dead))
     }
@@ -1968,13 +1968,14 @@ impl MeshDoc {
     fn tombstone_floors(&self, paths: &[Vec<String>]) -> Vec<Option<Stamp>> {
         paths
             .iter()
-            .map(|path| {
-                (1..=path.len())
-                    .filter_map(|depth| self.tombstones.get(&path[..depth]))
-                    .max()
-                    .cloned()
-            })
+            .map(|path| self.tombstone_floor(path))
             .collect()
+    }
+
+    /// The highest tombstone at `path` or above it.
+    fn tombstone_floor(&self, path: &[String]) -> Option<Stamp> {
+        let governing = (1..=path.len()).filter_map(|depth| self.tombstones.get(&path[..depth]));
+        governing.max().cloned()
     }
 
     /// The leaves that a replay frame changes or hides, that this node holds with a stamp, and the
@@ -2021,9 +2022,10 @@ impl MeshDoc {
             .zip(before)
             .map(|(path, before_stamp)| {
                 let (value, present) = held.remove(&path).unwrap_or((None, false));
-                let after_stamp = present
-                    .then(|| named_stamps.get(&path).map(|stamp| (*stamp).clone()))
-                    .flatten();
+                let after_stamp: Option<Stamp> = match named_stamps.get(&path) {
+                    Some(stamp) if present => Some((*stamp).clone()),
+                    _ => None,
+                };
                 Lowered {
                     path,
                     value,
@@ -2041,7 +2043,8 @@ impl MeshDoc {
     fn note_lowered(&mut self, lowered: &[Lowered]) {
         let paths: Vec<Vec<String>> = lowered.iter().map(|leaf| leaf.path.clone()).collect();
         let floors = self.tombstone_floors(&paths);
-        for (leaf, floor) in lowered.iter().zip(floors) {
+        let rows = lowered.iter().zip(floors);
+        for (leaf, floor) in rows {
             let value_lowered = match (&leaf.before, &leaf.after, &leaf.value) {
                 (Some(held), Some(now), Some(_)) => now < held,
                 (Some(held), None, Some(_)) => floor.as_ref() < Some(held),
@@ -2116,7 +2119,8 @@ impl MeshDoc {
         let floors = self.tombstone_floors(&paths);
         let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
         let mut stamps: Vec<(Vec<String>, Stamp)> = Vec::new();
-        for (((path, (value, stamp)), now), floor) in held.into_iter().zip(live).zip(floors) {
+        let rows = held.into_iter().zip(live).zip(floors);
+        for (((path, (value, stamp)), now), floor) in rows {
             // A delete of a higher stamp governs the path: a value is not written over it.
             let deleted = !value.is_null() && floor.is_some_and(|dead| dead >= stamp);
             // An empty object over an object that the document holds only wipes its keys.
@@ -2161,9 +2165,8 @@ impl MeshDoc {
             if path.is_empty() {
                 continue;
             }
-            let stamp: Stamp = named
-                .and_then(|list| list.iter().find(|(held, _)| *held == path))
-                .map_or_else(|| own.clone(), |(_, stamp)| stamp.clone());
+            let named_here = named.and_then(|list| list.iter().find(|(held, _)| *held == path));
+            let stamp: Stamp = named_here.map_or_else(|| own.clone(), |(_, stamp)| stamp.clone());
             match patch.action {
                 automerge::PatchAction::DeleteMap { .. } => self.add_tombstone(path, stamp),
                 automerge::PatchAction::PutMap { .. } => {
@@ -2197,9 +2200,8 @@ impl MeshDoc {
         }
         self.tombstones.insert(path, stamp);
         if self.tombstones.len() > DOC_SEED_TOMBSTONES_MAX {
-            let lowest = self
-                .tombstones
-                .iter()
+            let entries = self.tombstones.iter();
+            let lowest: Option<Vec<String>> = entries
                 .min_by(|left, right| left.1.cmp(right.1))
                 .map(|(held, _)| held.clone());
             if let Some(oldest) = lowest {
@@ -2605,15 +2607,11 @@ fn seed_stamp_map(
     let mut map: HashMap<Vec<String>, Stamp> = HashMap::new();
     for list in found.values() {
         for (path, stamp) in list {
-            map.entry(path.clone())
-                .and_modify(|held| *held = (*held).clone().max(stamp.clone()))
-                .or_insert_with(|| stamp.clone());
+            raise_stamp(&mut map, path, stamp);
         }
     }
     for (path, stamp) in dead {
-        map.entry(path.clone())
-            .and_modify(|held| *held = (*held).clone().max(stamp.clone()))
-            .or_insert_with(|| stamp.clone());
+        raise_stamp(&mut map, path, stamp);
     }
     map
 }
@@ -2644,11 +2642,10 @@ impl<'doc> PathReader<'doc> {
                 *counts.entry(parent).or_default() += 1;
             }
         }
-        let shared = counts
+        let crowded = counts
             .into_iter()
-            .filter(|(_, count)| *count >= PATH_READER_SHARED_MIN)
-            .map(|(parent, _)| parent.to_vec())
-            .collect();
+            .filter(|(_, count)| *count >= PATH_READER_SHARED_MIN);
+        let shared = crowded.map(|(parent, _)| parent.to_vec()).collect();
         Self {
             doc,
             shared,
@@ -2662,12 +2659,12 @@ impl<'doc> PathReader<'doc> {
         if !self.shared.contains(parent) {
             return json_at(doc, path);
         }
-        self.read
+        let read = self
+            .read
             .entry(parent.to_vec())
-            .or_insert_with(|| json_at(doc, parent))
-            .as_ref()
-            .and_then(|object| object.get(key.as_str()))
-            .cloned()
+            .or_insert_with(|| json_at(doc, parent));
+        let field: Option<&Value> = read.as_ref().and_then(|object| object.get(key.as_str()));
+        field.cloned()
     }
 }
 
@@ -2682,7 +2679,8 @@ fn json_at(doc: &Automerge, path: &[String]) -> Option<Value> {
             &object,
         ));
     }
-    for (position, key) in path.iter().enumerate() {
+    let steps = path.iter().enumerate();
+    for (position, key) in steps {
         let (value, id) = doc.get(&object, key.as_str()).ok()??;
         if position + 1 == path.len() {
             return Some(subtree_json(doc, &value, &id));
@@ -2700,25 +2698,40 @@ fn json_at(doc: &Automerge, path: &[String]) -> Option<Value> {
 /// reads as `null`.
 fn subtree_json(doc: &Automerge, value: &automerge::Value<'_>, id: &ObjId) -> Value {
     match value {
-        automerge::Value::Object(ObjType::List) => Value::Array(
-            doc.list_range(id, ..)
-                .map(|item| {
-                    let child = item.id();
-                    subtree_json(doc, &item.value.into_value(), &child)
-                })
-                .collect(),
-        ),
+        automerge::Value::Object(ObjType::List) => list_json(doc, id),
         automerge::Value::Object(ObjType::Text) => Value::String(doc.text(id).unwrap_or_default()),
-        automerge::Value::Object(ObjType::Map | ObjType::Table) => Value::Object(
-            doc.map_range(id, ..)
-                .map(|item| {
-                    let child = item.id();
-                    let json = subtree_json(doc, &item.value.into_value(), &child);
-                    (item.key.into_owned(), json)
-                })
-                .collect(),
-        ),
+        automerge::Value::Object(ObjType::Map | ObjType::Table) => map_json(doc, id),
         automerge::Value::Scalar(scalar) => scalar_json(scalar),
+    }
+}
+
+/// The JSON array of the list `id` of `doc`.
+fn list_json(doc: &Automerge, id: &ObjId) -> Value {
+    let items = doc.list_range(id, ..).map(|item| {
+        let child = item.id();
+        subtree_json(doc, &item.value.into_value(), &child)
+    });
+    Value::Array(items.collect())
+}
+
+/// The JSON object of the map or table `id` of `doc`.
+fn map_json(doc: &Automerge, id: &ObjId) -> Value {
+    let fields = doc.map_range(id, ..).map(|item| {
+        let child = item.id();
+        let json = subtree_json(doc, &item.value.into_value(), &child);
+        (item.key.into_owned(), json)
+    });
+    Value::Object(fields.collect())
+}
+
+/// Set the stamp of `path` in `map` to `stamp`, unless the map holds a higher one.
+fn raise_stamp(map: &mut HashMap<Vec<String>, Stamp>, path: &[String], stamp: &Stamp) {
+    match map.get_mut(path) {
+        Some(held) if *held >= *stamp => {}
+        Some(held) => *held = stamp.clone(),
+        None => {
+            map.insert(path.to_vec(), stamp.clone());
+        }
     }
 }
 
@@ -3852,6 +3865,26 @@ mod tests {
         carrier
     }
 
+    /// The change that `doc` builds for `merge` as the actor of `actor_seed`.
+    fn change_of(doc: &MeshDoc, merge: &Value, actor_seed: &[u8]) -> Vec<u8> {
+        let built = doc.build_change(merge, actor_seed).expect("applies");
+        built.expect("a change")
+    }
+
+    /// `path` as owned keys.
+    fn owned_path(path: Vec<&str>) -> Vec<String> {
+        path.into_iter().map(str::to_owned).collect()
+    }
+
+    /// Ingest `frame` into `doc`, and fail the test if the frame does not apply.
+    fn ingest_applies(doc: &mut MeshDoc, frame: &Verified) {
+        let outcome = doc.ingest(frame);
+        assert!(
+            matches!(outcome, Ingested::Applied { .. }),
+            "expected applied, got {outcome:?}"
+        );
+    }
+
     fn entry(who: &str, card: &str) -> Value {
         json!({ "peers": { who: { "card": card, "status": "idle" } } })
     }
@@ -4766,13 +4799,13 @@ mod tests {
         let first = write(&mut doc, &left, &json!({ "shared": 1, "n": { "k": 5 } }));
         // The other node takes it in, and then writes the shared leaf: its write is the later one.
         let mut other = MeshDoc::new_ungated().state_epochs();
-        assert!(matches!(other.ingest(&first), Ingested::Applied { .. }));
+        ingest_applies(&mut other, &first);
         let second = write(&mut other, &right, &json!({ "shared": 2 }));
-        assert!(matches!(doc.ingest(&second), Ingested::Applied { .. }));
+        ingest_applies(&mut doc, &second);
         let tag = |who: &Nickname| {
             super::actor_tag(&super::actor_for(&pad_seed(who.as_str().as_bytes())))
         };
-        let paths = vec![
+        let paths: Vec<Vec<String>> = vec![
             vec!["shared".to_owned()],
             vec!["n".to_owned(), "k".to_owned()],
             vec!["missing".to_owned()],
@@ -4798,10 +4831,11 @@ mod tests {
         let me = nick("me");
         let build = |time: u64| {
             let timeless = MeshDoc::new_ungated();
-            let bytes = timeless
-                .build_change(&json!({ "a": time }), &pad_seed(me.as_str().as_bytes()))
-                .expect("applies")
-                .expect("a change");
+            let bytes = change_of(
+                &timeless,
+                &json!({ "a": time }),
+                &pad_seed(me.as_str().as_bytes()),
+            );
             let body = change_body_timed(&bytes, None, 0, None, Some(time)).expect("a body");
             let key = signer(&me);
             Verified::fixture_unchecked(
@@ -4834,10 +4868,7 @@ mod tests {
         let mut ahead = doc_with_clock_at(49);
         let heard = write(&mut ahead, &other, &json!({ "z": 1 }));
         let mut doc = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
-        let bytes = doc
-            .build_change(&json!({ "a": 1 }), &pad_seed(me.as_str().as_bytes()))
-            .expect("applies")
-            .expect("a change");
+        let bytes = change_of(&doc, &json!({ "a": 1 }), &pad_seed(me.as_str().as_bytes()));
         assert!(
             matches!(
                 doc.compose_wire_body(&bytes, None),
@@ -4845,7 +4876,7 @@ mod tests {
             ),
             "a write waits: its time would be below the writes before the restart"
         );
-        assert!(matches!(doc.ingest(&heard), Ingested::Applied { .. }));
+        ingest_applies(&mut doc, &heard);
         assert!(
             matches!(
                 doc.compose_wire_body(&bytes, None),
@@ -4879,13 +4910,11 @@ mod tests {
         write(&mut writer, &me, &json!({ "gone": 1, "keep": { "x": 1 } }));
         // One change that writes an object and its leaves, and writes and deletes one leaf.
         let seed = pad_seed(me.as_str().as_bytes());
-        let bytes = writer
-            .build_change(
-                &json!({ "z": { "b": 2, "a": [1, 2] }, "m": 7, "gone": null, "keep": { "y": 3 } }),
-                &seed,
-            )
-            .expect("applies")
-            .expect("a change");
+        let bytes = change_of(
+            &writer,
+            &json!({ "z": { "b": 2, "a": [1, 2] }, "m": 7, "gone": null, "keep": { "y": 3 } }),
+            &seed,
+        );
         let change = Change::from_bytes(bytes.clone()).expect("a change");
         let expected: Vec<Vec<String>> = [
             vec!["gone"],
@@ -4896,7 +4925,7 @@ mod tests {
             vec!["z", "b"],
         ]
         .into_iter()
-        .map(|path| path.into_iter().map(str::to_owned).collect())
+        .map(owned_path)
         .collect();
         // Two nodes that hold the same history build the list from the same change.
         let mut left = MeshDoc::new_ungated();
@@ -4926,9 +4955,9 @@ mod tests {
         let mut doc = MeshDoc::new_ungated().state_epochs();
         let first = write(&mut doc, &left, &json!({ "shared": 1, "n": { "k": 5 } }));
         let mut other = MeshDoc::new_ungated().state_epochs();
-        assert!(matches!(other.ingest(&first), Ingested::Applied { .. }));
+        ingest_applies(&mut other, &first);
         let second = write(&mut other, &right, &json!({ "shared": 2 }));
-        assert!(matches!(doc.ingest(&second), Ingested::Applied { .. }));
+        ingest_applies(&mut doc, &second);
         // The cutter holds both writes and cuts a seed. A node that adopts it reads, for each leaf,
         // the stamp of the write that made the value, not the stamp of the cutter.
         let frames = seed_frames_of(&doc, &cutter, 3, None);
@@ -4940,7 +4969,7 @@ mod tests {
         let tag = |who: &Nickname| {
             super::actor_tag(&super::actor_for(&pad_seed(who.as_str().as_bytes())))
         };
-        let paths = vec![
+        let paths: Vec<Vec<String>> = vec![
             vec!["shared".to_owned()],
             vec!["n".to_owned(), "k".to_owned()],
         ];
@@ -4983,7 +5012,8 @@ mod tests {
                 .unverified_key(who),
             who,
         )];
-        for (index, bytes) in chain.changes.iter().enumerate().skip(1) {
+        let later = chain.changes.iter().enumerate().skip(1);
+        for (index, bytes) in later {
             let stamps = &chain.origins[index];
             let tail = change_body_stamped(bytes, None, 3, None, Some(chain.time), stamps)
                 .expect("a body");
@@ -5013,10 +5043,11 @@ mod tests {
         );
         let me = nick("me");
         let timeless = MeshDoc::new_ungated();
-        let bytes = timeless
-            .build_change(&json!({ "a": 1 }), &pad_seed(me.as_str().as_bytes()))
-            .expect("applies")
-            .expect("a change");
+        let bytes = change_of(
+            &timeless,
+            &json!({ "a": 1 }),
+            &pad_seed(me.as_str().as_bytes()),
+        );
         let build = |count: usize| {
             let stamps: Vec<Stamp> = (0..count).map(|_| Stamp::new(1, "aa".to_owned())).collect();
             let body =
@@ -5044,9 +5075,9 @@ mod tests {
         let mut doc = MeshDoc::new_ungated().state_epochs();
         let first = write(&mut doc, &left, &json!({ "shared": 1 }));
         let mut other = MeshDoc::new_ungated().state_epochs();
-        assert!(matches!(other.ingest(&first), Ingested::Applied { .. }));
+        ingest_applies(&mut other, &first);
         let second = write(&mut other, &right, &json!({ "shared": 2 }));
-        assert!(matches!(doc.ingest(&second), Ingested::Applied { .. }));
+        ingest_applies(&mut doc, &second);
         let frames = seed_frames_of(&doc, &cutter, 3, None);
         let mut adopter = MeshDoc::new_ungated().state_epochs();
         for frame in &frames {
@@ -5077,9 +5108,9 @@ mod tests {
         let mut doc = MeshDoc::new_ungated().state_epochs();
         let first = write(&mut doc, &left, &json!({ "shared": 1 }));
         let mut other = MeshDoc::new_ungated().state_epochs();
-        assert!(matches!(other.ingest(&first), Ingested::Applied { .. }));
+        ingest_applies(&mut other, &first);
         let second = write(&mut other, &right, &json!({ "shared": 2 }));
-        assert!(matches!(doc.ingest(&second), Ingested::Applied { .. }));
+        ingest_applies(&mut doc, &second);
         // The cutter sends the seed to itself, as every node does, and adopts it after the wait.
         let actor = pad_seed(cutter.as_str().as_bytes());
         let chain = doc
@@ -5127,7 +5158,8 @@ mod tests {
         }
         let mut adopter = MeshDoc::new_ungated().state_epochs();
         let who = signer(&cutter);
-        for (index, bytes) in chain.changes.iter().enumerate() {
+        let numbered = chain.changes.iter().enumerate();
+        for (index, bytes) in numbered {
             let mark = (index == 0).then_some(&chain.mark);
             let body = change_body_stamped(
                 bytes,
@@ -5250,10 +5282,14 @@ mod tests {
             chain.changes.len() > 1,
             "300 tombstones need more than 1 frame"
         );
-        for (index, dead) in chain.tombstones.iter().enumerate() {
+        let numbered = chain.tombstones.iter().enumerate();
+        for (index, dead) in numbered {
             let bytes: usize = dead
                 .iter()
-                .map(|(path, _)| path.iter().map(String::len).sum::<usize>() + 32)
+                .map(|(path, _)| {
+                    let path_bytes: usize = path.iter().map(String::len).sum();
+                    path_bytes + 32
+                })
                 .sum();
             assert!(
                 bytes <= super::DOC_SEED_TOMBSTONE_FRAME_BYTES,
@@ -5298,11 +5334,8 @@ mod tests {
         let (cutter, me) = (nick("cutter"), nick("me"));
         let doc = doc_with_long_tombstones(super::DOC_SEED_TOMBSTONES_MAX);
         let frames = seed_frames_of(&doc, &cutter, 3, None);
-        let longest = frames
-            .iter()
-            .map(|frame| frame.body.as_str().len())
-            .max()
-            .unwrap_or(0);
+        let bodies = frames.iter().map(|frame| frame.body.as_str());
+        let longest = bodies.map(str::len).max().unwrap_or(0);
         assert!(
             longest <= super::DOC_SEED_TOMBSTONE_FRAME_BYTES + 400,
             "the longest body stays near the budget of a frame: {longest} bytes in {} frames",
@@ -5321,7 +5354,8 @@ mod tests {
         );
         // One frame of the middle is missing: the node does not switch and holds no half seed.
         let mut broken = MeshDoc::new_ungated().state_epochs();
-        for (index, frame) in frames.iter().enumerate() {
+        let numbered = frames.iter().enumerate();
+        for (index, frame) in numbered {
             if index != frames.len() / 2 {
                 let _ = broken.ingest(frame);
             }
@@ -5341,12 +5375,7 @@ mod tests {
     fn a_tombstone_body_that_is_not_canonical_is_refused() {
         let _guard = ::habilis_network_test_tracing::init();
         let stamp = Stamp::new(9, "aa".to_owned());
-        let one = |path: Vec<&str>| {
-            (
-                path.into_iter().map(str::to_owned).collect::<Vec<_>>(),
-                stamp.clone(),
-            )
-        };
+        let one = |path: Vec<&str>| (owned_path(path), stamp.clone());
         let cases: Vec<(StampedPaths, &str)> = vec![
             (vec![one(vec!["a"]), one(vec!["a"])], "the same path twice"),
             (vec![one(vec!["b"]), one(vec!["a"])], "paths out of order"),
@@ -5381,10 +5410,11 @@ mod tests {
         );
         let me = nick("me");
         let timeless = MeshDoc::new_ungated();
-        let bytes = timeless
-            .build_change(&json!({ "a": 1 }), &pad_seed(me.as_str().as_bytes()))
-            .expect("applies")
-            .expect("a change");
+        let bytes = change_of(
+            &timeless,
+            &json!({ "a": 1 }),
+            &pad_seed(me.as_str().as_bytes()),
+        );
         let dead = vec![(vec!["k".to_owned()], Stamp::new(1, "aa".to_owned()))];
         let body =
             change_body_tombstoned(&bytes, None, 0, None, Some(1), &[], &dead).expect("a body");
@@ -5445,13 +5475,11 @@ mod tests {
         // A replay of another node sets `shared = 5` at the stamp 50, and automerge keeps it (the
         // actor of that node is the higher one), so this node plans to write 9 again.
         let replayer = MeshDoc::new_ungated().state_epochs();
-        let change = replayer
-            .build_change(
-                &json!({ "shared": 5 }),
-                &pad_seed(other.as_str().as_bytes()),
-            )
-            .expect("applies")
-            .expect("a change");
+        let change = change_of(
+            &replayer,
+            &json!({ "shared": 5 }),
+            &pad_seed(other.as_str().as_bytes()),
+        );
         let stamps = vec![(
             vec!["shared".to_owned()],
             Stamp::new(50, "7a7a7a7a00000000".to_owned()),
@@ -5465,7 +5493,7 @@ mod tests {
                 .unverified_key(key),
             key,
         );
-        assert!(matches!(doc.ingest(&replay), Ingested::Applied { .. }));
+        ingest_applies(&mut doc, &replay);
         assert!(
             doc.has_restores(),
             "the replay lowered the stamp, so a restore waits"
@@ -5475,7 +5503,7 @@ mod tests {
         let _ = newer.ingest(&first);
         let _ = newer.ingest(&replay);
         let latest = write(&mut newer, &third, &json!({ "shared": 7 }));
-        assert!(matches!(doc.ingest(&latest), Ingested::Applied { .. }));
+        ingest_applies(&mut doc, &latest);
         assert_eq!(
             doc.take_restores(),
             None,
@@ -5493,13 +5521,11 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let me = nick("me");
         let doc = MeshDoc::new_ungated().state_epochs();
-        let change = doc
-            .build_change(
-                &json!({ "o": { "x": 1 } }),
-                &pad_seed(me.as_str().as_bytes()),
-            )
-            .expect("applies")
-            .expect("a change");
+        let change = change_of(
+            &doc,
+            &json!({ "o": { "x": 1 } }),
+            &pad_seed(me.as_str().as_bytes()),
+        );
         let stamps = vec![(
             vec!["o".to_owned(), "x".to_owned()],
             Stamp::new(7, "aa".to_owned()),
@@ -5609,10 +5635,7 @@ mod tests {
         stamps: &[(Vec<String>, Stamp)],
     ) -> Verified {
         let replayer = MeshDoc::new_ungated().state_epochs();
-        let change = replayer
-            .build_change(merge, &pad_seed(other.as_str().as_bytes()))
-            .expect("applies")
-            .expect("a change");
+        let change = change_of(&replayer, merge, &pad_seed(other.as_str().as_bytes()));
         let body = replayer
             .compose_replay_body(&change, stamps)
             .expect("a replay body");
@@ -5655,10 +5678,7 @@ mod tests {
         let (mine, other) = (nick("aaa"), nick("zzz"));
         let mut doc = doc_with_600_leaves(&mine);
         let (merge, stamps) = replay_makes_obj_x();
-        assert!(matches!(
-            doc.ingest(&replay_frame_of(&other, &merge, &stamps)),
-            Ingested::Applied { .. }
-        ));
+        ingest_applies(&mut doc, &replay_frame_of(&other, &merge, &stamps));
         assert_eq!(
             doc.to_json(),
             json!({ "obj": { "x": 1 } }),
@@ -5724,7 +5744,7 @@ mod tests {
             }
         }
         let (patch, _stamps) = written.expect("the holder writes the write again after the wait");
-        assert_eq!(patch["late"], json!(1));
+        assert_eq!(patch["late"], json!(1), "the late write is written again");
     }
 
     #[test]
@@ -5803,10 +5823,7 @@ mod tests {
             author_switch.replay.expect("the author writes it again"),
             author_switch.replay_stamps,
         );
-        let change = writer
-            .build_change(&patch, &pad_seed(b"other"))
-            .expect("applies")
-            .expect("a change");
+        let change = change_of(&writer, &patch, &pad_seed(b"other"));
         let body = writer
             .compose_replay_body(&change, &stamps)
             .expect("a replay body");
@@ -5945,10 +5962,11 @@ mod tests {
         );
         let me = nick("me");
         let timeless = MeshDoc::new_ungated();
-        let bytes = timeless
-            .build_change(&json!({ "a": 1 }), &pad_seed(me.as_str().as_bytes()))
-            .expect("applies")
-            .expect("a change");
+        let bytes = change_of(
+            &timeless,
+            &json!({ "a": 1 }),
+            &pad_seed(me.as_str().as_bytes()),
+        );
         let body = super::wire::change_body_at(&bytes, None, 0).expect("a body");
         let key = signer(&me);
         let frame = Verified::fixture_unchecked(

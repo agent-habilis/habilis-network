@@ -60,6 +60,17 @@ fn signed(who: &Nickname, body: MessageBody) -> Verified {
     Verified::fixture_unchecked(message.unverified_key(key), key)
 }
 
+/// The change that `doc` builds for `merge`, written by the node `who`.
+fn change_of(doc: &MeshDoc, merge: &Value, who: &str) -> Vec<u8> {
+    let built = doc.build_change(merge, &pad(who)).expect("applies");
+    built.expect("a change")
+}
+
+/// The leaf count that `text` names, if it names one.
+fn parse_size(text: &str) -> Option<usize> {
+    text.trim().parse().ok()
+}
+
 /// The time and the bytes allocated that `step` took.
 fn measured<Out>(step: impl FnOnce() -> Out) -> (Out, Duration, usize) {
     let before = ALLOCATED.load(Ordering::Relaxed);
@@ -98,11 +109,8 @@ fn frame_of(writer: &str, object: &str, time: u64, replay: bool) -> Verified {
         ));
     }
     let merge = json!({ object: Value::Object(leaves) });
-    let change = author
-        .build_change(&merge, &pad(who.as_str()))
-        .expect("applies")
-        .expect("a change");
-    let body = if replay {
+    let change = change_of(&author, &merge, who.as_str());
+    let body: MessageBody = if replay {
         MeshDoc::new_ungated()
             .state_epochs()
             .compose_replay_body(&change, &stamps)
@@ -130,10 +138,7 @@ fn fill(doc: &mut MeshDoc, base: &mut MeshDoc, leaves: usize) {
             part.insert(format!("k{round:05}x{leaf:03}"), json!(leaf));
         }
         let merge = json!({ "live": Value::Object(part) });
-        let change = doc
-            .build_change(&merge, &pad(me.as_str()))
-            .expect("applies")
-            .expect("a change");
+        let change = change_of(doc, &merge, me.as_str());
         let (wire_body, _) = doc.compose_wire_body(&change, None).expect("a body");
         let frame = signed(&me, wire_body);
         doc.ingest(&frame);
@@ -146,11 +151,8 @@ fn fill(doc: &mut MeshDoc, base: &mut MeshDoc, leaves: usize) {
 #[test]
 #[ignore = "a measurement: run it in release mode with --ignored"]
 fn the_cost_of_a_replay_frame_and_of_a_burst() {
-    let sizes: Vec<usize> = env::var("REPLAY_COST_LEAVES")
-        .unwrap_or_else(|_| "1000,10000".to_owned())
-        .split(',')
-        .filter_map(|text| text.trim().parse().ok())
-        .collect();
+    let spec: String = env::var("REPLAY_COST_LEAVES").unwrap_or_else(|_| "1000,10000".to_owned());
+    let sizes: Vec<usize> = spec.split(',').filter_map(parse_size).collect();
     for leaves in sizes {
         let mut doc = MeshDoc::new_ungated().state_epochs();
         let mut base = MeshDoc::new_ungated();
@@ -218,10 +220,7 @@ fn the_bytes_that_the_stamps_add_to_a_frame() {
         ),
         ("a text of 200 chars", json!({ "note": "x".repeat(200) })),
     ] {
-        let change = doc
-            .build_change(&merge, &pad(me.as_str()))
-            .expect("applies")
-            .expect("a change");
+        let change = change_of(&doc, &merge, me.as_str());
         let plain = wire::change_body_at(&change, None, 0).expect("a plain body");
         let (timed, _) = doc.compose_wire_body(&change, None).expect("a timed body");
         let (plain_len, timed_len) = (plain.as_str().len(), timed.as_str().len());

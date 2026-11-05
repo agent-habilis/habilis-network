@@ -192,20 +192,13 @@ pub fn change_body_tombstoned(
     tombstones: &[(Vec<String>, Stamp)],
 ) -> Result<MessageBody, DocError> {
     let mut tags: Vec<String> = Vec::new();
-    let mut index_of = |tag: &String| -> Result<u32, DocError> {
-        let position = tags.iter().position(|held| held == tag).unwrap_or_else(|| {
-            tags.push(tag.clone());
-            tags.len() - 1
-        });
-        u32::try_from(position).map_err(DocError::encode)
-    };
     let mut named: Vec<(u64, u32)> = Vec::with_capacity(origins.len());
     for stamp in origins {
-        named.push((stamp.time, index_of(&stamp.tag)?));
+        named.push((stamp.time, tag_index(&mut tags, &stamp.tag)?));
     }
     let mut dead: Vec<(Vec<String>, u64, u32)> = Vec::with_capacity(tombstones.len());
     for (path, stamp) in tombstones {
-        dead.push((path.clone(), stamp.time, index_of(&stamp.tag)?));
+        dead.push((path.clone(), stamp.time, tag_index(&mut tags, &stamp.tag)?));
     }
     let tagged: Option<u64> = (epoch != 0).then_some(epoch);
     let mark: Option<SeedMark> = seed.cloned();
@@ -221,6 +214,16 @@ pub fn change_body_tombstoned(
     })
     .map_err(DocError::encode)?;
     Ok(MessageBody::try_new(&json)?)
+}
+
+/// The place of `tag` in the table `tags`: the table gets the tag at its end when it holds none yet.
+fn tag_index(tags: &mut Vec<String>, tag: &str) -> Result<u32, DocError> {
+    let found: Option<usize> = tags.iter().position(|held| held.as_str() == tag);
+    let position = found.unwrap_or_else(|| {
+        tags.push(tag.to_owned());
+        tags.len() - 1
+    });
+    u32::try_from(position).map_err(DocError::encode)
 }
 
 /// Decode a channel-event body back to raw automerge change bytes. `None` for a
@@ -267,13 +270,11 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
             // One body for one meaning: a stamp or a tombstone needs the time of the change, the
             // table names each tag once, and every tag of the table is used.
             let named_any = !origins.is_empty() || !tombstones.is_empty();
-            if (named_any && time.is_none())
-                || (!named_any && !tags.is_empty())
-                || tags
-                    .iter()
-                    .enumerate()
-                    .any(|(at, tag)| tags[..at].contains(tag))
-            {
+            let repeated: bool = tags
+                .iter()
+                .enumerate()
+                .any(|(at, tag)| tags[..at].contains(tag));
+            if (named_any && time.is_none()) || (!named_any && !tags.is_empty()) || repeated {
                 return None;
             }
             // The table is in the order of first use (the stamps first, then the tombstones), so
@@ -492,12 +493,11 @@ mod tests {
     fn the_tombstones_of_a_seed_root_read_back_and_share_the_tag_table() {
         let _guard = ::habilis_network_test_tracing::init();
         let stamps = vec![Stamp::new(5, "aa".to_owned())];
+        let shallow: Vec<String> = vec!["k".to_owned()];
+        let nested: Vec<String> = vec!["m".to_owned(), "n".to_owned()];
         let tombstones = vec![
-            (vec!["k".to_owned()], Stamp::new(9, "bb".to_owned())),
-            (
-                vec!["m".to_owned(), "n".to_owned()],
-                Stamp::new(8, "aa".to_owned()),
-            ),
+            (shallow, Stamp::new(9, "bb".to_owned())),
+            (nested, Stamp::new(8, "aa".to_owned())),
         ];
         let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &stamps, &tombstones)
             .expect("a body");
