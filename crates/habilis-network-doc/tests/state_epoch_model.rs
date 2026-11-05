@@ -11,9 +11,10 @@
 //! after the switch, from the cut vector of the seed. The cut gate is free: a node cuts at random,
 //! so a wait can hold several epochs and two cutters of one epoch.
 
+use std::collections::HashMap;
 use std::{env, mem};
 
-use habilis_network_doc::{DocError, MeshDoc, Stamp, StampedPaths, wire};
+use habilis_network_doc::{DocError, Ingested, MeshDoc, Stamp, StampedPaths, wire};
 use habilis_network_protocol::messages::{MessageBody, Verified};
 use habilis_network_protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
 use serde_json::{Map, Value, json};
@@ -67,6 +68,18 @@ struct Sim {
     step: u64,
     /// The values of every node, written in order.
     model: Map<String, Value>,
+    /// The stamp (time, tag) of the last change that a node composed.
+    last_stamp: Option<(u64, String)>,
+    /// The frame of the last change that a node composed.
+    last_frame: Option<Verified>,
+    /// The frame of the last write of each shared leaf. A node that writes the leaf takes it in
+    /// first, so the writes of one shared leaf are in a causal chain, and the last write is the one
+    /// that the leaf must end with. (Two writes of one leaf at the same time are decided by
+    /// automerge in the epoch, which is not what this model tests.)
+    shared_frames: HashMap<Vec<String>, Verified>,
+    /// For each shared leaf, the write with the highest stamp: the stamp and the value (`None` for
+    /// a delete). A shared leaf is written by every node, so the leaf must end with this write.
+    oracle: HashMap<Vec<String>, (u64, String, Option<Value>)>,
 }
 
 fn signed(who: &Nickname, body: MessageBody) -> Verified {
@@ -90,6 +103,10 @@ impl Sim {
             wire: Vec::new(),
             step: 0,
             model: Map::new(),
+            last_stamp: None,
+            last_frame: None,
+            shared_frames: HashMap::new(),
+            oracle: HashMap::new(),
         }
     }
 
@@ -114,10 +131,112 @@ impl Sim {
             return false;
         };
         let (wire, _plain) = node.doc.compose_wire_body(&change, None).expect("compose");
+        let time = wire::parse_change_full(wire.as_str()).and_then(|parsed| parsed.time);
+        let tag: String = actor
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        self.last_stamp = time.map(|stamped| (stamped, tag));
         let frame = signed(&node.name, wire);
         node.doc.ingest(&frame);
+        self.last_frame = Some(frame.clone());
         self.send_to_others(index, &frame);
         true
+    }
+
+    /// Node `index` writes the shared leaf at `path` (a top-level key, or a key of the object
+    /// `so`), and the oracle keeps the write with the highest stamp.
+    fn write_shared(&mut self, index: usize, path: &[&str], value: Option<Value>) {
+        let key: Vec<String> = path.iter().map(|part| (*part).to_owned()).collect();
+        // The node takes in the last write of the leaf first. If it cannot (the frame is of
+        // another epoch, or waits for a change that the node lacks), it does not write the leaf now.
+        if let Some(last) = self.shared_frames.get(&key).cloned() {
+            let taken = self.nodes[index].doc.ingest(&last);
+            if !matches!(taken, Ingested::Applied { .. } | Ingested::Duplicate) {
+                return;
+            }
+        }
+        let leaf: Value = value.clone().unwrap_or(Value::Null);
+        let merge: Value = match path {
+            [key] => json!({ *key: leaf }),
+            [object, key] => json!({ *object: { *key: leaf } }),
+            _ => panic!("a shared path has 1 or 2 keys"),
+        };
+        if !self.commit(index, &merge) {
+            return;
+        }
+        let Some((time, tag)) = self.last_stamp.clone() else {
+            return;
+        };
+        if let Some(frame) = self.last_frame.clone() {
+            self.shared_frames.insert(key.clone(), frame);
+        }
+        let newer = self
+            .oracle
+            .get(&key)
+            .is_none_or(|(held_time, held_tag, _)| {
+                (time, tag.as_str()) > (*held_time, held_tag.as_str())
+            });
+        if newer {
+            self.oracle.insert(key, (time, tag, value));
+        }
+    }
+
+    /// Node `index` writes one random shared leaf.
+    fn write_one_shared(&mut self, index: usize) {
+        let paths: [&[&str]; 4] = [&["s0"], &["s1"], &["so", "a"], &["so", "b"]];
+        let path = paths[self.dice.below(paths.len())];
+        let value: Option<Value> = match self.dice.below(4) {
+            0 => None,
+            1 => Some(json!(self.dice.below(1000))),
+            2 => Some(json!(vec![self.dice.below(10), self.dice.below(10)])),
+            _ => Some(json!(format!("v{}", self.dice.below(1000)))),
+        };
+        self.write_shared(index, path, value);
+    }
+
+    /// The model with the shared leaves that the oracle holds.
+    fn expected_with_shared(&self) -> Value {
+        let mut expected: Value = Value::Object(self.model.clone());
+        let mut object_made = false;
+        for (path, (_, _, value)) in &self.oracle {
+            if path.len() == 2 {
+                object_made = true;
+            }
+            let Some(held) = value else { continue };
+            if let Value::Object(fields) = &mut expected {
+                match path.as_slice() {
+                    [key] => {
+                        fields.insert(key.clone(), held.clone());
+                    }
+                    [object, key] => {
+                        let inner = fields.entry(object.clone()).or_insert_with(|| json!({}));
+                        if let Value::Object(leaves) = inner {
+                            leaves.insert(key.clone(), held.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if object_made && let Value::Object(fields) = &mut expected {
+            fields.entry("so".to_owned()).or_insert_with(|| json!({}));
+        }
+        expected
+    }
+
+    fn assert_shared_model(&self, label: &str) {
+        let expected = self.expected_with_shared();
+        for node in &self.nodes {
+            assert_eq!(
+                node.doc.to_json(),
+                expected,
+                "{label}: node {} does not hold the model with its shared leaves (epoch {})",
+                node.name.as_str(),
+                node.doc.epoch()
+            );
+        }
     }
 
     /// Node `index` sets (`Some`) or deletes (`None`) `key` inside its own key, and the model
@@ -654,5 +773,58 @@ fn model_random_writes_cuts_and_adopts_converge_to_the_model() {
         }
         sim.settle();
         sim.assert_model(&format!("seed {seed}"));
+    }
+}
+
+/// Every node writes shared leaves as well as its own keys, with cuts, several epochs in one wait,
+/// and two cutters. Each shared leaf must end with the write that has the highest stamp, which is
+/// the causally latest write whenever the writes are ordered.
+#[test]
+fn model_shared_leaves_follow_the_write_with_the_highest_stamp() {
+    let _guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::expect_warn(
+        "habilis_network::gossip",
+        "the seed of the candidate epoch was not complete",
+    );
+    for seed in 0..seed_count(300) {
+        let mut sim = Sim::new(seed);
+        // The shared object is made once and every node holds it before the run. Two nodes that
+        // make the same object at the same time leave one of them hidden, in the epoch as well as
+        // after a reset, and that is the semantics of automerge, not what this model tests.
+        sim.write_shared(0, &["so", "a"], Some(json!(0)));
+        sim.settle();
+        let mut cut_pending: Option<u64> = None;
+        for _ in 0..60 {
+            sim.step += 1;
+            match sim.dice.below(8) {
+                0..=1 => {
+                    let index = sim.dice.below(NODES);
+                    sim.write(index);
+                }
+                2..=3 => {
+                    let index = sim.dice.below(NODES);
+                    sim.write_one_shared(index);
+                }
+                4 => {
+                    if cut_pending.is_none() || sim.dice.below(2) == 0 {
+                        let cutter = sim.dice.below(NODES);
+                        let epoch = sim.nodes[cutter].doc.epoch() + 1;
+                        let _ = sim.cut(cutter);
+                        cut_pending = Some(epoch);
+                    }
+                }
+                5 => sim.tick_all(),
+                6 => sim.sync_all(),
+                _ => {}
+            }
+            sim.deliver_due();
+            if let Some(epoch) = cut_pending
+                && sim.nodes.iter().all(|node| node.doc.epoch() >= epoch)
+            {
+                cut_pending = None;
+            }
+        }
+        sim.settle();
+        sim.assert_shared_model(&format!("seed {seed}"));
     }
 }
