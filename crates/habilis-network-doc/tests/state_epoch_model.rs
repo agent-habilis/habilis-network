@@ -8,12 +8,12 @@
 //!
 //! The quiet scenario cuts only when no write is in flight. The free scenario writes while a cut
 //! is in the wait: a write of the old epoch that the seed lacks is written again by its author
-//! after the switch, from the cut vector of the seed. One cut runs at a time in both; two cutters
-//! of one epoch have their own test.
+//! after the switch, from the cut vector of the seed. The cut gate is free: a node cuts at random,
+//! so a wait can hold several epochs and two cutters of one epoch.
 
 use std::{env, mem};
 
-use habilis_network_doc::{MeshDoc, wire};
+use habilis_network_doc::{DocError, MeshDoc, wire};
 use habilis_network_protocol::messages::{MessageBody, Verified};
 use habilis_network_protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
 use serde_json::{Map, Value, json};
@@ -65,9 +65,6 @@ struct Sim {
     /// Frames on the way: the target node, the step at which it arrives, the frame.
     wire: Vec<(usize, u64, Verified)>,
     step: u64,
-    /// The epoch that each node cut last. A node that holds its own candidate does not cut the
-    /// same epoch again: two roots of one author are not a case the real glue produces.
-    last_cut: Vec<u64>,
     /// The values of every node, written in order.
     model: Map<String, Value>,
 }
@@ -94,7 +91,6 @@ impl Sim {
             dice: Dice(seed),
             wire: Vec::new(),
             step: 0,
-            last_cut: vec![0; NODES],
             model: Map::new(),
         }
     }
@@ -166,17 +162,15 @@ impl Sim {
     /// every node, itself included.
     fn cut(&mut self, index: usize) -> usize {
         let epoch = self.nodes[index].doc.epoch() + 1;
-        if self.last_cut[index] == epoch || self.nodes[index].doc.has_candidate() {
-            return 0;
-        }
-        self.last_cut[index] = epoch;
         let name = self.nodes[index].name.clone();
         let actor = pad(name.as_str());
         let fits = |merge: &Value| merge.to_string().len() <= FRAME_FITS;
-        let chain = self.nodes[index]
-            .doc
-            .build_seed(epoch, &actor, fits)
-            .expect("the live values split");
+        // A node that holds a candidate adopts it and cuts no epoch: the document says so.
+        let built = self.nodes[index].doc.build_seed(epoch, &actor, fits);
+        if matches!(built, Err(DocError::CandidateHeld)) {
+            return 0;
+        }
+        let chain = built.expect("the live values split");
         let mut frames: Vec<Verified> = Vec::new();
         let numbered: Vec<(usize, &Vec<u8>)> = chain.changes.iter().enumerate().collect();
         for (position, bytes) in numbered {

@@ -879,14 +879,18 @@ impl MeshDoc {
     /// deletes it, so a seed always has a root.
     ///
     /// # Errors
-    /// [`DocError::TooLarge`] when one leaf does not fit a frame, and [`DocError::Encode`] when a
-    /// merge does not encode.
+    /// [`DocError::TooLarge`] when one leaf does not fit a frame, [`DocError::Encode`] when a
+    /// merge does not encode, and [`DocError::CandidateHeld`] when the document waits to adopt a
+    /// candidate seed.
     pub fn build_seed(
         &self,
         epoch: u64,
         actor_seed: &[u8],
         fits: impl FnMut(&Value) -> bool,
     ) -> Result<SeedChain, DocError> {
+        if self.candidate.is_some() {
+            return Err(DocError::CandidateHeld);
+        }
         let (cut, truncated) = self.cut_vector();
         let live = self.to_json();
         let cuts: Result<Vec<Value>, DocError> = split_entry(&live, fits).collect();
@@ -3639,6 +3643,23 @@ mod tests {
             doc.to_json(),
             live,
             "the document holds the live json of the seed"
+        );
+    }
+
+    #[test]
+    fn a_node_that_holds_a_candidate_does_not_cut_an_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = doc.ingest(frame);
+        }
+        assert!(doc.has_candidate(), "the seed waits to be adopted");
+        let built = doc.build_seed(1, b"me", |_| true);
+        assert!(
+            matches!(built, Err(DocError::CandidateHeld)),
+            "a node adopts a candidate and does not cut: {built:?}"
         );
     }
 

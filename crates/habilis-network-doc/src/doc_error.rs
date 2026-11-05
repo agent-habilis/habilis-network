@@ -37,6 +37,9 @@ pub enum DocError {
         /// The number of frames that the seed would have.
         frames: usize,
     },
+    /// The document holds a candidate seed. It adopts the candidate after the wait and cuts no
+    /// epoch of its own: a cut from a view that the candidate replaces loses the values of others.
+    CandidateHeld,
 }
 
 impl DocError {
@@ -61,6 +64,7 @@ impl fmt::Display for DocError {
             Self::Encode(_) => "the change could not be encoded",
             Self::TooLarge { .. } => "one value is larger than a frame and cannot be cut",
             Self::SeedTooLong { .. } => "the seed would have more frames than a node accepts",
+            Self::CandidateHeld => "the document holds a candidate seed and cuts no epoch",
         })
     }
 }
@@ -68,7 +72,10 @@ impl fmt::Display for DocError {
 impl error::Error for DocError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Self::NotAnObject | Self::TooLarge { .. } | Self::SeedTooLong { .. } => None,
+            Self::NotAnObject
+            | Self::TooLarge { .. }
+            | Self::SeedTooLong { .. }
+            | Self::CandidateHeld => None,
             Self::Body(error) => Some(error),
             Self::Encode(error) => Some(&**error),
         }
