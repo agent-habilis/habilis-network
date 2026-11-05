@@ -1,5 +1,5 @@
 use crate::daemon::handler_ctx::HandlerCtx;
-use crate::daemon::state::EventLoopState;
+use crate::daemon::state::{EventLoopState, Standing};
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::messages::Verified;
@@ -124,6 +124,10 @@ pub(crate) async fn handle_presence(
             tracing::info!(target: "habilis_network::lifecycle", nickname = %departed, "peer left");
         }
         state.write_peer_count();
+        // A departure can end a nickname clash, and a directed frame waits in the buffer for that.
+        if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
+            gossip::flush_pending(state, context, "peer left").await;
+        }
         // App cleanup last, with the roster already consistent. The app tracks peers by nickname,
         // so it hears of the departure when no other key holds the nickname. Gated on
         // `surfaceable`: a relayed pre-join `Left` must never cancel live work — the same

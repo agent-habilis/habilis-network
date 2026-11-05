@@ -62,7 +62,7 @@ mod departed_tests {
     use iroh_gossip::net::Gossip;
 
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::EventLoopState;
+    use crate::daemon::state::{DirectState, EventLoopState, Standing};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::{CountingSink, NodeEvent, NodeSink, SilentSink};
     use crate::lookup::{TransportOpts, build_peer_multihop};
@@ -747,6 +747,78 @@ mod departed_tests {
             assert!(
                 state.endpoint_is_bound(others_endpoint),
                 "the goodbye of the stranger removed the hint of another key"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// A directed frame waits in the buffer while two live keys use its nickname. When the goodbye
+    /// of one key ends the clash, the frame goes at once, not at the next unrelated event.
+    #[test]
+    fn the_goodbye_that_ends_a_nickname_clash_flushes_the_frames_that_waited() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let (first, second) = (Identity::generate(), Identity::generate());
+            let (twin, survivor_endpoint) = (nick("twin"), endpoint_id(46));
+            let mut state = fresh_state();
+            state.standing.insert(Standing::Meshed);
+            for run in [&first, &second] {
+                state.names.insert(run.author_key(), twin.clone());
+                state.peers.insert(run.author_key());
+            }
+            state.bind_peer_endpoint(
+                first.author_key(),
+                twin.clone(),
+                iroh::EndpointAddr::new(survivor_endpoint),
+            );
+            state.direct.insert(survivor_endpoint, DirectState::Direct);
+            assert!(
+                state.nickname_is_ambiguous(&twin),
+                "two live keys use the nickname"
+            );
+            let frame =
+                Message::new_pong(&mesh, &us, twin, &protocol::MessageId::random()).sign(&identity);
+            let bytes = frame.serialize().expect("serialize");
+            assert!(
+                state.pending_outbound.push((frame, bytes)),
+                "the frame waits in the buffer"
+            );
+
+            let left = Message::new_left(&mesh, &nick("twin")).sign(&second);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the frame still waits after the clash ended"
             );
             endpoint.close().await;
         });

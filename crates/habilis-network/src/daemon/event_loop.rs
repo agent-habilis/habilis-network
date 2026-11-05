@@ -1183,6 +1183,12 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.sweep += 1;
         sweep_arm(&mut self.anchors, &mut self.state, self.parts.sink);
         let context = self.parts.handler_ctx(&self.sender);
+        // The sweep can end a nickname clash, and a directed frame waits in the buffer for that.
+        if self.state.standing.contains(&Standing::Meshed)
+            && !self.state.pending_outbound.is_empty()
+        {
+            gossip::flush_pending(&mut self.state, &context, "silence sweep").await;
+        }
         probe::prove_routed_pairs(&mut self.state, &context).await;
         self.app.on_tick(&mut self.state, &context).await;
     }
