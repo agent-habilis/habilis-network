@@ -5,8 +5,8 @@ use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
 use super::{
-    BeaconNote, DirectCounts, DirectState, IdleCounters, Latch, MeshSecrets, PingRound, Reach,
-    RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
+    BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshSecrets, PingRound,
+    Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
 };
 use crate::daemon::cohost_arm;
 use crate::daemon::doc::MeshDoc;
@@ -1287,11 +1287,36 @@ impl EventLoopState {
     /// Whether two or more live peers use `nickname`. A directed send names a nickname, so it
     /// cannot tell which of them it means.
     pub(crate) fn nickname_is_ambiguous(&self, nickname: &Nickname) -> bool {
+        self.key_of(nickname) == Err(KeyOfError::Ambiguous)
+    }
+
+    /// The one live key that uses `nickname`. A nickname is a label, so the lookup names a key
+    /// only when the answer is certain. A quiet key is no live key, so it neither is the answer
+    /// nor makes the nickname ambiguous.
+    ///
+    /// # Errors
+    /// [`KeyOfError::Unknown`] when no live key uses the nickname, and [`KeyOfError::Ambiguous`]
+    /// when two or more do.
+    pub fn key_of(&self, nickname: &Nickname) -> Result<AuthorKey, KeyOfError> {
         let mut users = self
             .peers
             .iter()
             .filter(|key| self.names.get(*key) == Some(nickname));
-        users.nth(1).is_some()
+        match (users.next(), users.next()) {
+            (Some(key), None) => Ok(*key),
+            (Some(_), Some(_)) => Err(KeyOfError::Ambiguous),
+            (None, _) => Err(KeyOfError::Unknown),
+        }
+    }
+
+    /// The nickname that a live key uses now, or `None` for a quiet key and for a key we never
+    /// saw.
+    #[must_use]
+    pub fn nickname_of(&self, key: &AuthorKey) -> Option<Nickname> {
+        if !self.peers.contains(key) {
+            return None;
+        }
+        self.names.get(key).cloned()
     }
 
     /// Whether a key of the roster, live or quiet, uses `nickname`.

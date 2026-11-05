@@ -1,6 +1,7 @@
 mod event_loop_state;
 
 mod idle_counters;
+mod key_of_error;
 mod latch;
 mod mesh_secrets;
 mod ping_round;
@@ -42,6 +43,7 @@ pub(crate) use state_init::StateInit;
 pub(crate) use beacon_note::BeaconNote;
 pub(crate) use direct_counts::DirectCounts;
 pub(crate) use direct_state::DirectState;
+pub use key_of_error::KeyOfError;
 #[cfg(feature = "multihop")]
 pub(crate) use parked_link_states::ParkedLinkStates;
 pub use reach::Reach;
@@ -78,8 +80,8 @@ const MAX_PARKED_LINK_STATES: usize = 256;
 #[cfg(test)]
 mod tests {
     use super::{
-        DirectCounts, DirectState, Duration, EndpointId, EventLoopState, PingRound, Reach,
-        RivalFlag,
+        DirectCounts, DirectState, Duration, EndpointId, EventLoopState, KeyOfError, PingRound,
+        Reach, RivalFlag,
     };
     use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
     use crate::protocol::{
@@ -727,6 +729,94 @@ mod tests {
         assert!(
             book.get_endpoint_info(linked).is_some(),
             "the linked endpoint is a reconnect target and keeps its entry"
+        );
+    }
+
+    /// Seat `key` in the roster under `nickname`, live or quiet.
+    fn seat(state: &mut EventLoopState, key: AuthorKey, nickname: &str, live: bool) {
+        state.names.insert(key, nick(nickname));
+        if live {
+            state.peers.insert(key);
+        } else {
+            state.quiet.insert(key);
+        }
+    }
+
+    /// A nickname maps to the one live key that uses it. It names no key when no live key uses
+    /// it, and none when two or more do: the engine never picks one of them.
+    #[test]
+    fn key_of_names_the_one_live_key_of_a_nickname_and_refuses_the_rest() {
+        let mut state = fresh_state();
+        let (alone, first, second, gone) = (
+            test_key("alone"),
+            test_key("twin#first"),
+            test_key("twin#second"),
+            test_key("gone"),
+        );
+        seat(&mut state, alone, "alone", true);
+        seat(&mut state, first, "twin", true);
+        seat(&mut state, second, "twin", true);
+        seat(&mut state, gone, "gone", false);
+
+        assert_eq!(
+            state.key_of(&nick("alone")),
+            Ok(alone),
+            "one live key uses the nickname"
+        );
+        assert_eq!(
+            state.key_of(&nick("twin")),
+            Err(KeyOfError::Ambiguous),
+            "two live keys use the nickname"
+        );
+        assert_eq!(
+            state.key_of(&nick("nobody")),
+            Err(KeyOfError::Unknown),
+            "no key uses the nickname"
+        );
+        assert_eq!(
+            state.key_of(&nick("gone")),
+            Err(KeyOfError::Unknown),
+            "a quiet key is no live key"
+        );
+    }
+
+    /// A quiet key does not make a nickname ambiguous, and the live key under it is named.
+    #[test]
+    fn a_quiet_key_of_a_nickname_does_not_hide_its_live_key_from_key_of() {
+        let mut state = fresh_state();
+        let (live, quiet) = (test_key("twin#live"), test_key("twin#quiet"));
+        seat(&mut state, live, "twin", true);
+        seat(&mut state, quiet, "twin", false);
+
+        assert_eq!(
+            state.key_of(&nick("twin")),
+            Ok(live),
+            "the quiet key is no user of the nickname"
+        );
+    }
+
+    /// A live key maps back to its nickname. A quiet key and a key we never saw map to none.
+    #[test]
+    fn nickname_of_names_a_live_key_and_no_other() {
+        let mut state = fresh_state();
+        let (live, quiet) = (test_key("live"), test_key("quiet"));
+        seat(&mut state, live, "live", true);
+        seat(&mut state, quiet, "quiet", false);
+
+        assert_eq!(
+            state.nickname_of(&live),
+            Some(nick("live")),
+            "a live key maps to its nickname"
+        );
+        assert_eq!(
+            state.nickname_of(&quiet),
+            None,
+            "a quiet key is no live key"
+        );
+        assert_eq!(
+            state.nickname_of(&test_key("stranger")),
+            None,
+            "a key we never saw has no nickname"
         );
     }
 
