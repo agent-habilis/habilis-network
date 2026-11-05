@@ -68,8 +68,8 @@ mod departed_tests {
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;
     use crate::protocol::meshes::LookupOpts;
-    use crate::protocol::messages::Authored;
-    use crate::protocol::{MeshId, Message, MessageKind, PresenceSubtype};
+    use crate::protocol::messages::{Authored, sole_addressee};
+    use crate::protocol::{AuthorKey, MeshId, Message, MessageKind, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::{MeshSender, PayloadPath};
     use crate::util::tuning::QUIET_CAP;
@@ -398,7 +398,7 @@ mod departed_tests {
     #[derive(Debug, PartialEq, Eq)]
     struct Departure {
         nickname: protocol::Nickname,
-        peer: protocol::AuthorKey,
+        peer: AuthorKey,
         synthetic: bool,
     }
 
@@ -825,6 +825,74 @@ mod departed_tests {
             assert!(
                 state.pending_outbound.is_empty(),
                 "the frame still waits after the goodbye of the other key"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// The goodbye of a key ends the wait of the directed frames that are buffered for it: nothing
+    /// can deliver them, and the buffer would requeue them until it is full. The frames for the
+    /// other key of the same nickname, and the broadcasts, stay.
+    #[test]
+    fn a_goodbye_drops_the_buffered_frames_addressed_to_the_key_that_left() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let (first, second) = (Identity::generate(), Identity::generate());
+            let twin = nick("twin");
+            let mut state = fresh_state();
+            state.standing.remove(&Standing::Meshed);
+            for run in [&first, &second] {
+                state.names.insert(run.author_key(), twin.clone());
+                state.peers.insert(run.author_key());
+            }
+            for to in [first.author_key(), second.author_key()] {
+                let frame = Message::new_pong(&mesh, &us, to, &protocol::MessageId::random())
+                    .sign(&identity);
+                let bytes = frame.serialize().expect("serialize");
+                assert!(state.pending_outbound.push((frame, bytes)), "room");
+            }
+
+            let left = Message::new_left(&mesh, &twin).sign(&second);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            let waiting = state.pending_outbound.take();
+            let recipients: Vec<AuthorKey> = waiting
+                .iter()
+                .filter_map(|(frame, _)| sole_addressee(&frame.kind).copied())
+                .collect();
+            assert_eq!(
+                recipients,
+                [first.author_key()],
+                "the buffer must keep only the frame of the key that stayed"
             );
             endpoint.close().await;
         });
