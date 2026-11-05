@@ -372,7 +372,8 @@ fn host_state_file<Driver: NodeDriver>(
         })
         .map(|path| {
             let owner_pid = runtime.owner.map(shutdown::Owner::pid);
-            let file = StateFile::new(path, &mesh.mesh, &mesh.author, &mesh.name)
+            let pubkey = mesh.identity.author_key();
+            let file = StateFile::new(path, &mesh.mesh, &mesh.author, &mesh.name, &pubkey)
                 .base(runtime.runtime_base.clone());
             file.topic(mesh.topic_string.as_deref())
                 .owner_pid(owner_pid)

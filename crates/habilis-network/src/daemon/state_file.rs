@@ -24,7 +24,9 @@
 //! including self. `last_updated` is a unix timestamp the daemon
 //! refreshes on a fixed heartbeat (see `tuning::STATE_REFRESH`)
 //! even when membership is unchanged, so a reader can treat a fresh
-//! value as a liveness signal. `pid` is the daemon's own process id —
+//! value as a liveness signal. `pubkey` is the author key of the daemon
+//! (64 lowercase hex digits), which is the identity of the member on the wire; the
+//! nickname is a label. `pid` is the daemon's own process id —
 //! what lets a consumer's `leave`/`session` map a state file back to a
 //! running daemon (and, via its ancestry, to the agent session that
 //! spawned it).
@@ -32,7 +34,7 @@
 //! File shape (keys are serialized in sorted order — `serde_json::Map` is a
 //! `BTreeMap` here, no `preserve_order` feature):
 //! ```json
-//! {"last_updated":1776720604,"name":"cool-team","nickname":"treat-empire","peer_count":3,"pid":34299,"ready":true,"gossip":"..."}
+//! {"last_updated":1776720604,"name":"cool-team","nickname":"treat-empire","peer_count":3,"pid":34299,"pubkey":"ab…ab","ready":true,"gossip":"..."}
 //! ```
 //!
 //! Writes are atomic (tempfile + rename on the same filesystem), so a
@@ -45,7 +47,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::protocol::meshes::MeshName;
-use crate::protocol::{MeshId, Nickname};
+use crate::protocol::{AuthorKey, MeshId, Nickname};
 use crate::util::unix_secs;
 
 use crate::util;
@@ -79,6 +81,8 @@ pub struct StateFile {
     mesh: String,
     name: String,
     nickname: String,
+    /// The author key of the daemon, as 64 lowercase hex digits.
+    pubkey: String,
     topic: Option<String>,
     owner_pid: Option<u32>,
     /// Extra fields the application publishes for its local clients to discover
@@ -89,7 +93,13 @@ pub struct StateFile {
 }
 
 impl StateFile {
-    pub(crate) fn new(path: PathBuf, mesh: &MeshId, nickname: &Nickname, name: &MeshName) -> Self {
+    pub(crate) fn new(
+        path: PathBuf,
+        mesh: &MeshId,
+        nickname: &Nickname,
+        name: &MeshName,
+        pubkey: &AuthorKey,
+    ) -> Self {
         let mesh = mesh.as_str().to_string();
         let name = name.as_str().to_string();
         let nickname = nickname.as_str().to_string();
@@ -99,6 +109,7 @@ impl StateFile {
             mesh,
             name,
             nickname,
+            pubkey: pubkey.to_string(),
             topic: None,
             owner_pid: None,
             discovery: sync::Mutex::new(serde_json::Map::new()),
@@ -194,6 +205,7 @@ impl StateFile {
         obj.insert("gossip".into(), self.mesh.clone().into());
         obj.insert("name".into(), self.name.clone().into());
         obj.insert("nickname".into(), self.nickname.clone().into());
+        obj.insert("pubkey".into(), self.pubkey.clone().into());
         if let Some(topic) = &self.topic {
             obj.insert("topic".into(), topic.clone().into());
         }
@@ -309,6 +321,8 @@ pub struct SessionIdentity {
     pub name: Option<String>,
     /// The nickname of the member.
     pub nickname: Option<String>,
+    /// The author key of the member, as 64 lowercase hex digits.
+    pub pubkey: Option<String>,
     /// The raw topic string; present only for a topic gossip.
     pub topic: Option<String>,
 }
@@ -343,6 +357,7 @@ pub fn read_identity(path: &Path) -> SessionIdentity {
         mesh: parsed.as_ref().and_then(mesh_field),
         name: field("name"),
         nickname: field("nickname"),
+        pubkey: field("pubkey"),
         topic: field("topic"),
     }
 }
@@ -536,6 +551,11 @@ mod tests {
     }
 
     use super::{MeshId, MeshName, Nickname, StateFile};
+    use crate::protocol::AuthorKey;
+
+    fn author() -> AuthorKey {
+        AuthorKey::from([0xab; 32])
+    }
     use crate::util::clock;
 
     fn name(value: &str) -> MeshName {
@@ -563,6 +583,7 @@ mod tests {
             &MeshId::from("abcd"),
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         let (logs, guard) = testing::LogCapture::start(tracing::Level::INFO);
         state_file.write(1, true);
@@ -594,6 +615,7 @@ mod tests {
             &MeshId::from("abcd"),
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(1, true);
         let unowned = super::read_session_entry(&path).expect("entry");
@@ -614,6 +636,34 @@ mod tests {
     }
 
     #[test]
+    fn the_state_file_carries_the_author_key_of_the_daemon() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("pubkey");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("abcd"),
+            &Nickname::from("treat-empire"),
+            &name("cool-team"),
+            &author(),
+        );
+        state_file.write(1, true);
+        let hex = "ab".repeat(32);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("the state file can be read"))
+                .expect("the state file the test wrote is json");
+        assert_eq!(
+            parsed["pubkey"], hex,
+            "the file names the author key as 64 lowercase hex digits"
+        );
+        assert_eq!(
+            super::read_identity(&path).pubkey.as_deref(),
+            Some(hex.as_str()),
+            "the identity reads the author key back"
+        );
+        state_file.remove();
+    }
+
+    #[test]
     fn writes_expected_shape() {
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("shape");
@@ -623,6 +673,7 @@ mod tests {
             &mesh,
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(3, true);
         let contents = fs::read_to_string(&path).expect("the written state file can be read");
@@ -674,6 +725,7 @@ mod tests {
             &MeshId::from("topic"),
             &Nickname::from("treat-empire"),
             &name("www.youtube.com/watch"),
+            &author(),
         )
         .topic(Some(raw));
         state_file.write(1, true);
@@ -707,6 +759,7 @@ mod tests {
             &MeshId::from("xyzw"),
             &Nickname::from("swift-cedar"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(0, false);
         state_file.write(1, true);
@@ -731,6 +784,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("n"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(0, false);
         assert!(path.exists(), "the file exists before remove is called");
@@ -748,6 +802,7 @@ mod tests {
                 &MeshId::from("test"),
                 &Nickname::from("n"),
                 &name("cool-team"),
+                &author(),
             );
             state_file.write(0, false);
             assert!(path.exists(), "the file exists before drop");
@@ -771,6 +826,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("n"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(2, true);
         assert!(
@@ -797,6 +853,7 @@ mod tests {
             &mesh,
             &Nickname::from("swift-cedar"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(3, true);
         let parsed: serde_json::Value =
@@ -843,6 +900,7 @@ mod tests {
             &MeshId::from("round"),
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         // Missing file → None (the caller polls and retries).
         assert!(
@@ -880,6 +938,7 @@ mod tests {
             &mesh,
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(2, true);
         let identity = super::read_identity(&path);
@@ -911,6 +970,7 @@ mod tests {
             &mesh,
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(2, true);
         let entry = super::read_session_entry(&path).expect("present");
