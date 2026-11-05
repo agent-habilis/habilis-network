@@ -16,6 +16,18 @@ use crate::util::clock::Instant;
 /// The first retry waits 30 s, and each next one waits twice as long: 30 s, 60 s, 120 s.
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(30);
 const RETRIES: u8 = 3;
+/// After the fast retries a session is asked once per 10 minutes, 6 times at most.
+const SLOW_RETRY_WAIT: Duration = Duration::from_secs(600);
+const SLOW_RETRIES: u8 = 6;
+
+/// The wait after the ask number `tries` (0 for the first): 30 s, 60 s, 120 s, then 10 minutes.
+fn retry_wait(tries: u8) -> Duration {
+    if tries < RETRIES {
+        FIRST_RETRY_WAIT * 2u32.pow(u32::from(tries))
+    } else {
+        SLOW_RETRY_WAIT
+    }
+}
 
 /// How many times a session was asked, and when the next request may go.
 #[derive(Debug, Clone, Copy)]
@@ -55,7 +67,7 @@ impl ProofExchange {
         }
         self.asked
             .get(session)
-            .is_none_or(|retry| retry.tries <= RETRIES && now >= retry.next_at)
+            .is_none_or(|retry| retry.tries <= RETRIES + SLOW_RETRIES && now >= retry.next_at)
     }
 
     /// The request for `session` went out at `now`: the retry clock of the session starts.
@@ -63,7 +75,7 @@ impl ProofExchange {
         let tries = self.asked.get(session).map_or(0, |retry| retry.tries);
         let retry = Retry {
             tries: tries.saturating_add(1),
-            next_at: now + FIRST_RETRY_WAIT * 2u32.pow(u32::from(tries.min(RETRIES))),
+            next_at: now + retry_wait(tries),
         };
         self.asked.insert_evicting(*session, retry, |_, _| false);
     }
@@ -224,8 +236,8 @@ mod tests {
         );
         joiner.note_asked(&session, at(210));
         assert!(
-            !joiner.wants_proof(&session, at(100_000)),
-            "no fourth retry"
+            !joiner.wants_proof(&session, at(809)),
+            "no fourth fast retry: the next ask waits 10 minutes"
         );
     }
 
