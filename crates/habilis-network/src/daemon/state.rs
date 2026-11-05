@@ -149,6 +149,21 @@ mod tests {
             other.proofs.proof_of(&key).is_none(),
             "a proof of another nickname is not held"
         );
+        let replayer = fresh_state();
+        let replayed = Message::new_joined_with_proof(
+            &mesh,
+            &nick("alice"),
+            &sender.own_proof(&nick("alice"), &mesh, 1),
+        )
+        .sign(&replayer.identity);
+        other.note_joined_proof(&replayed, &mesh);
+        assert!(
+            other
+                .proofs
+                .proof_of(&replayer.identity.author_key())
+                .is_none(),
+            "a proof body of another session, replayed under a new key, is not held"
+        );
         let empty = Message::new_joined(&mesh, &nick("alice")).sign(&sender.identity);
         other.note_joined_proof(&empty, &mesh);
         assert!(
