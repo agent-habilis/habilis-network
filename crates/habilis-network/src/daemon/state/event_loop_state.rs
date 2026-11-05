@@ -1109,12 +1109,12 @@ impl EventLoopState {
             .is_some_and(|flooded| flooded != current)
     }
 
-    /// Whether our `PeerInfo` is due for a refresh at `now`: a meshed node that has flooded
-    /// before, and has flooded for no reason during the refresh period of its roster. A
-    /// `PeerInfo` is not in the message log, so a member that missed one is not repaired by any
-    /// digest, and the flood of its sender is the only repair. The period is the time of
-    /// [`tuning::peerinfo_refresh_period`] for the live members, spread by
-    /// the spread of the last flood.
+    /// Whether our `PeerInfo` is due for a refresh at `now`. It is due for a meshed node that has
+    /// flooded before, when the refresh period has passed since the last flood, whatever caused
+    /// that flood. The period is [`tuning::peerinfo_refresh_period`] for the live members,
+    /// lengthened by the spread that the last flood drew. A `PeerInfo` is not in the message log,
+    /// so no digest repairs one that a member missed, and the flood of its sender is the only
+    /// repair.
     pub(crate) fn peerinfo_refresh_due(&self, now: Instant) -> bool {
         if !self.standing.contains(&Standing::Meshed) {
             return false;

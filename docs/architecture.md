@@ -236,9 +236,10 @@ Later links only re-send `PeerInfo`, behind a cooldown, so a flapping link canno
 A `PeerInfo` is in no message log, so no digest repairs one that a member missed.
 Without it, a member trusts no endpoint of the sender: it sends no pong to the sender, and it drops the link-state vectors of the sender.
 So a meshed node also floods its `PeerInfo` again when no flood has gone out for a refresh period.
-The period is the larger of 5 minutes and 5 seconds for each live member, so the whole mesh sends at most 1 refresh per 5 seconds.
-Each flood draws a random factor between 0.75 and 1.25, so the members do not flood together.
-A lost `PeerInfo` is back within one period.
+The period is the larger of 5 minutes and 5 seconds for each live member.
+Each flood draws a random factor between 1.0 and 1.5 that lengthens the next period, so the members do not flood together.
+The factor is never below 1.0, so the whole mesh sends at most 1 refresh per 5 seconds, whatever its size.
+A lost `PeerInfo` is back within one period, that is within 7.5 minutes for a mesh of up to 60 members.
 
 ### 5.3 The relay ladder
 

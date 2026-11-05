@@ -162,19 +162,21 @@ pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// than two of those intervals is of no use, and its slot goes to another signer.
 pub const PARKED_LINK_STATE_TTL: Duration = LINKSTATE_INTERVAL.saturating_mul(2);
 
-/// The least time between two `PeerInfo` floods of a node that sends no other reason to flood. A
-/// `PeerInfo` that a member missed is not in the message log, so no digest repairs it: only the
-/// flood of its sender does. The refresh sends it again, so a lost one is back within a period.
+/// The least time between two `PeerInfo` refreshes of a node. A `PeerInfo` that a member missed is
+/// not in the message log, so no digest repairs it: only the flood of its sender does. The refresh
+/// sends it again, so a lost one is back within one period.
 pub const PEERINFO_REFRESH_MIN: Duration = Duration::from_mins(5);
 
-/// The refresh period grows with the roster by this much per live member, so the whole mesh sends
-/// at most 1 refresh per this span, however many members it holds.
+/// The refresh period grows with the roster by this much per live member. The caller never
+/// shortens the period, so the whole mesh sends at most 1 refresh per this span, however many
+/// members it holds.
 pub const PEERINFO_REFRESH_PER_PEER: Duration = Duration::from_secs(5);
 
 /// The time after the last `PeerInfo` flood at which a node floods it again, for a roster of
-/// `members` live members (itself included): the larger of [`PEERINFO_REFRESH_MIN`] and
-/// [`PEERINFO_REFRESH_PER_PEER`] for each member, as set by the tuning. The caller spreads the
-/// value by a random factor so that the members do not flood together.
+/// `members` live members (itself included). It is the larger of two spans: the tuning value of
+/// [`PEERINFO_REFRESH_MIN`], and the tuning value of [`PEERINFO_REFRESH_PER_PEER`] times
+/// `members`. The caller lengthens the value by a random factor of 1.0 to 1.5, so that the members
+/// do not flood together.
 ///
 /// # Examples
 ///
