@@ -449,6 +449,9 @@ A quiet key keeps its endpoint, because a quiet peer can return.
 An endpoint that another key has proved is not an address of the old key.
 A receiver reads a directed frame only if `to` is its own key.
 Another key that uses the same nickname does not read it.
+A relay that the app allows keeps a directed frame of another key in its message log for anti-entropy.
+The log cap bounds these frames like any other frame.
+An anti-entropy answer gives such a frame only to its addressee.
 The bytes are the same canonical message on both planes.
 The receive path is one pipeline for both planes:
 

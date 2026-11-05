@@ -625,10 +625,10 @@ pub(crate) async fn ingest(
         return;
     }
 
-    // Directed frames are sealed to their addressee. A **relay** forwards and
-    // retains the opaque frame but never validates or surfaces its content (it
-    // can't read it, and `maybe_push_inbound`/dispatch below are already gated to
-    // the addressee). The **addressee** decrypts the body in place, then the
+    // Directed frames are sealed to their addressee. A **relay** forwards the
+    // opaque frame and never validates or surfaces its content (it can't read it, and
+    // `maybe_push_inbound` is gated to the addressee). The app sees it and decides
+    // whether the relay retains it. The **addressee** decrypts the body in place, then the
     // recovered plaintext passes the app boundary gate exactly as a broadcast
     // does. A frame sealed to us that fails to open (tampered / wrong key) is
     // dropped. Retention gets the original `verified` frame, so the log keeps
@@ -650,21 +650,15 @@ pub(crate) async fn ingest(
         // `false` means the frame is plumbing or addressed elsewhere —
         // stop before retention.
         MessageKind::App { .. } => {
-            // A directed frame for another key is never read by the app and never retained: the
-            // nickname it carries is a label, and the other key of that nickname is another peer.
-            if is_directed_content(&view.kind) && !addressed_to_us(&verified, &context.our_pubkey) {
-                true
-            } else {
-                !app.on_app_frame(
-                    InboundApp {
-                        message: &view,
-                        surfaceable,
-                    },
-                    state,
-                    context,
-                )
-                .await
-            }
+            !app.on_app_frame(
+                InboundApp {
+                    message: &view,
+                    surfaceable,
+                },
+                state,
+                context,
+            )
+            .await
         }
         // Everything the engine owns itself. Spelled out rather than `_` so
         // a new kind has to be routed deliberately.
@@ -1300,9 +1294,8 @@ fn gate_and_decrypt<F: Proof>(
 ) -> Gated {
     if is_directed_content(&frame.kind) {
         if !addressed_to_us(frame, &context.our_pubkey) {
-            // Relay: an opaque directed frame — forwarded + retained, never
-            // validated or surfaced (the dispatch below is gated to the
-            // addressee), so it needs no classification here.
+            // Relay: an opaque directed frame. The engine cannot open it, so it has no
+            // classification. The app still sees it and decides: `true` retains it.
             return Gated::Pass {
                 class: None,
                 view: frame.authored(),
@@ -1747,9 +1740,6 @@ fn is_loggable(kind: &MessageKind) -> bool {
             // here; this keeps the predicate honest if that changes).
             | MessageKind::State
             | MessageKind::Meta
-            // App-frame loggability is decided by the app's `classify`, never
-            // this infra predicate; an App kind never reaches here.
-            | MessageKind::App { .. }
     )
 }
 
@@ -2274,6 +2264,7 @@ mod first_contact_tests {
         ChannelEvent, dispatch_channel, dispatch_infra, handle_gossip_event, ingest, pong_for,
     };
     use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::message_log::{self, MissingQuery};
     use crate::daemon::state::{EventLoopState, PingRound};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
@@ -2821,11 +2812,13 @@ mod first_contact_tests {
         }
     }
 
-    /// Two live keys use one nickname, and a relay hands each of them the frames of the mesh. A
-    /// directed app frame names one key. The app of the other key never reads it, so it cannot
-    /// act on a message that was not meant for it. A frame for this key reaches the app.
+    /// A directed frame for another key reaches the app of this node, as it did before a frame
+    /// named a key: the app decides, and a `NodeApp` that returns `true` has the frame retained.
+    /// The log then holds it as a relay, and an anti-entropy answer gives it to its addressee
+    /// only. The frame for this key is read and retained as well.
     #[test]
-    fn a_frame_for_one_key_of_a_nickname_does_not_reach_the_app_of_the_other_key() {
+    fn a_relayed_directed_frame_is_retained_when_the_app_says_so_and_resent_only_to_its_addressee()
+    {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -2834,42 +2827,81 @@ mod first_contact_tests {
             let reads = Arc::new(atomic::AtomicUsize::new(0));
             let mut app = Counting(Arc::clone(&reads));
             let sender = Identity::generate();
-            let directed = |to: AuthorKey| {
-                let params = AppFrameParams::new(
-                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                    Some(to),
-                    None,
-                    MessageBody::from("for one key"),
-                );
-                let frame = Message::new_app(&node.mesh, &nick("alice"), params).sign(&sender);
-                frame.serialize().expect("serialize")
-            };
-            let other_key = test_key("twin#other");
-
-            ingest(
-                directed(other_key).into_bytes(),
-                &mut state,
-                &mut app,
-                &context,
-            )
-            .await;
-            assert_eq!(
-                reads.load(Ordering::Relaxed),
-                0,
-                "the app read a frame that names the other key of its nickname"
+            let (addressee, bystander) = (test_key("twin#addressee"), test_key("twin#bystander"));
+            let params = AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                Some(addressee),
+                None,
+                MessageBody::from("for one key"),
             );
+            let frame = Message::new_app(&node.mesh, &nick("alice"), params).sign(&sender);
+            let wire = frame.serialize().expect("serialize");
 
-            ingest(
-                directed(node.our_pubkey).into_bytes(),
-                &mut state,
-                &mut app,
-                &context,
-            )
-            .await;
+            ingest(wire.into_bytes(), &mut state, &mut app, &context).await;
+
             assert_eq!(
                 reads.load(Ordering::Relaxed),
                 1,
-                "the app did not read the frame that names its own key"
+                "the app reads the frame for another key once"
+            );
+            let have = HashSet::new();
+            let range = message_log::seconds(UnixSecs::ZERO, UnixSecs::MAX);
+            let resent_to = |requester: &AuthorKey| {
+                let query = MissingQuery {
+                    range,
+                    have: &have,
+                    max: 16,
+                    requester,
+                };
+                state.message_log.missing_in_window(query).len()
+            };
+            assert_eq!(
+                resent_to(&addressee),
+                1,
+                "the log did not keep the frame for its addressee"
+            );
+            assert_eq!(
+                resent_to(&bystander),
+                0,
+                "the log gave a directed frame to a key that it does not name"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An app that returns `false` for a directed frame of another key stops it: the relay does
+    /// not retain it, so no anti-entropy answer holds it, not even for its addressee.
+    #[test]
+    fn a_relayed_directed_frame_is_not_retained_when_the_app_says_false() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let addressee = test_key("twin#addressee");
+            let params = AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                Some(addressee),
+                None,
+                MessageBody::from("for one key"),
+            );
+            let frame =
+                Message::new_app(&node.mesh, &nick("alice"), params).sign(&Identity::generate());
+            let wire = frame.serialize().expect("serialize");
+
+            ingest(wire.into_bytes(), &mut state, &mut app, &context).await;
+
+            let have = HashSet::new();
+            let query = MissingQuery {
+                range: message_log::seconds(UnixSecs::ZERO, UnixSecs::MAX),
+                have: &have,
+                max: 16,
+                requester: &addressee,
+            };
+            assert_eq!(
+                state.message_log.missing_in_window(query).len(),
+                0,
+                "the log kept a frame that the app stopped"
             );
             node.endpoint.close().await;
         });

@@ -745,8 +745,13 @@ impl NodeApp for MembershipApp {
         if message.kind.app_tag().map(AppTag::as_str) != Some(MSG_TAG) {
             return false;
         }
-        // The engine only dispatches frames addressed to us or broadcast, so a
-        // present `to` is us.
+        // The engine hands over a directed frame for another key too: only a frame for this
+        // key, or a broadcast, is a message to the member.
+        if let MessageKind::App { to: Some(to), .. } = &message.kind
+            && *to != context.our_pubkey
+        {
+            return false;
+        }
         let inbound = Inbound {
             nick: message.author.to_string(),
             directed: matches!(message.kind, MessageKind::App { to: Some(_), .. }),
@@ -1606,6 +1611,8 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::daemon::state::Standing;
     #[cfg(feature = "host")]
+    use crate::gossip::app::{InboundApp, NodeApp};
+    #[cfg(feature = "host")]
     use crate::protocol::messages::sole_addressee;
     use crate::protocol::{AuthorKey, Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
@@ -1895,6 +1902,58 @@ mod tests {
                 Some(&second),
                 "the frame does not name the key that the caller chose"
             );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The engine hands a directed frame for another key to the app too. A member that shares a
+    /// nickname with that key is another peer, so its queue holds only the frames for its own
+    /// key, and the broadcasts.
+    #[cfg(feature = "host")]
+    #[test]
+    fn the_member_app_queues_a_directed_frame_only_for_its_own_key() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            let (inbound, mut queue) = mpsc::channel(4);
+            let mut app = MembershipApp::new(inbound);
+            let sender = Identity::generate();
+            let frame_to = |to: Option<AuthorKey>, text: &str| {
+                let params = AppFrameParams::new(
+                    AppTag::try_new(MSG_TAG).expect("a valid app tag"),
+                    to,
+                    None,
+                    MessageBody::from(text),
+                );
+                Message::new_app(&MeshId::from("test"), &Nickname::from("alice"), params)
+                    .sign(&sender)
+            };
+            let other = test_key("twin#other");
+
+            for (to, text, kept) in [
+                (Some(other), "for the other key", false),
+                (Some(context.our_pubkey), "for this key", true),
+                (None, "for everyone", true),
+            ] {
+                let frame = frame_to(to, text);
+                let retain = app
+                    .on_app_frame(
+                        InboundApp {
+                            message: &frame.authored(),
+                            surfaceable: true,
+                        },
+                        &mut state,
+                        &context,
+                    )
+                    .await;
+                assert!(!retain, "the member app never asks to retain a frame");
+                assert_eq!(
+                    queue.try_recv().is_ok(),
+                    kept,
+                    "the queue of the member took, or missed, the frame {text:?}"
+                );
+            }
             node.endpoint.close().await;
         });
     }
