@@ -212,6 +212,20 @@ impl Sim {
         self.wire = waiting;
     }
 
+    /// The value that each node holds at the top-level key `key`.
+    fn held(&self, key: &str) -> Vec<Option<Value>> {
+        let values = self
+            .nodes
+            .iter()
+            .map(|node| node.doc.to_json().get(key).cloned());
+        values.collect()
+    }
+
+    /// Lose the frames on the wire that wait for `target`: a partition for the moment.
+    fn drop_frames_to(&mut self, target: usize) {
+        self.wire.retain(|(to, _, _)| *to != target);
+    }
+
     fn tick_all(&mut self) {
         let mut replays: Vec<(usize, Value)> = Vec::new();
         for (index, node) in self.nodes.iter_mut().enumerate() {
@@ -422,6 +436,104 @@ fn model_a_cutter_whose_seed_loses_to_a_rival_writes_its_values_again() {
     let _ = sim.cut(1);
     sim.settle();
     sim.assert_model("the seed of a cutter loses to a lower rival");
+}
+
+const ORDERS: [[usize; 3]; 6] = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+];
+
+/// Three authors write one leaf. The seed of the cutter lacks the later writes, so the others write
+/// again. The leaf must hold what the old epoch holds: the write that is causally the latest. Every
+/// order of the keys of the three authors is run, so the result does not depend on the key order.
+#[test]
+#[ignore = "red: needs the replay rule of the design note v3 (state-epoch-replay-rule-v3.md)"]
+fn model_a_shared_leaf_keeps_the_causally_latest_write_of_three_writers() {
+    let _guard = habilis_network_test_tracing::init();
+    for [first, second, third] in ORDERS {
+        let mut sim = Sim::new(11);
+        // The first writes 1, the second sees it and writes 2, and the third writes 3 without
+        // seeing either: the latest is 2.
+        sim.commit(first, &json!({ "shared": 1 }));
+        sim.deliver_to(first, second);
+        sim.commit(second, &json!({ "shared": 2 }));
+        sim.commit(third, &json!({ "shared": 3 }));
+        // The writes of the old epoch do not reach the others before the cut, so each of the
+        // three holds its own value and writes it again after the switch.
+        sim.wire.clear();
+        // The first cuts from its own view, which holds only its write.
+        let _ = sim.cut(first);
+        sim.settle();
+        assert_eq!(
+            sim.held("shared"),
+            vec![Some(json!(2)); NODES],
+            "the causally latest write of a shared leaf, writers {first} {second} {third}"
+        );
+    }
+}
+
+/// A node that was away for two epochs jumps to the seed of the second. The seed holds a newer
+/// write of a shared leaf than the node does, so the node must not write its value again.
+#[test]
+#[ignore = "red: needs the replay rule of the design note v3 (state-epoch-replay-rule-v3.md)"]
+fn model_a_jump_does_not_revert_a_newer_value_of_a_shared_leaf() {
+    let _guard = habilis_network_test_tracing::init();
+    let mut sim = Sim::new(12);
+    sim.commit(0, &json!({ "shared": 1 }));
+    sim.deliver_to(0, 1);
+    sim.deliver_to(0, 2);
+    // n2 saw 1 and writes 3 after it. n0 is away from now on.
+    sim.commit(2, &json!({ "shared": 3 }));
+    sim.deliver_to(2, 1);
+    sim.drop_frames_to(0);
+    let _ = sim.cut(1);
+    sim.deliver_to(1, 2);
+    sim.drop_frames_to(0);
+    for _ in 0..=WAIT {
+        sim.tick_all();
+    }
+    sim.drop_frames_to(0);
+    // n1 cuts the next epoch, and only now does n0 hear of an epoch: it jumps from 0 to 2.
+    let _ = sim.cut(1);
+    sim.deliver_to(1, 0);
+    sim.deliver_to(1, 2);
+    sim.settle();
+    assert_eq!(
+        sim.held("shared"),
+        vec![Some(json!(3)); NODES],
+        "a jump keeps the newer value of a shared leaf"
+    );
+    assert_eq!(sim.nodes[0].doc.epoch(), 2, "n0 jumped over an epoch");
+}
+
+/// A delete of a shared leaf that comes after a write of another author must stay a delete when the
+/// two authors write again, whatever the order of their keys.
+#[test]
+#[ignore = "red: needs the replay rule of the design note v3 (state-epoch-replay-rule-v3.md)"]
+fn model_a_delete_of_a_shared_leaf_stays_deleted_after_the_writes_again() {
+    let _guard = habilis_network_test_tracing::init();
+    for [writer, deleter, cutter] in ORDERS {
+        let mut sim = Sim::new(13);
+        sim.commit(writer, &json!({ "shared": 1 }));
+        sim.settle();
+        // The writer writes 2. The deleter sees it and deletes the leaf, so the delete is the
+        // latest. The cutter holds only the first write.
+        sim.commit(writer, &json!({ "shared": 2 }));
+        sim.deliver_to(writer, deleter);
+        sim.commit(deleter, &json!({ "shared": null }));
+        sim.wire.clear();
+        let _ = sim.cut(cutter);
+        sim.settle();
+        assert_eq!(
+            sim.held("shared"),
+            vec![None; NODES],
+            "the delete is the latest write, writer {writer} deleter {deleter} cutter {cutter}"
+        );
+    }
 }
 
 /// Seeds for the run in CI: 500 take about 25 s of a debug build. The environment variable
