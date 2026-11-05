@@ -21,7 +21,7 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::lookup;
 use crate::protocol::crypto::Password;
 use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, MeshName, Transport};
-use crate::protocol::{MeshId, Nickname};
+use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::util::tuning::{RELAY_RUNG_PROBE, SETUP_RUNG_READ};
 use lookup::{
     ProbeAnswer, StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
@@ -674,17 +674,37 @@ fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> 
 /// means run 1.
 #[cfg(all(unix, feature = "host"))]
 fn next_run(state: Option<&Path>) -> Result<u64> {
+    use std::io::{ErrorKind, Write as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
     let Some(state) = state else {
         return Ok(1);
     };
     let run_path = state.with_extension("run");
-    let last = std::fs::read(&run_path)
-        .ok()
-        .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
-        .map_or(0, u64::from_le_bytes);
-    let run = last.saturating_add(1);
-    std::fs::write(&run_path, run.to_le_bytes())?;
+    let run = match std::fs::read(&run_path) {
+        Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_slice()) {
+            Ok(last) => u64::from_le_bytes(last).saturating_add(1),
+            Err(_) => counter_lost(),
+        },
+        Err(error) if error.kind() == ErrorKind::NotFound => 1,
+        Err(_) => counter_lost(),
+    };
+    // A crash after the write and before the rename leaves the old counter, never a cut short one.
+    let tmp_path = state.with_extension("run.tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true).mode(0o600);
+    let mut file = options.open(&tmp_path)?;
+    file.write_all(&run.to_le_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&tmp_path, &run_path)?;
     Ok(run)
+}
+
+/// The counter file is unreadable, so the count restarts from the unix seconds: the counter grows by
+/// 1 per start and the seconds grow faster, so the number is above any count that peers kept.
+#[cfg(all(unix, feature = "host"))]
+fn counter_lost() -> u64 {
+    tracing::warn!(target: "habilis_network::lifecycle", "run counter file is unreadable; the count restarts from the clock");
+    u64::try_from(UnixSecs::now().as_secs()).unwrap_or(1).max(1)
 }
 
 /// A target with no files has no state to count in, so each start is run 1.
