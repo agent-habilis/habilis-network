@@ -499,7 +499,9 @@ impl MeshDoc {
 
     /// Let this ungated document keep the root of a higher epoch as a candidate. Call it only on a
     /// node that ticks the state channel, because a candidate that no tick adopts or drops holds
-    /// its frames for ever.
+    /// its frames for ever. This is a development guard and no runtime switch: nodes that
+    /// disagree on it would diverge. Step 4 removes it, and every node of frame version 13.0 has
+    /// state epochs.
     #[must_use]
     pub fn state_epochs(mut self) -> Self {
         self.state_epochs = true;
