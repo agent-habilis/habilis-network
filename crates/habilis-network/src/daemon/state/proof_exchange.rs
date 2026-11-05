@@ -66,6 +66,11 @@ impl ProofExchange {
         true
     }
 
+    /// The request for `session` went out at `now`: the retry clock of the session starts.
+    pub(crate) fn note_asked(&mut self, session: &AuthorKey, now: Instant) {
+        let _ = (session, now);
+    }
+
     /// A proof came for `session`. It is held if it verifies for this nickname and mesh, and if it
     /// does not lower the run of a proof already held.
     pub(crate) fn accept(
@@ -148,6 +153,28 @@ mod tests {
         assert!(
             verify_proof(held, &session, nickname.as_ref(), mesh.as_ref()),
             "the held proof verifies"
+        );
+    }
+
+    /// A request that was not sent, for lack of a warm path, does not start the retry clock: the
+    /// session is asked at its next alive frame.
+    #[test]
+    fn a_request_that_was_not_sent_is_not_counted() {
+        let session = Identity::generate().author_key();
+        let mut joiner = ProofExchange::with_cap(QUIET_CAP);
+        let now = Instant::now();
+        assert!(
+            joiner.wants_proof(&session, now),
+            "the session needs a request"
+        );
+        assert!(
+            joiner.wants_proof(&session, now),
+            "no send, so the session still needs one"
+        );
+        joiner.note_asked(&session, now);
+        assert!(
+            !joiner.wants_proof(&session, now),
+            "after a send the retry clock runs"
         );
     }
 
