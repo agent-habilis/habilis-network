@@ -166,7 +166,11 @@ fn test_proof_request_round_trip() {
         MessageKind::ProofRequest { to: target },
         "the parsed kind is a proof request to the target"
     );
-    assert_eq!(parsed.body.as_str(), "", "a proof request has an empty body");
+    assert_eq!(
+        parsed.body.as_str(),
+        "",
+        "a proof request has an empty body"
+    );
 }
 
 #[test]
