@@ -218,6 +218,9 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         state.quiet.remove(&key);
         state.quiet_since.remove(&key);
         state.clock_evidence.quiet_aged.remove(&key);
+        // The set is a FIFO and `insert` keeps the place of a key it holds, so a key that lapses
+        // again leaves first: it is the newest lapse, and the cap must drop an older one before it.
+        state.clock_evidence.lapsed_quiet.remove(&key);
         state.clock_evidence.lapsed_quiet.insert(key);
     }
     // Keep `quiet_since` bounded to current `quiet` membership: peers that
@@ -629,6 +632,40 @@ mod tests {
         assert!(
             state.quiet.contains(&test_key("lost-heron")),
             "a peer quiet for a minute stays"
+        );
+    }
+
+    /// The lapsed set is a bounded FIFO. A key that lapses again is the newest lapse, so the cap
+    /// drops an older key before it, and the memory of the recent lapse stays.
+    #[test]
+    fn a_key_that_lapses_again_is_the_newest_in_the_lapsed_set() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let again = test_key("swift-cedar");
+        state.clock_evidence.lapsed_quiet.insert(again);
+        for index in 1..tuning::QUIET_CAP {
+            let mut bytes = [7u8; 32];
+            bytes[..8].copy_from_slice(&u64::try_from(index).expect("small").to_le_bytes());
+            state
+                .clock_evidence
+                .lapsed_quiet
+                .insert(AuthorKey::from(bytes));
+        }
+        let long_gone = Instant::now()
+            .checked_sub(QUIET_TTL + Duration::from_secs(60))
+            .expect("the monotonic clock has run past the quiet TTL since boot");
+        state.quiet_for_test("swift-cedar");
+        state.quiet_since.insert(again, long_gone);
+
+        tick_sweep(&mut state, &SilentSink);
+        state
+            .clock_evidence
+            .lapsed_quiet
+            .insert(AuthorKey::from([255; 32]));
+
+        assert!(
+            state.clock_evidence.lapsed_quiet.contains(&again),
+            "the key that lapsed last survives the cap, since an older key is dropped first"
         );
     }
 
