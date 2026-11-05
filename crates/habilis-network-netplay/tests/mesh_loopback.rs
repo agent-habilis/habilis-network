@@ -314,6 +314,23 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
     );
 }
 
+/// Folds the `SyncRequest` tokens that each bob received into `tokens`. Player 0 is alice, so the
+/// bob of slot `n` is player `n + 1`.
+fn collect_tokens(players: &[Player], tokens: &mut [Vec<u32>; 2]) {
+    let slots = tokens.iter_mut().enumerate();
+    for (slot, got) in slots {
+        let mut inbox = players[slot + 1]
+            .transport
+            .clone()
+            .expect("a bob has his transport");
+        for (_, message) in inbox.receive_all() {
+            if let Body::SyncRequest { token } = message.body {
+                got.push(token);
+            }
+        }
+    }
+}
+
 /// A nickname is a label, so two live keys can use one. A rollback packet is addressed to a key,
 /// so the key it names gets it and the other key does not.
 #[test]
@@ -348,36 +365,36 @@ fn a_packet_to_one_key_of_a_shared_nickname_reaches_that_key_only() {
             assert!(heard, "alice never heard from both peers named bob");
 
             // The token names the key that the packet is for: 1 for the first bob, 2 for the second.
-            for (bob, token) in [(1_usize, 1_u32), (2, 2)] {
-                let to = players[bob]
+            // Alice heard from both keys, but the PeerInfo of one can still be on its way. The
+            // engine then refuses the send, and the rollback layer resends a lost packet. So this
+            // test resends too, until each key has its packet.
+            let send_token = |group: &[Player], bob: usize, token: u32| {
+                let to = group[bob]
                     .transport
                     .as_ref()
                     .and_then(MeshTransport::local_pubkey)
                     .expect("a bob that alice heard from has a key");
                 let payload =
                     format!(r#"{{"magic":7,"body":{{"SyncRequest":{{"token":{token}}}}}}}"#);
-                players[0]
+                group[0]
                     .node
                     .sender()
                     .try_send(Outbound::Rollback { to, payload })
                     .expect("the outbound queue has room");
-            }
+            };
             let mut tokens: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+            let mut passes = 0_u32;
             let delivered: bool = drive(&mut players, Duration::from_secs(20), |players| {
-                // Player 0 is alice, so the bob of slot `n` is player `n + 1`.
-                let slots = tokens.iter_mut().enumerate();
-                for (slot, got) in slots {
-                    let bob = slot + 1;
-                    let mut inbox = players[bob]
-                        .transport
-                        .clone()
-                        .expect("a bob has his transport");
-                    for (_, message) in inbox.receive_all() {
-                        if let Body::SyncRequest { token } = message.body {
-                            got.push(token);
+                if passes.is_multiple_of(25) {
+                    let slots = tokens.iter().enumerate();
+                    for (slot, got) in slots {
+                        if got.is_empty() {
+                            send_token(players, slot + 1, u32::try_from(slot + 1).expect("small"));
                         }
                     }
                 }
+                passes += 1;
+                collect_tokens(players, &mut tokens);
                 tokens.iter().all(|got| !got.is_empty())
             })
             .await;
@@ -385,11 +402,21 @@ fn a_packet_to_one_key_of_a_shared_nickname_reaches_that_key_only() {
                 delivered,
                 "a key of the shared nickname got no packet: {tokens:?}"
             );
-            assert_eq!(
-                tokens,
-                [vec![1], vec![2]],
-                "each key must get the packet that names it, and only that one"
-            );
+
+            // A packet for the wrong key would arrive late, so keep listening before the check.
+            drive(&mut players, Duration::from_secs(2), |players| {
+                collect_tokens(players, &mut tokens);
+                false
+            })
+            .await;
+            let slots = tokens.iter().enumerate();
+            for (slot, got) in slots {
+                let own = u32::try_from(slot + 1).expect("small");
+                assert!(
+                    got.iter().all(|token| *token == own),
+                    "each key must get only the packet that names it: {tokens:?}"
+                );
+            }
 
             for player in players {
                 player.node.leave().await.expect("leave the mesh cleanly");
