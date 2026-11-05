@@ -1722,6 +1722,20 @@ impl MeshDoc {
         // `meta` map was the dominant cost of ingesting a frame. On the
         // rejection path this pays for a hydration it does not use, which is
         // the rare adversarial case rather than the steady-state one.
+        if self.adopting && self.gate.is_none() {
+            // The frames of a seed that a free-form channel adopts: nobody reads the JSON of the
+            // document after each one, and the channel has no gate that needs `before`. Two
+            // hydrations of the whole document for each frame made an adoption cost the square of
+            // the size of the state. A gated channel keeps the full path: its gate needs `before`.
+            if !self.apply(change, hash, frame.clone()) {
+                return Ingested::Ignored;
+            }
+            self.drain_pending();
+            return Ingested::Applied {
+                changed: true,
+                doc: Value::Null,
+            };
+        }
         let before = self.to_json();
         if self.forges_foreign_entry(&change, &frame.author, Some(&before)) {
             return Ingested::Rejected;
