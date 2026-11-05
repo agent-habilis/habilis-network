@@ -7,7 +7,7 @@ use automerge::{
 use serde_json::{Map, Value};
 
 use habilis_network_protocol::messages::Verified;
-use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
+use habilis_network_protocol::{AuthorKey, DedupKey, Message, SymmetricKey};
 use habilis_network_util::consts::{
     DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
     DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
@@ -502,10 +502,10 @@ impl MeshDoc {
     /// A fresh joiner holds nothing, so one frame can move it up to `DOC_EPOCH_JUMP_MAX` epochs. The
     /// mesh then follows it within one wait, because that jump is inside the bound of the mesh, and
     /// the joiner holds frames of others after that, so it waits the next time.
-    pub fn adopt_if_alone(&mut self, me: &Nickname, own: &AuthorKey) -> Option<EpochSwitch> {
+    pub fn adopt_if_alone(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
         self.candidate.as_ref()?;
         let alone = self.frames.values().all(|frame| frame.key() == *own);
-        if alone { self.adopt(me) } else { None }
+        if alone { self.adopt(own) } else { None }
     }
 
     /// One tick of 1 minute. Adopts the candidate epoch when it has waited for
@@ -522,12 +522,12 @@ impl MeshDoc {
     /// tick after the wait: a node adopts at the end of the wait and writes its entry on the next
     /// sweep, so the entries are back in that margin, whatever the phase of the two timers. Only a
     /// gated channel has epochs: the free-form `state` channel keeps every frame.
-    pub fn tick_epoch(&mut self, me: &Nickname) -> Option<EpochSwitch> {
+    pub fn tick_epoch(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
         self.epoch_ticks = self.epoch_ticks.saturating_add(1);
         if self.candidate.is_some() {
             self.candidate_ticks = self.candidate_ticks.saturating_add(1);
             if self.candidate_ticks >= DOC_EPOCH_ADOPT_WAIT_TICKS {
-                return self.adopt(me);
+                return self.adopt(own);
             }
         }
         if self.epoch_ticks == DOC_EPOCH_ADOPT_WAIT_TICKS + 2 {
@@ -541,9 +541,9 @@ impl MeshDoc {
         };
         if self.gate.is_some() && self.frame_bytes >= threshold {
             if self.candidate.is_some() {
-                return self.adopt(me);
+                return self.adopt(own);
             }
-            return Some(self.switch_to(self.epoch.saturating_add(1), me));
+            return Some(self.switch_to(self.epoch.saturating_add(1), own));
         }
         None
     }
@@ -552,9 +552,9 @@ impl MeshDoc {
     /// epoch, and a peer sent it once, so a switch that dropped it would leave its dedup key seen
     /// with no frame behind it. A node that crosses the threshold with a candidate adopts it for
     /// that reason, and does not start an epoch of its own.
-    fn adopt(&mut self, me: &Nickname) -> Option<EpochSwitch> {
+    fn adopt(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
         let candidate = self.candidate.take()?;
-        let switch = self.switch_to(candidate.epoch, me);
+        let switch = self.switch_to(candidate.epoch, own);
         if !matches!(self.ingest(&candidate.frame), Ingested::Applied { .. }) {
             // Automerge can still refuse the change in `apply`, which only a crafted frame reaches.
             self.dropped.push(candidate.frame.dedup_key());
@@ -565,14 +565,15 @@ impl MeshDoc {
         Some(switch)
     }
 
-    /// Drop every frame and start `epoch`, and hand back the entry of `me`, which only `me` can
-    /// write again.
-    fn switch_to(&mut self, epoch: u64, me: &Nickname) -> EpochSwitch {
+    /// Drop every frame and start `epoch`, and hand back the entry of `own`, which only the holder
+    /// of that key can write again. The slot of an entry is the hex of its author key.
+    fn switch_to(&mut self, epoch: u64, own: &AuthorKey) -> EpochSwitch {
         let gate_map = self.gate.as_ref().map(|gate| gate.map.clone());
         let map: String = gate_map.unwrap_or_default();
         let json = self.to_json();
         let peers = json.get(&map);
-        let own_entry: Option<Value> = peers.and_then(|peers| peers.get(me.as_str())).cloned();
+        let slot = own.to_string();
+        let own_entry: Option<Value> = peers.and_then(|peers| peers.get(slot.as_str())).cloned();
         self.restart(epoch);
         EpochSwitch {
             epoch,
@@ -774,7 +775,7 @@ impl MeshDoc {
             return refuse(self);
         }
         let fresh = Self::new_gated(gate).at_epoch(epoch);
-        if fresh.forges_foreign_entry(change, &frame.author, None) {
+        if fresh.forges_foreign_entry(change, &frame.key(), None) {
             return Ingested::Rejected;
         }
         match self.candidate.as_ref() {

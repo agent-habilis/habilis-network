@@ -16,7 +16,7 @@ use crate::doc::{DocError, EpochSwitch, split_entry};
 use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
-use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
+use crate::protocol::{AuthorKey, Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::{DOC_EPOCH_FRAME_MARGIN, MAX_MESSAGE_SIZE};
 
 use crate::logging::messages;
@@ -309,18 +309,19 @@ impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
 }
 
 /// The merges that write the entry of a switch to a new epoch again, as
-/// `{ <map>: { <me>: <part> } }`, each one for a frame that `fits` accepts. An item is an error for a
+/// `{ <map>: { <key of this node>: <part> } }`, each one for a frame that `fits` accepts. An item is an error for a
 /// value that cannot be cut to a frame; the other items are still there.
 pub(crate) fn entry_merges<Fits: FnMut(&serde_json::Value) -> bool>(
     switch: &EpochSwitch,
-    me: &Nickname,
+    own: &AuthorKey,
     mut fits: Fits,
 ) -> Vec<Result<serde_json::Value, DocError>> {
     let Some(entry) = switch.own_entry.as_ref() else {
         return Vec::new();
     };
     let map = switch.map.as_str();
-    let wrapped = |part: &serde_json::Value| serde_json::json!({ map: { me.as_str(): part } });
+    let slot = own.to_string();
+    let wrapped = |part: &serde_json::Value| serde_json::json!({ map: { slot.as_str(): part } });
     let cuts = split_entry(entry, |part| fits(&wrapped(part)));
     cuts.map(|cut| cut.map(|part| wrapped(&part))).collect()
 }
@@ -329,12 +330,13 @@ pub(crate) fn entry_merges<Fits: FnMut(&serde_json::Value) -> bool>(
 /// back what the app deleted or changed between the switch and the sweep.
 /// It patches only when a switch waits and has kept an entry: with no switch, or a switch that kept
 /// none, it does nothing.
-fn follow_own_write(state: &mut EventLoopState, merge: &serde_json::Value, author: &Nickname) {
+fn follow_own_write(state: &mut EventLoopState, merge: &serde_json::Value) {
+    let slot = state.identity.author_key().to_string();
     let Some(switch) = state.epoch_write.switch.as_mut() else {
         return;
     };
     let peers = merge.get(&switch.map);
-    let patch = peers.and_then(|peers| peers.get(author.as_str()));
+    let patch = peers.and_then(|peers| peers.get(slot.as_str()));
     if let (Some(patch), Some(entry)) = (patch, switch.own_entry.as_mut()) {
         apply_merge_patch(entry, patch);
     }
@@ -429,12 +431,14 @@ pub(crate) async fn write_entry_again(state: &mut EventLoopState, context: &Merg
     };
     let json = state.doc(Channel::Meta).to_json();
     let peers = json.get(&taken.map);
-    let held = peers.and_then(|peers| peers.get(context.author.as_str()));
+    let own = state.identity.author_key();
+    let slot = own.to_string();
+    let held = peers.and_then(|peers| peers.get(slot.as_str()));
     let entry = taken.own_entry.as_ref();
     let rest: Option<serde_json::Value> = entry.and_then(|entry| unwritten(entry, held));
     let switch = EpochSwitch::new(taken.epoch, taken.map.clone(), rest);
     let cuts: Vec<Result<serde_json::Value, DocError>> =
-        entry_merges(&switch, context.author, |merge| {
+        entry_merges(&switch, &own, |merge| {
             frame_fits(state, context.mesh, context.author, merge)
         });
     for cut in cuts {
@@ -643,7 +647,7 @@ pub async fn broadcast_state_merge(
         }
     };
     if channel == Channel::Meta {
-        follow_own_write(state, &merge, author);
+        follow_own_write(state, &merge);
     }
 
     // A departure is mirrored before gossip takes the frame: once gossip has it, the frame is

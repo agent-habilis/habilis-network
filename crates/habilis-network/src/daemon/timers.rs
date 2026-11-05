@@ -21,7 +21,7 @@ use crate::util::{resident_memory, tuning, unix_secs};
 
 use crate::gossip::PathSummary;
 use crate::net;
-use crate::protocol::{Channel, Nickname};
+use crate::protocol::{AuthorKey, Channel};
 use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -309,12 +309,12 @@ fn in_join_phase(joined_at: unix_secs::UnixSecs, now: unix_secs::UnixSecs) -> bo
 
 /// The entries of the per-peer map that belong to nobody on the roster and are not ours: members
 /// that left and whose entry stays in the document for good.
-fn absent_entries(nicks: &[String], roster: &HashSet<Nickname>, me: &Nickname) -> usize {
-    let absent = |nick: &&String| {
-        let owner = Nickname::try_new(nick);
-        owner.is_ok_and(|owner| owner != *me && !roster.contains(&owner))
+fn absent_entries(slots: &[String], roster: &HashSet<AuthorKey>, own: &AuthorKey) -> usize {
+    let absent = |slot: &&String| {
+        let owner = AuthorKey::decode_hex(slot);
+        owner.is_some_and(|owner| owner != *own && !roster.contains(&owner))
     };
-    nicks.iter().filter(absent).count()
+    slots.iter().filter(absent).count()
 }
 
 /// Every how many doc censuses the heavy part runs: the JSON, the save and the per-peer map cost
@@ -355,9 +355,9 @@ fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: us
 /// One tick of the minute timer for the epoch of the meta document: it adopts a higher epoch after
 /// its wait, or starts a new one when its frames reach the threshold. The sweep tick writes the
 /// entry of this node again.
-pub(crate) fn tick_epoch(state: &mut EventLoopState, me: &Nickname) {
+pub(crate) fn tick_epoch(state: &mut EventLoopState, own: &AuthorKey) {
     let doc = state.doc_mut(Channel::Meta);
-    let switch = doc.tick_epoch(me);
+    let switch = doc.tick_epoch(own);
     for key in doc.take_dropped() {
         state.seen.remove(&key);
     }
@@ -371,13 +371,13 @@ pub(crate) fn tick_epoch(state: &mut EventLoopState, me: &Nickname) {
 /// save, and the entries of the per-peer map of members that are gone, every
 /// [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read 0. A reader of the numbers can tell
 /// what a keyframe scheme would save.
-pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
+pub(crate) fn tick_doc_census(state: &mut EventLoopState, own: &AuthorKey) {
     let run = DOC_CENSUS_RUNS.fetch_add(1, Ordering::Relaxed);
     let heavy = is_heavy_run(run);
     let meta = state.doc_mut(Channel::Meta).census(heavy);
     let shared = state.doc_mut(Channel::State).census(heavy);
     let peer_nicks = meta.peer_nicks.as_deref().unwrap_or_default();
-    let absent = absent_entries(peer_nicks, &state.peers, me);
+    let absent = absent_entries(peer_nicks, &state.peers, own);
     let peer_entries = peer_nicks.len();
     tracing::info!(
         target: "habilis_network::lifecycle",

@@ -1193,7 +1193,7 @@ struct ChannelEvent<'message> {
 fn adopt_new_epoch(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let adopted = state
         .doc_mut(Channel::Meta)
-        .adopt_if_alone(context.author, &context.our_pubkey);
+        .adopt_if_alone(&context.our_pubkey);
     if let Some(switch) = adopted {
         state.note_epoch_switch(switch);
     }
