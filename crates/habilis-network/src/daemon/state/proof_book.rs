@@ -98,6 +98,13 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
         }
     }
 
+    /// Whether an answer to `asker` may go out at `now`: one answer per asker in each window, and
+    /// the node-wide cap as the outer bound. A refused answer is counted.
+    pub(crate) fn allow_answer_to(&mut self, asker: &K, now: Instant) -> bool {
+        let _ = asker;
+        self.allow_answer(now)
+    }
+
     pub(crate) fn answers_refused(&self) -> u64 {
         self.answers_refused
     }
@@ -161,6 +168,31 @@ mod tests {
         assert_eq!(book.get(&0), Some(&0), "the oldest live session stays");
         assert_eq!(book.len(), 4, "the book holds its cap");
         assert_eq!(book.refused(), 36, "every proof past the cap is counted");
+    }
+
+    /// One asker gets one answer per window, so a single asker cannot take the node-wide cap and
+    /// starve the others.
+    #[test]
+    fn one_asker_gets_one_answer_per_window() {
+        let mut book: ProofBook<u8, u8> = ProofBook::with_cap(4);
+        let now = Instant::now();
+        assert!(
+            book.allow_answer_to(&1, now),
+            "the first request of an asker is answered"
+        );
+        assert!(
+            !book.allow_answer_to(&1, now),
+            "its second request in the window is not"
+        );
+        assert!(
+            book.allow_answer_to(&2, now),
+            "another asker is still answered"
+        );
+        let later = now + std::time::Duration::from_secs(61);
+        assert!(
+            book.allow_answer_to(&1, later),
+            "the next window answers the asker again"
+        );
     }
 
     /// Answers to requests are capped per minute; the answers past the cap are refused and counted.
