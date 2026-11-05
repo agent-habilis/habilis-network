@@ -10,7 +10,7 @@ use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
 use habilis_network_util::consts::{
     DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
-    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
+    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_FRAMES_MAX,
 };
 
 use crate::wire::SeedMark;
@@ -179,7 +179,68 @@ pub struct SeedChain {
 #[derive(Debug)]
 struct Candidate {
     epoch: u64,
+    /// The root frame.
     frame: Verified,
+    /// The hash of the change of the root frame.
+    root_hash: ChangeHash,
+    /// The mark of a state seed root, `None` for the one frame candidate of a gated channel.
+    mark: Option<SeedMark>,
+    /// The later frames of a seed chain, by the hash of their change.
+    tail: HashMap<ChangeHash, TailFrame>,
+}
+
+impl Candidate {
+    fn new(epoch: u64, frame: Verified, root_hash: ChangeHash, mark: Option<SeedMark>) -> Self {
+        Self {
+            epoch,
+            frame,
+            root_hash,
+            mark,
+            tail: HashMap::new(),
+        }
+    }
+}
+
+impl Candidate {
+    /// The frames of the chain in order, root first, when the candidate holds all of them and the
+    /// last change is the one that the mark names. A candidate with no mark is its root alone.
+    fn chain(&self) -> Option<Vec<&Verified>> {
+        let Some(mark) = self.mark.as_ref() else {
+            return Some(vec![&self.frame]);
+        };
+        let named = mark.frames as usize;
+        let mut by_parent: HashMap<ChangeHash, (ChangeHash, &TailFrame)> = HashMap::new();
+        for (hash, tail) in &self.tail {
+            by_parent.insert(tail.parent, (*hash, tail));
+        }
+        let mut ordered: Vec<&Verified> = vec![&self.frame];
+        let mut tip: ChangeHash = self.root_hash;
+        while let Some((hash, tail)) = by_parent.get(&tip) {
+            if ordered.len() >= named {
+                return None;
+            }
+            ordered.push(&tail.frame);
+            tip = *hash;
+        }
+        let matches = ordered.len() == named && tip.to_string() == mark.last;
+        matches.then_some(ordered)
+    }
+
+    /// The dedup keys of every frame that the candidate holds.
+    fn keys(&self) -> Vec<DedupKey> {
+        let mut keys: Vec<DedupKey> = vec![self.frame.dedup_key()];
+        for tail in self.tail.values() {
+            keys.push(tail.frame.dedup_key());
+        }
+        keys
+    }
+}
+
+/// A frame of a seed chain after its root, and the change that it follows.
+#[derive(Debug)]
+struct TailFrame {
+    frame: Verified,
+    parent: ChangeHash,
 }
 
 /// What a [`MeshDoc`] holds, as [`MeshDoc::census`] reads it.
@@ -399,13 +460,13 @@ impl MeshDoc {
     /// `enc` body with this channel's key first. `None` for an opaque/foreign
     /// body (or, on a passworded mesh, an unsealed or unopenable body) — a
     /// no-op on the doc.
-    fn change_bytes(&self, frame: &Message) -> Option<(Vec<u8>, u64)> {
+    fn change_bytes(&self, frame: &Message) -> Option<wire::ParsedChange> {
         match self.key.as_ref() {
             // Passwordless: parse directly — no decrypt indirection, no clone.
-            None => wire::parse_change(frame.body.as_str()),
+            None => wire::parse_change_full(frame.body.as_str()),
             Some(key) => {
                 let plain = wire::decrypt_body(frame.body.as_str(), Some(key))?;
-                wire::parse_change(&plain)
+                wire::parse_change_full(&plain)
             }
         }
     }
@@ -514,9 +575,10 @@ impl MeshDoc {
     /// mesh then follows it within one wait, because that jump is inside the bound of the mesh, and
     /// the joiner holds frames of others after that, so it waits the next time.
     pub fn adopt_if_alone(&mut self, me: &Nickname, own: &AuthorKey) -> Option<EpochSwitch> {
-        self.candidate.as_ref()?;
+        let held = self.candidate.as_ref()?;
         let alone = self.frames.values().all(|frame| frame.key() == *own);
-        if alone { self.adopt(me) } else { None }
+        let whole = held.chain().is_some();
+        if alone && whole { self.adopt(me) } else { None }
     }
 
     /// One tick of 1 minute. Adopts the candidate epoch when it has waited for
@@ -566,12 +628,33 @@ impl MeshDoc {
     /// that reason, and does not start an epoch of its own.
     fn adopt(&mut self, me: &Nickname) -> Option<EpochSwitch> {
         let candidate = self.candidate.take()?;
+        let frames: Option<Vec<Verified>> = candidate.chain().map(|chain| {
+            let mut owned: Vec<Verified> = Vec::with_capacity(chain.len());
+            for frame in chain {
+                owned.push(frame.clone());
+            }
+            owned
+        });
+        let Some(frames) = frames else {
+            // The chain is not whole: the cutter left, or frames were lost. Adopting it would leave
+            // the state with a part of its values, so the node keeps its epoch and forgets the
+            // frames, and a later digest brings them again.
+            self.dropped.extend(candidate.keys());
+            if let Some(held) = self.warn_due("the seed of the candidate epoch was not complete") {
+                tracing::warn!(target: LOG_TARGET, held, author = %candidate.frame.author, "the seed of the candidate epoch was not complete");
+            }
+            return None;
+        };
         let switch = self.switch_to(candidate.epoch, me);
-        if !matches!(self.ingest(&candidate.frame), Ingested::Applied { .. }) {
-            // Automerge can still refuse the change in `apply`, which only a crafted frame reaches.
-            self.dropped.push(candidate.frame.dedup_key());
-            if let Some(refused) = self.warn_due("the candidate of the new epoch was not applied") {
-                tracing::warn!(target: LOG_TARGET, refused, author = %candidate.frame.author, "the candidate of the new epoch was not applied");
+        for frame in &frames {
+            if !matches!(self.ingest(frame), Ingested::Applied { .. }) {
+                // Automerge can still refuse the change in `apply`, which only a crafted frame reaches.
+                self.dropped.push(frame.dedup_key());
+                if let Some(refused) =
+                    self.warn_due("the candidate of the new epoch was not applied")
+                {
+                    tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "the candidate of the new epoch was not applied");
+                }
             }
         }
         Some(switch)
@@ -774,10 +857,11 @@ impl MeshDoc {
     /// `Verified` proof means the signature was checked before the frame got here,
     /// so the signer is `frame.key()`, never a field of the body.
     pub fn ingest(&mut self, frame: &Verified) -> Ingested {
-        let Some((bytes, epoch)) = self.change_bytes(frame) else {
+        let Some(parsed) = self.change_bytes(frame) else {
             return Ingested::Ignored;
         };
-        let Ok(change) = Change::from_bytes(bytes) else {
+        let (epoch, mark) = (parsed.epoch, parsed.seed);
+        let Ok(change) = Change::from_bytes(parsed.bytes) else {
             return Ingested::Ignored;
         };
         let author = frame.key();
@@ -790,7 +874,7 @@ impl MeshDoc {
             return Ingested::Ignored;
         }
         if epoch != self.epoch {
-            return self.ingest_other_epoch(epoch, &change, frame);
+            return self.ingest_other_epoch(epoch, &change, frame, mark);
         }
         let hash = change.hash();
         if self.applied.contains(&hash) {
@@ -829,42 +913,86 @@ impl MeshDoc {
     /// `DOC_EPOCH_JUMP_MAX` above, and passes the gate on a fresh document of that epoch. Every
     /// other refusal forgets the dedup key, so the re-send of the frame is not dropped as a repeat
     /// when it can be taken later.
-    fn ingest_other_epoch(&mut self, epoch: u64, change: &Change, frame: &Verified) -> Ingested {
+    fn ingest_other_epoch(
+        &mut self,
+        epoch: u64,
+        change: &Change,
+        frame: &Verified,
+        mark: Option<SeedMark>,
+    ) -> Ingested {
         if epoch < self.epoch {
             return Ingested::Ignored;
         }
-        let refuse = |doc: &mut Self| {
-            doc.dropped.push(frame.dedup_key());
-            Ingested::Ignored
-        };
-        let Some(gate) = self.gate.clone() else {
-            return refuse(self);
-        };
         if epoch - self.epoch > DOC_EPOCH_JUMP_MAX {
-            return refuse(self);
+            return self.refuse_frame(frame);
         }
-        if change.deps() != [peers_genesis(&gate.map, epoch).hash()] {
-            return refuse(self);
+        let Some(genesis) = self.genesis(epoch) else {
+            return self.refuse_frame(frame);
+        };
+        if change.deps() != [genesis.hash()] {
+            return self.take_tail_frame(epoch, change, frame);
         }
-        let fresh = Self::new_gated(gate).at_epoch(epoch);
-        if fresh.forges_foreign_entry(change, &frame.author, None) {
-            return Ingested::Rejected;
-        }
+        let mark: Option<SeedMark> = if let Some(gate) = self.gate.clone() {
+            let fresh = Self::new_gated(gate).at_epoch(epoch);
+            if fresh.forges_foreign_entry(change, &frame.author, None) {
+                return Ingested::Rejected;
+            }
+            None
+        } else {
+            let named: usize = mark.as_ref().map_or(0, |named| named.frames as usize);
+            if named == 0 || named > DOC_SEED_FRAMES_MAX {
+                return self.refuse_frame(frame);
+            }
+            mark
+        };
         match self.candidate.as_ref() {
             Some(held) if held.epoch == epoch && held.frame.dedup_key() == frame.dedup_key() => {
                 return Ingested::Duplicate;
             }
-            Some(held) if held.epoch >= epoch => return refuse(self),
+            Some(held) if held.epoch >= epoch => return self.refuse_frame(frame),
             _ => {}
         }
-        let kept = Candidate {
-            epoch,
-            frame: frame.clone(),
-        };
+        let kept = Candidate::new(epoch, frame.clone(), change.hash(), mark);
         match self.candidate.replace(kept) {
-            Some(beaten) => self.dropped.push(beaten.frame.dedup_key()),
+            Some(beaten) => self.dropped.extend(beaten.keys()),
             None => self.candidate_ticks = 0,
         }
+        Ingested::NewEpoch { epoch }
+    }
+
+    /// Forget the dedup key of a frame that the document does not take, so its re-send is not
+    /// dropped as a repeat when it can be taken later.
+    fn refuse_frame(&mut self, frame: &Verified) -> Ingested {
+        self.dropped.push(frame.dedup_key());
+        Ingested::Ignored
+    }
+
+    /// A frame of a higher epoch that is not a root: a later frame of the seed chain that the
+    /// candidate holds. Only the author of the root sends the chain, and the candidate holds as
+    /// many frames as the mark of its root names, so a flood of tail frames cannot grow it.
+    fn take_tail_frame(&mut self, epoch: u64, change: &Change, frame: &Verified) -> Ingested {
+        let hash = change.hash();
+        let Some(held) = self.candidate.as_mut() else {
+            return self.refuse_frame(frame);
+        };
+        let named = held.mark.as_ref().map_or(0, |mark| mark.frames as usize);
+        let [parent] = change.deps() else {
+            return self.refuse_frame(frame);
+        };
+        if held.epoch != epoch || named < 2 || frame.key() != held.frame.key() {
+            return self.refuse_frame(frame);
+        }
+        if hash == held.root_hash || held.tail.contains_key(&hash) {
+            return Ingested::Duplicate;
+        }
+        if held.tail.len() + 1 >= named {
+            return self.refuse_frame(frame);
+        }
+        let kept = TailFrame {
+            frame: frame.clone(),
+            parent: *parent,
+        };
+        held.tail.insert(hash, kept);
         Ingested::NewEpoch { epoch }
     }
 
@@ -1316,8 +1444,12 @@ fn put_number(
 
 #[cfg(test)]
 mod tests {
-    use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
+    use super::{
+        DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_FRAMES_MAX, Ingested, MeshDoc,
+        SelfWriteGate,
+    };
     use crate::DocError;
+    use crate::wire::{SeedMark, change_body_seed, encrypt_body};
     use automerge::Change;
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
@@ -2564,10 +2696,12 @@ mod tests {
         let mut doc = doc_over_the_cap(&bob);
         let fresh = MeshDoc::new_gated(card_gate()).at_epoch(1);
         let forged = frame_on(&fresh, &mallory, &entry(alice.as_str(), "forged"));
-        doc.candidate = Some(super::Candidate {
-            epoch: 1,
-            frame: forged.clone(),
-        });
+        doc.candidate = Some(super::Candidate::new(
+            1,
+            forged.clone(),
+            automerge::ChangeHash([0u8; 32]),
+            None,
+        ));
         let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
         assert_eq!(switch.epoch, 1, "the node still goes to the epoch");
         assert!(
@@ -2742,6 +2876,312 @@ mod tests {
             matches!(result, Err(DocError::TooLarge { .. })),
             "a leaf over the frame cannot be cut: {result:?}"
         );
+    }
+
+    /// The frames of the seed that `cutter` sends for `live` in `epoch`, root first, each cut to
+    /// 600 bytes of merge. A `key` seals the bodies, as on a passworded mesh.
+    fn seed_frames(
+        cutter: &Nickname,
+        live: &Value,
+        epoch: u64,
+        key: Option<&SymmetricKey>,
+    ) -> Vec<Verified> {
+        let doc = state_doc_with(live);
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = doc
+            .build_seed(epoch, &actor, within(600))
+            .expect("the live json splits");
+        let who = signer(cutter);
+        let mut frames: Vec<Verified> = Vec::new();
+        let numbered: Vec<(usize, &Vec<u8>)> = chain.changes.iter().enumerate().collect();
+        for (index, bytes) in numbered {
+            let mark = (index == 0).then_some(&chain.mark);
+            let plain = change_body_seed(bytes, None, epoch, mark).expect("a body");
+            let wire = match key {
+                Some(sealing) => encrypt_body(&plain, sealing).expect("sealed"),
+                None => plain,
+            };
+            let message =
+                Message::new_channel_event(&MeshId::from("test"), cutter, wire, Channel::State);
+            frames.push(Verified::fixture_unchecked(
+                message.unverified_key(who),
+                who,
+            ));
+        }
+        frames
+    }
+
+    fn ticks(doc: &mut MeshDoc, me: &Nickname, count: u32) -> Option<super::EpochSwitch> {
+        let mut last: Option<super::EpochSwitch> = None;
+        for _ in 0..count {
+            if let Some(switch) = doc.tick_epoch(me) {
+                last = Some(switch);
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn a_state_seed_chain_is_held_whole_and_adopted_after_the_wait() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        assert!(frames.len() > 2, "the seed has a tail: {}", frames.len());
+        let mut doc = MeshDoc::new_ungated();
+        for frame in &frames {
+            let taken = doc.ingest(frame);
+            assert!(
+                matches!(taken, Ingested::NewEpoch { epoch: 3 }),
+                "held: {taken:?}"
+            );
+        }
+        assert_eq!(
+            doc.epoch(),
+            0,
+            "the document does not adopt before the wait"
+        );
+        let switch = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(switch.epoch, 3, "the switch names the epoch of the seed");
+        assert_eq!(doc.epoch(), 3, "the document holds the epoch of the seed");
+        assert_eq!(
+            doc.to_json(),
+            live,
+            "the document holds the live json of the seed"
+        );
+    }
+
+    #[test]
+    fn a_node_adopts_only_a_complete_seed_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            super::LOG_TARGET,
+            "the seed of the candidate epoch was not complete",
+        );
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        write(&mut doc, &me, &json!({ "mine": 1 }));
+        for frame in &frames[..frames.len() - 1] {
+            doc.ingest(frame);
+        }
+        assert!(
+            ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).is_none(),
+            "a chain with a missing frame is not adopted"
+        );
+        assert_eq!(doc.epoch(), 0, "the document stays in its epoch");
+        assert_eq!(
+            doc.to_json(),
+            json!({ "mine": 1 }),
+            "the live values are kept"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_seed_is_dropped_and_its_keys_forgotten_when_the_wait_ends() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            super::LOG_TARGET,
+            "the seed of the candidate epoch was not complete",
+        );
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        for frame in &frames[..frames.len() - 1] {
+            doc.ingest(frame);
+        }
+        let _ = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        let forgotten: Vec<DedupKey> = dropped_keys(&mut doc);
+        for frame in &frames[..frames.len() - 1] {
+            assert!(
+                forgotten.contains(&frame.dedup_key()),
+                "the key of a frame of the dropped seed is forgotten, so its re-send is taken"
+            );
+        }
+        assert!(doc.candidate.is_none(), "the candidate is gone");
+    }
+
+    #[test]
+    fn the_cutter_leaving_in_the_wait_does_not_leave_a_one_frame_state() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            super::LOG_TARGET,
+            "the seed of the candidate epoch was not complete",
+        );
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        write(&mut doc, &me, &json!({ "mine": 1 }));
+        doc.ingest(&frames[0]);
+        assert!(
+            ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).is_none(),
+            "a root with no tail is not adopted"
+        );
+        assert_eq!(doc.to_json(), json!({ "mine": 1 }), "no value is lost");
+    }
+
+    #[test]
+    fn the_app_sees_no_half_seed_while_the_chain_fills() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        write(&mut doc, &me, &json!({ "mine": 1 }));
+        for frame in &frames[..frames.len() - 1] {
+            let taken = doc.ingest(frame);
+            assert!(
+                !matches!(taken, Ingested::Applied { .. }),
+                "a seed frame is never applied alone: {taken:?}"
+            );
+            assert_eq!(
+                doc.to_json(),
+                json!({ "mine": 1 }),
+                "the doc shows no half seed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seed_whose_tail_arrives_in_reverse_order_completes() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        doc.ingest(&frames[0]);
+        let reversed: Vec<&Verified> = frames[1..].iter().rev().collect();
+        for frame in reversed {
+            doc.ingest(frame);
+        }
+        ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(
+            doc.to_json(),
+            live,
+            "the chain in any order gives the live json"
+        );
+    }
+
+    #[test]
+    fn a_root_that_names_more_frames_than_the_bound_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let doc_of = state_doc_with(&live_state());
+        let chain = doc_of
+            .build_seed(3, &pad_seed(b"cutter"), within(600))
+            .expect("the live json splits");
+        let too_many = u32::try_from(DOC_SEED_FRAMES_MAX + 1).expect("fits");
+        let mark = SeedMark::new(too_many, chain.mark.last.clone());
+        let plain = change_body_seed(&chain.changes[0], None, 3, Some(&mark)).expect("a body");
+        let who = signer(&cutter);
+        let message =
+            Message::new_channel_event(&MeshId::from("test"), &cutter, plain, Channel::State);
+        let root = Verified::fixture_unchecked(message.unverified_key(who), who);
+        let mut doc = MeshDoc::new_ungated();
+        assert!(
+            matches!(doc.ingest(&root), Ingested::Ignored),
+            "a forged count is refused"
+        );
+        assert!(doc.candidate.is_none(), "no candidate is held");
+        assert!(
+            dropped_keys(&mut doc).contains(&root.dedup_key()),
+            "its key is forgotten"
+        );
+    }
+
+    #[test]
+    fn a_tail_frame_of_another_author_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (cutter, mallory) = (nick("cutter"), nick("mallory"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let foreign = seed_frames(&mallory, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        doc.ingest(&frames[0]);
+        let taken = doc.ingest(&foreign[1]);
+        assert!(
+            matches!(taken, Ingested::Ignored),
+            "a foreign tail frame is refused: {taken:?}"
+        );
+        assert!(
+            dropped_keys(&mut doc).contains(&foreign[1].dedup_key()),
+            "its key is forgotten"
+        );
+    }
+
+    #[test]
+    fn the_seed_chain_buffer_stays_inside_the_bound_at_ten_times_the_frames() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        for _ in 0..10 {
+            for frame in &frames {
+                doc.ingest(frame);
+            }
+        }
+        let held = doc
+            .candidate
+            .as_ref()
+            .map_or(0, |candidate| candidate.tail.len() + 1);
+        assert_eq!(
+            held,
+            frames.len(),
+            "the candidate holds the chain once, not 10 times"
+        );
+    }
+
+    #[test]
+    fn a_joiner_that_holds_nothing_adopts_a_complete_seed_at_once_and_waits_for_the_rest() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        let own = signer(&me);
+        for frame in &frames[..frames.len() - 1] {
+            doc.ingest(frame);
+            assert!(
+                doc.adopt_if_alone(&me, &own).is_none(),
+                "an incomplete seed is kept, not adopted"
+            );
+        }
+        doc.ingest(&frames[frames.len() - 1]);
+        let switch = doc
+            .adopt_if_alone(&me, &own)
+            .expect("the complete seed is adopted");
+        assert_eq!(switch.epoch, 3, "the switch names the epoch");
+        assert_eq!(doc.to_json(), live, "the joiner holds the live json");
+    }
+
+    #[test]
+    fn the_epoch_switch_of_a_state_document_carries_no_entry() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        let switch = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(
+            switch.own_entry, None,
+            "a state switch has no entry to write again"
+        );
+        assert_eq!(switch.map, "", "a state switch names no per-peer map");
+    }
+
+    #[test]
+    fn a_seed_on_a_passworded_mesh_is_adopted_through_its_sealed_frames() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let key = SymmetricKey::from([7u8; 32]);
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, Some(&key));
+        let mut doc = MeshDoc::new_ungated().key(Some(key));
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(doc.to_json(), live, "the sealed seed gives the live json");
     }
 
     /// Golden: the hash of the genesis of state epochs 1, 2 and a large one. A replica of another

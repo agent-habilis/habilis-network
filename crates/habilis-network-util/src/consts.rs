@@ -139,6 +139,20 @@ pub const DOC_EPOCH_WRITE_ATTEMPTS: u8 = 6;
 /// per minute, so the bound is the threshold plus one minute of writes.
 pub const DOC_EPOCH_FRAME_CAP_BYTES: usize = 1024 * 1024;
 
+/// The frame bytes that the state channel keeps in one epoch before the node starts a new one
+/// (provisional, a tunable). The real threshold is the larger of this value and twice the bytes
+/// that the epoch held when it settled, as for meta. A reset costs one broadcast of the live
+/// state, so a cap above the usual live size keeps resets rare.
+pub const DOC_STATE_EPOCH_FRAME_CAP_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most frames that the root of a state seed can name. Before the epoch settles the threshold
+/// is twice the cap, and a seed holds the live state, which is below that. A frame holds at least
+/// half of the bytes of a message, so the count is twice the threshold over the usable frame
+/// bytes. A root that names more is refused, so a forged mark cannot make a node hold more than
+/// this many frames as a candidate, which is 4519 frames of at most 3840 bytes.
+pub const DOC_SEED_FRAMES_MAX: usize =
+    4 * DOC_STATE_EPOCH_FRAME_CAP_BYTES / (MAX_MESSAGE_SIZE - DOC_EPOCH_FRAME_MARGIN);
+
 /// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged
 /// epoch number cannot lock the channel: the forger raises the epoch by this much per adoption.
 pub const DOC_EPOCH_JUMP_MAX: u64 = 131_072;
