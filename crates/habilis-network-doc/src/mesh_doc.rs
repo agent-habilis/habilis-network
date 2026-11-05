@@ -585,8 +585,7 @@ impl MeshDoc {
     fn restart(&mut self, epoch: u64) {
         let mut doc = Automerge::new();
         let mut applied = HashSet::new();
-        if let Some(gate) = self.gate.as_ref() {
-            let genesis = peers_genesis(&gate.map, epoch);
+        if let Some(genesis) = self.genesis(epoch) {
             applied.insert(genesis.hash());
             let _ = doc.apply_changes([genesis]);
         }
@@ -600,6 +599,16 @@ impl MeshDoc {
         self.epoch = epoch;
         self.epoch_ticks = 0;
         self.settled_bytes = 0;
+    }
+
+    /// The genesis of `epoch` for this channel: the per-peer map of a gated channel (meta), the
+    /// empty genesis of a state channel above epoch 0, and nothing for epoch 0 of a state channel.
+    fn genesis(&self, epoch: u64) -> Option<Change> {
+        match self.gate.as_ref() {
+            Some(gate) => Some(peers_genesis(&gate.map, epoch)),
+            None if epoch == 0 => None,
+            None => Some(state_genesis(epoch)),
+        }
     }
 
     /// The same document in `epoch`, with no change but its genesis.
@@ -1015,6 +1024,29 @@ fn gated_entries(json: &Value, gate: &SelfWriteGate) -> Map<String, Value> {
 
 fn doc_json(doc: &Automerge) -> Value {
     serde_json::to_value(AutoSerde::from(doc)).unwrap_or(Value::Null)
+}
+
+/// The deterministic genesis of a state epoch above 0, built from constants (fixed actor,
+/// `time = 0`, the epoch in the message) so every replica gets the same hash. It leaves no key in
+/// the document. A change with no operation is no change, so the genesis writes a key and deletes
+/// it.
+fn state_genesis(epoch: u64) -> Change {
+    let mut doc = Automerge::new();
+    doc.set_actor(automerge::ActorId::from(
+        b"habilis-state/genesis".as_slice(),
+    ));
+    {
+        let mut tx = doc.transaction();
+        tx.put(&ROOT, "epoch", epoch).expect("root is a map");
+        tx.delete(&ROOT, "epoch").expect("the key was just put");
+        let options = transaction::CommitOptions::default()
+            .with_time(0)
+            .with_message(format!("epoch {epoch}"));
+        tx.commit_with(options);
+    }
+    doc.get_changes(&[])
+        .pop()
+        .expect("genesis produced exactly one change")
 }
 
 /// The deterministic genesis change that creates the shared per-peer `map`. Built
@@ -2518,6 +2550,59 @@ mod tests {
                 seen.remove(&key);
             }
         }
+    }
+
+    /// Golden: the hash of the genesis of state epoch 1. A replica of another build must reach the
+    /// same hash, or the epoch frames of the two builds do not meet.
+    #[test]
+    fn state_genesis_bytes_are_pinned() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            format!("{:?}", super::state_genesis(1).hash()),
+            "ChangeHash(\"bfb565389605341479209de04fbd2be2ba2d7831ab1fc4f0cf162293a8e8e1f5\")",
+            "the state genesis change hash is pinned"
+        );
+    }
+
+    #[test]
+    fn a_state_genesis_leaves_no_key_and_differs_per_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut doc = automerge::Automerge::new();
+        doc.apply_changes([super::state_genesis(3)])
+            .expect("the genesis applies");
+        assert_eq!(
+            doc.get_changes(&[]).len(),
+            1,
+            "the genesis is one change, though it leaves no key"
+        );
+        let json = serde_json::to_value(automerge::AutoSerde::from(&doc)).expect("json");
+        assert_eq!(
+            json,
+            json!({}),
+            "the genesis of a state epoch leaves no key"
+        );
+        let hash = |epoch| super::state_genesis(epoch).hash();
+        assert_ne!(hash(1), hash(2), "epoch 2 has another genesis than epoch 1");
+        assert_ne!(
+            hash(1),
+            super::peers_genesis("peers", 1).hash(),
+            "the state genesis is not the meta genesis"
+        );
+    }
+
+    #[test]
+    fn an_ungated_document_restarted_at_an_epoch_holds_the_genesis_of_that_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated().at_epoch(3);
+        assert_eq!(doc.epoch(), 3, "the epoch is 3");
+        assert_eq!(doc.change_count(), 1, "the document holds its genesis");
+        assert_eq!(doc.to_json(), json!({}), "the genesis leaves no key");
+        let fresh = MeshDoc::new_ungated();
+        assert_eq!(
+            fresh.change_count(),
+            0,
+            "epoch 0 of a state document has no genesis"
+        );
     }
 
     #[test]
