@@ -650,15 +650,21 @@ pub(crate) async fn ingest(
         // `false` means the frame is plumbing or addressed elsewhere —
         // stop before retention.
         MessageKind::App { .. } => {
-            !app.on_app_frame(
-                InboundApp {
-                    message: &view,
-                    surfaceable,
-                },
-                state,
-                context,
-            )
-            .await
+            // A directed frame for another key is never read by the app and never retained: the
+            // nickname it carries is a label, and the other key of that nickname is another peer.
+            if is_directed_content(&view.kind) && !addressed_to_us(&verified, &context.our_pubkey) {
+                true
+            } else {
+                !app.on_app_frame(
+                    InboundApp {
+                        message: &view,
+                        surfaceable,
+                    },
+                    state,
+                    context,
+                )
+                .await
+            }
         }
         // Everything the engine owns itself. Spelled out rather than `_` so
         // a new kind has to be routed deliberately.
@@ -2498,8 +2504,9 @@ mod first_contact_tests {
         });
     }
 
-    /// A directed frame to one of two live keys that use a nickname is accepted. An unmeshed node
-    /// buffers it with the key as its recipient, and tells the caller `Ok`.
+    /// A directed frame to either of two live keys that use a nickname is accepted. An unmeshed
+    /// node buffers each frame with its own key as the recipient, in the order of the sends, and
+    /// tells the caller `Ok`.
     #[test]
     fn an_unmeshed_send_to_either_key_of_a_nickname_is_buffered() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -2513,26 +2520,27 @@ mod first_contact_tests {
                 state.names.insert(key, twin.clone());
                 state.peers.insert(key);
             }
-            let frame = Message::new_pong(
-                &node.mesh,
-                &node.author,
-                second,
-                &protocol::MessageId::random(),
-            )
-            .sign(&Identity::generate());
 
-            let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+            for to in [second, first] {
+                let frame =
+                    Message::new_pong(&node.mesh, &node.author, to, &protocol::MessageId::random())
+                        .sign(&Identity::generate());
+                let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+                assert!(
+                    sent.is_ok(),
+                    "the send to a key of the nickname was refused"
+                );
+            }
 
-            assert!(
-                sent.is_ok(),
-                "the send to a key of the nickname was refused"
-            );
             let buffered = state.pending_outbound.take();
-            assert_eq!(buffered.len(), 1, "the accepted frame is in the buffer");
+            let recipients: Vec<AuthorKey> = buffered
+                .iter()
+                .filter_map(|(frame, _)| sole_addressee(&frame.kind).copied())
+                .collect();
             assert_eq!(
-                sole_addressee(&buffered[0].0.kind),
-                Some(&second),
-                "the buffered frame lost its recipient key"
+                recipients,
+                [second, first],
+                "the buffer lost a frame or the key of a recipient"
             );
             node.endpoint.close().await;
         });
@@ -2815,6 +2823,60 @@ mod first_contact_tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             true
         }
+    }
+
+    /// Two live keys use one nickname, and a relay hands each of them the frames of the mesh. A
+    /// directed app frame names one key. The app of the other key never reads it, so it cannot
+    /// act on a message that was not meant for it. A frame for this key reaches the app.
+    #[test]
+    fn a_frame_for_one_key_of_a_nickname_does_not_reach_the_app_of_the_other_key() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the counter
+            let reads = Arc::new(atomic::AtomicUsize::new(0));
+            let mut app = Counting(Arc::clone(&reads));
+            let sender = Identity::generate();
+            let directed = |to: AuthorKey| {
+                let params = AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    Some(to),
+                    None,
+                    MessageBody::from("for one key"),
+                );
+                let frame = Message::new_app(&node.mesh, &nick("alice"), params).sign(&sender);
+                frame.serialize().expect("serialize")
+            };
+            let other_key = test_key("twin#other");
+
+            ingest(
+                directed(other_key).into_bytes(),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                reads.load(Ordering::Relaxed),
+                0,
+                "the app read a frame that names the other key of its nickname"
+            );
+
+            ingest(
+                directed(node.our_pubkey).into_bytes(),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                reads.load(Ordering::Relaxed),
+                1,
+                "the app did not read the frame that names its own key"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// A resend of a message that the app already read has a new gossip payload, and the ingest
