@@ -16,7 +16,7 @@ use habilis_network_util::consts::{
 };
 
 use crate::wire::SeedMark;
-use crate::{DocError, Stamp, split_entry, wire};
+use crate::{DocError, Stamp, pack_entry, wire};
 
 use automerge::transaction;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -807,7 +807,7 @@ impl MeshDoc {
         fits: impl FnMut(&Value) -> bool,
     ) -> Result<ReplayMerges, DocError> {
         let mut within_frame = fits;
-        let cuts: Result<Vec<Value>, DocError> = split_entry(replay, |merge| {
+        let cuts: Result<Vec<Value>, DocError> = pack_entry(replay, |merge| {
             count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
         })
         .collect();
@@ -1346,7 +1346,7 @@ impl MeshDoc {
     /// fit one frame, written as a chain of changes on the genesis of `epoch`. A node that starts
     /// the epoch sends the chain, and a node that adopts it holds the same live values, with no
     /// history. `fits` takes one merge and says whether its frame is small enough, as
-    /// [`split_entry`] does: the caller measures the real frame, signed and sealed.
+    /// [`pack_entry`] does: the caller measures the real frame, signed and sealed.
     /// `actor_seed` is the actor of the chain, the signing key of the cutter, as for
     /// [`Self::build_change`]. An empty document gives a chain of 1 change that writes a key and
     /// deletes it, so a seed always has a root.
@@ -1366,7 +1366,7 @@ impl MeshDoc {
         }
         let live = self.without_dead_values();
         let mut within_frame = fits;
-        let cuts: Result<Vec<Value>, DocError> = split_entry(&live, |merge| {
+        let cuts: Result<Vec<Value>, DocError> = pack_entry(&live, |merge| {
             count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
         })
         .collect();

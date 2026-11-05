@@ -55,7 +55,7 @@ pub use seed_mark::SeedMark;
 
 pub use stamp::Stamp;
 
-pub use split::split_entry;
+pub use split::{pack_entry, split_entry};
 
 mod mesh_doc;
 
