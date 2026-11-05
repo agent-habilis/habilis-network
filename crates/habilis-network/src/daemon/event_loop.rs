@@ -36,6 +36,7 @@ use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr, RelayUrl, Watcher as _};
 use iroh_gossip::api::{ApiError, Event, GossipReceiver, GossipTopic};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::task::JoinError;
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
@@ -74,7 +75,7 @@ use super::node::SignalHandling;
 use super::shutdown;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
 use super::state::{EventLoopState, MeshSecrets};
-use super::timers;
+use super::{state_cut, timers};
 use crate::daemon::setup::LiveCount;
 use ctx_parts::CtxParts;
 pub use event_loop_error::EventLoopError;
@@ -1151,8 +1152,29 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         timers::tick_prune(&mut self.state, self.parts.sink);
         let context = self.parts.handler_ctx(&self.sender);
         timers::tick_epoch(&mut self.state, context.author);
+        state_cut::tick(&mut self.state, context.author, context.mesh);
         timers::tick_doc_census(&mut self.state, context.author);
         timers::tick_collection_census(&self.state);
+    }
+
+    /// The build of a seed of the state channel is done: sign the chain and send it, root first.
+    /// A node that cannot reach the overlay keeps the frames for when it meshes.
+    async fn seed_built(&mut self, outcome: Result<state_cut::SeedOutcome, JoinError>) {
+        let context = self.parts.handler_ctx(&self.sender);
+        let frames = state_cut::finish(&mut self.state, outcome, context.author, context.mesh);
+        for (signed, bytes) in frames {
+            // The cutter takes its own seed as a candidate, like every node, and adopts it after
+            // the wait.
+            let _ = self.state.doc_mut(protocol::Channel::State).ingest(&signed);
+            if self.state.overlay_reachable() {
+                if let Err(error) = self.sender.broadcast(bytes).await {
+                    state_cut::cut_failed(&mut self.state, &error);
+                    return;
+                }
+            } else {
+                self.state.pending_outbound.push((signed, bytes));
+            }
+        }
     }
 
     async fn alive(&mut self) {
@@ -1702,6 +1724,7 @@ async fn run_loop<Driver: NodeDriver>(
                 None => { lp.unicast_rx = None; },
             },
             _ = lp.intervals.prune.tick() => { lp.prune(); },
+            outcome = state_cut::seed_job_done(&mut lp.state.seed_job) => { lp.seed_built(outcome).await; },
             _ = lp.intervals.alive.tick() => { lp.alive().await; },
             _ = lp.intervals.sweep.tick() => { lp.sweep().await; },
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
