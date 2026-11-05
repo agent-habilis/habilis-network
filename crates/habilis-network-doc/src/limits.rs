@@ -3,9 +3,9 @@
 //! so values that must agree cannot differ, and a test can build the same lines for a small seed.
 
 use habilis_network_util::consts::{
-    DOC_EPOCH_FRAME_MARGIN, DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX, DOC_SEED_TOMBSTONES_MAX,
-    DOC_STATE_DEPTH_MAX, DOC_STATE_PATHS_BREAK_EVEN, DOC_STATE_SEED_RATIO_PERCENT,
-    DOC_STATE_STAMP_BYTES_BASE, MAX_MESSAGE_SIZE,
+    DOC_EPOCH_FRAME_MARGIN, DOC_REFUSED_FRAMES_MAX, DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX,
+    DOC_SEED_TOMBSTONES_MAX, DOC_STATE_DEPTH_MAX, DOC_STATE_PATHS_BREAK_EVEN,
+    DOC_STATE_SEED_RATIO_PERCENT, DOC_STATE_STAMP_BYTES_BASE, MAX_MESSAGE_SIZE,
 };
 
 /// The lines of one axis (the bytes of the frames, or the operations of the changes).
@@ -54,6 +54,8 @@ pub struct Limits {
     pub tombstones_max: usize,
     /// The most restores that the document keeps.
     pub restores_max: usize,
+    /// The most hashes of refused frames that the document remembers.
+    pub refused_max: usize,
     /// The bytes of the frames.
     pub bytes: Axis,
     /// The operations of the changes.
@@ -79,6 +81,7 @@ impl Limits {
             tombstones_max: (DOC_SEED_TOMBSTONES_MAX * seed_frames_max / DOC_SEED_FRAMES_MAX)
                 .max(1),
             restores_max: (DOC_RESTORES_MAX * seed_frames_max / DOC_SEED_FRAMES_MAX).max(1),
+            refused_max: (DOC_REFUSED_FRAMES_MAX * seed_frames_max / DOC_SEED_FRAMES_MAX).max(8),
             bytes: Axis::from_break_even(bytes_break_even),
             ops: Axis::from_break_even(ops_break_even),
         }
@@ -252,8 +255,14 @@ mod tests {
         let small = Limits::from_seed_frames(40);
         let real = Limits::real();
         assert!(
-            small.tombstones_max < real.tombstones_max && small.restores_max < real.restores_max,
-            "the tombstones and the restores shrink with the seed"
+            small.tombstones_max < real.tombstones_max
+                && small.restores_max < real.restores_max
+                && small.refused_max < real.refused_max,
+            "the tombstones, the restores and the refused hashes shrink with the seed"
+        );
+        assert_eq!(
+            real.refused_max, 4_096,
+            "the real set holds 4 096 hashes of refused frames"
         );
     }
 }

@@ -224,6 +224,12 @@ pub const DOC_CUT_BACKOFF_FIRST: u32 = 6;
 /// The longest wait, in ticks, after failed cuts (about 1 hour).
 pub const DOC_CUT_BACKOFF_MAX: u32 = 64;
 
+/// The most hashes of refused frames that a state document remembers, so that a frame that it
+/// refused over its remote line is dropped when anti-entropy offers it again. Each hash is 32 bytes,
+/// so the set is about 130 kibibytes at the most. When it is full the oldest hash leaves, and the
+/// frame that it named costs one more refusal if it comes again. The set is cleared at a cut.
+pub const DOC_REFUSED_FRAMES_MAX: usize = 4096;
+
 /// The longest path (the bytes of its keys) that gets a tombstone. A delete of a longer path is
 /// written and counted, and has no tombstone.
 pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;

@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 
 use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
+use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
 use habilis_network_util::consts::{
     DOC_CUT_BACKOFF_FIRST, DOC_CUT_BACKOFF_MAX, DOC_CUT_RANKS_SLOTTED, DOC_CUT_SLOT_TICKS,
     DOC_CUT_SPREAD_TICKS, DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES,
@@ -431,6 +432,8 @@ pub struct DocCensus {
     /// The values that wait to be written again (see [`MeshDoc::take_restores`]): after a switch
     /// it is 0 again within 3 ticks, so a value that stays means a write that did not settle.
     pub replay_unsettled: u64,
+    /// The frames that the document refused over its remote line, since it began.
+    pub refused_remote: u64,
 }
 
 /// The bytes of a frame on the wire, 0 for a frame that does not serialize.
@@ -517,6 +520,12 @@ pub struct MeshDoc {
     seed_ops: usize,
     /// The lines of this document.
     limits: Limits,
+    /// The hashes of the frames that this document refused over its remote line, so that anti-
+    /// entropy that offers one again finds it dropped at once. Bounded by `Limits::refused_max`:
+    /// when it is full the oldest hash leaves. Cleared at a cut.
+    refused: BoundedFifoSet<ChangeHash>,
+    /// The frames refused over the remote line since the document began.
+    refused_remote: u64,
     /// The ticks since the size of this document first crossed the cut ceiling, `None` while it
     /// is below it.
     crossed_ticks: Option<u32>,
@@ -634,6 +643,8 @@ impl MeshDoc {
             seed_bytes: 0,
             seed_ops: 0,
             limits: Limits::real(),
+            refused: BoundedFifoSet::new(Limits::real().refused_max),
+            refused_remote: 0,
             crossed_ticks: None,
             cut_wait: 0,
             cut_backoff: DOC_CUT_BACKOFF_FIRST,
@@ -892,6 +903,7 @@ impl MeshDoc {
             unstamped_paths,
             dropped_restores: self.restores_dropped,
             replay_unsettled,
+            refused_remote: self.refused_remote,
         }
     }
 
@@ -1010,7 +1022,20 @@ impl MeshDoc {
     #[must_use]
     pub fn limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self.refused = BoundedFifoSet::new(limits.refused_max);
         self
+    }
+
+    /// The frames that this document refused over its remote line, since it began.
+    #[must_use]
+    pub fn refused_remote(&self) -> u64 {
+        self.refused_remote
+    }
+
+    /// The hashes of refused frames that the document holds now.
+    #[must_use]
+    pub fn refused_held(&self) -> usize {
+        self.refused.len()
     }
 
     /// The epoch of the history that this document holds.
@@ -1486,6 +1511,7 @@ impl MeshDoc {
         self.crossed_ticks = None;
         self.cut_wait = 0;
         self.cut_backoff = DOC_CUT_BACKOFF_FIRST;
+        self.refused = BoundedFifoSet::new(self.limits.refused_max);
         self.pending = HashMap::new();
         self.candidate = None;
         self.candidate_ticks = 0;
@@ -1803,8 +1829,54 @@ impl MeshDoc {
         let Some(change) = changes.pop() else {
             return Ok(None);
         };
-        self.check_lines(merge, &change)?;
+        self.check_lines(merge, &change, false)?;
         Ok(Some(change.raw_bytes().to_vec()))
+    }
+
+    /// [`Self::build_change`] for a write that puts back a value that this node held (a replay of
+    /// its own writes, or a restore). It is not refused at the refusal line or for its depth,
+    /// because it adds nothing that the document did not hold, but it is refused over the memory
+    /// line.
+    ///
+    /// # Errors
+    /// As [`Self::build_change`].
+    pub fn build_restore(
+        &self,
+        merge: &Value,
+        actor_seed: &[u8],
+    ) -> Result<Option<Vec<u8>>, DocError> {
+        let mut fork = self.doc.fork();
+        let actor = actor_for(actor_seed);
+        self.own_tag
+            .store(actor_tag_number(&actor), Ordering::Relaxed);
+        fork.set_actor(actor);
+        let heads = fork.get_heads();
+        {
+            let mut tx = fork.transaction();
+            write_map(&mut tx, &ROOT, merge).map_err(DocError::encode)?;
+            tx.commit();
+        }
+        let mut changes = fork.get_changes(&heads);
+        let Some(change) = changes.pop() else {
+            return Ok(None);
+        };
+        self.check_lines(merge, &change, true)?;
+        Ok(Some(change.raw_bytes().to_vec()))
+    }
+
+    /// Whether applying `change` (in `frame`) would take this document over its remote line: the
+    /// memory line of a local write (the frames, or the operations) and the room of a remote flood
+    /// above it. It is a bound on memory, not a policy: a node that refuses a frame holds less than
+    /// the nodes that took it, and the next seed brings the difference.
+    fn over_remote_line(&self, change: &Change, frame: &Verified) -> bool {
+        let bytes = &self.limits.bytes;
+        let ops = &self.limits.ops;
+        let frames_after = self.frame_bytes + wire_len(frame);
+        let ops_after = self.ops_held + change.len();
+        let line_bytes =
+            bytes.memory.max(self.seed_bytes + bytes.break_even / 10) + bytes.remote_extra;
+        let line_ops = ops.memory.max(self.seed_ops + ops.break_even / 10) + ops.remote_extra;
+        frames_after > line_bytes || ops_after > line_ops
     }
 
     /// The lines of a free-form state document, for a local write whose `change` was built from
@@ -1812,11 +1884,11 @@ impl MeshDoc {
     /// write is refused over the memory line, and a write that adds a value (a leaf that is not
     /// `null`, or an empty object) is refused when the next seed would pass the refusal line, on
     /// the bytes or on the operations. A delete is exempt from the refusal line and from the depth.
-    fn check_lines(&self, merge: &Value, change: &Change) -> Result<(), DocError> {
+    fn check_lines(&self, merge: &Value, change: &Change, restoring: bool) -> Result<(), DocError> {
         if !self.state_epochs || self.gate.is_some() {
             return Ok(());
         }
-        let adds = adds_value(merge);
+        let adds = adds_value(merge) && !restoring;
         if adds {
             let depth = merge_depth(merge);
             if depth > DOC_STATE_DEPTH_MAX {
@@ -1916,6 +1988,21 @@ impl MeshDoc {
         }
         if !self.deps_satisfied(change.deps()) {
             return self.buffer_orphan(author, hash, change, frame);
+        }
+        if self.state_epochs && self.gate.is_none() && !self.adopting {
+            if self.refused.contains(&hash) {
+                return Ingested::Ignored;
+            }
+            if self.over_remote_line(&change, frame) {
+                self.refused.insert(hash);
+                self.refused_remote = self.refused_remote.saturating_add(1);
+                if let Some(refused) =
+                    self.warn_due("a frame was refused: the state document is over its remote line")
+                {
+                    tracing::warn!(target: LOG_TARGET, refused, held = self.refused_remote, author = %frame.author, "a frame was refused: the state document is over its remote line");
+                }
+                return Ingested::Ignored;
+            }
         }
         // Hoisted above the gate so the two share one hydration: nothing
         // mutates the document between them, and `doc_json` over the whole
@@ -6827,6 +6914,39 @@ mod tests {
     }
 
     #[test]
+    fn a_restore_is_not_refused_at_the_refusal_line_or_for_its_depth_but_it_is_over_the_memory_line()
+     {
+        let _guard = ::habilis_network_test_tracing::init();
+        let above_the_line = full_state_doc(1_900);
+        let merge = leaves_merge(5_000, 5);
+        assert!(
+            write_error(&above_the_line, &merge).is_some(),
+            "an add is refused above the refusal line"
+        );
+        let restored = above_the_line.build_restore(&merge, &pad_seed(b"me"));
+        assert!(
+            restored.is_ok(),
+            "a restore of the same values passes the refusal line"
+        );
+        let mut deep = json!(1);
+        for level in 0..13 {
+            deep = json!({ format!("k{level}"): deep });
+        }
+        assert!(
+            above_the_line
+                .build_restore(&deep, &pad_seed(b"me"))
+                .is_ok(),
+            "a restore of a value deeper than 12 levels is not refused for its depth"
+        );
+        let at_memory = full_state_doc(2_115);
+        let refused = at_memory.build_restore(&leaves_merge(5_000, 20), &pad_seed(b"me"));
+        assert!(
+            matches!(refused, Err(DocError::StateFull { .. })),
+            "a restore over the memory line is refused"
+        );
+    }
+
+    #[test]
     fn a_document_with_no_state_epochs_has_no_lines() {
         let _guard = ::habilis_network_test_tracing::init();
         let plain = MeshDoc::new_ungated().limits(Limits::from_seed_frames(40));
@@ -6840,6 +6960,194 @@ mod tests {
         assert!(
             write_error(&plain, &merge).is_none(),
             "a document with no state epochs refuses no write of depth or size"
+        );
+    }
+
+    /// The frames of `leaves` leaves of the map `live` that `who` writes into `doc`, 100 in each.
+    fn history_frames(doc: &mut MeshDoc, who: &Nickname, leaves: usize) -> Vec<Verified> {
+        let mut frames: Vec<Verified> = Vec::new();
+        let mut done = 0;
+        while done < leaves {
+            let take = 100.min(leaves - done);
+            frames.push(write(doc, who, &leaves_merge(done, take)));
+            done += take;
+        }
+        frames
+    }
+
+    /// Three nodes that hold the same 2 300 leaves: an author and a holder with the real lines, and
+    /// a refuser with the lines of a small seed, which is over its remote line (2 226 operations).
+    fn trio_with_a_refuser_over_the_remote_line() -> (MeshDoc, MeshDoc, MeshDoc) {
+        let mut origin = MeshDoc::new_ungated().state_epochs();
+        let frames = history_frames(&mut origin, &nick("base"), 2_300);
+        let mut author = MeshDoc::new_ungated().state_epochs();
+        let mut refuser = MeshDoc::new_ungated().state_epochs();
+        let mut holder = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            author.ingest(frame);
+            refuser.ingest(frame);
+            holder.ingest(frame);
+        }
+        let refuser = refuser.limits(Limits::from_seed_frames(40));
+        (author, refuser, holder)
+    }
+
+    #[test]
+    fn a_remote_frame_over_the_remote_line_is_refused_once_and_remembered() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame was refused: the state document is over its remote line",
+        );
+        let (mut author, mut refuser, mut holder) = trio_with_a_refuser_over_the_remote_line();
+        let frame = write(&mut author, &nick("me"), &json!({ "x": 1 }));
+        let outcome = holder.ingest(&frame);
+        assert!(
+            matches!(outcome, Ingested::Applied { .. }),
+            "a node under its line applies the frame"
+        );
+        let outcome_over_the_line = refuser.ingest(&frame);
+        assert!(
+            matches!(outcome_over_the_line, Ingested::Ignored),
+            "a node over its remote line refuses the frame"
+        );
+        assert_eq!(refuser.refused_remote(), 1, "the refusal is counted");
+        assert!(
+            refuser.to_json().get("x").is_none(),
+            "the refused frame changed nothing"
+        );
+        let again = refuser.ingest(&frame);
+        assert!(
+            matches!(again, Ingested::Ignored),
+            "the frame that is offered again is dropped"
+        );
+        assert_eq!(
+            (refuser.refused_remote(), refuser.refused_held()),
+            (1, 1),
+            "a frame that is dropped from the set is not counted again"
+        );
+    }
+
+    #[test]
+    fn the_set_of_refused_frames_stays_inside_its_cap_when_it_is_fed_10_times_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame was refused: the state document is over its remote line",
+        );
+        let (author, mut refuser, _holder) = trio_with_a_refuser_over_the_remote_line();
+        let cap = Limits::from_seed_frames(40).refused_max;
+        for index in 0..(10 * cap) {
+            // Each frame follows the history that the refuser holds, not the frame before it, so
+            // none of them waits for a dependency that it refused.
+            let frame = frame_on(&author, &nick("me"), &json!({ format!("k{index}"): 1 }));
+            refuser.ingest(&frame);
+            assert!(
+                refuser.refused_held() <= cap,
+                "{} hashes after {} frames, the cap is {cap}",
+                refuser.refused_held(),
+                index + 1
+            );
+        }
+        assert_eq!(
+            refuser.refused_remote(),
+            u64::try_from(10 * cap).expect("a small number"),
+            "every one of the frames was refused and counted"
+        );
+        assert_eq!(
+            refuser.refused_held(),
+            cap,
+            "the set is full and holds the newest"
+        );
+    }
+
+    #[test]
+    fn a_seed_that_a_node_over_its_remote_line_adopts_is_applied_whole() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (_author, mut refuser, _holder) = trio_with_a_refuser_over_the_remote_line();
+        let mut big = MeshDoc::new_ungated().state_epochs();
+        write_leaves(&mut big, &nick("me"), 0, 2_500);
+        let frames = seed_frames_of(&big, &nick("cutter"), 3, None);
+        for frame in &frames {
+            refuser.ingest(frame);
+        }
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            refuser.tick_epoch(&nick("refuser"));
+        }
+        assert_eq!(refuser.epoch(), 3, "the node adopted the seed");
+        assert_eq!(
+            refuser.to_json(),
+            big.to_json(),
+            "the seed is whole: the remote line does not apply to the frames of a seed"
+        );
+        assert_eq!(
+            refuser.refused_remote(),
+            0,
+            "no frame of the seed was refused"
+        );
+    }
+
+    /// The restore that `holder` writes after it adopted the seed of `refuser`, with the ticks that
+    /// the adoption and the jitter of the restore need.
+    fn restore_after_the_cut_of(refuser: &MeshDoc, holder: &mut MeshDoc) -> Option<Value> {
+        let cutter = nick("cutter");
+        let frames = seed_frames_of(refuser, &cutter, 3, None);
+        for frame in &frames {
+            holder.ingest(frame);
+        }
+        ticks(holder, &nick("holder"), super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        assert_eq!(
+            holder.epoch(),
+            3,
+            "the holder adopted the seed of the refuser"
+        );
+        ticks(holder, &nick("holder"), 3);
+        holder.take_restores().map(|(patch, _stamps)| patch)
+    }
+
+    #[test]
+    fn the_write_that_a_refuser_lost_comes_back_from_a_holder_when_the_author_has_left() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame was refused: the state document is over its remote line",
+        );
+        let (mut author, mut refuser, mut holder) = trio_with_a_refuser_over_the_remote_line();
+        let frame = write(&mut author, &nick("me"), &json!({ "x": 7 }));
+        holder.ingest(&frame);
+        refuser.ingest(&frame);
+        drop(author);
+        let patch = restore_after_the_cut_of(&refuser, &mut holder);
+        assert_eq!(
+            patch.as_ref().and_then(|patch| patch.get("x")),
+            Some(&json!(7)),
+            "the holder writes x again after the seed that lacks it: {patch:?}"
+        );
+    }
+
+    #[test]
+    fn a_delete_that_a_refuser_lost_is_written_again_by_a_holder_and_not_undone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame was refused: the state document is over its remote line",
+        );
+        let (mut author, mut refuser, mut holder) = trio_with_a_refuser_over_the_remote_line();
+        let gone = json!({ "live": { "l00005": Value::Null } });
+        let frame = write(&mut author, &nick("me"), &gone);
+        holder.ingest(&frame);
+        refuser.ingest(&frame);
+        assert!(
+            refuser.to_json().pointer("/live/l00005").is_some(),
+            "the refuser still holds the value that the delete removed"
+        );
+        let patch = restore_after_the_cut_of(&refuser, &mut holder);
+        assert_eq!(
+            patch
+                .as_ref()
+                .and_then(|patch| patch.pointer("/live/l00005")),
+            Some(&Value::Null),
+            "the holder writes the delete again, so the value of the seed is removed: {patch:?}"
         );
     }
 
