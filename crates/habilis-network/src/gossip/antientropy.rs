@@ -657,10 +657,10 @@ pub(crate) async fn handle_state_digest(
     // and every answer goes to the connection that the asker's digest came on, or to its proven endpoint.
     let arrived_from = state.state_digest_serves.unicast.arrived_from;
     if arrived_from.is_none() {
-        let members = state.peers.iter().chain(iter::once(context.author));
+        let members = state.peers.iter().chain(iter::once(&context.our_pubkey));
         if !answers_digest(
-            context.author,
-            &message.author,
+            &context.our_pubkey,
+            &author,
             message.id.as_str(),
             members,
         ) {
