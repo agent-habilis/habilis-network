@@ -426,7 +426,7 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
             eprintln!("attempt {attempt} had no answer on the connection");
             assert!(
                 attempt < STATE_ATTEMPTS,
-                "no answer went on the connection in {STATE_ATTEMPTS} attempts: the unicast path never started"
+                "no answer went on the connection in {STATE_ATTEMPTS} attempts: no answer went on the connection, or no digest came on the connection"
             );
             attempt += 1;
         }
