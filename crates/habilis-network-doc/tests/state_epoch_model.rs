@@ -20,8 +20,9 @@ use serde_json::{Map, Value, json};
 const NODES: usize = 3;
 /// How many ticks a node waits before it adopts a seed. The same as `DOC_EPOCH_ADOPT_WAIT_TICKS`.
 const WAIT: u32 = 5;
-/// The largest merge of one seed frame, in bytes of JSON text.
-const FRAME_FITS: usize = 500;
+/// The largest merge of one seed frame, in bytes of JSON text. The live values of the model are a
+/// few hundred bytes, so this small bound gives a seed of several frames, and the chain is tested.
+const FRAME_FITS: usize = 60;
 const KEYS: [&str; 3] = ["a", "b", "c"];
 
 fn nick(name: &str) -> Nickname {
@@ -138,7 +139,7 @@ impl Sim {
 
     /// Node `index` cuts the next epoch: it builds the seed of its live values and sends it to
     /// every node, itself included.
-    fn cut(&mut self, index: usize) {
+    fn cut(&mut self, index: usize) -> usize {
         let epoch = self.nodes[index].doc.epoch() + 1;
         let name = self.nodes[index].name.clone();
         let actor = pad(name.as_str());
@@ -158,6 +159,7 @@ impl Sim {
             self.nodes[index].doc.ingest(frame);
             self.send_to_others(index, frame);
         }
+        frames.len()
     }
 
     fn deliver_due(&mut self) {
@@ -248,6 +250,7 @@ fn seed_count(default: u64) -> u64 {
 #[test]
 fn model_cuts_with_no_write_in_flight_converge_to_the_model() {
     let _guard = habilis_network_test_tracing::init();
+    let mut longest = 0;
     for seed in 0..seed_count(500) {
         let mut sim = Sim::new(seed);
         for round in 0..6 {
@@ -259,11 +262,15 @@ fn model_cuts_with_no_write_in_flight_converge_to_the_model() {
             sim.settle();
             sim.assert_model(&format!("seed {seed} round {round} before the cut"));
             let cutter = sim.dice.below(NODES);
-            sim.cut(cutter);
+            longest = longest.max(sim.cut(cutter));
             sim.settle();
             sim.assert_model(&format!("seed {seed} round {round} after the cut"));
         }
     }
+    assert!(
+        longest > 2,
+        "the seeds were too short to test a chain: the longest had {longest} frames"
+    );
 }
 
 #[test]
@@ -283,7 +290,7 @@ fn model_random_writes_cuts_and_adopts_converge_to_the_model() {
                 4 => {
                     if !cut_pending {
                         let cutter = sim.dice.below(NODES);
-                        sim.cut(cutter);
+                        let _ = sim.cut(cutter);
                         cut_pending = true;
                     }
                 }
