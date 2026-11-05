@@ -372,7 +372,7 @@ Peers then see an immediate neighbor-down event instead of an idle timeout.
 `EventLoopState` is layered, and only specific events write each layer:
 
 - **Transport layer** — live gossip links and remembered endpoints. Only neighbor-up and neighbor-down events write the link set. Cooldowns make sure that a flapping peer cannot start a mesh-wide connection storm.
-- **Membership layer** — the roster, keyed by nickname, with last-seen times and self-advertised endpoints.
+- **Membership layer** — the roster, keyed by author key, with the nickname of each key, last-seen times and self-advertised endpoints. A nickname is a label, so two live keys can use one.
 - **Heartbeat layer** — the quiet set for peers past the keepalive window.
 - **Presentation layer** — the surfaced subset of the roster, behind the join-horizon gate.
 
@@ -389,6 +389,10 @@ The signature covers the canonical form of the message with the key and signatur
 Unknown keys must be ignored, which leaves room for extension.
 
 The parser gates on an **exact** version match, `13.0`.
+A frame of another version is refused by its version, also when the frame fails to parse on a field that the version changed.
+A `12.0` peer and a `13.0` peer drop every frame of each other.
+Version `13.0` made the recipient of a directed frame an author key: `to` holds 64 lowercase hex digits, and a nickname there is a parse error.
+The `to` field is part of the signed kind, so the signature binds the recipient.
 The crypto byte-domains are mixed into every signature and derivation transcript.
 A silent domain change makes verification fail invisibly, and the exact gate turns that into a loud rejection.
 
@@ -429,6 +433,16 @@ flowchart LR
 
 A broadcast rides gossip.
 A directed message rides the unicast QUIC channel only, and gossip never carries it.
+A directed message names one author key, not a nickname.
+The endpoint of that key is the first source that has one:
+- the dial hint that the key made;
+- the endpoint that the key proved in its `PeerInfo`;
+- the endpoint that the key sent while another live key held its nickname.
+
+A quiet key keeps its endpoint, because a quiet peer can return.
+An endpoint that another key has proved is not an address of the old key.
+A receiver reads a directed frame only if `to` is its own key.
+Another key that uses the same nickname does not read it.
 The bytes are the same canonical message on both planes.
 The receive path is one pipeline for both planes:
 
