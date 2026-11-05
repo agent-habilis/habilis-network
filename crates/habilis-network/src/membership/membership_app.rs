@@ -29,6 +29,7 @@ use crate::beacon;
 use crate::daemon::event_loop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::DirectState;
+use crate::daemon::state::KeyOfError;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::ops;
 use crate::transport;
@@ -152,8 +153,9 @@ pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, transport::SendErr
 }
 
 /// The key a directed send by nickname goes to: the one live key that uses `to`. A frame names its
-/// recipient by key, so a nickname that no live key uses, or that two or more use, is refused here
-/// with the text of the cause. No `to` is a broadcast.
+/// recipient by key, so a nickname that two or more keys use is refused here with the text of the
+/// cause. When no live key uses the nickname, the one quiet key that does is the recipient, because
+/// a peer that went quiet may return and was sent to before. No `to` is a broadcast.
 fn recipient_key(
     state: &EventLoopState,
     to: Option<Nickname>,
@@ -161,10 +163,24 @@ fn recipient_key(
     let Some(nickname) = to else {
         return Ok(None);
     };
-    state
-        .key_of(&nickname)
+    let live = state.key_of(&nickname);
+    let found = match live {
+        Err(KeyOfError::Unknown) => only_quiet_key_of(state, &nickname),
+        other => other,
+    };
+    found
         .map(Some)
         .map_err(|error| format!("directed message to {nickname} refused: {error}"))
+}
+
+/// The one key of the roster that uses `nickname`, when none is live. Every key found is quiet.
+fn only_quiet_key_of(state: &EventLoopState, nickname: &Nickname) -> Result<AuthorKey, KeyOfError> {
+    let named = state.keys_named(nickname);
+    match named.as_slice() {
+        [] => Err(KeyOfError::Unknown),
+        [key] => Ok(*key),
+        _ => Err(KeyOfError::Ambiguous),
+    }
 }
 
 /// The length in bytes of `text` as `serde_json` writes it inside quotes: `"`, `\`, newline, tab
@@ -1692,6 +1708,47 @@ mod tests {
         assert!(
             stranger.contains("no live peer uses this nickname"),
             "the refusal does not name the cause: {stranger}"
+        );
+    }
+
+    /// A peer that went quiet may return, and a send by nickname to it was sent before: it goes to
+    /// the hint of the quiet key. A live key of the nickname wins over a quiet one, and two quiet
+    /// keys with no live key are as ambiguous as two live keys.
+    #[test]
+    fn a_send_by_nickname_to_the_only_quiet_key_of_it_is_sent() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (sleeper, live, quiet) = (
+            test_key("sleeper"),
+            test_key("mixed#live"),
+            test_key("mixed#quiet"),
+        );
+        state.names.insert(sleeper, Nickname::from("sleeper"));
+        state.quiet.insert(sleeper);
+        state.names.insert(live, Nickname::from("mixed"));
+        state.peers.insert(live);
+        state.names.insert(quiet, Nickname::from("mixed"));
+        state.quiet.insert(quiet);
+        for key in [test_key("snooze#first"), test_key("snooze#second")] {
+            state.names.insert(key, Nickname::from("snooze"));
+            state.quiet.insert(key);
+        }
+
+        assert_eq!(
+            recipient_key(&state, Some(Nickname::from("sleeper"))),
+            Ok(Some(sleeper)),
+            "the only key of the nickname is quiet, and it may return"
+        );
+        assert_eq!(
+            recipient_key(&state, Some(Nickname::from("mixed"))),
+            Ok(Some(live)),
+            "a live key wins over a quiet key of the same nickname"
+        );
+        let clash = recipient_key(&state, Some(Nickname::from("snooze")))
+            .expect_err("two quiet keys use the nickname");
+        assert!(
+            clash.contains("two or more"),
+            "the refusal does not name the cause: {clash}"
         );
     }
 
