@@ -1387,16 +1387,16 @@ mod tests {
         let first = author(
             &mut doc,
             &alice,
-            &json!({ "peers": { "alice": { "card": 1 } } }),
+            &json!({ "peers": { slot("alice"): { "card": 1 } } }),
         );
         let second = author(
             &mut doc,
             &bob,
-            &json!({ "peers": { "bob": { "card": 2 } } }),
+            &json!({ "peers": { slot("bob"): { "card": 2 } } }),
         );
         assert_eq!(
             hand_counted_wire_len(&first),
-            639,
+            720,
             "the hand count of the first frame matches the frame as it serializes"
         );
         let wire_bytes = hand_counted_wire_len(&first) + hand_counted_wire_len(&second);
@@ -1420,12 +1420,16 @@ mod tests {
         assert_eq!(heavy.frame_bytes, wire_bytes, "the same sum");
         assert_eq!(
             heavy.json_bytes,
-            Some(47),
-            "the 47 bytes of the two-entry document, counted by hand"
+            Some(167),
+            "the 167 bytes of the two-entry document: 10 for the head, two slots of 64 hex characters with quotes, a colon and the card, a comma, and 2 for the tail"
         );
         let mut nicks = heavy.peer_nicks.expect("the heavy census lists the owners");
         nicks.sort();
-        assert_eq!(nicks, ["alice", "bob"], "the owners of the peer map");
+        assert_eq!(
+            nicks,
+            [slot("alice"), slot("bob")],
+            "the owners of the peer map are the slots of the two keys"
+        );
         assert!(
             heavy.save_bytes.expect("a save was asked for") > 0,
             "the save has bytes"
@@ -2079,12 +2083,12 @@ mod tests {
     }
 
     fn entry(who: &str, card: &str) -> Value {
-        json!({ "peers": { who: { "card": card, "status": "idle" } } })
+        json!({ "peers": { slot(who): { "card": card, "status": "idle" } } })
     }
 
     /// A write of `who` that adds one field of about 2 KB: one frame, below the size of a message.
     fn filler(who: &str, field: &str) -> Value {
-        json!({ "peers": { who: { field: long(1_800) } } })
+        json!({ "peers": { slot(who): { field: long(1_800) } } })
     }
 
     /// `len` characters that automerge cannot squeeze, so a frame is about as long as its entry.
@@ -2176,7 +2180,10 @@ mod tests {
         let live = doc.census(false).frame_bytes;
         assert!(live > 4_000, "the live entries fill the cap: {live}");
         for tick in 0..30 {
-            assert!(doc.tick_epoch(&signer(&me)).is_none(), "no reset at tick {tick}");
+            assert!(
+                doc.tick_epoch(&signer(&me)).is_none(),
+                "no reset at tick {tick}"
+            );
         }
         assert_eq!(
             doc.epoch(),
@@ -2194,11 +2201,12 @@ mod tests {
         write(&mut doc, &me, &entry("me", "mine"));
         let (mut resets, mut peak) = (0, 0);
         for round in 0..200 {
-            let merge = json!({ "peers": { "me": { "status": format!("{round}{}", long(300)) } } });
+            let merge =
+                json!({ "peers": { slot("me"): { "status": format!("{round}{}", long(300)) } } });
             write(&mut doc, &me, &merge);
             if let Some(switch) = doc.tick_epoch(&signer(&me)) {
                 resets += 1;
-                let again = json!({ "peers": { "me": switch.own_entry } });
+                let again = json!({ "peers": { slot("me"): switch.own_entry } });
                 write(&mut doc, &me, &again);
             }
             peak = peak.max(doc.census(false).frame_bytes);
@@ -2234,7 +2242,7 @@ mod tests {
         assert_eq!(doc.epoch(), 1, "the document holds the new epoch");
         assert_eq!(
             doc.to_json(),
-            json!({ "peers": { "live": { "card": "live card", "status": "idle" } } }),
+            json!({ "peers": { slot("live"): { "card": "live card", "status": "idle" } } }),
             "the root applies in the new epoch and nothing of the old one stays"
         );
     }
@@ -2258,7 +2266,10 @@ mod tests {
             "a node that holds frames of others does not adopt at once"
         );
         for tick in 1..5 {
-            assert!(doc.tick_epoch(&signer(&quiet)).is_none(), "tick {tick} waits");
+            assert!(
+                doc.tick_epoch(&signer(&quiet)).is_none(),
+                "tick {tick} waits"
+            );
         }
         assert!(
             matches!(
@@ -2276,7 +2287,7 @@ mod tests {
         );
         assert_eq!(
             doc.to_json(),
-            json!({ "peers": { "live": { "card": "two", "status": "idle" } } }),
+            json!({ "peers": { slot("live"): { "card": "two", "status": "idle" } } }),
             "the document holds the entry of the highest epoch only"
         );
     }
@@ -2337,7 +2348,7 @@ mod tests {
         assert_eq!(doc.epoch(), 0, "no refused frame changes the epoch");
         assert_eq!(
             doc.to_json(),
-            json!({ "peers": { "alice": { "card": "alice card", "status": "idle" } } }),
+            json!({ "peers": { slot("alice"): { "card": "alice card", "status": "idle" } } }),
             "no refused frame changes the document"
         );
     }
@@ -2356,7 +2367,7 @@ mod tests {
         assert!(dropped_keys(&mut doc).is_empty(), "a dead frame stays seen");
         assert_eq!(
             doc.to_json(),
-            json!({ "peers": { "me": { "card": "mine", "status": "idle" } } }),
+            json!({ "peers": { slot("me"): { "card": "mine", "status": "idle" } } }),
             "a frame of a dead epoch does not change the document"
         );
     }
@@ -2406,7 +2417,7 @@ mod tests {
     }
 
     fn holds_entry(doc: &MeshDoc, who: &str) -> bool {
-        doc.to_json()["peers"].get(who).is_some()
+        doc.to_json()["peers"].get(slot(who)).is_some()
     }
 
     #[test]
@@ -2438,7 +2449,9 @@ mod tests {
             matches!(doc.ingest(&from_alice), Ingested::NewEpoch { epoch: 3 }),
             "the root of epoch 3 is the candidate"
         );
-        let switch = doc.tick_epoch(&signer(&bob)).expect("over the cap: a switch");
+        let switch = doc
+            .tick_epoch(&signer(&bob))
+            .expect("over the cap: a switch");
         assert_eq!(
             switch.epoch, 3,
             "the switch goes to the epoch of the candidate"
@@ -2469,7 +2482,9 @@ mod tests {
             epoch: 1,
             frame: forged.clone(),
         });
-        let switch = doc.tick_epoch(&signer(&bob)).expect("over the cap: a switch");
+        let switch = doc
+            .tick_epoch(&signer(&bob))
+            .expect("over the cap: a switch");
         assert_eq!(switch.epoch, 1, "the node still goes to the epoch");
         assert!(
             !holds_entry(&doc, "alice"),
