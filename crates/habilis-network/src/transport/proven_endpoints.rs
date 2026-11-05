@@ -123,7 +123,10 @@ impl ProvenEndpoints {
             self.stamps
                 .insert(endpoint, stamp.max(held.unwrap_or(stamp)));
         }
-        let live: HashSet<EndpointId> = self.by_signer.values().copied().collect();
+        // A trusted endpoint keeps its stamp when the cap takes its pair out: the stamp is what
+        // refuses an older `PeerInfo` that would move the trust to another signer.
+        let mut live: HashSet<EndpointId> = self.by_signer.values().copied().collect();
+        live.extend(self.trusted.values().copied());
         self.stamps.retain(|eid, _| live.contains(eid));
     }
 
@@ -292,6 +295,41 @@ mod one_signer_tests {
             proven.get(&AuthorKey::from([6; 32])),
             None,
             "the signer with the equal stamp holds nothing"
+        );
+    }
+
+    /// The cap can take a pair out of `by_signer` while the endpoint is still trusted. The stamp
+    /// of that endpoint must stay: without it an older `PeerInfo` of another signer reclaims the
+    /// endpoint, and the trust moves from the current signer to the replayed one.
+    #[test]
+    fn the_replay_stamp_of_a_trusted_endpoint_outlives_its_pair() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut proven = ProvenEndpoints::new(1);
+        let current = AuthorKey::from([1; 32]);
+        let held = SecretKey::generate().public();
+        let none = HashSet::new();
+        proven.insert(current, held, UnixSecs::from(10), &none);
+        proven.trust(current, held);
+
+        let other = SecretKey::generate().public();
+        proven.insert(AuthorKey::from([2; 32]), other, UnixSecs::from(1), &none);
+        assert_eq!(
+            proven.get(&current),
+            None,
+            "the cap took the pair of the current signer out"
+        );
+
+        let replayed = AuthorKey::from([3; 32]);
+        proven.insert(replayed, held, UnixSecs::from(5), &none);
+        assert_eq!(
+            proven.get(&replayed),
+            None,
+            "a PeerInfo older than the proof of the trusted signer does not reclaim the endpoint"
+        );
+        assert_eq!(
+            proven.trusted(&current),
+            Some(held),
+            "the current signer stays trusted"
         );
     }
 }
