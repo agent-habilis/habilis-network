@@ -1258,6 +1258,12 @@ impl EventLoopState {
             .then_some(address)
     }
 
+    /// Whether `key` is a member we can still reach: a live peer, a quiet peer that may return, or
+    /// a key with an address to dial. A directed frame to any other key has no one to wait for.
+    pub(crate) fn knows_key(&self, key: &AuthorKey) -> bool {
+        self.peers.contains(key) || self.quiet.contains(key) || self.address_of(key).is_some()
+    }
+
     /// Whether the dial hint of `nickname` was made by a key other than `key` that is live. A quiet
     /// or gone owner does not hold it against a live key: the nickname answers there now.
     pub(crate) fn hint_is_held_by_other(&self, nickname: &Nickname, key: AuthorKey) -> bool {

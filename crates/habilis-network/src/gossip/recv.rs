@@ -2538,6 +2538,51 @@ mod first_contact_tests {
         });
     }
 
+    /// An unmeshed node buffers a directed frame until the meshed edge. A key that no roster, quiet
+    /// set or address book holds is a key that nobody can deliver to, and the caller was told `Ok`
+    /// before. It is refused at once and the buffer stays empty. A quiet key, and a key that only
+    /// has a retained endpoint, can still return or be dialed, so their frames wait.
+    #[test]
+    fn an_unmeshed_send_to_a_key_outside_the_roster_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.remove(&Standing::Meshed);
+            let (quiet, hinted, stranger) =
+                (test_key("quiet"), test_key("hinted"), test_key("stranger"));
+            state.names.insert(quiet, nick("quiet"));
+            state.quiet.insert(quiet);
+            state.retain_refused_endpoint(hinted, iroh::EndpointAddr::new(endpoint_id(8)));
+            let frame_to = |to: AuthorKey| {
+                Message::new_pong(&node.mesh, &node.author, to, &protocol::MessageId::random())
+                    .sign(&Identity::generate())
+            };
+
+            let refused =
+                ops::send_app(&mut state, &context, frame_to(stranger), AppClass::NONE).await;
+            assert!(
+                matches!(refused, Err(transport::SendError::Undeliverable(_))),
+                "the unmeshed send to a stranger was not refused: {refused:?}"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the refused frame was buffered"
+            );
+
+            for key in [quiet, hinted] {
+                let sent = ops::send_app(&mut state, &context, frame_to(key), AppClass::NONE).await;
+                assert!(sent.is_ok(), "the unmeshed send to {key} was refused");
+            }
+            assert_eq!(
+                state.pending_outbound.take().len(),
+                2,
+                "the frames of the quiet key and of the key with an endpoint wait"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// Two live keys use one nickname. A directed frame names one key, so the other key is not its
     /// addressee, though it shares the nickname and a relay can hand it the frame. A broadcast is
     /// for both.

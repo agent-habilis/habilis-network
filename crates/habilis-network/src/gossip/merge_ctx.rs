@@ -71,7 +71,9 @@ use tokio::sync::oneshot;
 /// Refuses a body too large for one frame, propagates a serialize/deliver
 /// failure, and errors if the unmeshed buffer is full. A directed frame names its recipient by
 /// author key, so two live peers that use one nickname are two addressees, and neither send is
-/// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first.
+/// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. An unmeshed
+/// node refuses a directed frame to a key that no roster, quiet set or address book holds
+/// ([`crate::transport::SendError::Undeliverable`]), because nobody can deliver it later.
 ///
 /// # Examples
 ///
@@ -120,6 +122,15 @@ pub async fn send_app(
             }
         }
     } else {
+        // An unmeshed node buffers a directed frame for the meshed edge. A key that nobody holds
+        // can never be delivered to, so the caller hears that now.
+        if let Some(key) = sole_addressee(&frame.kind)
+            && !state.knows_key(key)
+        {
+            return Err(transport::SendError::Undeliverable(format!(
+                "directed message to {key} undeliverable: no roster, quiet set or address holds this key"
+            )));
+        }
         park_and_offer(state, context, &frame, &bytes);
     }
     if state.pending_outbound.push((frame.clone(), bytes)) {
