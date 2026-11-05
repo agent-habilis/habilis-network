@@ -228,6 +228,20 @@ fn take_tombstones(queue: &mut VecDeque<(Vec<String>, Stamp)>, entries: usize) -
 /// A path with a stamp each.
 pub type StampedPaths = Vec<(Vec<String>, Stamp)>;
 
+/// The merges of a split replay, in the order to send them: one frame for each merge.
+#[derive(Debug)]
+#[must_use]
+pub struct ReplayMerges(Vec<Value>);
+
+impl IntoIterator for ReplayMerges {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
 /// The stamps that the changes of a seed name: for each change, its paths with a stamp each.
 type SeedStamps = HashMap<ChangeHash, StampedPaths>;
 
@@ -782,16 +796,22 @@ impl MeshDoc {
 
     /// Split a replay merge into merges of at most `DOC_REPLAY_ENTRIES_MAX` paths that each fit a
     /// frame (`fits` measures the real frame, as for [`Self::build_seed`]). A sender that has more
-    /// leaves to write again than one frame names sends one frame for each merge. An item is
-    /// [`DocError::TooLarge`] when one leaf does not fit a frame.
-    pub fn split_replay<Fits: FnMut(&Value) -> bool>(
+    /// leaves to write again than one frame names sends one frame for each merge.
+    ///
+    /// # Errors
+    /// [`DocError::TooLarge`] when one leaf does not fit a frame. No merge comes out then, so the
+    /// caller never sends a part of the replay.
+    pub fn split_replay(
         &self,
         replay: &Value,
-        mut fits: Fits,
-    ) -> impl Iterator<Item = Result<Value, DocError>> + use<Fits> {
-        split_entry(replay, move |merge| {
-            count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && fits(merge)
+        fits: impl FnMut(&Value) -> bool,
+    ) -> Result<ReplayMerges, DocError> {
+        let mut within_frame = fits;
+        let cuts: Result<Vec<Value>, DocError> = split_entry(replay, |merge| {
+            count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
         })
+        .collect();
+        Ok(ReplayMerges(cuts?))
     }
 
     /// The plaintext body string to surface for `frame`, decrypting an `enc`
@@ -3863,6 +3883,19 @@ mod tests {
             "expected applied, got {outcome:?}"
         );
         carrier
+    }
+
+    #[test]
+    fn a_replay_with_a_leaf_that_does_not_fit_gives_the_error_and_no_merge() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated().state_epochs();
+        let patch = json!({ "a": 1, "b": "x".repeat(200) });
+        let fits = |merge: &Value| merge.to_string().len() <= 60;
+        let result = doc.split_replay(&patch, fits);
+        assert!(
+            matches!(result, Err(DocError::TooLarge { .. })),
+            "the leaf b is longer than a frame, so the whole replay is refused: {result:?}"
+        );
     }
 
     /// The change that `doc` builds for `merge` as the actor of `actor_seed`.

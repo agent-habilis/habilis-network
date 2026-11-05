@@ -60,5 +60,6 @@ pub use split::split_entry;
 mod mesh_doc;
 
 pub use mesh_doc::{
-    DocCensus, EpochSwitch, Ingested, MeshDoc, Restores, SeedChain, SelfWriteGate, StampedPaths,
+    DocCensus, EpochSwitch, Ingested, MeshDoc, ReplayMerges, Restores, SeedChain, SelfWriteGate,
+    StampedPaths,
 };
