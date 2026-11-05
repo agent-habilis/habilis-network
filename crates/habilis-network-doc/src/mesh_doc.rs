@@ -1924,7 +1924,10 @@ impl MeshDoc {
     /// leaves that the frame names (for a delete that the frame undoes). `after` is the document as
     /// it will look once the frame is applied. Only the leaves below the objects that the frame
     /// names are compared, and a stamp is read only for a leaf that differs, so the work follows what
-    /// the replay changes and not the size of the document.
+    /// the replay changes and not the size of the document. A leaf differs when its value is not the
+    /// same after the frame (the replay wrote another value), when the document held it and the
+    /// frame hides it (the replay made its object again), or when the frame names it and the document
+    /// had no value there (a delete that the frame undoes).
     fn lowered_leaves(&self, after: &Automerge, named: &[(Vec<String>, Stamp)]) -> Vec<Lowered> {
         let named_stamps: HashMap<&Vec<String>, &Stamp> =
             named.iter().map(|(path, stamp)| (path, stamp)).collect();
@@ -5372,44 +5375,64 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_replay_that_hides_a_large_object_restores_every_leaf_that_it_hid() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (mine, other) = (nick("aaa"), nick("zzz"));
-        // This node holds an object of 600 leaves, and wrote the last one at a high stamp.
+    /// A replay frame of `other` that writes `merge`, with `stamps` on its leaves. The actor of
+    /// `other` is the higher one, so the frame wins the conflicts in automerge.
+    fn replay_frame_of(
+        other: &Nickname,
+        merge: &Value,
+        stamps: &[(Vec<String>, Stamp)],
+    ) -> Verified {
+        let replayer = MeshDoc::new_ungated().state_epochs();
+        let change = replayer
+            .build_change(merge, &pad_seed(other.as_str().as_bytes()))
+            .expect("applies")
+            .expect("a change");
+        let body = replayer
+            .compose_replay_body(&change, stamps)
+            .expect("a replay body");
+        let key = signer(other);
+        Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), other, body, Channel::State)
+                .unverified_key(key),
+            key,
+        )
+    }
+
+    /// A node that holds `obj` with 600 leaves, written in rounds of 100, and the last leaf again
+    /// at a high stamp.
+    fn doc_with_600_leaves(mine: &Nickname) -> MeshDoc {
         let mut doc = doc_with_clock_at(99);
         for round in 0..6 {
             let mut part = Map::new();
             for leaf in 0..100 {
                 part.insert(format!("k{:03}", round * 100 + leaf), json!(leaf));
             }
-            write(&mut doc, &mine, &json!({ "obj": Value::Object(part) }));
+            write(&mut doc, mine, &json!({ "obj": Value::Object(part) }));
         }
-        write(&mut doc, &mine, &json!({ "obj": { "k599": 7 } }));
-        // A replay of another node makes `obj` again and wins in automerge (its actor is the higher
-        // one), so every leaf of this node is hidden, the 600th included.
-        let replayer = MeshDoc::new_ungated().state_epochs();
-        let change = replayer
-            .build_change(
-                &json!({ "obj": { "x": 1 } }),
-                &pad_seed(other.as_str().as_bytes()),
-            )
-            .expect("applies")
-            .expect("a change");
-        let stamps = vec![(
-            vec!["obj".to_owned(), "x".to_owned()],
-            Stamp::new(5, "7a7a7a7a00000000".to_owned()),
-        )];
-        let body = replayer
-            .compose_replay_body(&change, &stamps)
-            .expect("a replay body");
-        let key = signer(&other);
-        let replay = Verified::fixture_unchecked(
-            Message::new_channel_event(&MeshId::from("test"), &other, body, Channel::State)
-                .unverified_key(key),
-            key,
-        );
-        assert!(matches!(doc.ingest(&replay), Ingested::Applied { .. }));
+        write(&mut doc, mine, &json!({ "obj": { "k599": 7 } }));
+        doc
+    }
+
+    fn replay_makes_obj_x() -> (Value, Vec<(Vec<String>, Stamp)>) {
+        (
+            json!({ "obj": { "x": 1 } }),
+            vec![(
+                vec!["obj".to_owned(), "x".to_owned()],
+                Stamp::new(5, "7a7a7a7a00000000".to_owned()),
+            )],
+        )
+    }
+
+    #[test]
+    fn a_replay_that_hides_a_large_object_restores_every_leaf_that_it_hid() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other) = (nick("aaa"), nick("zzz"));
+        let mut doc = doc_with_600_leaves(&mine);
+        let (merge, stamps) = replay_makes_obj_x();
+        assert!(matches!(
+            doc.ingest(&replay_frame_of(&other, &merge, &stamps)),
+            Ingested::Applied { .. }
+        ));
         assert_eq!(
             doc.to_json(),
             json!({ "obj": { "x": 1 } }),
@@ -5426,6 +5449,54 @@ mod tests {
             json!(7),
             "the last leaf, the newest write, is among them"
         );
+    }
+
+    #[test]
+    fn a_leaf_that_was_deleted_before_the_replay_hid_the_object_is_not_restored() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other) = (nick("aaa"), nick("zzz"));
+        let mut doc = doc_with_600_leaves(&mine);
+        write(&mut doc, &mine, &json!({ "obj": { "k005": null } }));
+        let (merge, stamps) = replay_makes_obj_x();
+        doc.ingest(&replay_frame_of(&other, &merge, &stamps));
+        let (patch, written) = doc
+            .take_restores()
+            .expect("the live leaves are written again");
+        assert_eq!(written.len(), 599, "the 600 leaves less the deleted one");
+        assert!(
+            patch["obj"].get("k005").is_none(),
+            "the deleted leaf stays out of the patch"
+        );
+    }
+
+    #[test]
+    fn a_delete_that_a_concurrent_replay_undoes_is_written_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other) = (nick("aaa"), nick("zzz"));
+        let mut doc = doc_with_clock_at(99);
+        write(&mut doc, &mine, &json!({ "obj": { "gone": 1, "stay": 2 } }));
+        write(&mut doc, &mine, &json!({ "obj": { "gone": null } }));
+        // The replay does not know of the delete: it brings `gone` back with the stamp 5, which
+        // is below the stamp of the delete.
+        let merge = json!({ "obj": { "gone": 5 } });
+        let stamps = vec![(
+            vec!["obj".to_owned(), "gone".to_owned()],
+            Stamp::new(5, "7a7a7a7a00000000".to_owned()),
+        )];
+        doc.ingest(&replay_frame_of(&other, &merge, &stamps));
+        assert_eq!(
+            doc.to_json()["obj"]["gone"],
+            json!(5),
+            "the value came back"
+        );
+        let (patch, written) = doc.take_restores().expect("the delete is written again");
+        assert_eq!(
+            written.len(),
+            2,
+            "the delete, and `stay`, which the replay hid with its object"
+        );
+        assert_eq!(patch["obj"]["stay"], json!(2), "the hidden leaf is back");
+        assert_eq!(patch["obj"]["gone"], Value::Null, "as a delete");
     }
 
     #[test]
