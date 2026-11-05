@@ -39,12 +39,31 @@ pub mod wire;
 
 mod doc_error;
 
+mod parsed_change;
+
+mod seed_mark;
+
+mod stamp;
+
 mod split;
 
 pub use doc_error::DocError;
 
-pub use split::split_entry;
+pub use parsed_change::ParsedChange;
+
+pub use seed_mark::SeedMark;
+
+pub use stamp::Stamp;
+
+pub use split::{pack_entry, split_entry};
+
+mod limits;
+
+pub use limits::{Axis, Limits};
 
 mod mesh_doc;
 
-pub use mesh_doc::{DocCensus, EpochSwitch, Ingested, MeshDoc, SelfWriteGate};
+pub use mesh_doc::{
+    DocCensus, EpochSwitch, Ingested, MeshDoc, ReplayMerges, Restores, SeedChain, SelfWriteGate,
+    StampedPaths,
+};

@@ -139,6 +139,115 @@ pub const DOC_EPOCH_WRITE_ATTEMPTS: u8 = 6;
 /// per minute, so the bound is the threshold plus one minute of writes.
 pub const DOC_EPOCH_FRAME_CAP_BYTES: usize = 1024 * 1024;
 
+/// The frame bytes that the state channel keeps in one epoch before the node starts a new one
+/// (provisional, a tunable). The real threshold is the larger of this value and twice the bytes
+/// that the epoch held when it settled, as for meta. A reset costs one broadcast of the live
+/// state, so a cap above the usual live size keeps resets rare.
+pub const DOC_STATE_EPOCH_FRAME_CAP_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most frames that the root of a state seed can name. Before the epoch settles the threshold
+/// is twice the cap, and a seed holds the live state, which is below that. A frame holds at least
+/// half of the bytes of a message, so the count is twice the threshold over the usable frame
+/// bytes. A root that names more is refused, so a forged mark cannot make a node hold more than
+/// this many frames as a candidate, which is 4519 frames of at most 3840 bytes.
+pub const DOC_SEED_FRAMES_MAX: usize =
+    4 * DOC_STATE_EPOCH_FRAME_CAP_BYTES / (MAX_MESSAGE_SIZE - DOC_EPOCH_FRAME_MARGIN);
+
+/// The most paths that one frame of a seed or a replay can write, and so the most stamps that its
+/// `o` can carry. A frame holds 3840 bytes, so this bounds the work of a node that reads the stamps
+/// of one frame. The sender splits a longer replay into frames of at most this many paths, and a
+/// node refuses a frame that carries more.
+pub const DOC_REPLAY_ENTRIES_MAX: usize = 128;
+
+/// The most tombstones that a state document keeps, and that a seed carries: one for each path that
+/// was deleted, with the stamp of the delete. The one with the lowest stamp leaves first. A node
+/// that was away until the tombstone of a leaf left can bring back a value that others deleted.
+/// 1024 entries of at most `DOC_TOMBSTONE_PATH_BYTES_MAX` bytes of path are under 300 kibibytes.
+pub const DOC_SEED_TOMBSTONES_MAX: usize = 1024;
+
+/// The most values that a state document keeps to write again after a replay (restores). A restore
+/// holds a value that the node held, so the restores of a node are at most its live leaves. Nothing
+/// bounds the live leaves to the epoch budget of `DOC_STATE_EPOCH_FRAME_CAP_BYTES`: the live state
+/// can be as large as a seed of `DOC_SEED_FRAMES_MAX` frames carries, about 17 mebibytes. A leaf of
+/// 100 bytes gives about 170000 leaves, and a leaf of 10 bytes gives more. This cap holds 65536
+/// restores, which cost about 10 to 16 mebibytes of heap (150 to 250 bytes of overhead for each,
+/// and the path and the value). A replay that hides more leaves than that loses the restores
+/// beyond the cap: the newer writes of this node are not written again. They are counted and
+/// warned, never silent.
+pub const DOC_RESTORES_MAX: usize = 65_536;
+
+/// The bytes that the stamp of one path adds to a frame of a seed, besides the digits of its time:
+/// the index of the tag, the syntax, and a share of the table of tags. The stamp costs the digits
+/// of the clock plus this number (`Limits::stamp_bytes`): 16 bytes for times of 7 digits, which is
+/// what `tests/seed_cost.rs` measured (13 to 16), and 25 at the bound of the clock.
+pub const DOC_STATE_STAMP_BYTES_BASE: usize = 9;
+
+/// The most bytes that the stamp of one path can take in a frame of a seed: a time of 16 digits (the
+/// bound `2^53` of the Lamport time), 3 digits of tag index, 4 of syntax and a new tag of 19 bytes.
+/// A writer that sends such stamps can make a cut fail: it is a flood, not a case that the lines
+/// cover.
+pub const DOC_STATE_STAMP_BYTES_MAX: usize = 46;
+
+/// The bytes of the content of a seed (its changes, with no stamp) for 100 bytes of the history that
+/// made it. Measured at 83 to 95; 105 holds the margin of 10 percent.
+pub const DOC_STATE_SEED_RATIO_PERCENT: usize = 105;
+
+/// The deepest merge that a local write adds to a state document, counting the key of the leaf. A
+/// seed frame repeats the keys above its first leaf, so the depth bounds how many leaves a seed
+/// frame holds (`130 - 2 x depth` new paths).
+pub const DOC_STATE_DEPTH_MAX: usize = 12;
+
+/// The break-even of the paths of a state document: the cut ceiling is 0.75 of it (20 000 paths).
+/// Every ingest reads the whole document, so a frame at this size costs about 130 ms; the largest
+/// real document that was measured has 1 204 paths.
+pub const DOC_STATE_PATHS_BREAK_EVEN: usize = 26_667;
+
+/// The ticks that a node of rank `r` waits before it cuts a seed, for each rank, counted from the
+/// tick in which the size first crossed the cut ceiling: rank 0 cuts at once, rank 1 after 2 ticks.
+/// The seed of the node that cuts first reaches the others in seconds and turns them into holders of
+/// a candidate, so they do not cut. A slot of 2 ticks covers the phase between the timers of two
+/// nodes.
+pub const DOC_CUT_SLOT_TICKS: u32 = 2;
+
+/// The ranks that have a slot of their own. A node of a higher rank waits `DOC_CUT_SLOT_TICKS x 16`
+/// ticks and then a spread of `DOC_CUT_SPREAD_TICKS`, chosen by its tag, so that the ranks that
+/// were waiting for the first 16 nodes do not all cut in one tick.
+pub const DOC_CUT_RANKS_SLOTTED: usize = 16;
+
+/// The spread, in ticks, of the nodes above `DOC_CUT_RANKS_SLOTTED`.
+pub const DOC_CUT_SPREAD_TICKS: u32 = 16;
+
+/// The ticks that a node holds its cut after the first failed cut. Each failure doubles the wait, up
+/// to `DOC_CUT_BACKOFF_MAX`, and an adopted seed sets it back.
+pub const DOC_CUT_BACKOFF_FIRST: u32 = 6;
+
+/// The longest wait, in ticks, after failed cuts (about 1 hour).
+pub const DOC_CUT_BACKOFF_MAX: u32 = 64;
+
+/// The most hashes of refused frames that a state document remembers, so that a frame that it
+/// refused over its remote line is dropped when anti-entropy offers it again. Each hash is 32 bytes,
+/// so the set is about 130 kibibytes at the most. When it is full the oldest hash leaves, and the
+/// frame that it named costs one more refusal if it comes again. The set is cleared at a cut.
+pub const DOC_REFUSED_FRAMES_MAX: usize = 4096;
+
+/// The bytes that the signed message of a frame adds to its body: the signature, the key, the
+/// nickname, the mesh id and the rest of the envelope. It was 259 bytes with a nickname of 2
+/// characters and a mesh id of 4 (`tests/seed_cost.rs`); a long nickname and a mesh id of 60
+/// characters add about 90 more, so 400 holds. A leaf of a write must fit a frame with this
+/// envelope, the margin of `DOC_EPOCH_FRAME_MARGIN`, and the largest stamp, or a seed could not
+/// carry it.
+pub const DOC_STATE_ENVELOPE_BYTES: usize = 400;
+
+/// The longest path (the bytes of its keys) that gets a tombstone. A delete of a longer path is
+/// written and counted, and has no tombstone.
+pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;
+
+/// The bytes that the tombstones of one frame of a seed can take: the bytes of the paths and 32
+/// for each entry (the time, the tag index and the punctuation). A frame holds 3840 bytes, so the
+/// tombstones of a seed spread over its frames, and over carrier changes when there are more than
+/// its frames can hold. Each tombstone counts against `DOC_REPLAY_ENTRIES_MAX` with the stamps.
+pub const DOC_SEED_TOMBSTONE_FRAME_BYTES: usize = 1024;
+
 /// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged
 /// epoch number cannot lock the channel: the forger raises the epoch by this much per adoption.
 pub const DOC_EPOCH_JUMP_MAX: u64 = 131_072;

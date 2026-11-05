@@ -394,6 +394,10 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
         doc_state_frame_bytes = shared.frame_bytes,
         doc_state_save_bytes = shared.save_bytes.unwrap_or(0),
         doc_state_json_bytes = shared.json_bytes.unwrap_or(0),
+        doc_state_refused_time = shared.refused_time,
+        doc_state_unstamped_paths = shared.unstamped_paths,
+        doc_state_dropped_restores = shared.dropped_restores,
+        doc_state_replay_unsettled = shared.replay_unsettled,
         doc_save_taken = heavy,
         "doc census"
     );

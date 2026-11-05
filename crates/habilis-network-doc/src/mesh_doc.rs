@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use automerge::transaction::Transactable;
 use automerge::{
@@ -8,15 +8,22 @@ use serde_json::{Map, Value};
 
 use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
+use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
 use habilis_network_util::consts::{
-    DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
-    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
+    DOC_CUT_BACKOFF_FIRST, DOC_CUT_BACKOFF_MAX, DOC_CUT_RANKS_SLOTTED, DOC_CUT_SLOT_TICKS,
+    DOC_CUT_SPREAD_TICKS, DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES,
+    DOC_EPOCH_FRAME_MARGIN, DOC_EPOCH_JUMP_MAX, DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
+    DOC_REPLAY_ENTRIES_MAX, DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX, DOC_SEED_TOMBSTONE_FRAME_BYTES,
+    DOC_SEED_TOMBSTONES_MAX, DOC_STATE_DEPTH_MAX, DOC_STATE_ENVELOPE_BYTES,
+    DOC_STATE_EPOCH_FRAME_CAP_BYTES, DOC_TOMBSTONE_PATH_BYTES_MAX, MAX_MESSAGE_SIZE,
 };
 
-use crate::{DocError, wire};
+use crate::wire::SeedMark;
+use crate::{DocError, Limits, Stamp, pack_entry, wire};
 
 use automerge::transaction;
-use std::mem;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{mem, vec};
 /// Matches the receive path these drops happen on, so a reader filtering the
 /// gossip target sees the orphan buffer alongside the frames feeding it.
 const LOG_TARGET: &str = "habilis_network::gossip";
@@ -83,6 +90,8 @@ impl EpochSwitch {
             epoch,
             map,
             own_entry,
+            replay: None,
+            replay_stamps: Vec::new(),
         }
     }
 }
@@ -98,6 +107,14 @@ pub struct EpochSwitch {
     /// The entry of this node in that map, as it was before the switch. The caller writes it
     /// again, because only its owner can.
     pub own_entry: Option<Value>,
+    /// A merge of the values that this node wrote, or that it holds from the old epoch with no
+    /// seed behind them, and that the seed of the new epoch lacks. The caller writes it on top of
+    /// the seed. `None` for a gated channel and when nothing is lacking.
+    pub replay: Option<Value>,
+    /// The stamp of each leaf that `replay` writes again, where the leaf has one: the stamp of the
+    /// write that made the value in the old epoch. The caller passes them to
+    /// [`MeshDoc::compose_replay_body`], so the frame of the replay names them.
+    pub replay_stamps: Vec<(Vec<String>, Stamp)>,
 }
 
 /// Declares that a channel holds a **per-peer map** at the document root — one
@@ -163,11 +180,226 @@ struct Pending {
     arrival: u64,
 }
 
+/// The changes of a state seed, in order, and the mark that its root carries. The first change
+/// depends on the genesis of the epoch, and each later one on the change before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SeedChain {
+    /// The automerge changes, root first.
+    pub changes: Vec<Vec<u8>>,
+    /// The mark for the body of the root.
+    pub mark: SeedMark,
+    /// The Lamport time of the frames of the chain: the cutter takes one time for the whole seed.
+    pub time: u64,
+    /// For each change of the chain, the stamps of the paths that it writes, in the order of
+    /// those paths: the stamp of the write that made the value in the document of the cutter.
+    pub origins: Vec<Vec<Stamp>>,
+    /// For each change of the chain, the tombstones of the cutter that its frame carries, in the
+    /// order of the paths: all of them together are the tombstones of the cutter, and each list
+    /// stays inside `DOC_SEED_TOMBSTONE_FRAME_BYTES` bytes.
+    pub tombstones: Vec<StampedPaths>,
+}
+
+/// What a seed names: the stamps of its changes, and the tombstones of its root.
+type SeedRead = (SeedStamps, StampedPaths);
+
+/// What a restore asks the glue to write: a merge and a stamp for each path.
+pub type Restores = (Value, StampedPaths);
+
+/// Take tombstones from the front of `queue` for one frame: at most `entries`, and as many as fit
+/// `DOC_SEED_TOMBSTONE_FRAME_BYTES` (the bytes of the paths and 32 for each entry). One entry is
+/// always taken when there is one, since a path is at most `DOC_TOMBSTONE_PATH_BYTES_MAX` bytes.
+fn take_tombstones(queue: &mut VecDeque<(Vec<String>, Stamp)>, entries: usize) -> StampedPaths {
+    let mut taken: StampedPaths = Vec::new();
+    let mut bytes: usize = 0;
+    while let Some((path, _)) = queue.front() {
+        let path_bytes: usize = path.iter().map(String::len).sum();
+        let cost = path_bytes + 32;
+        let full = taken.len() >= entries
+            || (!taken.is_empty() && bytes + cost > DOC_SEED_TOMBSTONE_FRAME_BYTES);
+        if full {
+            break;
+        }
+        bytes += cost;
+        if let Some(entry) = queue.pop_front() {
+            taken.push(entry);
+        }
+    }
+    taken
+}
+
+/// A path with a stamp each.
+pub type StampedPaths = Vec<(Vec<String>, Stamp)>;
+
+/// The merges of a split replay, in the order to send them: one frame for each merge.
+#[derive(Debug)]
+#[must_use]
+pub struct ReplayMerges(Vec<Value>);
+
+impl IntoIterator for ReplayMerges {
+    type Item = Value;
+    type IntoIter = vec::IntoIter<Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+/// The stamps that the changes of a seed name: for each change, its paths with a stamp each.
+type SeedStamps = HashMap<ChangeHash, StampedPaths>;
+
+/// A leaf that a replay frame changes, hides or names: its value before (`None` when the leaf had
+/// none), the stamp that this node held for it, and the stamp that the replay leaves on it (`None`
+/// when the leaf is hidden).
+struct Lowered {
+    path: Vec<String>,
+    value: Option<Value>,
+    before: Option<Stamp>,
+    after: Option<Stamp>,
+}
+
+/// The stamps that stored frames name, read once for each call of `stamps_of`.
+type RebuiltStamps = HashMap<ChangeHash, Option<Vec<(Vec<String>, Stamp)>>>;
+
+/// The time that a stored frame carries, for each change that was asked about in one call. A frame
+/// is parsed once for each call and not once for each path that it holds (the parse decodes the
+/// change, which costs about 3 ms for a full frame).
+type FrameTimes = HashMap<ChangeHash, Option<u64>>;
+
+/// The ops that one change holds: which actor wrote them, the counter of the first, and how many.
+/// A scan of the history makes one per change, so an op id finds its change.
+struct OpSpan {
+    start: u64,
+    len: u64,
+    hash: ChangeHash,
+}
+
+/// The spans of every actor, each list sorted by the counter of its first op, so an op id finds its
+/// change by binary search.
+type OpIndex = HashMap<Vec<u8>, Vec<OpSpan>>;
+
+/// The object that each parent path names, read once for each call of `stamps_of`: the paths of
+/// one call mostly share a few parents, so the walk from the root is made once for each of them.
+type ParentObjects = HashMap<Vec<String>, Option<ObjId>>;
+
+/// The bound of the Lamport time of a state change: 2^53, the largest whole number that a JSON
+/// number keeps exact. A change with a time at or above it is refused, so the clock stays below it
+/// and `next_time` never saturates in practice. This does not stop a signed member from writing a
+/// time far below the bound that is still far above the clock of the others: that member wins
+/// the conflicts of the leaves that it writes, which any member of an ungated channel can already
+/// do by overwriting them.
+const DOC_TIME_MAX: u64 = 1 << 53;
+
 /// The root frame of a higher epoch that the document keeps until it adopts the epoch.
 #[derive(Debug)]
 struct Candidate {
     epoch: u64,
+    /// The root frame.
     frame: Verified,
+    /// The hash of the change of the root frame.
+    root_hash: ChangeHash,
+    /// The sequence number of the change of the root frame. The changes of a chain have the
+    /// sequence numbers that follow it, one each.
+    root_seq: u64,
+    /// The mark of a state seed root, `None` for the one frame candidate of a gated channel.
+    mark: Option<SeedMark>,
+    /// The later frames of a seed chain, by the hash of their change.
+    tail: HashMap<ChangeHash, TailFrame>,
+}
+
+impl Candidate {
+    fn new(epoch: u64, frame: Verified, root: &Change, mark: Option<SeedMark>) -> Self {
+        Self {
+            epoch,
+            frame,
+            root_hash: root.hash(),
+            root_seq: root.seq(),
+            mark,
+            tail: HashMap::new(),
+        }
+    }
+}
+
+impl Candidate {
+    /// The tail frames by the change that they follow.
+    fn by_parent(&self) -> HashMap<ChangeHash, (ChangeHash, &TailFrame)> {
+        let mut by_parent: HashMap<ChangeHash, (ChangeHash, &TailFrame)> = HashMap::new();
+        for (hash, tail) in &self.tail {
+            by_parent.insert(tail.parent, (*hash, tail));
+        }
+        by_parent
+    }
+
+    /// The path from the root through the tail frames that follow each other, as far as the mark
+    /// allows: the frames in order, root first, and the change at the end of the path.
+    fn path(&self) -> (Vec<&Verified>, ChangeHash) {
+        let named = self.mark.as_ref().map_or(1, |mark| mark.frames as usize);
+        let by_parent = self.by_parent();
+        let mut ordered: Vec<&Verified> = vec![&self.frame];
+        let mut tip: ChangeHash = self.root_hash;
+        while ordered.len() < named {
+            let Some((hash, tail)) = by_parent.get(&tip) else {
+                break;
+            };
+            ordered.push(&tail.frame);
+            tip = *hash;
+        }
+        (ordered, tip)
+    }
+
+    /// The frames of the chain in order, root first, when the candidate holds all of them and the
+    /// last change is the one that the mark names. A candidate with no mark is its root alone.
+    fn chain(&self) -> Option<Vec<&Verified>> {
+        let Some(mark) = self.mark.as_ref() else {
+            return Some(vec![&self.frame]);
+        };
+        let (ordered, tip) = self.path();
+        let whole = ordered.len() == mark.frames as usize && tip.to_string() == mark.last;
+        whole.then_some(ordered)
+    }
+
+    /// The hashes of the tail frames that lie on the path from the root.
+    fn on_path(&self) -> HashSet<ChangeHash> {
+        let by_parent = self.by_parent();
+        let mut hashes: HashSet<ChangeHash> = HashSet::new();
+        let mut tip: ChangeHash = self.root_hash;
+        while let Some((hash, _)) = by_parent.get(&tip) {
+            if !hashes.insert(*hash) {
+                break;
+            }
+            tip = *hash;
+        }
+        hashes
+    }
+
+    /// The tail frame that is not in `on_path` and has the lowest hash, if there is one. The order
+    /// is fixed, so every node gives way to the same frame.
+    fn first_off_path(&self, on_path: &HashSet<ChangeHash>) -> Option<ChangeHash> {
+        let mut found: Option<ChangeHash> = None;
+        for hash in self.tail.keys() {
+            let lower = found.is_none_or(|best| hash.0 < best.0);
+            if !on_path.contains(hash) && lower {
+                found = Some(*hash);
+            }
+        }
+        found
+    }
+
+    /// The dedup keys of every frame that the candidate holds.
+    fn keys(&self) -> Vec<DedupKey> {
+        let mut keys: Vec<DedupKey> = vec![self.frame.dedup_key()];
+        for tail in self.tail.values() {
+            keys.push(tail.frame.dedup_key());
+        }
+        keys
+    }
+}
+
+/// A frame of a seed chain after its root, and the change that it follows.
+#[derive(Debug)]
+struct TailFrame {
+    frame: Verified,
+    parent: ChangeHash,
 }
 
 /// What a [`MeshDoc`] holds, as [`MeshDoc::census`] reads it.
@@ -190,6 +422,18 @@ pub struct DocCensus {
     /// The nicknames that have an entry in the per-peer map, when the caller asked for the heavy
     /// census. Empty for a document with no gate.
     pub peer_nicks: Option<Vec<String>>,
+    /// The state changes that were refused for want of a valid time, since the document began.
+    pub refused_time: u64,
+    /// The paths of a seed that got the stamp 0 for want of a time, since the document began.
+    pub unstamped_paths: u64,
+    /// The restores that were dropped because the map of restores was full, since the document
+    /// began.
+    pub dropped_restores: u64,
+    /// The values that wait to be written again (see [`MeshDoc::take_restores`]): after a switch
+    /// it is 0 again within 3 ticks, so a value that stays means a write that did not settle.
+    pub replay_unsettled: u64,
+    /// The frames that the document refused over its remote line, since it began.
+    pub refused_remote: u64,
 }
 
 /// The bytes of a frame on the wire, 0 for a frame that does not serialize.
@@ -255,15 +499,89 @@ pub struct MeshDoc {
     /// The best root frame of a higher epoch that passed every check, and the document has not
     /// adopted. One frame at most, so it is bounded; a frame that does not take the place is
     /// forgotten by the receive path.
-    candidate: Option<Candidate>,
+    candidate: Option<Box<Candidate>>,
     /// The ticks since the candidate took its place.
     candidate_ticks: u32,
     /// The ticks since the epoch began.
     epoch_ticks: u32,
+    /// The tick of the epoch before which `take_restores` gives nothing: a node that is not the
+    /// author of a write that a seed lacks waits 1 to 3 ticks, so the author writes it first.
+    restores_due: u32,
+    /// The tag of the actor that this node wrote its last change with (the first 8 bytes), `0`
+    /// before its first write. A stamp with this tag is a write of this node.
+    own_tag: AtomicU64,
+    /// The operations of the changes that this document holds in this epoch: an upper bound of its
+    /// live paths, because every live key has at least the operation that made it.
+    ops_held: usize,
+    /// The frame bytes and the operations right after the seed that this node adopted was applied,
+    /// 0 in an epoch that began with no seed. What the document grew by since is the growth that
+    /// the lines of `Limits` measure.
+    seed_bytes: usize,
+    seed_ops: usize,
+    /// The lines of this document.
+    limits: Limits,
+    /// The hashes of the frames that this document refused over its remote line, so that anti-
+    /// entropy that offers one again finds it dropped at once. Bounded by `Limits::refused_max`:
+    /// when it is full the oldest hash leaves. Cleared at a cut.
+    refused: BoundedFifoSet<ChangeHash>,
+    /// The frames refused over the remote line since the document began.
+    refused_remote: u64,
+    /// The ticks since the size of this document first crossed the cut ceiling, `None` while it
+    /// is below it.
+    crossed_ticks: Option<u32>,
+    /// The ticks that the document still holds its cut after a failed cut, and the wait that the
+    /// next failure sets.
+    cut_wait: u32,
+    cut_backoff: u32,
     /// The frame bytes of the epoch when it settled, 0 before. The live entries are back by then.
     settled_bytes: usize,
     /// The frame bytes that start a reset, before the settled size is known.
     frame_cap: usize,
+    /// Whether the document is applying the frames of the seed that it adopts, which the rule for
+    /// a rival seed must not see.
+    adopting: bool,
+    /// The Lamport clock of a state channel with state epochs: the highest time that this node
+    /// wrote or saw. A change takes the time `clock + 1`, so it is above every change that its
+    /// author saw. It never goes down and it does not restart at an epoch. At most `DOC_TIME_MAX`:
+    /// a change with a higher time is refused, so one integer is all the memory it needs.
+    clock: AtomicU64,
+    /// The state changes that were refused for want of a valid time: one integer, which saturates.
+    refused_time: u64,
+    /// The paths of a seed that got the stamp 0 (see [`Self::unstamped_paths`]).
+    unstamped: AtomicU64,
+    /// The values that this node holds with a stamp above the live stamp that a replay of another
+    /// node just set: the replay won in automerge but has the lower stamp, so this node writes its
+    /// value again (see [`Self::take_restores`]). At most `DOC_RESTORES_MAX` paths.
+    restores: BTreeMap<Vec<String>, (Value, Stamp)>,
+    /// The restores that were dropped because the map was full (see [`Self::dropped_restores`]).
+    restores_dropped: u64,
+    /// Whether local writes wait for the end of the first sync (see [`Self::awaiting_first_sync`]).
+    awaiting_sync: bool,
+    /// The stamps that the changes of the adopted seed name, for each change and each path that it
+    /// writes. They tell who wrote the value of a leaf and when, where the change is the seed of
+    /// another node. Dropped at the next epoch, and at most the paths of the seed.
+    origins: SeedStamps,
+    /// The paths that were deleted, with the stamp of the delete: a leaf that a seed lacks because
+    /// it was deleted must not be written again from an older value. It survives the epochs (a
+    /// seed carries it), holds at most `DOC_SEED_TOMBSTONES_MAX` entries, and drops the one with
+    /// the lowest stamp when it is full.
+    tombstones: BTreeMap<Vec<String>, Stamp>,
+    /// The deletes of a path longer than `DOC_TOMBSTONE_PATH_BYTES_MAX` bytes, which have no
+    /// tombstone.
+    tombstone_paths_long: u64,
+    /// The author of the root of the seed that this document adopted for its epoch, `None` when
+    /// it holds no seed. A rival root of the same epoch with a lower key replaces that seed.
+    seed_author: Option<AuthorKey>,
+    /// The hashes of the changes of that seed. They are no write of the node, so a replay skips
+    /// them. At most `DOC_SEED_FRAMES_MAX`.
+    seed_hashes: HashSet<ChangeHash>,
+    /// The authors of rival roots that lost, so that the rest of their chains is refused at once.
+    /// At most 8, the oldest gives way.
+    refused_rivals: Vec<AuthorKey>,
+    /// Whether an ungated document keeps the root of a higher epoch as a candidate. Off by
+    /// default, so a state channel refuses such a frame, as it did before the state epochs, until
+    /// the node ticks the state channel (see [`Self::state_epochs`]).
+    state_epochs: bool,
     /// This channel's per-peer write gate, when it has one (`meta` does; `state`
     /// is free-form and carries no per-peer identity, so it does not).
     gate: Option<SelfWriteGate>,
@@ -319,8 +637,33 @@ impl MeshDoc {
             candidate: None,
             candidate_ticks: 0,
             epoch_ticks: 0,
+            restores_due: 0,
+            own_tag: AtomicU64::new(0),
+            ops_held: 0,
+            seed_bytes: 0,
+            seed_ops: 0,
+            limits: Limits::real(),
+            refused: BoundedFifoSet::new(Limits::real().refused_max),
+            refused_remote: 0,
+            crossed_ticks: None,
+            cut_wait: 0,
+            cut_backoff: DOC_CUT_BACKOFF_FIRST,
             settled_bytes: 0,
             frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
+            state_epochs: false,
+            adopting: false,
+            clock: AtomicU64::new(0),
+            refused_time: 0,
+            unstamped: AtomicU64::new(0),
+            restores: BTreeMap::new(),
+            restores_dropped: 0,
+            awaiting_sync: false,
+            origins: HashMap::new(),
+            tombstones: BTreeMap::new(),
+            tombstone_paths_long: 0,
+            seed_author: None,
+            seed_hashes: HashSet::new(),
+            refused_rivals: Vec::new(),
             gate,
             key: None,
         }
@@ -375,6 +718,17 @@ impl MeshDoc {
         nicks.any(|nick| nick.as_str() != author_name && before.get(nick) != after.get(nick))
     }
 
+    /// Let this ungated document keep the root of a higher epoch as a candidate. Call it only on a
+    /// node that ticks the state channel, because a candidate that no tick adopts or drops holds
+    /// its frames for ever. This is a development guard and no runtime switch: nodes that
+    /// disagree on it would diverge. Step 4 removes it, and every node of frame version 13.0 has
+    /// state epochs.
+    #[must_use]
+    pub fn state_epochs(mut self) -> Self {
+        self.state_epochs = true;
+        self
+    }
+
     /// Set this channel's encryption key (the daemon's per-channel
     /// mesh-password-derived key). `None` leaves the channel in plaintext.
     #[must_use]
@@ -387,13 +741,13 @@ impl MeshDoc {
     /// `enc` body with this channel's key first. `None` for an opaque/foreign
     /// body (or, on a passworded mesh, an unsealed or unopenable body) — a
     /// no-op on the doc.
-    fn change_bytes(&self, frame: &Message) -> Option<(Vec<u8>, u64)> {
+    fn change_bytes(&self, frame: &Message) -> Option<wire::ParsedChange> {
         match self.key.as_ref() {
             // Passwordless: parse directly — no decrypt indirection, no clone.
-            None => wire::parse_change(frame.body.as_str()),
+            None => wire::parse_change_full(frame.body.as_str()),
             Some(key) => {
                 let plain = wire::decrypt_body(frame.body.as_str(), Some(key))?;
-                wire::parse_change(&plain)
+                wire::parse_change_full(&plain)
             }
         }
     }
@@ -407,7 +761,8 @@ impl MeshDoc {
     /// # Errors
     /// [`DocError::NotAnObject`] when the merge is not a JSON object, [`DocError::Body`]
     /// when the change body is not a valid message body, or [`DocError::Encode`] when
-    /// the change does not encode.
+    /// the change does not encode, and [`DocError::ClockNotReady`] when a state document waits for
+    /// its first sync (see [`Self::awaiting_first_sync`]).
     pub fn compose_wire_body(
         &self,
         change: &[u8],
@@ -419,12 +774,86 @@ impl MeshDoc {
         ),
         DocError,
     > {
-        let plain = wire::change_body_at(change, merge, self.epoch)?;
+        let timed: bool = self.state_epochs && self.gate.is_none();
+        if timed && self.awaiting_sync {
+            return Err(DocError::ClockNotReady);
+        }
+        let time: Option<u64> = timed.then(|| self.next_time());
+        let plain = wire::change_body_timed(change, merge, self.epoch, None, time)?;
         let wire = match self.key.as_ref() {
             Some(key) => wire::encrypt_body(&plain, key)?,
             None => plain.clone(),
         };
         Ok((wire, plain))
+    }
+
+    /// Compose the wire body for a replay change: like [`Self::compose_wire_body`], and the body
+    /// names, for each path that the change writes, the stamp from `stamps` (the stamp that the
+    /// write had in the old epoch), or a fresh stamp of this change for a path with none. The
+    /// change is checked on a fork, so the paths it lists are those that a receiver lists.
+    ///
+    /// # Errors
+    /// As [`Self::compose_wire_body`], and [`DocError::TooLarge`] when the change writes more than
+    /// `DOC_REPLAY_ENTRIES_MAX` paths: split the replay with [`Self::split_replay`] first.
+    pub fn compose_replay_body(
+        &self,
+        change: &[u8],
+        stamps: &[(Vec<String>, Stamp)],
+    ) -> Result<habilis_network_protocol::MessageBody, DocError> {
+        if self.awaiting_sync {
+            return Err(DocError::ClockNotReady);
+        }
+        let parsed = Change::from_bytes(change.to_vec()).map_err(DocError::encode)?;
+        let mut fork = self.doc.fork();
+        fork.apply_changes([parsed.clone()])
+            .map_err(DocError::encode)?;
+        let paths = change_leaves(&fork, &parsed);
+        if paths.len() > DOC_REPLAY_ENTRIES_MAX {
+            return Err(DocError::TooLarge { bytes: paths.len() });
+        }
+        let time = self.next_time();
+        let fresh = Stamp::new(time, actor_tag(parsed.actor_id()));
+        let named: HashMap<&Vec<String>, &Stamp> =
+            stamps.iter().map(|(path, stamp)| (path, stamp)).collect();
+        // An object that the replay makes only because a leaf below it needs a place has no write
+        // of its own, so it gets the stamp 0: a stamp from now would cover the newer leaves that
+        // other nodes write below it.
+        let written: Value = doc_json(&fork);
+        let none = Stamp::new(0, "0000000000000000".to_owned());
+        let origins: Vec<Stamp> = paths
+            .iter()
+            .map(|path| match named.get(path) {
+                Some(stamp) => (*stamp).clone(),
+                None if lookup(&written, path).is_some_and(Value::is_object) => none.clone(),
+                None => fresh.clone(),
+            })
+            .collect();
+        let plain =
+            wire::change_body_stamped(change, None, self.epoch, None, Some(time), &origins)?;
+        match self.key.as_ref() {
+            Some(key) => wire::encrypt_body(&plain, key),
+            None => Ok(plain),
+        }
+    }
+
+    /// Split a replay merge into merges of at most `DOC_REPLAY_ENTRIES_MAX` paths that each fit a
+    /// frame (`fits` measures the real frame, as for [`Self::build_seed`]). A sender that has more
+    /// leaves to write again than one frame names sends one frame for each merge.
+    ///
+    /// # Errors
+    /// [`DocError::TooLarge`] when one leaf does not fit a frame. No merge comes out then, so the
+    /// caller never sends a part of the replay.
+    pub fn split_replay(
+        &self,
+        replay: &Value,
+        fits: impl FnMut(&Value) -> bool,
+    ) -> Result<ReplayMerges, DocError> {
+        let mut within_frame = fits;
+        let cuts: Result<Vec<Value>, DocError> = pack_entry(replay, |merge| {
+            count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
+        })
+        .collect();
+        Ok(ReplayMerges(cuts?))
     }
 
     /// The plaintext body string to surface for `frame`, decrypting an `enc`
@@ -460,6 +889,8 @@ impl MeshDoc {
             .as_ref()
             .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len()));
         let peer_nicks = json.as_ref().map(|json| self.gated_nicks(json));
+        let unstamped_paths: u64 = self.unstamped.load(Ordering::Relaxed);
+        let replay_unsettled: u64 = u64::try_from(self.restores.len()).unwrap_or(u64::MAX);
         DocCensus {
             epoch: self.epoch,
             changes: self.applied.len(),
@@ -468,6 +899,11 @@ impl MeshDoc {
             save_bytes,
             json_bytes,
             peer_nicks,
+            refused_time: self.refused_time,
+            unstamped_paths,
+            dropped_restores: self.restores_dropped,
+            replay_unsettled,
+            refused_remote: self.refused_remote,
         }
     }
 
@@ -480,10 +916,300 @@ impl MeshDoc {
         entries.keys().cloned().collect()
     }
 
+    /// The operations of the changes that this document holds in this epoch.
+    #[must_use]
+    pub fn ops_held(&self) -> usize {
+        self.ops_held
+    }
+
+    /// The frame bytes right after the seed of this epoch was applied.
+    #[must_use]
+    pub fn seed_bytes(&self) -> usize {
+        self.seed_bytes
+    }
+
+    /// The operations right after the seed of this epoch was applied.
+    #[must_use]
+    pub fn seed_ops(&self) -> usize {
+        self.seed_ops
+    }
+
+    /// A state document for the daemon: epochs on, no gate, the cap of the state channel, and a
+    /// clock that waits for the first sync (see [`Self::awaiting_first_sync`]).
+    #[must_use]
+    pub fn new_state(key: Option<SymmetricKey>) -> Self {
+        Self::new_ungated()
+            .state_epochs()
+            .key(key)
+            .epoch_cap(DOC_STATE_EPOCH_FRAME_CAP_BYTES)
+            .awaiting_first_sync()
+    }
+
+    /// Whether this document has state epochs.
+    #[must_use]
+    pub fn has_state_epochs(&self) -> bool {
+        self.state_epochs
+    }
+
+    /// Whether a cut of the state document is due for a node of `rank` among the nodes that it
+    /// sees alive. The size of the document must have crossed the cut ceiling (see [`Limits`]) and
+    /// grown by the growth of a cut since its seed, and the node must have waited the slot of its
+    /// rank: rank 0 at once, rank `r` for `2 x r` ticks, and a node of rank 16 or more for 32
+    /// ticks and a spread that its tag chooses. A node that holds a candidate does not cut, and a
+    /// node that a failed cut holds does not cut until the hold ends. The ticks are those of
+    /// [`Self::tick_epoch`]. The rank is soft: a wrong view of the nodes delays or doubles a cut and
+    /// never blocks it, because the higher ranks cut after the spread.
+    #[must_use]
+    pub fn cut_due(&self, rank: usize) -> bool {
+        if !self.state_epochs
+            || self.gate.is_some()
+            || self.candidate.is_some()
+            || self.cut_wait > 0
+        {
+            return false;
+        }
+        self.crossed_ticks
+            .is_some_and(|waited| waited >= self.cut_delay(rank))
+    }
+
+    /// The ticks that a node of `rank` waits after it sees the size cross the ceiling.
+    fn cut_delay(&self, rank: usize) -> u32 {
+        if rank < DOC_CUT_RANKS_SLOTTED {
+            let slot = u32::try_from(rank).unwrap_or(u32::MAX);
+            return DOC_CUT_SLOT_TICKS.saturating_mul(slot);
+        }
+        let slotted = u32::try_from(DOC_CUT_RANKS_SLOTTED).unwrap_or(u32::MAX);
+        let tag = self.own_tag.load(Ordering::Relaxed) ^ self.epoch;
+        let spread = u32::try_from(tag % u64::from(DOC_CUT_SPREAD_TICKS)).unwrap_or(0);
+        DOC_CUT_SLOT_TICKS.saturating_mul(slotted) + spread
+    }
+
+    /// Tell the document that the cut that it asked for failed: it holds the next cut for a wait
+    /// that doubles at each failure, from `DOC_CUT_BACKOFF_FIRST` ticks to `DOC_CUT_BACKOFF_MAX`.
+    pub fn note_cut_failed(&mut self) {
+        self.cut_wait = self.cut_backoff;
+        self.cut_backoff = self.cut_backoff.saturating_mul(2).min(DOC_CUT_BACKOFF_MAX);
+    }
+
+    /// Whether the size of this document is at the cut ceiling, on the bytes of the next seed or on
+    /// the operations, and has grown by the growth of a cut since its seed.
+    fn size_crossed(&self) -> bool {
+        let growth_bytes = self.frame_bytes.saturating_sub(self.seed_bytes);
+        let growth_ops = self.ops_held.saturating_sub(self.seed_ops);
+        let clock = self.clock.load(Ordering::Relaxed);
+        let projected = Limits::projected_bytes(self.seed_bytes, growth_bytes, growth_ops, clock);
+        let bytes = &self.limits.bytes;
+        let ops = &self.limits.ops;
+        (projected >= bytes.ceiling && growth_bytes >= bytes.growth)
+            || (self.ops_held >= ops.ceiling && growth_ops >= ops.growth)
+    }
+
+    /// One tick of the size of a free-form state document: count the ticks since it crossed the
+    /// ceiling, and let the hold of a failed cut run down.
+    fn watch_size(&mut self) {
+        self.cut_wait = self.cut_wait.saturating_sub(1);
+        self.crossed_ticks = if self.size_crossed() {
+            Some(
+                self.crossed_ticks
+                    .map_or(0, |waited| waited.saturating_add(1)),
+            )
+        } else {
+            None
+        };
+    }
+
+    /// Set the lines of this document, for a test that wants a small seed.
+    #[must_use]
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self.refused = BoundedFifoSet::new(limits.refused_max);
+        self
+    }
+
+    /// The frames that this document refused over its remote line, since it began.
+    #[must_use]
+    pub fn refused_remote(&self) -> u64 {
+        self.refused_remote
+    }
+
+    /// The hashes of refused frames that the document holds now.
+    #[must_use]
+    pub fn refused_held(&self) -> usize {
+        self.refused.len()
+    }
+
     /// The epoch of the history that this document holds.
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// The Lamport clock of this document: the highest time that it wrote or saw.
+    #[must_use]
+    pub fn clock(&self) -> u64 {
+        self.clock.load(Ordering::Relaxed)
+    }
+
+    /// The stamp of the value that the document holds at each of `paths`: the Lamport time and the
+    /// actor of the change that wrote the value that automerge kept. `None` for a path that holds
+    /// no value, and for a value whose change has no time (a change of a channel with no state
+    /// epochs, or the genesis). One scan of the history builds the index for all the paths.
+    #[must_use]
+    pub(crate) fn stamps_of(&self, paths: &[Vec<String>]) -> Vec<Option<Stamp>> {
+        let mut index: OpIndex = HashMap::new();
+        for change in self.doc.get_changes(&[]) {
+            let start: u64 = change.start_op().get();
+            let len: u64 = u64::try_from(change.len()).unwrap_or(u64::MAX);
+            let span = OpSpan {
+                start,
+                len,
+                hash: change.hash(),
+            };
+            let actor: Vec<u8> = change.actor_id().to_bytes().to_vec();
+            index.entry(actor).or_default().push(span);
+        }
+        for spans in index.values_mut() {
+            spans.sort_by_key(|span| span.start);
+        }
+        let mut rebuilt: RebuiltStamps = HashMap::new();
+        let mut times: FrameTimes = HashMap::new();
+        let mut parents: ParentObjects = HashMap::new();
+        paths
+            .iter()
+            .map(|path| self.stamp_at(path, &index, (&mut rebuilt, &mut times), &mut parents))
+            .collect()
+    }
+
+    /// The stamps that the stored frame of the change `hash` names, for each path that the change
+    /// writes. `None` when the frame is not stored, names none, or names a different number of stamps
+    /// than the change has leaves.
+    fn stamps_of_frame(&self, hash: &ChangeHash) -> Option<Vec<(Vec<String>, Stamp)>> {
+        let frame = self.frames.get(hash)?;
+        let parsed = self.change_bytes(frame)?;
+        if parsed.origins.is_empty() {
+            return None;
+        }
+        let change = Change::from_bytes(parsed.bytes).ok()?;
+        let paths = change_leaves(&self.doc, &change);
+        if paths.len() != parsed.origins.len() {
+            return None;
+        }
+        Some(paths.into_iter().zip(parsed.origins).collect())
+    }
+
+    /// The stamp of the value at `path`, from the op that holds it.
+    fn stamp_at(
+        &self,
+        path: &[String],
+        index: &OpIndex,
+        (rebuilt, times): (&mut RebuiltStamps, &mut FrameTimes),
+        parents: &mut ParentObjects,
+    ) -> Option<Stamp> {
+        let (leaf_key, parent_path) = path.split_last()?;
+        if !parents.contains_key(parent_path) {
+            parents.insert(parent_path.to_vec(), self.object_at(parent_path));
+        }
+        let parent: ObjId = parents.get(parent_path)?.clone()?;
+        let (_, id) = self.doc.get(&parent, leaf_key.as_str()).ok()??;
+        let holder = Some(id);
+        let ObjId::Id(counter, actor, _) = holder? else {
+            return None;
+        };
+        let spans = index.get(actor.to_bytes())?;
+        let after = spans.partition_point(|span| span.start <= counter);
+        let span = spans[..after]
+            .last()
+            .filter(|span| counter - span.start < span.len)?;
+        // The record of the stamps lives in memory only. A frame of a seed or a replay that is
+        // stored carries them, so a node that lost the record reads them from the frame.
+        // One frame names many paths, so the list that a frame gives is read once for each call.
+        let named: Option<&Vec<(Vec<String>, Stamp)>> = match self.origins.get(&span.hash) {
+            Some(list) => Some(list),
+            None => rebuilt
+                .entry(span.hash)
+                .or_insert_with(|| self.stamps_of_frame(&span.hash))
+                .as_ref(),
+        };
+        if let Some(stamp) = named.and_then(|list| list.iter().find(|(held, _)| held == path)) {
+            return Some(stamp.1.clone());
+        }
+        let known = times
+            .entry(span.hash)
+            .or_insert_with(|| self.frame_time(&span.hash));
+        let time: u64 = (*known)?;
+        Some(Stamp::new(time, actor_tag(&actor)))
+    }
+
+    /// The Lamport time that the stored frame of the change `hash` carries.
+    fn frame_time(&self, hash: &ChangeHash) -> Option<u64> {
+        let frame = self.frames.get(hash)?;
+        self.change_bytes(frame)?.time
+    }
+
+    /// The object that `path` names, `None` when the path holds no object.
+    fn object_at(&self, path: &[String]) -> Option<ObjId> {
+        let mut object: ObjId = ROOT;
+        for key in path {
+            let (value, id) = self.doc.get(&object, key.as_str()).ok()??;
+            if !matches!(value, automerge::Value::Object(_)) {
+                return None;
+            }
+            object = id;
+        }
+        Some(object)
+    }
+
+    /// How many paths of a seed got the stamp 0 for want of a time, since the document began. A
+    /// value that gets 0 loses to every replay, so the count says that a cut read a value with no
+    /// time.
+    #[must_use]
+    pub fn unstamped_paths(&self) -> u64 {
+        self.unstamped.load(Ordering::Relaxed)
+    }
+
+    /// How many state changes this document refused for want of a valid time: none, or above `DOC_TIME_MAX`. A caller reads it
+    /// for a gauge, so a refusal is never silent.
+    #[must_use]
+    pub fn refused_time(&self) -> u64 {
+        self.refused_time
+    }
+
+    /// Take the time of the next change of this node: one above the clock, which then holds it.
+    /// [`Self::compose_wire_body`] and [`Self::build_seed`] call it.
+    pub(crate) fn next_time(&self) -> u64 {
+        let taken = self
+            .clock
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                Some(held.saturating_add(1).min(DOC_TIME_MAX))
+            });
+        taken.map_or(DOC_TIME_MAX, |held| {
+            held.saturating_add(1).min(DOC_TIME_MAX)
+        })
+    }
+
+    /// Whether a candidate seed waits to be adopted. A node that holds one adopts it after the wait
+    /// and does not cut an epoch of its own, so the glue and the model ask before they cut.
+    #[must_use]
+    pub fn has_candidate(&self) -> bool {
+        self.candidate.is_some()
+    }
+
+    /// Hold the local writes of a state document until it has heard of another write. A node that
+    /// restarts has a clock of 0, so a write now would get a time below the writes that the node
+    /// made before, and lose to them. [`Self::compose_wire_body`] returns
+    /// [`DocError::ClockNotReady`] until [`Self::finish_sync`]. A frame does not end the wait,
+    /// because the first one that sync brings can be an old one with a low time.
+    #[must_use]
+    pub fn awaiting_first_sync(mut self) -> Self {
+        self.awaiting_sync = true;
+        self
+    }
+
+    /// Say that the first sync is over, so the local writes go on. The glue calls it after the
+    /// first full answer to the digest, when that answer is empty, and when no peer answers within
+    /// a time limit: without the last two a mesh where every node restarts at once never writes.
+    pub fn finish_sync(&mut self) {
+        self.awaiting_sync = false;
     }
 
     /// Set the frame bytes that start a reset, before the size of a settled epoch is known (the
@@ -502,9 +1228,10 @@ impl MeshDoc {
     /// mesh then follows it within one wait, because that jump is inside the bound of the mesh, and
     /// the joiner holds frames of others after that, so it waits the next time.
     pub fn adopt_if_alone(&mut self, me: &Nickname, own: &AuthorKey) -> Option<EpochSwitch> {
-        self.candidate.as_ref()?;
+        let held = self.candidate.as_ref()?;
         let alone = self.frames.values().all(|frame| frame.key() == *own);
-        if alone { self.adopt(me) } else { None }
+        let whole = held.chain().is_some();
+        if alone && whole { self.adopt(me) } else { None }
     }
 
     /// One tick of 1 minute. Adopts the candidate epoch when it has waited for
@@ -520,9 +1247,14 @@ impl MeshDoc {
     /// capabilities of a card can land after its other fields. The size of the epoch is taken one
     /// tick after the wait: a node adopts at the end of the wait and writes its entry on the next
     /// sweep, so the entries are back in that margin, whatever the phase of the two timers. Only a
-    /// gated channel has epochs: the free-form `state` channel keeps every frame.
+    /// gated channel has epochs today: the free-form `state` channel keeps every frame until the
+    /// state epoch work lands (`state-epoch-design.md`).
     pub fn tick_epoch(&mut self, me: &Nickname) -> Option<EpochSwitch> {
         self.epoch_ticks = self.epoch_ticks.saturating_add(1);
+        if self.state_epochs && self.gate.is_none() {
+            self.watch_size();
+        }
+
         if self.candidate.is_some() {
             self.candidate_ticks = self.candidate_ticks.saturating_add(1);
             if self.candidate_ticks >= DOC_EPOCH_ADOPT_WAIT_TICKS {
@@ -553,15 +1285,199 @@ impl MeshDoc {
     /// that reason, and does not start an epoch of its own.
     fn adopt(&mut self, me: &Nickname) -> Option<EpochSwitch> {
         let candidate = self.candidate.take()?;
-        let switch = self.switch_to(candidate.epoch, me);
-        if !matches!(self.ingest(&candidate.frame), Ingested::Applied { .. }) {
-            // Automerge can still refuse the change in `apply`, which only a crafted frame reaches.
-            self.dropped.push(candidate.frame.dedup_key());
-            if let Some(refused) = self.warn_due("the candidate of the new epoch was not applied") {
-                tracing::warn!(target: LOG_TARGET, refused, author = %candidate.frame.author, "the candidate of the new epoch was not applied");
+        let frames: Option<Vec<Verified>> = candidate.chain().map(|chain| {
+            let mut owned: Vec<Verified> = Vec::with_capacity(chain.len());
+            for frame in chain {
+                owned.push(frame.clone());
+            }
+            owned
+        });
+        let Some(frames) = frames else {
+            // The chain is not whole: the cutter left, or frames were lost. Adopting it would leave
+            // the state with a part of its values, so the node keeps its epoch and forgets the
+            // frames, and a later digest brings them again.
+            self.dropped.extend(candidate.keys());
+            if let Some(held) = self.warn_due("the seed of the candidate epoch was not complete") {
+                tracing::warn!(target: LOG_TARGET, held, author = %candidate.frame.author, "the seed of the candidate epoch was not complete");
+            }
+            return None;
+        };
+        // A state seed names the stamp of each path that each of its changes writes. A seed whose
+        // stamps do not match its changes is dropped before the switch, as an incomplete one is.
+        let recorded: Option<SeedRead> = if candidate.mark.is_some() {
+            let Some(found) = self.read_seed_stamps(candidate.epoch, &frames) else {
+                self.dropped.extend(candidate.keys());
+                if let Some(held) =
+                    self.warn_due("the stamps of the candidate seed do not match it")
+                {
+                    tracing::warn!(target: LOG_TARGET, held, author = %candidate.frame.author, "the stamps of the candidate seed do not match it");
+                }
+                return None;
+            };
+            Some(found)
+        } else {
+            None
+        };
+        // A state seed names the stamp of each path. A leaf that this node holds with a stamp above
+        // the stamp that the seed holds for it (or for an object that holds it) is a write that the
+        // seed lacks, and the node writes it again with its stamp. A leaf that the seed holds with
+        // a higher stamp stays as the seed has it. No cut is needed: the rule is the same for the
+        // next epoch, a jump, and a rival seed.
+        let theirs: HashMap<Vec<String>, Stamp> = match recorded.as_ref() {
+            Some((found, dead)) => seed_stamp_map(found, dead),
+            None => HashMap::new(),
+        };
+        let mut pending: Vec<(Vec<String>, Value, Stamp)> = match recorded.as_ref() {
+            Some(_) => self.pending_writes(&theirs),
+            None => Vec::new(),
+        };
+        // A delete of this node that the seed does not know of is written again as well, if the
+        // seed holds the value: its tombstone has the higher stamp. A value that the document
+        // still holds at that path is older than the delete (a newer write would have removed the
+        // tombstone), so what is written is the delete.
+        if let Some((found, _)) = recorded.as_ref() {
+            // Whether the seed holds a value that the delete outranks is a question about the
+            // values of the seed, not about its tombstones: a seed can hold a value and a tombstone
+            // of a higher stamp for it (its cutter had not yet written the delete again).
+            let held_by_seed = seed_stamp_map(found, &[]);
+            for (path, stamp) in &self.tombstones {
+                let bar: Option<&Stamp> = (1..=path.len())
+                    .filter_map(|depth| held_by_seed.get(&path[..depth]))
+                    .max();
+                if bar.is_none_or(|held| stamp > held) {
+                    pending.push((path.clone(), Value::Null, stamp.clone()));
+                }
             }
         }
+        let mut seed_hashes: HashSet<ChangeHash> = candidate.tail.keys().copied().collect();
+        seed_hashes.insert(candidate.root_hash);
+        let mut switch = self.switch_to(candidate.epoch, me);
+        self.adopting = true;
+        for frame in &frames {
+            if !matches!(self.ingest(frame), Ingested::Applied { .. }) {
+                // Automerge can still refuse the change in `apply`, which only a crafted frame reaches.
+                self.dropped.push(frame.dedup_key());
+                if let Some(refused) =
+                    self.warn_due("the candidate of the new epoch was not applied")
+                {
+                    tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "the candidate of the new epoch was not applied");
+                }
+            }
+        }
+        self.adopting = false;
+        self.seed_bytes = self.frame_bytes;
+        self.seed_ops = self.ops_held;
+        if let Some((found, dead)) = recorded {
+            self.origins = found;
+            // The tombstones of the seed join ours. A tombstone that the seed beats with a live
+            // value of a higher stamp is of no use any more.
+            for (path, stamp) in dead {
+                self.add_tombstone(path, stamp);
+            }
+            let live = seed_stamp_map(&self.origins, &[]);
+            self.tombstones
+                .retain(|path, stamp| live.get(path).is_none_or(|held| &*stamp >= held));
+        }
+        if candidate.mark.is_some() {
+            self.seed_author = Some(candidate.frame.key());
+            self.seed_hashes = seed_hashes;
+        }
+        // The author of a write writes it again at once. A node that holds a write of another node
+        // keeps it for 1 to 3 ticks: if the author's replay arrives first, the stamp that it
+        // names is the stamp that this node holds, and there is nothing left to write.
+        let own_tag = format!("{:016x}", self.own_tag.load(Ordering::Relaxed));
+        let (own, others): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|(_, _, stamp)| stamp.tag == own_tag);
+        let mut own_writes = own;
+        // The value of an object of this node holds the children that other nodes wrote. A child
+        // is written again with its own stamp when its wait is over, and not here, where it would
+        // get a fresh stamp that outranks a delete of the child.
+        for (path, value, _) in &mut own_writes {
+            for (child, _, _) in &others {
+                if child.len() > path.len() && child.starts_with(path) {
+                    remove_path(value, &child[path.len()..]);
+                }
+            }
+        }
+        // Only the leaves and the deletes wait: an object as a whole replaces the keys below it,
+        // and the leaves below it that have a write of another node are named on their own.
+        for (path, value, stamp) in others {
+            if !is_full_object(&value) {
+                self.keep_restore(path, (value, stamp));
+            }
+        }
+        let jitter = 1 + (self.own_tag.load(Ordering::Relaxed) ^ candidate.epoch) % 3;
+        self.restores_due = u32::try_from(jitter).unwrap_or(3);
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        let mut stamped: StampedPaths = Vec::new();
+        for (path, value, stamp) in &own_writes {
+            leaves.push((path.clone(), value.clone()));
+            stamped.push((path.clone(), stamp.clone()));
+        }
+        switch.replay = self.replay_patch(leaves);
+        if switch.replay.is_some() {
+            switch.replay_stamps = stamped;
+        }
         Some(switch)
+    }
+
+    /// The leaves and the objects that this document holds with a stamp above the one that the
+    /// seed holds for them (`theirs`): the writes that the seed lacks. The stamp of an object is
+    /// the stamp of the write that made it, so an object that was deleted and made again is a
+    /// write of the whole object, which replaces the keys that the seed holds below it. A path
+    /// with no stamp is not a write of anyone. The shorter paths come first.
+    fn pending_writes(
+        &self,
+        theirs: &HashMap<Vec<String>, Stamp>,
+    ) -> Vec<(Vec<String>, Value, Stamp)> {
+        let now: Value = self.to_json();
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_leaves(&now, &mut Vec::new(), &mut leaves);
+        let mut objects: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_objects(&now, &mut Vec::new(), &mut objects);
+        objects.extend(leaves);
+        let paths: Vec<Vec<String>> = objects.iter().map(|(path, _)| path.clone()).collect();
+        let mine = self.stamps_of(&paths);
+        let floors = self.tombstone_floors(&paths);
+        let mut pending: Vec<(Vec<String>, Value, Stamp)> = Vec::new();
+        let rows = objects.into_iter().zip(mine).zip(floors);
+        for (((path, value), stamp), floor) in rows {
+            let Some(stamp) = stamp else { continue };
+            // A value below a delete of a higher stamp is dead: the delete is what is written.
+            if floor.is_some_and(|dead| dead >= stamp) {
+                continue;
+            }
+            let bar: Option<&Stamp> = (1..=path.len())
+                .filter_map(|depth| theirs.get(&path[..depth]))
+                .max();
+            if bar.is_none_or(|held| stamp > *held) {
+                pending.push((path, value, stamp));
+            }
+        }
+        pending.sort_by_key(|(path, _, _)| path.len());
+        pending
+    }
+
+    /// The merge that writes again the `leaves` that the document does not hold yet. A leaf that
+    /// the new epoch already holds with the same value is left out, so a write that every node
+    /// holds is not sent again by every node.
+    fn replay_patch(&self, leaves: Vec<(Vec<String>, Value)>) -> Option<Value> {
+        let now: Value = self.to_json();
+        let mut merge: Map<String, Value> = Map::new();
+        let mut lacking = false;
+        for (path, value) in leaves {
+            let holds: Option<&Value> = lookup(&now, &path);
+            let same = match holds {
+                Some(held) => *held == value,
+                None => value.is_null(),
+            };
+            if !same {
+                set_path(&mut merge, &path, replace_with(&value, holds));
+                lacking = true;
+            }
+        }
+        lacking.then_some(Value::Object(merge))
     }
 
     /// Drop every frame and start `epoch`, and hand back the entry of `me`, which only `me` can
@@ -573,11 +1489,7 @@ impl MeshDoc {
         let peers = json.get(&map);
         let own_entry: Option<Value> = peers.and_then(|peers| peers.get(me.as_str())).cloned();
         self.restart(epoch);
-        EpochSwitch {
-            epoch,
-            map,
-            own_entry,
-        }
+        EpochSwitch::new(epoch, map, own_entry)
     }
 
     /// Forget the history: a document of `epoch` that holds its genesis and nothing else. The
@@ -585,8 +1497,7 @@ impl MeshDoc {
     fn restart(&mut self, epoch: u64) {
         let mut doc = Automerge::new();
         let mut applied = HashSet::new();
-        if let Some(gate) = self.gate.as_ref() {
-            let genesis = peers_genesis(&gate.map, epoch);
+        if let Some(genesis) = self.genesis(epoch) {
             applied.insert(genesis.hash());
             let _ = doc.apply_changes([genesis]);
         }
@@ -594,12 +1505,233 @@ impl MeshDoc {
         self.applied = applied;
         self.frames = HashMap::new();
         self.frame_bytes = 0;
+        self.ops_held = 0;
+        self.seed_bytes = 0;
+        self.seed_ops = 0;
+        self.crossed_ticks = None;
+        self.cut_wait = 0;
+        self.cut_backoff = DOC_CUT_BACKOFF_FIRST;
+        self.refused = BoundedFifoSet::new(self.limits.refused_max);
         self.pending = HashMap::new();
         self.candidate = None;
         self.candidate_ticks = 0;
         self.epoch = epoch;
         self.epoch_ticks = 0;
+        self.restores_due = 0;
         self.settled_bytes = 0;
+        self.seed_author = None;
+        self.seed_hashes = HashSet::new();
+        self.refused_rivals = Vec::new();
+        self.origins = HashMap::new();
+    }
+
+    /// The seed of `epoch`: the live JSON of this document, cut by leaf path into merges that each
+    /// fit one frame, written as a chain of changes on the genesis of `epoch`. A node that starts
+    /// the epoch sends the chain, and a node that adopts it holds the same live values, with no
+    /// history. `fits` takes one merge and says whether its frame is small enough, as
+    /// [`pack_entry`] does: the caller measures the real frame, signed and sealed.
+    /// `actor_seed` is the actor of the chain, the signing key of the cutter, as for
+    /// [`Self::build_change`]. An empty document gives a chain of 1 change that writes a key and
+    /// deletes it, so a seed always has a root.
+    ///
+    /// # Errors
+    /// [`DocError::TooLarge`] when one leaf does not fit a frame, [`DocError::Encode`] when a
+    /// merge does not encode, and [`DocError::CandidateHeld`] when the document waits to adopt a
+    /// candidate seed.
+    pub fn build_seed(
+        &self,
+        epoch: u64,
+        actor_seed: &[u8],
+        fits: impl FnMut(&Value) -> bool,
+    ) -> Result<SeedChain, DocError> {
+        if self.candidate.is_some() {
+            return Err(DocError::CandidateHeld);
+        }
+        let live = self.without_dead_values();
+        let mut within_frame = fits;
+        let cuts: Result<Vec<Value>, DocError> = pack_entry(&live, |merge| {
+            count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
+        })
+        .collect();
+        let mut merges: Vec<Value> = cuts?;
+        merges.retain(|merge| !matches!(merge, Value::Object(map) if map.is_empty()));
+        if merges.len() > DOC_SEED_FRAMES_MAX {
+            // A node refuses the root of such a seed, so the cutter does not send it. The live
+            // state is then over what a reset can carry: the bound of the channel is its live size.
+            return Err(DocError::SeedTooLong {
+                frames: merges.len(),
+            });
+        }
+        let mut fork = Automerge::new();
+        fork.apply_changes([state_genesis(epoch)])
+            .map_err(DocError::encode)?;
+        fork.set_actor(actor_for(actor_seed));
+        let mut changes: Vec<Vec<u8>> = Vec::new();
+        if merges.is_empty() {
+            let mut tx = fork.transaction();
+            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
+            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
+            tx.commit();
+            let all: Vec<Vec<u8>> = raw_changes(&fork, &[]);
+            changes.extend(all.into_iter().skip(1));
+        }
+        for merge in &merges {
+            let heads: Vec<ChangeHash> = fork.get_heads();
+            let mut tx = fork.transaction();
+            write_map(&mut tx, &ROOT, merge).map_err(DocError::encode)?;
+            tx.commit();
+            changes.extend(raw_changes(&fork, &heads));
+        }
+        let mut origins: Vec<Vec<Stamp>> = self.seed_origins_of(&fork, &changes)?;
+        // The tombstones go on the frames in the order of their paths, as many as a frame holds
+        // inside its byte budget and its entry cap. If the frames of the seed are not enough,
+        // carrier changes (a key written and deleted, as for an empty seed) take the rest.
+        let mut queue: VecDeque<(Vec<String>, Stamp)> = VecDeque::new();
+        for (path, stamp) in &self.tombstones {
+            queue.push_back((path.clone(), stamp.clone()));
+        }
+        let mut carried: Vec<StampedPaths> = Vec::with_capacity(changes.len());
+        for stamps in &origins {
+            carried.push(take_tombstones(
+                &mut queue,
+                DOC_REPLAY_ENTRIES_MAX - stamps.len(),
+            ));
+        }
+        while !queue.is_empty() {
+            let heads: Vec<ChangeHash> = fork.get_heads();
+            let mut tx = fork.transaction();
+            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
+            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
+            tx.commit();
+            changes.extend(raw_changes(&fork, &heads));
+            origins.push(Vec::new());
+            carried.push(take_tombstones(&mut queue, DOC_REPLAY_ENTRIES_MAX));
+            if changes.len() > DOC_SEED_FRAMES_MAX {
+                return Err(DocError::SeedTooLong {
+                    frames: changes.len(),
+                });
+            }
+        }
+        let tip: Vec<u8> = changes.last().cloned().unwrap_or_default();
+        let tip_change: Change = Change::from_bytes(tip).map_err(DocError::encode)?;
+        let last: String = tip_change.hash().to_string();
+        let frames = u32::try_from(changes.len()).unwrap_or(u32::MAX);
+        Ok(SeedChain {
+            changes,
+            mark: SeedMark::new(frames, last),
+            time: self.next_time(),
+            origins,
+            tombstones: carried,
+        })
+    }
+
+    /// The JSON of this document without the values that a tombstone of a higher stamp governs. A
+    /// replay of another node can bring such a value back for a while (the restore removes it
+    /// again), and a seed must not carry it: a node that adopts it would hold a value that the
+    /// seed itself says was deleted.
+    fn without_dead_values(&self) -> Value {
+        let mut live: Value = self.to_json();
+        if self.tombstones.is_empty() {
+            return live;
+        }
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_leaves(&live, &mut Vec::new(), &mut leaves);
+        let paths: Vec<Vec<String>> = leaves.into_iter().map(|(path, _)| path).collect();
+        let stamps = self.stamps_of(&paths);
+        let floors = self.tombstone_floors(&paths);
+        let rows = paths.iter().zip(stamps).zip(floors);
+        for ((path, stamp), floor) in rows {
+            let dead = match (stamp, floor) {
+                (Some(held), Some(floor)) => held < floor,
+                (None, Some(_)) => true,
+                (_, None) => false,
+            };
+            if dead {
+                remove_path(&mut live, path);
+            }
+        }
+        live
+    }
+
+    /// The stamps that the frames of a seed name, checked against the changes: a scratch document
+    /// of `epoch` applies the changes in order, and each frame must carry one stamp for each path
+    /// that its change writes, and the tombstones of the root. `None` when a frame carries a number of
+    /// stamps that does not match, more than `DOC_REPLAY_ENTRIES_MAX`, tombstones outside the root
+    /// or more than `DOC_SEED_TOMBSTONES_MAX`, or no body.
+    fn read_seed_stamps(&self, epoch: u64, frames: &[Verified]) -> Option<SeedRead> {
+        let mut scratch = Automerge::new();
+        scratch.apply_changes([state_genesis(epoch)]).ok()?;
+        let mut found: SeedStamps = HashMap::new();
+        let mut dead: Vec<(Vec<String>, Stamp)> = Vec::new();
+        for frame in frames {
+            let parsed = self.change_bytes(frame)?;
+            // The tombstones of the chain, frame after frame, are in the order of their paths with
+            // none twice, and no more than a node keeps.
+            for entry in parsed.tombstones {
+                if dead.last().is_some_and(|last| last.0 >= entry.0) {
+                    return None;
+                }
+                dead.push(entry);
+            }
+            if dead.len() > DOC_SEED_TOMBSTONES_MAX {
+                return None;
+            }
+            let change = Change::from_bytes(parsed.bytes).ok()?;
+            scratch.apply_changes([change.clone()]).ok()?;
+            let paths = change_leaves(&scratch, &change);
+            if paths.len() != parsed.origins.len() || paths.len() > DOC_REPLAY_ENTRIES_MAX {
+                return None;
+            }
+            let named: StampedPaths = paths.into_iter().zip(parsed.origins).collect();
+            found.insert(change.hash(), named);
+        }
+        Some((found, dead))
+    }
+
+    /// The stamps for the changes of a seed that `fork` holds: for each change, one stamp for each
+    /// path that it writes, in the order of the paths. The stamp is the one that this document
+    /// holds for the path, so a node that adopts the seed learns who wrote each value and when. A
+    /// path that this document holds no stamp for (a change with no time) gets the stamp 0.
+    fn seed_origins_of(
+        &self,
+        fork: &Automerge,
+        changes: &[Vec<u8>],
+    ) -> Result<Vec<Vec<Stamp>>, DocError> {
+        let mut per_change: Vec<Vec<Vec<String>>> = Vec::with_capacity(changes.len());
+        for bytes in changes {
+            let change = Change::from_bytes(bytes.clone()).map_err(DocError::encode)?;
+            per_change.push(change_leaves(fork, &change));
+        }
+        let all: Vec<Vec<String>> = per_change.iter().flatten().cloned().collect();
+        let mut found = self.stamps_of(&all).into_iter();
+        let none = Stamp::new(0, "0000000000000000".to_owned());
+        let mut zeros: u64 = 0;
+        let mut origins: Vec<Vec<Stamp>> = Vec::with_capacity(per_change.len());
+        for paths in &per_change {
+            let mut stamps: Vec<Stamp> = Vec::with_capacity(paths.len());
+            for _ in paths {
+                stamps.push(found.next().flatten().unwrap_or_else(|| {
+                    zeros += 1;
+                    none.clone()
+                }));
+            }
+            origins.push(stamps);
+        }
+        if zeros > 0 {
+            self.unstamped.fetch_add(zeros, Ordering::Relaxed);
+            tracing::warn!(target: LOG_TARGET, zeros, "a seed path got the stamp 0 for want of a time");
+        }
+        Ok(origins)
+    }
+
+    /// The genesis of `epoch` for this channel: the per-peer map of a gated channel (meta), the
+    /// empty genesis of a state channel above epoch 0, and nothing for epoch 0 of a state channel.
+    fn genesis(&self, epoch: u64) -> Option<Change> {
+        match self.gate.as_ref() {
+            Some(gate) => Some(peers_genesis(&gate.map, epoch)),
+            None if epoch == 0 => None,
+            None => Some(state_genesis(epoch)),
+        }
     }
 
     /// The same document in `epoch`, with no change but its genesis.
@@ -683,7 +1815,10 @@ impl MeshDoc {
             return Err(DocError::NotAnObject);
         };
         let mut fork = self.doc.fork();
-        fork.set_actor(actor_for(actor_seed));
+        let actor = actor_for(actor_seed);
+        self.own_tag
+            .store(actor_tag_number(&actor), Ordering::Relaxed);
+        fork.set_actor(actor);
         let heads = fork.get_heads();
         {
             let mut tx = fork.transaction();
@@ -691,7 +1826,134 @@ impl MeshDoc {
             tx.commit();
         }
         let mut changes = fork.get_changes(&heads);
-        Ok(changes.pop().map(|change| change.raw_bytes().to_vec()))
+        let Some(change) = changes.pop() else {
+            return Ok(None);
+        };
+        self.check_lines(merge, &change, false)?;
+        Ok(Some(change.raw_bytes().to_vec()))
+    }
+
+    /// [`Self::build_change`] for a write that puts back a value that this node held (a replay of
+    /// its own writes, or a restore). It is not refused at the refusal line or for its depth,
+    /// because it adds nothing that the document did not hold, but it is refused over the memory
+    /// line.
+    ///
+    /// # Errors
+    /// As [`Self::build_change`].
+    pub fn build_restore(
+        &self,
+        merge: &Value,
+        actor_seed: &[u8],
+    ) -> Result<Option<Vec<u8>>, DocError> {
+        let mut fork = self.doc.fork();
+        let actor = actor_for(actor_seed);
+        self.own_tag
+            .store(actor_tag_number(&actor), Ordering::Relaxed);
+        fork.set_actor(actor);
+        let heads = fork.get_heads();
+        {
+            let mut tx = fork.transaction();
+            write_map(&mut tx, &ROOT, merge).map_err(DocError::encode)?;
+            tx.commit();
+        }
+        let mut changes = fork.get_changes(&heads);
+        let Some(change) = changes.pop() else {
+            return Ok(None);
+        };
+        self.check_lines(merge, &change, true)?;
+        Ok(Some(change.raw_bytes().to_vec()))
+    }
+
+    /// Whether applying `change` (in `frame`) would take this document over its remote line: the
+    /// memory line of a local write (the frames, or the operations) and the room of a remote flood
+    /// above it. It is a bound on memory, not a policy: a node that refuses a frame holds less than
+    /// the nodes that took it, and the next seed brings the difference.
+    fn over_remote_line(&self, change: &Change, frame: &Verified) -> bool {
+        let bytes = &self.limits.bytes;
+        let ops = &self.limits.ops;
+        let frames_after = self.frame_bytes + wire_len(frame);
+        let ops_after = self.ops_held + change.len();
+        let line_bytes =
+            bytes.memory.max(self.seed_bytes + bytes.break_even / 10) + bytes.remote_extra;
+        let line_ops = ops.memory.max(self.seed_ops + ops.break_even / 10) + ops.remote_extra;
+        frames_after > line_bytes || ops_after > line_ops
+    }
+
+    /// A leaf that this write adds must fit a frame of a seed, with the largest stamp, the margin
+    /// of the envelope and the envelope itself. If one did not, the write would pass the frame of
+    /// the write (which has no stamp) and every later cut would fail on it. Only a leaf of
+    /// `SEED_LEAF_CHECK_MIN` bytes or more is built and measured: a smaller one always fits.
+    fn check_seed_frames(merge: &Value) -> Result<(), DocError> {
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_leaves(merge, &mut Vec::new(), &mut leaves);
+        for (path, value) in &leaves {
+            if value.is_null() {
+                continue;
+            }
+            let path_bytes: usize = path.iter().map(String::len).sum();
+            let json_bytes: usize = serde_json::to_vec(value).map_or(0, |bytes| bytes.len());
+            if path_bytes + json_bytes < SEED_LEAF_CHECK_MIN {
+                continue;
+            }
+            let body = seed_frame_body_len(path, value);
+            if body + DOC_EPOCH_FRAME_MARGIN + DOC_STATE_ENVELOPE_BYTES > MAX_MESSAGE_SIZE {
+                return Err(DocError::TooLarge {
+                    bytes: path_bytes + json_bytes,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The lines of a free-form state document, for a local write whose `change` was built from
+    /// `merge`. A merge nested deeper than `DOC_STATE_DEPTH_MAX` that adds a value is refused. Any
+    /// write is refused over the memory line, and a write that adds a value (a leaf that is not
+    /// `null`, or an empty object) is refused when the next seed would pass the refusal line, on
+    /// the bytes or on the operations. A delete is exempt from the refusal line and from the depth.
+    fn check_lines(&self, merge: &Value, change: &Change, restoring: bool) -> Result<(), DocError> {
+        if !self.state_epochs || self.gate.is_some() {
+            return Ok(());
+        }
+        let adds = adds_value(merge) && !restoring;
+        if adds {
+            Self::check_seed_frames(merge)?;
+            let depth = merge_depth(merge);
+            if depth > DOC_STATE_DEPTH_MAX {
+                return Err(DocError::StateTooDeep {
+                    depth,
+                    limit: DOC_STATE_DEPTH_MAX,
+                });
+            }
+        }
+        let bytes = &self.limits.bytes;
+        let ops = &self.limits.ops;
+        // The frame of a change is its bytes in base58 (a factor of 1.37) and the margin of the
+        // envelope.
+        let frame = change.raw_bytes().len() * 137 / 100 + DOC_EPOCH_FRAME_MARGIN;
+        let frames_after = self.frame_bytes + frame;
+        let ops_after = self.ops_held + change.len();
+        let memory_bytes = bytes.memory.max(self.seed_bytes + bytes.break_even / 10);
+        let memory_ops = ops.memory.max(self.seed_ops + ops.break_even / 10);
+        if frames_after > memory_bytes {
+            return Err(full(frames_after, memory_bytes, "bytes"));
+        }
+        if ops_after > memory_ops {
+            return Err(full(ops_after, memory_ops, "operations"));
+        }
+        if !adds {
+            return Ok(());
+        }
+        let growth_bytes = frames_after.saturating_sub(self.seed_bytes);
+        let growth_ops = ops_after.saturating_sub(self.seed_ops);
+        let clock = self.clock.load(Ordering::Relaxed);
+        let projected = Limits::projected_bytes(self.seed_bytes, growth_bytes, growth_ops, clock);
+        if projected > bytes.refuse_add {
+            return Err(full(projected, bytes.refuse_add, "bytes"));
+        }
+        if ops_after > ops.refuse_add {
+            return Err(full(ops_after, ops.refuse_add, "operations"));
+        }
+        Ok(())
     }
 
     /// Ingest one verified frame carrying an automerge change. Verifies causal
@@ -700,10 +1962,17 @@ impl MeshDoc {
     /// `Verified` proof means the signature was checked before the frame got here,
     /// so the signer is `frame.key()`, never a field of the body.
     pub fn ingest(&mut self, frame: &Verified) -> Ingested {
-        let Some((bytes, epoch)) = self.change_bytes(frame) else {
+        let Some(parsed) = self.change_bytes(frame) else {
             return Ingested::Ignored;
         };
-        let Ok(change) = Change::from_bytes(bytes) else {
+        let (epoch, mark, time) = (parsed.epoch, parsed.seed, parsed.time);
+        if parsed.origins.len() + parsed.tombstones.len() > DOC_REPLAY_ENTRIES_MAX {
+            if let Some(refused) = self.warn_due("a frame carries more stamps than the cap") {
+                tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "a frame carries more stamps than the cap");
+            }
+            return Ingested::Ignored;
+        }
+        let Ok(change) = Change::from_bytes(parsed.bytes) else {
             return Ingested::Ignored;
         };
         let author = frame.key();
@@ -715,8 +1984,30 @@ impl MeshDoc {
             }
             return Ingested::Ignored;
         }
+        if self.state_epochs && self.gate.is_none() {
+            // A state change names its Lamport time, and a node that cannot place it before or
+            // after its own writes would break the order of the replay rule.
+            let Some(stamped) = time.filter(|stamped| *stamped < DOC_TIME_MAX) else {
+                self.refused_time = self.refused_time.saturating_add(1);
+                if let Some(refused) =
+                    self.warn_due("a state change with no valid time was refused")
+                {
+                    tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "a state change with no valid time was refused");
+                }
+                return Ingested::Ignored;
+            };
+            self.clock.fetch_max(stamped, Ordering::Relaxed);
+        }
         if epoch != self.epoch {
-            return self.ingest_other_epoch(epoch, &change, frame);
+            return self.ingest_other_epoch(epoch, &change, frame, mark);
+        }
+        if self.state_epochs
+            && !self.adopting
+            && self.gate.is_none()
+            && self.epoch > 0
+            && let Some(taken) = self.rival_seed_frame(&change, frame, mark)
+        {
+            return taken;
         }
         let hash = change.hash();
         if self.applied.contains(&hash) {
@@ -725,11 +2016,40 @@ impl MeshDoc {
         if !self.deps_satisfied(change.deps()) {
             return self.buffer_orphan(author, hash, change, frame);
         }
+        if self.state_epochs && self.gate.is_none() && !self.adopting {
+            if self.refused.contains(&hash) {
+                return Ingested::Ignored;
+            }
+            if self.over_remote_line(&change, frame) {
+                self.refused.insert(hash);
+                self.refused_remote = self.refused_remote.saturating_add(1);
+                if let Some(refused) =
+                    self.warn_due("a frame was refused: the state document is over its remote line")
+                {
+                    tracing::warn!(target: LOG_TARGET, refused, held = self.refused_remote, author = %frame.author, "a frame was refused: the state document is over its remote line");
+                }
+                return Ingested::Ignored;
+            }
+        }
         // Hoisted above the gate so the two share one hydration: nothing
         // mutates the document between them, and `doc_json` over the whole
         // `meta` map was the dominant cost of ingesting a frame. On the
         // rejection path this pays for a hydration it does not use, which is
         // the rare adversarial case rather than the steady-state one.
+        if self.adopting && self.gate.is_none() {
+            // The frames of a seed that a free-form channel adopts: nobody reads the JSON of the
+            // document after each one, and the channel has no gate that needs `before`. Two
+            // hydrations of the whole document for each frame made an adoption cost the square of
+            // the size of the state. A gated channel keeps the full path: its gate needs `before`.
+            if !self.apply(change, hash, frame.clone()) {
+                return Ingested::Ignored;
+            }
+            self.drain_pending();
+            return Ingested::Applied {
+                changed: true,
+                doc: Value::Null,
+            };
+        }
         let before = self.to_json();
         if self.forges_foreign_entry(&change, &frame.author, Some(&before)) {
             return Ingested::Rejected;
@@ -755,42 +2075,188 @@ impl MeshDoc {
     /// `DOC_EPOCH_JUMP_MAX` above, and passes the gate on a fresh document of that epoch. Every
     /// other refusal forgets the dedup key, so the re-send of the frame is not dropped as a repeat
     /// when it can be taken later.
-    fn ingest_other_epoch(&mut self, epoch: u64, change: &Change, frame: &Verified) -> Ingested {
+    fn ingest_other_epoch(
+        &mut self,
+        epoch: u64,
+        change: &Change,
+        frame: &Verified,
+        mark: Option<SeedMark>,
+    ) -> Ingested {
         if epoch < self.epoch {
             return Ingested::Ignored;
         }
-        let refuse = |doc: &mut Self| {
-            doc.dropped.push(frame.dedup_key());
-            Ingested::Ignored
-        };
-        let Some(gate) = self.gate.clone() else {
-            return refuse(self);
-        };
         if epoch - self.epoch > DOC_EPOCH_JUMP_MAX {
-            return refuse(self);
+            return self.refuse_frame(frame);
         }
-        if change.deps() != [peers_genesis(&gate.map, epoch).hash()] {
-            return refuse(self);
+        let Some(genesis) = self.genesis(epoch) else {
+            return self.refuse_frame(frame);
+        };
+        if change.deps() != [genesis.hash()] {
+            return self.take_tail_frame(epoch, change, frame);
         }
-        let fresh = Self::new_gated(gate).at_epoch(epoch);
-        if fresh.forges_foreign_entry(change, &frame.author, None) {
-            return Ingested::Rejected;
-        }
+        let mark: Option<SeedMark> = if let Some(gate) = self.gate.clone() {
+            let fresh = Self::new_gated(gate).at_epoch(epoch);
+            if fresh.forges_foreign_entry(change, &frame.author, None) {
+                return Ingested::Rejected;
+            }
+            None
+        } else {
+            if !self.state_epochs {
+                return self.refuse_frame(frame);
+            }
+            let named: usize = mark.as_ref().map_or(0, |named| named.frames as usize);
+            if named == 0 || named > DOC_SEED_FRAMES_MAX {
+                return self.refuse_frame(frame);
+            }
+            mark
+        };
         match self.candidate.as_ref() {
             Some(held) if held.epoch == epoch && held.frame.dedup_key() == frame.dedup_key() => {
                 return Ingested::Duplicate;
             }
-            Some(held) if held.epoch >= epoch => return refuse(self),
+            // Two seeds of one epoch: the root with the lowest key wins on every node.
+            Some(held)
+                if held.epoch == epoch
+                    && mark.is_some()
+                    && beats(&frame.key(), &held.frame.key()) => {}
+            Some(held) if held.epoch >= epoch => return self.refuse_frame(frame),
             _ => {}
         }
-        let kept = Candidate {
-            epoch,
-            frame: frame.clone(),
-        };
-        match self.candidate.replace(kept) {
-            Some(beaten) => self.dropped.push(beaten.frame.dedup_key()),
+        let kept = Candidate::new(epoch, frame.clone(), change, mark);
+        match self.candidate.replace(Box::new(kept)) {
+            Some(beaten) => self.dropped.extend(beaten.keys()),
             None => self.candidate_ticks = 0,
         }
+        Ingested::NewEpoch { epoch }
+    }
+
+    /// A frame of the epoch that the document holds that belongs to a rival seed: another node cut
+    /// the same epoch from another view. `None` when the frame is no part of a rival seed.
+    fn rival_seed_frame(
+        &mut self,
+        change: &Change,
+        frame: &Verified,
+        mark: Option<SeedMark>,
+    ) -> Option<Ingested> {
+        let genesis: Change = state_genesis(self.epoch);
+        let is_root = change.deps() == [genesis.hash()];
+        if is_root && mark.is_some() {
+            if self.applied.contains(&change.hash()) {
+                return Some(Ingested::Duplicate);
+            }
+            return Some(self.take_rival_root(change, frame, mark));
+        }
+        if self.deps_satisfied(change.deps()) {
+            return None;
+        }
+        let rival_chain = self
+            .candidate
+            .as_ref()
+            .is_some_and(|held| held.epoch == self.epoch);
+        if rival_chain {
+            return Some(self.take_tail_frame(self.epoch, change, frame));
+        }
+        if self.refused_rivals.contains(&frame.key()) {
+            return Some(self.refuse_frame(frame));
+        }
+        None
+    }
+
+    /// The root of a rival seed of the epoch that the document holds. The seed whose root has the
+    /// lowest key wins on every node, so all nodes end in one seed. A lower root becomes the
+    /// candidate and the document switches to it after the wait, as for a higher epoch.
+    fn take_rival_root(
+        &mut self,
+        change: &Change,
+        frame: &Verified,
+        mark: Option<SeedMark>,
+    ) -> Ingested {
+        let named: usize = mark.as_ref().map_or(0, |mark| mark.frames as usize);
+        let Some(adopted) = self.seed_author else {
+            return self.refuse_frame(frame);
+        };
+        if named == 0 || named > DOC_SEED_FRAMES_MAX {
+            return self.refuse_frame(frame);
+        }
+        if let Some(held) = self.candidate.as_ref()
+            && held.epoch == self.epoch
+            && held.frame.dedup_key() == frame.dedup_key()
+        {
+            return Ingested::Duplicate;
+        }
+        let standing: AuthorKey = match self.candidate.as_ref() {
+            Some(held) if held.epoch == self.epoch => held.frame.key(),
+            _ => adopted,
+        };
+        if !beats(&frame.key(), &standing) {
+            if self.refused_rivals.len() >= 8 {
+                self.refused_rivals.remove(0);
+            }
+            self.refused_rivals.push(frame.key());
+            return self.refuse_frame(frame);
+        }
+        let kept = Candidate::new(self.epoch, frame.clone(), change, mark);
+        match self.candidate.replace(Box::new(kept)) {
+            Some(beaten) => self.dropped.extend(beaten.keys()),
+            None => self.candidate_ticks = 0,
+        }
+        Ingested::NewEpoch { epoch: self.epoch }
+    }
+
+    /// Forget the dedup key of a frame that the document does not take, so its re-send is not
+    /// dropped as a repeat when it can be taken later.
+    fn refuse_frame(&mut self, frame: &Verified) -> Ingested {
+        self.dropped.push(frame.dedup_key());
+        Ingested::Ignored
+    }
+
+    /// A frame of a higher epoch that is not a root: a later frame of the seed chain that the
+    /// candidate holds. Only the author of the root sends the chain, and the candidate holds as
+    /// many frames as the mark of its root names, so a flood of tail frames cannot grow it.
+    fn take_tail_frame(&mut self, epoch: u64, change: &Change, frame: &Verified) -> Ingested {
+        let hash = change.hash();
+        let Some(held) = self.candidate.as_mut() else {
+            return self.refuse_frame(frame);
+        };
+        let named = held.mark.as_ref().map_or(0, |mark| mark.frames as usize);
+        let [parent] = change.deps() else {
+            return self.refuse_frame(frame);
+        };
+        if held.epoch != epoch || named < 2 || frame.key() != held.frame.key() {
+            return self.refuse_frame(frame);
+        }
+        if hash == held.root_hash || held.tail.contains_key(&hash) {
+            return Ingested::Duplicate;
+        }
+        // The changes of the chain are one actor's, so their sequence numbers follow the root one
+        // by one. A write of the cutter after the seed, and every write that follows it, has a
+        // number above them. A second frame that follows one change is a fork.
+        let last_seq: u64 = held.root_seq + u64::try_from(named).unwrap_or(u64::MAX) - 1;
+        let outside = change.seq() <= held.root_seq || change.seq() > last_seq;
+        let forked = held.tail.values().any(|kept| kept.parent == *parent);
+        if outside || forked {
+            return self.refuse_frame(frame);
+        }
+        if held.tail.len() + 1 >= named {
+            // The slots are full. A frame that is off the path from the root has no place that a
+            // frame of the chain needs, so one of them gives way.
+            let on_path = held.on_path();
+            let off_path: Option<ChangeHash> = held.first_off_path(&on_path);
+            let Some(victim) = off_path else {
+                return self.refuse_frame(frame);
+            };
+            if let Some(gone) = held.tail.remove(&victim) {
+                self.dropped.push(gone.frame.dedup_key());
+            }
+        }
+        let Some(slots) = self.candidate.as_mut() else {
+            return self.refuse_frame(frame);
+        };
+        let kept = TailFrame {
+            frame: frame.clone(),
+            parent: *parent,
+        };
+        slots.tail.insert(hash, kept);
         Ingested::NewEpoch { epoch }
     }
 
@@ -810,6 +2276,30 @@ impl MeshDoc {
     /// Two processes sharing a signing key reach it without any malice, since
     /// the actor id is derived from the key.
     fn apply(&mut self, change: Change, hash: ChangeHash, frame: Verified) -> bool {
+        // A frame of a replay names the stamp of each path that its change writes. The stamps are
+        // checked on a fork before the change is applied, so a frame that names them wrongly is
+        // refused as a whole, and the node records them after it is applied.
+        let stamped: Option<(StampedPaths, Automerge)> = if self.state_epochs && !self.adopting {
+            let Ok(stamped) = self.stamped_paths(&change, &frame) else {
+                if let Some(refused) = self.warn_due("the stamps of a frame do not match it") {
+                    tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "the stamps of a frame do not match it");
+                }
+                return false;
+            };
+            stamped
+        } else {
+            None
+        };
+        // A frame of a replay names stamps. Before it is applied, the node finds the leaves that
+        // it holds with a stamp, and that the replay changes or hides (the fork that checked the
+        // stamps shows how the document will look). If the replay won in automerge with a lower
+        // stamp than the value that this node held, the node writes its value again.
+        let watch: Option<Vec<Lowered>> = stamped
+            .as_ref()
+            .map(|(named, after)| self.lowered_leaves(after, named));
+        let named: Option<StampedPaths> = stamped.map(|(named, _)| named);
+        let seen: Option<Change> = (self.state_epochs && !self.adopting).then(|| change.clone());
+        let ops = change.len();
         if let Err(error) = self.doc.apply_changes([change]) {
             if let Some(changes) = self.warn_due("dropping a channel change automerge refused") {
                 tracing::warn!(target: LOG_TARGET, changes, %error, author = %frame.author, "dropping a channel change automerge refused");
@@ -817,11 +2307,299 @@ impl MeshDoc {
             return false;
         }
         self.applied.insert(hash);
+        if let Some(applied) = seen.as_ref() {
+            self.note_deletes(applied, &frame, named.as_deref());
+        }
+        if let Some(named) = named {
+            self.origins.insert(hash, named);
+        }
+        if let Some(lowered) = watch {
+            self.note_lowered(&lowered);
+        }
         self.frame_bytes += wire_len(&frame);
-        if let Some(replaced) = self.frames.insert(hash, frame) {
-            self.frame_bytes -= wire_len(&replaced);
+        match self.frames.insert(hash, frame) {
+            Some(replaced) => self.frame_bytes -= wire_len(&replaced),
+            None => self.ops_held += ops,
         }
         true
+    }
+
+    /// The highest tombstone at each of `paths` or above it: the stamp of the delete that governs
+    /// the path, if a value there would be a value that the delete should have removed.
+    fn tombstone_floors(&self, paths: &[Vec<String>]) -> Vec<Option<Stamp>> {
+        paths
+            .iter()
+            .map(|path| self.tombstone_floor(path))
+            .collect()
+    }
+
+    /// The highest tombstone at `path` or above it.
+    fn tombstone_floor(&self, path: &[String]) -> Option<Stamp> {
+        let governing = (1..=path.len()).filter_map(|depth| self.tombstones.get(&path[..depth]));
+        governing.max().cloned()
+    }
+
+    /// The leaves that a replay frame changes or hides, that this node holds with a stamp, and the
+    /// leaves that the frame names (for a delete that the frame undoes). `after` is the document as
+    /// it will look once the frame is applied. Only the leaves below the objects that the frame
+    /// names are compared, and a stamp is read only for a leaf that differs, so the work follows what
+    /// the replay changes and not the size of the document. A leaf differs when its value is not the
+    /// same after the frame (the replay wrote another value), when the document held it and the
+    /// frame hides it (the replay made its object again), or when the frame names it and the document
+    /// had no value there (a delete that the frame undoes).
+    fn lowered_leaves(&self, after: &Automerge, named: &[(Vec<String>, Stamp)]) -> Vec<Lowered> {
+        let named_stamps: HashMap<&Vec<String>, &Stamp> =
+            named.iter().map(|(path, stamp)| (path, stamp)).collect();
+        let paths: Vec<&[String]> = named.iter().map(|(path, _)| path.as_slice()).collect();
+        let mut before_reader = PathReader::new(&self.doc, &paths);
+        let mut after_reader = PathReader::new(after, &paths);
+        // For each leaf that differs: the value that this node held (`None` for a leaf that the
+        // frame names with no value held), and whether the document has a value there after the frame.
+        let mut held: BTreeMap<Vec<String>, (Option<Value>, bool)> = BTreeMap::new();
+        for (path, _) in named {
+            let before = before_reader.value_at(path);
+            let now = after_reader.value_at(path);
+            if let Some(object) = &before {
+                let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+                collect_leaves(object, &mut path.clone(), &mut leaves);
+                for (leaf, value) in leaves {
+                    let there = now
+                        .as_ref()
+                        .and_then(|after_value| lookup(after_value, &leaf[path.len()..]));
+                    if there != Some(&value) {
+                        held.insert(leaf, (Some(value), there.is_some()));
+                    }
+                }
+            }
+            // A leaf that the frame names: a delete that the frame undoes shows here.
+            if now.as_ref().is_some_and(|value| !is_full_object(value)) {
+                held.entry(path.clone()).or_insert((None, true));
+            }
+        }
+        let leaf_paths: Vec<Vec<String>> = held.keys().cloned().collect();
+        let before = self.stamps_of(&leaf_paths);
+        leaf_paths
+            .into_iter()
+            .zip(before)
+            .map(|(path, before_stamp)| {
+                let (value, present) = held.remove(&path).unwrap_or((None, false));
+                let after_stamp: Option<Stamp> = match named_stamps.get(&path) {
+                    Some(stamp) if present => Some((*stamp).clone()),
+                    _ => None,
+                };
+                Lowered {
+                    path,
+                    value,
+                    before: before_stamp,
+                    after: after_stamp,
+                }
+            })
+            .collect()
+    }
+
+    /// Keep what this node must write again after a replay was applied: a value that it held with
+    /// a stamp above the stamp that the replay left (or with the leaf hidden), and a delete that
+    /// governed a path (a tombstone above the stamp of a value that the replay brought back). The
+    /// deletes are kept as `null`.
+    fn note_lowered(&mut self, lowered: &[Lowered]) {
+        let paths: Vec<Vec<String>> = lowered.iter().map(|leaf| leaf.path.clone()).collect();
+        let floors = self.tombstone_floors(&paths);
+        let rows = lowered.iter().zip(floors);
+        for (leaf, floor) in rows {
+            let value_lowered = match (&leaf.before, &leaf.after, &leaf.value) {
+                (Some(held), Some(now), Some(_)) => now < held,
+                (Some(held), None, Some(_)) => floor.as_ref() < Some(held),
+                _ => false,
+            };
+            let delete_lost = match (&leaf.value, &leaf.after, &floor) {
+                (None, Some(now), Some(dead)) => now < dead,
+                _ => false,
+            };
+            let kept: Option<(Value, Stamp)> = if value_lowered {
+                leaf.value.clone().zip(leaf.before.clone())
+            } else if delete_lost {
+                floor.map(|dead| (Value::Null, dead))
+            } else {
+                None
+            };
+            if let Some(kept) = kept {
+                self.keep_restore(leaf.path.clone(), kept);
+            }
+        }
+    }
+
+    /// Keep a restore for `path`, unless one with a higher stamp waits. A restore that finds the map
+    /// full (`DOC_RESTORES_MAX` paths) is dropped, which is a newer write that the node
+    /// cannot write again: it is counted and warned, never silent.
+    fn keep_restore(&mut self, path: Vec<String>, kept: (Value, Stamp)) {
+        if self.restores.len() >= DOC_RESTORES_MAX && !self.restores.contains_key(&path) {
+            self.restores_dropped = self.restores_dropped.saturating_add(1);
+            if let Some(dropped) =
+                self.warn_due("a restore was dropped: the map of restores is full")
+            {
+                tracing::warn!(target: LOG_TARGET, dropped, "a restore was dropped: the map of restores is full");
+            }
+            return;
+        }
+        match self.restores.get(&path) {
+            Some(held) if held.1 >= kept.1 => {}
+            _ => {
+                self.restores.insert(path, kept);
+            }
+        }
+    }
+
+    /// How many restores were dropped because the map of restores was full, since the document
+    /// began. Each one is a newer write that this node could not write again.
+    #[must_use]
+    pub fn dropped_restores(&self) -> u64 {
+        self.restores_dropped
+    }
+
+    /// Whether a value waits to be written again (see [`Self::take_restores`]).
+    #[must_use]
+    pub fn has_restores(&self) -> bool {
+        !self.restores.is_empty()
+    }
+
+    /// The values that this node must write again because a replay of another node set a lower
+    /// stamp on them, and the deletes that a replay undid: a merge and the stamp of each path, for
+    /// [`Self::compose_replay_body`]. The live stamps are read again here, so a value that a
+    /// newer write, or a delete of a higher stamp, has overtaken in the meantime is not written.
+    /// That read saves writes and is not needed for convergence: a node that writes an overtaken
+    /// value anyway lowers the stamp of the newer value on the nodes that hold it, and they restore it.
+    /// `None` when there is nothing to write. The glue calls it on each tick.
+    pub fn take_restores(&mut self) -> Option<Restores> {
+        if self.epoch_ticks < self.restores_due {
+            return None;
+        }
+        let held: Vec<(Vec<String>, (Value, Stamp))> =
+            mem::take(&mut self.restores).into_iter().collect();
+        let paths: Vec<Vec<String>> = held.iter().map(|(path, _)| path.clone()).collect();
+        let live = self.stamps_of(&paths);
+        let floors = self.tombstone_floors(&paths);
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        let mut stamps: Vec<(Vec<String>, Stamp)> = Vec::new();
+        let rows = held.into_iter().zip(live).zip(floors);
+        for (((path, (value, stamp)), now), floor) in rows {
+            // A delete of a higher stamp governs the path: a value is not written over it.
+            let deleted = !value.is_null() && floor.is_some_and(|dead| dead >= stamp);
+            // An empty object over an object that the document holds only wipes its keys.
+            let wipes = matches!(&value, Value::Object(fields) if fields.is_empty())
+                && json_at(&self.doc, &path).is_some_and(|there| there.is_object());
+            let stale = deleted
+                || wipes
+                || match &now {
+                    Some(current) => *current >= stamp,
+                    None => value.is_null(),
+                };
+            if !stale {
+                leaves.push((path.clone(), value));
+                stamps.push((path, stamp));
+            }
+        }
+        let patch = self.replay_patch(leaves)?;
+        Some((patch, stamps))
+    }
+
+    /// Record the deletes of a change that was just applied, and forget the tombstone of a path
+    /// that the change writes again with a higher stamp. Only a state document with state epochs
+    /// keeps tombstones. The stamp of a path is the stamp that the frame names for it, or the time
+    /// of the change with the tag of its actor.
+    fn note_deletes(
+        &mut self,
+        change: &Change,
+        frame: &Verified,
+        named: Option<&[(Vec<String>, Stamp)]>,
+    ) {
+        if self.gate.is_some() {
+            return;
+        }
+        let Some(time) = self.change_bytes(frame).and_then(|parsed| parsed.time) else {
+            return;
+        };
+        let own = Stamp::new(time, actor_tag(change.actor_id()));
+        let deps: Vec<ChangeHash> = change.deps().to_vec();
+        let patches = self.doc.diff(&deps, &[change.hash()]);
+        for patch in patches {
+            let path = leaf_path(&patch);
+            if path.is_empty() {
+                continue;
+            }
+            let named_here = named.and_then(|list| list.iter().find(|(held, _)| *held == path));
+            let stamp: Stamp = named_here.map_or_else(|| own.clone(), |(_, stamp)| stamp.clone());
+            match patch.action {
+                automerge::PatchAction::DeleteMap { .. } => self.add_tombstone(path, stamp),
+                automerge::PatchAction::PutMap { .. } => {
+                    if self.tombstones.get(&path).is_some_and(|held| *held < stamp) {
+                        self.tombstones.remove(&path);
+                    }
+                }
+                automerge::PatchAction::PutSeq { .. }
+                | automerge::PatchAction::Insert { .. }
+                | automerge::PatchAction::SpliceText { .. }
+                | automerge::PatchAction::Increment { .. }
+                | automerge::PatchAction::Conflict { .. }
+                | automerge::PatchAction::DeleteSeq { .. }
+                | automerge::PatchAction::Mark { .. } => {}
+            }
+        }
+    }
+
+    /// Keep the tombstone of `path`, unless the path is too long, and drop the one with the lowest
+    /// stamp when there are more than `DOC_SEED_TOMBSTONES_MAX`. A tombstone with a higher stamp
+    /// already there stays.
+    fn add_tombstone(&mut self, path: Vec<String>, stamp: Stamp) {
+        let bytes: usize = path.iter().map(String::len).sum();
+        if bytes > DOC_TOMBSTONE_PATH_BYTES_MAX {
+            self.tombstone_paths_long = self.tombstone_paths_long.saturating_add(1);
+            return;
+        }
+        match self.tombstones.get(&path) {
+            Some(held) if *held >= stamp => return,
+            _ => {}
+        }
+        self.tombstones.insert(path, stamp);
+        if self.tombstones.len() > DOC_SEED_TOMBSTONES_MAX {
+            let entries = self.tombstones.iter();
+            let lowest: Option<Vec<String>> = entries
+                .min_by(|left, right| left.1.cmp(right.1))
+                .map(|(held, _)| held.clone());
+            if let Some(oldest) = lowest {
+                self.tombstones.remove(&oldest);
+            }
+        }
+    }
+
+    /// The paths of `change` with the stamps that its `frame` names, and the document as it will
+    /// look when the change is applied (a fork that has applied it). `None` when the frame names no
+    /// stamps, and `Err` when they do not match the paths of the change.
+    fn stamped_paths(
+        &self,
+        change: &Change,
+        frame: &Verified,
+    ) -> Result<Option<(StampedPaths, Automerge)>, ()> {
+        let Some(parsed) = self.change_bytes(frame) else {
+            return Ok(None);
+        };
+        // The tombstones belong to the frames of a seed, which an adoption applies and which do not
+        // come here. A normal write or a replay that carries some is refused.
+        if !parsed.tombstones.is_empty() {
+            return Err(());
+        }
+        if parsed.origins.is_empty() {
+            return Ok(None);
+        }
+        let mut fork = self.doc.fork();
+        fork.apply_changes([change.clone()]).map_err(|_| ())?;
+        let paths = change_leaves(&fork, change);
+        if paths.len() != parsed.origins.len() {
+            return Err(());
+        }
+        Ok(Some((
+            paths.into_iter().zip(parsed.origins).collect(),
+            fork,
+        )))
     }
 
     fn deps_satisfied(&self, deps: &[ChangeHash]) -> bool {
@@ -1017,6 +2795,30 @@ fn doc_json(doc: &Automerge) -> Value {
     serde_json::to_value(AutoSerde::from(doc)).unwrap_or(Value::Null)
 }
 
+/// The deterministic genesis of a state epoch above 0, built from constants (fixed actor,
+/// `time = 0`, the epoch in the message) so every replica gets the same hash. It leaves no key in
+/// the document. A change with no operation is no change, so the genesis writes a key and deletes
+/// it. The hash depends on how automerge encodes that pair, so a bump of automerge must keep the
+/// pinned hashes: if it does not, the bump is a wire break and needs a frame version bump.
+fn state_genesis(epoch: u64) -> Change {
+    let mut doc = Automerge::new();
+    doc.set_actor(automerge::ActorId::from(
+        b"habilis-state/genesis".as_slice(),
+    ));
+    {
+        let mut tx = doc.transaction();
+        tx.put(&ROOT, "epoch", epoch).expect("root is a map");
+        tx.delete(&ROOT, "epoch").expect("the key was just put");
+        let options = transaction::CommitOptions::default()
+            .with_time(0)
+            .with_message(format!("epoch {epoch}"));
+        tx.commit_with(options);
+    }
+    doc.get_changes(&[])
+        .pop()
+        .expect("genesis produced exactly one change")
+}
+
 /// The deterministic genesis change that creates the shared per-peer `map`. Built
 /// from constants (fixed actor, `time = 0`) so its hash — and thus the map's
 /// object id — is identical on every replica configured with the same gate.
@@ -1039,6 +2841,422 @@ fn peers_genesis(map: &str, epoch: u64) -> Change {
     doc.get_changes(&[])
         .pop()
         .expect("genesis produced exactly one change")
+}
+
+/// Whether the root of a seed from `rival` wins over the one from `held`: the lowest key wins on
+/// every node, so all nodes end in one seed.
+fn beats(rival: &AuthorKey, held: &AuthorKey) -> bool {
+    rival.as_bytes() < held.as_bytes()
+}
+
+/// The merge that makes the value `held` into `desired`. A merge of an object only adds and
+/// changes keys, so a key that `held` has and `desired` lacks is deleted with a `null`.
+fn replace_with(desired: &Value, held: Option<&Value>) -> Value {
+    let (Value::Object(wanted), Some(Value::Object(present))) = (desired, held) else {
+        return desired.clone();
+    };
+    let mut merge: Map<String, Value> = Map::new();
+    for (key, value) in wanted {
+        merge.insert(key.clone(), replace_with(value, present.get(key)));
+    }
+    for key in present.keys() {
+        if !wanted.contains_key(key) {
+            merge.insert(key.clone(), Value::Null);
+        }
+    }
+    Value::Object(merge)
+}
+
+/// A tag of the actor of a change for the cut vector: the first 8 bytes, in hex.
+/// The tag of `actor` as a number: the first 8 bytes, as [`actor_tag`] writes them in hex.
+fn actor_tag_number(actor: &automerge::ActorId) -> u64 {
+    let mut bytes = [0u8; 8];
+    let first = actor.to_bytes();
+    let len = first.len().min(8);
+    bytes[..len].copy_from_slice(&first[..len]);
+    u64::from_be_bytes(bytes)
+}
+
+fn actor_tag(actor: &automerge::ActorId) -> String {
+    use std::fmt::Write as _;
+
+    let bytes: &[u8] = actor.to_bytes();
+    let first: &[u8] = &bytes[..bytes.len().min(8)];
+    let mut tag = String::with_capacity(16);
+    for byte in first {
+        let _ = write!(tag, "{byte:02x}");
+    }
+    tag
+}
+
+/// The value at `path` in `json`, `None` when a key on the way is missing.
+fn lookup<'json>(json: &'json Value, path: &[String]) -> Option<&'json Value> {
+    let mut here: &Value = json;
+    for key in path {
+        here = here.get(key.as_str())?;
+    }
+    Some(here)
+}
+
+/// Put `value` at `path` inside the nested merge `root`.
+fn set_path(root: &mut Map<String, Value>, path: &[String], value: Value) {
+    let Some((first, rest)) = path.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        root.insert(first.clone(), value);
+        return;
+    }
+    let child = root
+        .entry(first.clone())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Value::Object(fields) = child {
+        set_path(fields, rest, value);
+    }
+}
+
+/// The path of the leaf that a patch of one change touched. A patch inside a list gives the path
+/// of the list, because a list is written whole. A counter or a conflict patch gives the path of
+/// its parent: the state JSON has no counters, so no value of it is a counter.
+fn leaf_path(patch: &automerge::Patch) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for (_, prop) in &patch.path {
+        match prop {
+            automerge::Prop::Map(key) => keys.push(key.clone()),
+            automerge::Prop::Seq(_) => return keys,
+        }
+    }
+    match &patch.action {
+        automerge::PatchAction::PutMap { key, .. } | automerge::PatchAction::DeleteMap { key } => {
+            keys.push(key.clone());
+        }
+        automerge::PatchAction::PutSeq { .. }
+        | automerge::PatchAction::Insert { .. }
+        | automerge::PatchAction::SpliceText { .. }
+        | automerge::PatchAction::Increment { .. }
+        | automerge::PatchAction::Conflict { .. }
+        | automerge::PatchAction::DeleteSeq { .. }
+        | automerge::PatchAction::Mark { .. } => {}
+    }
+    keys
+}
+
+/// The paths that `change` writes in `doc`, which already holds it: the leaves, and the objects
+/// that it makes, once each. They come from the patches of the change, in the order of the paths
+/// (the lists of keys compared key by key, each key by its bytes), so two nodes that hold the same
+/// change list the same paths in the same order. The `o` of a frame follows this order.
+fn change_leaves(doc: &Automerge, change: &Change) -> Vec<Vec<String>> {
+    let deps: Vec<ChangeHash> = change.deps().to_vec();
+    let mut paths: Vec<Vec<String>> = Vec::new();
+    for patch in doc.diff(&deps, &[change.hash()]) {
+        let path = leaf_path(&patch);
+        if !path.is_empty() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The stamp of each path that the changes of a seed name, and the tombstones of its root, in one
+/// map: a path with both keeps the higher stamp.
+fn seed_stamp_map(
+    found: &SeedStamps,
+    dead: &[(Vec<String>, Stamp)],
+) -> HashMap<Vec<String>, Stamp> {
+    let mut map: HashMap<Vec<String>, Stamp> = HashMap::new();
+    for list in found.values() {
+        for (path, stamp) in list {
+            raise_stamp(&mut map, path, stamp);
+        }
+    }
+    for (path, stamp) in dead {
+        raise_stamp(&mut map, path, stamp);
+    }
+    map
+}
+
+/// Whether a JSON value is an object with keys: a leaf is anything else.
+fn is_full_object(value: &Value) -> bool {
+    matches!(value, Value::Object(fields) if !fields.is_empty())
+}
+
+/// Reads values of one document by path. A parent object that several of the paths share is read
+/// once as JSON, because a read of each path walks the parent again; a path with no sibling is read
+/// by its walk, so a leaf in a large object costs no pass over it.
+struct PathReader<'doc> {
+    doc: &'doc Automerge,
+    /// The parents that at least `PATH_READER_SHARED_MIN` of the paths share.
+    shared: HashSet<Vec<String>>,
+    read: HashMap<Vec<String>, Option<Value>>,
+}
+
+/// The number of paths with one parent from which the parent is read once.
+const PATH_READER_SHARED_MIN: usize = 4;
+
+impl<'doc> PathReader<'doc> {
+    fn new(doc: &'doc Automerge, paths: &[&[String]]) -> Self {
+        let mut counts: HashMap<&[String], usize> = HashMap::new();
+        for path in paths {
+            if let Some((_, parent)) = path.split_last() {
+                *counts.entry(parent).or_default() += 1;
+            }
+        }
+        let crowded = counts
+            .into_iter()
+            .filter(|(_, count)| *count >= PATH_READER_SHARED_MIN);
+        let shared = crowded.map(|(parent, _)| parent.to_vec()).collect();
+        Self {
+            doc,
+            shared,
+            read: HashMap::new(),
+        }
+    }
+
+    fn value_at(&mut self, path: &[String]) -> Option<Value> {
+        let doc = self.doc;
+        let (key, parent) = path.split_last()?;
+        if !self.shared.contains(parent) {
+            return json_at(doc, path);
+        }
+        let read = self
+            .read
+            .entry(parent.to_vec())
+            .or_insert_with(|| json_at(doc, parent));
+        let field: Option<&Value> = read.as_ref().and_then(|object| object.get(key.as_str()));
+        field.cloned()
+    }
+}
+
+/// The value at `path` in `doc`: a walk down the path, and one pass over the subtree below it. The
+/// empty path is the whole document.
+fn json_at(doc: &Automerge, path: &[String]) -> Option<Value> {
+    let mut object: ObjId = ROOT;
+    if path.is_empty() {
+        return Some(subtree_json(
+            doc,
+            &automerge::Value::Object(ObjType::Map),
+            &object,
+        ));
+    }
+    let steps = path.iter().enumerate();
+    for (position, key) in steps {
+        let (value, id) = doc.get(&object, key.as_str()).ok()??;
+        if position + 1 == path.len() {
+            return Some(subtree_json(doc, &value, &id));
+        }
+        if !matches!(value, automerge::Value::Object(_)) {
+            return None;
+        }
+        object = id;
+    }
+    None
+}
+
+/// The JSON of one value of `doc` and of everything below it, in one pass over each object. The
+/// state JSON holds numbers, strings, booleans, `null`, lists and objects, so any other scalar
+/// reads as `null`.
+fn subtree_json(doc: &Automerge, value: &automerge::Value<'_>, id: &ObjId) -> Value {
+    match value {
+        automerge::Value::Object(ObjType::List) => list_json(doc, id),
+        automerge::Value::Object(ObjType::Text) => Value::String(doc.text(id).unwrap_or_default()),
+        automerge::Value::Object(ObjType::Map | ObjType::Table) => map_json(doc, id),
+        automerge::Value::Scalar(scalar) => scalar_json(scalar),
+    }
+}
+
+/// The JSON array of the list `id` of `doc`.
+fn list_json(doc: &Automerge, id: &ObjId) -> Value {
+    let items = doc.list_range(id, ..).map(|item| {
+        let child = item.id();
+        subtree_json(doc, &item.value.into_value(), &child)
+    });
+    Value::Array(items.collect())
+}
+
+/// The JSON object of the map or table `id` of `doc`.
+fn map_json(doc: &Automerge, id: &ObjId) -> Value {
+    let fields = doc.map_range(id, ..).map(|item| {
+        let child = item.id();
+        let json = subtree_json(doc, &item.value.into_value(), &child);
+        (item.key.into_owned(), json)
+    });
+    Value::Object(fields.collect())
+}
+
+/// Set the stamp of `path` in `map` to `stamp`, unless the map holds a higher one.
+fn raise_stamp(map: &mut HashMap<Vec<String>, Stamp>, path: &[String], stamp: &Stamp) {
+    match map.get_mut(path) {
+        Some(held) if *held >= *stamp => {}
+        Some(held) => *held = stamp.clone(),
+        None => {
+            map.insert(path.to_vec(), stamp.clone());
+        }
+    }
+}
+
+/// The JSON of a scalar of the state document.
+fn scalar_json(scalar: &automerge::ScalarValue) -> Value {
+    match scalar {
+        automerge::ScalarValue::Str(text) => Value::String(text.to_string()),
+        automerge::ScalarValue::Int(number) => Value::from(*number),
+        automerge::ScalarValue::Uint(number) => Value::from(*number),
+        automerge::ScalarValue::F64(number) => {
+            serde_json::Number::from_f64(*number).map_or(Value::Null, Value::Number)
+        }
+        automerge::ScalarValue::Boolean(flag) => Value::Bool(*flag),
+        automerge::ScalarValue::Bytes(_)
+        | automerge::ScalarValue::Counter(_)
+        | automerge::ScalarValue::Timestamp(_)
+        | automerge::ScalarValue::Null
+        | automerge::ScalarValue::Unknown { .. } => Value::Null,
+    }
+}
+
+/// Remove the value at `path` from a JSON value, and the objects that this leaves empty.
+fn remove_path(value: &mut Value, path: &[String]) {
+    let Some((key, rest)) = path.split_first() else {
+        return;
+    };
+    let Value::Object(fields) = value else {
+        return;
+    };
+    if rest.is_empty() {
+        fields.remove(key);
+        return;
+    }
+    if let Some(inner) = fields.get_mut(key) {
+        remove_path(inner, rest);
+        if matches!(inner, Value::Object(left) if left.is_empty()) {
+            fields.remove(key);
+        }
+    }
+}
+
+/// The leaves of a JSON value with their paths: a scalar, a list, or an empty object is one leaf.
+fn collect_leaves(value: &Value, prefix: &mut Vec<String>, out: &mut Vec<(Vec<String>, Value)>) {
+    match value {
+        Value::Object(fields) if !fields.is_empty() => {
+            for (key, inner) in fields {
+                prefix.push(key.clone());
+                collect_leaves(inner, prefix, out);
+                prefix.pop();
+            }
+        }
+        Value::Object(_)
+        | Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_) => {
+            if !prefix.is_empty() {
+                out.push((prefix.clone(), value.clone()));
+            }
+        }
+    }
+}
+
+/// The objects of a JSON value with their paths, the root left out, each with its whole value.
+fn collect_objects(value: &Value, prefix: &mut Vec<String>, out: &mut Vec<(Vec<String>, Value)>) {
+    if let Value::Object(fields) = value {
+        if !prefix.is_empty() {
+            out.push((prefix.clone(), value.clone()));
+        }
+        for (key, inner) in fields {
+            prefix.push(key.clone());
+            collect_objects(inner, prefix, out);
+            prefix.pop();
+        }
+    }
+}
+
+/// How many paths a merge writes: each key of each object counts once, and a list is one leaf. A
+/// frame stays inside `DOC_REPLAY_ENTRIES_MAX` paths, which also bounds its stamps.
+/// The bytes of a leaf (its keys and its value) from which `check_seed_frames` builds the frame that
+/// a seed would carry it in. A leaf of 1 500 bytes is about 2 100 bytes of body, which fits.
+const SEED_LEAF_CHECK_MIN: usize = 1_500;
+
+/// The bytes of the body of the frame of a seed that holds only the leaf `value` at `path`, with the
+/// largest stamp. The change is built on an empty document, so it holds the keys above the leaf as
+/// well, which is more than a later frame of the seed needs: the figure is an upper bound.
+fn seed_frame_body_len(path: &[String], value: &Value) -> usize {
+    let mut merge = value.clone();
+    let innermost_first = path.iter().rev();
+    for key in innermost_first {
+        merge = Value::Object(Map::from_iter([(key.clone(), merge)]));
+    }
+    let mut doc = Automerge::new();
+    let mut tx = doc.transaction();
+    if write_map(&mut tx, &ROOT, &merge).is_err() {
+        return usize::MAX;
+    }
+    tx.commit();
+    let mut changes = doc.get_changes(&[]);
+    let Some(change) = changes.pop() else {
+        return usize::MAX;
+    };
+    let time = DOC_TIME_MAX - 1;
+    let worst = [Stamp::new(time, "ffffffffffffffff".to_owned())];
+    let bytes = change.raw_bytes();
+    let body = wire::change_body_tombstoned(bytes, None, 1, None, Some(time), &worst, &[]);
+    body.map_or(usize::MAX, |body| body.as_str().len())
+}
+
+/// The error of a state document that is over a line.
+fn full(used: usize, limit: usize, what: &'static str) -> DocError {
+    DocError::StateFull { used, limit, what }
+}
+
+/// Whether `merge` adds a value: it has a leaf that is not `null`. An empty object is a leaf that
+/// adds a map. A merge of nulls only deletes.
+fn adds_value(merge: &Value) -> bool {
+    match merge {
+        Value::Object(fields) if !fields.is_empty() => {
+            let mut adds = false;
+            for field in fields.values() {
+                adds = adds || adds_value(field);
+            }
+            adds
+        }
+        Value::Null => false,
+        Value::Object(_)
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_) => true,
+    }
+}
+
+/// The keys on the way to the deepest value that `merge` adds, counting the key of the value.
+fn merge_depth(merge: &Value) -> usize {
+    let Value::Object(fields) = merge else {
+        return 0;
+    };
+    let mut deepest = 0;
+    for field in fields.values() {
+        if adds_value(field) {
+            deepest = deepest.max(merge_depth(field));
+        }
+    }
+    if fields.is_empty() { 0 } else { 1 + deepest }
+}
+
+fn count_paths(merge: &Value) -> usize {
+    match merge {
+        Value::Object(fields) => fields.values().map(|value| 1 + count_paths(value)).sum(),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) => 0,
+    }
+}
+
+/// The raw bytes of every change of `doc` that comes after `since`, in order.
+fn raw_changes(doc: &Automerge, since: &[ChangeHash]) -> Vec<Vec<u8>> {
+    let changes = doc.get_changes(since);
+    let mut raw: Vec<Vec<u8>> = Vec::with_capacity(changes.len());
+    for change in changes {
+        raw.push(change.raw_bytes().to_vec());
+    }
+    raw
 }
 
 /// Derive a stable automerge [`ActorId`](automerge::ActorId) from a
@@ -1208,14 +3426,24 @@ fn put_number(
 
 #[cfg(test)]
 mod tests {
-    use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
+    use super::{
+        DOC_CUT_BACKOFF_FIRST, DOC_CUT_BACKOFF_MAX, DOC_CUT_RANKS_SLOTTED, DOC_CUT_SLOT_TICKS,
+        DOC_CUT_SPREAD_TICKS, DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_FRAMES_MAX,
+        Ingested, Limits, MeshDoc, SelfWriteGate,
+    };
+    use crate::wire::{
+        SeedMark, change_body_stamped, change_body_timed, change_body_tombstoned, encrypt_body,
+        parse_change_full,
+    };
+    use crate::{DocError, Stamp, StampedPaths};
     use automerge::Change;
+    use automerge::transaction::Transactable;
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
     };
-    use serde_json::{Value, json};
-    use std::collections::HashSet;
+    use serde_json::{Map, Value, json};
+    use std::collections::{HashMap, HashSet};
 
     fn nick(name: &str) -> Nickname {
         Nickname::from(name)
@@ -1750,7 +3978,7 @@ mod tests {
 
     /// The number of chain changes that landed in `doc`.
     fn landed(doc: &MeshDoc) -> usize {
-        doc.to_json().as_object().map_or(0, serde_json::Map::len)
+        doc.to_json().as_object().map_or(0, Map::len)
     }
 
     /// Feed `order` into a fresh sink, then the root prefix `0..root_len`.
@@ -2066,6 +4294,39 @@ mod tests {
             "expected applied, got {outcome:?}"
         );
         carrier
+    }
+
+    #[test]
+    fn a_replay_with_a_leaf_that_does_not_fit_gives_the_error_and_no_merge() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated().state_epochs();
+        let patch = json!({ "a": 1, "b": "x".repeat(200) });
+        let fits = |merge: &Value| merge.to_string().len() <= 60;
+        let result = doc.split_replay(&patch, fits);
+        assert!(
+            matches!(result, Err(DocError::TooLarge { .. })),
+            "the leaf b is longer than a frame, so the whole replay is refused: {result:?}"
+        );
+    }
+
+    /// The change that `doc` builds for `merge` as the actor of `actor_seed`.
+    fn change_of(doc: &MeshDoc, merge: &Value, actor_seed: &[u8]) -> Vec<u8> {
+        let built = doc.build_change(merge, actor_seed).expect("applies");
+        built.expect("a change")
+    }
+
+    /// `path` as owned keys.
+    fn owned_path(path: Vec<&str>) -> Vec<String> {
+        path.into_iter().map(str::to_owned).collect()
+    }
+
+    /// Ingest `frame` into `doc`, and fail the test if the frame does not apply.
+    fn ingest_applies(doc: &mut MeshDoc, frame: &Verified) {
+        let outcome = doc.ingest(frame);
+        assert!(
+            matches!(outcome, Ingested::Applied { .. }),
+            "expected applied, got {outcome:?}"
+        );
     }
 
     fn entry(who: &str, card: &str) -> Value {
@@ -2455,10 +4716,18 @@ mod tests {
         let mut doc = doc_over_the_cap(&bob);
         let fresh = MeshDoc::new_gated(card_gate()).at_epoch(1);
         let forged = frame_on(&fresh, &mallory, &entry(alice.as_str(), "forged"));
-        doc.candidate = Some(super::Candidate {
-            epoch: 1,
-            frame: forged.clone(),
-        });
+        let forged_change = Change::from_bytes(
+            parse_change_full(forged.body.as_str())
+                .expect("a change body")
+                .bytes,
+        )
+        .expect("a change");
+        doc.candidate = Some(Box::new(super::Candidate::new(
+            1,
+            forged.clone(),
+            &forged_change,
+            None,
+        )));
         let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
         assert_eq!(switch.epoch, 1, "the node still goes to the epoch");
         assert!(
@@ -2518,6 +4787,2613 @@ mod tests {
                 seen.remove(&key);
             }
         }
+    }
+
+    /// A `fits` for `build_seed`: a merge fits when its JSON text is at most `limit` bytes.
+    fn within(limit: usize) -> impl FnMut(&Value) -> bool {
+        move |merge| merge.to_string().len() <= limit
+    }
+
+    fn parse_changes(raw: &[Vec<u8>]) -> Vec<Change> {
+        let mut changes: Vec<Change> = Vec::with_capacity(raw.len());
+        for bytes in raw {
+            changes.push(Change::from_bytes(bytes.clone()).expect("a change"));
+        }
+        changes
+    }
+
+    fn state_doc_of(changes: &[Vec<u8>], epoch: u64) -> Value {
+        let mut doc = automerge::Automerge::new();
+        doc.apply_changes([super::state_genesis(epoch)])
+            .expect("the genesis applies");
+        for bytes in changes {
+            let change = Change::from_bytes(bytes.clone()).expect("a change");
+            doc.apply_changes([change]).expect("the change applies");
+        }
+        serde_json::to_value(automerge::AutoSerde::from(&doc)).expect("json")
+    }
+
+    fn live_state() -> Value {
+        json!({
+            "board": { "title": "t", "rows": [1, 2, {"a": [true, null]}], "empty": {}, "none": [] },
+            "notes": { "a": long(300), "b": long(300), "c": long(300) },
+            "n": 7,
+            "flag": false,
+        })
+    }
+
+    fn state_doc_with(live: &Value) -> MeshDoc {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let me = nick("me");
+        write(&mut doc, &me, live);
+        doc
+    }
+
+    #[test]
+    fn a_seed_chain_rebuilds_the_live_json_on_a_fresh_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let live = live_state();
+        let doc = state_doc_with(&live);
+        let chain = doc
+            .build_seed(5, b"cutter", within(400))
+            .expect("the live json splits");
+        assert!(
+            chain.changes.len() > 1,
+            "the live json needs more than 1 frame"
+        );
+        assert_eq!(
+            state_doc_of(&chain.changes, 5),
+            live,
+            "the chain on the genesis of epoch 5 gives the live json"
+        );
+    }
+
+    #[test]
+    fn a_seed_chain_is_linear_and_its_mark_names_the_last_change() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = state_doc_with(&live_state());
+        let chain = doc
+            .build_seed(5, b"cutter", within(400))
+            .expect("the live json splits");
+        let changes: Vec<Change> = parse_changes(&chain.changes);
+        assert_eq!(
+            changes[0].deps(),
+            [super::state_genesis(5).hash()],
+            "the root depends on the genesis of the epoch"
+        );
+        for pair in changes.windows(2) {
+            assert_eq!(
+                pair[1].deps(),
+                [pair[0].hash()],
+                "each change depends on the one before"
+            );
+        }
+        assert_eq!(
+            chain.mark.frames as usize,
+            changes.len(),
+            "the mark counts the frames"
+        );
+        let tip: &Change = changes.last().expect("a change");
+        let tip_hash: String = tip.hash().to_string();
+        assert_eq!(chain.mark.last, tip_hash, "the mark names the last change");
+    }
+
+    #[test]
+    fn an_empty_live_document_gives_a_seed_of_one_change() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated();
+        let chain = doc
+            .build_seed(2, b"cutter", within(400))
+            .expect("an empty json splits");
+        assert_eq!(chain.changes.len(), 1, "a seed has a root even when empty");
+        assert_eq!(
+            state_doc_of(&chain.changes, 2),
+            json!({}),
+            "the seed leaves no key"
+        );
+    }
+
+    #[test]
+    fn a_seed_that_would_pass_the_frame_max_is_not_built() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut live: Map<String, Value> = Map::new();
+        for index in 0..=DOC_SEED_FRAMES_MAX {
+            live.insert(format!("k{index}"), json!(1));
+        }
+        let mut doc = MeshDoc::new_ungated();
+        write(&mut doc, &nick("me"), &Value::Object(live));
+        let result = doc.build_seed(2, b"cutter", within(14));
+        assert!(
+            matches!(result, Err(DocError::SeedTooLong { .. })),
+            "a seed over the max that a node accepts is not cut: {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_leaf_that_does_not_fit_one_frame_is_an_error() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = state_doc_with(&json!({ "big": long(500) }));
+        let result = doc.build_seed(2, b"cutter", within(100));
+        assert!(
+            matches!(result, Err(DocError::TooLarge { .. })),
+            "a leaf over the frame cannot be cut: {result:?}"
+        );
+    }
+
+    /// The frames of the seed that `cutter` sends for `live` in `epoch`, root first, each cut to
+    /// 600 bytes of merge. A `key` seals the bodies, as on a passworded mesh.
+    fn seed_frames(
+        cutter: &Nickname,
+        live: &Value,
+        epoch: u64,
+        key: Option<&SymmetricKey>,
+    ) -> Vec<Verified> {
+        let doc = state_doc_with(live);
+        seed_frames_of(&doc, cutter, epoch, key)
+    }
+
+    /// The frames of the seed that `cutter` cuts from `doc` in `epoch`, each one with the stamps
+    /// of the paths that it writes.
+    fn seed_frames_of(
+        doc: &MeshDoc,
+        cutter: &Nickname,
+        epoch: u64,
+        key: Option<&SymmetricKey>,
+    ) -> Vec<Verified> {
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = doc
+            .build_seed(epoch, &actor, within(600))
+            .expect("the live json splits");
+        let who = signer(cutter);
+        let mut frames: Vec<Verified> = Vec::new();
+        let numbered: Vec<(usize, &Vec<u8>)> = chain.changes.iter().enumerate().collect();
+        for (index, bytes) in numbered {
+            let mark = (index == 0).then_some(&chain.mark);
+            let stamps: Vec<Stamp> = chain.origins.get(index).cloned().unwrap_or_default();
+            let dead: &[(Vec<String>, Stamp)] =
+                chain.tombstones.get(index).map_or(&[], Vec::as_slice);
+            let plain =
+                change_body_tombstoned(bytes, None, epoch, mark, Some(chain.time), &stamps, dead)
+                    .expect("a body");
+            let wire = match key {
+                Some(sealing) => encrypt_body(&plain, sealing).expect("sealed"),
+                None => plain,
+            };
+            let message =
+                Message::new_channel_event(&MeshId::from("test"), cutter, wire, Channel::State);
+            frames.push(Verified::fixture_unchecked(
+                message.unverified_key(who),
+                who,
+            ));
+        }
+        frames
+    }
+
+    fn ticks(doc: &mut MeshDoc, me: &Nickname, count: u32) -> Option<super::EpochSwitch> {
+        let mut last: Option<super::EpochSwitch> = None;
+        for _ in 0..count {
+            if let Some(switch) = doc.tick_epoch(me) {
+                last = Some(switch);
+            }
+        }
+        last
+    }
+
+    /// The frames that `cutter` writes after it adopted the seed `frames` of epoch 3: each one
+    /// follows the change before it, the first one follows the tip of the seed.
+    fn writes_after_the_seed(
+        cutter: &Nickname,
+        frames: &[Verified],
+        count: usize,
+    ) -> Vec<Verified> {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for frame in frames {
+            doc.ingest(frame);
+        }
+        let me = nick("me");
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            doc.tick_epoch(&me);
+        }
+        let mut writes: Vec<Verified> = Vec::new();
+        for index in 0..count {
+            writes.push(write(&mut doc, cutter, &json!({ "after": index })));
+        }
+        writes
+    }
+
+    #[test]
+    fn a_write_of_the_cutter_after_the_seed_does_not_take_a_slot_of_the_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        let writes = writes_after_the_seed(&cutter, &frames, 1);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let last = frames.len() - 1;
+        for frame in &frames[..last] {
+            doc.ingest(frame);
+        }
+        doc.ingest(&writes[0]);
+        doc.ingest(&frames[last]);
+        let switch = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        assert!(
+            switch.is_some(),
+            "the chain is whole, so the seed is adopted"
+        );
+        assert_eq!(
+            doc.to_json(),
+            live,
+            "the document holds the live json of the seed"
+        );
+    }
+
+    /// A frame of `cutter` in epoch 3 that follows the root of the chain `frames`, as the second
+    /// frame of the chain does, with other content: a fork of the chain.
+    fn fork_of_the_root(cutter: &Nickname, frames: &[Verified]) -> Verified {
+        let root: Vec<u8> = parse_change_full(frames[0].body.as_str())
+            .expect("a root body")
+            .bytes;
+        let mut doc = automerge::Automerge::new();
+        doc.apply_changes([super::state_genesis(3)])
+            .expect("the genesis applies");
+        doc.apply_changes([Change::from_bytes(root).expect("a change")])
+            .expect("the root applies");
+        doc.set_actor(super::actor_for(&pad_seed(cutter.as_str().as_bytes())));
+        let heads: Vec<automerge::ChangeHash> = doc.get_heads();
+        let mut tx = doc.transaction();
+        Transactable::put(&mut tx, &automerge::ROOT, "fork", 1_i64).expect("a put");
+        tx.commit();
+        let mut changes = doc.get_changes(&heads);
+        let change: Vec<u8> = changes.pop().expect("a change").raw_bytes().to_vec();
+        let plain = change_body_timed(&change, None, 3, None, Some(1)).expect("a body");
+        let who = signer(cutter);
+        let message =
+            Message::new_channel_event(&MeshId::from("test"), cutter, plain, Channel::State);
+        Verified::fixture_unchecked(message.unverified_key(who), who)
+    }
+
+    #[test]
+    fn a_write_after_a_refused_write_of_the_cutter_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let writes = writes_after_the_seed(&cutter, &frames, 2);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        doc.ingest(&frames[0]);
+        let first = doc.ingest(&writes[0]);
+        assert!(
+            matches!(first, Ingested::Ignored),
+            "a write after the chain is refused: {first:?}"
+        );
+        let second = doc.ingest(&writes[1]);
+        assert!(
+            matches!(second, Ingested::Ignored),
+            "the write that follows a refused write is refused too, by its seq: {second:?}"
+        );
+        let held = doc
+            .candidate
+            .as_ref()
+            .map_or(0, |candidate| candidate.tail.len());
+        assert_eq!(held, 0, "no slot of the tail is taken");
+    }
+
+    #[test]
+    fn a_second_child_of_one_parent_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let fork = fork_of_the_root(&cutter, &frames);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        doc.ingest(&frames[0]);
+        doc.ingest(&frames[1]);
+        let taken = doc.ingest(&fork);
+        assert!(
+            matches!(taken, Ingested::Ignored),
+            "a fork of the chain is refused: {taken:?}"
+        );
+        assert!(
+            dropped_keys(&mut doc).contains(&fork.dedup_key()),
+            "its key is forgotten"
+        );
+    }
+
+    #[test]
+    fn a_tail_full_of_frames_off_the_chain_still_takes_the_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        let writes = writes_after_the_seed(&cutter, &frames, frames.len() + 2);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        doc.ingest(&frames[0]);
+        for write_frame in &writes[1..] {
+            doc.ingest(write_frame);
+        }
+        for frame in &frames[1..] {
+            doc.ingest(frame);
+        }
+        let switch = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        assert!(
+            switch.is_some(),
+            "the chain pushed the off-chain frames out"
+        );
+        assert_eq!(
+            doc.to_json(),
+            live,
+            "the document holds the live json of the seed"
+        );
+    }
+
+    #[test]
+    fn a_state_document_refuses_a_seed_until_state_epochs_are_on() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        for frame in &frames {
+            let taken = doc.ingest(frame);
+            assert!(
+                matches!(taken, Ingested::Ignored),
+                "refused while the policy is off: {taken:?}"
+            );
+        }
+        assert!(
+            doc.candidate.is_none(),
+            "no candidate is held, so no memory is pinned"
+        );
+        let forgotten: Vec<DedupKey> = dropped_keys(&mut doc);
+        assert!(
+            forgotten.contains(&frames[0].dedup_key()),
+            "the key of the root is forgotten"
+        );
+    }
+
+    #[test]
+    fn a_state_seed_chain_is_held_whole_and_adopted_after_the_wait() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        assert!(frames.len() > 2, "the seed has a tail: {}", frames.len());
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let taken = doc.ingest(frame);
+            assert!(
+                matches!(taken, Ingested::NewEpoch { epoch: 3 }),
+                "held: {taken:?}"
+            );
+        }
+        assert_eq!(
+            doc.epoch(),
+            0,
+            "the document does not adopt before the wait"
+        );
+        let switch = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(switch.epoch, 3, "the switch names the epoch of the seed");
+        assert_eq!(doc.epoch(), 3, "the document holds the epoch of the seed");
+        assert_eq!(
+            doc.to_json(),
+            live,
+            "the document holds the live json of the seed"
+        );
+    }
+
+    #[test]
+    fn a_node_that_holds_a_candidate_does_not_cut_an_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = doc.ingest(frame);
+        }
+        assert!(doc.has_candidate(), "the seed waits to be adopted");
+        let built = doc.build_seed(1, b"me", |_| true);
+        assert!(
+            matches!(built, Err(DocError::CandidateHeld)),
+            "a node adopts a candidate and does not cut: {built:?}"
+        );
+    }
+
+    /// A state document whose clock reads `time`, as after `time` writes.
+    fn doc_with_clock_at(time: u64) -> MeshDoc {
+        let doc = MeshDoc::new_ungated().state_epochs();
+        for _ in 0..time {
+            let _ = doc.next_time();
+        }
+        doc
+    }
+
+    /// The Lamport time that the plain body of `frame` carries.
+    fn time_of(frame: &Verified) -> Option<u64> {
+        parse_change_full(frame.body.as_str()).and_then(|parsed| parsed.time)
+    }
+
+    #[test]
+    fn a_state_change_carries_a_time_above_every_time_that_its_node_saw() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other) = (nick("me"), nick("other"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let first = write(&mut doc, &me, &json!({ "a": 1 }));
+        let second = write(&mut doc, &me, &json!({ "a": 2 }));
+        assert_eq!(time_of(&first), Some(1), "the first change of a node");
+        assert_eq!(time_of(&second), Some(2), "the next one is above it");
+        // A node with a far higher clock writes, and this document sees it.
+        let mut ahead = doc_with_clock_at(49);
+        let late = write(&mut ahead, &other, &json!({ "z": 1 }));
+        assert_eq!(time_of(&late), Some(50), "the other node is at 50");
+        assert!(
+            matches!(doc.ingest(&late), Ingested::Applied { .. }),
+            "the change of the other node applies"
+        );
+        assert_eq!(
+            doc.clock(),
+            50,
+            "the clock takes the time of a change that it saw"
+        );
+        let after = write(&mut doc, &me, &json!({ "a": 3 }));
+        assert_eq!(time_of(&after), Some(51), "a write after it is above it");
+    }
+
+    #[test]
+    fn the_stamp_of_a_leaf_is_the_time_and_the_actor_of_the_change_that_holds_its_value() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (left, right) = (nick("left"), nick("right"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let first = write(&mut doc, &left, &json!({ "shared": 1, "n": { "k": 5 } }));
+        // The other node takes it in, and then writes the shared leaf: its write is the later one.
+        let mut other = MeshDoc::new_ungated().state_epochs();
+        ingest_applies(&mut other, &first);
+        let second = write(&mut other, &right, &json!({ "shared": 2 }));
+        ingest_applies(&mut doc, &second);
+        let tag = |who: &Nickname| {
+            super::actor_tag(&super::actor_for(&pad_seed(who.as_str().as_bytes())))
+        };
+        let paths: Vec<Vec<String>> = vec![
+            vec!["shared".to_owned()],
+            vec!["n".to_owned(), "k".to_owned()],
+            vec!["missing".to_owned()],
+        ];
+        assert_eq!(
+            doc.stamps_of(&paths),
+            vec![
+                Some(Stamp::new(2, tag(&right))),
+                Some(Stamp::new(1, tag(&left))),
+                None
+            ],
+            "the stamp is the time and the actor of the write that made the value"
+        );
+    }
+
+    #[test]
+    fn a_time_at_the_top_of_the_range_is_refused_so_the_clock_cannot_be_pinned() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a state change with no valid time was refused",
+        );
+        let me = nick("me");
+        let build = |time: u64| {
+            let timeless = MeshDoc::new_ungated();
+            let bytes = change_of(
+                &timeless,
+                &json!({ "a": time }),
+                &pad_seed(me.as_str().as_bytes()),
+            );
+            let body = change_body_timed(&bytes, None, 0, None, Some(time)).expect("a body");
+            let key = signer(&me);
+            Verified::fixture_unchecked(
+                Message::new_channel_event(&MeshId::from("test"), &me, body, Channel::State)
+                    .unverified_key(key),
+                key,
+            )
+        };
+        let top = super::DOC_TIME_MAX;
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        assert!(
+            matches!(doc.ingest(&build(top - 1)), Ingested::Applied { .. }),
+            "the highest time that is allowed"
+        );
+        let mut pinned = MeshDoc::new_ungated().state_epochs();
+        for refused in [top, top + 1] {
+            assert!(
+                matches!(pinned.ingest(&build(refused)), Ingested::Ignored),
+                "a time of {refused} is refused"
+            );
+        }
+        assert_eq!(pinned.clock(), 0, "a refused time does not move the clock");
+        assert_eq!(pinned.refused_time(), 2, "both refusals are counted");
+    }
+
+    #[test]
+    fn a_state_document_after_a_restart_holds_its_writes_until_it_heard_of_another_write() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other) = (nick("me"), nick("other"));
+        let mut ahead = doc_with_clock_at(49);
+        let heard = write(&mut ahead, &other, &json!({ "z": 1 }));
+        let mut doc = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        let bytes = change_of(&doc, &json!({ "a": 1 }), &pad_seed(me.as_str().as_bytes()));
+        assert!(
+            matches!(
+                doc.compose_wire_body(&bytes, None),
+                Err(DocError::ClockNotReady)
+            ),
+            "a write waits: its time would be below the writes before the restart"
+        );
+        ingest_applies(&mut doc, &heard);
+        assert!(
+            matches!(
+                doc.compose_wire_body(&bytes, None),
+                Err(DocError::ClockNotReady)
+            ),
+            "a frame does not end the wait: it can be an old one, below our own writes"
+        );
+        doc.finish_sync();
+        let after = write(&mut doc, &me, &json!({ "a": 1 }));
+        assert_eq!(
+            time_of(&after),
+            Some(51),
+            "a write after the sync is above the frame"
+        );
+        // A node that is alone ends the wait itself.
+        let mut alone = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        alone.finish_sync();
+        let first = write(&mut alone, &me, &json!({ "a": 1 }));
+        assert_eq!(
+            time_of(&first),
+            Some(1),
+            "after finish_sync the node writes"
+        );
+    }
+
+    #[test]
+    fn two_nodes_list_the_paths_of_a_change_in_the_same_order() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut writer = MeshDoc::new_ungated();
+        write(&mut writer, &me, &json!({ "gone": 1, "keep": { "x": 1 } }));
+        // One change that writes an object and its leaves, and writes and deletes one leaf.
+        let seed = pad_seed(me.as_str().as_bytes());
+        let bytes = change_of(
+            &writer,
+            &json!({ "z": { "b": 2, "a": [1, 2] }, "m": 7, "gone": null, "keep": { "y": 3 } }),
+            &seed,
+        );
+        let change = Change::from_bytes(bytes.clone()).expect("a change");
+        let expected: Vec<Vec<String>> = [
+            vec!["gone"],
+            vec!["keep", "y"],
+            vec!["m"],
+            vec!["z"],
+            vec!["z", "a"],
+            vec!["z", "b"],
+        ]
+        .into_iter()
+        .map(owned_path)
+        .collect();
+        // Two nodes that hold the same history build the list from the same change.
+        let mut left = MeshDoc::new_ungated();
+        let mut right = MeshDoc::new_ungated();
+        for doc in [&mut left, &mut right] {
+            for frame in writer.changes_since(&[], 100) {
+                doc.ingest(&frame);
+            }
+            let held = Change::from_bytes(bytes.clone()).expect("a change");
+            doc.doc.apply_changes([held]).expect("applies");
+        }
+        let (one, two) = (
+            super::change_leaves(&left.doc, &change),
+            super::change_leaves(&right.doc, &change),
+        );
+        assert_eq!(one, two, "the same change gives the same list on two nodes");
+        assert_eq!(
+            one, expected,
+            "the list is sorted, with the objects and the leaves"
+        );
+    }
+
+    #[test]
+    fn a_seed_carries_the_stamps_of_its_cutter_view_and_a_node_that_adopts_it_reads_them() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (left, right, cutter, me) = (nick("left"), nick("right"), nick("cutter"), nick("me"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let first = write(&mut doc, &left, &json!({ "shared": 1, "n": { "k": 5 } }));
+        let mut other = MeshDoc::new_ungated().state_epochs();
+        ingest_applies(&mut other, &first);
+        let second = write(&mut other, &right, &json!({ "shared": 2 }));
+        ingest_applies(&mut doc, &second);
+        // The cutter holds both writes and cuts a seed. A node that adopts it reads, for each leaf,
+        // the stamp of the write that made the value, not the stamp of the cutter.
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = adopter.ingest(frame);
+        }
+        ticks(&mut adopter, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        let tag = |who: &Nickname| {
+            super::actor_tag(&super::actor_for(&pad_seed(who.as_str().as_bytes())))
+        };
+        let paths: Vec<Vec<String>> = vec![
+            vec!["shared".to_owned()],
+            vec!["n".to_owned(), "k".to_owned()],
+        ];
+        assert_eq!(
+            adopter.stamps_of(&paths),
+            vec![
+                Some(Stamp::new(2, tag(&right))),
+                Some(Stamp::new(1, tag(&left)))
+            ],
+            "the stamps of the seed are the stamps of the original writes"
+        );
+    }
+
+    #[test]
+    fn a_seed_whose_stamps_do_not_match_its_changes_is_dropped_before_the_switch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "the stamps of the candidate seed do not match it",
+        );
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let doc = state_doc_with(&live_state());
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = doc
+            .build_seed(3, &actor, within(600))
+            .expect("the live json splits");
+        // The root frame names no stamp, although its change writes paths.
+        let who = signer(&cutter);
+        let body = change_body_stamped(
+            &chain.changes[0],
+            None,
+            3,
+            Some(&chain.mark),
+            Some(chain.time),
+            &[],
+        )
+        .expect("a body");
+        let mut frames = vec![Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &cutter, body, Channel::State)
+                .unverified_key(who),
+            who,
+        )];
+        let later = chain.changes.iter().enumerate().skip(1);
+        for (index, bytes) in later {
+            let stamps = &chain.origins[index];
+            let tail = change_body_stamped(bytes, None, 3, None, Some(chain.time), stamps)
+                .expect("a body");
+            frames.push(Verified::fixture_unchecked(
+                Message::new_channel_event(&MeshId::from("test"), &cutter, tail, Channel::State)
+                    .unverified_key(who),
+                who,
+            ));
+        }
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = adopter.ingest(frame);
+        }
+        assert!(
+            ticks(&mut adopter, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).is_none(),
+            "a seed with stamps that do not match is not adopted"
+        );
+        assert_eq!(adopter.epoch(), 0, "the node keeps its epoch");
+    }
+
+    #[test]
+    fn a_frame_with_more_stamps_than_the_cap_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame carries more stamps than the cap",
+        );
+        let me = nick("me");
+        let timeless = MeshDoc::new_ungated();
+        let bytes = change_of(
+            &timeless,
+            &json!({ "a": 1 }),
+            &pad_seed(me.as_str().as_bytes()),
+        );
+        let build = |count: usize| {
+            let stamps: Vec<Stamp> = (0..count).map(|_| Stamp::new(1, "aa".to_owned())).collect();
+            let body =
+                change_body_stamped(&bytes, None, 0, None, Some(1), &stamps).expect("a body");
+            let key = signer(&me);
+            Verified::fixture_unchecked(
+                Message::new_channel_event(&MeshId::from("test"), &me, body, Channel::State)
+                    .unverified_key(key),
+                key,
+            )
+        };
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let taken = doc.ingest(&build(super::DOC_REPLAY_ENTRIES_MAX + 1));
+        assert!(
+            matches!(taken, Ingested::Ignored),
+            "over the cap: {taken:?}"
+        );
+        assert_eq!(doc.to_json(), json!({}), "nothing was applied");
+    }
+
+    #[test]
+    fn the_stamp_of_a_seed_leaf_is_rebuilt_from_the_stored_frame_when_the_record_is_gone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (left, right, cutter, me) = (nick("left"), nick("right"), nick("cutter"), nick("me"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let first = write(&mut doc, &left, &json!({ "shared": 1 }));
+        let mut other = MeshDoc::new_ungated().state_epochs();
+        ingest_applies(&mut other, &first);
+        let second = write(&mut other, &right, &json!({ "shared": 2 }));
+        ingest_applies(&mut doc, &second);
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = adopter.ingest(frame);
+        }
+        ticks(&mut adopter, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        let tag = super::actor_tag(&super::actor_for(&pad_seed(right.as_str().as_bytes())));
+        let paths = vec![vec!["shared".to_owned()]];
+        let expected = vec![Some(Stamp::new(2, tag))];
+        assert_eq!(adopter.stamps_of(&paths), expected, "read from the record");
+        // The record lives in memory only. The frame of the seed carries the stamps, so a node
+        // that lost the record reads the same stamps from the frame that it stores.
+        adopter.origins = HashMap::new();
+        assert_eq!(
+            adopter.stamps_of(&paths),
+            expected,
+            "rebuilt from the stored frame"
+        );
+    }
+
+    /// A guard for step 4: the cutter adopts its own seed through `adopt`, which keeps the record
+    /// of the stamps, so this passes without the rebuild from the stored frame and pins nothing
+    /// new today. A glue that switches the cutter some other way must keep it passing.
+    #[test]
+    fn the_node_that_cut_a_seed_reads_the_stamps_of_the_original_writes_after_its_own_switch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (left, right, cutter) = (nick("left"), nick("right"), nick("cutter"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let first = write(&mut doc, &left, &json!({ "shared": 1 }));
+        let mut other = MeshDoc::new_ungated().state_epochs();
+        ingest_applies(&mut other, &first);
+        let second = write(&mut other, &right, &json!({ "shared": 2 }));
+        ingest_applies(&mut doc, &second);
+        // The cutter sends the seed to itself, as every node does, and adopts it after the wait.
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = doc
+            .build_seed(3, &actor, within(600))
+            .expect("the live json splits");
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        assert_eq!(
+            chain.origins.len(),
+            frames.len(),
+            "one stamp list for each frame"
+        );
+        for frame in &frames {
+            let _ = doc.ingest(frame);
+        }
+        ticks(&mut doc, &cutter, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        let tag = super::actor_tag(&super::actor_for(&pad_seed(right.as_str().as_bytes())));
+        assert_eq!(
+            doc.stamps_of(&[vec!["shared".to_owned()]]),
+            vec![Some(Stamp::new(2, tag))],
+            "the cutter keeps the stamp of the original write"
+        );
+    }
+
+    #[test]
+    fn a_seed_of_more_than_the_cap_of_paths_is_cut_into_frames_inside_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let mut wide = Map::new();
+        for index in 0..130 {
+            wide.insert(format!("k{index:03}"), json!(index));
+        }
+        let live = Value::Object(wide);
+        let doc = state_doc_with(&live);
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = doc
+            .build_seed(3, &actor, |_| true)
+            .expect("the live json splits");
+        assert!(chain.changes.len() >= 2, "130 paths need 2 frames or more");
+        for stamps in &chain.origins {
+            assert!(
+                stamps.len() <= super::DOC_REPLAY_ENTRIES_MAX,
+                "a frame names at most the cap: {}",
+                stamps.len()
+            );
+        }
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        let who = signer(&cutter);
+        let numbered = chain.changes.iter().enumerate();
+        for (index, bytes) in numbered {
+            let mark = (index == 0).then_some(&chain.mark);
+            let body = change_body_stamped(
+                bytes,
+                None,
+                3,
+                mark,
+                Some(chain.time),
+                &chain.origins[index],
+            )
+            .expect("a body");
+            let frame = Verified::fixture_unchecked(
+                Message::new_channel_event(&MeshId::from("test"), &cutter, body, Channel::State)
+                    .unverified_key(who),
+                who,
+            );
+            let _ = adopter.ingest(&frame);
+        }
+        ticks(&mut adopter, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(adopter.to_json(), live, "the node holds the 130 leaves");
+    }
+
+    #[test]
+    fn a_seed_path_with_no_time_gets_the_stamp_zero_and_is_counted() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a seed path got the stamp 0 for want of a time",
+        );
+        let me = nick("me");
+        // A document with state epochs off writes bodies with no time.
+        let mut doc = MeshDoc::new_ungated();
+        write(&mut doc, &me, &json!({ "a": 1, "b": { "c": 2 } }));
+        let actor = pad_seed(me.as_str().as_bytes());
+        let chain = doc
+            .build_seed(3, &actor, within(600))
+            .expect("the live json splits");
+        let zeros: usize = chain
+            .origins
+            .iter()
+            .flatten()
+            .filter(|stamp| stamp.time == 0)
+            .count();
+        assert!(zeros > 0, "the paths have the stamp 0");
+        assert_eq!(
+            doc.unstamped_paths(),
+            u64::try_from(zeros).unwrap_or(u64::MAX),
+            "each one is counted"
+        );
+        assert_eq!(
+            doc.census(false).unstamped_paths,
+            doc.unstamped_paths(),
+            "the census carries the count, so it is not only a log line"
+        );
+    }
+
+    #[test]
+    fn the_tombstones_stay_inside_the_cap_at_ten_times_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let total = super::DOC_SEED_TOMBSTONES_MAX * 10;
+        for index in 0..total {
+            let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
+            doc.add_tombstone(vec![format!("k{index}")], stamp);
+            assert!(
+                doc.tombstones.len() <= super::DOC_SEED_TOMBSTONES_MAX,
+                "the map holds at most the cap"
+            );
+        }
+        assert_eq!(
+            doc.tombstones.len(),
+            super::DOC_SEED_TOMBSTONES_MAX,
+            "it is full"
+        );
+        let lowest = doc.tombstones.values().map(|stamp| stamp.time).min();
+        assert_eq!(
+            lowest,
+            Some(u64::try_from(total - super::DOC_SEED_TOMBSTONES_MAX).unwrap_or(0) + 1),
+            "the tombstones with the lowest stamps left first"
+        );
+        let long = vec!["x".repeat(super::DOC_TOMBSTONE_PATH_BYTES_MAX + 1)];
+        doc.add_tombstone(long, Stamp::new(u64::MAX, "aa".to_owned()));
+        assert_eq!(
+            doc.tombstone_paths_long, 1,
+            "a path that is too long has no tombstone"
+        );
+        assert_eq!(
+            doc.tombstones.len(),
+            super::DOC_SEED_TOMBSTONES_MAX,
+            "and the map is unchanged"
+        );
+    }
+
+    /// The tombstones of a document that deleted `count` paths of 40 bytes, with growing stamps.
+    fn doc_with_tombstones(count: usize) -> MeshDoc {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for index in 0..count {
+            let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
+            doc.add_tombstone(vec![format!("{index:040}")], stamp);
+        }
+        doc
+    }
+
+    #[test]
+    fn a_seed_spreads_many_tombstones_over_its_frames_inside_a_byte_budget() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let doc = doc_with_tombstones(300);
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = doc
+            .build_seed(3, &actor, within(600))
+            .expect("a seed with many tombstones is built");
+        let total: usize = chain.tombstones.iter().map(Vec::len).sum();
+        assert_eq!(total, 300, "every tombstone is carried by some frame");
+        assert_eq!(
+            chain.tombstones.len(),
+            chain.changes.len(),
+            "one list for each frame"
+        );
+        assert!(
+            chain.changes.len() > 1,
+            "300 tombstones need more than 1 frame"
+        );
+        let numbered = chain.tombstones.iter().enumerate();
+        for (index, dead) in numbered {
+            let bytes: usize = dead
+                .iter()
+                .map(|(path, _)| {
+                    let path_bytes: usize = path.iter().map(String::len).sum();
+                    path_bytes + 32
+                })
+                .sum();
+            assert!(
+                bytes <= super::DOC_SEED_TOMBSTONE_FRAME_BYTES,
+                "the tombstones of frame {index} fit the budget: {bytes}"
+            );
+            assert!(
+                dead.len() + chain.origins[index].len() <= super::DOC_REPLAY_ENTRIES_MAX,
+                "the stamps and the tombstones of a frame stay inside the entry cap"
+            );
+        }
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = adopter.ingest(frame);
+        }
+        ticks(&mut adopter, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(
+            adopter.tombstones.len(),
+            300,
+            "the node holds the 300 tombstones"
+        );
+    }
+
+    /// The tombstones of a document that deleted `count` paths of 250 bytes (the longest path
+    /// that a tombstone keeps is 256 bytes), with growing stamps.
+    fn doc_with_long_tombstones(count: usize) -> MeshDoc {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for index in 0..count {
+            let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
+            doc.add_tombstone(vec![format!("{index:0250}")], stamp);
+        }
+        doc
+    }
+
+    #[test]
+    fn a_seed_with_the_full_cap_of_long_tombstones_is_adopted_whole_or_not_at_all() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "the seed of the candidate epoch was not complete",
+        );
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let doc = doc_with_long_tombstones(super::DOC_SEED_TOMBSTONES_MAX);
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let bodies = frames.iter().map(|frame| frame.body.as_str());
+        let longest = bodies.map(str::len).max().unwrap_or(0);
+        assert!(
+            longest <= super::DOC_SEED_TOMBSTONE_FRAME_BYTES + 400,
+            "the longest body stays near the budget of a frame: {longest} bytes in {} frames",
+            frames.len()
+        );
+        // Every frame arrives: the node holds all the tombstones.
+        let mut whole = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = whole.ingest(frame);
+        }
+        ticks(&mut whole, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(
+            whole.tombstones.len(),
+            super::DOC_SEED_TOMBSTONES_MAX,
+            "the node holds every tombstone"
+        );
+        // One frame of the middle is missing: the node does not switch and holds no half seed.
+        let mut broken = MeshDoc::new_ungated().state_epochs();
+        let numbered = frames.iter().enumerate();
+        for (index, frame) in numbered {
+            if index != frames.len() / 2 {
+                let _ = broken.ingest(frame);
+            }
+        }
+        assert!(
+            ticks(&mut broken, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).is_none(),
+            "a seed with a frame missing is not adopted"
+        );
+        assert_eq!(broken.epoch(), 0, "the node keeps its epoch");
+        assert!(
+            broken.tombstones.is_empty(),
+            "and holds no tombstone of the seed"
+        );
+    }
+
+    #[test]
+    fn a_tombstone_body_that_is_not_canonical_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let stamp = Stamp::new(9, "aa".to_owned());
+        let one = |path: Vec<&str>| (owned_path(path), stamp.clone());
+        let cases: Vec<(StampedPaths, &str)> = vec![
+            (vec![one(vec!["a"]), one(vec!["a"])], "the same path twice"),
+            (vec![one(vec!["b"]), one(vec!["a"])], "paths out of order"),
+            (vec![one(vec![])], "an empty path"),
+            (
+                vec![one(vec![
+                    &"x".repeat(super::DOC_TOMBSTONE_PATH_BYTES_MAX + 1),
+                ])],
+                "a path over the cap",
+            ),
+        ];
+        for (tombstones, why) in cases {
+            let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &[], &tombstones)
+                .expect("a body");
+            assert!(parse_change_full(body.as_str()).is_none(), "refused: {why}");
+        }
+        let fine = vec![one(vec!["a"]), one(vec!["a", "b"]), one(vec!["b"])];
+        let body =
+            change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &[], &fine).expect("a body");
+        assert!(
+            parse_change_full(body.as_str()).is_some(),
+            "the control: a canonical list parses"
+        );
+    }
+
+    #[test]
+    fn tombstones_on_a_frame_that_is_not_a_seed_frame_are_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "the stamps of a frame do not match it",
+        );
+        let me = nick("me");
+        let timeless = MeshDoc::new_ungated();
+        let bytes = change_of(
+            &timeless,
+            &json!({ "a": 1 }),
+            &pad_seed(me.as_str().as_bytes()),
+        );
+        let dead = vec![(vec!["k".to_owned()], Stamp::new(1, "aa".to_owned()))];
+        let body =
+            change_body_tombstoned(&bytes, None, 0, None, Some(1), &[], &dead).expect("a body");
+        let key = signer(&me);
+        let frame = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &me, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let taken = doc.ingest(&frame);
+        assert!(
+            matches!(taken, Ingested::Ignored),
+            "a normal write carries no tombstone: {taken:?}"
+        );
+        assert_eq!(doc.to_json(), json!({}), "nothing was applied");
+    }
+
+    #[test]
+    fn a_seed_leaves_out_a_value_that_a_tombstone_of_a_higher_stamp_governs() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write(
+            &mut doc,
+            &me,
+            &json!({ "gone": 1, "kept": 2, "o": { "gone": 3, "kept": 4 } }),
+        );
+        // A replay brought back `gone` and `o.gone`, but a delete of a higher stamp governs them.
+        let high = Stamp::new(99, "aa".to_owned());
+        doc.add_tombstone(vec!["gone".to_owned()], high.clone());
+        doc.add_tombstone(vec!["o".to_owned(), "gone".to_owned()], high);
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = adopter.ingest(frame);
+        }
+        ticks(
+            &mut adopter,
+            &nick("adopter"),
+            super::DOC_EPOCH_ADOPT_WAIT_TICKS,
+        )
+        .expect("adopted");
+        assert_eq!(
+            adopter.to_json(),
+            json!({ "kept": 2, "o": { "kept": 4 } }),
+            "the seed holds no value that a delete of a higher stamp governs"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_a_newer_write_overtook_is_not_written() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other, third) = (nick("aaa"), nick("zzz"), nick("mmm"));
+        // This node holds `shared = 9` at the stamp 100.
+        let mut doc = doc_with_clock_at(99);
+        let first = write(&mut doc, &mine, &json!({ "shared": 9 }));
+        // A replay of another node sets `shared = 5` at the stamp 50, and automerge keeps it (the
+        // actor of that node is the higher one), so this node plans to write 9 again.
+        let replayer = MeshDoc::new_ungated().state_epochs();
+        let change = change_of(
+            &replayer,
+            &json!({ "shared": 5 }),
+            &pad_seed(other.as_str().as_bytes()),
+        );
+        let stamps = vec![(
+            vec!["shared".to_owned()],
+            Stamp::new(50, "7a7a7a7a00000000".to_owned()),
+        )];
+        let body = replayer
+            .compose_replay_body(&change, &stamps)
+            .expect("a replay body");
+        let key = signer(&other);
+        let replay = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &other, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        ingest_applies(&mut doc, &replay);
+        assert!(
+            doc.has_restores(),
+            "the replay lowered the stamp, so a restore waits"
+        );
+        // Before the restore goes out, a third node that saw both writes a newer value.
+        let mut newer = doc_with_clock_at(120);
+        let _ = newer.ingest(&first);
+        let _ = newer.ingest(&replay);
+        let latest = write(&mut newer, &third, &json!({ "shared": 7 }));
+        ingest_applies(&mut doc, &latest);
+        assert_eq!(
+            doc.take_restores(),
+            None,
+            "the live stamp is read again, so the restore of 9 is not written over the newer 7"
+        );
+        assert_eq!(
+            doc.to_json(),
+            json!({ "shared": 7 }),
+            "the newer write stays"
+        );
+    }
+
+    #[test]
+    fn an_object_that_a_replay_makes_for_a_leaf_gets_the_stamp_zero() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let doc = MeshDoc::new_ungated().state_epochs();
+        let change = change_of(
+            &doc,
+            &json!({ "o": { "x": 1 } }),
+            &pad_seed(me.as_str().as_bytes()),
+        );
+        let stamps = vec![(
+            vec!["o".to_owned(), "x".to_owned()],
+            Stamp::new(7, "aa".to_owned()),
+        )];
+        let body = doc
+            .compose_replay_body(&change, &stamps)
+            .expect("a replay body");
+        let parsed = parse_change_full(body.as_str()).expect("it parses");
+        assert_eq!(
+            parsed.origins,
+            vec![
+                Stamp::new(0, "0000000000000000".to_owned()),
+                Stamp::new(7, "aa".to_owned())
+            ],
+            "the object has no write of its own, and the leaf keeps its stamp"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_a_delete_of_a_higher_stamp_overtook_is_not_written() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = doc_with_clock_at(9);
+        write(&mut doc, &me, &json!({ "shared": 1 }));
+        // A restore of `shared = 2` at the stamp 50 waits, and then a delete of the leaf with the
+        // stamp 60 arrives: the delete is the newer write, and the restore must not bring 2 back.
+        let path = vec!["shared".to_owned()];
+        doc.restores
+            .insert(path.clone(), (json!(2), Stamp::new(50, "aa".to_owned())));
+        doc.add_tombstone(path, Stamp::new(60, "bb".to_owned()));
+        assert_eq!(
+            doc.take_restores(),
+            None,
+            "a delete of a higher stamp governs the leaf, so the restore is stale"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_finds_the_map_full_is_dropped_counted_and_warned() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a restore was dropped: the map of restores is full",
+        );
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let stamp = Stamp::new(5, "aa".to_owned());
+        for index in 0..super::DOC_RESTORES_MAX {
+            doc.keep_restore(vec![format!("k{index}")], (json!(index), stamp.clone()));
+        }
+        assert_eq!(
+            doc.dropped_restores(),
+            0,
+            "nothing was dropped while there was room"
+        );
+        doc.keep_restore(vec!["one-more".to_owned()], (json!(0), stamp));
+        assert_eq!(
+            doc.dropped_restores(),
+            1,
+            "the one that found the map full is counted"
+        );
+        assert_eq!(
+            doc.census(false).dropped_restores,
+            1,
+            "and the census carries it"
+        );
+        doc.keep_restore(
+            vec!["k0".to_owned()],
+            (json!(9), Stamp::new(9, "aa".to_owned())),
+        );
+        assert_eq!(
+            doc.dropped_restores(),
+            1,
+            "a path that is there is updated, not dropped"
+        );
+    }
+
+    #[test]
+    fn the_restores_stay_inside_the_cap_at_ten_times_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a restore was dropped: the map of restores is full",
+        );
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let stamp = Stamp::new(5, "aa".to_owned());
+        let total = super::DOC_RESTORES_MAX * 10;
+        for index in 0..total {
+            doc.keep_restore(vec![format!("k{index}")], (json!(index), stamp.clone()));
+        }
+        assert_eq!(
+            doc.restores.len(),
+            super::DOC_RESTORES_MAX,
+            "the map stays at the cap"
+        );
+        assert_eq!(
+            doc.dropped_restores(),
+            u64::try_from(total - super::DOC_RESTORES_MAX).unwrap_or(0),
+            "every other one is counted"
+        );
+    }
+
+    /// A replay frame of `other` that writes `merge`, with `stamps` on its leaves. The actor of
+    /// `other` is the higher one, so the frame wins the conflicts in automerge.
+    fn replay_frame_of(
+        other: &Nickname,
+        merge: &Value,
+        stamps: &[(Vec<String>, Stamp)],
+    ) -> Verified {
+        let replayer = MeshDoc::new_ungated().state_epochs();
+        let change = change_of(&replayer, merge, &pad_seed(other.as_str().as_bytes()));
+        let body = replayer
+            .compose_replay_body(&change, stamps)
+            .expect("a replay body");
+        let key = signer(other);
+        Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), other, body, Channel::State)
+                .unverified_key(key),
+            key,
+        )
+    }
+
+    /// A node that holds `obj` with 600 leaves, written in rounds of 100, and the last leaf again
+    /// at a high stamp.
+    fn doc_with_600_leaves(mine: &Nickname) -> MeshDoc {
+        let mut doc = doc_with_clock_at(99);
+        for round in 0..6 {
+            let mut part = Map::new();
+            for leaf in 0..100 {
+                part.insert(format!("k{:03}", round * 100 + leaf), json!(leaf));
+            }
+            write(&mut doc, mine, &json!({ "obj": Value::Object(part) }));
+        }
+        write(&mut doc, mine, &json!({ "obj": { "k599": 7 } }));
+        doc
+    }
+
+    fn replay_makes_obj_x() -> (Value, Vec<(Vec<String>, Stamp)>) {
+        (
+            json!({ "obj": { "x": 1 } }),
+            vec![(
+                vec!["obj".to_owned(), "x".to_owned()],
+                Stamp::new(5, "7a7a7a7a00000000".to_owned()),
+            )],
+        )
+    }
+
+    #[test]
+    fn a_replay_that_hides_a_large_object_restores_every_leaf_that_it_hid() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other) = (nick("aaa"), nick("zzz"));
+        let mut doc = doc_with_600_leaves(&mine);
+        let (merge, stamps) = replay_makes_obj_x();
+        ingest_applies(&mut doc, &replay_frame_of(&other, &merge, &stamps));
+        assert_eq!(
+            doc.to_json(),
+            json!({ "obj": { "x": 1 } }),
+            "the replay hid every leaf"
+        );
+        let (patch, written) = doc.take_restores().expect("the leaves are written again");
+        assert_eq!(
+            written.len(),
+            600,
+            "all 600 leaves come back, the object is not written as a whole"
+        );
+        assert_eq!(
+            patch["obj"]["k599"],
+            json!(7),
+            "the last leaf, the newest write, is among them"
+        );
+    }
+
+    /// A node `other` that wrote the key `late` after the seed was cut, a node `me` that holds
+    /// the write and never wrote itself, and the seed of a third node that lacks the write. Each
+    /// node has the seed and has waited for it.
+    fn a_write_that_the_seed_lacks() -> (MeshDoc, MeshDoc, super::EpochSwitch, Nickname) {
+        let (me, other, cutter) = (nick("me"), nick("other"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut writer = MeshDoc::new_ungated().state_epochs();
+        let late = write(&mut writer, &other, &json!({ "late": 1 }));
+        let mut holder = MeshDoc::new_ungated().state_epochs();
+        holder.ingest(&late);
+        for frame in &frames {
+            writer.ingest(frame);
+            holder.ingest(frame);
+        }
+        let author_switch = ticks(&mut writer, &other, super::DOC_EPOCH_ADOPT_WAIT_TICKS)
+            .expect("the author adopts");
+        ticks(&mut holder, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("the holder adopts");
+        (writer, holder, author_switch, me)
+    }
+
+    #[test]
+    fn the_author_of_a_write_that_the_seed_lacks_writes_it_again_at_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (_writer, _holder, author_switch, _me) = a_write_that_the_seed_lacks();
+        let patch = author_switch.replay.expect("the author writes it again");
+        assert_eq!(patch["late"], json!(1), "the write is in the replay");
+    }
+
+    #[test]
+    fn a_holder_that_is_not_the_author_waits_up_to_three_ticks_before_it_writes_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (_writer, mut holder, _author_switch, me) = a_write_that_the_seed_lacks();
+        assert!(
+            holder.has_restores(),
+            "the holder keeps the write for later"
+        );
+        assert_eq!(holder.take_restores(), None, "it does not write at once");
+        let mut written = None;
+        for waited in 1..=3 {
+            let _ = holder.tick_epoch(&me);
+            written = holder.take_restores();
+            if written.is_some() {
+                assert!(waited <= 3, "it writes within 3 ticks");
+                break;
+            }
+        }
+        let (patch, _stamps) = written.expect("the holder writes the write again after the wait");
+        assert_eq!(patch["late"], json!(1), "the late write is written again");
+    }
+
+    #[test]
+    fn the_replay_of_an_object_leaves_out_a_child_that_another_node_wrote() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other, cutter) = (nick("me"), nick("other"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut holder = MeshDoc::new_ungated().state_epochs();
+        let made = write(&mut holder, &me, &json!({ "obj": { "mine": 1 } }));
+        let mut writer = MeshDoc::new_ungated().state_epochs();
+        writer.ingest(&made);
+        let child = write(&mut writer, &other, &json!({ "obj": { "late": 2 } }));
+        holder.ingest(&child);
+        for frame in &frames {
+            holder.ingest(frame);
+        }
+        let switch = ticks(&mut holder, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        let patch = switch.replay.expect("the node writes its own object again");
+        assert_eq!(patch["obj"]["mine"], json!(1), "its own leaf is written");
+        assert!(
+            patch["obj"].get("late").is_none(),
+            "the child of another node has its own stamp and its own wait: {patch}"
+        );
+        assert!(
+            switch
+                .replay_stamps
+                .iter()
+                .all(|(path, _)| path.last().map(String::as_str) != Some("late")),
+            "and it is not named in the stamps of this replay"
+        );
+    }
+
+    #[test]
+    fn a_holder_keeps_no_object_as_a_whole_for_later() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other, cutter) = (nick("me"), nick("other"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut writer = MeshDoc::new_ungated().state_epochs();
+        let made = write(&mut writer, &other, &json!({ "obj": { "late": 2 } }));
+        let mut holder = MeshDoc::new_ungated().state_epochs();
+        holder.ingest(&made);
+        for frame in &frames {
+            holder.ingest(frame);
+        }
+        ticks(&mut holder, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        let waits: Vec<Vec<String>> = holder.restores.keys().cloned().collect();
+        assert_eq!(
+            waits,
+            vec![vec!["obj".to_owned(), "late".to_owned()]],
+            "only the leaf waits: an object as a whole would replace the keys below it"
+        );
+    }
+
+    #[test]
+    fn a_restore_of_an_empty_object_does_not_replace_what_the_document_holds_there() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = doc_with_clock_at(9);
+        write(&mut doc, &me, &json!({ "obj": { "newer": 5 } }));
+        doc.restores.insert(
+            vec!["obj".to_owned()],
+            (json!({}), Stamp::new(50, "aa".to_owned())),
+        );
+        assert_eq!(
+            doc.take_restores(),
+            None,
+            "the object is there, and an empty object would only wipe its keys"
+        );
+    }
+
+    #[test]
+    fn a_holder_that_is_not_the_author_does_not_write_what_the_author_wrote_first() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (writer, mut holder, author_switch, me) = a_write_that_the_seed_lacks();
+        let (patch, stamps) = (
+            author_switch.replay.expect("the author writes it again"),
+            author_switch.replay_stamps,
+        );
+        let change = change_of(&writer, &patch, &pad_seed(b"other"));
+        let body = writer
+            .compose_replay_body(&change, &stamps)
+            .expect("a replay body");
+        let author = nick("other");
+        let key = signer(&author);
+        let frame = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &author, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        assert!(holder.has_restores(), "the holder waits with the write");
+        holder.ingest(&frame);
+        for _ in 0..3 {
+            let _ = holder.tick_epoch(&me);
+        }
+        assert_eq!(
+            holder.take_restores(),
+            None,
+            "the write of the author carries the same stamp, so the holder has nothing to write"
+        );
+    }
+
+    #[test]
+    fn a_replay_that_hides_an_object_of_1100_leaves_loses_no_restore() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other) = (nick("aaa"), nick("zzz"));
+        let mut doc = doc_with_clock_at(99);
+        for round in 0..11 {
+            let mut part = Map::new();
+            for leaf in 0..100 {
+                part.insert(format!("k{:04}", round * 100 + leaf), json!(leaf));
+            }
+            write(&mut doc, &mine, &json!({ "obj": Value::Object(part) }));
+        }
+        let (merge, stamps) = replay_makes_obj_x();
+        doc.ingest(&replay_frame_of(&other, &merge, &stamps));
+        assert_eq!(doc.dropped_restores(), 0, "no newer write is dropped");
+        let (_, written) = doc.take_restores().expect("the leaves are written again");
+        assert_eq!(written.len(), 1100, "all 1100 leaves come back");
+    }
+
+    #[test]
+    fn a_leaf_that_was_deleted_before_the_replay_hid_the_object_is_not_restored() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other) = (nick("aaa"), nick("zzz"));
+        let mut doc = doc_with_600_leaves(&mine);
+        write(&mut doc, &mine, &json!({ "obj": { "k005": null } }));
+        let (merge, stamps) = replay_makes_obj_x();
+        doc.ingest(&replay_frame_of(&other, &merge, &stamps));
+        let (patch, written) = doc
+            .take_restores()
+            .expect("the live leaves are written again");
+        assert_eq!(written.len(), 599, "the 600 leaves less the deleted one");
+        assert!(
+            patch["obj"].get("k005").is_none(),
+            "the deleted leaf stays out of the patch"
+        );
+    }
+
+    #[test]
+    fn a_delete_that_a_concurrent_replay_undoes_is_written_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other) = (nick("aaa"), nick("zzz"));
+        let mut doc = doc_with_clock_at(99);
+        write(&mut doc, &mine, &json!({ "obj": { "gone": 1, "stay": 2 } }));
+        write(&mut doc, &mine, &json!({ "obj": { "gone": null } }));
+        // The replay does not know of the delete: it brings `gone` back with the stamp 5, which
+        // is below the stamp of the delete.
+        let merge = json!({ "obj": { "gone": 5 } });
+        let stamps = vec![(
+            vec!["obj".to_owned(), "gone".to_owned()],
+            Stamp::new(5, "7a7a7a7a00000000".to_owned()),
+        )];
+        doc.ingest(&replay_frame_of(&other, &merge, &stamps));
+        assert_eq!(
+            doc.to_json()["obj"]["gone"],
+            json!(5),
+            "the value came back"
+        );
+        let (patch, written) = doc.take_restores().expect("the delete is written again");
+        assert_eq!(
+            written.len(),
+            2,
+            "the delete, and `stay`, which the replay hid with its object"
+        );
+        assert_eq!(patch["obj"]["stay"], json!(2), "the hidden leaf is back");
+        assert_eq!(patch["obj"]["gone"], Value::Null, "as a delete");
+    }
+
+    #[test]
+    fn a_gated_channel_never_writes_a_time() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = MeshDoc::new_gated(card_gate()).state_epochs();
+        let frame = write(&mut doc, &me, &entry("me", "mine"));
+        assert_eq!(
+            time_of(&frame),
+            None,
+            "a body of the meta channel is the body from before the time"
+        );
+        assert_eq!(doc.clock(), 0, "a gated channel keeps no clock");
+    }
+
+    #[test]
+    fn the_clock_does_not_restart_at_an_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for count in 0..9 {
+            write(&mut doc, &me, &json!({ "n": count }));
+        }
+        assert_eq!(doc.clock(), 9, "nine writes");
+        for frame in &seed_frames(&cutter, &live_state(), 3, None) {
+            let _ = doc.ingest(frame);
+        }
+        ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(doc.epoch(), 3, "the document adopted the seed");
+        assert!(
+            doc.clock() >= 9,
+            "the clock is not lower than before the switch"
+        );
+        let after = write(&mut doc, &me, &json!({ "again": 1 }));
+        assert!(
+            time_of(&after) > Some(9),
+            "a write of the new epoch is above the old clock: {:?}",
+            time_of(&after)
+        );
+    }
+
+    #[test]
+    fn a_state_change_with_no_time_is_refused_when_state_epochs_are_on() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a state change with no valid time was refused",
+        );
+        let me = nick("me");
+        let timeless = MeshDoc::new_ungated();
+        let bytes = change_of(
+            &timeless,
+            &json!({ "a": 1 }),
+            &pad_seed(me.as_str().as_bytes()),
+        );
+        let body = super::wire::change_body_at(&bytes, None, 0).expect("a body");
+        let key = signer(&me);
+        let frame = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &me, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        let mut off = MeshDoc::new_ungated();
+        assert!(
+            matches!(off.ingest(&frame), Ingested::Applied { .. }),
+            "a document with state epochs off takes it, as before"
+        );
+        let mut on = MeshDoc::new_ungated().state_epochs();
+        let taken = on.ingest(&frame);
+        assert!(
+            matches!(taken, Ingested::Ignored),
+            "a state epoch document refuses a change with no time: {taken:?}"
+        );
+        assert_eq!(on.to_json(), json!({}), "nothing was applied");
+        assert_eq!(
+            on.refused_time(),
+            1,
+            "the refusal is counted, so it is never silent"
+        );
+    }
+
+    #[test]
+    fn a_node_adopts_only_a_complete_seed_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            super::LOG_TARGET,
+            "the seed of the candidate epoch was not complete",
+        );
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write(&mut doc, &me, &json!({ "mine": 1 }));
+        for frame in &frames[..frames.len() - 1] {
+            doc.ingest(frame);
+        }
+        assert!(
+            ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).is_none(),
+            "a chain with a missing frame is not adopted"
+        );
+        assert_eq!(doc.epoch(), 0, "the document stays in its epoch");
+        assert_eq!(
+            doc.to_json(),
+            json!({ "mine": 1 }),
+            "the live values are kept"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_seed_is_dropped_and_its_keys_forgotten_when_the_wait_ends() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            super::LOG_TARGET,
+            "the seed of the candidate epoch was not complete",
+        );
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames[..frames.len() - 1] {
+            doc.ingest(frame);
+        }
+        let _ = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        let forgotten: Vec<DedupKey> = dropped_keys(&mut doc);
+        for frame in &frames[..frames.len() - 1] {
+            assert!(
+                forgotten.contains(&frame.dedup_key()),
+                "the key of a frame of the dropped seed is forgotten, so its re-send is taken"
+            );
+        }
+        assert!(doc.candidate.is_none(), "the candidate is gone");
+    }
+
+    #[test]
+    fn the_cutter_leaving_in_the_wait_does_not_leave_a_one_frame_state() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            super::LOG_TARGET,
+            "the seed of the candidate epoch was not complete",
+        );
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write(&mut doc, &me, &json!({ "mine": 1 }));
+        doc.ingest(&frames[0]);
+        assert!(
+            ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).is_none(),
+            "a root with no tail is not adopted"
+        );
+        assert_eq!(doc.to_json(), json!({ "mine": 1 }), "no value is lost");
+    }
+
+    #[test]
+    fn the_app_sees_no_half_seed_while_the_chain_fills() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write(&mut doc, &me, &json!({ "mine": 1 }));
+        for frame in &frames[..frames.len() - 1] {
+            let taken = doc.ingest(frame);
+            assert!(
+                !matches!(taken, Ingested::Applied { .. }),
+                "a seed frame is never applied alone: {taken:?}"
+            );
+            assert_eq!(
+                doc.to_json(),
+                json!({ "mine": 1 }),
+                "the doc shows no half seed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seed_whose_tail_arrives_in_reverse_order_completes() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        doc.ingest(&frames[0]);
+        let reversed: Vec<&Verified> = frames[1..].iter().rev().collect();
+        for frame in reversed {
+            doc.ingest(frame);
+        }
+        ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(
+            doc.to_json(),
+            live,
+            "the chain in any order gives the live json"
+        );
+    }
+
+    #[test]
+    fn a_root_that_names_more_frames_than_the_bound_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let doc_of = state_doc_with(&live_state());
+        let chain = doc_of
+            .build_seed(3, &pad_seed(b"cutter"), within(600))
+            .expect("the live json splits");
+        let too_many = u32::try_from(DOC_SEED_FRAMES_MAX + 1).expect("fits");
+        let mark = SeedMark::new(too_many, chain.mark.last.clone());
+        let plain = change_body_timed(&chain.changes[0], None, 3, Some(&mark), Some(chain.time))
+            .expect("a body");
+        let who = signer(&cutter);
+        let message =
+            Message::new_channel_event(&MeshId::from("test"), &cutter, plain, Channel::State);
+        let root = Verified::fixture_unchecked(message.unverified_key(who), who);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        assert!(
+            matches!(doc.ingest(&root), Ingested::Ignored),
+            "a forged count is refused"
+        );
+        assert!(doc.candidate.is_none(), "no candidate is held");
+        assert!(
+            dropped_keys(&mut doc).contains(&root.dedup_key()),
+            "its key is forgotten"
+        );
+    }
+
+    #[test]
+    fn a_tail_frame_of_another_author_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (cutter, mallory) = (nick("cutter"), nick("mallory"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let foreign = seed_frames(&mallory, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        doc.ingest(&frames[0]);
+        let taken = doc.ingest(&foreign[1]);
+        assert!(
+            matches!(taken, Ingested::Ignored),
+            "a foreign tail frame is refused: {taken:?}"
+        );
+        assert!(
+            dropped_keys(&mut doc).contains(&foreign[1].dedup_key()),
+            "its key is forgotten"
+        );
+    }
+
+    #[test]
+    fn the_seed_chain_buffer_stays_inside_the_bound_at_ten_times_the_frames() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for _ in 0..10 {
+            for frame in &frames {
+                doc.ingest(frame);
+            }
+        }
+        let held = doc
+            .candidate
+            .as_ref()
+            .map_or(0, |candidate| candidate.tail.len() + 1);
+        assert_eq!(
+            held,
+            frames.len(),
+            "the candidate holds the chain once, not 10 times"
+        );
+    }
+
+    #[test]
+    fn a_joiner_that_holds_nothing_adopts_a_complete_seed_at_once_and_waits_for_the_rest() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let own = signer(&me);
+        for frame in &frames[..frames.len() - 1] {
+            doc.ingest(frame);
+            assert!(
+                doc.adopt_if_alone(&me, &own).is_none(),
+                "an incomplete seed is kept, not adopted"
+            );
+        }
+        doc.ingest(&frames[frames.len() - 1]);
+        let switch = doc
+            .adopt_if_alone(&me, &own)
+            .expect("the complete seed is adopted");
+        assert_eq!(switch.epoch, 3, "the switch names the epoch");
+        assert_eq!(doc.to_json(), live, "the joiner holds the live json");
+    }
+
+    #[test]
+    fn the_operations_of_the_applied_changes_are_counted_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        assert_eq!(doc.ops_held(), 0, "a new document holds no operation");
+        let first = write(&mut doc, &me, &json!({ "a": 1, "b": { "c": 2 } }));
+        assert_eq!(
+            doc.ops_held(),
+            3,
+            "a leaf, a map and a leaf are 3 operations"
+        );
+        write(&mut doc, &me, &json!({ "a": 5 }));
+        assert_eq!(doc.ops_held(), 4, "an overwrite is one more operation");
+        let again = doc.ingest(&first);
+        assert!(
+            matches!(again, Ingested::Duplicate),
+            "the same frame is a duplicate: {again:?}"
+        );
+        assert_eq!(doc.ops_held(), 4, "a duplicate adds no operation");
+    }
+
+    #[test]
+    fn the_cutter_and_an_adopter_hold_the_same_seed_counts_and_drop_the_old_ones() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter, joiner) = (nick("me"), nick("cutter"), nick("joiner"));
+        let mut doc = state_doc_with(&live_state());
+        let history_ops = doc.ops_held();
+        assert!(history_ops > 0, "the history of the cutter has operations");
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            doc.ingest(frame);
+            adopter.ingest(frame);
+        }
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            doc.tick_epoch(&me);
+            adopter.tick_epoch(&joiner);
+        }
+        assert_eq!(doc.epoch(), 3, "the cutter adopts its own seed");
+        assert_eq!(adopter.epoch(), 3, "the joiner adopts the seed");
+        assert!(
+            doc.seed_bytes() > 0 && doc.seed_ops() > 0,
+            "the cutter counts its seed: {} bytes, {} operations",
+            doc.seed_bytes(),
+            doc.seed_ops()
+        );
+        assert_eq!(
+            (doc.seed_bytes(), doc.seed_ops()),
+            (adopter.seed_bytes(), adopter.seed_ops()),
+            "the cutter and the adopter hold equal seed counts"
+        );
+        assert_eq!(
+            doc.ops_held(),
+            doc.seed_ops(),
+            "the operations of the old epoch are gone: the document holds the seed"
+        );
+    }
+
+    /// A state document with the lines of a small seed (40 frames: the cut is due at 1590
+    /// operations), and `leaves` leaves written in merges of 100.
+    fn small_state_doc(leaves: usize) -> MeshDoc {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write_leaves(&mut doc, &nick("me"), 0, leaves);
+        doc.limits(Limits::from_seed_frames(40))
+    }
+
+    /// Write the leaves `first` to `first + count` of the map `live`, 100 in each frame.
+    fn write_leaves(doc: &mut MeshDoc, who: &Nickname, first: usize, count: usize) {
+        let mut done = 0;
+        while done < count {
+            let take = 100.min(count - done);
+            let mut leaves = Map::new();
+            for leaf in 0..take {
+                leaves.insert(format!("l{:05}", first + done + leaf), json!(leaf));
+            }
+            write(doc, who, &json!({ "live": Value::Object(leaves) }));
+            done += take;
+        }
+    }
+
+    #[test]
+    fn a_cut_is_not_due_while_the_document_is_below_the_ceiling() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut doc = small_state_doc(500);
+        for _ in 0..20 {
+            doc.tick_epoch(&nick("me"));
+        }
+        assert!(
+            !doc.cut_due(0),
+            "{} operations are below the ceiling of {}",
+            doc.ops_held(),
+            Limits::from_seed_frames(40).ops.ceiling
+        );
+    }
+
+    #[test]
+    fn a_cut_is_due_at_the_ceiling_for_rank_0_at_once_and_for_rank_1_after_2_ticks() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = small_state_doc(1_700);
+        assert!(
+            !doc.cut_due(0),
+            "nothing says that the size crossed before a tick looks at it"
+        );
+        doc.tick_epoch(&me);
+        assert!(
+            doc.cut_due(0),
+            "rank 0 cuts at the tick that sees the crossing"
+        );
+        assert!(!doc.cut_due(1), "rank 1 waits 2 ticks");
+        doc.tick_epoch(&me);
+        assert!(
+            !doc.cut_due(1),
+            "1 tick after the crossing is too early for rank 1"
+        );
+        doc.tick_epoch(&me);
+        assert!(
+            doc.cut_due(1),
+            "2 ticks after the crossing is the slot of rank 1"
+        );
+        assert!(!doc.cut_due(2), "rank 2 waits 4 ticks");
+    }
+
+    #[test]
+    fn the_ranks_above_the_slotted_ones_wait_a_spread_that_the_tag_chooses() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = small_state_doc(1_700);
+        let slotted = u32::try_from(DOC_CUT_RANKS_SLOTTED).expect("a small number");
+        let first = DOC_CUT_SLOT_TICKS * slotted;
+        for _ in 0..first {
+            doc.tick_epoch(&me);
+        }
+        assert!(
+            !doc.cut_due(DOC_CUT_RANKS_SLOTTED),
+            "a node of rank 16 waits for the 16 slotted ranks, then its spread"
+        );
+        for _ in 0..=DOC_CUT_SPREAD_TICKS {
+            doc.tick_epoch(&me);
+        }
+        assert!(
+            doc.cut_due(DOC_CUT_RANKS_SLOTTED) && doc.cut_due(1_000),
+            "after the slots and the whole spread, every higher rank cuts"
+        );
+    }
+
+    #[test]
+    fn a_document_that_began_above_the_ceiling_does_not_cut_again_without_growth() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter, joiner) = (nick("me"), nick("cutter"), nick("joiner"));
+        let big = small_state_doc(1_700);
+        let frames = seed_frames_of(&big, &cutter, 3, None);
+        let mut doc = MeshDoc::new_ungated()
+            .state_epochs()
+            .limits(Limits::from_seed_frames(40));
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            doc.tick_epoch(&joiner);
+        }
+        assert_eq!(doc.epoch(), 3, "the document adopted the seed");
+        assert!(
+            doc.seed_ops() >= Limits::from_seed_frames(40).ops.ceiling,
+            "the seed itself is above the ceiling: {} operations",
+            doc.seed_ops()
+        );
+        for tick in 0..100 {
+            doc.tick_epoch(&joiner);
+            assert!(!doc.cut_due(0), "no growth since the seed, tick {tick}");
+        }
+        // The growth comes from the real lines, which refuse nothing at this size: the test is
+        // about the growth rule of the cut and not about the refusal of a write.
+        let small = doc.limits;
+        doc.limits = Limits::real();
+        write_leaves(&mut doc, &me, 10_000, 200);
+        doc.limits = small;
+        doc.tick_epoch(&joiner);
+        assert!(
+            doc.cut_due(0),
+            "200 operations of growth are above the growth of {}",
+            Limits::from_seed_frames(40).ops.growth
+        );
+    }
+
+    #[test]
+    fn a_failed_cut_holds_the_next_one_for_6_ticks_and_then_for_12() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = small_state_doc(1_700);
+        doc.tick_epoch(&me);
+        assert!(doc.cut_due(0), "the cut is due");
+        doc.note_cut_failed();
+        assert!(!doc.cut_due(0), "a failed cut holds the next one");
+        for tick in 1..DOC_CUT_BACKOFF_FIRST {
+            doc.tick_epoch(&me);
+            assert!(!doc.cut_due(0), "held at tick {tick} of 6");
+        }
+        doc.tick_epoch(&me);
+        assert!(doc.cut_due(0), "the 6th tick ends the hold");
+        doc.note_cut_failed();
+        for tick in 1..(2 * DOC_CUT_BACKOFF_FIRST) {
+            doc.tick_epoch(&me);
+            assert!(!doc.cut_due(0), "held at tick {tick} of 12");
+        }
+        doc.tick_epoch(&me);
+        assert!(doc.cut_due(0), "the 12th tick ends the second hold");
+        for _ in 0..10 {
+            doc.note_cut_failed();
+        }
+        for _ in 0..DOC_CUT_BACKOFF_MAX {
+            doc.tick_epoch(&me);
+        }
+        assert!(
+            doc.cut_due(0),
+            "the hold is at most {DOC_CUT_BACKOFF_MAX} ticks"
+        );
+    }
+
+    /// The leaves `first` to `first + count` as a merge of the map `live`.
+    fn leaves_merge(first: usize, count: usize) -> Value {
+        let mut leaves = Map::new();
+        for leaf in first..first + count {
+            leaves.insert(format!("l{leaf:05}"), json!(leaf % 10));
+        }
+        json!({ "live": Value::Object(leaves) })
+    }
+
+    /// The error that a write of `merge` to `doc` gives, if it gives one.
+    fn write_error(doc: &MeshDoc, merge: &Value) -> Option<DocError> {
+        doc.build_change(merge, &pad_seed(b"me")).err()
+    }
+
+    /// A state document with the lines of a small seed that holds `leaves` leaves: written with the
+    /// real lines (which refuse nothing at this size), and then given the small ones.
+    fn full_state_doc(leaves: usize) -> MeshDoc {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write_leaves(&mut doc, &nick("me"), 0, leaves);
+        doc.limits(Limits::from_seed_frames(40))
+    }
+
+    #[test]
+    fn a_write_that_adds_a_value_is_refused_when_the_next_seed_would_pass_the_refusal_line() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = full_state_doc(1_700);
+        let refused = write_error(&doc, &leaves_merge(5_000, 200));
+        assert!(
+            matches!(&refused, Some(DocError::StateFull { .. })),
+            "1 900 operations pass the refusal line of 1 802: {refused:?}"
+        );
+        let roomy = full_state_doc(700);
+        assert!(
+            write_error(&roomy, &leaves_merge(5_000, 100)).is_none(),
+            "800 operations and about 25 000 bytes of next seed are below both refusal lines"
+        );
+    }
+
+    #[test]
+    fn a_write_of_the_same_value_is_an_add_and_is_refused_at_the_line() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = full_state_doc(1_790);
+        let same = write_error(&doc, &leaves_merge(0, 30));
+        assert!(
+            matches!(&same, Some(DocError::StateFull { .. })),
+            "30 more operations pass the line, also for the same values: {same:?}"
+        );
+        let text = same.map(|error| error.to_string()).unwrap_or_default();
+        assert!(
+            text.contains("delete keys") && text.contains("also with the same value"),
+            "the text tells what to do: {text}"
+        );
+    }
+
+    #[test]
+    fn a_delete_passes_the_refusal_line_and_stops_at_the_memory_line() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut gone = Map::new();
+        for leaf in 0..10 {
+            gone.insert(format!("l{leaf:05}"), Value::Null);
+        }
+        let deletes = json!({ "live": Value::Object(gone) });
+        let above_the_line = full_state_doc(1_900);
+        assert!(
+            write_error(&above_the_line, &leaves_merge(5_000, 5)).is_some(),
+            "an add is refused above the refusal line"
+        );
+        assert!(
+            write_error(&above_the_line, &deletes).is_none(),
+            "a delete passes: the memory line is 2 120"
+        );
+        let at_memory = full_state_doc(2_115);
+        let refused = write_error(&at_memory, &deletes);
+        assert!(
+            matches!(&refused, Some(DocError::StateFull { .. })),
+            "a delete that passes the memory line is refused: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_merge_that_adds_a_value_deeper_than_12_levels_is_refused_and_a_delete_is_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated().state_epochs();
+        let nest = |levels: usize, leaf: Value| {
+            let mut merge = leaf;
+            for level in (0..levels).rev() {
+                merge = json!({ format!("k{level}"): merge });
+            }
+            merge
+        };
+        assert!(
+            write_error(&doc, &nest(12, json!(1))).is_none(),
+            "12 levels are allowed"
+        );
+        let deep = write_error(&doc, &nest(13, json!(1)));
+        assert!(
+            matches!(
+                &deep,
+                Some(DocError::StateTooDeep {
+                    depth: 13,
+                    limit: 12
+                })
+            ),
+            "13 levels are refused: {deep:?}"
+        );
+        assert!(
+            write_error(&doc, &nest(13, Value::Null)).is_none(),
+            "a delete of a key deeper than 12 levels passes"
+        );
+    }
+
+    #[test]
+    fn a_restore_is_not_refused_at_the_refusal_line_or_for_its_depth_but_it_is_over_the_memory_line()
+     {
+        let _guard = ::habilis_network_test_tracing::init();
+        let above_the_line = full_state_doc(1_900);
+        let merge = leaves_merge(5_000, 5);
+        assert!(
+            write_error(&above_the_line, &merge).is_some(),
+            "an add is refused above the refusal line"
+        );
+        let restored = above_the_line.build_restore(&merge, &pad_seed(b"me"));
+        assert!(
+            restored.is_ok(),
+            "a restore of the same values passes the refusal line"
+        );
+        let mut deep = json!(1);
+        for level in 0..13 {
+            deep = json!({ format!("k{level}"): deep });
+        }
+        assert!(
+            above_the_line
+                .build_restore(&deep, &pad_seed(b"me"))
+                .is_ok(),
+            "a restore of a value deeper than 12 levels is not refused for its depth"
+        );
+        let at_memory = full_state_doc(2_115);
+        let refused = at_memory.build_restore(&leaves_merge(5_000, 20), &pad_seed(b"me"));
+        assert!(
+            matches!(refused, Err(DocError::StateFull { .. })),
+            "a restore over the memory line is refused"
+        );
+    }
+
+    /// The bytes of the body of the frame of a seed that holds only the leaf `value` at `path`, with
+    /// the largest stamp.
+    fn seed_body_of(path: &[&str], value: &Value) -> usize {
+        let mut merge = value.clone();
+        let innermost_first = path.iter().rev();
+        for key in innermost_first {
+            merge = json!({ *key: merge });
+        }
+        let timeless = MeshDoc::new_ungated();
+        let change = change_of(&timeless, &merge, &pad_seed(b"me"));
+        let time = super::DOC_TIME_MAX - 1;
+        let worst = Stamp::new(time, "ffffffffffffffff".to_owned());
+        let body = change_body_tombstoned(&change, None, 1, None, Some(time), &[worst], &[]);
+        body.map_or(usize::MAX, |body| body.as_str().len())
+    }
+
+    #[test]
+    fn a_leaf_that_a_frame_of_a_seed_could_not_carry_is_refused_when_it_is_written() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated().state_epochs();
+        let fits_a_seed = |value: &Value| {
+            let body = seed_body_of(&["a", "b"], value);
+            body + super::DOC_EPOCH_FRAME_MARGIN + super::DOC_STATE_ENVELOPE_BYTES
+                <= super::MAX_MESSAGE_SIZE
+        };
+        let mut length = 1_000;
+        let mut largest_fitting = 0;
+        while length <= 3_200 {
+            let value = json!("x".repeat(length));
+            let refused = write_error(&doc, &json!({ "a": { "b": value.clone() } }));
+            let too_large = matches!(refused, Some(DocError::TooLarge { .. }));
+            assert_eq!(
+                too_large,
+                !fits_a_seed(&value),
+                "a leaf of {length} bytes: the write is refused exactly when its seed frame does not fit"
+            );
+            if !too_large {
+                largest_fitting = length;
+            }
+            length += 50;
+        }
+        assert!(
+            (2_000..3_000).contains(&largest_fitting),
+            "the largest leaf that is written is about 2 KB: {largest_fitting}"
+        );
+        assert!(
+            write_error(&doc, &json!({ "a": { "b": Value::Null } })).is_none(),
+            "a delete has no leaf to carry"
+        );
+    }
+
+    #[test]
+    fn a_document_with_no_state_epochs_has_no_lines() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let plain = MeshDoc::new_ungated().limits(Limits::from_seed_frames(40));
+        let merge = {
+            let mut deep = json!(1);
+            for level in 0..20 {
+                deep = json!({ format!("k{level}"): deep });
+            }
+            deep
+        };
+        assert!(
+            write_error(&plain, &merge).is_none(),
+            "a document with no state epochs refuses no write of depth or size"
+        );
+    }
+
+    /// The frames of `leaves` leaves of the map `live` that `who` writes into `doc`, 100 in each.
+    fn history_frames(doc: &mut MeshDoc, who: &Nickname, leaves: usize) -> Vec<Verified> {
+        let mut frames: Vec<Verified> = Vec::new();
+        let mut done = 0;
+        while done < leaves {
+            let take = 100.min(leaves - done);
+            frames.push(write(doc, who, &leaves_merge(done, take)));
+            done += take;
+        }
+        frames
+    }
+
+    /// Three nodes that hold the same 2 300 leaves: an author and a holder with the real lines, and
+    /// a refuser with the lines of a small seed, which is over its remote line (2 226 operations).
+    fn trio_with_a_refuser_over_the_remote_line() -> (MeshDoc, MeshDoc, MeshDoc) {
+        let mut origin = MeshDoc::new_ungated().state_epochs();
+        let frames = history_frames(&mut origin, &nick("base"), 2_300);
+        let mut author = MeshDoc::new_ungated().state_epochs();
+        let mut refuser = MeshDoc::new_ungated().state_epochs();
+        let mut holder = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            author.ingest(frame);
+            refuser.ingest(frame);
+            holder.ingest(frame);
+        }
+        let refuser = refuser.limits(Limits::from_seed_frames(40));
+        (author, refuser, holder)
+    }
+
+    #[test]
+    fn a_remote_frame_over_the_remote_line_is_refused_once_and_remembered() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame was refused: the state document is over its remote line",
+        );
+        let (mut author, mut refuser, mut holder) = trio_with_a_refuser_over_the_remote_line();
+        let frame = write(&mut author, &nick("me"), &json!({ "x": 1 }));
+        let outcome = holder.ingest(&frame);
+        assert!(
+            matches!(outcome, Ingested::Applied { .. }),
+            "a node under its line applies the frame"
+        );
+        let outcome_over_the_line = refuser.ingest(&frame);
+        assert!(
+            matches!(outcome_over_the_line, Ingested::Ignored),
+            "a node over its remote line refuses the frame"
+        );
+        assert_eq!(refuser.refused_remote(), 1, "the refusal is counted");
+        assert!(
+            refuser.to_json().get("x").is_none(),
+            "the refused frame changed nothing"
+        );
+        let again = refuser.ingest(&frame);
+        assert!(
+            matches!(again, Ingested::Ignored),
+            "the frame that is offered again is dropped"
+        );
+        assert_eq!(
+            (refuser.refused_remote(), refuser.refused_held()),
+            (1, 1),
+            "a frame that is dropped from the set is not counted again"
+        );
+    }
+
+    #[test]
+    fn the_set_of_refused_frames_stays_inside_its_cap_when_it_is_fed_10_times_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame was refused: the state document is over its remote line",
+        );
+        let (author, mut refuser, _holder) = trio_with_a_refuser_over_the_remote_line();
+        let cap = Limits::from_seed_frames(40).refused_max;
+        for index in 0..(10 * cap) {
+            // Each frame follows the history that the refuser holds, not the frame before it, so
+            // none of them waits for a dependency that it refused.
+            let frame = frame_on(&author, &nick("me"), &json!({ format!("k{index}"): 1 }));
+            refuser.ingest(&frame);
+            assert!(
+                refuser.refused_held() <= cap,
+                "{} hashes after {} frames, the cap is {cap}",
+                refuser.refused_held(),
+                index + 1
+            );
+        }
+        assert_eq!(
+            refuser.refused_remote(),
+            u64::try_from(10 * cap).expect("a small number"),
+            "every one of the frames was refused and counted"
+        );
+        assert_eq!(
+            refuser.refused_held(),
+            cap,
+            "the set is full and holds the newest"
+        );
+    }
+
+    #[test]
+    fn a_seed_that_a_node_over_its_remote_line_adopts_is_applied_whole() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (_author, mut refuser, _holder) = trio_with_a_refuser_over_the_remote_line();
+        let mut big = MeshDoc::new_ungated().state_epochs();
+        write_leaves(&mut big, &nick("me"), 0, 2_500);
+        let frames = seed_frames_of(&big, &nick("cutter"), 3, None);
+        for frame in &frames {
+            refuser.ingest(frame);
+        }
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            refuser.tick_epoch(&nick("refuser"));
+        }
+        assert_eq!(refuser.epoch(), 3, "the node adopted the seed");
+        assert_eq!(
+            refuser.to_json(),
+            big.to_json(),
+            "the seed is whole: the remote line does not apply to the frames of a seed"
+        );
+        assert_eq!(
+            refuser.refused_remote(),
+            0,
+            "no frame of the seed was refused"
+        );
+    }
+
+    /// The restore that `holder` writes after it adopted the seed of `refuser`, with the ticks that
+    /// the adoption and the jitter of the restore need.
+    fn restore_after_the_cut_of(refuser: &MeshDoc, holder: &mut MeshDoc) -> Option<Value> {
+        let cutter = nick("cutter");
+        let frames = seed_frames_of(refuser, &cutter, 3, None);
+        for frame in &frames {
+            holder.ingest(frame);
+        }
+        ticks(holder, &nick("holder"), super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        assert_eq!(
+            holder.epoch(),
+            3,
+            "the holder adopted the seed of the refuser"
+        );
+        ticks(holder, &nick("holder"), 3);
+        holder.take_restores().map(|(patch, _stamps)| patch)
+    }
+
+    #[test]
+    fn the_write_that_a_refuser_lost_comes_back_from_a_holder_when_the_author_has_left() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame was refused: the state document is over its remote line",
+        );
+        let (mut author, mut refuser, mut holder) = trio_with_a_refuser_over_the_remote_line();
+        let frame = write(&mut author, &nick("me"), &json!({ "x": 7 }));
+        holder.ingest(&frame);
+        refuser.ingest(&frame);
+        drop(author);
+        let patch = restore_after_the_cut_of(&refuser, &mut holder);
+        assert_eq!(
+            patch.as_ref().and_then(|patch| patch.get("x")),
+            Some(&json!(7)),
+            "the holder writes x again after the seed that lacks it: {patch:?}"
+        );
+    }
+
+    #[test]
+    fn a_delete_that_a_refuser_lost_is_written_again_by_a_holder_and_not_undone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame was refused: the state document is over its remote line",
+        );
+        let (mut author, mut refuser, mut holder) = trio_with_a_refuser_over_the_remote_line();
+        let gone = json!({ "live": { "l00005": Value::Null } });
+        let frame = write(&mut author, &nick("me"), &gone);
+        holder.ingest(&frame);
+        refuser.ingest(&frame);
+        assert!(
+            refuser.to_json().pointer("/live/l00005").is_some(),
+            "the refuser still holds the value that the delete removed"
+        );
+        let patch = restore_after_the_cut_of(&refuser, &mut holder);
+        assert_eq!(
+            patch
+                .as_ref()
+                .and_then(|patch| patch.pointer("/live/l00005")),
+            Some(&Value::Null),
+            "the holder writes the delete again, so the value of the seed is removed: {patch:?}"
+        );
+    }
+
+    #[test]
+    fn a_state_document_that_holds_a_candidate_has_no_cut_due() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let mut doc = small_state_doc(1_700);
+        doc.tick_epoch(&me);
+        assert!(doc.cut_due(0), "the cut is due");
+        let frames = seed_frames(&cutter, &live_state(), 7, None);
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        assert!(doc.has_candidate(), "the document holds the candidate");
+        assert!(
+            !doc.cut_due(0),
+            "a node that holds a candidate adopts it and does not cut"
+        );
+    }
+
+    #[test]
+    fn a_state_document_made_for_the_daemon_has_epochs_the_cap_and_the_wait_for_the_first_sync() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_state(None);
+        assert!(doc.has_state_epochs(), "the state channel has epochs");
+        let change = change_of(&doc, &json!({ "a": 1 }), &pad_seed(b"me"));
+        let outcome = doc.compose_wire_body(&change, None);
+        assert!(
+            matches!(outcome, Err(DocError::ClockNotReady)),
+            "the body of a write waits for the first sync: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn the_epoch_switch_of_a_state_document_carries_no_entry() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        let switch = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(
+            switch.own_entry, None,
+            "a state switch has no entry to write again"
+        );
+        assert_eq!(switch.map, "", "a state switch names no per-peer map");
+        assert_eq!(
+            switch.replay, None,
+            "a node that holds nothing writes nothing again"
+        );
+    }
+
+    #[test]
+    fn a_seed_on_a_passworded_mesh_is_adopted_through_its_sealed_frames() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let key = SymmetricKey::from([7u8; 32]);
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, Some(&key));
+        let mut doc = MeshDoc::new_ungated().state_epochs().key(Some(key));
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(doc.to_json(), live, "the sealed seed gives the live json");
+    }
+
+    /// Golden: the hash of the genesis of state epochs 1, 2 and a large one. A replica of another
+    /// build must reach the same hash, or the epoch frames of the two builds do not meet. The large
+    /// epoch pins the encoding of the `u64` that the genesis writes.
+    #[test]
+    fn state_genesis_bytes_are_pinned() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let pinned = [
+            (
+                1,
+                "bfb565389605341479209de04fbd2be2ba2d7831ab1fc4f0cf162293a8e8e1f5",
+            ),
+            (
+                2,
+                "2938c155a12397b7bad436dba6ad3bde04358dbbdceca75a1b2c37906def0171",
+            ),
+            (
+                u64::MAX,
+                "b0c86ed12e33b25a1d80657a967aff0ce9650e223856399771c09484e13c00f1",
+            ),
+        ];
+        for (epoch, hex) in pinned {
+            assert_eq!(
+                super::state_genesis(epoch).hash().to_string(),
+                hex,
+                "the state genesis hash of epoch {epoch} is pinned"
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_genesis_leaves_no_key_and_differs_per_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut doc = automerge::Automerge::new();
+        doc.apply_changes([super::state_genesis(3)])
+            .expect("the genesis applies");
+        assert_eq!(
+            doc.get_changes(&[]).len(),
+            1,
+            "the genesis is one change, though it leaves no key"
+        );
+        let json = serde_json::to_value(automerge::AutoSerde::from(&doc)).expect("json");
+        assert_eq!(
+            json,
+            json!({}),
+            "the genesis of a state epoch leaves no key"
+        );
+        let hash = |epoch| super::state_genesis(epoch).hash();
+        assert_ne!(hash(1), hash(2), "epoch 2 has another genesis than epoch 1");
+        assert_ne!(
+            hash(1),
+            super::peers_genesis("peers", 1).hash(),
+            "the state genesis is not the meta genesis"
+        );
+    }
+
+    #[test]
+    fn an_ungated_document_restarted_at_an_epoch_holds_the_genesis_of_that_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated().at_epoch(3);
+        assert_eq!(doc.epoch(), 3, "the epoch is 3");
+        assert_eq!(doc.change_count(), 1, "the document holds its genesis");
+        assert_eq!(doc.to_json(), json!({}), "the genesis leaves no key");
+        let fresh = MeshDoc::new_ungated();
+        assert_eq!(
+            fresh.change_count(),
+            0,
+            "epoch 0 of a state document has no genesis"
+        );
     }
 
     #[test]
