@@ -392,6 +392,9 @@ pub struct DocCensus {
     pub refused_time: u64,
     /// The paths of a seed that got the stamp 0 for want of a time, since the document began.
     pub unstamped_paths: u64,
+    /// The restores that were dropped because the map of restores was full, since the document
+    /// began.
+    pub dropped_restores: u64,
 }
 
 /// The bytes of a frame on the wire, 0 for a frame that does not serialize.
@@ -482,6 +485,8 @@ pub struct MeshDoc {
     /// node just set: the replay won in automerge but has the lower stamp, so this node writes its
     /// value again (see [`Self::take_restores`]). At most `DOC_SEED_TOMBSTONES_MAX` paths.
     restores: BTreeMap<Vec<String>, (Value, Stamp)>,
+    /// The restores that were dropped because the map was full (see [`Self::dropped_restores`]).
+    restores_dropped: u64,
     /// Whether local writes wait for the end of the first sync (see [`Self::awaiting_first_sync`]).
     awaiting_sync: bool,
     /// The stamps that the changes of the adopted seed name, for each change and each path that it
@@ -572,6 +577,7 @@ impl MeshDoc {
             refused_time: 0,
             unstamped: AtomicU64::new(0),
             restores: BTreeMap::new(),
+            restores_dropped: 0,
             awaiting_sync: false,
             origins: HashMap::new(),
             tombstones: BTreeMap::new(),
@@ -812,6 +818,7 @@ impl MeshDoc {
             peer_nicks,
             refused_time: self.refused_time,
             unstamped_paths: self.unstamped.load(Ordering::Relaxed),
+            dropped_restores: self.restores_dropped,
         }
     }
 
@@ -1952,16 +1959,36 @@ impl MeshDoc {
                 None
             };
             let Some(kept) = kept else { continue };
-            if self.restores.len() >= DOC_SEED_TOMBSTONES_MAX && !self.restores.contains_key(path) {
-                continue;
+            self.keep_restore(path.clone(), kept);
+        }
+    }
+
+    /// Keep a restore for `path`, unless one with a higher stamp waits. A restore that finds the map
+    /// full (`DOC_SEED_TOMBSTONES_MAX` paths) is dropped, which is a newer write that the node
+    /// cannot write again: it is counted and warned, never silent.
+    fn keep_restore(&mut self, path: Vec<String>, kept: (Value, Stamp)) {
+        if self.restores.len() >= DOC_SEED_TOMBSTONES_MAX && !self.restores.contains_key(&path) {
+            self.restores_dropped = self.restores_dropped.saturating_add(1);
+            if let Some(dropped) =
+                self.warn_due("a restore was dropped: the map of restores is full")
+            {
+                tracing::warn!(target: LOG_TARGET, dropped, "a restore was dropped: the map of restores is full");
             }
-            match self.restores.get(path) {
-                Some(held) if held.1 >= kept.1 => {}
-                _ => {
-                    self.restores.insert(path.clone(), kept);
-                }
+            return;
+        }
+        match self.restores.get(&path) {
+            Some(held) if held.1 >= kept.1 => {}
+            _ => {
+                self.restores.insert(path, kept);
             }
         }
+    }
+
+    /// How many restores were dropped because the map of restores was full, since the document
+    /// began. Each one is a newer write that this node could not write again.
+    #[must_use]
+    pub fn dropped_restores(&self) -> u64 {
+        self.restores_dropped
     }
 
     /// Whether a value waits to be written again (see [`Self::take_restores`]).
@@ -5198,6 +5225,45 @@ mod tests {
             doc.take_restores(),
             None,
             "a delete of a higher stamp governs the leaf, so the restore is stale"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_finds_the_map_full_is_dropped_counted_and_warned() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a restore was dropped: the map of restores is full",
+        );
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let stamp = Stamp::new(5, "aa".to_owned());
+        for index in 0..super::DOC_SEED_TOMBSTONES_MAX {
+            doc.keep_restore(vec![format!("k{index}")], (json!(index), stamp.clone()));
+        }
+        assert_eq!(
+            doc.dropped_restores(),
+            0,
+            "nothing was dropped while there was room"
+        );
+        doc.keep_restore(vec!["one-more".to_owned()], (json!(0), stamp.clone()));
+        assert_eq!(
+            doc.dropped_restores(),
+            1,
+            "the one that found the map full is counted"
+        );
+        assert_eq!(
+            doc.census(false).dropped_restores,
+            1,
+            "and the census carries it"
+        );
+        doc.keep_restore(
+            vec!["k0".to_owned()],
+            (json!(9), Stamp::new(9, "aa".to_owned())),
+        );
+        assert_eq!(
+            doc.dropped_restores(),
+            1,
+            "a path that is there is updated, not dropped"
         );
     }
 
