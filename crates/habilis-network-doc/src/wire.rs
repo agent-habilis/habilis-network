@@ -13,6 +13,40 @@ use crate::DocError;
 use habilis_network_protocol::messages::MessageBody;
 
 use habilis_network_protocol::seal_error;
+/// What the root frame of a state seed says about the chain that it starts: how many frames the
+/// chain has, the root included, and the hash of the last change (hex). A node adopts a seed only
+/// when it holds a chain that matches this mark.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SeedMark {
+    /// The number of frames of the chain, the root included.
+    #[serde(rename = "n")]
+    pub frames: u32,
+    /// The hash of the last change of the chain, in hex.
+    #[serde(rename = "l")]
+    pub last: String,
+}
+
+impl SeedMark {
+    /// A mark for a chain of `frames` frames whose last change has the hash `last`, in hex.
+    #[must_use]
+    pub fn new(frames: u32, last: String) -> Self {
+        Self { frames, last }
+    }
+}
+
+/// A change body, read back: the change bytes, the epoch, and the seed mark of a seed root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ParsedChange {
+    /// The automerge change bytes.
+    pub bytes: Vec<u8>,
+    /// The epoch of the change, 0 when the body has none.
+    pub epoch: u64,
+    /// The mark of a seed root, `None` for any other change.
+    pub seed: Option<SeedMark>,
+}
+
 /// The tagged `State`/`Meta` message body.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "k", rename_all = "snake_case")]
@@ -32,6 +66,9 @@ enum StateOp<'merge> {
         /// body of epoch 0 is the body from before epochs.
         #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u64>,
+        /// The mark of a state seed root (wire key `s`). Left out of every other body.
+        #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
+        seed: Option<SeedMark>,
     },
     /// The pre-automerge RFC 7386 merge shape. Retained only so a body still
     /// composes for the adversarial harness; the automerge engine ignores it (a
@@ -104,11 +141,26 @@ pub fn change_body_at(
     merge: Option<&Value>,
     epoch: u64,
 ) -> Result<MessageBody, DocError> {
+    change_body_seed(change, merge, epoch, None)
+}
+
+/// [`change_body_at`] for the root of a state seed, which carries the `seed` mark of its chain.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_seed(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+    seed: Option<&SeedMark>,
+) -> Result<MessageBody, DocError> {
     let tagged: Option<u64> = (epoch != 0).then_some(epoch);
+    let mark: Option<SeedMark> = seed.cloned();
     let json = serde_json::to_string(&StateOp::Change {
         data: bs58::encode(change).into_string(),
         merge: merge.map(Cow::Borrowed),
         epoch: tagged,
+        seed: mark,
     })
     .map_err(DocError::encode)?;
     Ok(MessageBody::try_new(&json)?)
@@ -137,11 +189,21 @@ pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
 /// [`parse_change_body`] with the epoch of the change. A body with no epoch reads as epoch 0.
 #[must_use]
 pub fn parse_change(body: &str) -> Option<(Vec<u8>, u64)> {
+    parse_change_full(body).map(|parsed| (parsed.bytes, parsed.epoch))
+}
+
+/// [`parse_change`] with the seed mark of a seed root.
+#[must_use]
+pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
     let op: StateOp<'_> = serde_json::from_str(body).ok()?;
     match op {
-        StateOp::Change { data, epoch, .. } => {
-            Some((bs58::decode(&data).into_vec().ok()?, epoch.unwrap_or(0)))
-        }
+        StateOp::Change {
+            data, epoch, seed, ..
+        } => Some(ParsedChange {
+            bytes: bs58::decode(&data).into_vec().ok()?,
+            epoch: epoch.unwrap_or(0),
+            seed,
+        }),
         StateOp::Merge { .. } | StateOp::Enc { .. } => None,
     }
 }
@@ -219,13 +281,37 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        change_body, change_body_at, decrypt_body, encrypt_body, merge_body, parse_change,
-        parse_change_body,
+        SeedMark, change_body, change_body_at, change_body_seed, decrypt_body, encrypt_body,
+        merge_body, parse_change, parse_change_body, parse_change_full,
     };
     use habilis_network_protocol::SymmetricKey;
 
     fn key(byte: u8) -> SymmetricKey {
         SymmetricKey::from([byte; 32])
+    }
+
+    #[test]
+    fn a_seed_mark_reads_back_and_a_body_without_one_is_unchanged() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mark = SeedMark {
+            frames: 565,
+            last: "ab".repeat(32),
+        };
+        let body = change_body_seed(&[1, 2], None, 4, Some(&mark)).expect("a seed root body");
+        let parsed = parse_change_full(body.as_str()).expect("it parses");
+        assert_eq!(parsed.bytes, vec![1, 2], "the change bytes read back");
+        assert_eq!(parsed.epoch, 4, "the epoch reads back");
+        assert_eq!(parsed.seed, Some(mark), "the mark reads back");
+        let plain = change_body_at(&[1, 2], None, 4).expect("a body");
+        assert_eq!(
+            parse_change_full(plain.as_str()).expect("it parses").seed,
+            None,
+            "a body without a mark reads with none"
+        );
+        assert!(
+            !plain.as_str().contains("\"s\""),
+            "a body without a mark adds nothing to the wire"
+        );
     }
 
     #[test]
