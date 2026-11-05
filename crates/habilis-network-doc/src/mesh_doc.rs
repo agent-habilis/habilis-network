@@ -872,7 +872,7 @@ impl MeshDoc {
     /// Let this ungated document keep the root of a higher epoch as a candidate. Call it only on a
     /// node that ticks the state channel, because a candidate that no tick adopts or drops holds
     /// its frames for ever. This is a development guard and no runtime switch: nodes that
-    /// disagree on it would diverge. Step 4 removes it, and every node of frame version 13.0 has
+    /// disagree on it would diverge. Step 4 removes it, and every node of frame version 14.0 has
     /// state epochs.
     #[must_use]
     pub fn state_epochs(mut self) -> Self {
@@ -3754,7 +3754,7 @@ mod tests {
     }
 
     /// The bytes that one fixture frame takes on the wire, counted by hand from its JSON, on the
-    /// mesh `test`: 103 bytes of fixed text (the keys, the quotes, the commas and `{"v":"13.0"`
+    /// mesh `test`: 103 bytes of fixed text (the keys, the quotes, the commas and `{"v":"14.0"`
     /// through `"ext":{}}`), a 36 byte id, a 62 byte mesh id, a 10 digit timestamp, a 64 byte hex
     /// key and a 128 byte hex signature, which is 300 bytes, and then the author and the body. The
     /// body is written as a JSON string, so each of its quotes costs one more byte for the
