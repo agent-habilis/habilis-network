@@ -2239,6 +2239,43 @@ impl EventLoopState {
         }
     }
 
+    /// Place the endpoint that `key` published under `nickname`: as the dial hint of the nickname,
+    /// or, when another key holds it, as the endpoint retained for `key`. A key that said
+    /// goodbye never speaks again, so what it published is a replay and binds nothing. Another
+    /// key under the same nickname binds no hint while the key that made the hint is in the
+    /// roster, or while another live key holds the nickname: a directed send must not reach a
+    /// node that only borrowed the label. One rule for a `PeerInfo` and for a meta card.
+    pub(crate) fn place_endpoint(
+        &mut self,
+        key: AuthorKey,
+        nickname: &Nickname,
+        endpoint: EndpointAddr,
+    ) {
+        if self.key_said_goodbye(key) {
+            return;
+        }
+        let held = self.hint_is_held_by_other(nickname, key)
+            || self.nickname_is_taken_by_live_other(nickname, key);
+        if held {
+            self.retain_refused_endpoint(key, endpoint);
+        } else {
+            self.bind_peer_endpoint(key, nickname.clone(), endpoint);
+            self.release_refused_endpoint(&key);
+        }
+    }
+
+    /// Bind the endpoint that the meta card of `key` names as its dial hint, as the `PeerInfo` of
+    /// the key does, so a send to the key is deliverable before the `PeerInfo` comes. The rule is
+    /// the one of a `PeerInfo`: a second live key of a nickname gets the endpoint retained for it,
+    /// and a send to that key dials it. A key with no name in the roster, and a key that said
+    /// goodbye, bind nothing.
+    pub fn note_key_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
+        let Some(nickname) = self.names.get(&key).cloned() else {
+            return;
+        };
+        self.place_endpoint(key, &nickname, endpoint);
+    }
+
     /// Bind the retained endpoint of each key that is now the only live key of its nickname, with
     /// the flow of a `PeerInfo`, and drop the retained value.
     pub(crate) fn rebind_refused_endpoints(&mut self) {

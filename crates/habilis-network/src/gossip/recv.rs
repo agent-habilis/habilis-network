@@ -1560,20 +1560,12 @@ async fn handle_peer_info(
     // nothing while the key that made the hint is still in the roster: a directed send must not
     // reach a node that only borrowed the label.
     let hinter = message.key();
-    let may_bind: bool = !state.key_said_goodbye(hinter)
-        && !state.hint_is_held_by_other(&message.author, hinter)
-        && !state.nickname_is_taken_by_live_other(&message.author, hinter);
     // Whether the address differs from the one registered for this endpoint. A dial hint is no
     // registration: a hint of another nickname can name the address that nothing put in the book.
     // It does not depend on `may_bind`: a rival key binds no hint, but its address is still a
     // path to its node.
     let changed = !state.unicast_pool.remembers_address(&peer_addr);
-    if may_bind {
-        state.bind_peer_endpoint(message.key(), message.author.clone(), peer_addr.clone());
-        state.release_refused_endpoint(&hinter);
-    } else if !state.key_said_goodbye(hinter) {
-        state.retain_refused_endpoint(hinter, peer_addr.clone());
-    }
+    state.place_endpoint(hinter, &message.author, peer_addr.clone());
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.

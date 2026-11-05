@@ -1012,6 +1012,104 @@ mod tests {
         );
     }
 
+    /// A card in the meta channel names the endpoint of its key before the `PeerInfo` of that key
+    /// comes. `note_key_endpoint` binds it as the dial hint of the key, so a send to the key is
+    /// deliverable at once, and the `PeerInfo` that follows finds the same binding.
+    #[test]
+    fn a_card_endpoint_makes_the_key_deliverable_before_its_peer_info() {
+        let mut state = fresh_state();
+        let bob = test_key("bob");
+        let endpoint = endpoint_id(61);
+        seat(&mut state, bob, "bob", true);
+        assert!(
+            state.address_of(&bob).is_none(),
+            "no address before the card"
+        );
+
+        state.note_key_endpoint(bob, iroh::EndpointAddr::new(endpoint));
+
+        assert_eq!(
+            state.address_of(&bob).map(|address| address.id),
+            Some(endpoint),
+            "a send to the key has no address after its card"
+        );
+        assert_eq!(
+            state.hint_owner.get(&nick("bob")),
+            Some(&bob),
+            "the hint belongs to the key of the card"
+        );
+        state.bind_peer_endpoint(bob, nick("bob"), iroh::EndpointAddr::new(endpoint));
+        assert_eq!(
+            state.address_of(&bob).map(|address| address.id),
+            Some(endpoint),
+            "the PeerInfo that follows moved the address"
+        );
+    }
+
+    /// Two live keys share a nickname and the first owns the dial hint. The card of the second
+    /// binds no hint: a directed send to the nickname must not reach a node that only borrowed
+    /// the label. The endpoint waits for the second key, which a send to that key dials.
+    #[test]
+    fn the_card_endpoint_of_a_second_live_key_of_a_nickname_is_refused_not_bound() {
+        let mut state = fresh_state();
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint) = (endpoint_id(62), endpoint_id(63));
+        seat(&mut state, first, "bob", true);
+        seat(&mut state, second, "bob", true);
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+
+        state.note_key_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+
+        assert_eq!(
+            state
+                .peer_endpoints
+                .get(&nick("bob"))
+                .map(|address| address.id),
+            Some(first_endpoint),
+            "the hint of the nickname moved to the second key"
+        );
+        assert_eq!(
+            state
+                .refused_endpoints
+                .get(&second)
+                .map(|address| address.id),
+            Some(second_endpoint),
+            "the endpoint of the second key was not kept"
+        );
+        assert_eq!(
+            state.address_of(&second).map(|address| address.id),
+            Some(second_endpoint),
+            "a send to the second key does not dial its own endpoint"
+        );
+        assert_eq!(
+            state.address_of(&first).map(|address| address.id),
+            Some(first_endpoint),
+            "the first key lost its endpoint"
+        );
+    }
+
+    /// A card binds nothing for a key that said goodbye, since a key never speaks again and the
+    /// card is a replay, and nothing for a key that no roster holds: no name, no hint.
+    #[test]
+    fn a_card_endpoint_binds_nothing_for_a_departed_key_or_a_stranger() {
+        let mut state = fresh_state();
+        let (departed, stranger) = (test_key("departed"), test_key("stranger"));
+        seat(&mut state, departed, "departed", true);
+        state.note_left(departed);
+
+        state.note_key_endpoint(departed, iroh::EndpointAddr::new(endpoint_id(64)));
+        state.note_key_endpoint(stranger, iroh::EndpointAddr::new(endpoint_id(65)));
+
+        assert!(
+            state.address_of(&departed).is_none() && state.address_of(&stranger).is_none(),
+            "a card bound an endpoint for a departed key or a stranger"
+        );
+        assert!(
+            state.peer_endpoints.is_empty() && state.refused_endpoints.is_empty(),
+            "a card left a hint or a retained endpoint behind"
+        );
+    }
+
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
     #[test]
