@@ -1,4 +1,3 @@
-//! The proofs of sessions this node has verified, and the answers it sends for the ones it is asked.
 #![cfg_attr(
     not(test),
     expect(
