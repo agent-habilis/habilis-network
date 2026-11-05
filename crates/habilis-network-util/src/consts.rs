@@ -202,6 +202,28 @@ pub const DOC_STATE_DEPTH_MAX: usize = 12;
 /// real document that was measured has 1 204 paths.
 pub const DOC_STATE_PATHS_BREAK_EVEN: usize = 26_667;
 
+/// The ticks that a node of rank `r` waits before it cuts a seed, for each rank, counted from the
+/// tick in which the size first crossed the cut ceiling: rank 0 cuts at once, rank 1 after 2 ticks.
+/// The seed of the node that cuts first reaches the others in seconds and turns them into holders of
+/// a candidate, so they do not cut. A slot of 2 ticks covers the phase between the timers of two
+/// nodes.
+pub const DOC_CUT_SLOT_TICKS: u32 = 2;
+
+/// The ranks that have a slot of their own. A node of a higher rank waits `DOC_CUT_SLOT_TICKS x 16`
+/// ticks and then a spread of `DOC_CUT_SPREAD_TICKS`, chosen by its tag, so that the ranks that
+/// were waiting for the first 16 nodes do not all cut in one tick.
+pub const DOC_CUT_RANKS_SLOTTED: usize = 16;
+
+/// The spread, in ticks, of the nodes above `DOC_CUT_RANKS_SLOTTED`.
+pub const DOC_CUT_SPREAD_TICKS: u32 = 16;
+
+/// The ticks that a node holds its cut after the first failed cut. Each failure doubles the wait, up
+/// to `DOC_CUT_BACKOFF_MAX`, and an adopted seed sets it back.
+pub const DOC_CUT_BACKOFF_FIRST: u32 = 6;
+
+/// The longest wait, in ticks, after failed cuts (about 1 hour).
+pub const DOC_CUT_BACKOFF_MAX: u32 = 64;
+
 /// The longest path (the bytes of its keys) that gets a tombstone. A delete of a longer path is
 /// written and counted, and has no tombstone.
 pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;

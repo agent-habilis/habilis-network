@@ -9,10 +9,11 @@ use serde_json::{Map, Value};
 use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
 use habilis_network_util::consts::{
-    DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
-    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_RESTORES_MAX,
-    DOC_SEED_FRAMES_MAX, DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX,
-    DOC_TOMBSTONE_PATH_BYTES_MAX,
+    DOC_CUT_BACKOFF_FIRST, DOC_CUT_BACKOFF_MAX, DOC_CUT_RANKS_SLOTTED, DOC_CUT_SLOT_TICKS,
+    DOC_CUT_SPREAD_TICKS, DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES,
+    DOC_EPOCH_JUMP_MAX, DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX,
+    DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX, DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX,
+    DOC_STATE_EPOCH_FRAME_CAP_BYTES, DOC_TOMBSTONE_PATH_BYTES_MAX,
 };
 
 use crate::wire::SeedMark;
@@ -515,6 +516,13 @@ pub struct MeshDoc {
     seed_ops: usize,
     /// The lines of this document.
     limits: Limits,
+    /// The ticks since the size of this document first crossed the cut ceiling, `None` while it
+    /// is below it.
+    crossed_ticks: Option<u32>,
+    /// The ticks that the document still holds its cut after a failed cut, and the wait that the
+    /// next failure sets.
+    cut_wait: u32,
+    cut_backoff: u32,
     /// The frame bytes of the epoch when it settled, 0 before. The live entries are back by then.
     settled_bytes: usize,
     /// The frame bytes that start a reset, before the settled size is known.
@@ -625,6 +633,9 @@ impl MeshDoc {
             seed_bytes: 0,
             seed_ops: 0,
             limits: Limits::real(),
+            crossed_ticks: None,
+            cut_wait: 0,
+            cut_backoff: DOC_CUT_BACKOFF_FIRST,
             settled_bytes: 0,
             frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
             state_epochs: false,
@@ -910,6 +921,90 @@ impl MeshDoc {
         self.seed_ops
     }
 
+    /// A state document for the daemon: epochs on, no gate, the cap of the state channel, and a
+    /// clock that waits for the first sync (see [`Self::awaiting_first_sync`]).
+    #[must_use]
+    pub fn new_state(key: Option<SymmetricKey>) -> Self {
+        Self::new_ungated()
+            .state_epochs()
+            .key(key)
+            .epoch_cap(DOC_STATE_EPOCH_FRAME_CAP_BYTES)
+            .awaiting_first_sync()
+    }
+
+    /// Whether this document has state epochs.
+    #[must_use]
+    pub fn has_state_epochs(&self) -> bool {
+        self.state_epochs
+    }
+
+    /// Whether a cut of the state document is due for a node of `rank` among the nodes that it
+    /// sees alive. The size of the document must have crossed the cut ceiling (see [`Limits`]) and
+    /// grown by the growth of a cut since its seed, and the node must have waited the slot of its
+    /// rank: rank 0 at once, rank `r` for `2 x r` ticks, and a node of rank 16 or more for 32
+    /// ticks and a spread that its tag chooses. A node that holds a candidate does not cut, and a
+    /// node that a failed cut holds does not cut until the hold ends. The ticks are those of
+    /// [`Self::tick_epoch`]. The rank is soft: a wrong view of the nodes delays or doubles a cut and
+    /// never blocks it, because the higher ranks cut after the spread.
+    #[must_use]
+    pub fn cut_due(&self, rank: usize) -> bool {
+        if !self.state_epochs
+            || self.gate.is_some()
+            || self.candidate.is_some()
+            || self.cut_wait > 0
+        {
+            return false;
+        }
+        self.crossed_ticks
+            .is_some_and(|waited| waited >= self.cut_delay(rank))
+    }
+
+    /// The ticks that a node of `rank` waits after it sees the size cross the ceiling.
+    fn cut_delay(&self, rank: usize) -> u32 {
+        if rank < DOC_CUT_RANKS_SLOTTED {
+            let slot = u32::try_from(rank).unwrap_or(u32::MAX);
+            return DOC_CUT_SLOT_TICKS.saturating_mul(slot);
+        }
+        let slotted = u32::try_from(DOC_CUT_RANKS_SLOTTED).unwrap_or(u32::MAX);
+        let tag = self.own_tag.load(Ordering::Relaxed) ^ self.epoch;
+        let spread = u32::try_from(tag % u64::from(DOC_CUT_SPREAD_TICKS)).unwrap_or(0);
+        DOC_CUT_SLOT_TICKS.saturating_mul(slotted) + spread
+    }
+
+    /// Tell the document that the cut that it asked for failed: it holds the next cut for a wait
+    /// that doubles at each failure, from `DOC_CUT_BACKOFF_FIRST` ticks to `DOC_CUT_BACKOFF_MAX`.
+    pub fn note_cut_failed(&mut self) {
+        self.cut_wait = self.cut_backoff;
+        self.cut_backoff = self.cut_backoff.saturating_mul(2).min(DOC_CUT_BACKOFF_MAX);
+    }
+
+    /// Whether the size of this document is at the cut ceiling, on the bytes of the next seed or on
+    /// the operations, and has grown by the growth of a cut since its seed.
+    fn size_crossed(&self) -> bool {
+        let growth_bytes = self.frame_bytes.saturating_sub(self.seed_bytes);
+        let growth_ops = self.ops_held.saturating_sub(self.seed_ops);
+        let clock = self.clock.load(Ordering::Relaxed);
+        let projected = Limits::projected_bytes(self.seed_bytes, growth_bytes, growth_ops, clock);
+        let bytes = &self.limits.bytes;
+        let ops = &self.limits.ops;
+        (projected >= bytes.ceiling && growth_bytes >= bytes.growth)
+            || (self.ops_held >= ops.ceiling && growth_ops >= ops.growth)
+    }
+
+    /// One tick of the size of a free-form state document: count the ticks since it crossed the
+    /// ceiling, and let the hold of a failed cut run down.
+    fn watch_size(&mut self) {
+        self.cut_wait = self.cut_wait.saturating_sub(1);
+        self.crossed_ticks = if self.size_crossed() {
+            Some(
+                self.crossed_ticks
+                    .map_or(0, |waited| waited.saturating_add(1)),
+            )
+        } else {
+            None
+        };
+    }
+
     /// Set the lines of this document, for a test that wants a small seed.
     #[must_use]
     pub fn limits(mut self, limits: Limits) -> Self {
@@ -1130,6 +1225,9 @@ impl MeshDoc {
     /// state epoch work lands (`state-epoch-design.md`).
     pub fn tick_epoch(&mut self, me: &Nickname) -> Option<EpochSwitch> {
         self.epoch_ticks = self.epoch_ticks.saturating_add(1);
+        if self.state_epochs && self.gate.is_none() {
+            self.watch_size();
+        }
 
         if self.candidate.is_some() {
             self.candidate_ticks = self.candidate_ticks.saturating_add(1);
@@ -1384,6 +1482,9 @@ impl MeshDoc {
         self.ops_held = 0;
         self.seed_bytes = 0;
         self.seed_ops = 0;
+        self.crossed_ticks = None;
+        self.cut_wait = 0;
+        self.cut_backoff = DOC_CUT_BACKOFF_FIRST;
         self.pending = HashMap::new();
         self.candidate = None;
         self.candidate_ticks = 0;
@@ -3088,8 +3189,9 @@ fn put_number(
 #[cfg(test)]
 mod tests {
     use super::{
-        DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_FRAMES_MAX, Ingested, MeshDoc,
-        SelfWriteGate,
+        DOC_CUT_BACKOFF_FIRST, DOC_CUT_BACKOFF_MAX, DOC_CUT_RANKS_SLOTTED, DOC_CUT_SLOT_TICKS,
+        DOC_CUT_SPREAD_TICKS, DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_FRAMES_MAX,
+        Ingested, Limits, MeshDoc, SelfWriteGate,
     };
     use crate::wire::{
         SeedMark, change_body_stamped, change_body_timed, change_body_tombstoned, encrypt_body,
@@ -6355,6 +6457,196 @@ mod tests {
             doc.ops_held(),
             doc.seed_ops(),
             "the operations of the old epoch are gone: the document holds the seed"
+        );
+    }
+
+    /// A state document with the lines of a small seed (40 frames: the cut is due at 1590
+    /// operations), and `leaves` leaves written in merges of 100.
+    fn small_state_doc(leaves: usize) -> MeshDoc {
+        let me = nick("me");
+        let mut doc = MeshDoc::new_ungated()
+            .state_epochs()
+            .limits(Limits::from_seed_frames(40));
+        write_leaves(&mut doc, &me, 0, leaves);
+        doc
+    }
+
+    /// Write the leaves `first` to `first + count` of the map `live`, 100 in each frame.
+    fn write_leaves(doc: &mut MeshDoc, who: &Nickname, first: usize, count: usize) {
+        let mut done = 0;
+        while done < count {
+            let take = 100.min(count - done);
+            let mut leaves = Map::new();
+            for leaf in 0..take {
+                leaves.insert(format!("l{:05}", first + done + leaf), json!(leaf));
+            }
+            write(doc, who, &json!({ "live": Value::Object(leaves) }));
+            done += take;
+        }
+    }
+
+    #[test]
+    fn a_cut_is_not_due_while_the_document_is_below_the_ceiling() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut doc = small_state_doc(500);
+        for _ in 0..20 {
+            doc.tick_epoch(&nick("me"));
+        }
+        assert!(
+            !doc.cut_due(0),
+            "{} operations are below the ceiling of {}",
+            doc.ops_held(),
+            Limits::from_seed_frames(40).ops.ceiling
+        );
+    }
+
+    #[test]
+    fn a_cut_is_due_at_the_ceiling_for_rank_0_at_once_and_for_rank_1_after_2_ticks() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = small_state_doc(1_700);
+        assert!(
+            !doc.cut_due(0),
+            "nothing says that the size crossed before a tick looks at it"
+        );
+        doc.tick_epoch(&me);
+        assert!(
+            doc.cut_due(0),
+            "rank 0 cuts at the tick that sees the crossing"
+        );
+        assert!(!doc.cut_due(1), "rank 1 waits 2 ticks");
+        doc.tick_epoch(&me);
+        assert!(
+            !doc.cut_due(1),
+            "1 tick after the crossing is too early for rank 1"
+        );
+        doc.tick_epoch(&me);
+        assert!(
+            doc.cut_due(1),
+            "2 ticks after the crossing is the slot of rank 1"
+        );
+        assert!(!doc.cut_due(2), "rank 2 waits 4 ticks");
+    }
+
+    #[test]
+    fn the_ranks_above_the_slotted_ones_wait_a_spread_that_the_tag_chooses() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = small_state_doc(1_700);
+        let slotted = u32::try_from(DOC_CUT_RANKS_SLOTTED).expect("a small number");
+        let first = DOC_CUT_SLOT_TICKS * slotted;
+        for _ in 0..first {
+            doc.tick_epoch(&me);
+        }
+        assert!(
+            !doc.cut_due(DOC_CUT_RANKS_SLOTTED),
+            "a node of rank 16 waits for the 16 slotted ranks, then its spread"
+        );
+        for _ in 0..=DOC_CUT_SPREAD_TICKS {
+            doc.tick_epoch(&me);
+        }
+        assert!(
+            doc.cut_due(DOC_CUT_RANKS_SLOTTED) && doc.cut_due(1_000),
+            "after the slots and the whole spread, every higher rank cuts"
+        );
+    }
+
+    #[test]
+    fn a_document_that_began_above_the_ceiling_does_not_cut_again_without_growth() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter, joiner) = (nick("me"), nick("cutter"), nick("joiner"));
+        let big = small_state_doc(1_700);
+        let frames = seed_frames_of(&big, &cutter, 3, None);
+        let mut doc = MeshDoc::new_ungated()
+            .state_epochs()
+            .limits(Limits::from_seed_frames(40));
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            doc.tick_epoch(&joiner);
+        }
+        assert_eq!(doc.epoch(), 3, "the document adopted the seed");
+        assert!(
+            doc.seed_ops() >= Limits::from_seed_frames(40).ops.ceiling,
+            "the seed itself is above the ceiling: {} operations",
+            doc.seed_ops()
+        );
+        for tick in 0..100 {
+            doc.tick_epoch(&joiner);
+            assert!(!doc.cut_due(0), "no growth since the seed, tick {tick}");
+        }
+        write_leaves(&mut doc, &me, 10_000, 200);
+        doc.tick_epoch(&joiner);
+        assert!(
+            doc.cut_due(0),
+            "200 operations of growth are above the growth of {}",
+            Limits::from_seed_frames(40).ops.growth
+        );
+    }
+
+    #[test]
+    fn a_failed_cut_holds_the_next_one_for_6_ticks_and_then_for_12() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = small_state_doc(1_700);
+        doc.tick_epoch(&me);
+        assert!(doc.cut_due(0), "the cut is due");
+        doc.note_cut_failed();
+        assert!(!doc.cut_due(0), "a failed cut holds the next one");
+        for tick in 1..DOC_CUT_BACKOFF_FIRST {
+            doc.tick_epoch(&me);
+            assert!(!doc.cut_due(0), "held at tick {tick} of 6");
+        }
+        doc.tick_epoch(&me);
+        assert!(doc.cut_due(0), "the 6th tick ends the hold");
+        doc.note_cut_failed();
+        for tick in 1..(2 * DOC_CUT_BACKOFF_FIRST) {
+            doc.tick_epoch(&me);
+            assert!(!doc.cut_due(0), "held at tick {tick} of 12");
+        }
+        doc.tick_epoch(&me);
+        assert!(doc.cut_due(0), "the 12th tick ends the second hold");
+        for _ in 0..10 {
+            doc.note_cut_failed();
+        }
+        for _ in 0..DOC_CUT_BACKOFF_MAX {
+            doc.tick_epoch(&me);
+        }
+        assert!(
+            doc.cut_due(0),
+            "the hold is at most {DOC_CUT_BACKOFF_MAX} ticks"
+        );
+    }
+
+    #[test]
+    fn a_state_document_that_holds_a_candidate_has_no_cut_due() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let mut doc = small_state_doc(1_700);
+        doc.tick_epoch(&me);
+        assert!(doc.cut_due(0), "the cut is due");
+        let frames = seed_frames(&cutter, &live_state(), 7, None);
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        assert!(doc.has_candidate(), "the document holds the candidate");
+        assert!(
+            !doc.cut_due(0),
+            "a node that holds a candidate adopts it and does not cut"
+        );
+    }
+
+    #[test]
+    fn a_state_document_made_for_the_daemon_has_epochs_the_cap_and_the_wait_for_the_first_sync() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_state(None);
+        assert!(doc.has_state_epochs(), "the state channel has epochs");
+        let change = change_of(&doc, &json!({ "a": 1 }), &pad_seed(b"me"));
+        let outcome = doc.compose_wire_body(&change, None);
+        assert!(
+            matches!(outcome, Err(DocError::ClockNotReady)),
+            "the body of a write waits for the first sync: {outcome:?}"
         );
     }
 
