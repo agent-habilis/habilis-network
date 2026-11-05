@@ -380,6 +380,32 @@ fn model_a_rival_seed_keeps_the_newer_object_of_a_node() {
     sim.assert_model("a rival seed after a rewrite of an object");
 }
 
+/// The cut vector of a rival seed counts the sequence numbers of the epoch before the seed, and the
+/// node holds the numbers of the epoch of the seed that it adopted. A write of the node with a low
+/// number must not read as covered by the vector of the rival.
+#[test]
+fn model_a_rival_seed_does_not_cover_a_write_by_its_cut_vector() {
+    let _guard = habilis_network_test_tracing::init();
+    let mut sim = Sim::new(6);
+    // n0 has written 3 changes in epoch 0, and every node holds them: the vector of any seed of
+    // epoch 1 names n0 with 3.
+    for round in 1..=3 {
+        sim.write_exact(0, "a", Some(json!(round)));
+    }
+    sim.settle();
+    // Only the seed of n2 reaches n0 first. n0 adopts it, and writes once in epoch 1.
+    let _ = sim.cut(2);
+    sim.deliver_to(2, 0);
+    for _ in 0..=WAIT {
+        sim.tick_all();
+    }
+    sim.write_exact(0, "z", Some(json!(9)));
+    // The lower rival of n1 does not hold `z`, and its vector says that n0 is covered up to 3.
+    let _ = sim.cut(1);
+    sim.settle();
+    sim.assert_model("a rival seed with a vector above the writes of the node");
+}
+
 /// Seeds for the run in CI: 500 take about 25 s of a debug build. The environment variable
 /// `STATE_EPOCH_MODEL_SEEDS` sets the count, for a long run by hand.
 fn seed_count(default: u64) -> u64 {
