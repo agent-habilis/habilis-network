@@ -42,6 +42,12 @@ impl<K: Eq + Hash, V> ProofBook<K, V> {
         }
     }
 
+    /// Hold the proof of a session. At the cap, the oldest session that `is_live` denies goes first.
+    /// If every held session is live, the proof is refused and counted.
+    pub(crate) fn insert_evicting(&mut self, key: K, value: V, _is_live: impl Fn(&K) -> bool) {
+        self.insert(key, value);
+    }
+
     /// Forget the proof of a session that left or that a newer run replaced.
     pub(crate) fn remove(&mut self, key: &K) {
         self.held.remove(key);
@@ -109,6 +115,32 @@ mod tests {
         assert_eq!(book.get(&39), Some(&39), "the newest session verifies");
         assert_eq!(book.len(), 1, "only the newest session stays");
         assert_eq!(book.refused(), 0, "no proof was refused");
+    }
+
+    /// 40 members that each come once and never return must not fill the book: the oldest dead
+    /// session goes, so the newest always verifies.
+    #[test]
+    fn dead_sessions_go_first_when_the_book_is_full() {
+        let mut book: ProofBook<u8, u8> = ProofBook::with_cap(4);
+        for member in 0..40u8 {
+            book.insert_evicting(member, member, |_| false);
+        }
+        assert_eq!(book.get(&39), Some(&39), "the newest session verifies");
+        assert_eq!(book.len(), 4, "the book holds its cap");
+        assert_eq!(book.refused(), 0, "no proof was refused");
+    }
+
+    /// A live session is never evicted: if all are live and the book is full, the new proof is
+    /// refused and counted.
+    #[test]
+    fn a_live_session_is_never_evicted() {
+        let mut book: ProofBook<u8, u8> = ProofBook::with_cap(4);
+        for member in 0..40u8 {
+            book.insert_evicting(member, member, |_| true);
+        }
+        assert_eq!(book.get(&0), Some(&0), "the oldest live session stays");
+        assert_eq!(book.len(), 4, "the book holds its cap");
+        assert_eq!(book.refused(), 36, "every proof past the cap is counted");
     }
 
     /// Answers to requests are capped per minute; the answers past the cap are refused and counted.
