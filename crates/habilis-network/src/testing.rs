@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use iroh::{EndpointId, SecretKey};
 
-use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
+use crate::daemon::state::{EventLoopState, MeshSecrets, RunKeys, StateInit};
 use crate::protocol::identity::Identity;
 use crate::protocol::{AuthorKey, Nickname};
 use crate::util::clock::Instant;
@@ -51,8 +51,11 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
         StateInit {
             #[cfg(feature = "host")]
             state_file: None,
-            // the identity is shared with the loop and its handlers, which hold clones
-            identity: Arc::new(Identity::generate()),
+            // the keys are shared with the loop and its handlers, which hold clones
+            keys: RunKeys {
+                session: Arc::new(Identity::generate()),
+                member: Arc::new(Identity::generate()),
+            },
             secrets: MeshSecrets::default(),
             per_peer_gate: None,
             webrtc_admission: transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS),

@@ -26,11 +26,11 @@ use iroh::{EndpointAddr, EndpointId};
 use crate::daemon::message_log::MessageLog;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
-use crate::protocol::identity::Identity;
+use crate::protocol::identity::{Identity, IdentityProof};
 use crate::protocol::meshes::Mesh;
 use crate::protocol::messages::{Authored, Verified, WireFrame};
 use crate::protocol::{
-    AuthorKey, ContentHash, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs,
+    AuthorKey, ContentHash, DedupKey, MeshId, Nickname, ShardGroup, SymmetricKey, UnixSecs,
 };
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
@@ -466,6 +466,8 @@ pub struct EventLoopState {
     /// The public key is the durable identity; the nickname is a
     /// non-unique display label (see `docs/history-integrity.md`).
     pub(crate) identity: Arc<Identity>,
+    /// The key that survives a restart. It signs the proof of this session and nothing else.
+    pub(crate) member_identity: Arc<Identity>,
     /// Our own per-author log cursor (Phase 2): `self_seq` is the next
     /// `Msg` sequence number to emit, `self_prev` the content hash of our
     /// last sent `Msg` (`None` until the first). Advanced on every send so
@@ -651,7 +653,8 @@ impl EventLoopState {
             state_doc: MeshDoc::new_ungated().key(state_key),
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
-            identity: init.identity,
+            identity: init.keys.session,
+            member_identity: init.keys.member,
             self_seq: 0,
             self_prev: None,
             author_seqs: HashMap::new(),
@@ -1703,6 +1706,17 @@ impl EventLoopState {
     #[must_use]
     pub fn mint_mesh(&self) -> Option<&Mesh> {
         self.mint_mesh.as_ref()
+    }
+
+    /// The proof that this session speaks as `nickname` on `mesh` in run `run`.
+    #[must_use]
+    pub(crate) fn own_proof(&self, nickname: &Nickname, mesh: &MeshId, run: u64) -> IdentityProof {
+        self.identity.prove(
+            &self.identity.author_key(),
+            nickname.as_ref(),
+            mesh.as_ref(),
+            run,
+        )
     }
 
     /// Stamp the next position on this author's hash chain, advancing it.

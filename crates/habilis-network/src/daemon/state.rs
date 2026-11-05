@@ -46,7 +46,7 @@ pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
 pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
-pub(crate) use state_init::StateInit;
+pub(crate) use state_init::{RunKeys, StateInit};
 #[cfg(test)]
 pub(crate) use wire_out_tally::app_frame_with_tag;
 pub(crate) use wire_out_tally::{Arrival, FrameShape, WireOut, WireOutTally, by_arrival, by_class};
@@ -98,6 +98,25 @@ mod tests {
         AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, UnixSecs,
     };
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
+
+    /// The proof of a session is signed by the member key, over the session key, the nickname and
+    /// the mesh. The session key signs frames, so a proof signed by it would prove nothing.
+    #[test]
+    fn the_proof_of_a_session_is_signed_by_the_member_key() {
+        use crate::protocol::identity::verify_proof;
+        let state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let proof = state.own_proof(&nick("alice"), &mesh, 7);
+        assert_eq!(
+            proof.identity,
+            state.member_identity.public(),
+            "the member key signs the proof"
+        );
+        assert!(
+            verify_proof(&proof, &state.identity.author_key(), "alice", mesh.as_ref()),
+            "the proof binds the session key, the nickname and the mesh"
+        );
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;

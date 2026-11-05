@@ -33,6 +33,7 @@ use crate::lifecycle;
 use super::config::{
     EndpointOwner, Endpoints, MeshSpec, RendezvousConfig, RuntimeConfig, TransportSet,
 };
+use super::state::RunKeys;
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
 use crate::gossip::split;
@@ -671,6 +672,17 @@ fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> 
     Ok(identity::Identity::generate())
 }
 
+/// The keys of this run. The member key comes from the state file. The session key is the one that
+/// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
+/// would start the same actor again at sequence 1.
+fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
+    let member = sync::Arc::new(load_or_create_identity(state)?);
+    Ok(RunKeys {
+        session: sync::Arc::clone(&member),
+        member,
+    })
+}
+
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -762,8 +774,8 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             topic_string,
             mint_mesh,
             author,
-            // The mesh spec and the loop state both hold the signing identity, so it is shared.
-            identity: sync::Arc::new(load_or_create_identity(state_file.as_deref())?),
+            // The mesh spec and the loop state both hold the keys, so they are shared.
+            keys: run_keys(state_file.as_deref())?,
             mesh_password,
             mesh_key,
         },
@@ -1165,6 +1177,68 @@ mod tests {
             fresh.author_key(),
             first.author_key(),
             "no file means a new key"
+        );
+    }
+
+    /// The member key survives a restart and the session key does not: the session key is the
+    /// automerge actor, and a restart that kept it would start the same actor again.
+    #[test]
+    fn a_restart_keeps_the_member_key_and_changes_the_session_key() {
+        let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
+        let first = super::run_keys(Some(&state)).expect("first start");
+        let second = super::run_keys(Some(&state)).expect("restart");
+        assert_eq!(
+            first.member.author_key(),
+            second.member.author_key(),
+            "the restart keeps the member key"
+        );
+        assert_ne!(
+            first.session.author_key(),
+            second.session.author_key(),
+            "the restart makes a new session key"
+        );
+        assert_ne!(
+            first.session.author_key(),
+            first.member.author_key(),
+            "the session key is not the member key"
+        );
+    }
+
+    /// The failure this prevents: after a restart the session starts a new document at sequence 1.
+    /// Under the old actor, a replica that holds the first run refuses that change as a duplicate
+    /// sequence number, and every write of the restarted member is lost.
+    #[test]
+    fn a_restarted_session_writes_under_a_new_actor() {
+        use crate::doc::{Ingested, MeshDoc};
+        use crate::protocol::{Channel, MeshId, Message};
+        let dir = env::temp_dir().join(format!("habilis-restart-actor-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
+        let mesh = MeshId::from("💬test");
+        let author = crate::testing::nick("alice");
+        let write = |keys: &crate::daemon::state::RunKeys, value: u8| {
+            let doc = MeshDoc::new_ungated();
+            let seed = *keys.session.public().as_bytes();
+            let change = doc
+                .build_change(&serde_json::json!({ "k": value }), &seed)
+                .expect("a JSON object merges")
+                .expect("a non-empty merge yields a change");
+            let (wire, _plain) = doc.compose_wire_body(&change, None).expect("wire body");
+            Message::new_channel_event(&mesh, &author, wire, Channel::State).sign(&keys.session)
+        };
+        let before = write(&super::run_keys(Some(&state)).expect("first start"), 1);
+        let after = write(&super::run_keys(Some(&state)).expect("restart"), 2);
+        let mut replica = MeshDoc::new_ungated();
+        assert!(
+            matches!(replica.ingest(&before), Ingested::Applied { .. }),
+            "the replica takes the first run"
+        );
+        let outcome = replica.ingest(&after);
+        assert!(
+            matches!(outcome, Ingested::Applied { .. }),
+            "the replica takes the restarted run, got {outcome:?}: the actor is new"
         );
     }
 
