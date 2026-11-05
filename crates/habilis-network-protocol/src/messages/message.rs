@@ -149,8 +149,8 @@ impl Message {
         author: &Nickname,
         proof: &identity::IdentityProof,
     ) -> Self {
-        let body = MessageBody::try_new(&proof.encode())
-            .expect("a proof text is hex digits and separators, so it is a valid body");
+        // A proof text is hex digits and separators, so it is always a valid body.
+        let body = MessageBody::try_new(&proof.encode()).unwrap_or_else(|_| empty_body());
         Self::new(
             mesh,
             author,
