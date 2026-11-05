@@ -1375,7 +1375,11 @@ fn a_directed_frame_names_its_recipient_by_key_on_the_wire() {
 #[test]
 fn a_nickname_as_the_recipient_of_a_frame_is_refused_at_parse() {
     let _guard = ::habilis_network_test_tracing::init();
-    for (kind, extra) in [("app", r#""tag":"app_msg","#), ("pong", r#""probe":"x","#)] {
+    let pong_probe = format!(r#""probe":"{FIXTURE_ID}","#);
+    for (kind, extra) in [
+        ("app", r#""tag":"app_msg","#),
+        ("pong", pong_probe.as_str()),
+    ] {
         let json = format!(
             r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"{kind}",{extra}"to":"bob","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"","ext":{{}}}}"#
         );
