@@ -29,7 +29,6 @@ use crate::beacon;
 use crate::daemon::event_loop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::DirectState;
-use crate::daemon::state::KeyOfError;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::ops;
 use crate::transport;
@@ -152,10 +151,9 @@ pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, transport::SendErr
         .map_err(|error| transport::SendError::InvalidAddressee(error.to_string()))
 }
 
-/// The key a directed send by nickname goes to: the one live key that uses `to`. A frame names its
-/// recipient by key, so a nickname that two or more keys use is refused here with the text of the
-/// cause. When no live key uses the nickname, the one quiet key that does is the recipient, because
-/// a peer that went quiet may return and was sent to before. No `to` is a broadcast.
+/// The key a directed send by nickname goes to ([`EventLoopState::addressee_key`]). A frame names
+/// its recipient by key, so a nickname that no key uses, or that two or more keys of one rank
+/// use, is refused here with the text of the cause. No `to` is a broadcast.
 fn recipient_key(
     state: &EventLoopState,
     to: Option<Nickname>,
@@ -163,24 +161,10 @@ fn recipient_key(
     let Some(nickname) = to else {
         return Ok(None);
     };
-    let live = state.key_of(&nickname);
-    let found = match live {
-        Err(KeyOfError::Unknown) => only_quiet_key_of(state, &nickname),
-        other => other,
-    };
-    found
+    state
+        .addressee_key(&nickname)
         .map(Some)
         .map_err(|error| format!("directed message to {nickname} refused: {error}"))
-}
-
-/// The one key of the roster that uses `nickname`, when none is live. Every key found is quiet.
-fn only_quiet_key_of(state: &EventLoopState, nickname: &Nickname) -> Result<AuthorKey, KeyOfError> {
-    let named = state.keys_named(nickname);
-    match named.as_slice() {
-        [] => Err(KeyOfError::Unknown),
-        [key] => Ok(*key),
-        _ => Err(KeyOfError::Ambiguous),
-    }
 }
 
 /// The length in bytes of `text` as `serde_json` writes it inside quotes: `"`, `\`, newline, tab

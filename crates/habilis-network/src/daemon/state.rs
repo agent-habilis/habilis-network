@@ -970,6 +970,48 @@ mod tests {
         );
     }
 
+    /// `addressee_key` is the key that a send by nickname goes to: the one live key, else the one
+    /// quiet key, because a peer that went quiet may return. A live key wins over a quiet key of
+    /// the same nickname, two keys of one rank are ambiguous, and a nickname that nobody uses is
+    /// unknown.
+    #[test]
+    fn addressee_key_takes_the_live_key_then_the_only_quiet_key() {
+        let mut state = fresh_state();
+        let (sleeper, live, quiet, first, second) = (
+            test_key("sleeper"),
+            test_key("mixed#live"),
+            test_key("mixed#quiet"),
+            test_key("snooze#first"),
+            test_key("snooze#second"),
+        );
+        seat(&mut state, sleeper, "sleeper", false);
+        seat(&mut state, live, "mixed", true);
+        seat(&mut state, quiet, "mixed", false);
+        seat(&mut state, first, "snooze", false);
+        seat(&mut state, second, "snooze", false);
+
+        assert_eq!(
+            state.addressee_key(&nick("sleeper")),
+            Ok(sleeper),
+            "the only key of the nickname is quiet, and it may return"
+        );
+        assert_eq!(
+            state.addressee_key(&nick("mixed")),
+            Ok(live),
+            "a live key wins over a quiet key of the same nickname"
+        );
+        assert_eq!(
+            state.addressee_key(&nick("snooze")),
+            Err(KeyOfError::Ambiguous),
+            "two quiet keys use the nickname"
+        );
+        assert_eq!(
+            state.addressee_key(&nick("nobody")),
+            Err(KeyOfError::Unknown),
+            "no key uses the nickname"
+        );
+    }
+
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
     #[test]

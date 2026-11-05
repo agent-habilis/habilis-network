@@ -1276,6 +1276,29 @@ impl EventLoopState {
             .then_some(address)
     }
 
+    /// The key that a send by nickname goes to: the one live key that uses `nickname`, as
+    /// [`key_of`](Self::key_of) gives it, or, when no live key uses it, the one quiet key that
+    /// does, because a peer that went quiet may return and was sent to before a frame named a key.
+    /// Two quiet keys are as ambiguous as two live keys.
+    ///
+    /// # Errors
+    /// [`KeyOfError::Unknown`] when no key of the roster uses the nickname, and
+    /// [`KeyOfError::Ambiguous`] when two or more live keys, or two or more quiet keys with no
+    /// live key, do.
+    pub fn addressee_key(&self, nickname: &Nickname) -> Result<AuthorKey, KeyOfError> {
+        match self.key_of(nickname) {
+            Err(KeyOfError::Unknown) => {
+                let named = self.keys_named(nickname);
+                match named.as_slice() {
+                    [] => Err(KeyOfError::Unknown),
+                    [key] => Ok(*key),
+                    _ => Err(KeyOfError::Ambiguous),
+                }
+            }
+            found => found,
+        }
+    }
+
     /// The keys of the live peers: not the quiet ones, and not a key that left. Two live keys
     /// that share a nickname are two entries. An app that tracks peers by key reads the live set
     /// here, as [`live_nicknames`](Self::live_nicknames) gives it by name.
