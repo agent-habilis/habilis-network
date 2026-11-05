@@ -1225,7 +1225,9 @@ impl EventLoopState {
     ///   the nickname.
     ///
     /// A quiet key keeps its address, so a peer that returns keeps its route. A key that left the
-    /// roster has none.
+    /// roster has none. An endpoint that another key proved is not an address of `key`: a process
+    /// that restarts keeps its endpoint and makes a new key, and until the old key times out, its
+    /// hint still names the endpoint of the new process.
     pub(crate) fn address_of(&self, key: &AuthorKey) -> Option<EndpointAddr> {
         let hint = self.names.get(key).and_then(|nickname| {
             let owned = self.hint_owner.get(nickname) == Some(key);
@@ -1236,8 +1238,12 @@ impl EventLoopState {
             }
         });
         let proven = self.proven_endpoints.trusted(key).map(EndpointAddr::new);
-        hint.or(proven)
-            .or_else(|| self.refused_endpoints.get(key).cloned())
+        let retained = self.refused_endpoints.get(key).cloned();
+        let address: EndpointAddr = hint.or(proven).or(retained)?;
+        let holder = self.proven_endpoints.trusted_signer(address.id);
+        holder
+            .is_none_or(|signer| signer == *key)
+            .then_some(address)
     }
 
     /// Whether the dial hint of `nickname` was made by a key other than `key` that is live. A quiet

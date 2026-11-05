@@ -720,6 +720,39 @@ mod tests {
         );
     }
 
+    /// A process that restarts keeps its endpoint and mints a new author key. Until the silence
+    /// timeout the old key is still live, and its hint still names the endpoint. The new key has
+    /// proved that endpoint with a newer stamp, so the endpoint is the new key's: a send to the old
+    /// key must not reach the new process.
+    #[test]
+    fn a_send_to_the_old_key_of_a_restarted_process_does_not_reach_the_new_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let (old, new) = (test_key("bob#old"), test_key("bob#new"));
+        let endpoint = endpoint_id(7);
+        for key in [old, new] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.bind_peer_endpoint(old, nick("bob"), iroh::EndpointAddr::new(endpoint));
+        state.note_proven_endpoint(old, endpoint, UnixSecs::from(1));
+        state.note_proven_endpoint(new, endpoint, UnixSecs::from(2));
+        state.retain_refused_endpoint(new, iroh::EndpointAddr::new(endpoint));
+        state.direct.insert(endpoint, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg_to(old), &state),
+            Route::Undeliverable,
+            "the send to the old key reached the process of the new key"
+        );
+        assert_eq!(
+            route(&directed_msg_to(new), &state),
+            Route::Unicast(endpoint),
+            "the new key lost its own endpoint"
+        );
+    }
+
     // ── the gossip plane (broadcasts only) ────────────────────────────
 
     #[test]
