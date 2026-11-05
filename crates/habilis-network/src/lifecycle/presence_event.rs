@@ -81,11 +81,15 @@ pub(crate) async fn handle_presence(
         // The roster knows the key by the nickname it recorded, and a goodbye can name any
         // nickname. `forget_key` drops the record, so read it first.
         let departed = state.names.get(&key).unwrap_or(&message.author).clone();
-        // A key that renamed left one endpoint for each nickname it used, and each one is torn down,
-        // unless another nickname still binds it.
+        // A key that renamed left one endpoint for each nickname it used, and it can have proved an
+        // endpoint without owning a hint, when another key held its nickname. Each one is torn
+        // down, unless a nickname still binds it. `forget_key` drops the trust, so read it first.
+        let proved = state.proven_endpoints.trusted(&key);
         let left_hints = state.forget_key(key);
-        let endpoints = left_hints.iter().map(|hint| hint.id);
-        let unbound: Vec<_> = endpoints
+        let hinted = left_hints.iter().map(|hint| hint.id);
+        let left_endpoints: Vec<_> = hinted.chain(proved).collect();
+        let unbound: Vec<_> = left_endpoints
+            .into_iter()
             .filter(|endpoint_id| !state.endpoint_is_bound(*endpoint_id))
             .collect();
         for endpoint_id in unbound {

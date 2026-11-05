@@ -663,6 +663,65 @@ mod departed_tests {
         });
     }
 
+    /// A key can prove an endpoint and own no dial hint: its nickname was held by another key when
+    /// its `PeerInfo` came. Its goodbye still ends the pooled connection and the dial cooldown of
+    /// the endpoint that it proved.
+    #[test]
+    fn the_goodbye_of_a_key_that_proved_an_endpoint_and_owns_no_hint_ends_its_pool_state() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let rival = Identity::generate();
+            let proved = endpoint_id(43);
+            let mut state = fresh_state();
+            state.peers.insert(rival.author_key());
+            state.names.insert(rival.author_key(), nick("swift-cedar"));
+            state.proven_endpoints.trust(rival.author_key(), proved);
+            state.unicast_pool.note_dial_failure(proved).await;
+            assert!(
+                !state.endpoint_is_bound(proved),
+                "no nickname binds the endpoint, so the key owns no hint"
+            );
+
+            let left = Message::new_left(&mesh, &nick("swift-cedar")).sign(&rival);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.unicast_pool.is_cooling(proved).await,
+                "the cooldown of the proved endpoint survived the goodbye"
+            );
+            endpoint.close().await;
+        });
+    }
+
     /// A key that renamed owns a dial hint under each nickname it used, and each hint names an
     /// endpoint. Its goodbye ends the pooled connection and the dial cooldown of every one of
     /// them, not only of the endpoint of its current nickname.
