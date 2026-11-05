@@ -69,6 +69,8 @@ struct Sim {
     step: u64,
     /// The most bytes that a merge of a seed or of a replay can have to fit one frame.
     fits: usize,
+    /// How many restores nodes wrote again, taken from `take_restores`.
+    restore_writes: usize,
     /// The values of every node, written in order.
     model: Map<String, Value>,
     /// The stamp (time, tag) of the last change that a node composed.
@@ -106,6 +108,7 @@ impl Sim {
             wire: Vec::new(),
             step: 0,
             fits: FRAME_FITS,
+            restore_writes: 0,
             model: Map::new(),
             last_stamp: None,
             last_frame: None,
@@ -371,6 +374,7 @@ impl Sim {
         }
         for index in 0..NODES {
             if let Some((patch, stamps)) = self.nodes[index].doc.take_restores() {
+                self.restore_writes += 1;
                 replays.push((index, patch, stamps));
             }
         }
@@ -480,6 +484,48 @@ fn model_writes_during_the_wait_are_replayed() {
     sim.write_exact(2, "c", Some(json!([3, 4])));
     sim.settle();
     sim.assert_model("writes during the wait");
+}
+
+/// A holder that is not the author keeps a write for 1 to 3 ticks. A newer write of the same leaf
+/// that reaches it in that time must stay: the holder reads the stamp of the leaf again before it
+/// writes, and writes nothing.
+#[test]
+fn model_a_waiting_restore_that_a_newer_write_overtook_is_not_written() {
+    let _guard = habilis_network_test_tracing::init();
+    let mut sim = Sim::new(5);
+    // Node n2 writes `s0`. Node n1 gets the write, node n0 does not, so the seed of n0 lacks it.
+    sim.write_shared(2, &["s0"], Some(json!("old")));
+    sim.deliver_to(2, 1);
+    sim.drop_frames_to(0);
+    sim.cut(0);
+    sim.deliver_everything();
+    // Tick until node n1, which holds `s0` and did not write it, adopts the seed.
+    for _ in 0..30 {
+        if sim.nodes[1].doc.epoch() >= 1 {
+            break;
+        }
+        sim.tick_all();
+    }
+    assert!(sim.nodes[1].doc.epoch() >= 1, "node n1 adopted the seed");
+    assert!(
+        sim.nodes[1].doc.has_restores(),
+        "node n1 waits with the write of node n2"
+    );
+    // The replay of the author reaches node n1, and then node n2 writes `s0` again.
+    sim.deliver_to(2, 1);
+    assert!(sim.commit(2, &json!({ "s0": "new" })));
+    let (time, tag) = sim.last_stamp.clone().expect("a stamp");
+    sim.oracle
+        .insert(vec!["s0".to_owned()], (time, tag, Some(json!("new"))));
+    sim.deliver_to(2, 1);
+    sim.settle();
+    sim.assert_shared_model("a newer write overtook a waiting restore");
+    // The end state is the same if the holder writes the old value on top, because the nodes that
+    // see their newer value lowered restore it. The holder must not write it at all.
+    assert_eq!(
+        sim.restore_writes, 0,
+        "no node writes a restore: the write of the author came first and a newer write followed"
+    );
 }
 
 /// A replay of more leaves than one frame can name (128 paths) is split by the sender, and every
