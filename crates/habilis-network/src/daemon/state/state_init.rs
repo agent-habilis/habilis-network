@@ -20,7 +20,10 @@ pub(crate) struct RunKeys {
     /// The run number of this start, which the proof of the session names.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the joined body carries the proof in a later commit")
+        expect(
+            dead_code,
+            reason = "the joined body carries the proof in a later commit"
+        )
     )]
     pub(crate) run: u64,
 }
