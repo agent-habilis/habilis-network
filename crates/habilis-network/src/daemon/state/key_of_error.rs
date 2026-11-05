@@ -7,12 +7,21 @@ use std::fmt;
 ///
 /// # Examples
 ///
-/// A nickname that no live key uses is unknown.
+/// The error tells a caller why it cannot send to a nickname: no live key uses it, or two or
+/// more do. The doc test compiles the match but does not run it.
 ///
-/// ```
-/// use habilis_network::embed::KeyOfError;
+/// ```no_run
+/// use habilis_network::embed::{EventLoopState, KeyOfError};
+/// use habilis_network::protocol::Nickname;
 ///
-/// assert_ne!(KeyOfError::Unknown, KeyOfError::Ambiguous);
+/// # fn demo(state: &EventLoopState, nickname: &Nickname) {
+/// match state.key_of(nickname) {
+///     Ok(key) => println!("send to {key}"),
+///     Err(KeyOfError::Unknown) => println!("no live key uses {nickname}"),
+///     Err(KeyOfError::Ambiguous) => println!("two or more live keys use {nickname}"),
+///     Err(_) => println!("another reason"),
+/// }
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
