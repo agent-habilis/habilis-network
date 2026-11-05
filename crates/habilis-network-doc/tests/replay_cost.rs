@@ -1,11 +1,5 @@
-//! The cost of a replay frame, as a measurement and not as a check: wall time and bytes allocated
-//! to apply one replay frame of 127 leaves and an object, and to apply 96 of them, in a state
-//! document of N live leaves. It is ignored by default. Run it in release mode:
-//!
-//! `REPLAY_COST_LEAVES=1000,10000 cargo test --release -p habilis-network-doc --test replay_cost -- --ignored --nocapture`.
-//!
-//! Filling a document through normal writes costs a hydration of the whole document for each
-//! frame (the gate check of every ingest), so the fill takes minutes at 100000 leaves.
+//! Run in release mode, with `REPLAY_COST_LEAVES=1000,10000`:
+//! `cargo test --release -p habilis-network-doc --test replay_cost -- --ignored --nocapture`.
 
 #![expect(
     unsafe_code,
@@ -28,6 +22,8 @@ struct Counting;
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 
 // SAFETY: every call goes to the system allocator unchanged; the counter is the only addition.
+/// `GlobalAlloc` is an unsafe trait, and the counter must sit in the allocator to see every
+/// allocation: there is no safe way to count them.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);

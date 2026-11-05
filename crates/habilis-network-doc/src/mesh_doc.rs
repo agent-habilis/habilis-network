@@ -19,8 +19,8 @@ use crate::wire::SeedMark;
 use crate::{DocError, Stamp, split_entry, wire};
 
 use automerge::transaction;
-use std::mem;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{mem, vec};
 /// Matches the receive path these drops happen on, so a reader filtering the
 /// gossip target sees the orphan buffer alongside the frames feeding it.
 const LOG_TARGET: &str = "habilis_network::gossip";
@@ -235,7 +235,7 @@ pub struct ReplayMerges(Vec<Value>);
 
 impl IntoIterator for ReplayMerges {
     type Item = Value;
-    type IntoIter = std::vec::IntoIter<Value>;
+    type IntoIter = vec::IntoIter<Value>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()

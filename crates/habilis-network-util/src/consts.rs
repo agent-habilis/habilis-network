@@ -166,10 +166,14 @@ pub const DOC_REPLAY_ENTRIES_MAX: usize = 128;
 pub const DOC_SEED_TOMBSTONES_MAX: usize = 1024;
 
 /// The most values that a state document keeps to write again after a replay (restores). A restore
-/// holds a value that the node held, so the restores of a node are at most the live state, which
-/// the epoch budget of `DOC_STATE_EPOCH_FRAME_CAP_BYTES` keeps near 40000 leaves of 100 bytes. The
-/// cap is above that, at about 10 mebibytes of values and paths. A restore beyond it is dropped and
-/// counted, because more live state than the budget allows cannot exist.
+/// holds a value that the node held, so the restores of a node are at most its live leaves. Nothing
+/// bounds the live leaves to the epoch budget of `DOC_STATE_EPOCH_FRAME_CAP_BYTES`: the live state
+/// can be as large as a seed of `DOC_SEED_FRAMES_MAX` frames carries, about 17 mebibytes. A leaf of
+/// 100 bytes gives about 170000 leaves, and a leaf of 10 bytes gives more. This cap holds 65536
+/// restores, which cost about 10 to 16 mebibytes of heap (150 to 250 bytes of overhead for each,
+/// and the path and the value). A replay that hides more leaves than that loses the restores
+/// beyond the cap: the newer writes of this node are not written again. They are counted and
+/// warned, never silent.
 pub const DOC_RESTORES_MAX: usize = 65_536;
 
 /// The longest path (the bytes of its keys) that gets a tombstone. A delete of a longer path is
