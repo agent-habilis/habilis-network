@@ -258,6 +258,11 @@ struct Lowered {
 /// The stamps that stored frames name, read once for each call of `stamps_of`.
 type RebuiltStamps = HashMap<ChangeHash, Option<Vec<(Vec<String>, Stamp)>>>;
 
+/// The time that a stored frame carries, for each change that was asked about in one call. A frame
+/// is parsed once for each call and not once for each path that it holds (the parse decodes the
+/// change, which costs about 3 ms for a full frame).
+type FrameTimes = HashMap<ChangeHash, Option<u64>>;
+
 /// The ops that one change holds: which actor wrote them, the counter of the first, and how many.
 /// A scan of the history makes one per change, so an op id finds its change.
 struct OpSpan {
@@ -907,10 +912,11 @@ impl MeshDoc {
             spans.sort_by_key(|span| span.start);
         }
         let mut rebuilt: RebuiltStamps = HashMap::new();
+        let mut times: FrameTimes = HashMap::new();
         let mut parents: ParentObjects = HashMap::new();
         paths
             .iter()
-            .map(|path| self.stamp_at(path, &index, &mut rebuilt, &mut parents))
+            .map(|path| self.stamp_at(path, &index, (&mut rebuilt, &mut times), &mut parents))
             .collect()
     }
 
@@ -936,7 +942,7 @@ impl MeshDoc {
         &self,
         path: &[String],
         index: &OpIndex,
-        rebuilt: &mut RebuiltStamps,
+        (rebuilt, times): (&mut RebuiltStamps, &mut FrameTimes),
         parents: &mut ParentObjects,
     ) -> Option<Stamp> {
         let (leaf_key, parent_path) = path.split_last()?;
@@ -967,12 +973,18 @@ impl MeshDoc {
         if let Some(stamp) = named.and_then(|list| list.iter().find(|(held, _)| held == path)) {
             return Some(stamp.1.clone());
         }
-        let time = self
-            .frames
-            .get(&span.hash)
-            .and_then(|frame| self.change_bytes(frame))?
-            .time?;
+        let time: u64 = times
+            .entry(span.hash)
+            .or_insert_with(|| self.frame_time(&span.hash))
+            .as_ref()
+            .copied()?;
         Some(Stamp::new(time, actor_tag(&actor)))
+    }
+
+    /// The Lamport time that the stored frame of the change `hash` carries.
+    fn frame_time(&self, hash: &ChangeHash) -> Option<u64> {
+        let frame = self.frames.get(hash)?;
+        self.change_bytes(frame)?.time
     }
 
     /// The object that `path` names, `None` when the path holds no object.

@@ -4,20 +4,24 @@
 //! `SEED_COST_LEAVES=1000,10000 cargo test --release -p habilis-network-doc --test seed_cost -- --ignored --nocapture`.
 
 use std::env;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use habilis_network_doc::{Ingested, MeshDoc, SeedChain, Stamp, wire};
 use habilis_network_protocol::messages::{MessageBody, Verified};
-use habilis_network_protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
+use habilis_network_protocol::{AuthorKey, Channel, Identity, MeshId, Message, Nickname};
+use habilis_network_util::consts::{DOC_EPOCH_FRAME_MARGIN, MAX_MESSAGE_SIZE};
 use serde_json::{Map, Value, json};
 
-/// The largest body of a frame: the message size of 3840 bytes less the margin of the envelope.
-const BODY_MAX: usize = 3712;
 /// The room that the seed mark of the root takes, which the `fits` of a merge leaves free.
 const MARK_ROOM: usize = 64;
 /// The Lamport clock at the start, so the times have 7 digits, as in a mesh that has run a while.
 const CLOCK_START: u64 = 5_000_000;
-const TAG: &str = "7a7a7a7a00000000";
+/// The writers that take turns to write the plain frames, so a seed frame carries many tags.
+const WRITERS: usize = 128;
+/// How many times the seed is built for one document, for the spread of the time.
+const BUILDS: usize = 5;
 
 #[derive(Clone, Copy)]
 enum Shape {
@@ -27,6 +31,8 @@ enum Shape {
     Small,
     /// A string of 100 bytes.
     Large,
+    /// A number at the end of a path of 8 keys.
+    Nested,
 }
 
 impl Shape {
@@ -35,12 +41,21 @@ impl Shape {
             Self::Tiny => "tiny number",
             Self::Small => "string of 16 B",
             Self::Large => "string of 100 B",
+            Self::Nested => "number at depth 8",
+        }
+    }
+
+    /// The paths above the leaves: the keys of the levels that all the leaves share.
+    fn prefix_paths(self) -> usize {
+        match self {
+            Self::Nested => 7,
+            Self::Tiny | Self::Small | Self::Large => 1,
         }
     }
 
     fn value(self, index: usize) -> Value {
         match self {
-            Self::Tiny => json!(index % 1000),
+            Self::Tiny | Self::Nested => json!(index % 1000),
             Self::Small => json!(format!("{index:016}")),
             Self::Large => json!(format!("{index:0>100}")),
         }
@@ -75,7 +90,14 @@ fn merge_of(shape: Shape, first: usize, count: usize) -> Value {
     for index in first..first + count {
         leaves.insert(format!("k{index:06}"), shape.value(index));
     }
-    json!({ "live": Value::Object(leaves) })
+    let mut level = Value::Object(leaves);
+    if matches!(shape, Shape::Nested) {
+        for depth in (1..=7).rev() {
+            level = json!({ format!("n{depth}"): level });
+        }
+        return level;
+    }
+    json!({ "live": level })
 }
 
 fn leaf_count(value: &Value) -> usize {
@@ -90,8 +112,45 @@ fn leaf_count(value: &Value) -> usize {
     }
 }
 
-/// Whether the real frame of `merge`, with the stamps of a seed, is inside a frame.
+/// The key that signs the frames of this measurement.
+fn identity() -> &'static Identity {
+    static IDENTITY: OnceLock<Identity> = OnceLock::new();
+    IDENTITY.get_or_init(Identity::generate)
+}
+
+/// Whether the frame of `body`, signed and serialized as a node sends it, is inside a message
+/// with the margin of the envelope that the daemon keeps.
+fn wire_fits(body: MessageBody) -> bool {
+    let message =
+        Message::new_channel_event(&MeshId::from("test"), &nick("me"), body, Channel::State);
+    let frame = message.sign(identity());
+    frame
+        .serialize()
+        .is_ok_and(|wire| wire.as_bytes().len() + DOC_EPOCH_FRAME_MARGIN <= MAX_MESSAGE_SIZE)
+}
+
+/// The tag of the writer number `position`, 16 hexadecimal digits.
+fn tag_of(position: usize) -> String {
+    let number = u64::try_from(position).expect("a number");
+    format!("{:016x}", 0x7a7a_0000_0000_0000_u64 + number)
+}
+
+/// Whether the real frame of `merge`, with the stamps of a seed, is inside a frame. The stamps
+/// are those of a mesh that has run a while: a time of 7 digits, and a tag of any of the writers.
 fn frame_fits(merge: &Value) -> bool {
+    let call_started = Instant::now();
+    let answer = frame_fits_inner(merge);
+    FITS_CALLS.fetch_add(1, Ordering::Relaxed);
+    let nanos = u64::try_from(call_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    FITS_NANOS.fetch_add(nanos, Ordering::Relaxed);
+    answer
+}
+
+/// How many times `frame_fits` was asked, and the nanoseconds that it took, since the last reset.
+static FITS_CALLS: AtomicUsize = AtomicUsize::new(0);
+static FITS_NANOS: AtomicU64 = AtomicU64::new(0);
+
+fn frame_fits_inner(merge: &Value) -> bool {
     let timeless = MeshDoc::new_ungated();
     let built = timeless.build_change(merge, &pad("seed"));
     let Ok(Some(change)) = built else {
@@ -100,11 +159,14 @@ fn frame_fits(merge: &Value) -> bool {
     let mut stamps: Vec<Stamp> = Vec::new();
     for position in 0..leaf_count(merge) {
         let time = CLOCK_START + u64::try_from(position).expect("a small number");
-        stamps.push(Stamp::new(time, TAG.to_owned()));
+        stamps.push(Stamp::new(time, tag_of(position % WRITERS)));
     }
-    let body =
-        wire::change_body_tombstoned(&change, None, 1, None, Some(CLOCK_START), &stamps, &[]);
-    body.is_ok_and(|body| body.as_str().len() + MARK_ROOM <= BODY_MAX)
+    let root = Some(CLOCK_START);
+    let body = wire::change_body_tombstoned(&change, None, 1, None, root, &stamps, &[]);
+    let Ok(body) = body else {
+        return false;
+    };
+    body.as_str().len() + MARK_ROOM + DOC_EPOCH_FRAME_MARGIN <= MAX_MESSAGE_SIZE && wire_fits(body)
 }
 
 /// Move the clock of `doc` to `CLOCK_START`, with a frame of another node that carries that time.
@@ -123,18 +185,18 @@ fn move_clock(doc: &mut MeshDoc) {
 /// Fill `doc` with `leaves` leaves of `shape`, in plain frames that hold as many leaves as fit.
 /// Returns the number of frames.
 fn fill(doc: &mut MeshDoc, shape: Shape, leaves: usize) -> usize {
-    let me = nick("me");
     let mut chunk: usize = 400;
     let mut index: usize = 0;
     let mut frames: usize = 0;
     while index < leaves {
         let take = chunk.min(leaves - index);
         let merge = merge_of(shape, index, take);
+        let me = nick(&format!("w{:03}", frames % WRITERS));
         let change = change_of(doc, &merge, me.as_str());
         let composed = doc.compose_wire_body(&change, None);
         let fitting: bool = composed
             .as_ref()
-            .is_ok_and(|(body, _)| body.as_str().len() <= BODY_MAX);
+            .is_ok_and(|(body, _)| wire_fits(body.clone()));
         if !fitting {
             assert!(chunk > 1, "one leaf does not fit a frame");
             chunk = (chunk * 3 / 4).max(1);
@@ -152,13 +214,64 @@ fn fill(doc: &mut MeshDoc, shape: Shape, leaves: usize) -> usize {
     frames
 }
 
-/// The real frames of a seed chain, and the bytes of their bodies.
-fn seed_frames(chain: &SeedChain, epoch: u64, who: &Nickname) -> (Vec<Verified>, usize, usize) {
-    let mut frames: Vec<Verified> = Vec::new();
-    let mut total: usize = 0;
-    let mut longest: usize = 0;
+/// The real frames of a seed chain and what they weigh.
+struct SeedFrames {
+    frames: Vec<Verified>,
+    /// The bytes of all the bodies.
+    total: usize,
+    /// The bytes of the same bodies with no stamp and no tombstone: the content of the seed.
+    plain: usize,
+    /// The longest body.
+    longest: usize,
+    /// The most bytes of stamps for one path in one frame.
+    worst_stamp: usize,
+}
+
+fn seed_frames(chain: &SeedChain, epoch: u64, who: &Nickname) -> SeedFrames {
+    let mut weighed = SeedFrames {
+        frames: Vec::new(),
+        total: 0,
+        plain: 0,
+        longest: 0,
+        worst_stamp: 0,
+    };
     let numbered = chain.changes.iter().enumerate();
     for (position, bytes) in numbered {
+        let mark = (position == 0).then_some(&chain.mark);
+        let origins = &chain.origins[position];
+        let body = wire::change_body_tombstoned(
+            bytes,
+            None,
+            epoch,
+            mark,
+            Some(chain.time),
+            origins,
+            &chain.tombstones[position],
+        )
+        .expect("a body");
+        let bare =
+            wire::change_body_tombstoned(bytes, None, epoch, mark, Some(chain.time), &[], &[])
+                .expect("a body");
+        weighed.total += body.as_str().len();
+        weighed.plain += bare.as_str().len();
+        weighed.longest = weighed.longest.max(body.as_str().len());
+        let stamps = body.as_str().len().saturating_sub(bare.as_str().len());
+        weighed.worst_stamp = weighed.worst_stamp.max(stamps / origins.len().max(1));
+        weighed.frames.push(signed(who, body));
+    }
+    weighed
+}
+
+/// The time to sign and serialize the frames of the chain as a node does to send them: the root
+/// alone, and all of them. The network time is not in it.
+fn send_cpu(chain: &SeedChain, epoch: u64) -> (Duration, Duration) {
+    let identity = Identity::generate();
+    let who = nick("me");
+    let mut root_time = Duration::ZERO;
+    let started = Instant::now();
+    let numbered = chain.changes.iter().enumerate();
+    for (position, bytes) in numbered {
+        let frame_started = Instant::now();
         let mark = (position == 0).then_some(&chain.mark);
         let body = wire::change_body_tombstoned(
             bytes,
@@ -170,11 +283,14 @@ fn seed_frames(chain: &SeedChain, epoch: u64, who: &Nickname) -> (Vec<Verified>,
             &chain.tombstones[position],
         )
         .expect("a body");
-        total += body.as_str().len();
-        longest = longest.max(body.as_str().len());
-        frames.push(signed(who, body));
+        let message = Message::new_channel_event(&MeshId::from("test"), &who, body, Channel::State);
+        let signed_frame = message.sign(&identity);
+        signed_frame.serialize().expect("a wire frame");
+        if position == 0 {
+            root_time = frame_started.elapsed();
+        }
     }
-    (frames, total, longest)
+    (root_time, started.elapsed())
 }
 
 /// The time that the adopter takes to adopt the seed in `frames`, at the tick that adopts it.
@@ -209,10 +325,10 @@ fn the_cost_of_a_seed_by_shape_and_size() {
     if big > 0 {
         sizes.push(big);
     }
-    for shape in [Shape::Tiny, Shape::Small, Shape::Large] {
+    for shape in [Shape::Tiny, Shape::Small, Shape::Large, Shape::Nested] {
         for leaves in &sizes {
             let leaves = *leaves;
-            if leaves > 20_000 && !matches!(shape, Shape::Tiny) {
+            if leaves > 4_000 && matches!(shape, Shape::Large) {
                 continue;
             }
             measure(shape, leaves);
@@ -239,19 +355,39 @@ fn measure(shape: Shape, leaves: usize) {
     let history_frames = fill(&mut doc, shape, leaves);
     let fill_time = started.elapsed();
     let history_bytes = doc.census(false).frame_bytes;
-    let paths = leaves + 1;
-    let cut_started = Instant::now();
-    let built = doc.build_seed(1, &pad(me.as_str()), frame_fits);
-    let build_time = cut_started.elapsed();
-    let chain = built.expect("the live values split");
-    let (frames, seed_bytes, longest) = seed_frames(&chain, 1, &me);
-    let adopt_time = adoption_time(&frames, 1);
+    let paths = leaves + shape.prefix_paths();
+    let mut builds: Vec<Duration> = Vec::new();
+    let mut last: Option<SeedChain> = None;
+    for _ in 0..BUILDS {
+        FITS_CALLS.store(0, Ordering::Relaxed);
+        FITS_NANOS.store(0, Ordering::Relaxed);
+        let cut_started = Instant::now();
+        let built = doc.build_seed(1, &pad(me.as_str()), frame_fits);
+        builds.push(cut_started.elapsed());
+        last = Some(built.expect("the live values split"));
+    }
+    let fits_calls = FITS_CALLS.load(Ordering::Relaxed);
+    let fits_time = Duration::from_nanos(FITS_NANOS.load(Ordering::Relaxed));
+    builds.sort();
+    let chain = last.expect("a chain");
+    let weighed = seed_frames(&chain, 1, &me);
+    let (root_send, chain_send) = send_cpu(&chain, 1);
+    let adopt_time = adoption_time(&weighed.frames, 1);
     eprintln!(
-        "SEED shape={} leaves={leaves} history: {history_frames} frames {history_bytes} B ({} B/path) seed: {} frames {seed_bytes} B ({} B/path, longest body {longest}) seed/history={} fill={fill_time:?} build={build_time:?} adopt={adopt_time:?}",
+        "SEED shape={} paths={paths} history: {history_frames} frames {history_bytes} B ({} B/path) seed: {} frames {} B ({} B/path, content {} B/path, longest body {}) S_avg={} B/path S_worst={} B/path a={} seed/history={} fill={fill_time:?} build min={:?} median={:?} max={:?} sign+serialize root={root_send:?} chain={chain_send:?} adopt={adopt_time:?} fits calls={fits_calls} in {fits_time:?}",
         shape.name(),
         ratio(history_bytes, paths),
-        frames.len(),
-        ratio(seed_bytes, paths),
-        ratio(seed_bytes, history_bytes),
+        weighed.frames.len(),
+        weighed.total,
+        ratio(weighed.total, paths),
+        ratio(weighed.plain, paths),
+        weighed.longest,
+        ratio(weighed.total - weighed.plain, paths),
+        weighed.worst_stamp,
+        ratio(weighed.plain, history_bytes),
+        ratio(weighed.total, history_bytes),
+        builds[0],
+        builds[builds.len() / 2],
+        builds[builds.len() - 1],
     );
 }
