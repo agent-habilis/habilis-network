@@ -428,7 +428,7 @@ pub struct MeshDoc {
     clock: AtomicU64,
     /// The state changes that were refused for want of a valid time: one integer, which saturates.
     refused_time: u64,
-    /// Whether local writes wait for the first frame with a time (see [`Self::awaiting_first_sync`]).
+    /// Whether local writes wait for the end of the first sync (see [`Self::awaiting_first_sync`]).
     awaiting_sync: bool,
     /// The author of the root of the seed that this document adopted for its epoch, `None` when
     /// it holds no seed. A rival root of the same epoch with a lower key replaces that seed.
@@ -793,15 +793,17 @@ impl MeshDoc {
     /// Hold the local writes of a state document until it has heard of another write. A node that
     /// restarts has a clock of 0, so a write now would get a time below the writes that the node
     /// made before, and lose to them. [`Self::compose_wire_body`] returns
-    /// [`DocError::ClockNotReady`] until a frame with a time arrives, or [`Self::finish_sync`].
+    /// [`DocError::ClockNotReady`] until [`Self::finish_sync`]. A frame does not end the wait,
+    /// because the first one that sync brings can be an old one with a low time.
     #[must_use]
     pub fn awaiting_first_sync(mut self) -> Self {
         self.awaiting_sync = true;
         self
     }
 
-    /// Say that the first sync is over (the digest was answered with nothing, or the node is
-    /// alone), so the local writes go on.
+    /// Say that the first sync is over, so the local writes go on. The glue calls it after the
+    /// first full answer to the digest, when that answer is empty, and when no peer answers within
+    /// a time limit: without the last two a mesh where every node restarts at once never writes.
     pub fn finish_sync(&mut self) {
         self.awaiting_sync = false;
     }
@@ -1294,7 +1296,6 @@ impl MeshDoc {
                 return Ingested::Ignored;
             };
             self.clock.fetch_max(stamped, Ordering::Relaxed);
-            self.awaiting_sync = false;
         }
         if epoch != self.epoch {
             return self.ingest_other_epoch(epoch, &change, frame, mark);
@@ -3818,6 +3819,15 @@ mod tests {
         );
     }
 
+    /// A state document whose clock reads `time`, as after `time` writes.
+    fn doc_with_clock_at(time: u64) -> MeshDoc {
+        let doc = MeshDoc::new_ungated().state_epochs();
+        for _ in 0..time {
+            let _ = doc.next_time();
+        }
+        doc
+    }
+
     /// The Lamport time that the plain body of `frame` carries.
     fn time_of(frame: &Verified) -> Option<u64> {
         parse_change_full(frame.body.as_str()).and_then(|parsed| parsed.time)
@@ -3833,10 +3843,7 @@ mod tests {
         assert_eq!(time_of(&first), Some(1), "the first change of a node");
         assert_eq!(time_of(&second), Some(2), "the next one is above it");
         // A node with a far higher clock writes, and this document sees it.
-        let mut ahead = MeshDoc::new_ungated().state_epochs();
-        for _ in 0..49 {
-            let _ = ahead.next_time();
-        }
+        let mut ahead = doc_with_clock_at(49);
         let late = write(&mut ahead, &other, &json!({ "z": 1 }));
         assert_eq!(time_of(&late), Some(50), "the other node is at 50");
         assert!(
@@ -3925,10 +3932,7 @@ mod tests {
     fn a_state_document_after_a_restart_holds_its_writes_until_it_heard_of_another_write() {
         let _guard = ::habilis_network_test_tracing::init();
         let (me, other) = (nick("me"), nick("other"));
-        let mut ahead = MeshDoc::new_ungated().state_epochs();
-        for _ in 0..49 {
-            let _ = ahead.next_time();
-        }
+        let mut ahead = doc_with_clock_at(49);
         let heard = write(&mut ahead, &other, &json!({ "z": 1 }));
         let mut doc = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
         let bytes = doc
@@ -3943,11 +3947,19 @@ mod tests {
             "a write waits: its time would be below the writes before the restart"
         );
         assert!(matches!(doc.ingest(&heard), Ingested::Applied { .. }));
+        assert!(
+            matches!(
+                doc.compose_wire_body(&bytes, None),
+                Err(DocError::ClockNotReady)
+            ),
+            "a frame does not end the wait: it can be an old one, below our own writes"
+        );
+        doc.finish_sync();
         let after = write(&mut doc, &me, &json!({ "a": 1 }));
         assert_eq!(
             time_of(&after),
             Some(51),
-            "a write after a frame is above it"
+            "a write after the sync is above the frame"
         );
         // A node that is alone ends the wait itself.
         let mut alone = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();

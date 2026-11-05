@@ -247,15 +247,22 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
             {
                 return None;
             }
-            let mut used: Vec<bool> = vec![false; tags.len()];
+            // The table is in the order of first use, so the same stamps have one body: a stamp
+            // names a tag that was used before, or the next one of the table.
+            let mut next_new: usize = 0;
             let mut stamps: Vec<Stamp> = Vec::with_capacity(origins.len());
             for (at, index) in origins {
                 let position = usize::try_from(index).ok()?;
                 let tag = tags.get(position)?;
-                used[position] = true;
+                if position > next_new {
+                    return None;
+                }
+                if position == next_new {
+                    next_new += 1;
+                }
                 stamps.push(Stamp::new(at, tag.clone()));
             }
-            if used.contains(&false) {
+            if next_new != tags.len() {
                 return None;
             }
             Some(ParsedChange {
@@ -453,6 +460,10 @@ mod tests {
             (
                 r#"{"k":"change","c":"Ldp","o":[[5,0]],"a":["aa"]}"#,
                 "stamps with no time of the change",
+            ),
+            (
+                r#"{"k":"change","c":"Ldp","t":7,"o":[[5,1],[7,0]],"a":["bb","aa"]}"#,
+                "a table that is not in the order of first use",
             ),
         ];
         for (body, why) in bodies {
