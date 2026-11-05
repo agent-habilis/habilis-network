@@ -700,6 +700,36 @@ mod tests {
         );
     }
 
+    /// The address of a peer goes to the book of the endpoint and to the pool together, so the
+    /// state of a pruned endpoint drops both. A linked endpoint is a reconnect target and keeps
+    /// its entry until the link ends.
+    #[test]
+    fn a_pruned_endpoint_leaves_the_address_book_and_a_linked_one_stays() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let book = memory::MemoryLookup::new();
+        let mut state = fresh_state_with_book(book.clone());
+        let (pruned, linked) = (endpoint_id(1), endpoint_id(2));
+        for endpoint in [pruned, linked] {
+            let address = iroh::EndpointAddr::new(endpoint)
+                .with_ip_addr("192.0.2.1:4000".parse().expect("address"));
+            lookup::add_peer_addr(state.address_book(), address.clone());
+            state.unicast_pool.note_addr(&address);
+        }
+        state.linked_endpoints.insert(linked);
+
+        state.release_unbound_endpoint(pruned);
+        state.release_unbound_endpoint(linked);
+
+        assert!(
+            book.get_endpoint_info(pruned).is_none(),
+            "the book lost the entry of the pruned endpoint"
+        );
+        assert!(
+            book.get_endpoint_info(linked).is_some(),
+            "the linked endpoint is a reconnect target and keeps its entry"
+        );
+    }
+
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
     #[test]

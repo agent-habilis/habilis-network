@@ -1162,8 +1162,9 @@ impl EventLoopState {
     }
 
     /// Drop every state that is keyed by `endpoint`: the backoff, the proof, the rival flag, the
-    /// direct state and the path state.
+    /// direct state, the path state and the address of the endpoint, in the pool and in the book.
     pub(crate) fn forget_endpoint_state(&mut self, endpoint: EndpointId) {
+        self.address_book.remove_endpoint_info(endpoint);
         self.graft_backoff.reset(endpoint);
         self.proven_endpoints.forget_endpoint(endpoint);
         self.forget_rival_holder(endpoint);
