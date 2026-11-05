@@ -267,12 +267,9 @@ fn prune_per_key_state(state: &mut EventLoopState) {
     state
         .proven_endpoints
         .retain_trusted(|key| is_peer(key) || is_quiet(key) || lapsed.contains(key));
-    let gone: Vec<AuthorKey> = state
-        .refused_endpoints
-        .keys()
-        .filter(|key| !(is_peer(key) || is_quiet(key) || lapsed.contains(key)))
-        .copied()
-        .collect();
+    let refused = state.refused_endpoints.keys();
+    let departed = refused.filter(|key| !(is_peer(key) || is_quiet(key) || lapsed.contains(key)));
+    let gone: Vec<AuthorKey> = departed.copied().collect();
     for key in gone {
         state.release_refused_endpoint(&key);
     }

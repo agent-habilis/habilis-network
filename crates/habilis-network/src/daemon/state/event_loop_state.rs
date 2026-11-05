@@ -15,7 +15,7 @@ use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
 use crate::doc;
 
-use crate::transport::UdpTransport;
+use crate::transport::{ResendOutbox, UdpTransport};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -274,7 +274,7 @@ pub struct EventLoopState {
     digest_unreadable: Cooldown<AuthorKey>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
-    pub(crate) resend_outbox: transport::ResendOutbox,
+    pub(crate) resend_outbox: ResendOutbox,
     /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
     /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -639,8 +639,7 @@ impl EventLoopState {
             password: mesh_password,
             key: mesh_key,
         } = init.secrets;
-        let (resend_outbox, resend_receiver) =
-            transport::ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
+        let (resend_outbox, resend_receiver) = ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
         // Per-channel keys, domain-separated from each other and from every other seed-derived
         // secret. `None` (passwordless): the docs and the broadcast chat stay plaintext.
         let [state_key, meta_key, broadcast_key] = Self::channel_keys(mesh_key.as_ref());
@@ -2131,10 +2130,9 @@ impl EventLoopState {
     /// Bind the retained endpoint of each key that is now the only live key of its nickname, with
     /// the flow of a `PeerInfo`, and drop the retained value.
     fn rebind_refused_endpoints(&mut self) {
-        let waiting: Vec<(AuthorKey, Nickname)> = self
-            .refused_endpoints
-            .keys()
-            .filter(|key| self.peers.contains(*key))
+        let refused = self.refused_endpoints.keys();
+        let live = refused.filter(|key| self.peers.contains(*key));
+        let waiting: Vec<(AuthorKey, Nickname)> = live
             .filter_map(|key| Some((*key, self.names.get(key)?.clone())))
             .collect();
         for (key, nickname) in waiting {
