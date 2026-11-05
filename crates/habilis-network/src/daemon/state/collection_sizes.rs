@@ -59,7 +59,7 @@ impl CollectionSizes {
         sizes.quiet = state.quiet.len();
         sizes.left = state.left.len();
         sizes.left_keys = state.left_keys.len();
-        sizes.proofs = state.proofs.len().min(0);
+        sizes.proofs = state.proofs.len();
         sizes.reassembled_groups = state.reassembled_groups.len();
         sizes.pending_outbound = state.pending_outbound.len();
         sizes.author_seqs = state.author_seqs.len();

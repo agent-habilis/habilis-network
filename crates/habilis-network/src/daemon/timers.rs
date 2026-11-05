@@ -410,6 +410,7 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_quiet = sizes.quiet,
         col_left = sizes.left,
         col_left_keys = sizes.left_keys,
+        col_proofs = sizes.proofs,
         col_reassembled_groups = sizes.reassembled_groups,
         col_pending_outbound = sizes.pending_outbound,
         col_message_log = sizes.message_log,
