@@ -151,7 +151,6 @@ pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, transport::SendErr
         .map_err(|error| transport::SendError::InvalidAddressee(error.to_string()))
 }
 
-/// `text` as `serde_json` writes it inside quotes.
 /// The key a directed send by nickname goes to: the one live key that uses `to`. A frame names its
 /// recipient by key, so a nickname that no live key uses, or that two or more use, is refused here
 /// with the text of the cause. No `to` is a broadcast.
@@ -168,6 +167,8 @@ fn recipient_key(
         .map_err(|error| format!("directed message to {nickname} refused: {error}"))
 }
 
+/// The length in bytes of `text` as `serde_json` writes it inside quotes: `"`, `\`, newline, tab
+/// and carriage return take two bytes, and every other scalar keeps its UTF-8 length.
 fn escaped_len(text: &str) -> usize {
     text.chars()
         .map(|scalar| match scalar {
