@@ -14,7 +14,7 @@ use habilis_network_util::consts::{
 };
 
 use crate::wire::SeedMark;
-use crate::{DocError, split_entry, wire};
+use crate::{DocError, Stamp, split_entry, wire};
 
 use automerge::transaction;
 use std::mem;
@@ -185,6 +185,15 @@ pub struct SeedChain {
     pub truncated: bool,
     /// The Lamport time of the frames of the chain: the cutter takes one time for the whole seed.
     pub time: u64,
+}
+
+/// The ops that one change holds: which actor wrote them, the counter of the first, and how many.
+/// A scan of the history makes one per change, so an op id finds its change.
+struct OpSpan {
+    actor: automerge::ActorId,
+    start: u64,
+    len: u64,
+    hash: ChangeHash,
 }
 
 /// The highest Lamport time that a state change can carry: 2^53, the largest whole number that a
@@ -686,6 +695,58 @@ impl MeshDoc {
     #[must_use]
     pub fn clock(&self) -> u64 {
         self.clock.load(Ordering::Relaxed)
+    }
+
+    /// The stamp of the value that the document holds at each of `paths`: the Lamport time and the
+    /// actor of the change that wrote the value that automerge kept. `None` for a path that holds
+    /// no value, and for a value whose change has no time (a change of a channel with no state
+    /// epochs, or the genesis). One scan of the history builds the index for all the paths.
+    #[must_use]
+    pub fn stamps_of(&self, paths: &[Vec<String>]) -> Vec<Option<Stamp>> {
+        let index: Vec<OpSpan> = self
+            .doc
+            .get_changes(&[])
+            .iter()
+            .map(|change| OpSpan {
+                actor: change.actor_id().clone(),
+                start: change.start_op().get(),
+                len: u64::try_from(change.len()).unwrap_or(u64::MAX),
+                hash: change.hash(),
+            })
+            .collect();
+        paths
+            .iter()
+            .map(|path| self.stamp_at(path, &index))
+            .collect()
+    }
+
+    /// The stamp of the value at `path`, from the op that holds it.
+    fn stamp_at(&self, path: &[String], index: &[OpSpan]) -> Option<Stamp> {
+        let mut object: ObjId = ROOT;
+        let mut holder: Option<ObjId> = None;
+        for (position, key) in path.iter().enumerate() {
+            let (value, id) = self.doc.get(&object, key.as_str()).ok()??;
+            if position + 1 == path.len() {
+                holder = Some(id);
+                break;
+            }
+            if !matches!(value, automerge::Value::Object(_)) {
+                return None;
+            }
+            object = id;
+        }
+        let ObjId::Id(counter, actor, _) = holder? else {
+            return None;
+        };
+        let span = index.iter().find(|span| {
+            span.actor == actor && span.start <= counter && counter - span.start < span.len
+        })?;
+        let time = self
+            .frames
+            .get(&span.hash)
+            .and_then(|frame| self.change_bytes(frame))?
+            .time?;
+        Some(Stamp::new(time, actor_tag(&actor)))
     }
 
     /// How many state changes this document refused for want of a valid time: none, or above `DOC_TIME_MAX`. A caller reads it
@@ -1981,8 +2042,8 @@ mod tests {
         DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_CUT_MAX, DOC_SEED_FRAMES_MAX,
         Ingested, MeshDoc, SelfWriteGate,
     };
-    use crate::DocError;
     use crate::wire::{SeedMark, change_body_timed, encrypt_body, parse_change_full};
+    use crate::{DocError, Stamp};
     use automerge::Change;
     use automerge::transaction::Transactable;
     use habilis_network_protocol::messages::Verified;
@@ -3759,6 +3820,36 @@ mod tests {
         );
         let after = write(&mut doc, &me, &json!({ "a": 3 }));
         assert_eq!(time_of(&after), Some(51), "a write after it is above it");
+    }
+
+    #[test]
+    fn the_stamp_of_a_leaf_is_the_time_and_the_actor_of_the_change_that_holds_its_value() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (left, right) = (nick("left"), nick("right"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let first = write(&mut doc, &left, &json!({ "shared": 1, "n": { "k": 5 } }));
+        // The other node takes it in, and then writes the shared leaf: its write is the later one.
+        let mut other = MeshDoc::new_ungated().state_epochs();
+        assert!(matches!(other.ingest(&first), Ingested::Applied { .. }));
+        let second = write(&mut other, &right, &json!({ "shared": 2 }));
+        assert!(matches!(doc.ingest(&second), Ingested::Applied { .. }));
+        let tag = |who: &Nickname| {
+            super::actor_tag(&super::actor_for(&pad_seed(who.as_str().as_bytes())))
+        };
+        let paths = vec![
+            vec!["shared".to_owned()],
+            vec!["n".to_owned(), "k".to_owned()],
+            vec!["missing".to_owned()],
+        ];
+        assert_eq!(
+            doc.stamps_of(&paths),
+            vec![
+                Some(Stamp::new(2, tag(&right))),
+                Some(Stamp::new(1, tag(&left))),
+                None
+            ],
+            "the stamp is the time and the actor of the write that made the value"
+        );
     }
 
     #[test]

@@ -43,6 +43,8 @@ mod parsed_change;
 
 mod seed_mark;
 
+mod stamp;
+
 mod split;
 
 pub use doc_error::DocError;
@@ -50,6 +52,8 @@ pub use doc_error::DocError;
 pub use parsed_change::ParsedChange;
 
 pub use seed_mark::SeedMark;
+
+pub use stamp::Stamp;
 
 pub use split::split_entry;
 
