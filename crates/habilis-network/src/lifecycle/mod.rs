@@ -663,6 +663,76 @@ mod departed_tests {
         });
     }
 
+    /// A `PeerInfo` can bind a dial hint before the roster admits its key. If that key says
+    /// goodbye first, it is no peer, and its hint must go with it: the hint stays routable
+    /// otherwise.
+    #[test]
+    fn the_goodbye_of_a_key_outside_the_roster_removes_the_dial_hints_it_owns() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let stranger = Identity::generate();
+            let other = Identity::generate();
+            let (strangers_endpoint, others_endpoint) = (endpoint_id(44), endpoint_id(45));
+            let mut state = fresh_state();
+            state.bind_peer_endpoint(
+                stranger.author_key(),
+                nick("swift-cedar"),
+                iroh::EndpointAddr::new(strangers_endpoint),
+            );
+            state.bind_peer_endpoint(
+                other.author_key(),
+                nick("calm-otter"),
+                iroh::EndpointAddr::new(others_endpoint),
+            );
+            assert!(
+                !state.peers.contains(&stranger.author_key()),
+                "the key is outside the roster"
+            );
+
+            let left = Message::new_left(&mesh, &nick("swift-cedar")).sign(&stranger);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.endpoint_is_bound(strangers_endpoint),
+                "the dial hint of the stranger survived its goodbye"
+            );
+            assert!(
+                state.endpoint_is_bound(others_endpoint),
+                "the goodbye of the stranger removed the hint of another key"
+            );
+            endpoint.close().await;
+        });
+    }
+
     /// A key can prove an endpoint and own no dial hint: its nickname was held by another key when
     /// its `PeerInfo` came. Its goodbye still ends the pooled connection and the dial cooldown of
     /// the endpoint that it proved.

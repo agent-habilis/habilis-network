@@ -4,6 +4,7 @@ use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::messages::Verified;
 use crate::protocol::{Message, Nickname, PresenceSubtype};
+use iroh::EndpointId;
 
 use super::membership_update;
 
@@ -42,6 +43,26 @@ fn departure(message: &Verified, departed: &Nickname, context: &HandlerCtx<'_>) 
     }
 }
 
+/// End the pooled connection, the dial cooldown and the multihop origin of each endpoint that no
+/// nickname binds. A graceful goodbye, unlike a silence timeout, drops the dial hint, and with it
+/// the warm unicast connection, so a rejoin re-dials cold. The advertised links go too, or routes
+/// keep running through a peer that said goodbye until its vector ages out.
+async fn end_unbound_endpoints(state: &mut EventLoopState, endpoints: Vec<EndpointId>) {
+    let unbound: Vec<_> = endpoints
+        .into_iter()
+        .filter(|endpoint_id| !state.endpoint_is_bound(*endpoint_id))
+        .collect();
+    for endpoint_id in unbound {
+        state.unicast_pool.forget(endpoint_id).await;
+        #[cfg(feature = "multihop")]
+        if let Some(handle) = state.multihop.as_ref() {
+            let _ = handle.remove_origin(habilis_network_iroh_multihop_transport::AppId::new(
+                endpoint_id,
+            ));
+        }
+    }
+}
+
 pub(crate) async fn handle_presence(
     event: PresenceEvent<'_>,
     state: &mut EventLoopState,
@@ -74,6 +95,11 @@ pub(crate) async fn handle_presence(
             || state.clock_evidence.lapsed_quiet.contains(&key);
         if !was_peer {
             state.note_stranger_left(key);
+            // A `PeerInfo` can bind a hint before the roster admits its key, and the hint of a
+            // key that said goodbye must not stay routable.
+            let stranger_hints = state.forget_hints_of(key);
+            let hinted = stranger_hints.iter().map(|hint| hint.id);
+            end_unbound_endpoints(state, hinted.collect()).await;
             return;
         }
         state.note_left(key);
@@ -88,23 +114,7 @@ pub(crate) async fn handle_presence(
         let left_hints = state.forget_key(key);
         let hinted = left_hints.iter().map(|hint| hint.id);
         let left_endpoints: Vec<_> = hinted.chain(proved).collect();
-        let unbound: Vec<_> = left_endpoints
-            .into_iter()
-            .filter(|endpoint_id| !state.endpoint_is_bound(*endpoint_id))
-            .collect();
-        for endpoint_id in unbound {
-            // A graceful goodbye, unlike a silence timeout, drops the dial hint, and with it the
-            // warm unicast connection and any dial cooldown, so a rejoin re-dials cold.
-            state.unicast_pool.forget(endpoint_id).await;
-            // Its advertised links go too, or routes keep running through a peer
-            // that said goodbye until its vector ages out.
-            #[cfg(feature = "multihop")]
-            if let Some(handle) = state.multihop.as_ref() {
-                let _ = handle.remove_origin(habilis_network_iroh_multihop_transport::AppId::new(
-                    endpoint_id,
-                ));
-            }
-        }
+        end_unbound_endpoints(state, left_endpoints).await;
         // Only announce a departure for a peer whose arrival we
         // surfaced — keeps the join-horizon view symmetric. A `left`
         // for a peer known only through pre-join backlog (or one we

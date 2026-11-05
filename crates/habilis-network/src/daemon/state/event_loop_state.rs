@@ -1188,8 +1188,13 @@ impl EventLoopState {
         self.proven_endpoints.forget_trust(&key);
         self.rival_holders.remove(&key);
         self.names.remove(&key);
-        // A key that renamed owns a hint under each nickname it used. The owned nicknames are read
-        // before any hint goes, since a removal changes the owner map.
+        self.forget_hints_of(key)
+    }
+
+    /// Drop every dial hint that `key` made, under each nickname it used, and return the address
+    /// of each. A key that renamed owns a hint under each nickname it used.
+    pub(crate) fn forget_hints_of(&mut self, key: AuthorKey) -> Vec<EndpointAddr> {
+        // The owned nicknames are read before any hint goes, since a removal changes the owner map.
         let owned_hints = self.hint_owner.iter().filter(|(_, owner)| **owner == key);
         let owned: Vec<Nickname> = owned_hints.map(|(nickname, _)| nickname.clone()).collect();
         let forget = |nickname: &Nickname| self.forget_peer_endpoint(nickname.as_str());
