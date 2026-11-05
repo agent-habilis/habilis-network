@@ -425,13 +425,13 @@ mod tests {
         let mut store = BlobStore::try_new(temp_dir("spool"))?;
         let hash = BlobDigest::from([5u8; HASH_LEN]);
         let group = |index: usize| ContentId::new(&format!("blob-test-group-{index}"));
-        let offer = |store: &mut BlobStore, index: usize| {
+        let offer = |target: &mut BlobStore, index: usize| {
             let meta = ContentMeta {
                 sha256: hash,
                 size: 1,
                 content_id: group(index),
             };
-            store.snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
+            target.snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
         };
         for index in 0..super::MAX_BLOB_OWNERS {
             offer(&mut store, index)?;
