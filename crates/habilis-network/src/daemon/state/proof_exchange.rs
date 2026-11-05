@@ -22,6 +22,7 @@ pub(crate) struct ProofExchange {
     book: ProofBook<AuthorKey, IdentityProof>,
     // one request per session: a bound like the book, so a flood of new sessions cannot grow it
     asked: BoundedFifoSet<AuthorKey>,
+    ties_refused: u64,
 }
 
 impl ProofExchange {
@@ -29,6 +30,7 @@ impl ProofExchange {
         Self {
             book: ProofBook::with_cap(cap),
             asked: BoundedFifoSet::new(cap),
+            ties_refused: 0,
         }
     }
 
@@ -55,6 +57,7 @@ impl ProofExchange {
             .get(session)
             .is_some_and(|held| held.run >= proof.run)
         {
+            self.ties_refused += 1;
             return false;
         }
         self.book.insert_evicting(*session, proof, is_live);
@@ -68,7 +71,7 @@ impl ProofExchange {
 
     /// How many proofs this node refused because their run did not beat the held run.
     pub(crate) fn ties_refused(&self) -> u64 {
-        0
+        self.ties_refused
     }
 
     pub(crate) fn len(&self) -> usize {
