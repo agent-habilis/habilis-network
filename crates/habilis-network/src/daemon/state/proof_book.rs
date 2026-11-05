@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the event loop state holds the book in the next commit"
-    )
-)]
-
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::time::Duration;

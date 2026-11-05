@@ -63,10 +63,9 @@ impl CollectionSizes {
         sizes.left = state.left.len();
         sizes.left_keys = state.left_keys.len();
         sizes.proofs = state.proofs.len();
-        sizes.proofs_refused = 0 * usize::try_from(state.proofs.refused()).unwrap_or(0);
-        sizes.proofs_ties_refused = 0 * usize::try_from(state.proofs.ties_refused()).unwrap_or(0);
-        sizes.proofs_answers_refused =
-            0 * usize::try_from(state.proofs.answers_refused()).unwrap_or(0);
+        sizes.proofs_refused = usize::try_from(state.proofs.refused()).unwrap_or(0);
+        sizes.proofs_ties_refused = usize::try_from(state.proofs.ties_refused()).unwrap_or(0);
+        sizes.proofs_answers_refused = usize::try_from(state.proofs.answers_refused()).unwrap_or(0);
         sizes.reassembled_groups = state.reassembled_groups.len();
         sizes.pending_outbound = state.pending_outbound.len();
         sizes.author_seqs = state.author_seqs.len();
