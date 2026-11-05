@@ -45,6 +45,24 @@ pub enum DocError {
     /// and would lose to them. The caller holds the write until a frame with a time arrives or
     /// it calls `finish_sync`.
     ClockNotReady,
+    /// The state document is full: a write that adds a value would take the next seed, or the
+    /// frames that the document holds, over a line of its limits. A write that only deletes passes
+    /// until the memory line. The caller deletes keys to free space, or waits for the next cut.
+    StateFull {
+        /// The size that the write would reach.
+        used: usize,
+        /// The line that it would pass.
+        limit: usize,
+        /// What the two numbers count: `bytes` or `operations`.
+        what: &'static str,
+    },
+    /// The merge adds a value nested deeper than the state document allows.
+    StateTooDeep {
+        /// The keys on the way to the deepest value that the merge adds, counting its own.
+        depth: usize,
+        /// The deepest nesting that a write may add.
+        limit: usize,
+    },
 }
 
 impl DocError {
@@ -61,6 +79,18 @@ impl DocError {
 
 impl fmt::Display for DocError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::StateFull { used, limit, what } = self {
+            return write!(
+                formatter,
+                "the shared state is full: {used} of {limit} {what}; a write that adds a value is refused, also with the same value; delete keys with a null merge to free space, or wait for the next cut"
+            );
+        }
+        if let Self::StateTooDeep { depth, limit } = self {
+            return write!(
+                formatter,
+                "the value is nested {depth} levels deep and the shared state allows {limit}"
+            );
+        }
         formatter.write_str(match self {
             Self::NotAnObject => {
                 "merge must be a JSON object (the automerge document root is a map)"
@@ -71,6 +101,7 @@ impl fmt::Display for DocError {
             Self::SeedTooLong { .. } => "the seed would have more frames than a node accepts",
             Self::CandidateHeld => "the document holds a candidate seed and cuts no epoch",
             Self::ClockNotReady => "the clock of the document has not heard of another write yet",
+            Self::StateFull { .. } | Self::StateTooDeep { .. } => unreachable!("written above"),
         })
     }
 }
@@ -82,7 +113,9 @@ impl error::Error for DocError {
             | Self::TooLarge { .. }
             | Self::SeedTooLong { .. }
             | Self::CandidateHeld
-            | Self::ClockNotReady => None,
+            | Self::ClockNotReady
+            | Self::StateFull { .. }
+            | Self::StateTooDeep { .. } => None,
             Self::Body(error) => Some(error),
             Self::Encode(error) => Some(&**error),
         }

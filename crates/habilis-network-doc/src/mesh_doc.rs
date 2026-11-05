@@ -11,9 +11,10 @@ use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, Symmetric
 use habilis_network_util::consts::{
     DOC_CUT_BACKOFF_FIRST, DOC_CUT_BACKOFF_MAX, DOC_CUT_RANKS_SLOTTED, DOC_CUT_SLOT_TICKS,
     DOC_CUT_SPREAD_TICKS, DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES,
-    DOC_EPOCH_JUMP_MAX, DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX,
-    DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX, DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX,
-    DOC_STATE_EPOCH_FRAME_CAP_BYTES, DOC_TOMBSTONE_PATH_BYTES_MAX,
+    DOC_EPOCH_FRAME_MARGIN, DOC_EPOCH_JUMP_MAX, DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
+    DOC_REPLAY_ENTRIES_MAX, DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX, DOC_SEED_TOMBSTONE_FRAME_BYTES,
+    DOC_SEED_TOMBSTONES_MAX, DOC_STATE_DEPTH_MAX, DOC_STATE_EPOCH_FRAME_CAP_BYTES,
+    DOC_TOMBSTONE_PATH_BYTES_MAX,
 };
 
 use crate::wire::SeedMark;
@@ -1799,7 +1800,61 @@ impl MeshDoc {
             tx.commit();
         }
         let mut changes = fork.get_changes(&heads);
-        Ok(changes.pop().map(|change| change.raw_bytes().to_vec()))
+        let Some(change) = changes.pop() else {
+            return Ok(None);
+        };
+        self.check_lines(merge, &change)?;
+        Ok(Some(change.raw_bytes().to_vec()))
+    }
+
+    /// The lines of a free-form state document, for a local write whose `change` was built from
+    /// `merge`. A merge nested deeper than `DOC_STATE_DEPTH_MAX` that adds a value is refused. Any
+    /// write is refused over the memory line, and a write that adds a value (a leaf that is not
+    /// `null`, or an empty object) is refused when the next seed would pass the refusal line, on
+    /// the bytes or on the operations. A delete is exempt from the refusal line and from the depth.
+    fn check_lines(&self, merge: &Value, change: &Change) -> Result<(), DocError> {
+        if !self.state_epochs || self.gate.is_some() {
+            return Ok(());
+        }
+        let adds = adds_value(merge);
+        if adds {
+            let depth = merge_depth(merge);
+            if depth > DOC_STATE_DEPTH_MAX {
+                return Err(DocError::StateTooDeep {
+                    depth,
+                    limit: DOC_STATE_DEPTH_MAX,
+                });
+            }
+        }
+        let bytes = &self.limits.bytes;
+        let ops = &self.limits.ops;
+        // The frame of a change is its bytes in base58 (a factor of 1.37) and the margin of the
+        // envelope.
+        let frame = change.raw_bytes().len() * 137 / 100 + DOC_EPOCH_FRAME_MARGIN;
+        let frames_after = self.frame_bytes + frame;
+        let ops_after = self.ops_held + change.len();
+        let memory_bytes = bytes.memory.max(self.seed_bytes + bytes.break_even / 10);
+        let memory_ops = ops.memory.max(self.seed_ops + ops.break_even / 10);
+        if frames_after > memory_bytes {
+            return Err(full(frames_after, memory_bytes, "bytes"));
+        }
+        if ops_after > memory_ops {
+            return Err(full(ops_after, memory_ops, "operations"));
+        }
+        if !adds {
+            return Ok(());
+        }
+        let growth_bytes = frames_after.saturating_sub(self.seed_bytes);
+        let growth_ops = ops_after.saturating_sub(self.seed_ops);
+        let clock = self.clock.load(Ordering::Relaxed);
+        let projected = Limits::projected_bytes(self.seed_bytes, growth_bytes, growth_ops, clock);
+        if projected > bytes.refuse_add {
+            return Err(full(projected, bytes.refuse_add, "bytes"));
+        }
+        if ops_after > ops.refuse_add {
+            return Err(full(ops_after, ops.refuse_add, "operations"));
+        }
+        Ok(())
     }
 
     /// Ingest one verified frame carrying an automerge change. Verifies causal
@@ -3004,6 +3059,45 @@ fn collect_objects(value: &Value, prefix: &mut Vec<String>, out: &mut Vec<(Vec<S
 
 /// How many paths a merge writes: each key of each object counts once, and a list is one leaf. A
 /// frame stays inside `DOC_REPLAY_ENTRIES_MAX` paths, which also bounds its stamps.
+/// The error of a state document that is over a line.
+fn full(used: usize, limit: usize, what: &'static str) -> DocError {
+    DocError::StateFull { used, limit, what }
+}
+
+/// Whether `merge` adds a value: it has a leaf that is not `null`. An empty object is a leaf that
+/// adds a map. A merge of nulls only deletes.
+fn adds_value(merge: &Value) -> bool {
+    match merge {
+        Value::Object(fields) if !fields.is_empty() => {
+            let mut adds = false;
+            for field in fields.values() {
+                adds = adds || adds_value(field);
+            }
+            adds
+        }
+        Value::Null => false,
+        Value::Object(_)
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_) => true,
+    }
+}
+
+/// The keys on the way to the deepest value that `merge` adds, counting the key of the value.
+fn merge_depth(merge: &Value) -> usize {
+    let Value::Object(fields) = merge else {
+        return 0;
+    };
+    let mut deepest = 0;
+    for field in fields.values() {
+        if adds_value(field) {
+            deepest = deepest.max(merge_depth(field));
+        }
+    }
+    if fields.is_empty() { 0 } else { 1 + deepest }
+}
+
 fn count_paths(merge: &Value) -> usize {
     match merge {
         Value::Object(fields) => fields.values().map(|value| 1 + count_paths(value)).sum(),
@@ -6463,12 +6557,9 @@ mod tests {
     /// A state document with the lines of a small seed (40 frames: the cut is due at 1590
     /// operations), and `leaves` leaves written in merges of 100.
     fn small_state_doc(leaves: usize) -> MeshDoc {
-        let me = nick("me");
-        let mut doc = MeshDoc::new_ungated()
-            .state_epochs()
-            .limits(Limits::from_seed_frames(40));
-        write_leaves(&mut doc, &me, 0, leaves);
-        doc
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write_leaves(&mut doc, &nick("me"), 0, leaves);
+        doc.limits(Limits::from_seed_frames(40))
     }
 
     /// Write the leaves `first` to `first + count` of the map `live`, 100 in each frame.
@@ -6576,7 +6667,12 @@ mod tests {
             doc.tick_epoch(&joiner);
             assert!(!doc.cut_due(0), "no growth since the seed, tick {tick}");
         }
+        // The growth comes from the real lines, which refuse nothing at this size: the test is
+        // about the growth rule of the cut and not about the refusal of a write.
+        let small = doc.limits;
+        doc.limits = Limits::real();
         write_leaves(&mut doc, &me, 10_000, 200);
+        doc.limits = small;
         doc.tick_epoch(&joiner);
         assert!(
             doc.cut_due(0),
@@ -6616,6 +6712,134 @@ mod tests {
         assert!(
             doc.cut_due(0),
             "the hold is at most {DOC_CUT_BACKOFF_MAX} ticks"
+        );
+    }
+
+    /// The leaves `first` to `first + count` as a merge of the map `live`.
+    fn leaves_merge(first: usize, count: usize) -> Value {
+        let mut leaves = Map::new();
+        for leaf in first..first + count {
+            leaves.insert(format!("l{leaf:05}"), json!(leaf % 10));
+        }
+        json!({ "live": Value::Object(leaves) })
+    }
+
+    /// The error that a write of `merge` to `doc` gives, if it gives one.
+    fn write_error(doc: &MeshDoc, merge: &Value) -> Option<DocError> {
+        doc.build_change(merge, &pad_seed(b"me")).err()
+    }
+
+    /// A state document with the lines of a small seed that holds `leaves` leaves: written with the
+    /// real lines (which refuse nothing at this size), and then given the small ones.
+    fn full_state_doc(leaves: usize) -> MeshDoc {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write_leaves(&mut doc, &nick("me"), 0, leaves);
+        doc.limits(Limits::from_seed_frames(40))
+    }
+
+    #[test]
+    fn a_write_that_adds_a_value_is_refused_when_the_next_seed_would_pass_the_refusal_line() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = full_state_doc(1_700);
+        let refused = write_error(&doc, &leaves_merge(5_000, 200));
+        assert!(
+            matches!(&refused, Some(DocError::StateFull { .. })),
+            "1 900 operations pass the refusal line of 1 802: {refused:?}"
+        );
+        let roomy = full_state_doc(700);
+        assert!(
+            write_error(&roomy, &leaves_merge(5_000, 100)).is_none(),
+            "800 operations and about 25 000 bytes of next seed are below both refusal lines"
+        );
+    }
+
+    #[test]
+    fn a_write_of_the_same_value_is_an_add_and_is_refused_at_the_line() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = full_state_doc(1_790);
+        let same = write_error(&doc, &leaves_merge(0, 30));
+        assert!(
+            matches!(&same, Some(DocError::StateFull { .. })),
+            "30 more operations pass the line, also for the same values: {same:?}"
+        );
+        let text = same.map(|error| error.to_string()).unwrap_or_default();
+        assert!(
+            text.contains("delete keys") && text.contains("also with the same value"),
+            "the text tells what to do: {text}"
+        );
+    }
+
+    #[test]
+    fn a_delete_passes_the_refusal_line_and_stops_at_the_memory_line() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut gone = Map::new();
+        for leaf in 0..10 {
+            gone.insert(format!("l{leaf:05}"), Value::Null);
+        }
+        let deletes = json!({ "live": Value::Object(gone) });
+        let above_the_line = full_state_doc(1_900);
+        assert!(
+            write_error(&above_the_line, &leaves_merge(5_000, 5)).is_some(),
+            "an add is refused above the refusal line"
+        );
+        assert!(
+            write_error(&above_the_line, &deletes).is_none(),
+            "a delete passes: the memory line is 2 120"
+        );
+        let at_memory = full_state_doc(2_115);
+        let refused = write_error(&at_memory, &deletes);
+        assert!(
+            matches!(&refused, Some(DocError::StateFull { .. })),
+            "a delete that passes the memory line is refused: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_merge_that_adds_a_value_deeper_than_12_levels_is_refused_and_a_delete_is_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = MeshDoc::new_ungated().state_epochs();
+        let nest = |levels: usize, leaf: Value| {
+            let mut merge = leaf;
+            for level in (0..levels).rev() {
+                merge = json!({ format!("k{level}"): merge });
+            }
+            merge
+        };
+        assert!(
+            write_error(&doc, &nest(12, json!(1))).is_none(),
+            "12 levels are allowed"
+        );
+        let deep = write_error(&doc, &nest(13, json!(1)));
+        assert!(
+            matches!(
+                &deep,
+                Some(DocError::StateTooDeep {
+                    depth: 13,
+                    limit: 12
+                })
+            ),
+            "13 levels are refused: {deep:?}"
+        );
+        assert!(
+            write_error(&doc, &nest(13, Value::Null)).is_none(),
+            "a delete of a key deeper than 12 levels passes"
+        );
+    }
+
+    #[test]
+    fn a_document_with_no_state_epochs_has_no_lines() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let plain = MeshDoc::new_ungated().limits(Limits::from_seed_frames(40));
+        let merge = {
+            let mut deep = json!(1);
+            for level in 0..20 {
+                deep = json!({ format!("k{level}"): deep });
+            }
+            deep
+        };
+        assert!(
+            write_error(&plain, &merge).is_none(),
+            "a document with no state epochs refuses no write of depth or size"
         );
     }
 
