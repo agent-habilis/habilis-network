@@ -673,12 +673,28 @@ fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> 
 /// reads the clock, so a clock that went back cannot make a newer run look older. No state file
 /// means run 1.
 #[cfg(all(unix, feature = "host"))]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "run_keys carries the run in the next commit")
+fn next_run(state: Option<&Path>) -> Result<u64> {
+    let Some(state) = state else {
+        return Ok(1);
+    };
+    let run_path = state.with_extension("run");
+    let last = std::fs::read(&run_path)
+        .ok()
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+        .map_or(0, u64::from_le_bytes);
+    let run = last.saturating_add(1);
+    std::fs::write(&run_path, run.to_le_bytes())?;
+    Ok(run)
+}
+
+/// A target with no files has no state to count in, so each start is run 1.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the file-backed version, so the caller is one call"
 )]
 fn next_run(_state: Option<&Path>) -> Result<u64> {
-    Ok(0)
+    Ok(1)
 }
 
 /// The keys of this run. The member key comes from the state file. The session key is the one that
@@ -690,6 +706,7 @@ fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
         session: sync::Arc::new(identity::Identity::generate()),
         // shared with the loop and its handlers, which hold clones
         member: sync::Arc::new(load_or_create_identity(state)?),
+        run: next_run(state)?,
     })
 }
 
@@ -1234,6 +1251,11 @@ mod tests {
             first.session.author_key(),
             first.member.author_key(),
             "the session key is not the member key"
+        );
+        assert_eq!(
+            (first.run, second.run),
+            (1, 2),
+            "the run number counts the starts"
         );
     }
 

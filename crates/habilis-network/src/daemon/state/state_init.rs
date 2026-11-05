@@ -17,6 +17,12 @@ pub(crate) struct RunKeys {
     pub(crate) session: Arc<Identity>,
     // shared with the loop and its handlers, which hold clones
     pub(crate) member: Arc<Identity>,
+    /// The run number of this start, which the proof of the session names.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the joined body carries the proof in a later commit")
+    )]
+    pub(crate) run: u64,
 }
 
 /// Everything `EventLoopState::new` needs beyond the clock, grouped for the
