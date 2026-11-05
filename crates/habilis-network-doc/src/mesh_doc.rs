@@ -202,28 +202,65 @@ impl Candidate {
 }
 
 impl Candidate {
+    /// The tail frames by the change that they follow.
+    fn by_parent(&self) -> HashMap<ChangeHash, (ChangeHash, &TailFrame)> {
+        let mut by_parent: HashMap<ChangeHash, (ChangeHash, &TailFrame)> = HashMap::new();
+        for (hash, tail) in &self.tail {
+            by_parent.insert(tail.parent, (*hash, tail));
+        }
+        by_parent
+    }
+
+    /// The path from the root through the tail frames that follow each other, as far as the mark
+    /// allows: the frames in order, root first, and the change at the end of the path.
+    fn path(&self) -> (Vec<&Verified>, ChangeHash) {
+        let named = self.mark.as_ref().map_or(1, |mark| mark.frames as usize);
+        let by_parent = self.by_parent();
+        let mut ordered: Vec<&Verified> = vec![&self.frame];
+        let mut tip: ChangeHash = self.root_hash;
+        while ordered.len() < named {
+            let Some((hash, tail)) = by_parent.get(&tip) else {
+                break;
+            };
+            ordered.push(&tail.frame);
+            tip = *hash;
+        }
+        (ordered, tip)
+    }
+
     /// The frames of the chain in order, root first, when the candidate holds all of them and the
     /// last change is the one that the mark names. A candidate with no mark is its root alone.
     fn chain(&self) -> Option<Vec<&Verified>> {
         let Some(mark) = self.mark.as_ref() else {
             return Some(vec![&self.frame]);
         };
-        let named = mark.frames as usize;
-        let mut by_parent: HashMap<ChangeHash, (ChangeHash, &TailFrame)> = HashMap::new();
-        for (hash, tail) in &self.tail {
-            by_parent.insert(tail.parent, (*hash, tail));
-        }
-        let mut ordered: Vec<&Verified> = vec![&self.frame];
+        let (ordered, tip) = self.path();
+        let whole = ordered.len() == mark.frames as usize && tip.to_string() == mark.last;
+        whole.then_some(ordered)
+    }
+
+    /// The hashes of the tail frames that lie on the path from the root.
+    fn on_path(&self) -> HashSet<ChangeHash> {
+        let by_parent = self.by_parent();
+        let mut hashes: HashSet<ChangeHash> = HashSet::new();
         let mut tip: ChangeHash = self.root_hash;
-        while let Some((hash, tail)) = by_parent.get(&tip) {
-            if ordered.len() >= named {
-                return None;
+        while let Some((hash, _)) = by_parent.get(&tip) {
+            if !hashes.insert(*hash) {
+                break;
             }
-            ordered.push(&tail.frame);
             tip = *hash;
         }
-        let matches = ordered.len() == named && tip.to_string() == mark.last;
-        matches.then_some(ordered)
+        hashes
+    }
+
+    /// A tail frame that is not in `on_path`, if there is one.
+    fn first_off_path(&self, on_path: &HashSet<ChangeHash>) -> Option<ChangeHash> {
+        for hash in self.tail.keys() {
+            if !on_path.contains(hash) {
+                return Some(*hash);
+            }
+        }
+        None
     }
 
     /// The dedup keys of every frame that the candidate holds.
@@ -1002,14 +1039,36 @@ impl MeshDoc {
         if hash == held.root_hash || held.tail.contains_key(&hash) {
             return Ingested::Duplicate;
         }
-        if held.tail.len() + 1 >= named {
+        // A frame that follows the last change of the chain is a write after the seed, and a
+        // second frame that follows the same change is a fork. Neither belongs to the chain.
+        let after_the_chain = held
+            .mark
+            .as_ref()
+            .is_some_and(|mark| mark.last == parent.to_string());
+        let forked = held.tail.values().any(|kept| kept.parent == *parent);
+        if after_the_chain || forked {
             return self.refuse_frame(frame);
         }
+        if held.tail.len() + 1 >= named {
+            // The slots are full. A frame that is off the path from the root has no place that a
+            // frame of the chain needs, so one of them gives way.
+            let on_path = held.on_path();
+            let off_path: Option<ChangeHash> = held.first_off_path(&on_path);
+            let Some(victim) = off_path else {
+                return self.refuse_frame(frame);
+            };
+            if let Some(gone) = held.tail.remove(&victim) {
+                self.dropped.push(gone.frame.dedup_key());
+            }
+        }
+        let Some(slots) = self.candidate.as_mut() else {
+            return self.refuse_frame(frame);
+        };
         let kept = TailFrame {
             frame: frame.clone(),
             parent: *parent,
         };
-        held.tail.insert(hash, kept);
+        slots.tail.insert(hash, kept);
         Ingested::NewEpoch { epoch }
     }
 
@@ -1466,8 +1525,9 @@ mod tests {
         SelfWriteGate,
     };
     use crate::DocError;
-    use crate::wire::{SeedMark, change_body_seed, encrypt_body};
+    use crate::wire::{SeedMark, change_body_seed, encrypt_body, parse_change_full};
     use automerge::Change;
+    use automerge::transaction::Transactable;
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
@@ -2936,6 +2996,126 @@ mod tests {
             }
         }
         last
+    }
+
+    /// The frames that `cutter` writes after it adopted the seed `frames` of epoch 3: each one
+    /// follows the change before it, the first one follows the tip of the seed.
+    fn writes_after_the_seed(
+        cutter: &Nickname,
+        frames: &[Verified],
+        count: usize,
+    ) -> Vec<Verified> {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for frame in frames {
+            doc.ingest(frame);
+        }
+        let me = nick("me");
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            doc.tick_epoch(&me);
+        }
+        let mut writes: Vec<Verified> = Vec::new();
+        for index in 0..count {
+            writes.push(write(&mut doc, cutter, &json!({ "after": index })));
+        }
+        writes
+    }
+
+    #[test]
+    fn a_write_of_the_cutter_after_the_seed_does_not_take_a_slot_of_the_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        let writes = writes_after_the_seed(&cutter, &frames, 1);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let last = frames.len() - 1;
+        for frame in &frames[..last] {
+            doc.ingest(frame);
+        }
+        doc.ingest(&writes[0]);
+        doc.ingest(&frames[last]);
+        let switch = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        assert!(
+            switch.is_some(),
+            "the chain is whole, so the seed is adopted"
+        );
+        assert_eq!(
+            doc.to_json(),
+            live,
+            "the document holds the live json of the seed"
+        );
+    }
+
+    /// A frame of `cutter` in epoch 3 that follows the root of the chain `frames`, as the second
+    /// frame of the chain does, with other content: a fork of the chain.
+    fn fork_of_the_root(cutter: &Nickname, frames: &[Verified]) -> Verified {
+        let root: Vec<u8> = parse_change_full(frames[0].body.as_str())
+            .expect("a root body")
+            .bytes;
+        let mut doc = automerge::Automerge::new();
+        doc.apply_changes([super::state_genesis(3)])
+            .expect("the genesis applies");
+        doc.apply_changes([Change::from_bytes(root).expect("a change")])
+            .expect("the root applies");
+        doc.set_actor(super::actor_for(&pad_seed(cutter.as_str().as_bytes())));
+        let heads: Vec<automerge::ChangeHash> = doc.get_heads();
+        let mut tx = doc.transaction();
+        Transactable::put(&mut tx, &automerge::ROOT, "fork", 1_i64).expect("a put");
+        tx.commit();
+        let mut changes = doc.get_changes(&heads);
+        let change: Vec<u8> = changes.pop().expect("a change").raw_bytes().to_vec();
+        let plain = change_body_seed(&change, None, 3, None).expect("a body");
+        let who = signer(cutter);
+        let message =
+            Message::new_channel_event(&MeshId::from("test"), cutter, plain, Channel::State);
+        Verified::fixture_unchecked(message.unverified_key(who), who)
+    }
+
+    #[test]
+    fn a_second_child_of_one_parent_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let fork = fork_of_the_root(&cutter, &frames);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        doc.ingest(&frames[0]);
+        doc.ingest(&frames[1]);
+        let taken = doc.ingest(&fork);
+        assert!(
+            matches!(taken, Ingested::Ignored),
+            "a fork of the chain is refused: {taken:?}"
+        );
+        assert!(
+            dropped_keys(&mut doc).contains(&fork.dedup_key()),
+            "its key is forgotten"
+        );
+    }
+
+    #[test]
+    fn a_tail_full_of_frames_off_the_chain_still_takes_the_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let live = live_state();
+        let frames = seed_frames(&cutter, &live, 3, None);
+        let writes = writes_after_the_seed(&cutter, &frames, frames.len() + 2);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        doc.ingest(&frames[0]);
+        for write_frame in &writes[1..] {
+            doc.ingest(write_frame);
+        }
+        for frame in &frames[1..] {
+            doc.ingest(frame);
+        }
+        let switch = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        assert!(
+            switch.is_some(),
+            "the chain pushed the off-chain frames out"
+        );
+        assert_eq!(
+            doc.to_json(),
+            live,
+            "the document holds the live json of the seed"
+        );
     }
 
     #[test]
