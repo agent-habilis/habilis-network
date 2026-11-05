@@ -662,6 +662,10 @@ impl EventLoopState {
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
     /// per-channel keys are derived, rather than lingering in the caller.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one literal of every field; the merge of the key-addressed roster added the last line over the limit"
+    )]
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
         let MeshSecrets {
             password: mesh_password,

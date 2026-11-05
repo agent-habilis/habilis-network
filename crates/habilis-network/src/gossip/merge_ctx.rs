@@ -865,6 +865,7 @@ mod tests {
         entry_merges, farewell_targets, frame_fits, mark_parked, peer_info_json, unwritten,
         write_entry_again,
     };
+    use crate::daemon::state::EventLoopState;
     use crate::doc::EpochSwitch;
     use crate::protocol::{MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
@@ -1031,7 +1032,7 @@ mod tests {
     /// The merges that write an entry again each fit the frame that `fits` measures, join into the
     /// entry, and name the map and the owner.
     /// The slot of the entry of this node: the hex of the key that signs for it.
-    fn own_slot(state: &crate::daemon::state::EventLoopState) -> String {
+    fn own_slot(state: &EventLoopState) -> String {
         state.identity.author_key().to_string()
     }
 

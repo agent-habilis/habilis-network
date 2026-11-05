@@ -1556,7 +1556,7 @@ mod tests {
             holder.heal_tick().await;
 
             let shed = holder.rendezvous.is_none();
-            holder.close().await;
+            Box::pin(holder.close()).await;
             lower_beacon.shed_and_wait().await;
             lower_endpoint.close().await;
             assert!(
@@ -1587,7 +1587,7 @@ mod tests {
                 );
             }
             drop(silent);
-            holder.close().await;
+            Box::pin(holder.close()).await;
         });
     }
 
@@ -1628,7 +1628,7 @@ mod tests {
                 time::sleep(Duration::from_millis(50)).await;
             }
 
-            holder.close().await;
+            Box::pin(holder.close()).await;
             assert!(
                 kept_at_the_first,
                 "one check that does not answer shed the beacon"
@@ -1653,7 +1653,7 @@ mod tests {
             }
 
             let kept = holder.rendezvous.is_some();
-            holder.close().await;
+            Box::pin(holder.close()).await;
             assert!(kept, "a beacon that answers was shed by its own check");
         });
     }
@@ -1681,7 +1681,7 @@ mod tests {
             let peer = holder.rendezvous.is_none();
 
             beacon::set_blind_rung_probes(holder.endpoint.id(), false);
-            holder.close().await;
+            Box::pin(holder.close()).await;
             lower_beacon.shed_and_wait().await;
             lower_endpoint.close().await;
             assert!(shed, "the first tick reads the lower rung and sheds");

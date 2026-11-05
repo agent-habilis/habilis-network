@@ -1608,7 +1608,7 @@ mod tests {
             let members: Vec<_> = (0..30)
                 .map(|index| test_key(&format!("member-{index}")))
                 .collect();
-            state.peers.extend(members.iter().cloned());
+            state.peers.extend(members.iter().copied());
             let asker = Identity::generate();
             let holder_key = net.our_pubkey;
             let mut digests =

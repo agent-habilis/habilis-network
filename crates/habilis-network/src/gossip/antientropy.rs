@@ -1633,7 +1633,7 @@ mod tests {
             .expect("a digest id that skips this node among 30 members");
         for (unicast, answered) in [(true, true), (false, false)] {
             let (mut state, mut resends) = holder_for_unicast(2, &asker_identity, asker_endpoint);
-            state.peers.extend(members.iter().cloned());
+            state.peers.extend(members.iter().copied());
             if unicast {
                 state.state_digest_serves.unicast.arrived_from = Some(asker_endpoint);
             }

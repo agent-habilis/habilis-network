@@ -5292,11 +5292,9 @@ mod dedup_counter_tests {
         );
         let seed = *sender_identity.public().as_bytes();
         let slot = sender_identity.author_key().to_string();
+        let merge = json!({"peers": {slot.as_str(): {"card": "from epoch 1"}}});
         let change = writer
-            .build_change(
-                &json!({"peers": {slot.as_str(): {"card": "from epoch 1"}}}),
-                &seed,
-            )
+            .build_change(&merge, &seed)
             .expect("a JSON object merges")
             .expect("a non-empty merge yields a change");
         let (body, _plain) = writer
