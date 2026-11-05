@@ -1754,7 +1754,8 @@ impl EventLoopState {
     /// The `joined` frame this node announces: signed by the session key, with the proof of the
     /// session in the body.
     pub(crate) fn own_joined(&self, mesh: &MeshId, nickname: &Nickname) -> Verified {
-        Message::new_joined(mesh, nickname).sign(&self.identity)
+        let proof = self.own_proof(nickname, mesh, self.run);
+        Message::new_joined_with_proof(mesh, nickname, &proof).sign(&self.identity)
     }
 
     /// The request to send for an `alive` frame whose session this node holds no proof for. It asks

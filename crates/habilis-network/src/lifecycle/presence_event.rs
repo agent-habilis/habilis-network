@@ -3,8 +3,8 @@ use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
 use crate::logging::messages;
+use crate::protocol::PresenceSubtype;
 use crate::protocol::messages::Verified;
-use crate::protocol::{Message, PresenceSubtype};
 use crate::transport;
 
 use super::membership_update;
@@ -105,7 +105,7 @@ pub(crate) async fn handle_presence(
             // re-announce mints a fresh id, so without this each one becomes
             // another message we can never acknowledge and every peer re-sends to
             // us forever (see `gossip::recv::retain_own_broadcast`).
-            let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
+            let joined = state.own_joined(context.mesh, context.author);
             gossip::broadcast_msg(context.sender, &joined).await;
             gossip::retain_own_broadcast(state, joined);
             state.last_sent_at = Instant::now();
