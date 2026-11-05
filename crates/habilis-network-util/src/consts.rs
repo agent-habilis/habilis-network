@@ -153,18 +153,21 @@ pub const DOC_STATE_EPOCH_FRAME_CAP_BYTES: usize = 4 * 1024 * 1024;
 pub const DOC_SEED_FRAMES_MAX: usize =
     4 * DOC_STATE_EPOCH_FRAME_CAP_BYTES / (MAX_MESSAGE_SIZE - DOC_EPOCH_FRAME_MARGIN);
 
-/// The most writers that a state seed lists in its cut vector. The root frame holds the vector,
-/// at about 30 bytes for each writer (a tag of 8 bytes of the actor and a sequence number), and a
-/// frame holds 3840 bytes. A cutter with more writers than this keeps the busiest ones and says so
-/// (`SeedChain::truncated`): a writer that is left out is read as covering nothing, so its
-/// author writes again the leaves of its own that the seed holds with another value.
-pub const DOC_SEED_CUT_MAX: usize = 96;
-
 /// The most paths that one frame of a seed or a replay can write, and so the most stamps that its
 /// `o` can carry. A frame holds 3840 bytes, so this bounds the work of a node that reads the stamps
 /// of one frame. The sender splits a longer replay into frames of at most this many paths, and a
 /// node refuses a frame that carries more.
 pub const DOC_REPLAY_ENTRIES_MAX: usize = 128;
+
+/// The most tombstones that a state document keeps, and that a seed carries: one for each path that
+/// was deleted, with the stamp of the delete. The one with the lowest stamp leaves first. A node
+/// that was away until the tombstone of a leaf left can bring back a value that others deleted.
+/// 1024 entries of at most `DOC_TOMBSTONE_PATH_BYTES_MAX` bytes of path are under 300 kibibytes.
+pub const DOC_SEED_TOMBSTONES_MAX: usize = 1024;
+
+/// The longest path (the bytes of its keys) that gets a tombstone. A delete of a longer path is
+/// written and counted, and has no tombstone.
+pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;
 
 /// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged
 /// epoch number cannot lock the channel: the forger raises the epoch by this much per adoption.

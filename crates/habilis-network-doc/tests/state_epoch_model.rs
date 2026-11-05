@@ -13,7 +13,7 @@
 
 use std::{env, mem};
 
-use habilis_network_doc::{DocError, MeshDoc, wire};
+use habilis_network_doc::{DocError, MeshDoc, Stamp, StampedPaths, wire};
 use habilis_network_protocol::messages::{MessageBody, Verified};
 use habilis_network_protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
 use serde_json::{Map, Value, json};
@@ -81,9 +81,7 @@ impl Sim {
         for index in 0..NODES {
             nodes.push(Node {
                 name: nick(&format!("n{index}")),
-                doc: MeshDoc::new_ungated()
-                    .state_epochs()
-                    .owner(AuthorKey::from(pad(&format!("n{index}")))),
+                doc: MeshDoc::new_ungated().state_epochs(),
             });
         }
         Self {
@@ -230,17 +228,51 @@ impl Sim {
     }
 
     fn tick_all(&mut self) {
-        let mut replays: Vec<(usize, Value)> = Vec::new();
+        let mut replays: Vec<(usize, Value, StampedPaths)> = Vec::new();
         for (index, node) in self.nodes.iter_mut().enumerate() {
             let me = node.name.clone();
             let switched = node.doc.tick_epoch(&me);
-            if let Some(patch) = switched.and_then(|switch| switch.replay) {
-                replays.push((index, patch));
+            if let Some(switch) = switched
+                && let Some(patch) = switch.replay
+            {
+                replays.push((index, patch, switch.replay_stamps));
             }
         }
-        for (index, patch) in replays {
-            self.commit(index, &patch);
+        for index in 0..NODES {
+            if let Some((patch, stamps)) = self.nodes[index].doc.take_restores() {
+                replays.push((index, patch, stamps));
+            }
         }
+        for (index, patch, stamps) in replays {
+            let fits = |merge: &Value| merge.to_string().len() <= FRAME_FITS;
+            let chunks = self.nodes[index]
+                .doc
+                .split_replay(&patch, fits)
+                .expect("the replay splits");
+            for chunk in chunks {
+                self.commit_replay(index, &chunk, &stamps);
+            }
+        }
+    }
+
+    /// Node `index` writes the replay `merge` with the stamps of the old epoch, and sends the frame.
+    fn commit_replay(&mut self, index: usize, merge: &Value, stamps: &[(Vec<String>, Stamp)]) {
+        let node = &mut self.nodes[index];
+        let actor = pad(node.name.as_str());
+        let built = node
+            .doc
+            .build_change(merge, &actor)
+            .expect("the merge applies");
+        let Some(change) = built else {
+            return;
+        };
+        let wire = node
+            .doc
+            .compose_replay_body(&change, stamps)
+            .expect("compose");
+        let frame = signed(&node.name, wire);
+        node.doc.ingest(&frame);
+        self.send_to_others(index, &frame);
     }
 
     /// The answer to a digest: every node gives every other node the frames that it lacks.
@@ -277,7 +309,10 @@ impl Sim {
             let epoch = self.nodes[0].doc.epoch();
             let mut same = true;
             for node in &self.nodes {
-                if node.doc.to_json() != first || node.doc.epoch() != epoch {
+                if node.doc.to_json() != first
+                    || node.doc.epoch() != epoch
+                    || node.doc.has_restores()
+                {
                     same = false;
                 }
             }
@@ -454,7 +489,6 @@ const ORDERS: [[usize; 3]; 6] = [
 /// again. The leaf must hold what the old epoch holds: the write that is causally the latest. Every
 /// order of the keys of the three authors is run, so the result does not depend on the key order.
 #[test]
-#[ignore = "red: needs the replay rule of the design note v3 (state-epoch-replay-rule-v3.md)"]
 fn model_a_shared_leaf_keeps_the_causally_latest_write_of_three_writers() {
     let _guard = habilis_network_test_tracing::init();
     for [first, second, third] in ORDERS {
@@ -482,7 +516,6 @@ fn model_a_shared_leaf_keeps_the_causally_latest_write_of_three_writers() {
 /// A node that was away for two epochs jumps to the seed of the second. The seed holds a newer
 /// write of a shared leaf than the node does, so the node must not write its value again.
 #[test]
-#[ignore = "red: needs the replay rule of the design note v3 (state-epoch-replay-rule-v3.md)"]
 fn model_a_jump_does_not_revert_a_newer_value_of_a_shared_leaf() {
     let _guard = habilis_network_test_tracing::init();
     let mut sim = Sim::new(12);
@@ -516,7 +549,6 @@ fn model_a_jump_does_not_revert_a_newer_value_of_a_shared_leaf() {
 /// A delete of a shared leaf that comes after a write of another author must stay a delete when the
 /// two authors write again, whatever the order of their keys.
 #[test]
-#[ignore = "red: needs the replay rule of the design note v3 (state-epoch-replay-rule-v3.md)"]
 fn model_a_delete_of_a_shared_leaf_stays_deleted_after_the_writes_again() {
     let _guard = habilis_network_test_tracing::init();
     for [writer, deleter, cutter] in ORDERS {

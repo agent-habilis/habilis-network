@@ -10,8 +10,8 @@ use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
 use habilis_network_util::consts::{
     DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
-    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_SEED_CUT_MAX,
-    DOC_SEED_FRAMES_MAX,
+    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_SEED_FRAMES_MAX,
+    DOC_SEED_TOMBSTONES_MAX, DOC_TOMBSTONE_PATH_BYTES_MAX,
 };
 
 use crate::wire::SeedMark;
@@ -87,6 +87,7 @@ impl EpochSwitch {
             map,
             own_entry,
             replay: None,
+            replay_stamps: Vec::new(),
         }
     }
 }
@@ -106,6 +107,10 @@ pub struct EpochSwitch {
     /// seed behind them, and that the seed of the new epoch lacks. The caller writes it on top of
     /// the seed. `None` for a gated channel and when nothing is lacking.
     pub replay: Option<Value>,
+    /// The stamp of each leaf that `replay` writes again, where the leaf has one: the stamp of the
+    /// write that made the value in the old epoch. The caller passes them to
+    /// [`MeshDoc::compose_replay_body`], so the frame of the replay names them.
+    pub replay_stamps: Vec<(Vec<String>, Stamp)>,
 }
 
 /// Declares that a channel holds a **per-peer map** at the document root — one
@@ -180,19 +185,30 @@ pub struct SeedChain {
     pub changes: Vec<Vec<u8>>,
     /// The mark for the body of the root.
     pub mark: SeedMark,
-    /// Whether the cut vector of the mark lists fewer writers than the document has. A writer
-    /// that is not listed has its changes counted as not in the seed, so its author writes again
-    /// the leaves of its own that differ. The caller warns once and counts it.
-    pub truncated: bool,
     /// The Lamport time of the frames of the chain: the cutter takes one time for the whole seed.
     pub time: u64,
     /// For each change of the chain, the stamps of the paths that it writes, in the order of
     /// those paths: the stamp of the write that made the value in the document of the cutter.
     pub origins: Vec<Vec<Stamp>>,
+    /// The tombstones of the cutter, which the root frame of the seed carries.
+    pub tombstones: Vec<(Vec<String>, Stamp)>,
 }
 
+/// What a seed names: the stamps of its changes, and the tombstones of its root.
+type SeedRead = (SeedStamps, StampedPaths);
+
+/// The paths that a replay frame names with what this node knew of them before: the paths, the
+/// live stamp of each, and the JSON of the document.
+type Watch = (Vec<Vec<String>>, Vec<Option<Stamp>>, Value);
+
+/// What a restore asks the glue to write: a merge and a stamp for each path.
+pub type Restores = (Value, StampedPaths);
+
+/// A path with a stamp each.
+pub type StampedPaths = Vec<(Vec<String>, Stamp)>;
+
 /// The stamps that the changes of a seed name: for each change, its paths with a stamp each.
-type SeedStamps = HashMap<ChangeHash, Vec<(Vec<String>, Stamp)>>;
+type SeedStamps = HashMap<ChangeHash, StampedPaths>;
 
 /// The stamps that stored frames name, read once for each call of `stamps_of`.
 type RebuiltStamps = HashMap<ChangeHash, Option<Vec<(Vec<String>, Stamp)>>>;
@@ -427,12 +443,6 @@ pub struct MeshDoc {
     settled_bytes: usize,
     /// The frame bytes that start a reset, before the settled size is known.
     frame_cap: usize,
-    /// The values that this node wrote in the epoch before the seed that it adopted last, for the
-    /// leaves of a rival seed that wins later: a node that cut its own seed holds the leaves of
-    /// that seed only here, and a rival can come at any time, after a partition for one. It is
-    /// replaced at the next adoption, and it holds no more than the values of the node, so the
-    /// bound is the live size of the document.
-    carried: Vec<(Vec<String>, Value)>,
     /// Whether the document is applying the frames of the seed that it adopts, which the rule for
     /// a rival seed must not see.
     adopting: bool,
@@ -445,12 +455,24 @@ pub struct MeshDoc {
     refused_time: u64,
     /// The paths of a seed that got the stamp 0 (see [`Self::unstamped_paths`]).
     unstamped: AtomicU64,
+    /// The values that this node holds with a stamp above the live stamp that a replay of another
+    /// node just set: the replay won in automerge but has the lower stamp, so this node writes its
+    /// value again (see [`Self::take_restores`]). At most `DOC_SEED_TOMBSTONES_MAX` paths.
+    restores: BTreeMap<Vec<String>, (Value, Stamp)>,
     /// Whether local writes wait for the end of the first sync (see [`Self::awaiting_first_sync`]).
     awaiting_sync: bool,
     /// The stamps that the changes of the adopted seed name, for each change and each path that it
     /// writes. They tell who wrote the value of a leaf and when, where the change is the seed of
     /// another node. Dropped at the next epoch, and at most the paths of the seed.
     origins: SeedStamps,
+    /// The paths that were deleted, with the stamp of the delete: a leaf that a seed lacks because
+    /// it was deleted must not be written again from an older value. It survives the epochs (a
+    /// seed carries it), holds at most `DOC_SEED_TOMBSTONES_MAX` entries, and drops the one with
+    /// the lowest stamp when it is full.
+    tombstones: BTreeMap<Vec<String>, Stamp>,
+    /// The deletes of a path longer than `DOC_TOMBSTONE_PATH_BYTES_MAX` bytes, which have no
+    /// tombstone.
+    tombstone_paths_long: u64,
     /// The author of the root of the seed that this document adopted for its epoch, `None` when
     /// it holds no seed. A rival root of the same epoch with a lower key replaces that seed.
     seed_author: Option<AuthorKey>,
@@ -464,10 +486,6 @@ pub struct MeshDoc {
     /// default, so a state channel refuses such a frame, as it did before the state epochs, until
     /// the node ticks the state channel (see [`Self::state_epochs`]).
     state_epochs: bool,
-    /// The key of the node that holds this document, when it is set. Only the changes that it
-    /// signed are written again after a state epoch switch: a write of another node, written
-    /// again by every holder, would come after a newer write of its author and take its place.
-    owner: Option<AuthorKey>,
     /// This channel's per-peer write gate, when it has one (`meta` does; `state`
     /// is free-form and carries no per-peer identity, so it does not).
     gate: Option<SelfWriteGate>,
@@ -526,14 +544,15 @@ impl MeshDoc {
             settled_bytes: 0,
             frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
             state_epochs: false,
-            owner: None,
-            carried: Vec::new(),
             adopting: false,
             clock: AtomicU64::new(0),
             refused_time: 0,
             unstamped: AtomicU64::new(0),
+            restores: BTreeMap::new(),
             awaiting_sync: false,
             origins: HashMap::new(),
+            tombstones: BTreeMap::new(),
+            tombstone_paths_long: 0,
             seed_author: None,
             seed_hashes: HashSet::new(),
             refused_rivals: Vec::new(),
@@ -602,14 +621,6 @@ impl MeshDoc {
         self
     }
 
-    /// Name the node that holds this document, so that a switch to a state epoch writes again the
-    /// changes that the node signed and the seed lacks.
-    #[must_use]
-    pub fn owner(mut self, key: AuthorKey) -> Self {
-        self.owner = Some(key);
-        self
-    }
-
     /// Set this channel's encryption key (the daemon's per-channel
     /// mesh-password-derived key). `None` leaves the channel in plaintext.
     #[must_use]
@@ -666,6 +677,73 @@ impl MeshDoc {
             None => plain.clone(),
         };
         Ok((wire, plain))
+    }
+
+    /// Compose the wire body for a replay change: like [`Self::compose_wire_body`], and the body
+    /// names, for each path that the change writes, the stamp from `stamps` (the stamp that the
+    /// write had in the old epoch), or a fresh stamp of this change for a path with none. The
+    /// change is checked on a fork, so the paths it lists are those that a receiver lists.
+    ///
+    /// # Errors
+    /// As [`Self::compose_wire_body`], and [`DocError::TooLarge`] when the change writes more than
+    /// `DOC_REPLAY_ENTRIES_MAX` paths: split the replay with [`Self::split_replay`] first.
+    pub fn compose_replay_body(
+        &self,
+        change: &[u8],
+        stamps: &[(Vec<String>, Stamp)],
+    ) -> Result<habilis_network_protocol::MessageBody, DocError> {
+        if self.awaiting_sync {
+            return Err(DocError::ClockNotReady);
+        }
+        let parsed = Change::from_bytes(change.to_vec()).map_err(DocError::encode)?;
+        let mut fork = self.doc.fork();
+        fork.apply_changes([parsed.clone()])
+            .map_err(DocError::encode)?;
+        let paths = change_leaves(&fork, &parsed);
+        if paths.len() > DOC_REPLAY_ENTRIES_MAX {
+            return Err(DocError::TooLarge { bytes: paths.len() });
+        }
+        let time = self.next_time();
+        let fresh = Stamp::new(time, actor_tag(parsed.actor_id()));
+        let named: HashMap<&Vec<String>, &Stamp> =
+            stamps.iter().map(|(path, stamp)| (path, stamp)).collect();
+        // An object that the replay makes only because a leaf below it needs a place has no write
+        // of its own, so it gets the stamp 0: a stamp from now would cover the newer leaves that
+        // other nodes write below it.
+        let written: Value = doc_json(&fork);
+        let none = Stamp::new(0, "0000000000000000".to_owned());
+        let origins: Vec<Stamp> = paths
+            .iter()
+            .map(|path| match named.get(path) {
+                Some(stamp) => (*stamp).clone(),
+                None if lookup(&written, path).is_some_and(Value::is_object) => none.clone(),
+                None => fresh.clone(),
+            })
+            .collect();
+        let plain =
+            wire::change_body_stamped(change, None, self.epoch, None, Some(time), &origins)?;
+        match self.key.as_ref() {
+            Some(key) => wire::encrypt_body(&plain, key),
+            None => Ok(plain),
+        }
+    }
+
+    /// Split a replay merge into merges of at most `DOC_REPLAY_ENTRIES_MAX` paths that each fit a
+    /// frame (`fits` measures the real frame, as for [`Self::build_seed`]). A sender that has more
+    /// leaves to write again than one frame names sends one frame for each merge.
+    ///
+    /// # Errors
+    /// [`DocError::TooLarge`] when one leaf does not fit a frame.
+    pub fn split_replay(
+        &self,
+        replay: &Value,
+        fits: impl FnMut(&Value) -> bool,
+    ) -> Result<Vec<Value>, DocError> {
+        let mut within_frame = fits;
+        split_entry(replay, |merge| {
+            count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
+        })
+        .collect()
     }
 
     /// The plaintext body string to surface for `frame`, decrypting an `enc`
@@ -968,7 +1046,7 @@ impl MeshDoc {
         };
         // A state seed names the stamp of each path that each of its changes writes. A seed whose
         // stamps do not match its changes is dropped before the switch, as an incomplete one is.
-        let recorded: Option<SeedStamps> = if candidate.mark.is_some() {
+        let recorded: Option<SeedRead> = if candidate.mark.is_some() {
             let Some(found) = self.read_seed_stamps(candidate.epoch, &frames) else {
                 self.dropped.extend(candidate.keys());
                 if let Some(held) =
@@ -982,37 +1060,32 @@ impl MeshDoc {
         } else {
             None
         };
-        // The cut vector of a seed counts the sequence numbers of the document of its cutter, which
-        // held the epoch before the seed. It covers what this document holds only when this
-        // document is at that epoch. A rival seed of the epoch that the document holds, and a seed
-        // that jumps over an epoch, are not in that case: no cut is known, so every change of the
-        // node above the seed that it adopted is written again, and a value that the new epoch
-        // holds as it is stays unsent.
-        let consecutive = candidate.epoch == self.epoch + 1;
-        let rival = candidate.epoch == self.epoch;
-        let now: Value = self.to_json();
-        let paths = self.own_leaf_paths(&self.seed_hashes);
-        let no_cut: Vec<(String, u64)> = Vec::new();
-        let mut leaves: Vec<(Vec<String>, Value)> = match candidate.mark.as_ref() {
-            Some(mark) if consecutive => Self::leaves_for(&paths, &mark.cut, &now),
-            Some(_) => Self::leaves_for(&paths, &no_cut, &now),
+        // A state seed names the stamp of each path. A leaf that this node holds with a stamp above
+        // the stamp that the seed holds for it (or for an object that holds it) is a write that the
+        // seed lacks, and the node writes it again with its stamp. A leaf that the seed holds with
+        // a higher stamp stays as the seed has it. No cut is needed: the rule is the same for the
+        // next epoch, a jump, and a rival seed.
+        let theirs: HashMap<Vec<String>, Stamp> = match recorded.as_ref() {
+            Some((found, dead)) => seed_stamp_map(found, dead),
+            None => HashMap::new(),
+        };
+        let mut pending: Vec<(Vec<String>, Value, Stamp)> = match recorded.as_ref() {
+            Some(_) => self.pending_writes(&theirs),
             None => Vec::new(),
         };
-        // The values of this node in the epoch that the seed replaces, with no cut: if a rival seed
-        // of the new epoch wins in the wait that follows, the leaves of the seed that this node
-        // adopted come from here, since the document no longer holds them.
-        let carried_now: Vec<(Vec<String>, Value)> = match candidate.mark.as_ref() {
-            Some(_) => Self::leaves_for(&paths, &no_cut, &now),
-            None => Vec::new(),
-        };
-        if rival {
-            // A carried leaf is older than a write of this epoch to the same leaf or to a leaf that
-            // holds it, so the write wins and the carried value is not applied above it.
-            let mut merged: Vec<(Vec<String>, Value)> = mem::take(&mut self.carried);
-            merged.retain(|(carried, _)| !leaves.iter().any(|(path, _)| carried.starts_with(path)));
-            merged.extend(leaves);
-            merged.sort_by_key(|(path, _)| path.len());
-            leaves = merged;
+        // A delete of this node that the seed does not know of is written again as well, if the
+        // seed holds the value: its tombstone has the higher stamp. A value that the document
+        // still holds at that path is older than the delete (a newer write would have removed the
+        // tombstone), so what is written is the delete.
+        if recorded.is_some() {
+            for (path, stamp) in &self.tombstones {
+                let bar: Option<&Stamp> = (1..=path.len())
+                    .filter_map(|depth| theirs.get(&path[..depth]))
+                    .max();
+                if bar.is_none_or(|held| stamp > held) {
+                    pending.push((path.clone(), Value::Null, stamp.clone()));
+                }
+            }
         }
         let mut seed_hashes: HashSet<ChangeHash> = candidate.tail.keys().copied().collect();
         seed_hashes.insert(candidate.root_hash);
@@ -1030,16 +1103,69 @@ impl MeshDoc {
             }
         }
         self.adopting = false;
-        if let Some(found) = recorded {
+        if let Some((found, dead)) = recorded {
             self.origins = found;
+            // The tombstones of the seed join ours. A tombstone that the seed beats with a live
+            // value of a higher stamp is of no use any more.
+            for (path, stamp) in dead {
+                self.add_tombstone(path, stamp);
+            }
+            let live = seed_stamp_map(&self.origins, &[]);
+            self.tombstones
+                .retain(|path, stamp| live.get(path).is_none_or(|held| &*stamp >= held));
         }
-        self.carried = carried_now;
         if candidate.mark.is_some() {
             self.seed_author = Some(candidate.frame.key());
             self.seed_hashes = seed_hashes;
         }
+        let leaves: Vec<(Vec<String>, Value)> = pending
+            .iter()
+            .map(|(path, value, _)| (path.clone(), value.clone()))
+            .collect();
         switch.replay = self.replay_patch(leaves);
+        if switch.replay.is_some() {
+            switch.replay_stamps = pending
+                .iter()
+                .map(|(path, _, stamp)| (path.clone(), stamp.clone()))
+                .collect();
+        }
         Some(switch)
+    }
+
+    /// The leaves and the objects that this document holds with a stamp above the one that the
+    /// seed holds for them (`theirs`): the writes that the seed lacks. The stamp of an object is
+    /// the stamp of the write that made it, so an object that was deleted and made again is a
+    /// write of the whole object, which replaces the keys that the seed holds below it. A path
+    /// with no stamp is not a write of anyone. The shorter paths come first.
+    fn pending_writes(
+        &self,
+        theirs: &HashMap<Vec<String>, Stamp>,
+    ) -> Vec<(Vec<String>, Value, Stamp)> {
+        let now: Value = self.to_json();
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_leaves(&now, &mut Vec::new(), &mut leaves);
+        let mut objects: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_objects(&now, &mut Vec::new(), &mut objects);
+        objects.extend(leaves);
+        let paths: Vec<Vec<String>> = objects.iter().map(|(path, _)| path.clone()).collect();
+        let mine = self.stamps_of(&paths);
+        let floors = self.tombstone_floors(&paths);
+        let mut pending: Vec<(Vec<String>, Value, Stamp)> = Vec::new();
+        for (((path, value), stamp), floor) in objects.into_iter().zip(mine).zip(floors) {
+            let Some(stamp) = stamp else { continue };
+            // A value below a delete of a higher stamp is dead: the delete is what is written.
+            if floor.is_some_and(|dead| dead >= stamp) {
+                continue;
+            }
+            let bar: Option<&Stamp> = (1..=path.len())
+                .filter_map(|depth| theirs.get(&path[..depth]))
+                .max();
+            if bar.is_none_or(|held| stamp > *held) {
+                pending.push((path, value, stamp));
+            }
+        }
+        pending.sort_by_key(|(path, _, _)| path.len());
+        pending
     }
 
     /// The merge that writes again the `leaves` that the document does not hold yet. A leaf that
@@ -1122,7 +1248,6 @@ impl MeshDoc {
         if self.candidate.is_some() {
             return Err(DocError::CandidateHeld);
         }
-        let (cut, truncated) = self.cut_vector();
         let live = self.to_json();
         let mut within_frame = fits;
         let cuts: Result<Vec<Value>, DocError> = split_entry(&live, |merge| {
@@ -1165,23 +1290,37 @@ impl MeshDoc {
         let frames = u32::try_from(changes.len()).unwrap_or(u32::MAX);
         Ok(SeedChain {
             changes,
-            mark: SeedMark::new(frames, last).with_cut(cut),
-            truncated,
+            mark: SeedMark::new(frames, last),
             time: self.next_time(),
             origins,
+            tombstones: self
+                .tombstones
+                .iter()
+                .map(|(path, stamp)| (path.clone(), stamp.clone()))
+                .collect(),
         })
     }
 
     /// The stamps that the frames of a seed name, checked against the changes: a scratch document
     /// of `epoch` applies the changes in order, and each frame must carry one stamp for each path
-    /// that its change writes. `None` when a frame carries a number of stamps that does not match,
-    /// more than `DOC_REPLAY_ENTRIES_MAX`, or no body.
-    fn read_seed_stamps(&self, epoch: u64, frames: &[Verified]) -> Option<SeedStamps> {
+    /// that its change writes, and the tombstones of the root. `None` when a frame carries a number of
+    /// stamps that does not match, more than `DOC_REPLAY_ENTRIES_MAX`, tombstones outside the root
+    /// or more than `DOC_SEED_TOMBSTONES_MAX`, or no body.
+    fn read_seed_stamps(&self, epoch: u64, frames: &[Verified]) -> Option<SeedRead> {
         let mut scratch = Automerge::new();
         scratch.apply_changes([state_genesis(epoch)]).ok()?;
         let mut found: SeedStamps = HashMap::new();
-        for frame in frames {
+        let mut dead: Vec<(Vec<String>, Stamp)> = Vec::new();
+        for (position, frame) in frames.iter().enumerate() {
             let parsed = self.change_bytes(frame)?;
+            if position == 0 {
+                dead = parsed.tombstones;
+                if dead.len() > DOC_SEED_TOMBSTONES_MAX {
+                    return None;
+                }
+            } else if !parsed.tombstones.is_empty() {
+                return None;
+            }
             let change = Change::from_bytes(parsed.bytes).ok()?;
             scratch.apply_changes([change.clone()]).ok()?;
             let paths = change_leaves(&scratch, &change);
@@ -1193,7 +1332,7 @@ impl MeshDoc {
                 paths.into_iter().zip(parsed.origins).collect(),
             );
         }
-        Some(found)
+        Some((found, dead))
     }
 
     /// The stamps for the changes of a seed that `fork` holds: for each change, one stamp for each
@@ -1230,90 +1369,6 @@ impl MeshDoc {
             tracing::warn!(target: LOG_TARGET, zeros, "a seed path got the stamp 0 for want of a time");
         }
         Ok(origins)
-    }
-
-    /// The cut vector of a seed built from this document: for each writer, the tag of its actor
-    /// and the highest sequence number of its changes that this document holds, and whether the
-    /// vector is cut short. With more writers than `DOC_SEED_CUT_MAX` it keeps the ones with the
-    /// highest numbers, the busiest. A writer that is left out is read as covering nothing, so
-    /// its author writes again the leaves of its own that the seed holds with another value, and
-    /// a writer that left writes nothing, so a left out writer costs a few writes, no value.
-    fn cut_vector(&self) -> (Vec<(String, u64)>, bool) {
-        let mut highest: BTreeMap<String, u64> = BTreeMap::new();
-        for change in self.doc.get_changes(&[]) {
-            if change.actor_id().to_bytes() == STATE_GENESIS_ACTOR {
-                continue;
-            }
-            let seen = highest.entry(actor_tag(change.actor_id())).or_insert(0);
-            *seen = (*seen).max(change.seq());
-        }
-        let mut cut: Vec<(String, u64)> = highest.into_iter().collect();
-        let truncated = cut.len() > DOC_SEED_CUT_MAX;
-        if truncated {
-            cut.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-            cut.truncate(DOC_SEED_CUT_MAX);
-            cut.sort();
-        }
-        (cut, truncated)
-    }
-
-    /// The leaves that the changes of this node wrote, one item for each leaf of each change: the
-    /// tag of the actor, the sequence number of the change, and the path. A change of the seed
-    /// that the document adopted is no write of the node, so `skip` leaves it out.
-    fn own_leaf_paths(&self, skip: &HashSet<ChangeHash>) -> Vec<(String, u64, Vec<String>)> {
-        let Some(owner) = self.owner.as_ref() else {
-            return Vec::new();
-        };
-        let mut found: Vec<(String, u64, Vec<String>)> = Vec::new();
-        for change in self.doc.get_changes(&[]) {
-            let mine: bool = change.actor_id().to_bytes() == owner.as_bytes().as_slice();
-            if !mine || skip.contains(&change.hash()) {
-                continue;
-            }
-            let tag = actor_tag(change.actor_id());
-            let deps: Vec<ChangeHash> = change.deps().to_vec();
-            for patch in self.doc.diff(&deps, &[change.hash()]) {
-                let path = leaf_path(&patch);
-                if !path.is_empty() {
-                    found.push((tag.clone(), change.seq(), path));
-                }
-            }
-        }
-        found
-    }
-
-    /// The leaves of `paths` that the changes above `cut` wrote, with the value that each holds in
-    /// `now` (`null` for a leaf that is gone). A leaf inside another leaf is left out, because the
-    /// outer one carries it.
-    fn leaves_for(
-        paths: &[(String, u64, Vec<String>)],
-        cut: &[(String, u64)],
-        now: &Value,
-    ) -> Vec<(Vec<String>, Value)> {
-        let mut covered: HashMap<&str, u64> = HashMap::new();
-        for (tag, seq) in cut {
-            covered.insert(tag.as_str(), *seq);
-        }
-        let mut open: Vec<Vec<String>> = Vec::new();
-        for (tag, seq, path) in paths {
-            let held: u64 = covered.get(tag.as_str()).copied().unwrap_or(0);
-            if *seq > held && !open.contains(path) {
-                open.push(path.clone());
-            }
-        }
-        open.sort_by_key(Vec::len);
-        let mut kept: Vec<Vec<String>> = Vec::new();
-        for path in open {
-            if !kept.iter().any(|outer| path.starts_with(outer)) {
-                kept.push(path);
-            }
-        }
-        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
-        for path in kept {
-            let value: Value = lookup(now, &path).cloned().unwrap_or(Value::Null);
-            leaves.push((path, value));
-        }
-        leaves
     }
 
     /// The genesis of `epoch` for this channel: the per-peer map of a gated channel (meta), the
@@ -1709,6 +1764,43 @@ impl MeshDoc {
     /// Two processes sharing a signing key reach it without any malice, since
     /// the actor id is derived from the key.
     fn apply(&mut self, change: Change, hash: ChangeHash, frame: Verified) -> bool {
+        // A frame of a replay names the stamp of each path that its change writes. The stamps are
+        // checked on a fork before the change is applied, so a frame that names them wrongly is
+        // refused as a whole, and the node records them after it is applied.
+        let named: Option<StampedPaths> = if self.state_epochs && !self.adopting {
+            let Ok(named) = self.stamped_paths(&change, &frame) else {
+                if let Some(refused) = self.warn_due("the stamps of a frame do not match it") {
+                    tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "the stamps of a frame do not match it");
+                }
+                return false;
+            };
+            named
+        } else {
+            None
+        };
+        // A frame of a replay names stamps. The live stamps of its paths are read before it is
+        // applied, and again after: if a live stamp went down, the replay won in automerge with a
+        // lower stamp than the value that this node held, and the node writes its value again.
+        let watch: Option<Watch> = named.as_ref().map(|list| {
+            let json: Value = self.to_json();
+            let mut paths: Vec<Vec<String>> = list.iter().map(|(path, _)| path.clone()).collect();
+            // A replay that names an object can make it again beside the one that this node
+            // holds, and the keys that this node wrote below it are hidden. Every leaf below an
+            // object that the replay names is watched as well.
+            let named_paths: Vec<Vec<String>> = paths.clone();
+            for path in named_paths {
+                if let Some(below) = lookup(&json, &path).filter(|held| held.is_object()) {
+                    let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+                    collect_leaves(below, &mut path.clone(), &mut leaves);
+                    paths.extend(leaves.into_iter().map(|(leaf, _)| leaf));
+                }
+            }
+            paths.sort();
+            paths.dedup();
+            let before = self.stamps_of(&paths);
+            (paths, before, json)
+        });
+        let seen: Option<Change> = (self.state_epochs && !self.adopting).then(|| change.clone());
         if let Err(error) = self.doc.apply_changes([change]) {
             if let Some(changes) = self.warn_due("dropping a channel change automerge refused") {
                 tracing::warn!(target: LOG_TARGET, changes, %error, author = %frame.author, "dropping a channel change automerge refused");
@@ -1716,11 +1808,198 @@ impl MeshDoc {
             return false;
         }
         self.applied.insert(hash);
+        if let Some(applied) = seen.as_ref() {
+            self.note_deletes(applied, &frame, named.as_deref());
+        }
+        if let Some(named) = named {
+            self.origins.insert(hash, named);
+        }
+        if let Some((paths, before, json)) = watch {
+            self.note_lowered(&paths, &before, &json);
+        }
         self.frame_bytes += wire_len(&frame);
         if let Some(replaced) = self.frames.insert(hash, frame) {
             self.frame_bytes -= wire_len(&replaced);
         }
         true
+    }
+
+    /// The highest tombstone at each of `paths` or above it: the stamp of the delete that governs
+    /// the path, if a value there would be a value that the delete should have removed.
+    fn tombstone_floors(&self, paths: &[Vec<String>]) -> Vec<Option<Stamp>> {
+        paths
+            .iter()
+            .map(|path| {
+                (1..=path.len())
+                    .filter_map(|depth| self.tombstones.get(&path[..depth]))
+                    .max()
+                    .cloned()
+            })
+            .collect()
+    }
+
+    /// Keep what this node must write again after a replay was applied: a value that it held with
+    /// a stamp above the live stamp that the replay left (`before` and the value in `json`), and a
+    /// delete that governed a path (a tombstone above the live stamp of a value that the replay
+    /// brought back). The deletes are kept as `null`.
+    fn note_lowered(&mut self, paths: &[Vec<String>], before: &[Option<Stamp>], json: &Value) {
+        let live = self.stamps_of(paths);
+        let floor = self.tombstone_floors(paths);
+        for (at, path) in paths.iter().enumerate() {
+            let value_lowered = match (&before[at], &live[at]) {
+                (Some(held), Some(now)) => now < held,
+                (Some(_), None) => floor[at].as_ref() < before[at].as_ref(),
+                (None, _) => false,
+            };
+            let delete_lost = match (&live[at], &floor[at]) {
+                (Some(now), Some(dead)) => before[at].is_none() && now < dead,
+                _ => false,
+            };
+            // An object is not restored as a whole: its keys hold writes of other nodes that the
+            // restored value would overwrite. Each of its leaves is restored on its own.
+            let is_object = lookup(json, path)
+                .is_some_and(|held| matches!(held, Value::Object(fields) if !fields.is_empty()));
+            let kept: Option<(Value, Stamp)> = if is_object {
+                None
+            } else if value_lowered {
+                lookup(json, path).cloned().zip(before[at].clone())
+            } else if delete_lost {
+                floor[at].clone().map(|dead| (Value::Null, dead))
+            } else {
+                None
+            };
+            let Some(kept) = kept else { continue };
+            if self.restores.len() >= DOC_SEED_TOMBSTONES_MAX && !self.restores.contains_key(path) {
+                continue;
+            }
+            match self.restores.get(path) {
+                Some(held) if held.1 >= kept.1 => {}
+                _ => {
+                    self.restores.insert(path.clone(), kept);
+                }
+            }
+        }
+    }
+
+    /// Whether a value waits to be written again (see [`Self::take_restores`]).
+    #[must_use]
+    pub fn has_restores(&self) -> bool {
+        !self.restores.is_empty()
+    }
+
+    /// The values that this node must write again because a replay of another node set a lower
+    /// stamp on them, and the deletes that a replay undid: a merge and the stamp of each path, for
+    /// [`Self::compose_replay_body`]. The live stamps are read again here, so a value that a
+    /// newer write has overtaken in the meantime is not written. `None` when there is nothing to
+    /// write. The glue calls it on each tick.
+    pub fn take_restores(&mut self) -> Option<Restores> {
+        let held: Vec<(Vec<String>, (Value, Stamp))> =
+            mem::take(&mut self.restores).into_iter().collect();
+        let paths: Vec<Vec<String>> = held.iter().map(|(path, _)| path.clone()).collect();
+        let live = self.stamps_of(&paths);
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        let mut stamps: Vec<(Vec<String>, Stamp)> = Vec::new();
+        for ((path, (value, stamp)), now) in held.into_iter().zip(live) {
+            let stale = match &now {
+                Some(current) => *current >= stamp,
+                None => value.is_null(),
+            };
+            if !stale {
+                leaves.push((path.clone(), value));
+                stamps.push((path, stamp));
+            }
+        }
+        let patch = self.replay_patch(leaves)?;
+        Some((patch, stamps))
+    }
+
+    /// Record the deletes of a change that was just applied, and forget the tombstone of a path
+    /// that the change writes again with a higher stamp. Only a state document with state epochs
+    /// keeps tombstones. The stamp of a path is the stamp that the frame names for it, or the time
+    /// of the change with the tag of its actor.
+    fn note_deletes(
+        &mut self,
+        change: &Change,
+        frame: &Verified,
+        named: Option<&[(Vec<String>, Stamp)]>,
+    ) {
+        if self.gate.is_some() {
+            return;
+        }
+        let Some(time) = self.change_bytes(frame).and_then(|parsed| parsed.time) else {
+            return;
+        };
+        let own = Stamp::new(time, actor_tag(change.actor_id()));
+        let deps: Vec<ChangeHash> = change.deps().to_vec();
+        let patches = self.doc.diff(&deps, &[change.hash()]);
+        for patch in patches {
+            let path = leaf_path(&patch);
+            if path.is_empty() {
+                continue;
+            }
+            let stamp: Stamp = named
+                .and_then(|list| list.iter().find(|(held, _)| *held == path))
+                .map_or_else(|| own.clone(), |(_, stamp)| stamp.clone());
+            match patch.action {
+                automerge::PatchAction::DeleteMap { .. } => self.add_tombstone(path, stamp),
+                automerge::PatchAction::PutMap { .. } => {
+                    if self.tombstones.get(&path).is_some_and(|held| *held < stamp) {
+                        self.tombstones.remove(&path);
+                    }
+                }
+                automerge::PatchAction::PutSeq { .. }
+                | automerge::PatchAction::Insert { .. }
+                | automerge::PatchAction::SpliceText { .. }
+                | automerge::PatchAction::Increment { .. }
+                | automerge::PatchAction::Conflict { .. }
+                | automerge::PatchAction::DeleteSeq { .. }
+                | automerge::PatchAction::Mark { .. } => {}
+            }
+        }
+    }
+
+    /// Keep the tombstone of `path`, unless the path is too long, and drop the one with the lowest
+    /// stamp when there are more than `DOC_SEED_TOMBSTONES_MAX`. A tombstone with a higher stamp
+    /// already there stays.
+    fn add_tombstone(&mut self, path: Vec<String>, stamp: Stamp) {
+        let bytes: usize = path.iter().map(String::len).sum();
+        if bytes > DOC_TOMBSTONE_PATH_BYTES_MAX {
+            self.tombstone_paths_long = self.tombstone_paths_long.saturating_add(1);
+            return;
+        }
+        match self.tombstones.get(&path) {
+            Some(held) if *held >= stamp => return,
+            _ => {}
+        }
+        self.tombstones.insert(path, stamp);
+        if self.tombstones.len() > DOC_SEED_TOMBSTONES_MAX {
+            let lowest = self
+                .tombstones
+                .iter()
+                .min_by(|left, right| left.1.cmp(right.1))
+                .map(|(held, _)| held.clone());
+            if let Some(oldest) = lowest {
+                self.tombstones.remove(&oldest);
+            }
+        }
+    }
+
+    /// The paths of `change` with the stamps that its `frame` names, `None` when the frame names
+    /// none, and `Err` when the stamps do not match the paths of the change.
+    fn stamped_paths(&self, change: &Change, frame: &Verified) -> Result<Option<StampedPaths>, ()> {
+        let Some(parsed) = self.change_bytes(frame) else {
+            return Ok(None);
+        };
+        if parsed.origins.is_empty() {
+            return Ok(None);
+        }
+        let mut fork = self.doc.fork();
+        fork.apply_changes([change.clone()]).map_err(|_| ())?;
+        let paths = change_leaves(&fork, change);
+        if paths.len() != parsed.origins.len() {
+            return Err(());
+        }
+        Ok(Some(paths.into_iter().zip(parsed.origins).collect()))
     }
 
     fn deps_satisfied(&self, deps: &[ChangeHash]) -> bool {
@@ -1921,9 +2200,6 @@ fn doc_json(doc: &Automerge) -> Value {
 /// the document. A change with no operation is no change, so the genesis writes a key and deletes
 /// it. The hash depends on how automerge encodes that pair, so a bump of automerge must keep the
 /// pinned hashes: if it does not, the bump is a wire break and needs a frame version bump.
-/// The actor of the genesis of a state epoch. It is no writer, so a cut vector leaves it out.
-const STATE_GENESIS_ACTOR: &[u8] = b"habilis-state/genesis";
-
 fn state_genesis(epoch: u64) -> Change {
     let mut doc = Automerge::new();
     doc.set_actor(automerge::ActorId::from(
@@ -2072,6 +2348,65 @@ fn change_leaves(doc: &Automerge, change: &Change) -> Vec<Vec<String>> {
     paths.sort();
     paths.dedup();
     paths
+}
+
+/// The stamp of each path that the changes of a seed name, and the tombstones of its root, in one
+/// map: a path with both keeps the higher stamp.
+fn seed_stamp_map(
+    found: &SeedStamps,
+    dead: &[(Vec<String>, Stamp)],
+) -> HashMap<Vec<String>, Stamp> {
+    let mut map: HashMap<Vec<String>, Stamp> = HashMap::new();
+    for list in found.values() {
+        for (path, stamp) in list {
+            map.entry(path.clone())
+                .and_modify(|held| *held = (*held).clone().max(stamp.clone()))
+                .or_insert_with(|| stamp.clone());
+        }
+    }
+    for (path, stamp) in dead {
+        map.entry(path.clone())
+            .and_modify(|held| *held = (*held).clone().max(stamp.clone()))
+            .or_insert_with(|| stamp.clone());
+    }
+    map
+}
+
+/// The leaves of a JSON value with their paths: a scalar, a list, or an empty object is one leaf.
+fn collect_leaves(value: &Value, prefix: &mut Vec<String>, out: &mut Vec<(Vec<String>, Value)>) {
+    match value {
+        Value::Object(fields) if !fields.is_empty() => {
+            for (key, inner) in fields {
+                prefix.push(key.clone());
+                collect_leaves(inner, prefix, out);
+                prefix.pop();
+            }
+        }
+        Value::Object(_)
+        | Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_) => {
+            if !prefix.is_empty() {
+                out.push((prefix.clone(), value.clone()));
+            }
+        }
+    }
+}
+
+/// The objects of a JSON value with their paths, the root left out, each with its whole value.
+fn collect_objects(value: &Value, prefix: &mut Vec<String>, out: &mut Vec<(Vec<String>, Value)>) {
+    if let Value::Object(fields) = value {
+        if !prefix.is_empty() {
+            out.push((prefix.clone(), value.clone()));
+        }
+        for (key, inner) in fields {
+            prefix.push(key.clone());
+            collect_objects(inner, prefix, out);
+            prefix.pop();
+        }
+    }
 }
 
 /// How many paths a merge writes: each key of each object counts once, and a list is one leaf. A
@@ -2261,11 +2596,12 @@ fn put_number(
 #[cfg(test)]
 mod tests {
     use super::{
-        DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_CUT_MAX, DOC_SEED_FRAMES_MAX,
-        Ingested, MeshDoc, SelfWriteGate,
+        DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_SEED_FRAMES_MAX, Ingested, MeshDoc,
+        SelfWriteGate,
     };
     use crate::wire::{
-        SeedMark, change_body_stamped, change_body_timed, encrypt_body, parse_change_full,
+        SeedMark, change_body_stamped, change_body_timed, change_body_tombstoned, encrypt_body,
+        parse_change_full,
     };
     use crate::{DocError, Stamp};
     use automerge::Change;
@@ -3693,39 +4029,6 @@ mod tests {
     }
 
     #[test]
-    fn a_seed_for_more_writers_than_the_cut_vector_lists_is_cut_with_the_busiest() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut doc = MeshDoc::new_ungated().state_epochs();
-        for index in 0..=DOC_SEED_CUT_MAX {
-            let writer = nick(&format!("w{index}"));
-            write(&mut doc, &writer, &json!({ format!("w{index}"): 1 }));
-        }
-        let busy = nick("w0");
-        write(&mut doc, &busy, &json!({ "w0": 2 }));
-        let chain = doc
-            .build_seed(2, b"cutter", within(600))
-            .expect("a seed with more writers than the vector lists is still cut");
-        assert!(
-            chain.truncated,
-            "the seed says that its cut vector is cut short"
-        );
-        assert_eq!(
-            chain.mark.cut.len(),
-            DOC_SEED_CUT_MAX,
-            "the vector holds the most it can"
-        );
-        let busiest = super::actor_tag(&automerge::ActorId::from(pad_seed(b"w0").as_slice()));
-        assert!(
-            chain
-                .mark
-                .cut
-                .iter()
-                .any(|(tag, seq)| *tag == busiest && *seq == 2),
-            "the writer with the most changes is in the vector"
-        );
-    }
-
-    #[test]
     fn a_seed_that_would_pass_the_frame_max_is_not_built() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut live: Map<String, Value> = Map::new();
@@ -3782,8 +4085,10 @@ mod tests {
         for (index, bytes) in numbered {
             let mark = (index == 0).then_some(&chain.mark);
             let stamps: Vec<Stamp> = chain.origins.get(index).cloned().unwrap_or_default();
-            let plain = change_body_stamped(bytes, None, epoch, mark, Some(chain.time), &stamps)
-                .expect("a body");
+            let dead: &[(Vec<String>, Stamp)] = if index == 0 { &chain.tombstones } else { &[] };
+            let plain =
+                change_body_tombstoned(bytes, None, epoch, mark, Some(chain.time), &stamps, dead)
+                    .expect("a body");
             let wire = match key {
                 Some(sealing) => encrypt_body(&plain, sealing).expect("sealed"),
                 None => plain,
@@ -4490,6 +4795,43 @@ mod tests {
     }
 
     #[test]
+    fn the_tombstones_stay_inside_the_cap_at_ten_times_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let total = super::DOC_SEED_TOMBSTONES_MAX * 10;
+        for index in 0..total {
+            let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
+            doc.add_tombstone(vec![format!("k{index}")], stamp);
+            assert!(
+                doc.tombstones.len() <= super::DOC_SEED_TOMBSTONES_MAX,
+                "the map holds at most the cap"
+            );
+        }
+        assert_eq!(
+            doc.tombstones.len(),
+            super::DOC_SEED_TOMBSTONES_MAX,
+            "it is full"
+        );
+        let lowest = doc.tombstones.values().map(|stamp| stamp.time).min();
+        assert_eq!(
+            lowest,
+            Some(u64::try_from(total - super::DOC_SEED_TOMBSTONES_MAX).unwrap_or(0) + 1),
+            "the tombstones with the lowest stamps left first"
+        );
+        let long = vec!["x".repeat(super::DOC_TOMBSTONE_PATH_BYTES_MAX + 1)];
+        doc.add_tombstone(long, Stamp::new(u64::MAX, "aa".to_owned()));
+        assert_eq!(
+            doc.tombstone_paths_long, 1,
+            "a path that is too long has no tombstone"
+        );
+        assert_eq!(
+            doc.tombstones.len(),
+            super::DOC_SEED_TOMBSTONES_MAX,
+            "and the map is unchanged"
+        );
+    }
+
+    #[test]
     fn a_gated_channel_never_writes_a_time() {
         let _guard = ::habilis_network_test_tracing::init();
         let me = nick("me");
@@ -4787,7 +5129,7 @@ mod tests {
         assert_eq!(switch.map, "", "a state switch names no per-peer map");
         assert_eq!(
             switch.replay, None,
-            "a node with no owner key writes nothing again"
+            "a node that holds nothing writes nothing again"
         );
     }
 
