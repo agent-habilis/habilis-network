@@ -13,18 +13,27 @@
 
 use std::time::Duration;
 
-use habilis_network::embed::SilentSink;
-use habilis_network::protocol::{AuthorKey, LookupOpts, Nickname};
+use habilis_network::embed::{
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
+};
+use habilis_network::ops;
+use habilis_network::protocol::messages::Authored;
+use habilis_network::protocol::{
+    AppFrameParams, AppTag, AuthorKey, LookupOpts, MessageBody, Nickname,
+};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+    EventLoopConfig, Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with,
+    setup_mesh,
 };
 use serde::{Deserialize, Serialize};
 
 use habilis_network_netplay::{
-    Body, Config, Event, Lobby, MeshTransport, Outbound, P2PSession, Request, RollbackDriver,
-    RollbackError, SessionState, Tick, Transport,
+    Body, Config, Event, Lobby, MeshTransport, Outbound, P2PSession, ROLLBACK_TAG, Request,
+    RollbackDriver, RollbackError, SessionState, Tick, Transport,
 };
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{process, thread};
 use tokio::time;
 use tokio::time::Instant;
@@ -59,7 +68,8 @@ struct Player {
     desynced: bool,
 }
 
-async fn spawn(topic: &str, nick: &str) -> Player {
+/// The config of one loopback node that joins the mesh of `topic` as `nick`.
+async fn node_config(topic: &str, nick: &str) -> EventLoopConfig {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
     let author = Nickname::try_new(nick).expect("valid nickname");
@@ -67,12 +77,17 @@ async fn spawn(topic: &str, nick: &str) -> Player {
         mesh,
         topic_string: topic.to_owned(),
     };
-    let config = setup_mesh(
+    setup_mesh(
         kind,
-        SetupParams::new(author.clone(), SilentSink::default()).max_peers(16),
+        SetupParams::new(author, SilentSink::default()).max_peers(16),
     )
     .await
-    .expect("setup_mesh on a loopback mesh must not touch the network");
+    .expect("setup_mesh on a loopback mesh must not touch the network")
+}
+
+async fn spawn(topic: &str, nick: &str) -> Player {
+    let author = Nickname::try_new(nick).expect("valid nickname");
+    let config = node_config(topic, nick).await;
 
     let (driver, pending): (RollbackDriver<Game>, _) = RollbackDriver::new();
     let node: Node<RollbackDriver<Game>> = Node::spawn(config, driver, None, SignalHandling::Leave);
@@ -418,6 +433,118 @@ fn a_packet_to_one_key_of_a_shared_nickname_reaches_that_key_only() {
                 );
             }
 
+            for player in players {
+                player.node.leave().await.expect("leave the mesh cleanly");
+            }
+        },
+    );
+}
+
+/// A driver that, on the first frame the engine gives it, also gives its inner driver two frames
+/// that it builds itself: a rollback frame for another key, and one for our own key. The engine
+/// builds the `HandlerCtx`, so a frame of the real mesh is the trigger.
+struct Probe {
+    inner: RollbackDriver<Game>,
+    // the test reads the flag while the node task sets it
+    injected: Arc<AtomicBool>,
+}
+
+#[habilis_network::async_trait]
+impl NodeApp for Probe {
+    fn classify(&self, message: &Authored) -> AppClass {
+        self.inner.classify(message)
+    }
+
+    async fn on_app_frame(
+        &mut self,
+        frame: InboundApp<'_>,
+        state: &mut EventLoopState,
+        context: &HandlerCtx<'_>,
+    ) -> bool {
+        if !self.injected.load(Ordering::SeqCst) {
+            // A nickname is a label, so another key can use the nickname of this node.
+            let twin = AuthorKey::from([9; 32]);
+            for (to, token) in [(twin, 1_u32), (context.our_pubkey, 2)] {
+                let tag = AppTag::try_new(ROLLBACK_TAG).expect("a valid tag");
+                let payload =
+                    format!(r#"{{"magic":7,"body":{{"SyncRequest":{{"token":{token}}}}}}}"#);
+                let body = MessageBody::try_new(&payload).expect("a valid body");
+                let params = AppFrameParams::new(tag, Some(to), None, body);
+                let sent = ops::app_frame(context, params).authored();
+                let mut copy = frame.clone();
+                copy.message = &sent;
+                self.inner.on_app_frame(copy, state, context).await;
+            }
+            self.injected.store(true, Ordering::SeqCst);
+        }
+        self.inner.on_app_frame(frame, state, context).await
+    }
+}
+
+#[habilis_network::async_trait]
+impl NodeDriver for Probe {
+    type Session = Outbound;
+    type Http = ();
+    type Ipc = serde_json::Value;
+
+    async fn on_startup(&mut self, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+        self.inner.on_startup(state, context).await;
+    }
+
+    async fn handle_session(
+        &mut self,
+        request: Outbound,
+        state: &mut EventLoopState,
+        context: &HandlerCtx<'_>,
+    ) -> bool {
+        self.inner.handle_session(request, state, context).await
+    }
+}
+
+/// The engine gives the app a directed frame that is for another key, because a relay holds it for
+/// anti-entropy. A nickname is a label, so that other key can be a twin of this node. The driver
+/// must act only on a frame for its own key: a packet for the twin must not reach our session.
+#[test]
+fn a_rollback_frame_for_another_key_does_not_reach_our_session() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(
+        guard,
+        thread::available_parallelism().map_or(1, usize::from),
+        async {
+            let topic = format!("habilis-network-netplay-recipient-{}", process::id());
+            let mut players = vec![spawn(&topic, "alice").await];
+
+            let (inner, pending): (RollbackDriver<Game>, _) = RollbackDriver::new();
+            // the test and the node task share the flag
+            let injected = Arc::new(AtomicBool::new(false));
+            let probe = Probe {
+                inner,
+                injected: Arc::clone(&injected),
+            };
+            let config = node_config(&topic, "bob").await;
+            let node = Node::spawn(config, probe, None, SignalHandling::Leave);
+            let mut inbox = pending.connect(node.sender());
+
+            // Alice sends her presence to each peer she knows, so a frame reaches bob.
+            let met: bool = drive(&mut players, Duration::from_secs(30), |_| {
+                injected.load(Ordering::SeqCst)
+            })
+            .await;
+            assert!(met, "bob never got a frame from alice");
+
+            let mut tokens: Vec<u32> = Vec::new();
+            for (_, message) in inbox.receive_all() {
+                if let Body::SyncRequest { token } = message.body {
+                    tokens.push(token);
+                }
+            }
+            assert_eq!(
+                tokens,
+                [2],
+                "only the frame for our own key reaches the session"
+            );
+
+            node.leave().await.expect("leave the mesh cleanly");
             for player in players {
                 player.node.leave().await.expect("leave the mesh cleanly");
             }

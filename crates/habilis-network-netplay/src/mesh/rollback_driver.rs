@@ -1,6 +1,6 @@
 //! The engine-facing half: mailboxes, framing, and the only `send_app` call.
 
-use habilis_network::protocol::messages::Authored;
+use habilis_network::protocol::messages::{Authored, sole_addressee};
 use std::sync::Arc;
 
 use habilis_network::embed::{
@@ -124,11 +124,16 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
         &mut self,
         frame: InboundApp<'_>,
         _state: &mut EventLoopState,
-        _ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
         let Some(tag) = frame.message.kind.app_tag().map(AppTag::as_str) else {
             return false;
         };
+        // The engine gives the app a frame that a relay holds for another key. A nickname is a
+        // label, so that key can be a twin of ours, and its packet is not ours to act on.
+        if sole_addressee(&frame.message.kind).is_some_and(|to| *to != context.our_pubkey) {
+            return false;
+        }
         let pubkey = frame.message.key();
 
         // Learn the pubkey -> nickname pairing from any frame. The signed
