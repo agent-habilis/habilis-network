@@ -2147,7 +2147,7 @@ impl EventLoopState {
 
     /// Bind the retained endpoint of each key that is now the only live key of its nickname, with
     /// the flow of a `PeerInfo`, and drop the retained value.
-    fn rebind_refused_endpoints(&mut self) {
+    pub(crate) fn rebind_refused_endpoints(&mut self) {
         let refused = self.refused_endpoints.keys();
         let live = refused.filter(|key| self.peers.contains(*key));
         let waiting: Vec<(AuthorKey, Nickname)> = live

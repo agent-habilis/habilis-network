@@ -235,6 +235,8 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .clock_evidence
         .confirmed_suspends
         .retain(|suspend| now.duration_since(suspend.at) <= QUIET_TTL);
+    // A holder that went quiet ends a nickname clash: the live key that it shadowed binds now.
+    state.rebind_refused_endpoints();
     prune_per_key_state(state);
     prune_dial_hints(state);
     #[cfg(feature = "multihop")]
@@ -395,6 +397,53 @@ mod tests {
         assert!(
             state.refused_endpoints.is_empty(),
             "the retained endpoint of a key that left the roster stayed"
+        );
+    }
+
+    /// The key that held the hint of a nickname crashes: no `Left`, only silence. The sweep moves
+    /// it to quiet, so the nickname has one live key left, and the endpoint that this key had
+    /// retained becomes the hint at once. Else a send to the survivor finds a stale hint and
+    /// waits for a `PeerInfo` that no timer sends.
+    #[test]
+    fn the_sweep_that_silences_the_holder_of_a_hint_binds_the_endpoint_the_survivor_retained() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let twin = nick("twin");
+        let (older, survivor) = (test_key("twin#older"), test_key("twin#survivor"));
+        let (held, retained) = (
+            iroh::EndpointAddr::new(testing::endpoint_id(56)),
+            iroh::EndpointAddr::new(testing::endpoint_id(57)),
+        );
+        for key in [older, survivor] {
+            state.names.insert(key, twin.clone());
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+            state.last_seen.insert(key, Instant::now());
+        }
+        state.unicast_pool.note_addr(&held);
+        state.unicast_pool.note_addr(&retained);
+        state.bind_peer_endpoint(older, twin.clone(), held);
+        state.retain_refused_endpoint(survivor, retained.clone());
+        let silent_for = tuning::alive_timeout() + Duration::from_secs(30);
+        let heard = Instant::now()
+            .checked_sub(silent_for)
+            .expect("the monotonic clock has run past the alive timeout since boot");
+        state.last_seen.insert(older, heard);
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains(&older) && state.peers.contains(&survivor),
+            "the sweep did not leave one live key under the nickname"
+        );
+        assert_eq!(
+            state.peer_endpoints.get(&twin).map(|address| address.id),
+            Some(retained.id),
+            "the endpoint of the survivor was not bound when the holder went quiet"
+        );
+        assert!(
+            !state.hint_is_stale(&twin),
+            "the hint of the survivor is stale after the sweep"
         );
     }
 
