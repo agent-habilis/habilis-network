@@ -393,13 +393,26 @@ mod departed_tests {
         });
     }
 
-    /// Keeps the nickname of each departure that the engine surfaces to the operator.
+    /// One departure that the engine surfaces to the operator: the nickname of the `left` frame,
+    /// the key of the peer that departed, and whether this node minted the frame.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Departure {
+        nickname: protocol::Nickname,
+        peer: protocol::AuthorKey,
+        synthetic: bool,
+    }
+
+    /// Keeps each departure that the engine surfaces to the operator.
     #[derive(Default)]
-    struct DepartureSink(Mutex<Vec<protocol::Nickname>>);
+    struct DepartureSink(Mutex<Vec<Departure>>);
 
     impl NodeSink for DepartureSink {
         fn emit(&self, event: NodeEvent) {
-            if let NodeEvent::Presence { message, .. } = event
+            if let NodeEvent::Presence {
+                message,
+                peer,
+                synthetic,
+            } = event
                 && matches!(
                     message.kind,
                     MessageKind::Presence {
@@ -407,10 +420,11 @@ mod departed_tests {
                     }
                 )
             {
-                self.0
-                    .lock()
-                    .expect("the sink lock")
-                    .push(message.author.clone());
+                self.0.lock().expect("the sink lock").push(Departure {
+                    nickname: message.author.clone(),
+                    peer,
+                    synthetic,
+                });
             }
         }
     }
@@ -525,10 +539,15 @@ mod departed_tests {
                 vec![recorded.clone()],
                 "the app was told of a nickname that the departed key did not hold"
             );
+            let expected = Departure {
+                nickname: recorded,
+                peer: run.author_key(),
+                synthetic: true,
+            };
             assert_eq!(
                 *sink.0.lock().expect("the sink lock"),
-                vec![recorded],
-                "the operator was told of a nickname that the departed key did not hold"
+                vec![expected],
+                "the operator was told of a nickname that the departed key did not hold, or not as a departure this node minted"
             );
             endpoint.close().await;
         });
