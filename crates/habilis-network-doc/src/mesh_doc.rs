@@ -183,6 +183,9 @@ struct Candidate {
     frame: Verified,
     /// The hash of the change of the root frame.
     root_hash: ChangeHash,
+    /// The sequence number of the change of the root frame. The changes of a chain have the
+    /// sequence numbers that follow it, one each.
+    root_seq: u64,
     /// The mark of a state seed root, `None` for the one frame candidate of a gated channel.
     mark: Option<SeedMark>,
     /// The later frames of a seed chain, by the hash of their change.
@@ -190,11 +193,12 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn new(epoch: u64, frame: Verified, root_hash: ChangeHash, mark: Option<SeedMark>) -> Self {
+    fn new(epoch: u64, frame: Verified, root: &Change, mark: Option<SeedMark>) -> Self {
         Self {
             epoch,
             frame,
-            root_hash,
+            root_hash: root.hash(),
+            root_seq: root.seq(),
             mark,
             tail: HashMap::new(),
         }
@@ -253,14 +257,17 @@ impl Candidate {
         hashes
     }
 
-    /// A tail frame that is not in `on_path`, if there is one.
+    /// The tail frame that is not in `on_path` and has the lowest hash, if there is one. The order
+    /// is fixed, so every node gives way to the same frame.
     fn first_off_path(&self, on_path: &HashSet<ChangeHash>) -> Option<ChangeHash> {
+        let mut found: Option<ChangeHash> = None;
         for hash in self.tail.keys() {
-            if !on_path.contains(hash) {
-                return Some(*hash);
+            let lower = found.is_none_or(|best| hash.0 < best.0);
+            if !on_path.contains(hash) && lower {
+                found = Some(*hash);
             }
         }
-        None
+        found
     }
 
     /// The dedup keys of every frame that the candidate holds.
@@ -1013,7 +1020,7 @@ impl MeshDoc {
             Some(held) if held.epoch >= epoch => return self.refuse_frame(frame),
             _ => {}
         }
-        let kept = Candidate::new(epoch, frame.clone(), change.hash(), mark);
+        let kept = Candidate::new(epoch, frame.clone(), change, mark);
         match self.candidate.replace(kept) {
             Some(beaten) => self.dropped.extend(beaten.keys()),
             None => self.candidate_ticks = 0,
@@ -1046,14 +1053,13 @@ impl MeshDoc {
         if hash == held.root_hash || held.tail.contains_key(&hash) {
             return Ingested::Duplicate;
         }
-        // A frame that follows the last change of the chain is a write after the seed, and a
-        // second frame that follows the same change is a fork. Neither belongs to the chain.
-        let after_the_chain = held
-            .mark
-            .as_ref()
-            .is_some_and(|mark| mark.last == parent.to_string());
+        // The changes of the chain are one actor's, so their sequence numbers follow the root one
+        // by one. A write of the cutter after the seed, and every write that follows it, has a
+        // number above them. A second frame that follows one change is a fork.
+        let last_seq: u64 = held.root_seq + u64::try_from(named).unwrap_or(u64::MAX) - 1;
+        let outside = change.seq() <= held.root_seq || change.seq() > last_seq;
         let forked = held.tail.values().any(|kept| kept.parent == *parent);
-        if after_the_chain || forked {
+        if outside || forked {
             return self.refuse_frame(frame);
         }
         if held.tail.len() + 1 >= named {
@@ -2780,10 +2786,16 @@ mod tests {
         let mut doc = doc_over_the_cap(&bob);
         let fresh = MeshDoc::new_gated(card_gate()).at_epoch(1);
         let forged = frame_on(&fresh, &mallory, &entry(alice.as_str(), "forged"));
+        let forged_change = Change::from_bytes(
+            parse_change_full(forged.body.as_str())
+                .expect("a change body")
+                .bytes,
+        )
+        .expect("a change");
         doc.candidate = Some(super::Candidate::new(
             1,
             forged.clone(),
-            automerge::ChangeHash([0u8; 32]),
+            &forged_change,
             None,
         ));
         let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
@@ -3092,6 +3104,31 @@ mod tests {
         let message =
             Message::new_channel_event(&MeshId::from("test"), cutter, plain, Channel::State);
         Verified::fixture_unchecked(message.unverified_key(who), who)
+    }
+
+    #[test]
+    fn a_write_after_a_refused_write_of_the_cutter_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let writes = writes_after_the_seed(&cutter, &frames, 2);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        doc.ingest(&frames[0]);
+        let first = doc.ingest(&writes[0]);
+        assert!(
+            matches!(first, Ingested::Ignored),
+            "a write after the chain is refused: {first:?}"
+        );
+        let second = doc.ingest(&writes[1]);
+        assert!(
+            matches!(second, Ingested::Ignored),
+            "the write that follows a refused write is refused too, by its seq: {second:?}"
+        );
+        let held = doc
+            .candidate
+            .as_ref()
+            .map_or(0, |candidate| candidate.tail.len());
+        assert_eq!(held, 0, "no slot of the tail is taken");
     }
 
     #[test]
