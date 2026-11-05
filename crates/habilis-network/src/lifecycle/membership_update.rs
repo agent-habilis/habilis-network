@@ -70,6 +70,7 @@ pub(crate) fn compute(
         | MessageKind::Pong { .. }
         | MessageKind::StateDigest
         | MessageKind::MetaDigest
+        | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
         | _ => !known,
     };

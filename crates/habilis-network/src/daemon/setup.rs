@@ -1291,6 +1291,11 @@ mod tests {
     #[test]
     fn a_cut_short_counter_file_does_not_restart_the_count() {
         use std::os::unix::fs::PermissionsExt as _;
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "run counter file is unreadable",
+        );
         let dir = TempDir::new("habilis-run-cut");
         let state = dir.path().join("session.json");
         fs::write(state.with_extension("run"), b"").expect("a cut short file");

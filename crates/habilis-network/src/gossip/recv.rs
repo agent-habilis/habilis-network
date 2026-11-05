@@ -1511,6 +1511,7 @@ fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
         | MessageKind::StateDigest
         | MessageKind::Meta
         | MessageKind::MetaDigest
+        | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
         | _ => true,
     }
