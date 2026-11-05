@@ -138,13 +138,31 @@ impl IdentityProof {
     /// The wire text of the proof, as `<identity hex>:<run>:<signature hex>`.
     #[must_use]
     pub fn encode(&self) -> String {
-        String::new()
+        format!(
+            "{}:{}:{}",
+            to_hex(self.identity.as_bytes()),
+            self.run,
+            to_hex(&self.signature.to_bytes())
+        )
     }
 
     /// Parse the wire text of a proof. A wrong shape, length or digit gives `None`.
     #[must_use]
-    pub fn decode(_text: &str) -> Option<Self> {
-        None
+    pub fn decode(text: &str) -> Option<Self> {
+        if text.len() > Self::MAX_TEXT_LEN {
+            return None;
+        }
+        let mut parts = text.split(':');
+        let (identity, run, signature) = (parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() {
+            return None;
+        }
+        let identity: [u8; 32] = parse_hex(identity).ok()?.try_into().ok()?;
+        Some(Self {
+            identity: PublicKey::from_bytes(&identity).ok()?,
+            run: run.parse().ok()?,
+            signature: decode_sig(signature).ok()?,
+        })
     }
 }
 
