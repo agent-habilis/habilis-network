@@ -267,6 +267,15 @@ fn prune_per_key_state(state: &mut EventLoopState) {
     state
         .proven_endpoints
         .retain_trusted(|key| is_peer(key) || is_quiet(key) || lapsed.contains(key));
+    let gone: Vec<AuthorKey> = state
+        .refused_endpoints
+        .keys()
+        .filter(|key| !(is_peer(key) || is_quiet(key) || lapsed.contains(key)))
+        .copied()
+        .collect();
+    for key in gone {
+        state.release_refused_endpoint(&key);
+    }
 }
 
 /// Prune the dial hints and the state that is keyed by their endpoints.
@@ -367,6 +376,34 @@ mod tests {
     use std::time::Duration;
 
     use crate::{protocol, testing};
+    /// A `PeerInfo` of a key that another key shadows binds no hint, but its address goes into
+    /// the unicast book. When the key is no peer, quiet or lapsed any more, the sweep releases the
+    /// address too, or the book grows with each such endpoint.
+    #[test]
+    fn the_sweep_releases_the_endpoint_of_a_refused_key_that_left_the_roster() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let rival = test_key("twin#second");
+        let address = iroh::EndpointAddr::new(testing::endpoint_id(53));
+        state.unicast_pool.note_addr(&address);
+        state.retain_refused_endpoint(rival, address.clone());
+        assert!(
+            state.unicast_pool.remembers_address(&address),
+            "the book holds the address of the refused key"
+        );
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.unicast_pool.remembers_address(&address),
+            "the address of a key that left the roster stayed in the book"
+        );
+        assert!(
+            state.refused_endpoints.is_empty(),
+            "the retained endpoint of a key that left the roster stayed"
+        );
+    }
+
     #[test]
     fn a_late_sweep_gives_every_peer_a_new_timeout() {
         let _guard = ::habilis_network_test_tracing::init();

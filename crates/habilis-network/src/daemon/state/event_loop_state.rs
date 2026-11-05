@@ -311,6 +311,10 @@ pub struct EventLoopState {
     /// nickname goes to the hint of the last `PeerInfo` under that nickname, whatever key sent it;
     /// the hint leaves with that key, when the key is no longer a peer, quiet or lapsed.
     pub(crate) hint_owner: HashMap<Nickname, AuthorKey>,
+    /// The endpoint of a `PeerInfo` that bound no dial hint, because another live key holds the
+    /// nickname of its signer. It waits here: the signer takes the nickname over when the other
+    /// key leaves, and the sweep releases the endpoint of a signer that left the roster.
+    pub(crate) refused_endpoints: HashMap<AuthorKey, EndpointAddr>,
     /// The newest stamp that we heard from each peer in a frame that proved it was alive, on the
     /// clock of that peer. A quiet peer returns only on a frame stamped after it: two stamps of
     /// one clock compare at any skew between that clock and ours.
@@ -685,6 +689,7 @@ impl EventLoopState {
             quiet_since: HashMap::new(),
             names: HashMap::new(),
             hint_owner: HashMap::new(),
+            refused_endpoints: HashMap::new(),
             peer_stamp: HashMap::new(),
             clock_evidence: ClockEvidence::default(),
             left_keys: Goodbyes::default(),
@@ -1188,6 +1193,7 @@ impl EventLoopState {
         self.proven_endpoints.forget_trust(&key);
         self.rival_holders.remove(&key);
         self.names.remove(&key);
+        self.release_refused_endpoint(&key);
         self.forget_hints_of(key)
     }
 
@@ -2096,6 +2102,27 @@ impl EventLoopState {
             if self.rendezvous_id == Some(id) {
                 self.probe_backoff.reset();
             }
+        }
+    }
+
+    /// Keep the endpoint of a `PeerInfo` of `key` that bound no dial hint, for the day `key` is
+    /// the only live key of its nickname.
+    pub(crate) fn retain_refused_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
+        self.refused_endpoints.insert(key, endpoint);
+    }
+
+    /// Give up the retained endpoint of `key`. Its state goes with it, unless a nickname binds the
+    /// endpoint or another retained endpoint names it.
+    pub(crate) fn release_refused_endpoint(&mut self, key: &AuthorKey) {
+        let Some(address) = self.refused_endpoints.remove(key) else {
+            return;
+        };
+        let shared = self
+            .refused_endpoints
+            .values()
+            .any(|other| other.id == address.id);
+        if !shared && !self.endpoint_is_bound(address.id) {
+            self.release_unbound_endpoint(address.id);
         }
     }
 

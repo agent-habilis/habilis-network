@@ -1569,6 +1569,9 @@ async fn handle_peer_info(
     let changed = !state.unicast_pool.remembers_address(&peer_addr);
     if may_bind {
         state.bind_peer_endpoint(message.key(), message.author.clone(), peer_addr.clone());
+        state.refused_endpoints.remove(&hinter);
+    } else if !state.key_said_goodbye(hinter) {
+        state.retain_refused_endpoint(hinter, peer_addr.clone());
     }
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
