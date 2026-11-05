@@ -9,7 +9,7 @@ use std::borrow::Cow;
 
 use habilis_network_protocol::SymmetricKey;
 
-use crate::DocError;
+use crate::{DocError, Stamp};
 use habilis_network_protocol::messages::MessageBody;
 
 use habilis_network_protocol::seal_error;
@@ -42,6 +42,13 @@ enum StateOp<'merge> {
         /// writes it, and every other body is the body from before the time.
         #[serde(rename = "t", default, skip_serializing_if = "Option::is_none")]
         time: Option<u64>,
+        /// The stamps of the leaves that a seed or a replay frame writes (wire key `o`): for each
+        /// leaf, the time and an index into the tag table `a`.
+        #[serde(rename = "o", default, skip_serializing_if = "Vec::is_empty")]
+        origins: Vec<(u64, u32)>,
+        /// The tags of the actors that `o` names (wire key `a`), each one once.
+        #[serde(rename = "a", default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
     },
     /// The pre-automerge RFC 7386 merge shape. Retained only so a body still
     /// composes for the adversarial harness; the automerge engine ignores it (a
@@ -142,6 +149,38 @@ pub fn change_body_timed(
     seed: Option<&SeedMark>,
     time: Option<u64>,
 ) -> Result<MessageBody, DocError> {
+    change_body_stamped(change, merge, epoch, seed, time, &[])
+}
+
+/// [`change_body_timed`] with the stamps of the writes that the change carries: a frame of a seed
+/// or a replay names, for each leaf that it writes, the stamp of the write that made its value
+/// (wire keys `o` and `a`). `origins` lists them in the order of the paths of the leaves.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_stamped(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+    seed: Option<&SeedMark>,
+    time: Option<u64>,
+    origins: &[Stamp],
+) -> Result<MessageBody, DocError> {
+    let mut tags: Vec<String> = Vec::new();
+    let mut named: Vec<(u64, u32)> = Vec::with_capacity(origins.len());
+    for stamp in origins {
+        let position = tags
+            .iter()
+            .position(|tag| *tag == stamp.tag)
+            .unwrap_or_else(|| {
+                tags.push(stamp.tag.clone());
+                tags.len() - 1
+            });
+        named.push((
+            stamp.time,
+            u32::try_from(position).map_err(DocError::encode)?,
+        ));
+    }
     let tagged: Option<u64> = (epoch != 0).then_some(epoch);
     let mark: Option<SeedMark> = seed.cloned();
     let json = serde_json::to_string(&StateOp::Change {
@@ -150,6 +189,8 @@ pub fn change_body_timed(
         epoch: tagged,
         seed: mark,
         time,
+        origins: named,
+        tags,
     })
     .map_err(DocError::encode)?;
     Ok(MessageBody::try_new(&json)?)
@@ -191,13 +232,23 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
             epoch,
             seed,
             time,
+            origins,
+            tags,
             ..
-        } => Some(ParsedChange {
-            bytes: bs58::decode(&data).into_vec().ok()?,
-            epoch: epoch.unwrap_or(0),
-            seed,
-            time,
-        }),
+        } => {
+            let mut stamps: Vec<Stamp> = Vec::with_capacity(origins.len());
+            for (at, index) in origins {
+                let tag = tags.get(usize::try_from(index).ok()?)?;
+                stamps.push(Stamp::new(at, tag.clone()));
+            }
+            Some(ParsedChange {
+                bytes: bs58::decode(&data).into_vec().ok()?,
+                epoch: epoch.unwrap_or(0),
+                seed,
+                time,
+                origins: stamps,
+            })
+        }
         StateOp::Merge { .. } | StateOp::Enc { .. } => None,
     }
 }
@@ -275,8 +326,9 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SeedMark, change_body, change_body_at, change_body_seed, change_body_timed, decrypt_body,
-        encrypt_body, merge_body, parse_change, parse_change_body, parse_change_full,
+        SeedMark, Stamp, change_body, change_body_at, change_body_seed, change_body_stamped,
+        change_body_timed, decrypt_body, encrypt_body, merge_body, parse_change, parse_change_body,
+        parse_change_full,
     };
     use habilis_network_protocol::SymmetricKey;
 
@@ -329,6 +381,39 @@ mod tests {
             parse_change_full(plain.as_str()).expect("it parses").time,
             None,
             "a body with no time reads with none"
+        );
+    }
+
+    #[test]
+    fn the_stamps_of_a_frame_read_back_and_a_body_without_them_adds_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let stamps = vec![
+            Stamp::new(5, "aa".to_owned()),
+            Stamp::new(7, "bb".to_owned()),
+            Stamp::new(5, "aa".to_owned()),
+        ];
+        let body =
+            change_body_stamped(&[1, 2, 3], None, 0, None, Some(7), &stamps).expect("a body");
+        assert_eq!(
+            body.as_str(),
+            r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0],[7,1],[5,0]],"a":["aa","bb"]}"#,
+            "the stamps are the keys o and a, with each tag once"
+        );
+        assert_eq!(
+            parse_change_full(body.as_str()).expect("it parses").origins,
+            stamps,
+            "the stamps read back in order"
+        );
+        let plain = change_body_stamped(&[1, 2, 3], None, 0, None, Some(7), &[]).expect("a body");
+        assert_eq!(
+            plain.as_str(),
+            r#"{"k":"change","c":"Ldp","t":7}"#,
+            "a body with no stamps is the body of step 2"
+        );
+        let broken = r#"{"k":"change","c":"Ldp","t":7,"o":[[5,3]],"a":["aa"]}"#;
+        assert!(
+            parse_change_full(broken).is_none(),
+            "a stamp that names a tag outside the table is no body"
         );
     }
 
