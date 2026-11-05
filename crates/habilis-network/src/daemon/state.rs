@@ -156,6 +156,37 @@ mod tests {
             "an empty body holds no proof"
         );
     }
+
+    /// A proof request for this node gets one answer with a proof that verifies. A request for
+    /// another node gets none, and the answers stop at the per-minute cap.
+    #[test]
+    fn a_proof_request_is_answered_once_in_the_cap() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let now = Instant::now();
+        assert!(
+            state.proof_answer(&nick("bob"), &me, &mesh, now).is_none(),
+            "a request for another node gets no answer"
+        );
+        let answer = state
+            .proof_answer(&me, &me, &mesh, now)
+            .expect("a request for this node gets an answer");
+        let proof = answer.joined_proof().expect("the answer holds a proof");
+        assert!(
+            protocol::identity::verify_proof(
+                &proof,
+                &state.identity.author_key(),
+                "alice",
+                mesh.as_ref()
+            ),
+            "the proof in the answer verifies"
+        );
+        let answered = (0..100)
+            .filter(|_| state.proof_answer(&me, &me, &mesh, now).is_some())
+            .count();
+        assert_eq!(answered + 1, 30, "the answers stop at the per-minute cap");
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;

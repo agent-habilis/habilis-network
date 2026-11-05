@@ -1736,6 +1736,19 @@ impl EventLoopState {
         )
     }
 
+    /// The answer to a proof request: a signed `joined` frame with the proof of this session, if
+    /// the request is for this node and the answers of the last minute are under the cap.
+    pub(crate) fn proof_answer(
+        &mut self,
+        request_to: &Nickname,
+        own: &Nickname,
+        mesh: &MeshId,
+        now: Instant,
+    ) -> Option<Verified> {
+        let _ = (request_to, own, mesh, now);
+        None
+    }
+
     /// Hold the proof in the body of a `joined` frame, if it verifies for the author of the frame.
     /// A frame with an empty or bad body holds none.
     pub(crate) fn note_joined_proof(&mut self, message: &Verified, mesh: &MeshId) {
