@@ -40,6 +40,11 @@ pub enum DocError {
     /// The document holds a candidate seed. It adopts the candidate after the wait and cuts no
     /// epoch of its own: a cut from a view that the candidate replaces loses the values of others.
     CandidateHeld,
+    /// A state document that has not heard of any other write yet. Its clock is 0, so a change
+    /// that it wrote now would get a time below the writes that its node made before a restart,
+    /// and would lose to them. The caller holds the write until a frame with a time arrives or
+    /// it calls `finish_sync`.
+    ClockNotReady,
 }
 
 impl DocError {
@@ -65,6 +70,7 @@ impl fmt::Display for DocError {
             Self::TooLarge { .. } => "one value is larger than a frame and cannot be cut",
             Self::SeedTooLong { .. } => "the seed would have more frames than a node accepts",
             Self::CandidateHeld => "the document holds a candidate seed and cuts no epoch",
+            Self::ClockNotReady => "the clock of the document has not heard of another write yet",
         })
     }
 }
@@ -75,7 +81,8 @@ impl error::Error for DocError {
             Self::NotAnObject
             | Self::TooLarge { .. }
             | Self::SeedTooLong { .. }
-            | Self::CandidateHeld => None,
+            | Self::CandidateHeld
+            | Self::ClockNotReady => None,
             Self::Body(error) => Some(error),
             Self::Encode(error) => Some(&**error),
         }

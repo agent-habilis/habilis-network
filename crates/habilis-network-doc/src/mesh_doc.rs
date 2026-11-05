@@ -196,8 +196,12 @@ struct OpSpan {
     hash: ChangeHash,
 }
 
-/// The highest Lamport time that a state change can carry: 2^53, the largest whole number that a
-/// JSON number keeps exact. A change with a higher time is refused, which bounds the clock.
+/// The bound of the Lamport time of a state change: 2^53, the largest whole number that a JSON
+/// number keeps exact. A change with a time at or above it is refused, so the clock stays below it
+/// and `next_time` never saturates in practice. This does not stop a signed member from writing a
+/// time far below the bound that is still far above the clock of the others: that member wins
+/// the conflicts of the leaves that it writes, which any member of an ungated channel can already
+/// do by overwriting them.
 const DOC_TIME_MAX: u64 = 1 << 53;
 
 /// The root frame of a higher epoch that the document keeps until it adopts the epoch.
@@ -332,6 +336,8 @@ pub struct DocCensus {
     /// The nicknames that have an entry in the per-peer map, when the caller asked for the heavy
     /// census. Empty for a document with no gate.
     pub peer_nicks: Option<Vec<String>>,
+    /// The state changes that were refused for want of a valid time, since the document began.
+    pub refused_time: u64,
 }
 
 /// The bytes of a frame on the wire, 0 for a frame that does not serialize.
@@ -422,6 +428,8 @@ pub struct MeshDoc {
     clock: AtomicU64,
     /// The state changes that were refused for want of a valid time: one integer, which saturates.
     refused_time: u64,
+    /// Whether local writes wait for the first frame with a time (see [`Self::awaiting_first_sync`]).
+    awaiting_sync: bool,
     /// The author of the root of the seed that this document adopted for its epoch, `None` when
     /// it holds no seed. A rival root of the same epoch with a lower key replaces that seed.
     seed_author: Option<AuthorKey>,
@@ -502,6 +510,7 @@ impl MeshDoc {
             adopting: false,
             clock: AtomicU64::new(0),
             refused_time: 0,
+            awaiting_sync: false,
             seed_author: None,
             seed_hashes: HashSet::new(),
             refused_rivals: Vec::new(),
@@ -610,7 +619,8 @@ impl MeshDoc {
     /// # Errors
     /// [`DocError::NotAnObject`] when the merge is not a JSON object, [`DocError::Body`]
     /// when the change body is not a valid message body, or [`DocError::Encode`] when
-    /// the change does not encode.
+    /// the change does not encode, and [`DocError::ClockNotReady`] when a state document waits for
+    /// its first sync (see [`Self::awaiting_first_sync`]).
     pub fn compose_wire_body(
         &self,
         change: &[u8],
@@ -622,8 +632,11 @@ impl MeshDoc {
         ),
         DocError,
     > {
-        let time: Option<u64> =
-            (self.state_epochs && self.gate.is_none()).then(|| self.next_time());
+        let timed: bool = self.state_epochs && self.gate.is_none();
+        if timed && self.awaiting_sync {
+            return Err(DocError::ClockNotReady);
+        }
+        let time: Option<u64> = timed.then(|| self.next_time());
         let plain = wire::change_body_timed(change, merge, self.epoch, None, time)?;
         let wire = match self.key.as_ref() {
             Some(key) => wire::encrypt_body(&plain, key)?,
@@ -673,6 +686,7 @@ impl MeshDoc {
             save_bytes,
             json_bytes,
             peer_nicks,
+            refused_time: self.refused_time,
         }
     }
 
@@ -757,9 +771,8 @@ impl MeshDoc {
     }
 
     /// Take the time of the next change of this node: one above the clock, which then holds it.
-    /// [`Self::compose_wire_body`] and [`Self::build_seed`] call it, and so does a caller that
-    /// builds a body by hand.
-    pub fn next_time(&self) -> u64 {
+    /// [`Self::compose_wire_body`] and [`Self::build_seed`] call it.
+    pub(crate) fn next_time(&self) -> u64 {
         let taken = self
             .clock
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
@@ -775,6 +788,22 @@ impl MeshDoc {
     #[must_use]
     pub fn has_candidate(&self) -> bool {
         self.candidate.is_some()
+    }
+
+    /// Hold the local writes of a state document until it has heard of another write. A node that
+    /// restarts has a clock of 0, so a write now would get a time below the writes that the node
+    /// made before, and lose to them. [`Self::compose_wire_body`] returns
+    /// [`DocError::ClockNotReady`] until a frame with a time arrives, or [`Self::finish_sync`].
+    #[must_use]
+    pub fn awaiting_first_sync(mut self) -> Self {
+        self.awaiting_sync = true;
+        self
+    }
+
+    /// Say that the first sync is over (the digest was answered with nothing, or the node is
+    /// alone), so the local writes go on.
+    pub fn finish_sync(&mut self) {
+        self.awaiting_sync = false;
     }
 
     /// Set the frame bytes that start a reset, before the size of a settled epoch is known (the
@@ -1255,7 +1284,7 @@ impl MeshDoc {
         if self.state_epochs && self.gate.is_none() {
             // A state change names its Lamport time, and a node that cannot place it before or
             // after its own writes would break the order of the replay rule.
-            let Some(stamped) = time.filter(|stamped| *stamped <= DOC_TIME_MAX) else {
+            let Some(stamped) = time.filter(|stamped| *stamped < DOC_TIME_MAX) else {
                 self.refused_time = self.refused_time.saturating_add(1);
                 if let Some(refused) =
                     self.warn_due("a state change with no valid time was refused")
@@ -1265,6 +1294,7 @@ impl MeshDoc {
                 return Ingested::Ignored;
             };
             self.clock.fetch_max(stamped, Ordering::Relaxed);
+            self.awaiting_sync = false;
         }
         if epoch != self.epoch {
             return self.ingest_other_epoch(epoch, &change, frame, mark);
@@ -3853,6 +3883,84 @@ mod tests {
     }
 
     #[test]
+    fn a_time_at_the_top_of_the_range_is_refused_so_the_clock_cannot_be_pinned() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a state change with no valid time was refused",
+        );
+        let me = nick("me");
+        let build = |time: u64| {
+            let timeless = MeshDoc::new_ungated();
+            let bytes = timeless
+                .build_change(&json!({ "a": time }), &pad_seed(me.as_str().as_bytes()))
+                .expect("applies")
+                .expect("a change");
+            let body = change_body_timed(&bytes, None, 0, None, Some(time)).expect("a body");
+            let key = signer(&me);
+            Verified::fixture_unchecked(
+                Message::new_channel_event(&MeshId::from("test"), &me, body, Channel::State)
+                    .unverified_key(key),
+                key,
+            )
+        };
+        let top = super::DOC_TIME_MAX;
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        assert!(
+            matches!(doc.ingest(&build(top - 1)), Ingested::Applied { .. }),
+            "the highest time that is allowed"
+        );
+        let mut pinned = MeshDoc::new_ungated().state_epochs();
+        for refused in [top, top + 1] {
+            assert!(
+                matches!(pinned.ingest(&build(refused)), Ingested::Ignored),
+                "a time of {refused} is refused"
+            );
+        }
+        assert_eq!(pinned.clock(), 0, "a refused time does not move the clock");
+        assert_eq!(pinned.refused_time(), 2, "both refusals are counted");
+    }
+
+    #[test]
+    fn a_state_document_after_a_restart_holds_its_writes_until_it_heard_of_another_write() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other) = (nick("me"), nick("other"));
+        let mut ahead = MeshDoc::new_ungated().state_epochs();
+        for _ in 0..49 {
+            let _ = ahead.next_time();
+        }
+        let heard = write(&mut ahead, &other, &json!({ "z": 1 }));
+        let mut doc = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        let bytes = doc
+            .build_change(&json!({ "a": 1 }), &pad_seed(me.as_str().as_bytes()))
+            .expect("applies")
+            .expect("a change");
+        assert!(
+            matches!(
+                doc.compose_wire_body(&bytes, None),
+                Err(DocError::ClockNotReady)
+            ),
+            "a write waits: its time would be below the writes before the restart"
+        );
+        assert!(matches!(doc.ingest(&heard), Ingested::Applied { .. }));
+        let after = write(&mut doc, &me, &json!({ "a": 1 }));
+        assert_eq!(
+            time_of(&after),
+            Some(51),
+            "a write after a frame is above it"
+        );
+        // A node that is alone ends the wait itself.
+        let mut alone = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        alone.finish_sync();
+        let first = write(&mut alone, &me, &json!({ "a": 1 }));
+        assert_eq!(
+            time_of(&first),
+            Some(1),
+            "after finish_sync the node writes"
+        );
+    }
+
+    #[test]
     fn a_gated_channel_never_writes_a_time() {
         let _guard = ::habilis_network_test_tracing::init();
         let me = nick("me");
@@ -3880,6 +3988,10 @@ mod tests {
         }
         ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
         assert_eq!(doc.epoch(), 3, "the document adopted the seed");
+        assert!(
+            doc.clock() >= 9,
+            "the clock is not lower than before the switch"
+        );
         let after = write(&mut doc, &me, &json!({ "again": 1 }));
         assert!(
             time_of(&after) > Some(9),
