@@ -1,7 +1,7 @@
 # habilis-network — Architecture
 
 This document describes the architecture of the habilis-network workspace at version 0.6.0.
-The wire protocol described here is message version `13.0`.
+The wire protocol described here is message version `14.0`.
 The style follows ASD-STE100 Simplified Technical English.
 
 ## Abstract
@@ -388,7 +388,7 @@ The parser rejects a key with no signature and a signature with no key.
 The signature covers the canonical form of the message with the key and signature fields empty.
 Unknown keys must be ignored, which leaves room for extension.
 
-The parser gates on an **exact** version match, `13.0`.
+The parser gates on an **exact** version match, `14.0`.
 The crypto byte-domains are mixed into every signature and derivation transcript.
 A silent domain change makes verification fail invisibly, and the exact gate turns that into a loud rejection.
 
