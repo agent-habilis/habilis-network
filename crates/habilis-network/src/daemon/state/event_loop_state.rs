@@ -1741,7 +1741,9 @@ impl EventLoopState {
         own: &Nickname,
         mesh: &MeshId,
     ) -> Option<Verified> {
-        if !self.peers.contains(alive.author.as_str()) || !self.proofs.wants_proof(&alive.key()) {
+        if !self.peers.contains(alive.author.as_str())
+            || !self.proofs.wants_proof(&alive.key(), Instant::now())
+        {
             return None;
         }
         Some(Message::new_proof_request(mesh, own, alive.author.clone()).sign(&self.identity))

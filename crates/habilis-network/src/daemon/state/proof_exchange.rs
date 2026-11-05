@@ -35,7 +35,7 @@ impl ProofExchange {
     }
 
     /// An alive frame came from `session`. True means: send the session one proof request now.
-    pub(crate) fn wants_proof(&mut self, session: &AuthorKey) -> bool {
+    pub(crate) fn wants_proof(&mut self, session: &AuthorKey, _now: Instant) -> bool {
         self.book.get(session).is_none() && self.asked.insert(*session)
     }
 
@@ -91,7 +91,9 @@ mod tests {
     use super::{ProofExchange, verify_proof};
     use crate::protocol::identity::Identity;
     use crate::protocol::{MeshId, Nickname};
+    use crate::util::clock::Instant;
     use crate::util::tuning::QUIET_CAP;
+    use std::time::Duration;
 
     /// A joiner that missed the `joined` frame of a member gets the proof by one request.
     #[test]
@@ -104,11 +106,11 @@ mod tests {
         let mut joiner = ProofExchange::with_cap(QUIET_CAP);
 
         assert!(
-            joiner.wants_proof(&session),
+            joiner.wants_proof(&session, Instant::now()),
             "an alive frame of a session with no proof asks for it"
         );
         assert!(
-            !joiner.wants_proof(&session),
+            !joiner.wants_proof(&session, Instant::now()),
             "the session is asked once, not at each alive frame"
         );
         assert!(
@@ -119,6 +121,44 @@ mod tests {
         assert!(
             verify_proof(held, &session, nickname.as_ref(), mesh.as_ref()),
             "the held proof verifies"
+        );
+    }
+
+    /// A request that got no answer is sent again, 3 times at most, after 30 s, 60 s and 120 s.
+    #[test]
+    fn an_unanswered_request_is_retried_three_times_with_a_back_off() {
+        let session = Identity::generate().author_key();
+        let mut joiner = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        assert!(
+            joiner.wants_proof(&session, at(0)),
+            "the first request goes at once"
+        );
+        assert!(
+            !joiner.wants_proof(&session, at(29)),
+            "no retry before 30 s"
+        );
+        assert!(joiner.wants_proof(&session, at(30)), "retry 1 after 30 s");
+        assert!(
+            !joiner.wants_proof(&session, at(89)),
+            "no retry before 60 s more"
+        );
+        assert!(
+            joiner.wants_proof(&session, at(90)),
+            "retry 2 after 60 s more"
+        );
+        assert!(
+            !joiner.wants_proof(&session, at(209)),
+            "no retry before 120 s more"
+        );
+        assert!(
+            joiner.wants_proof(&session, at(210)),
+            "retry 3 after 120 s more"
+        );
+        assert!(
+            !joiner.wants_proof(&session, at(100_000)),
+            "no fourth retry"
         );
     }
 
@@ -136,7 +176,9 @@ mod tests {
             receiver.accept(&session, &nickname, &mesh, proof, |_| true),
             "the joined frame proof is held"
         );
-        let requests = (0..1000).filter(|_| receiver.wants_proof(&session)).count();
+        let requests = (0..1000)
+            .filter(|_| receiver.wants_proof(&session, Instant::now()))
+            .count();
         assert_eq!(
             requests, 0,
             "1000 alive frames of a held session ask 0 times"
