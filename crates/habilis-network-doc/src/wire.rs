@@ -236,10 +236,27 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
             tags,
             ..
         } => {
+            // One body for one meaning: a stamp needs the time of the change, the table names each
+            // tag once, and every tag of the table is used.
+            if (!origins.is_empty() && time.is_none())
+                || (origins.is_empty() && !tags.is_empty())
+                || tags
+                    .iter()
+                    .enumerate()
+                    .any(|(at, tag)| tags[..at].contains(tag))
+            {
+                return None;
+            }
+            let mut used: Vec<bool> = vec![false; tags.len()];
             let mut stamps: Vec<Stamp> = Vec::with_capacity(origins.len());
             for (at, index) in origins {
-                let tag = tags.get(usize::try_from(index).ok()?)?;
+                let position = usize::try_from(index).ok()?;
+                let tag = tags.get(position)?;
+                used[position] = true;
                 stamps.push(Stamp::new(at, tag.clone()));
+            }
+            if used.contains(&false) {
+                return None;
             }
             Some(ParsedChange {
                 bytes: bs58::decode(&data).into_vec().ok()?,
@@ -414,6 +431,37 @@ mod tests {
         assert!(
             parse_change_full(broken).is_none(),
             "a stamp that names a tag outside the table is no body"
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_canonical_in_its_stamps_is_no_body() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let bodies = [
+            (
+                r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0]],"a":["aa","bb"]}"#,
+                "a tag that no stamp uses",
+            ),
+            (
+                r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0],[6,1]],"a":["aa","aa"]}"#,
+                "a tag that the table names twice",
+            ),
+            (
+                r#"{"k":"change","c":"Ldp","t":7,"a":["aa"]}"#,
+                "a table with no stamps",
+            ),
+            (
+                r#"{"k":"change","c":"Ldp","o":[[5,0]],"a":["aa"]}"#,
+                "stamps with no time of the change",
+            ),
+        ];
+        for (body, why) in bodies {
+            assert!(parse_change_full(body).is_none(), "refused: {why}");
+        }
+        let canonical = r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0],[6,1]],"a":["aa","bb"]}"#;
+        assert!(
+            parse_change_full(canonical).is_some(),
+            "the control: a canonical body parses"
         );
     }
 
