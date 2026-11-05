@@ -1,0 +1,306 @@
+//! A model of the state channel across epoch resets.
+//!
+//! Three nodes hold an ungated document each. Each node writes only inside its own key (`n0`, `n1`,
+//! `n2`), so the value of every key has one writer, and the model is the plain sum of the writes of
+//! each node in order. A node cuts a seed, and every node, the cutter too, adopts it after the
+//! wait. Frames travel with random delay, and a sync round (the answer to a digest) gives every
+//! node the frames of the others that it lacks. When all is quiet, every node must hold the model.
+//!
+//! The quiet scenario cuts only when no write is in flight. The free scenario writes while a cut
+//! is in the wait, and a write of the old epoch that is not in the seed is lost until the replay
+//! of the cut vector exists, so that scenario is ignored until then.
+
+use std::{env, mem};
+
+use habilis_network_doc::{MeshDoc, wire};
+use habilis_network_protocol::messages::{MessageBody, Verified};
+use habilis_network_protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
+use serde_json::{Map, Value, json};
+
+const NODES: usize = 3;
+/// How many ticks a node waits before it adopts a seed. The same as `DOC_EPOCH_ADOPT_WAIT_TICKS`.
+const WAIT: u32 = 5;
+/// The largest merge of one seed frame, in bytes of JSON text.
+const FRAME_FITS: usize = 500;
+const KEYS: [&str; 3] = ["a", "b", "c"];
+
+fn nick(name: &str) -> Nickname {
+    Nickname::try_new(name).expect("a nickname")
+}
+
+fn pad(name: &str) -> [u8; 32] {
+    let mut padded = [0u8; 32];
+    padded[..name.len()].copy_from_slice(name.as_bytes());
+    padded
+}
+
+/// A small deterministic generator, so a failing seed can be run again.
+struct Dice(u64);
+
+impl Dice {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        let wide = u64::try_from(bound).expect("a bound");
+        usize::try_from(self.next() % wide).expect("a small number")
+    }
+}
+
+struct Node {
+    name: Nickname,
+    doc: MeshDoc,
+}
+
+struct Sim {
+    nodes: Vec<Node>,
+    dice: Dice,
+    /// Frames on the way: the target node, the step at which it arrives, the frame.
+    wire: Vec<(usize, u64, Verified)>,
+    step: u64,
+    /// The values of every node, written in order.
+    model: Map<String, Value>,
+}
+
+fn signed(who: &Nickname, body: MessageBody) -> Verified {
+    let key = AuthorKey::from(pad(who.as_str()));
+    let message = Message::new_channel_event(&MeshId::from("test"), who, body, Channel::State);
+    Verified::fixture_unchecked(message.unverified_key(key), key)
+}
+
+impl Sim {
+    fn new(seed: u64) -> Self {
+        let mut nodes: Vec<Node> = Vec::new();
+        for index in 0..NODES {
+            nodes.push(Node {
+                name: nick(&format!("n{index}")),
+                doc: MeshDoc::new_ungated(),
+            });
+        }
+        Self {
+            nodes,
+            dice: Dice(seed),
+            wire: Vec::new(),
+            step: 0,
+            model: Map::new(),
+        }
+    }
+
+    fn send_to_others(&mut self, from: usize, frame: &Verified) {
+        for target in 0..NODES {
+            if target != from {
+                let delay = u64::try_from(self.dice.below(4)).expect("a delay");
+                self.wire.push((target, self.step + delay, frame.clone()));
+            }
+        }
+    }
+
+    /// Node `index` sets or deletes one key inside its own key.
+    fn write(&mut self, index: usize) {
+        let key: &str = KEYS[self.dice.below(KEYS.len())];
+        let kind = self.dice.below(4);
+        let value: Value = match kind {
+            0 => Value::Null,
+            1 => json!(self.dice.below(1000)),
+            2 => json!(vec![self.dice.below(10), self.dice.below(10)]),
+            _ => json!(format!("v{}", self.dice.below(1000))),
+        };
+        let own = format!("n{index}");
+        let merge: Value = json!({ own.clone(): { key: value } });
+        let node = &mut self.nodes[index];
+        let actor = pad(node.name.as_str());
+        let built = node
+            .doc
+            .build_change(&merge, &actor)
+            .expect("the merge applies");
+        let Some(change) = built else {
+            // A delete of a key that is not there changes nothing, and neither does the model.
+            return;
+        };
+        let (wire, _plain) = node.doc.compose_wire_body(&change, None).expect("compose");
+        let frame = signed(&node.name, wire);
+        node.doc.ingest(&frame);
+        let namespace = self.model.entry(own).or_insert_with(|| json!({}));
+        if let Value::Object(fields) = namespace {
+            if value.is_null() {
+                fields.remove(key);
+            } else {
+                fields.insert(key.to_owned(), value);
+            }
+        }
+        self.send_to_others(index, &frame);
+    }
+
+    /// Node `index` cuts the next epoch: it builds the seed of its live values and sends it to
+    /// every node, itself included.
+    fn cut(&mut self, index: usize) {
+        let epoch = self.nodes[index].doc.epoch() + 1;
+        let name = self.nodes[index].name.clone();
+        let actor = pad(name.as_str());
+        let fits = |merge: &Value| merge.to_string().len() <= FRAME_FITS;
+        let chain = self.nodes[index]
+            .doc
+            .build_seed(epoch, &actor, fits)
+            .expect("the live values split");
+        let mut frames: Vec<Verified> = Vec::new();
+        let numbered: Vec<(usize, &Vec<u8>)> = chain.changes.iter().enumerate().collect();
+        for (position, bytes) in numbered {
+            let mark = (position == 0).then_some(&chain.mark);
+            let body = wire::change_body_seed(bytes, None, epoch, mark).expect("a body");
+            frames.push(signed(&name, body));
+        }
+        for frame in &frames {
+            self.nodes[index].doc.ingest(frame);
+            self.send_to_others(index, frame);
+        }
+    }
+
+    fn deliver_due(&mut self) {
+        let due_at = self.step;
+        let mut waiting: Vec<(usize, u64, Verified)> = Vec::new();
+        for (target, at, frame) in mem::take(&mut self.wire) {
+            if at <= due_at {
+                self.nodes[target].doc.ingest(&frame);
+            } else {
+                waiting.push((target, at, frame));
+            }
+        }
+        self.wire = waiting;
+    }
+
+    fn tick_all(&mut self) {
+        for node in &mut self.nodes {
+            let me = node.name.clone();
+            node.doc.tick_epoch(&me);
+        }
+    }
+
+    /// The answer to a digest: every node gives every other node the frames that it lacks.
+    fn sync_all(&mut self) {
+        for from in 0..NODES {
+            for to in 0..NODES {
+                if from == to {
+                    continue;
+                }
+                let have: Vec<String> = self.nodes[to].doc.heads().collect();
+                let missing: Vec<Verified> =
+                    self.nodes[from].doc.changes_since(&have, 100_000).collect();
+                for frame in &missing {
+                    self.nodes[to].doc.ingest(frame);
+                }
+            }
+        }
+    }
+
+    fn deliver_everything(&mut self) {
+        self.step += 100;
+        self.deliver_due();
+    }
+
+    /// Run until every node holds the same epoch and values, or give up.
+    fn settle(&mut self) {
+        for _ in 0..30 {
+            self.deliver_everything();
+            for _ in 0..=WAIT {
+                self.tick_all();
+            }
+            self.sync_all();
+            let first: Value = self.nodes[0].doc.to_json();
+            let epoch = self.nodes[0].doc.epoch();
+            let mut same = true;
+            for node in &self.nodes {
+                if node.doc.to_json() != first || node.doc.epoch() != epoch {
+                    same = false;
+                }
+            }
+            if same {
+                return;
+            }
+        }
+    }
+
+    fn assert_model(&self, label: &str) {
+        let expected = Value::Object(self.model.clone());
+        for node in &self.nodes {
+            assert_eq!(
+                node.doc.to_json(),
+                expected,
+                "{label}: node {} does not hold the model (epoch {})",
+                node.name.as_str(),
+                node.doc.epoch()
+            );
+        }
+    }
+}
+
+/// Seeds for the run in CI: 500 take about 25 s of a debug build. The environment variable
+/// `STATE_EPOCH_MODEL_SEEDS` sets the count, for a long run by hand.
+fn seed_count(default: u64) -> u64 {
+    let text: Option<String> = env::var("STATE_EPOCH_MODEL_SEEDS").ok();
+    text.and_then(|count| count.parse().ok()).unwrap_or(default)
+}
+
+#[test]
+fn model_cuts_with_no_write_in_flight_converge_to_the_model() {
+    let _guard = habilis_network_test_tracing::init();
+    for seed in 0..seed_count(500) {
+        let mut sim = Sim::new(seed);
+        for round in 0..6 {
+            let writes = 3 + sim.dice.below(6);
+            for _ in 0..writes {
+                let index = sim.dice.below(NODES);
+                sim.write(index);
+            }
+            sim.settle();
+            sim.assert_model(&format!("seed {seed} round {round} before the cut"));
+            let cutter = sim.dice.below(NODES);
+            sim.cut(cutter);
+            sim.settle();
+            sim.assert_model(&format!("seed {seed} round {round} after the cut"));
+        }
+    }
+}
+
+#[test]
+#[ignore = "red until the replay of step 3: a write made while a cut waits is not in the seed"]
+fn model_random_writes_cuts_and_adopts_converge_to_the_model() {
+    let _guard = habilis_network_test_tracing::init();
+    for seed in 0..seed_count(1000) {
+        let mut sim = Sim::new(seed);
+        let mut cut_pending = false;
+        for _ in 0..60 {
+            sim.step += 1;
+            match sim.dice.below(8) {
+                0..=3 => {
+                    let index = sim.dice.below(NODES);
+                    sim.write(index);
+                }
+                4 => {
+                    if !cut_pending {
+                        let cutter = sim.dice.below(NODES);
+                        sim.cut(cutter);
+                        cut_pending = true;
+                    }
+                }
+                5 => sim.tick_all(),
+                6 => sim.sync_all(),
+                _ => {}
+            }
+            sim.deliver_due();
+            if sim
+                .nodes
+                .iter()
+                .all(|node| node.doc.epoch() == sim.nodes[0].doc.epoch())
+            {
+                cut_pending = false;
+            }
+        }
+        sim.settle();
+        sim.assert_model(&format!("seed {seed}"));
+    }
+}
