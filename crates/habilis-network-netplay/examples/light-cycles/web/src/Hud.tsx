@@ -25,9 +25,6 @@ import type { GameEvent, HudDto } from './types.ts'
 function outcomeLabel(hud: HudDto | null): string {
   if (!hud) return ''
   if (hud.desynced) return 'desynced'
-  // Ahead of the waiting states on purpose: a lobby that *cannot* start
-  // must not keep reporting that it is about to.
-  if (hud.blocked) return hud.blocked
   if (hud.waiting) return hud.present > 1 ? `${hud.present} players ready` : 'waiting'
   if (hud.syncing) return 'syncing'
   switch (hud.outcome.type) {
@@ -67,7 +64,7 @@ export const Hud = component<{ hud: Signal<HudDto | null>; events: Signal<GameEv
             </li>
           )}
         </ul>
-        <p class="status" attrs={{ 'data-desync': String((hud?.desynced ?? false) || hud?.blocked != null) }}>
+        <p class="status" attrs={{ 'data-desync': String(hud?.desynced ?? false) }}>
           {outcomeLabel(hud)}
         </p>
       </header>

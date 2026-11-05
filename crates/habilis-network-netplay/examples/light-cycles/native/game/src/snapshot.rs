@@ -19,9 +19,6 @@ pub struct Snapshot {
     /// never happen; if it does, the two are no longer playing the same
     /// game and the display is not to be trusted.
     pub desynced: bool,
-    /// Why the lobby cannot start a match, when that is not something
-    /// waiting will fix — a duplicate nickname, say. `None` while healthy.
-    pub blocked: Option<String>,
     /// The session exists but is still aligning frame numbers with its
     /// peers. Distinct from both "waiting" and "playing": the arena is up
     /// but frozen, which without a word on screen reads as a hang.

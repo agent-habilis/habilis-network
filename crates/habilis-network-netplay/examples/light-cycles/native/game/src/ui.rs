@@ -135,11 +135,6 @@ pub fn status_line(s: &Snapshot) -> String {
     if s.desynced {
         return "DESYNCED".to_owned();
     }
-    // Ahead of the waiting states on purpose: a lobby that *cannot* start
-    // must not keep reporting that it is about to.
-    if let Some(blocked) = &s.blocked {
-        return blocked.to_uppercase();
-    }
     if s.waiting {
         return if s.present > 1 {
             format!("{} PLAYERS READY", s.present)
@@ -165,8 +160,7 @@ pub fn status_line(s: &Snapshot) -> String {
 }
 
 fn status(s: &Snapshot) -> View {
-    let alarming = s.desynced || s.blocked.is_some();
-    let color = if alarming { palette(1) } else { palette(6) };
+    let color = if s.desynced { palette(1) } else { palette(6) };
     View::boxed(
         BoxProps {
             direction: Direction::Row,
@@ -200,14 +194,7 @@ fn arena(s: &Snapshot) -> View {
                         fg: dim(),
                         ..BoxProps::default()
                     },
-                    // Pointless advice when the lobby is blocked — sharing
-                    // the code again fixes nothing, and the status line
-                    // above is already carrying the actual reason.
-                    vec![View::text(if s.blocked.is_some() {
-                        ""
-                    } else {
-                        "SHARE THE ROOM CODE BELOW"
-                    })],
+                    vec![View::text("SHARE THE ROOM CODE BELOW")],
                 ),
             ],
         )]
@@ -230,12 +217,8 @@ fn arena(s: &Snapshot) -> View {
 
 /// The big line in the middle of an empty arena.
 ///
-/// A blocked lobby must not read as an imminent match: "GET READY" for
-/// something that can never start is worse than saying nothing.
 fn attract_headline(s: &Snapshot) -> String {
-    if s.blocked.is_some() {
-        "CANNOT START".to_owned()
-    } else if s.present > 1 {
+    if s.present > 1 {
         "GET READY".to_owned()
     } else {
         "WAITING FOR A PLAYER".to_owned()

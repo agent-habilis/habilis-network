@@ -28,7 +28,7 @@
 //! logical frame 0; the session's own handshake
 //! ([`SessionState::Synchronizing`](crate::SessionState)) aligns the rest.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use habilis_network::protocol::{AuthorKey, Nickname};
 use serde::{Deserialize, Serialize};
@@ -196,8 +196,8 @@ impl TickSpan {
 pub enum LobbyMessage {
     /// "I am here, and this is what to call me."
     Present {
-        /// The sender's display name. Cosmetic, but it has to be unique
-        /// within a match — see [`LobbyError::DuplicateNickname`].
+        /// The sender's display name. Cosmetic: two players can share one,
+        /// because a packet is addressed by public key.
         nick: Nickname,
     },
     /// "Start now, with exactly these players."
@@ -270,23 +270,12 @@ mod key_list {
 pub enum LobbyError {
     /// Fewer than two players are present.
     NotEnoughPlayers,
-    /// Two peers are using the same nickname.
-    ///
-    /// Fatal rather than cosmetic: `send_app` addresses peers by nickname,
-    /// so two players sharing one are not separately reachable and one would
-    /// silently never receive input.
-    DuplicateNickname(Nickname),
 }
 
 impl fmt::Display for LobbyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotEnoughPlayers => write!(formatter, "need at least two players to start"),
-            Self::DuplicateNickname(nick) => write!(
-                formatter,
-                "two peers are both called {nick:?}; unicast addressing is by nickname, so they \
-                 are not separately reachable"
-            ),
         }
     }
 }
@@ -397,28 +386,6 @@ impl Lobby {
         self.present
             .iter()
             .map(|(pubkey, seen)| (*pubkey, seen.nick.clone()))
-    }
-
-    /// Why a match cannot start, when the reason is not simply "nobody
-    /// else is here yet".
-    ///
-    /// The same rule [`Self::propose`] enforces, asked without proposing.
-    /// Only one peer proposes — the lobby picks one so a room does not
-    /// fill with competing proposals — so without this the other peer has
-    /// no idea why nothing is happening, and its screen cheerfully reports
-    /// that the match is about to start.
-    #[must_use]
-    pub fn blocker(&self) -> Option<LobbyError> {
-        if self.present.len() < 2 {
-            return None;
-        }
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        for presence in self.present.values() {
-            if !seen.insert(presence.nick.as_str()) {
-                return Some(LobbyError::DuplicateNickname(presence.nick.clone()));
-            }
-        }
-        None
     }
 
     /// Drop peers we have not heard from within `ttl` of `now`.
@@ -562,14 +529,10 @@ impl Lobby {
     /// thing as abandoning it.
     ///
     /// # Errors
-    /// [`LobbyError::NotEnoughPlayers`] below two players;
-    /// [`LobbyError::DuplicateNickname`] if two peers share a nickname.
+    /// [`LobbyError::NotEnoughPlayers`] below two players.
     pub fn propose(&mut self) -> Result<LobbyMessage, LobbyError> {
         if self.present.len() < 2 {
             return Err(LobbyError::NotEnoughPlayers);
-        }
-        if let Some(blocker) = self.blocker() {
-            return Err(blocker);
         }
         // `BTreeMap` iterates sorted, so every peer proposing the same set
         // produces the same order and therefore the same handles.
@@ -775,8 +738,10 @@ mod tests {
         );
     }
 
+    /// A nickname is a label, so two keys can use one. The lobby keys its players by public key and
+    /// the engine addresses a packet by key, so both players start the match.
     #[test]
-    fn two_peers_sharing_a_nickname_is_refused() {
+    fn two_peers_sharing_a_nickname_start_a_match_with_both_keys() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
@@ -786,10 +751,13 @@ mod tests {
             }),
             Tick::new(0),
         );
+        let Ok(LobbyMessage::Start { players, .. }) = lobby.propose() else {
+            panic!("two keys that share a nickname could not start a match");
+        };
         assert_eq!(
-            lobby.propose(),
-            Err(LobbyError::DuplicateNickname(nick("alice"))),
-            "unicast is addressed by nickname, so a duplicate is unreachable"
+            players,
+            vec![key(0xaa), key(0xbb)],
+            "the match holds both keys, in key order"
         );
     }
 
@@ -917,32 +885,6 @@ mod tests {
             lobby.announcement(),
             None,
             "a lobby with no match has nothing to announce"
-        );
-    }
-
-    /// Regression for a pair that could only be unwedged by restarting
-    /// both sides: presence was insert-only, and a relaunched peer arrives
-    /// under a brand-new public key, so the departed one lingered and the
-    /// next match was proposed with a player who could never answer.
-    /// Both peers must be able to say why, not just whichever one the
-    /// lobby elected to propose.
-    #[test]
-    fn a_duplicate_nickname_is_reported_without_proposing() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
-        assert_eq!(lobby.blocker(), None, "alone is not blocked, just empty");
-
-        lobby.on_message(
-            &key(0xbb),
-            &raw(&LobbyMessage::Present {
-                nick: nick("alice"),
-            }),
-            Tick::new(0),
-        );
-        assert_eq!(
-            lobby.blocker(),
-            Some(LobbyError::DuplicateNickname(nick("alice"))),
-            "a duplicate nickname is reported as the blocker without a proposal"
         );
     }
 
