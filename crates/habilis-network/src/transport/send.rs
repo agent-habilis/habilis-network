@@ -968,7 +968,7 @@ mod tests {
         let linked = state.linked_endpoints.clone();
         state
             .proven_endpoints
-            .insert(signer, endpoint, UnixSecs::from(1), &linked);
+            .insert(signer, endpoint, UnixSecs::from(1), &linked, |_| true);
     }
 
     /// [`prove`] for the key of `identity`.

@@ -2229,6 +2229,95 @@ mod tests {
         );
     }
 
+    /// A process that restarts keeps its endpoint and makes a new key. When its clock is behind the
+    /// old one, the new `PeerInfo` carries an older stamp. The old key is quiet by then, so it
+    /// holds nothing against the new key: the new key takes the endpoint, whatever the stamp.
+    /// Assumption: the peers of a mesh are cooperative, so no guard against a replay of an old
+    /// `PeerInfo` is kept for a holder that is not live.
+    #[test]
+    fn a_restarted_process_with_a_clock_behind_takes_its_endpoint_from_the_quiet_old_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (old, new) = (test_key("bob#old"), test_key("bob#new"));
+        let endpoint = endpoint_id(61);
+        state.peers.insert(old);
+        state.note_proven_endpoint(old, endpoint, UnixSecs::from(1000));
+        assert_eq!(
+            state.proven_endpoints.trusted(&old),
+            Some(endpoint),
+            "the old key is trusted for the endpoint before the restart"
+        );
+
+        state.peers.remove(&old);
+        state.quiet.insert(old);
+        state.peers.insert(new);
+        state.note_proven_endpoint(new, endpoint, UnixSecs::from(400));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&new),
+            Some(endpoint),
+            "the new key of a restarted process stayed untrusted while its clock was behind"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&old),
+            None,
+            "the quiet old key kept the trust in the endpoint"
+        );
+    }
+
+    /// A holder that is live keeps its endpoint against a proof that is not newer than its own.
+    /// This is the rule for a live holder, and it does not change.
+    #[test]
+    fn a_live_key_keeps_its_endpoint_against_an_older_stamp_of_another_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (holder, other) = (test_key("bob#holder"), test_key("bob#other"));
+        let endpoint = endpoint_id(62);
+        state.peers.insert(holder);
+        state.peers.insert(other);
+        state.note_proven_endpoint(holder, endpoint, UnixSecs::from(1000));
+
+        state.note_proven_endpoint(other, endpoint, UnixSecs::from(400));
+        state.note_proven_endpoint(other, endpoint, UnixSecs::from(1000));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&holder),
+            Some(endpoint),
+            "a live holder lost its endpoint to a stamp that is not newer"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&other),
+            None,
+            "a key took the endpoint of a live holder with a stamp that is not newer"
+        );
+    }
+
+    /// After a takeover the stored stamp is the stamp of the new key, not the larger stamp of the
+    /// old holder. Else a second restart with a clock still behind would be refused as the first
+    /// one was.
+    #[test]
+    fn the_stamp_of_a_takeover_replaces_the_stamp_of_the_old_holder() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second, third) = (test_key("bob#1"), test_key("bob#2"), test_key("bob#3"));
+        let endpoint = endpoint_id(63);
+        state.quiet.insert(first);
+        state.peers.insert(second);
+        state.peers.insert(third);
+        state.peers.insert(first);
+        state.note_proven_endpoint(first, endpoint, UnixSecs::from(1000));
+        state.peers.remove(&first);
+
+        state.note_proven_endpoint(second, endpoint, UnixSecs::from(400));
+        state.note_proven_endpoint(third, endpoint, UnixSecs::from(450));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&third),
+            Some(endpoint),
+            "the stamp of the old holder still guarded the endpoint after the takeover"
+        );
+    }
+
     /// A live key that renamed no longer answers to its old nickname. The hint under the old name
     /// is no address of the key: a send to the key follows the hint of its current name, or its
     /// proof. A key with no name on record yet has no address either.

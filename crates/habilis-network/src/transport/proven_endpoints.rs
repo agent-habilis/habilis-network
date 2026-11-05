@@ -52,7 +52,8 @@ pub(crate) fn verifies(
 /// "Latest" holds because an endpoint key is new each run by default: an
 /// endpoint that keeps its key across runs lets an old `PeerInfo` be replayed
 /// to put back the old signer, and that peer is answered on gossip until its
-/// next `PeerInfo`.
+/// next `PeerInfo`. The peers of a mesh are cooperative: a holder that is not live keeps
+/// its endpoint against no replay guard.
 #[derive(Debug, Clone)]
 pub(crate) struct ProvenEndpoints {
     by_signer: HashMap<AuthorKey, EndpointId>,
@@ -122,25 +123,46 @@ impl ProvenEndpoints {
         self.by_signer.get(signer).copied()
     }
 
+    /// The signer that holds `endpoint`: the signer of its pair, else the signer that the roster
+    /// trusts for it.
+    fn holder_of(&self, endpoint: EndpointId) -> Option<AuthorKey> {
+        let paired = self.by_signer.iter().find(|(_, eid)| **eid == endpoint);
+        let trusted = self.trusted.iter().find(|(_, eid)| **eid == endpoint);
+        paired.or(trusted).map(|(signer, _)| *signer)
+    }
+
     /// Record that `signer` proved `endpoint` in a `PeerInfo` stamped `stamp`. Another signer
-    /// takes an endpoint over only with a newer stamp: a restart keeps the key of the endpoint
-    /// and makes a new signing key, and a replay of the old `PeerInfo` must not put it back.
+    /// takes an endpoint over from a holder that is live only with a newer stamp. A restart keeps
+    /// the key of the endpoint and makes a new signing key, and the old key stays live until it is
+    /// silent for the alive timeout. A holder that is not live (`holder_is_live` says no) holds
+    /// the endpoint against nothing: a restart whose clock is behind the old key has an older
+    /// stamp and must take the endpoint all the same. The stored stamp is then the stamp of the
+    /// new signer, so the next restart is judged against it and not against the old holder.
+    ///
+    /// The peers of a mesh are cooperative. A replay of an old `PeerInfo` can take an endpoint
+    /// from a holder that is not live, and no guard stops it.
     pub(crate) fn insert(
         &mut self,
         signer: AuthorKey,
         endpoint: EndpointId,
         stamp: UnixSecs,
         linked: &HashSet<EndpointId>,
+        holder_is_live: impl Fn(&AuthorKey) -> bool,
     ) {
         let held = self.stamps.get(&endpoint).copied();
-        if self.by_signer.get(&signer) != Some(&endpoint) && held.is_some_and(|held| stamp <= held)
-        {
+        let other_holder = self.holder_of(endpoint).filter(|holder| *holder != signer);
+        let outranked = held.is_some_and(|held| stamp <= held);
+        if outranked && other_holder.is_some_and(|holder| holder_is_live(&holder)) {
             return;
         }
         self.place(signer, endpoint, linked);
         if self.by_signer.get(&signer) == Some(&endpoint) {
-            self.stamps
-                .insert(endpoint, stamp.max(held.unwrap_or(stamp)));
+            let kept = if other_holder.is_some() {
+                stamp
+            } else {
+                stamp.max(held.unwrap_or(stamp))
+            };
+            self.stamps.insert(endpoint, kept);
         }
         // A trusted endpoint keeps its stamp when the cap takes its pair out: the stamp is what
         // refuses an older `PeerInfo` that would move the trust to another signer.
@@ -205,6 +227,11 @@ mod tests {
         AuthorKey::from([byte; 32])
     }
 
+    /// Every holder is live: the rule for a live holder, which these tests pin.
+    fn every_key(_holder: &AuthorKey) -> bool {
+        true
+    }
+
     #[test]
     fn a_proof_holds_only_for_its_signer_and_mesh() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -237,13 +264,14 @@ mod tests {
         let mut proven = ProvenEndpoints::new(cap);
         let linked_one = SecretKey::generate().public();
         let linked: HashSet<_> = [linked_one].into_iter().collect();
-        proven.insert(key(0), linked_one, UnixSecs::from(1), &linked);
+        proven.insert(key(0), linked_one, UnixSecs::from(1), &linked, every_key);
         for byte in 1..=u8::try_from(cap * 2).expect("small") {
             proven.insert(
                 key(byte),
                 SecretKey::generate().public(),
                 UnixSecs::from(1),
                 &linked,
+                every_key,
             );
         }
         assert_eq!(
@@ -272,6 +300,11 @@ mod one_signer_tests {
     use super::ProvenEndpoints;
     use crate::protocol::{AuthorKey, UnixSecs};
 
+    /// Every holder is live: the rule for a live holder, which these tests pin.
+    fn every_key(_holder: &AuthorKey) -> bool {
+        true
+    }
+
     /// Many signers can prove one endpoint, since whoever holds that endpoint's
     /// key makes as many signing keys as it likes. Kept as separate pairs, a
     /// linked peer would fill the map with pairs the cap may not evict, and no
@@ -284,10 +317,22 @@ mod one_signer_tests {
         let linked: HashSet<_> = [attacker].into_iter().collect();
         for byte in 1..=5u8 {
             let stamp = UnixSecs::from(i64::from(byte));
-            proven.insert(AuthorKey::from([byte; 32]), attacker, stamp, &linked);
+            proven.insert(
+                AuthorKey::from([byte; 32]),
+                attacker,
+                stamp,
+                &linked,
+                every_key,
+            );
         }
         let honest = SecretKey::generate().public();
-        proven.insert(AuthorKey::from([9; 32]), honest, UnixSecs::from(1), &linked);
+        proven.insert(
+            AuthorKey::from([9; 32]),
+            honest,
+            UnixSecs::from(1),
+            &linked,
+            every_key,
+        );
 
         assert_eq!(
             proven.get(&AuthorKey::from([9; 32])),
@@ -306,6 +351,7 @@ mod one_signer_tests {
             attacker,
             UnixSecs::from(5),
             &linked,
+            every_key,
         );
         assert_eq!(
             proven.get(&AuthorKey::from([5; 32])),
@@ -396,11 +442,17 @@ mod one_signer_tests {
         let current = AuthorKey::from([1; 32]);
         let held = SecretKey::generate().public();
         let none = HashSet::new();
-        proven.insert(current, held, UnixSecs::from(10), &none);
+        proven.insert(current, held, UnixSecs::from(10), &none, every_key);
         proven.trust(current, held);
 
         let other = SecretKey::generate().public();
-        proven.insert(AuthorKey::from([2; 32]), other, UnixSecs::from(1), &none);
+        proven.insert(
+            AuthorKey::from([2; 32]),
+            other,
+            UnixSecs::from(1),
+            &none,
+            every_key,
+        );
         assert_eq!(
             proven.get(&current),
             None,
@@ -408,7 +460,7 @@ mod one_signer_tests {
         );
 
         let replayed = AuthorKey::from([3; 32]);
-        proven.insert(replayed, held, UnixSecs::from(5), &none);
+        proven.insert(replayed, held, UnixSecs::from(5), &none, every_key);
         assert_eq!(
             proven.get(&replayed),
             None,

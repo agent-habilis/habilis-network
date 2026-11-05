@@ -2241,8 +2241,11 @@ impl EventLoopState {
         stamp: UnixSecs,
     ) {
         let linked = self.linked_endpoints.clone();
+        let roster = &self.peers;
         self.proven_endpoints
-            .insert(signer, endpoint, stamp, &linked);
+            .insert(signer, endpoint, stamp, &linked, |holder| {
+                roster.contains(holder)
+            });
         // The table can refuse a replay of an older stamp, so the trust follows what it holds.
         self.promote_stored_proof(signer);
     }

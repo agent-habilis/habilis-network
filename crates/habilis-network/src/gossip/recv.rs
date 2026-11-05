@@ -2722,12 +2722,14 @@ mod first_contact_tests {
                 first_endpoint,
                 UnixSecs::from(1),
                 &HashSet::new(),
+                |_| true,
             );
             state.proven_endpoints.insert(
                 second.author_key(),
                 second_endpoint,
                 UnixSecs::from(1),
                 &HashSet::new(),
+                |_| true,
             );
 
             let request = Message::new_ping(&node.mesh, &twin).sign(&second);

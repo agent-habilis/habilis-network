@@ -1417,9 +1417,13 @@ mod tests {
         state.bind_peer_endpoint(ghost, nick("ghost-oak"), iroh::EndpointAddr::new(endpoint));
         state.linked_endpoints.insert(endpoint);
         let linked = state.linked_endpoints.clone();
-        state
-            .proven_endpoints
-            .insert(ghost, endpoint, protocol::UnixSecs::from(1), &linked);
+        state.proven_endpoints.insert(
+            ghost,
+            endpoint,
+            protocol::UnixSecs::from(1),
+            &linked,
+            |_| true,
+        );
         state.direct.insert(endpoint, DirectState::Direct);
 
         tick_sweep(&mut state, &SilentSink);

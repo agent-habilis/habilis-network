@@ -550,7 +550,7 @@ mod tests {
         let endpoint = SecretKey::generate().public();
         state
             .proven_endpoints
-            .insert(key, endpoint, UnixSecs::now(), &HashSet::new());
+            .insert(key, endpoint, UnixSecs::now(), &HashSet::new(), |_| true);
         assert_eq!(
             state.proven_endpoints.trusted(&key),
             None,
