@@ -4,7 +4,7 @@
 //! event loop, builds the chain from the plan on a blocking thread so that the loop keeps ticking
 //! (a seed of 20 000 paths takes seconds), and gets the chain back through the handle of the job.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::future::pending;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::task::spawn_blocking;
 use tokio::task::{JoinError, JoinHandle};
 
-use crate::doc::{DocError, MeshDoc, SeedChain, SeedPlan, Stamp, wire};
+use crate::doc::{DocError, MeshDoc, SeedChain, SeedPlan, Stamp, StampedPaths, wire};
 use crate::protocol::identity::Identity;
 use crate::protocol::messages::{Verified, WireFrame};
 use crate::protocol::{Channel, MeshId, Message, Nickname, SymmetricKey};
@@ -181,18 +181,21 @@ pub(crate) fn signed_frames(
     Ok(frames)
 }
 
-/// Send the frames of a seed, root first: each one is taken as a candidate by this node (it adopts
-/// its own seed after the wait, like every node) and then goes to the overlay, or waits in the
-/// buffer of a node that does not reach it yet. A send that fails stops the chain and holds the
-/// next cut back. Returns how many frames went out.
+/// Send frames in order: with `take_first` (a seed) each one is taken by this node as a candidate
+/// first (it adopts its own seed after the wait, like every node), and then it goes to the overlay,
+/// or waits in the buffer of a node that does not reach it yet. A send that fails stops the chain
+/// and holds the next cut back. Returns how many frames went out.
 pub(crate) async fn send_frames(
     state: &mut EventLoopState,
     sender: &MeshSender,
     frames: Vec<(Verified, WireFrame)>,
+    take_first: bool,
 ) -> usize {
     let mut sent = 0;
     for (signed, bytes) in frames {
-        let _ = state.doc_mut(Channel::State).ingest(&signed);
+        if take_first {
+            let _ = state.doc_mut(Channel::State).ingest(&signed);
+        }
         if state.overlay_reachable() {
             if let Err(error) = sender.broadcast(bytes).await {
                 cut_failed(state, &error);
@@ -235,7 +238,7 @@ pub(crate) async fn cut_now(
         took: started.elapsed(),
     };
     let frames = finish(state, Ok(outcome), me, mesh);
-    Ok(send_frames(state, sender, frames).await)
+    Ok(send_frames(state, sender, frames, true).await)
 }
 
 /// One tick of the state channel, on the minute timer: the document counts its epoch and the size
@@ -248,9 +251,21 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     }
     let doc = state.doc_mut(Channel::State);
     let epoch = doc.epoch();
-    let _ = doc.tick_epoch(me);
+    let switch = doc.tick_epoch(me);
     for key in doc.take_dropped() {
         state.seen.remove(&key);
+    }
+    // The writes that a seed lacks, and the restores that are due, wait for the loop to send them.
+    let restores = state.doc_mut(Channel::State).take_restores();
+    let replay = switch.and_then(|switch| {
+        let stamps = switch.replay_stamps;
+        switch.replay.map(|patch| (patch, stamps))
+    });
+    if let Some(item) = replay {
+        queue_replay(state, item);
+    }
+    if let Some(item) = restores {
+        queue_replay(state, item);
     }
     if state.seed_job.is_some() {
         return;
@@ -312,6 +327,123 @@ pub(crate) fn sync_deadline(state: &mut EventLoopState) {
     state.doc_mut(Channel::State).finish_sync();
     let limit_secs = DOC_STATE_SYNC_WAIT.as_secs();
     tracing::warn!(target: "habilis_network::gossip", limit_secs, "no peer answered the digest of the state channel within the time limit, so the node writes with the clock that it has; a write that it made before a restart can win against its new ones");
+}
+
+/// Put a replay or a restore in the queue that the loop drains after the tick. The queue is bounded:
+/// when it is full the new item is refused, and the node warns (the document keeps the value as a
+/// restore of a later tick only for a restore, so a replay that is refused is a write that the
+/// seed lacks and that no node sends: the warning is the signal).
+fn queue_replay(state: &mut EventLoopState, item: (serde_json::Value, StampedPaths)) {
+    if !state.replay_queue.push(item) {
+        tracing::warn!(target: "habilis_network::gossip", "the replay of the state channel was dropped: its queue is full");
+    }
+}
+
+/// The paths that a merge writes: its leaves and the objects that it makes.
+fn merge_paths(merge: &serde_json::Value, prefix: &mut Vec<String>, paths: &mut Vec<Vec<String>>) {
+    if let serde_json::Value::Object(fields) = merge
+        && !fields.is_empty()
+    {
+        if !prefix.is_empty() {
+            paths.push(prefix.clone());
+        }
+        for (key, inner) in fields {
+            prefix.push(key.clone());
+            merge_paths(inner, prefix, paths);
+            prefix.pop();
+        }
+    } else if !prefix.is_empty() {
+        paths.push(prefix.clone());
+    }
+}
+
+/// Whether the frame of a replay `merge` fits a message: the stamp of each path is the one that
+/// the replay names for it (the largest stamp for a path that it names none for).
+fn replay_frame_fits(
+    job: &SeedJob,
+    merge: &serde_json::Value,
+    known: &HashMap<&Vec<String>, &Stamp>,
+) -> bool {
+    let mut paths: Vec<Vec<String>> = Vec::new();
+    merge_paths(merge, &mut Vec::new(), &mut paths);
+    let mut stamps: Vec<Stamp> = Vec::with_capacity(paths.len());
+    let worst = Stamp::new(LARGEST_TIME, "ffffffffffffffff".to_owned());
+    for path in &paths {
+        let named: Option<&&Stamp> = known.get(path);
+        stamps.push(named.map_or_else(|| worst.clone(), |stamp| (*stamp).clone()));
+    }
+    frame_fits_with(job, merge, &stamps)
+}
+
+/// The signed frames that write `patch` again, with the stamps of the old epoch: the replay of the
+/// writes that a seed lacks after a switch, or a restore. The patch is split into merges that each
+/// fit a frame (all or none: a leaf that does not fit sends nothing and warns), and each merge is
+/// built on the document as the last one left it and taken by it at once, so the frames follow
+/// one another. A write that puts a value back is not refused at the lines of the state, only over
+/// the memory line (`MeshDoc::build_restore`).
+pub(crate) fn replay_frames(
+    state: &mut EventLoopState,
+    patch: &serde_json::Value,
+    stamps: &StampedPaths,
+    me: &Nickname,
+    mesh: &MeshId,
+) -> Vec<(Verified, WireFrame)> {
+    let job = job_for(state, me, mesh, state.doc(Channel::State).epoch());
+    let mut known: HashMap<&Vec<String>, &Stamp> = HashMap::with_capacity(stamps.len());
+    for (path, stamp) in stamps {
+        known.insert(path, stamp);
+    }
+    let split = state
+        .doc(Channel::State)
+        .split_replay(patch, |merge| replay_frame_fits(&job, merge, &known));
+    let merges = match split {
+        Ok(merges) => merges,
+        Err(error) => {
+            tracing::warn!(target: "habilis_network::gossip", %error, "a value of the replay of the state channel is too large for a frame, so the replay is not sent");
+            return Vec::new();
+        }
+    };
+    let mut frames: Vec<(Verified, WireFrame)> = Vec::new();
+    for merge in merges {
+        let doc = state.doc(Channel::State);
+        let change = match doc.build_restore(&merge, &job.actor) {
+            Ok(Some(change)) => change,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: the document refused a frame of it");
+                break;
+            }
+        };
+        let body = match doc.compose_replay_body(&change, stamps) {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: a frame of it does not compose");
+                break;
+            }
+        };
+        let signed =
+            Message::new_channel_event(mesh, me, body, Channel::State).sign(&state.identity);
+        let Ok(bytes) = signed.serialize() else {
+            break;
+        };
+        let _ = state.doc_mut(Channel::State).ingest(&signed);
+        frames.push((signed, bytes));
+    }
+    frames
+}
+
+/// Build and send what waits in the queue of the replays and the restores of the state channel.
+pub(crate) async fn send_replays(
+    state: &mut EventLoopState,
+    sender: &MeshSender,
+    me: &Nickname,
+    mesh: &MeshId,
+) {
+    let waiting = state.replay_queue.take();
+    for (patch, stamps) in waiting {
+        let frames = replay_frames(state, &patch, &stamps, me, mesh);
+        send_frames(state, sender, frames, false).await;
+    }
 }
 
 /// A cut that failed: the document holds the next one back, and the node warns once.
@@ -382,13 +514,14 @@ mod tests {
 
     use super::{
         ClockInstant, LARGEST_TIME, SeedJob, SeedOutcome, finish, frame_fits_with, peer_heads_seen,
-        rank_of, spawn_build, sync_deadline, tick,
+        queue_replay, rank_of, replay_frames, spawn_build, sync_deadline, tick,
     };
     use tokio::time::interval;
 
     use crate::daemon::state::EventLoopState;
     use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp};
     use crate::protocol::identity::Identity;
+    use crate::protocol::messages::Verified;
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing;
     use crate::util::bounded_fifo_set::BoundedFifoSet;
@@ -446,9 +579,34 @@ mod tests {
         );
     }
 
-    /// Write `count` leaves into `doc`, as `who`, one frame of 100.
-    fn write_leaves(doc: &mut MeshDoc, identity: &Identity, who: &Nickname, count: usize) {
+    /// Write `merge` into `doc`, as `who`, and give the signed frame.
+    fn write_merge(
+        doc: &mut MeshDoc,
+        identity: &Identity,
+        who: &Nickname,
+        merge: &Value,
+    ) -> Verified {
         let mesh = MeshId::from("test");
+        let built = doc.build_change(merge, identity.public().as_bytes());
+        let change = built.expect("the merge applies").expect("a change");
+        let (body, _plain) = doc.compose_wire_body(&change, None).expect("a body");
+        let signed = Message::new_channel_event(&mesh, who, body, Channel::State).sign(identity);
+        let outcome = doc.ingest(&signed);
+        assert!(
+            matches!(outcome, Ingested::Applied { .. }),
+            "the frame applies"
+        );
+        signed
+    }
+
+    /// Write `count` leaves into `doc`, as `who`, one frame of 100, and give the frames.
+    fn write_leaves(
+        doc: &mut MeshDoc,
+        identity: &Identity,
+        who: &Nickname,
+        count: usize,
+    ) -> Vec<Verified> {
+        let mut frames: Vec<Verified> = Vec::new();
         let mut done = 0;
         while done < count {
             let take = 100.min(count - done);
@@ -457,18 +615,10 @@ mod tests {
                 leaves.insert(format!("l{:05}", done + leaf), json!(leaf % 10));
             }
             let merge = json!({ "live": Value::Object(leaves) });
-            let built = doc.build_change(&merge, identity.public().as_bytes());
-            let change = built.expect("the merge applies").expect("a change");
-            let (body, _plain) = doc.compose_wire_body(&change, None).expect("a body");
-            let signed =
-                Message::new_channel_event(&mesh, who, body, Channel::State).sign(identity);
-            let outcome = doc.ingest(&signed);
-            assert!(
-                matches!(outcome, Ingested::Applied { .. }),
-                "the frame applies"
-            );
+            frames.push(write_merge(doc, identity, who, &merge));
             done += take;
         }
+        frames
     }
 
     // The test keeps the key that the job signs with.
@@ -758,6 +908,181 @@ mod tests {
             "the real stamps give {} frames, the worst stamp gives {}",
             real.changes.len(),
             worst.changes.len()
+        );
+    }
+
+    /// The frames of the seed that the document `peer` cuts in the epoch 4, signed by a cutter.
+    async fn seed_frames_of(peer: &MeshDoc) -> Vec<Verified> {
+        // Shared with the job that builds on another thread.
+        let cutter = Arc::new(Identity::generate());
+        let plan = peer.seed_plan().expect("a plan");
+        let outcome = spawn_build(plan, job_of(&cutter, 4))
+            .await
+            .expect("the build ends");
+        let chain = outcome.chain.expect("the seed is built");
+        let frames = super::signed_frames(&chain, &job_of(&cutter, 4)).expect("the frames sign");
+        let mut verified: Vec<Verified> = Vec::new();
+        for (frame, _bytes) in frames {
+            verified.push(frame);
+        }
+        verified
+    }
+
+    /// Tick the state channel of `state` 5 times, the wait of an adopter.
+    fn tick_to_adoption(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
+        for _ in 0..5 {
+            tick(state, me, mesh);
+        }
+    }
+
+    /// A node that wrote a value after the seed was cut writes it again after the switch, and a
+    /// third node that took the seed and then the frames of the replay holds the same document.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_write_that_the_seed_lacks_is_sent_again_after_the_switch_and_another_node_takes_it()
+    {
+        let me = testing::nick("me");
+        let mesh = MeshId::from("test");
+        let mut state = testing::fresh_state();
+        let identity = Arc::clone(&state.identity);
+        let mut doc = MeshDoc::new_state(None);
+        doc.finish_sync();
+        let base = write_leaves(&mut doc, &identity, &me, 300);
+        let mut peer = MeshDoc::new_state(None);
+        peer.finish_sync();
+        for frame in &base {
+            peer.ingest(frame);
+        }
+        write_merge(&mut doc, &identity, &me, &json!({ "x": 7 }));
+        state.state_doc = doc;
+        let seed = seed_frames_of(&peer).await;
+        for frame in &seed {
+            state.doc_mut(Channel::State).ingest(frame);
+        }
+        tick_to_adoption(&mut state, &me, &mesh);
+        assert_eq!(
+            state.doc(Channel::State).epoch(),
+            4,
+            "the node adopted the seed"
+        );
+        let waiting = state.replay_queue.take();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "the write that the seed lacks waits to be sent"
+        );
+        let (patch, stamps) = waiting.into_iter().next().expect("the replay");
+        let frames = replay_frames(&mut state, &patch, &stamps, &me, &mesh);
+        assert!(!frames.is_empty(), "the replay has a frame");
+        let mut third = MeshDoc::new_state(None);
+        third.finish_sync();
+        for frame in &seed {
+            third.ingest(frame);
+        }
+        let waiter = testing::nick("third");
+        for _ in 0..5 {
+            third.tick_epoch(&waiter);
+        }
+        for (frame, _bytes) in &frames {
+            third.ingest(frame);
+        }
+        assert_eq!(
+            third.to_json().get("x"),
+            Some(&json!(7)),
+            "the third node holds the write"
+        );
+        assert_eq!(
+            third.to_json(),
+            state.doc(Channel::State).to_json(),
+            "the third node and the writer hold the same document"
+        );
+    }
+
+    /// A node that holds the write of another node that the seed lacks writes it again as a
+    /// restore, a few ticks after the author had its turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_holder_writes_again_what_the_seed_lacks_when_the_author_does_not() {
+        let me = testing::nick("me");
+        let mesh = MeshId::from("test");
+        let mut state = testing::fresh_state();
+        let own = Arc::clone(&state.identity);
+        // Shared with the author that writes the value.
+        let author_key = Arc::new(Identity::generate());
+        let mut doc = MeshDoc::new_state(None);
+        doc.finish_sync();
+        let base = write_leaves(&mut doc, &own, &me, 300);
+        let mut peer = MeshDoc::new_state(None);
+        peer.finish_sync();
+        for frame in &base {
+            peer.ingest(frame);
+        }
+        let author = testing::nick("author");
+        let from_author = frame_after(&doc, &author_key, &author, &json!({ "x": 7 }));
+        doc.ingest(&from_author);
+        state.state_doc = doc;
+        let seed = seed_frames_of(&peer).await;
+        for frame in &seed {
+            state.doc_mut(Channel::State).ingest(frame);
+        }
+        tick_to_adoption(&mut state, &me, &mesh);
+        let mut restored = None;
+        for _ in 0..3 {
+            tick(&mut state, &me, &mesh);
+            restored = state.replay_queue.take().into_iter().next();
+            if restored.is_some() {
+                break;
+            }
+        }
+        let (patch, stamps) = restored.expect("the holder restores the write within 3 ticks");
+        let frames = replay_frames(&mut state, &patch, &stamps, &me, &mesh);
+        let mut third = MeshDoc::new_state(None);
+        third.finish_sync();
+        for frame in &seed {
+            third.ingest(frame);
+        }
+        for _ in 0..5 {
+            third.tick_epoch(&testing::nick("third"));
+        }
+        for (frame, _bytes) in &frames {
+            third.ingest(frame);
+        }
+        assert_eq!(
+            third.to_json().get("x"),
+            Some(&json!(7)),
+            "the third node holds the value"
+        );
+    }
+
+    /// The frame of `who` that writes `merge` on top of `doc`, with `identity`, not applied.
+    fn frame_after(doc: &MeshDoc, identity: &Identity, who: &Nickname, merge: &Value) -> Verified {
+        let mesh = MeshId::from("test");
+        let built = doc.build_change(merge, identity.public().as_bytes());
+        let change = built.expect("the merge applies").expect("a change");
+        let (body, _plain) = doc.compose_wire_body(&change, None).expect("a body");
+        Message::new_channel_event(&mesh, who, body, Channel::State).sign(identity)
+    }
+
+    #[test]
+    fn the_queue_of_replays_holds_at_most_its_cap_when_it_is_fed_10_times_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "the replay of the state channel was dropped: its queue is full",
+        );
+        let mut state = testing::fresh_state();
+        let cap = state.replay_queue.remaining();
+        for index in 0..(10 * cap) {
+            queue_replay(&mut state, (json!({ "k": index }), Vec::new()));
+            assert!(
+                state.replay_queue.len() <= cap,
+                "{} items after {} pushes, the cap is {cap}",
+                state.replay_queue.len(),
+                index + 1
+            );
+        }
+        assert_eq!(
+            state.replay_queue.len(),
+            cap,
+            "the queue is full and refuses the rest"
         );
     }
 }

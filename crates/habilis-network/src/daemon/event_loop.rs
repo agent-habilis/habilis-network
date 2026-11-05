@@ -1162,7 +1162,14 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     async fn seed_built(&mut self, outcome: Result<seed_job::SeedOutcome, JoinError>) {
         let context = self.parts.handler_ctx(&self.sender);
         let frames = seed_job::finish(&mut self.state, outcome, context.author, context.mesh);
-        seed_job::send_frames(&mut self.state, &self.sender, frames).await;
+        seed_job::send_frames(&mut self.state, &self.sender, frames, true).await;
+    }
+
+    /// Send the replay of the writes that a seed lacks, and the restores that are due, which the
+    /// tick of the state channel queued.
+    async fn send_replays(&mut self) {
+        let context = self.parts.handler_ctx(&self.sender);
+        seed_job::send_replays(&mut self.state, &self.sender, context.author, context.mesh).await;
     }
 
     async fn alive(&mut self) {
@@ -1712,7 +1719,10 @@ async fn run_loop<Driver: NodeDriver>(
                 Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },
             },
-            _ = lp.intervals.prune.tick() => { lp.prune(); },
+            _ = lp.intervals.prune.tick() => {
+                lp.prune();
+                lp.send_replays().await;
+            },
             outcome = seed_job::seed_job_done(&mut lp.state.seed_job) => { lp.seed_built(outcome).await; },
             _ = lp.intervals.alive.tick() => { lp.alive().await; },
             _ = lp.intervals.sweep.tick() => { lp.sweep().await; },
