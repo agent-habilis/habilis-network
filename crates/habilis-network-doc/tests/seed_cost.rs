@@ -252,10 +252,12 @@ fn seed_frames(chain: &SeedChain, epoch: u64, who: &Nickname) -> SeedFrames {
         let bare =
             wire::change_body_tombstoned(bytes, None, epoch, mark, Some(chain.time), &[], &[])
                 .expect("a body");
-        weighed.total += body.as_str().len();
-        weighed.plain += bare.as_str().len();
-        weighed.longest = weighed.longest.max(body.as_str().len());
-        let stamp_bytes = body.as_str().len().saturating_sub(bare.as_str().len());
+        let with_stamps = body.as_str().len();
+        let without = bare.as_str().len();
+        weighed.total += with_stamps;
+        weighed.plain += without;
+        weighed.longest = weighed.longest.max(with_stamps);
+        let stamp_bytes = with_stamps.saturating_sub(without);
         let per_path: usize = stamp_bytes / origins.len().max(1);
         weighed.worst_stamp = weighed.worst_stamp.max(per_path);
         weighed.frames.push(signed(who, body));
