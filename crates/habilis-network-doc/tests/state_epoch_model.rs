@@ -127,6 +127,7 @@ impl Sim {
 
     /// Node `index` writes `merge`, and sends the frame. `false` when the merge changes nothing.
     fn commit(&mut self, index: usize, merge: &Value) -> bool {
+        use std::fmt::Write as _;
         let node = &mut self.nodes[index];
         let actor = pad(node.name.as_str());
         let built = node
@@ -138,7 +139,6 @@ impl Sim {
         };
         let (wire, _plain) = node.doc.compose_wire_body(&change, None).expect("compose");
         let time = wire::parse_change_full(wire.as_str()).and_then(|parsed| parsed.time);
-        use std::fmt::Write as _;
         let mut tag = String::new();
         let first_bytes = actor.iter().take(8);
         for byte in first_bytes {
