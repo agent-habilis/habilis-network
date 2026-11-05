@@ -158,7 +158,8 @@ fn a_joined_frame_carries_the_proof_in_its_body() {
     let member = identity::Identity::generate();
     let session = identity::Identity::generate();
     let author = nick("word-word");
-    let proof = member.prove(&session.author_key(), author.as_ref(), sid().as_ref(), 3);
+    let proof: identity::IdentityProof =
+        member.prove(&session.author_key(), author.as_ref(), sid().as_ref(), 3);
     let message = Message::new_joined_with_proof(&sid(), &author, &proof);
     let bytes = message
         .serialize()

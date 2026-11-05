@@ -149,15 +149,22 @@ impl Message {
         author: &Nickname,
         proof: &identity::IdentityProof,
     ) -> Self {
-        let _ = proof;
-        Self::new_joined(mesh, author)
+        let body = MessageBody::try_new(&proof.encode())
+            .expect("a proof text is hex digits and separators, so it is a valid body");
+        Self::new(
+            mesh,
+            author,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Joined,
+            },
+            body,
+        )
     }
 
     /// The identity proof in the body of a `joined` frame. An empty, cut or bad body gives `None`.
     #[must_use]
     pub fn joined_proof(&self) -> Option<identity::IdentityProof> {
-        let _ = self;
-        None
+        identity::IdentityProof::decode(self.body.as_str())
     }
 
     /// A presence message for `author` leaving `mesh`. It has no body.
