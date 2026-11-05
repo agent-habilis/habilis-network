@@ -448,8 +448,9 @@ The endpoint of that key is the first source that has one:
 
 A quiet key keeps its endpoint, because a quiet peer can return.
 An endpoint that another key has proved is not an address of the old key.
-A receiver reads a directed frame only if `to` is its own key.
-Another key that uses the same nickname does not read it.
+The engine can pass a directed frame of another key to `NodeApp::on_app_frame`.
+An app must act on it only if `to` is its own key (`HandlerCtx::our_pubkey`).
+Another key that uses the same nickname must not act on it.
 A relay that the app allows keeps a directed frame of another key in its message log for anti-entropy.
 The log cap bounds these frames like any other frame.
 An anti-entropy answer gives such a frame only to its addressee.

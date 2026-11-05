@@ -962,7 +962,7 @@ async fn handle_shard(
     // A directed shard (task leg / RPC) not addressed to us is relayed at the
     // gossip layer but never retained or reassembled here — a third party must
     // not persist or reconstruct a task exchange it is not part of. The
-    // single-frame path drops non-addressee directed frames the same way.
+    // single-frame path hands such a frame to the app, which decides.
     if !addressed_to_us(message, &context.our_pubkey) {
         return;
     }
