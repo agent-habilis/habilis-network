@@ -6,11 +6,23 @@
     )
 )]
 
+use std::time::Duration;
+
 use super::proof_book::ProofBook;
 use crate::protocol::identity::{IdentityProof, verify_proof};
 use crate::protocol::{AuthorKey, MeshId, Nickname};
 use crate::util::clock::Instant;
-use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
+
+/// The first retry waits 30 s, and each next one waits twice as long: 30 s, 60 s, 120 s.
+const FIRST_RETRY_WAIT: Duration = Duration::from_secs(30);
+const RETRIES: u8 = 3;
+
+/// How many times a session was asked, and when the next request may go.
+#[derive(Debug, Clone, Copy)]
+struct Retry {
+    tries: u8,
+    next_at: Instant,
+}
 
 /// The proofs this node holds, and the sessions it already asked for one. A proof comes in the
 /// `joined` frame of a session. A receiver that missed that frame asks the session once, by a
@@ -20,8 +32,8 @@ use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
 #[derive(Debug)]
 pub(crate) struct ProofExchange {
     book: ProofBook<AuthorKey, (Nickname, IdentityProof)>,
-    // one request per session: a bound like the book, so a flood of new sessions cannot grow it
-    asked: BoundedFifoSet<AuthorKey>,
+    // the requests per session, as many as the book holds at most: when full, the oldest goes
+    asked: ProofBook<AuthorKey, Retry>,
     ties_refused: u64,
 }
 
@@ -29,14 +41,29 @@ impl ProofExchange {
     pub(crate) fn with_cap(cap: usize) -> Self {
         Self {
             book: ProofBook::with_cap(cap),
-            asked: BoundedFifoSet::new(cap),
+            asked: ProofBook::with_cap(cap),
             ties_refused: 0,
         }
     }
 
     /// An alive frame came from `session`. True means: send the session one proof request now.
-    pub(crate) fn wants_proof(&mut self, session: &AuthorKey, _now: Instant) -> bool {
-        self.book.get(session).is_none() && self.asked.insert(*session)
+    /// A request that got no answer is sent again, 3 times at most, with a doubling back-off.
+    pub(crate) fn wants_proof(&mut self, session: &AuthorKey, now: Instant) -> bool {
+        if self.book.get(session).is_some() {
+            return false;
+        }
+        let tries = match self.asked.get(session) {
+            None => 0,
+            Some(retry) if retry.tries <= RETRIES && now >= retry.next_at => retry.tries,
+            Some(_) => return false,
+        };
+        let wait = FIRST_RETRY_WAIT * 2u32.pow(u32::from(tries));
+        let retry = Retry {
+            tries: tries + 1,
+            next_at: now + wait,
+        };
+        self.asked.insert_evicting(*session, retry, |_, _| false);
+        true
     }
 
     /// A proof came for `session`. It is held if it verifies for this nickname and mesh, and if it
