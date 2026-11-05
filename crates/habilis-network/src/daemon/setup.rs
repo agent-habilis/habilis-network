@@ -1106,6 +1106,19 @@ async fn setup_join(
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    /// A restarted member keeps its identity: the same state file gives the same key, and a
+    /// missing file gives a new one.
+    #[test]
+    fn a_restart_keeps_its_identity() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let state = dir.path().join("session.json");
+        let first = super::load_or_create_identity(Some(&state)).expect("first start");
+        let second = super::load_or_create_identity(Some(&state)).expect("restart");
+        assert_eq!(first.author_key(), second.author_key(), "the restart keeps the key");
+        let fresh = super::load_or_create_identity(None).expect("no state file");
+        assert_ne!(fresh.author_key(), first.author_key(), "no file means a new key");
+    }
+
     use crate::daemon::node::SignalHandling;
     use crate::transport::PayloadPath;
     use crate::{embed, lookup, membership, transport};
