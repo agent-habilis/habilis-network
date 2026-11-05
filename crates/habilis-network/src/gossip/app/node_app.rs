@@ -1,8 +1,8 @@
 use super::{AppClass, InboundApp};
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
-use crate::protocol::Nickname;
 use crate::protocol::messages::Authored;
+use crate::protocol::{AuthorKey, Nickname};
 
 /// The seam the engine drives for application-payload handling. The engine
 /// owns [`EventLoopState`] and hands the app the frame plus the loop context
@@ -50,13 +50,15 @@ pub trait NodeApp: Send {
     }
 
     /// Post-apply hook for a meta-channel event: adopt the author's published
-    /// endpoint hint into the dial book, if any.
+    /// endpoint hint into the dial book, if any. `author` is the key that signed the
+    /// event, and the slot of that key is the one that changed: a nickname is a label that
+    /// two keys can share, so it does not name a slot.
     ///
     /// Defaults to a no-op — an app that publishes no per-peer endpoint hint
     /// into the meta channel has nothing to adopt.
     fn on_meta_applied(
         &mut self,
-        author: &Nickname,
+        author: &AuthorKey,
         state: &mut EventLoopState,
         context: &HandlerCtx<'_>,
     ) {
