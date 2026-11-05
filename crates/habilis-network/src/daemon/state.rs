@@ -2142,10 +2142,10 @@ mod tests {
     }
 
     /// A live key that renamed no longer answers to its old nickname. The hint under the old name
-    /// would send a directed frame to the node of the renamed key, so it is stale. The hint under
-    /// the current name, and a hint whose owner has no name on record yet, are not.
+    /// is no address of the key: a send to the key follows the hint of its current name, or its
+    /// proof. A key with no name on record yet has no address either.
     #[test]
-    fn a_hint_under_the_old_nickname_of_a_live_key_that_renamed_is_stale() {
+    fn a_hint_under_the_old_nickname_of_a_live_key_that_renamed_is_no_address_of_the_key() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let key = test_key("swift-cedar");
@@ -2156,19 +2156,20 @@ mod tests {
             iroh::EndpointAddr::new(endpoint_id(35)),
         );
         assert!(
-            !state.hint_is_stale(&nick("swift-cedar")),
+            state.address_of(&key).is_none(),
             "the owner has no name on record yet"
         );
 
         state.names.insert(key, nick("swift-cedar"));
-        assert!(
-            !state.hint_is_stale(&nick("swift-cedar")),
+        assert_eq!(
+            state.address_of(&key).map(|address| address.id),
+            Some(endpoint_id(35)),
             "the owner still uses the nickname"
         );
 
         state.names.insert(key, nick("calm-otter"));
         assert!(
-            state.hint_is_stale(&nick("swift-cedar")),
+            state.address_of(&key).is_none(),
             "the owner renamed, and the old nickname still has a hint"
         );
     }

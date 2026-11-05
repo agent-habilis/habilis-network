@@ -14,7 +14,9 @@ use crate::embed::{
 };
 use crate::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
 use crate::protocol::messages::Authored;
-use crate::protocol::{AppFrameParams, AppTag, Channel, MessageBody, MessageKind, Nickname};
+use crate::protocol::{
+    AppFrameParams, AppTag, AuthorKey, Channel, MessageBody, MessageKind, Nickname,
+};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -70,7 +72,7 @@ pub const DEPARTURE_GRACE: Duration = Duration::from_millis(750);
 
 /// What a signed `App` frame costs beyond its body: ids, the pubkey, the
 /// signature, the mesh id and the JSON keys. Checked by
-/// `the_envelope_fits_its_reserve` against a 32-scalar author and addressee
+/// `the_envelope_fits_its_reserve` against a 32-scalar author, an addressee key
 /// and a mesh id carrying a custom relay ladder.
 const ENVELOPE_RESERVE: usize = 1024;
 
@@ -150,6 +152,22 @@ pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, transport::SendErr
 }
 
 /// `text` as `serde_json` writes it inside quotes.
+/// The key a directed send by nickname goes to: the one live key that uses `to`. A frame names its
+/// recipient by key, so a nickname that no live key uses, or that two or more use, is refused here
+/// with the text of the cause. No `to` is a broadcast.
+fn recipient_key(
+    state: &EventLoopState,
+    to: Option<Nickname>,
+) -> Result<Option<AuthorKey>, String> {
+    let Some(nickname) = to else {
+        return Ok(None);
+    };
+    state
+        .key_of(&nickname)
+        .map(Some)
+        .map_err(|error| format!("directed message to {nickname} refused: {error}"))
+}
+
 fn escaped_len(text: &str) -> usize {
     text.chars()
         .map(|scalar| match scalar {
@@ -800,6 +818,13 @@ impl MembershipApp {
     ) -> bool {
         match request {
             Messaging::Send { to, body, reply } => {
+                let to = match recipient_key(state, to) {
+                    Ok(to) => to,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return false;
+                    }
+                };
                 let frame = app_frame(
                     context,
                     AppFrameParams::new(
@@ -854,6 +879,13 @@ impl MembershipApp {
     ) -> bool {
         match request {
             MessagingTest::SendCold { to, body, reply } => {
+                let to = match recipient_key(state, to) {
+                    Ok(to) => to,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return false;
+                    }
+                };
                 let frame = app_frame(
                     context,
                     AppFrameParams::new(
@@ -1541,12 +1573,13 @@ mod tests {
     use super::{
         AppFrameParams, AppTag, ENVELOPE_RESERVE, ESCAPED_BUDGET, MAX_MESSAGE_SIZE, MAX_MSG,
         MSG_TAG, MembershipApp, MessageBody, Messaging, Nickname, Request, mpsc, msg_body,
-        msg_fits,
+        msg_fits, recipient_key,
     };
-    use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
+    use crate::protocol::{AuthorKey, Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
     #[cfg(feature = "host")]
     use crate::testing::LaneNode;
+    use crate::testing::{fresh_state, test_key};
 
     #[cfg(feature = "host")]
     use super::NodeDriver;
@@ -1582,13 +1615,52 @@ mod tests {
             &widest_nick('\u{1F980}'),
             AppFrameParams::new(
                 AppTag::try_new(MSG_TAG).expect("a valid app tag"),
-                Some(widest_nick('\u{1F99E}')),
+                Some(AuthorKey::from_bytes([0xab; 32])),
                 None,
                 MessageBody::try_new(text).expect("body"),
             ),
         )
         .sign(&Identity::generate())
         .wire_len()
+    }
+
+    /// A send by nickname names the one live key that uses it. A nickname that no live key uses,
+    /// or that two or more use, is refused with the cause, and a send with no nickname is a
+    /// broadcast. The frame names a key, so the engine never picks one of two.
+    #[test]
+    fn a_send_by_nickname_resolves_to_the_one_live_key_and_refuses_the_rest() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let alone = test_key("alone");
+        state.names.insert(alone, Nickname::from("alone"));
+        state.peers.insert(alone);
+        for key in [test_key("twin#first"), test_key("twin#second")] {
+            state.names.insert(key, Nickname::from("twin"));
+            state.peers.insert(key);
+        }
+
+        assert_eq!(
+            recipient_key(&state, Some(Nickname::from("alone"))),
+            Ok(Some(alone)),
+            "one live key uses the nickname"
+        );
+        assert_eq!(
+            recipient_key(&state, None),
+            Ok(None),
+            "no nickname is a broadcast"
+        );
+        let clash = recipient_key(&state, Some(Nickname::from("twin")))
+            .expect_err("two live keys use the nickname");
+        assert!(
+            clash.contains("two or more live peers use this nickname"),
+            "the refusal does not name the cause: {clash}"
+        );
+        let stranger = recipient_key(&state, Some(Nickname::from("nobody")))
+            .expect_err("no live key uses the nickname");
+        assert!(
+            stranger.contains("no live peer uses this nickname"),
+            "the refusal does not name the cause: {stranger}"
+        );
     }
 
     #[test]

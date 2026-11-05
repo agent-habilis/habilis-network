@@ -314,11 +314,11 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
     );
 }
 
-/// The engine addresses a directed frame by nickname and never picks one of two live keys that use
-/// it. A rollback packet to such a peer is refused, and a resend cannot change that, so the
-/// transport reports the peer instead of losing every packet without a trace.
+/// The engine addresses a directed frame by author key, so a nickname that two live peers use
+/// does not make either of them unaddressable. A rollback packet to one of them is sent, and the
+/// transport does not report the peer as refused.
 #[test]
-fn a_peer_whose_nickname_two_live_peers_use_is_reported_unaddressable() {
+fn a_peer_whose_nickname_two_live_peers_use_is_addressable_by_its_key() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(
         guard,
@@ -358,7 +358,7 @@ fn a_peer_whose_nickname_two_live_peers_use_is_reported_unaddressable() {
                     payload: "{}".to_owned(),
                 })
                 .expect("the outbound queue has room");
-            let reported: bool = drive(&mut players, Duration::from_secs(10), |players| {
+            let reported: bool = drive(&mut players, Duration::from_secs(5), |players| {
                 let transport = players[0]
                     .transport
                     .as_ref()
@@ -367,8 +367,8 @@ fn a_peer_whose_nickname_two_live_peers_use_is_reported_unaddressable() {
             })
             .await;
             assert!(
-                reported,
-                "the refusal of a packet to a nickname of two live peers was never reported"
+                !reported,
+                "a packet to one key of a nickname that two live peers use was refused"
             );
 
             for player in players {

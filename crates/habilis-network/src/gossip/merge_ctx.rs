@@ -69,11 +69,9 @@ use tokio::sync::oneshot;
 ///
 /// # Errors
 /// Refuses a body too large for one frame, propagates a serialize/deliver
-/// failure, and errors if the unmeshed buffer is full. A directed frame to a
-/// nickname that two or more live peers use fails with
-/// [`crate::transport::SendError::Ambiguous`], meshed or not, and the frame is not buffered: the
-/// engine never picks one of the keys. A frame that was buffered before the clash began waits for
-/// the flush.
+/// failure, and errors if the unmeshed buffer is full. A directed frame names its recipient by
+/// author key, so two live peers that use one nickname are two addressees, and neither send is
+/// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first.
 ///
 /// # Examples
 ///
@@ -99,13 +97,6 @@ pub async fn send_app(
         return Err(transport::SendError::Oversize(format!(
             "app frame too large: {} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit",
             frame.wire_len()
-        )));
-    }
-    if let Some(addressee) = sole_addressee(&frame.kind)
-        && state.nickname_is_ambiguous(addressee)
-    {
-        return Err(transport::SendError::Ambiguous(format!(
-            "directed message to {addressee} refused: two or more live peers use this nickname"
         )));
     }
     let bytes = frame
@@ -685,10 +676,10 @@ pub(crate) fn park_and_offer(
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
 fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
-    let Some(nick) = sole_addressee(&frame.kind) else {
+    let Some(key) = sole_addressee(&frame.kind) else {
         return;
     };
-    let Some(address) = state.peer_endpoints.get(nick).cloned() else {
+    let Some(address) = state.address_of(key) else {
         return;
     };
     if state.lane_session_wanted(address.id, clock::Instant::now()) {
@@ -727,6 +718,7 @@ mod tests {
         state.rendezvous_id = Some(rendezvous);
         // A live key made its hint with a PeerInfo.
         state.peer_for_test("owned");
+        state.names.insert(test_key("owned"), nick("owned"));
         state.bind_peer_endpoint(
             test_key("owned"),
             nick("owned"),
@@ -737,6 +729,7 @@ mod tests {
         state.peer_for_test("card");
         // The key that made a hint went quiet.
         state.quiet_for_test("quiet");
+        state.names.insert(test_key("quiet"), nick("quiet"));
         state.bind_peer_endpoint(
             test_key("quiet"),
             nick("quiet"),
@@ -744,6 +737,7 @@ mod tests {
         );
         // A live key advertised the rendezvous.
         state.peer_for_test("beacon");
+        state.names.insert(test_key("beacon"), nick("beacon"));
         state.bind_peer_endpoint(
             test_key("beacon"),
             nick("beacon"),
@@ -766,6 +760,7 @@ mod tests {
         let shared = endpoint_id(1);
         for name in ["swift-cedar", "lost-heron"] {
             state.peer_for_test(name);
+            state.names.insert(test_key(name), nick(name));
             state.bind_peer_endpoint(test_key(name), nick(name), iroh::EndpointAddr::new(shared));
         }
 
@@ -830,6 +825,7 @@ mod tests {
                 let mut state = fresh_state();
                 state.unicast_pool = UnicastPool::new(node.clone(), false);
                 lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                state.names.insert(test_key("bob"), nick("bob"));
                 state.bind_peer_endpoint(test_key("bob"), nick("bob"), server.addr());
                 state.peer_for_test("bob");
 
@@ -911,6 +907,7 @@ mod tests {
         state.standing.remove(&Standing::Meshed);
         state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
+        state.names.insert(test_key("bob"), nick("bob"));
         state.bind_peer_endpoint(
             test_key("bob"),
             nick("bob"),
@@ -920,7 +917,7 @@ mod tests {
         let frame = Message::new_pong(
             &MeshId::from("test"),
             &nick("alice"),
-            nick("bob"),
+            test_key("bob"),
             &protocol::MessageId::random(),
         )
         .sign(&protocol::Identity::generate());
@@ -943,6 +940,7 @@ mod tests {
         let mut state = fresh_state();
         state.standing.remove(&Standing::Meshed);
         let bob = endpoint_id(1);
+        state.names.insert(test_key("bob"), nick("bob"));
         state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         let frame = Message::new_app(
             &MeshId::from("test"),

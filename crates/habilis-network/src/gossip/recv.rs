@@ -19,7 +19,7 @@ use crate::lifecycle::membership_update::MembershipUpdate;
 use crate::protocol::messages::{
     Authored, MessageBody, Proof, Verified, WireFrame, shard_fits_log,
 };
-use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
+use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
 use crate::{lifecycle, lookup};
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
@@ -738,7 +738,7 @@ async fn dispatch_infra(
             // bounds the map and keeps `responded`/`known` honest against a peer
             // that forges pongs from fabricated authors, and the probe id drops a
             // pong that answers a round that is over.
-            if to == context.author
+            if *to == context.our_pubkey
                 && state.peers.contains(&message.key())
                 && let Some(round) = state.ping_round.as_mut()
             {
@@ -927,14 +927,9 @@ fn pong_for(
     state: &EventLoopState,
     context: &HandlerCtx<'_>,
 ) -> (Verified, Option<iroh::EndpointId>) {
-    let answer = Message::new_pong(
-        context.mesh,
-        context.author,
-        request.author.clone(),
-        &request.id,
-    )
-    .sign(context.identity);
     let signer = request.key();
+    let answer =
+        Message::new_pong(context.mesh, context.author, signer, &request.id).sign(context.identity);
     let proofs = &state.proven_endpoints;
     let target: Option<iroh::EndpointId> = proofs
         .trusted(&signer)
@@ -968,7 +963,7 @@ async fn handle_shard(
     // gossip layer but never retained or reassembled here — a third party must
     // not persist or reconstruct a task exchange it is not part of. The
     // single-frame path drops non-addressee directed frames the same way.
-    if !addressed_to_us(message, context.author) {
+    if !addressed_to_us(message, &context.our_pubkey) {
         return;
     }
     // The raw shard's own per-tag policy (loggability/chain) — computed from its
@@ -1298,7 +1293,7 @@ fn gate_and_decrypt<F: Proof>(
     app: &dyn NodeApp,
 ) -> Gated {
     if is_directed_content(&frame.kind) {
-        if !addressed_to_us(frame, context.author) {
+        if !addressed_to_us(frame, &context.our_pubkey) {
             // Relay: an opaque directed frame — forwarded + retained, never
             // validated or surfaced (the dispatch below is gated to the
             // addressee), so it needs no classification here.
@@ -1413,7 +1408,7 @@ fn decrypt_directed<F: ops::Deref<Target = Message>>(
     }
 }
 
-fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
+fn addressed_to_us(message: &Message, us: &AuthorKey) -> bool {
     match &message.kind {
         MessageKind::App { to: Some(to), .. } => to == us,
         // Broadcast app frames (chat) and infra kinds are delivered to everyone.
@@ -1456,7 +1451,7 @@ fn maybe_push_inbound(
     };
     if tx.receiver_count() == 0
         || !surfaceable
-        || !addressed_to_us(message, context.author)
+        || !addressed_to_us(message, &context.our_pubkey)
         || matches!(
             message.kind,
             MessageKind::Digest
@@ -2003,7 +1998,7 @@ mod retain_own_broadcast_tests {
             &Nickname::from("me"),
             AppFrameParams::new(
                 protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                to.map(Nickname::from),
+                to.map(testing::test_key),
                 None,
                 protocol::MessageBody::from("hello"),
             ),
@@ -2080,7 +2075,7 @@ mod retain_own_broadcast_tests {
             max: 64,
             // "us" is the peer whose digest advertised the window; presence is
             // undirected, so the addressee gate passes it either way.
-            requester: &Nickname::from("us"),
+            requester: &testing::test_key("us"),
         });
         assert!(
             offered.is_empty(),
@@ -2286,7 +2281,7 @@ mod first_contact_tests {
     use crate::ops;
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
-    use crate::protocol::{Channel, MeshId, Message, MessageKind, Nickname};
+    use crate::protocol::{AuthorKey, Channel, MeshId, Message, MessageKind, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::MeshSender;
 
@@ -2295,7 +2290,8 @@ mod first_contact_tests {
     use crate::gossip;
     use crate::gossip::split;
     use crate::lifecycle::heartbeat;
-    use crate::protocol::messages::AppFrameParams;
+    use crate::protocol::messages::{AppFrameParams, sole_addressee};
+    use crate::transport::outbox::Resend;
     use crate::transport::proven_endpoints::ProvenEndpoints;
     use crate::transport::{PayloadPath, webrtc};
     use crate::util::{clock, tuning};
@@ -2335,7 +2331,7 @@ mod first_contact_tests {
         sender: MeshSender,
         mesh: MeshId,
         identity: Identity,
-        our_pubkey: protocol::AuthorKey,
+        our_pubkey: AuthorKey,
         author: Nickname,
         sink: SilentSink,
     }
@@ -2406,13 +2402,14 @@ mod first_contact_tests {
                 state.standing.insert(Standing::Meshed);
                 state.unicast_pool = transport::UnicastPool::new(node.endpoint.clone(), false);
                 state.direct.insert(bob, DirectState::Direct);
+                state.names.insert(test_key("bob"), nick("bob"));
                 state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob_addr);
                 let (failed_tx, mut failed_rx) = mpsc::unbounded_channel();
                 state.flush_failed = failed_tx;
                 let frame = Message::new_pong(
                     &node.mesh,
                     &node.author,
-                    nick("bob"),
+                    test_key("bob"),
                     &protocol::MessageId::random(),
                 )
                 .sign(&Identity::generate());
@@ -2448,13 +2445,12 @@ mod first_contact_tests {
         );
     }
 
-    /// A directed frame that was parked to a nickname which two live peers now use is not
-    /// deliverable yet, like a frame to a peer whose endpoint is not known. The ambiguity ends when
-    /// one of the keys leaves or times out (a node that restarts under its nickname leaves its old
-    /// key live until the silence timeout), so the flush keeps the frame and a later flush
-    /// delivers it. The sender was told `Ok` when the frame was parked, so a drop would be silent.
+    /// A directed frame names a key, so a nickname that two live peers use does not make it
+    /// undeliverable: the frame to the second key of the nickname waits only for an endpoint of
+    /// that key. The flush keeps it until the key retains one, and then the send decision routes
+    /// it to that endpoint, not to the dial hint that the first key owns.
     #[test]
-    fn a_buffered_frame_to_an_ambiguous_nickname_waits_until_one_key_leaves() {
+    fn a_buffered_frame_to_the_second_key_of_a_nickname_waits_for_its_own_endpoint() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -2466,10 +2462,12 @@ mod first_contact_tests {
                 state.names.insert(key, twin.clone());
                 state.peers.insert(key);
             }
+            state.names.insert(first, twin.clone());
+            state.bind_peer_endpoint(first, twin, iroh::EndpointAddr::new(endpoint_id(5)));
             let frame = Message::new_pong(
                 &node.mesh,
                 &node.author,
-                twin.clone(),
+                second,
                 &protocol::MessageId::random(),
             )
             .sign(&Identity::generate());
@@ -2486,39 +2484,39 @@ mod first_contact_tests {
                 "the flush dropped a frame that a later flush can deliver"
             );
 
-            state.forget_key(second);
-            state.bind_peer_endpoint(first, twin, iroh::EndpointAddr::new(endpoint_id(5)));
+            state.retain_refused_endpoint(second, iroh::EndpointAddr::new(endpoint_id(6)));
+            state.direct.insert(endpoint_id(6), DirectState::Direct);
 
             assert!(
-                !matches!(
+                matches!(
                     transport::resolve(&frame, bytes, &state),
-                    Err(transport::SendError::Ambiguous(_))
+                    Ok(Resend::Unicast(eid, _)) if eid == endpoint_id(6)
                 ),
-                "the nickname stayed ambiguous after one key left"
+                "the frame to the second key did not route to the endpoint of that key"
             );
             node.endpoint.close().await;
         });
     }
 
-    /// The contract of `send_app` says that a directed frame to a nickname of two live peers
-    /// fails with `Ambiguous`. A node that is not meshed parked the frame and told the caller
-    /// `Ok`, so a caller that reads the result took the peer for one that it can address.
+    /// A directed frame to one of two live keys that use a nickname is accepted. An unmeshed node
+    /// buffers it with the key as its recipient, and tells the caller `Ok`.
     #[test]
-    fn an_unmeshed_send_to_an_ambiguous_nickname_fails_at_once_and_buffers_nothing() {
+    fn an_unmeshed_send_to_either_key_of_a_nickname_is_buffered() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
             let mut state = fresh_state();
             state.standing.remove(&Standing::Meshed);
             let twin = nick("twin");
-            for key in [test_key("twin#first"), test_key("twin#second")] {
+            let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+            for key in [first, second] {
                 state.names.insert(key, twin.clone());
                 state.peers.insert(key);
             }
             let frame = Message::new_pong(
                 &node.mesh,
                 &node.author,
-                twin,
+                second,
                 &protocol::MessageId::random(),
             )
             .sign(&Identity::generate());
@@ -2526,15 +2524,49 @@ mod first_contact_tests {
             let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
 
             assert!(
-                matches!(sent, Err(transport::SendError::Ambiguous(_))),
-                "the unmeshed send did not refuse the nickname of two live peers"
+                sent.is_ok(),
+                "the send to a key of the nickname was refused"
             );
-            assert!(
-                state.pending_outbound.is_empty(),
-                "the refused frame was buffered"
+            let buffered = state.pending_outbound.take();
+            assert_eq!(buffered.len(), 1, "the accepted frame is in the buffer");
+            assert_eq!(
+                sole_addressee(&buffered[0].0.kind),
+                Some(&second),
+                "the buffered frame lost its recipient key"
             );
             node.endpoint.close().await;
         });
+    }
+
+    /// Two live keys use one nickname. A directed frame names one key, so the other key is not its
+    /// addressee, though it shares the nickname and a relay can hand it the frame. A broadcast is
+    /// for both.
+    #[test]
+    fn a_frame_to_one_key_of_a_nickname_is_not_addressed_to_the_other_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+        let tag = protocol::AppTag::try_new("app_msg").expect("a valid app tag");
+        let frame = |to: Option<AuthorKey>| {
+            Message::new_app(
+                &MeshId::from("test"),
+                &nick("sender"),
+                AppFrameParams::new(tag.clone(), to, None, MessageBody::from("hi")),
+            )
+        };
+
+        let to_first = frame(Some(first));
+        assert!(
+            super::addressed_to_us(&to_first, &first),
+            "the addressee did not take its frame"
+        );
+        assert!(
+            !super::addressed_to_us(&to_first, &second),
+            "the other key of the nickname took a frame meant for the first"
+        );
+        assert!(
+            super::addressed_to_us(&frame(None), &second),
+            "a broadcast is for every key"
+        );
     }
 
     /// Feed one gossip event to the handler, as the loop does.
@@ -2600,7 +2632,7 @@ mod first_contact_tests {
 
             for run in &runs {
                 let pong =
-                    Message::new_pong(&node.mesh, &twin, node.author.clone(), &probe.id).sign(run);
+                    Message::new_pong(&node.mesh, &twin, node.our_pubkey, &probe.id).sign(run);
                 let flow =
                     dispatch_infra(&pong, true, &update, &mut state, &mut Inert, &context).await;
                 assert!(flow.is_break(), "a pong is handled by the engine");
@@ -2653,7 +2685,7 @@ mod first_contact_tests {
                 "the pong went to the endpoint under the nickname, not to the signer's"
             );
             assert!(
-                matches!(&answer.kind, MessageKind::Pong { to, probe } if *to == twin && *probe == request.id),
+                matches!(&answer.kind, MessageKind::Pong { to, probe } if *to == second.author_key() && *probe == request.id),
                 "the pong does not answer the probe of the pinger: {:?}",
                 answer.kind
             );
@@ -2863,6 +2895,7 @@ mod first_contact_tests {
                 lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob.addr());
                 let mut state = fresh_state();
                 state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
+                state.names.insert(test_key("bob"), nick("bob"));
                 state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob.addr());
                 feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
                 feed(Event::NeighborDown(bob.id()), &mut state, &context).await;
@@ -2870,9 +2903,13 @@ mod first_contact_tests {
                     state.standing.contains(&Standing::Meshed),
                     "the gap does not clear meshed"
                 );
-                let frame =
-                    Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random())
-                        .sign(&Identity::generate());
+                let frame = Message::new_pong(
+                    &node.mesh,
+                    &node.author,
+                    test_key("bob"),
+                    &MessageId::random(),
+                )
+                .sign(&Identity::generate());
                 let bytes = frame.serialize().expect("serialize");
                 assert!(
                     state.pending_outbound.push((frame, bytes.clone())),
@@ -4517,7 +4554,7 @@ mod left_tests {
 mod requeue_tests {
     use crate::daemon::state::Standing;
 
-    use crate::testing::{LaneNode, nick};
+    use crate::testing::{LaneNode, nick, test_key};
 
     use crate::transport;
     use crate::util::clock;
@@ -4556,7 +4593,7 @@ mod requeue_tests {
                     "one admission slot is in flight after the requeue"
                 );
 
-                state.note_peer_endpoint(nick("bob"), address);
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), address);
                 drop(
                     transport::resolve(&frame, bytes.clone(), &state)
                         .expect_err("a lookup-only relay holds the frame"),

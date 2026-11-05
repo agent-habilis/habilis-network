@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::RosterEntry;
-use crate::protocol::Nickname;
+use crate::protocol::{AuthorKey, Nickname};
 
 use serde::Serialize;
 
@@ -57,6 +57,13 @@ impl RosterSnapshot {
         self.live_rows()
             .map(|entry| &entry.nickname)
             .filter(move |nickname| uses.get(nickname) == Some(&1))
+    }
+
+    /// The keys that a directed send can name: each shown live member. Two live members that use
+    /// one nickname are two addressees, because a frame names the key. A quiet member is no
+    /// addressee, because its endpoint is likely dead.
+    pub fn addressee_keys(&self) -> impl Iterator<Item = &AuthorKey> {
+        self.live_rows().map(|entry| &entry.key)
     }
 
     /// The nicknames that two or more live peers use, shown or not, each once, in nickname order.

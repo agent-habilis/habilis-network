@@ -177,7 +177,7 @@ impl Message {
     /// A `Pong` response addressed to the original pinger (`to`), naming the `Ping` (`probe`) that
     /// it answers.
     #[must_use]
-    pub fn new_pong(mesh: &MeshId, author: &Nickname, to: Nickname, probe: &MessageId) -> Self {
+    pub fn new_pong(mesh: &MeshId, author: &Nickname, to: AuthorKey, probe: &MessageId) -> Self {
         let probe = probe.clone();
         Self::new(mesh, author, MessageKind::Pong { to, probe }, empty_body())
     }

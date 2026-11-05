@@ -7,7 +7,7 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
 use habilis_network::protocol::messages::Verified;
-use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody, Nickname};
+use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody};
 use habilis_network::runtime::SendError;
 use serde::{Deserialize, Serialize};
 
@@ -186,11 +186,11 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                 // Resolve and release the lock *before* awaiting: holding a
                 // `std::sync::Mutex` guard across an await is denied
                 // workspace-wide, and rightly so.
-                let nickname: Option<Nickname> = {
+                let known: bool = {
                     let book = self.mailboxes.directory.lock().ok();
-                    book.and_then(|directory| directory.get(&to).cloned())
+                    book.is_some_and(|directory| directory.contains_key(&to))
                 };
-                let Some(nickname) = nickname else {
+                if !known {
                     // We have never heard from this peer, so we cannot
                     // address it. The lobby only admits peers we have heard
                     // from, so this means they left mid-match.
@@ -199,8 +199,8 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                         "dropped a rollback packet for a peer with no known nickname"
                     );
                     return false;
-                };
-                let Some(frame) = frame_for(context, ROLLBACK_TAG, Some(nickname), &payload) else {
+                }
+                let Some(frame) = frame_for(context, ROLLBACK_TAG, Some(to), &payload) else {
                     return false;
                 };
                 let class = self.classify(&frame.authored());
@@ -222,7 +222,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                         "lobby packet skipped: two live peers use this nickname"
                     );
                 }
-                let peers: Vec<Nickname> = roster.addressees().cloned().collect();
+                let peers: Vec<AuthorKey> = roster.addressee_keys().copied().collect();
                 let mut delivered = false;
                 for peer in peers {
                     let Some(frame) = frame_for(context, LOBBY_TAG, Some(peer), &payload) else {
@@ -262,7 +262,7 @@ impl<T: Config> RollbackDriver<T> {
 fn frame_for(
     context: &HandlerCtx<'_>,
     tag: &str,
-    to: Option<Nickname>,
+    to: Option<AuthorKey>,
     payload: &str,
 ) -> Option<Verified> {
     let (Ok(tag), Ok(body)) = (AppTag::try_new(tag), MessageBody::try_new(payload)) else {

@@ -1,9 +1,9 @@
 //! The plane a message's addressing chooses, and the rule that picks it.
 
 use crate::daemon::state::DirectState;
-use crate::protocol::Nickname;
 
 use crate::daemon::state::EventLoopState;
+use crate::protocol::AuthorKey;
 use crate::protocol::messages::{Verified, sole_addressee};
 use iroh::EndpointId;
 
@@ -21,21 +21,15 @@ pub(super) enum Route {
     /// where the relay carries no payload: parked until a direct path is
     /// proven, never sent relayed.
     Held(EndpointId),
-    /// Directed to a nickname that two or more live peers use: an error. The engine never picks
-    /// one of the keys.
-    Ambiguous,
     /// Directed with no known endpoint: an error, never gossip.
     Undeliverable,
 }
 
 pub(super) fn route(message: &Verified, state: &EventLoopState) -> Route {
-    let Some(nick) = sole_addressee(&message.kind) else {
+    let Some(key) = sole_addressee(&message.kind) else {
         return Route::Broadcast;
     };
-    if state.nickname_is_ambiguous(nick) {
-        return Route::Ambiguous;
-    }
-    match directed_endpoint(nick, state) {
+    match directed_endpoint(key, state) {
         Some(eid) if held(eid, state) => Route::Held(eid),
         Some(eid) => Route::Unicast(eid),
         None => Route::Undeliverable,
@@ -49,16 +43,12 @@ pub(super) fn held(eid: EndpointId, state: &EventLoopState) -> bool {
     !state.relay_transport.relay_allowed() && state.direct.get(&eid) != Some(&DirectState::Direct)
 }
 
-/// The endpoint a directed message to `nick` can be sent to, or `None` for an
-/// addressee we hold no endpoint for or the rendezvous pseudo-node (never a
-/// directed target), a nickname that two live peers use, or a nickname whose hint names a peer that
-/// went quiet while another key is live under it. Reachability is left to iroh's connect (direct or
+/// The endpoint a directed message to `key` can be sent to, or `None` for a key we hold no
+/// endpoint for, and for the rendezvous pseudo-node (never a directed target). The sources are
+/// the ones of [`EventLoopState::address_of`]. Reachability is left to iroh's connect (direct or
 /// multihop).
-pub(super) fn directed_endpoint(nick: &Nickname, state: &EventLoopState) -> Option<EndpointId> {
-    if state.nickname_is_ambiguous(nick) || state.hint_is_stale(nick) {
-        return None;
-    }
-    let eid = state.peer_endpoints.get(nick)?.id;
+pub(super) fn directed_endpoint(key: &AuthorKey, state: &EventLoopState) -> Option<EndpointId> {
+    let eid = state.address_of(key)?.id;
     if state.rendezvous_id == Some(eid) {
         return None;
     }

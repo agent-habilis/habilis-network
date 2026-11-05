@@ -441,9 +441,10 @@ mod tests {
             Some(retained.id),
             "the endpoint of the survivor was not bound when the holder went quiet"
         );
-        assert!(
-            !state.hint_is_stale(&twin),
-            "the hint of the survivor is stale after the sweep"
+        assert_eq!(
+            state.address_of(&survivor).map(|address| address.id),
+            Some(retained.id),
+            "a send to the survivor does not reach the endpoint that it retained"
         );
     }
 

@@ -2,7 +2,7 @@ use super::Reach;
 
 use serde::Serialize;
 
-use crate::protocol::Nickname;
+use crate::protocol::{AuthorKey, Nickname};
 
 use crate::transport;
 /// One peer in a [`RosterSnapshot`](super::RosterSnapshot). `last_seen_secs_ago` is
@@ -28,6 +28,10 @@ use crate::transport;
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct RosterEntry {
+    /// The author key of the member. A nickname is a label that two live members can share, and
+    /// a directed send names the key. Not part of the JSON.
+    #[serde(skip)]
+    pub key: AuthorKey,
     /// The nickname of the member.
     pub nickname: Nickname,
     /// Seconds since the member was last heard from.

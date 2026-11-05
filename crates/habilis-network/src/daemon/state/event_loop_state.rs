@@ -836,25 +836,27 @@ impl EventLoopState {
             let heard = self.clock_evidence.heard.get(key);
             heard.or_else(|| self.last_seen.get(key))
         };
-        let lane = |key: &AuthorKey, nick: &Nickname| self.lane_of(key, nick);
+        let lane = |key: &AuthorKey| transport::lane_for(key, self);
         let shown = self.peers.iter().filter(|key| self.surfaced.contains(*key));
         // One row per key: two live keys under one nickname are two rows.
         let mut peers: Vec<RosterEntry> = shown
             .filter_map(|key| {
                 let nick = self.names.get(key)?;
                 Some(RosterEntry {
+                    key: *key,
                     nickname: nick.clone(),
                     // Active peers: when they were really heard. A stall forgiveness moves
                     // `last_seen`, not `heard`.
                     last_seen_secs_ago: heard_at(key).map(secs_since),
                     quiet: false,
                     reach: self.reach_of(key, nick),
-                    transport: lane(key, nick),
+                    transport: lane(key),
                 })
             })
             .chain(self.quiet.iter().filter_map(|key| {
                 let nick = self.names.get(key)?;
                 Some(RosterEntry {
+                    key: *key,
                     nickname: nick.clone(),
                     // Quiet peers: their last-heard instant, retained in
                     // `quiet_since` (the eviction drops `last_seen`). A quiet
@@ -864,7 +866,7 @@ impl EventLoopState {
                         .map(|silence| silence.as_secs()),
                     quiet: true,
                     reach: Reach::Gossip,
-                    transport: lane(key, nick),
+                    transport: lane(key),
                 })
             }))
             .collect();
@@ -874,17 +876,6 @@ impl EventLoopState {
             peers,
             count: self.member_count(),
             live: self.live_nicknames().cloned().collect(),
-        }
-    }
-
-    /// The lane of the row of `key`. The lane is the lane of the dial hint of the nickname, and the
-    /// hint has one owner, so a key that another key owns it for reads no lane.
-    fn lane_of(&self, key: &AuthorKey, nick: &Nickname) -> transport::Lane {
-        let owned_by_other = self.hint_owner.get(nick).is_some_and(|owner| owner != key);
-        if owned_by_other {
-            transport::Lane::Unreachable
-        } else {
-            transport::lane_for(nick, self)
         }
     }
 
@@ -1227,29 +1218,34 @@ impl EventLoopState {
         !self.peers.contains(&key) && users.any(|name| name == nickname)
     }
 
+    /// The address a directed send to `key` dials, from the first source that has one:
+    /// - the dial hint under the nickname of `key`, when `key` made it;
+    /// - the endpoint that `key` proved in its `PeerInfo`;
+    /// - the endpoint of a `PeerInfo` of `key` that bound no hint, because another live key holds
+    ///   the nickname.
+    ///
+    /// A quiet key keeps its address, so a peer that returns keeps its route. A key that left the
+    /// roster has none.
+    pub(crate) fn address_of(&self, key: &AuthorKey) -> Option<EndpointAddr> {
+        let hint = self.names.get(key).and_then(|nickname| {
+            let owned = self.hint_owner.get(nickname) == Some(key);
+            if owned {
+                self.peer_endpoints.get(nickname).cloned()
+            } else {
+                None
+            }
+        });
+        let proven = self.proven_endpoints.trusted(key).map(EndpointAddr::new);
+        hint.or(proven)
+            .or_else(|| self.refused_endpoints.get(key).cloned())
+    }
+
     /// Whether the dial hint of `nickname` was made by a key other than `key` that is live. A quiet
     /// or gone owner does not hold it against a live key: the nickname answers there now.
     pub(crate) fn hint_is_held_by_other(&self, nickname: &Nickname, key: AuthorKey) -> bool {
         self.hint_owner
             .get(nickname)
             .is_some_and(|owner| *owner != key && self.peers.contains(owner))
-    }
-
-    /// Whether the dial hint of `nickname` is no longer the way to reach whoever answers to it.
-    /// Two cases: the hint was made by a key that is not live, while another key is live under the
-    /// nickname (the hint names the endpoint of a peer that went quiet or left, so a send waits for
-    /// the live key to rebind it; with no live key the quiet peer may return, and its hint stays
-    /// the target); or the key that made the hint is live but renamed, so the old nickname no
-    /// longer names it.
-    pub(crate) fn hint_is_stale(&self, nickname: &Nickname) -> bool {
-        let Some(owner) = self.hint_owner.get(nickname) else {
-            return false;
-        };
-        if self.peers.contains(owner) {
-            return self.names.get(owner).is_some_and(|name| name != nickname);
-        }
-        let live = self.peers.iter().filter_map(|key| self.names.get(key));
-        live.into_iter().any(|name| name == nickname)
     }
 
     /// How long the quiet peer `key` has been silent at `now`, suspends included.

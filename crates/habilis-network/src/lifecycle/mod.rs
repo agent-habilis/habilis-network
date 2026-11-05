@@ -793,8 +793,13 @@ mod departed_tests {
                 state.nickname_is_ambiguous(&twin),
                 "two live keys use the nickname"
             );
-            let frame =
-                Message::new_pong(&mesh, &us, twin, &protocol::MessageId::random()).sign(&identity);
+            let frame = Message::new_pong(
+                &mesh,
+                &us,
+                first.author_key(),
+                &protocol::MessageId::random(),
+            )
+            .sign(&identity);
             let bytes = frame.serialize().expect("serialize");
             assert!(
                 state.pending_outbound.push((frame, bytes)),

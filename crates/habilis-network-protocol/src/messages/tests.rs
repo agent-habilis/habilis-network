@@ -2,11 +2,18 @@ use super::{
     AppFrameParams, AppTag, AppTagError, BuildMsgParams, ChainCtx, CorrIdError, MeshId, Message,
     MessageBody, MessageId, MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
 };
+use crate::AuthorKey;
+use crate::messages::sole_addressee;
 
 use crate::identity;
 use habilis_network_util::consts;
 fn nick(name: &str) -> Nickname {
     Nickname::from(name)
+}
+
+/// A key that tells apart from the others by its seed byte.
+fn key_of_seed(seed: u8) -> AuthorKey {
+    AuthorKey::from_bytes([seed; 32])
 }
 
 fn sid() -> MeshId {
@@ -137,9 +144,9 @@ fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
 #[test]
 fn test_pong_round_trip() {
     let _guard = ::habilis_network_test_tracing::init();
-    let target = nick("pinger-here");
+    let target = key_of_seed(3);
     let probe = MessageId::random();
-    let message = Message::new_pong(&sid(), &nick("word-word"), target.clone(), &probe);
+    let message = Message::new_pong(&sid(), &nick("word-word"), target, &probe);
     let bytes = message
         .serialize()
         .expect("the fixture message is well formed, so it serializes");
@@ -155,13 +162,13 @@ fn test_pong_round_trip() {
 #[test]
 fn test_task_status_round_trip() {
     let _guard = ::habilis_network_test_tracing::init();
-    let target = nick("calm-otter");
+    let target = key_of_seed(1);
     let message = Message::new_app(
         &sid(),
         &nick("word-word"),
         AppFrameParams {
             tag: AppTag::try_new("app_status").expect("a valid app tag"),
-            to: Some(target.clone()),
+            to: Some(target),
             corr: None,
             body: MessageBody::from(r#"{"kind":"status-update"}"#),
         },
@@ -193,11 +200,11 @@ fn test_task_status_round_trip() {
 #[test]
 fn test_task_artifact_round_trip() {
     let _guard = ::habilis_network_test_tracing::init();
-    let target = nick("calm-otter");
+    let target = key_of_seed(1);
     let message = Message::new_frame(
         &sid(),
         &nick("word-word"),
-        MessageKind::app_to("app_artifact", target.clone(), None),
+        MessageKind::app_to("app_artifact", target, None),
         MessageBody::from(r#"{"kind":"artifact-update"}"#),
     );
     let bytes = message
@@ -482,7 +489,7 @@ mod signing {
     fn tampered_task_target_breaks_signature() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut message = Message::fixture(
-            MessageKind::app_to("app_status", "calm-otter".into(), None),
+            MessageKind::app_to("app_status", super::key_of_seed(1), None),
             "{}",
         )
         .sign(&identity())
@@ -491,7 +498,7 @@ mod signing {
             message.verify_signature(),
             "a tampered task target keeps the signature valid"
         );
-        message.kind = MessageKind::app_to("app_status", "evil-otter".into(), None);
+        message.kind = MessageKind::app_to("app_status", super::key_of_seed(2), None);
         assert!(
             !message.verify_signature(),
             "directed `to` is a signed field"
@@ -504,7 +511,7 @@ mod signing {
         let mut message: Message = Message::fixture(
             MessageKind::app_to(
                 "app_req",
-                "calm-otter".into(),
+                super::key_of_seed(1),
                 Some(CorrId::try_new("aaaa").expect("a valid correlation id")),
             ),
             "{}",
@@ -513,7 +520,7 @@ mod signing {
         .into_message();
         message.kind = MessageKind::app_to(
             "app_req",
-            "calm-otter".into(),
+            super::key_of_seed(1),
             Some(CorrId::try_new("bbbb").expect("a valid correlation id")),
         );
         assert!(!message.verify_signature(), "`corr` is a signed field");
@@ -666,7 +673,7 @@ mod chain {
 
 mod snapshots {
     use super::super::CorrId;
-    use super::{Message, MessageKind, Nickname, PresenceSubtype};
+    use super::{Message, MessageKind, PresenceSubtype};
 
     /// A deterministic broadcast app frame. The body is a JSON payload shaped
     /// like a real consumer's — nested object, unicode, an embedded mesh id —
@@ -710,7 +717,7 @@ mod snapshots {
             "\"scope\":\"test\",\"progress\":{\"phase\":\"running\"}}"
         );
         let message = Message::fixture(
-            MessageKind::app_to("app_status", Nickname::from("addressed-nick"), None),
+            MessageKind::app_to("app_status", super::key_of_seed(4), None),
             body,
         );
         let bytes = message
@@ -758,7 +765,7 @@ mod snapshots {
         let message = Message::fixture(
             MessageKind::app_to(
                 "app_req",
-                Nickname::from("addressed-nick"),
+                super::key_of_seed(4),
                 Some(
                     CorrId::try_new("00000000-0000-0000-0000-0000000000aa")
                         .expect("a valid correlation id"),
@@ -782,7 +789,7 @@ mod snapshots {
         let message = Message::fixture(
             MessageKind::app_to(
                 "app_resp",
-                Nickname::from("addressed-nick"),
+                super::key_of_seed(4),
                 Some(
                     CorrId::try_new("00000000-0000-0000-0000-0000000000aa")
                         .expect("a valid correlation id"),
@@ -1321,6 +1328,60 @@ mod verified {
             serde_json::to_string(&verified).expect("a verified message serializes to JSON"),
             SIGNED_WIRE,
             "a verified message serializes to the same bytes as its message"
+        );
+    }
+}
+
+const RECIPIENT_HEX: &str = "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12";
+
+fn recipient() -> AuthorKey {
+    AuthorKey::decode_hex(RECIPIENT_HEX).expect("a lowercase 64-char key")
+}
+
+/// A directed frame names its recipient by author key, as 64 lowercase hex digits. The
+/// nickname of the author stays a label. Wire change: the `to` of an `app` frame and of a
+/// `pong` frame was a nickname.
+#[test]
+fn a_directed_frame_names_its_recipient_by_key_on_the_wire() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let tag = AppTag::try_new("app_msg").expect("a valid app tag");
+    let app = Message::new_app(
+        &sid(),
+        &nick("alice"),
+        AppFrameParams::new(tag, Some(recipient()), None, MessageBody::from("hi")),
+    );
+    let wire = String::from_utf8(app.serialize().expect("serialize")).expect("a frame is UTF-8");
+    assert!(
+        wire.contains(&format!("\"to\":\"{RECIPIENT_HEX}\"")),
+        "the app frame names its recipient by key: {wire}"
+    );
+    let parsed = Message::parse(wire.as_bytes()).expect("the wire form parses");
+    assert_eq!(
+        sole_addressee(&parsed.kind),
+        Some(&recipient()),
+        "the parsed frame names the same key"
+    );
+    let pong = Message::new_pong(&sid(), &nick("alice"), recipient(), &MessageId::random());
+    let pong_wire =
+        String::from_utf8(pong.serialize().expect("serialize")).expect("a frame is UTF-8");
+    assert!(
+        pong_wire.contains(&format!("\"to\":\"{RECIPIENT_HEX}\"")),
+        "the pong names its recipient by key: {pong_wire}"
+    );
+}
+
+/// The old form, a nickname as the recipient, is a parse error: a nickname is a label and
+/// names no member.
+#[test]
+fn a_nickname_as_the_recipient_of_a_frame_is_refused_at_parse() {
+    let _guard = ::habilis_network_test_tracing::init();
+    for (kind, extra) in [("app", r#""tag":"app_msg","#), ("pong", r#""probe":"x","#)] {
+        let json = format!(
+            r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"{kind}",{extra}"to":"bob","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"","ext":{{}}}}"#
+        );
+        assert!(
+            Message::parse(json.as_bytes()).is_err(),
+            "a {kind} frame to a nickname parses"
         );
     }
 }

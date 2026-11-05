@@ -280,11 +280,12 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_
             report_unreadable_digest(message, state);
             continue;
         };
+        let requester = message.key();
         for missing in state.message_log.missing_in_window(MissingQuery {
             range,
             have: &have,
             max: budget,
-            requester: &message.author,
+            requester: &requester,
         }) {
             if !resend_one(&missing, state) {
                 continue;
@@ -1695,7 +1696,7 @@ mod tests {
                     range: window.range().expect("our own encoding"),
                     have: &have,
                     max: 100,
-                    requester: &nick("node"),
+                    requester: &test_key("node"),
                 })
             })
             .map(|message| message.body.as_str().to_string())
@@ -1767,7 +1768,7 @@ mod tests {
                 range: window.range().expect("our own encoding"),
                 have: &have,
                 max: budget,
-                requester: &nick("node"),
+                requester: &test_key("node"),
             }) {
                 have.insert(message.dedup_key());
                 sent.push(message);

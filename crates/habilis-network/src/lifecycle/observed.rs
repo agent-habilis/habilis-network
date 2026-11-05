@@ -1013,7 +1013,7 @@ mod churn_red {
                     sign_at(Message::new_pong(
                         &rig.mesh,
                         &who,
-                        nick("calm-fern"),
+                        test_key("calm-fern"),
                         &probe.id,
                     )),
                 ),
