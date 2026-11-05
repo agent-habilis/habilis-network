@@ -309,8 +309,8 @@ mod departed_tests {
         });
     }
 
-    /// Records the nickname of each departure that the engine reports to the app.
-    struct Recorder(Vec<protocol::Nickname>);
+    /// Records the key and the nickname of each departure that the engine reports to the app.
+    struct Recorder(Vec<(AuthorKey, protocol::Nickname)>);
 
     #[async_trait::async_trait]
     impl NodeApp for Recorder {
@@ -329,11 +329,12 @@ mod departed_tests {
 
         async fn on_peer_left(
             &mut self,
+            key: &AuthorKey,
             nickname: &protocol::Nickname,
             _state: &mut EventLoopState,
             _ctx: &HandlerCtx<'_>,
         ) {
-            self.0.push(nickname.clone());
+            self.0.push((*key, nickname.clone()));
         }
     }
 
@@ -386,7 +387,7 @@ mod departed_tests {
 
             assert_eq!(
                 app.0,
-                vec![recorded],
+                vec![(run.author_key(), recorded)],
                 "the app was told of a nickname that the departed key did not hold"
             );
             endpoint.close().await;
@@ -476,7 +477,7 @@ mod departed_tests {
 
             assert_eq!(
                 app.0,
-                vec![hidden],
+                vec![(run.author_key(), hidden)],
                 "the app never heard that a peer it read from the roster left"
             );
             assert!(
@@ -536,7 +537,7 @@ mod departed_tests {
 
             assert_eq!(
                 app.0,
-                vec![recorded.clone()],
+                vec![(run.author_key(), recorded.clone())],
                 "the app was told of a nickname that the departed key did not hold"
             );
             let expected = Departure {
@@ -553,10 +554,11 @@ mod departed_tests {
         });
     }
 
-    /// The app tracks peers by nickname, so it hears of a departure only when no other key holds
-    /// the nickname that the departed key held.
+    /// The app tracks peers by key, so it hears of every key that leaves, also when another key
+    /// still holds the nickname of the departed key: the twin that stays does not make the state
+    /// of the leaver valid.
     #[test]
-    fn the_app_does_not_hear_of_a_nickname_that_another_key_still_holds() {
+    fn the_app_hears_of_each_key_that_leaves_also_when_another_key_holds_its_nickname() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (endpoint, sender) = endpoint_and_sender().await;
             let identity = Identity::generate();
@@ -601,10 +603,10 @@ mod departed_tests {
             )
             .await;
 
-            assert!(
-                app.0.is_empty(),
-                "the app heard of a nickname that the second key still holds: {:?}",
-                app.0
+            assert_eq!(
+                app.0,
+                vec![(first_run.author_key(), shared)],
+                "the app must hear once of the key that left, though the second key holds its nickname"
             );
             endpoint.close().await;
         });

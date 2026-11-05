@@ -129,12 +129,12 @@ pub(crate) async fn handle_presence(
         if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
             gossip::flush_pending(state, context, "peer left").await;
         }
-        // App cleanup last, with the roster already consistent. The app tracks peers by nickname,
-        // so it hears of the departure when no other key holds the nickname. Gated on
-        // `surfaceable`: a relayed pre-join `Left` must never cancel live work — the same
-        // join-horizon symmetry as the announcement above.
-        if surfaceable && !state.nickname_is_held(&departed) {
-            app.on_peer_left(&departed, state, context).await;
+        // App cleanup last, with the roster already consistent. The app hears of every key that
+        // leaves, whoever else holds its nickname. Gated on `surfaceable`: a relayed pre-join
+        // `Left` must never cancel live work — the same join-horizon symmetry as the
+        // announcement above.
+        if surfaceable {
+            app.on_peer_left(&key, &departed, state, context).await;
         }
     } else if subtype == PresenceSubtype::Joined && !update.stale {
         // Every `joined` re-floods our `PeerInfo`, newcomer and rejoin

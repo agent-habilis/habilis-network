@@ -2141,6 +2141,7 @@ mod churn_red {
 
         async fn on_peer_left(
             &mut self,
+            _key: &AuthorKey,
             nickname: &Nickname,
             _state: &mut EventLoopState,
             _context: &HandlerCtx<'_>,
@@ -2943,10 +2944,10 @@ mod churn_red {
         });
     }
 
-    /// The app tracks peers by nickname, so it hears of a departure when the last key of the
-    /// nickname leaves, not when the first one does. `is_peer` agrees: it holds while one key lives.
+    /// The app tracks peers by key, so it hears of a departure for every key that leaves, not
+    /// only for the last key of the nickname. `is_peer` still holds while one key lives.
     #[test]
-    fn h7_the_app_hears_of_a_departure_when_the_last_key_of_a_nickname_leaves() {
+    fn h7_the_app_hears_of_each_key_that_leaves_also_when_another_key_holds_the_nickname() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let rig = Rig::new().await;
             let context = rig.context();
@@ -2965,15 +2966,15 @@ mod churn_red {
 
             say_goodbye(&first, &who, &rig, &mut state, &mut app).await;
             assert!(
-                app.0.is_empty() && state.is_peer("swift-cedar"),
-                "the app heard of a departure while a key of the nickname lives: {:?}",
+                app.0 == ["swift-cedar".to_owned()] && state.is_peer("swift-cedar"),
+                "the app did not hear of the first key leaving, or the nickname lost its peer: {:?}",
                 app.0
             );
 
             say_goodbye(&second, &who, &rig, &mut state, &mut app).await;
             assert_eq!(
                 app.0,
-                vec!["swift-cedar".to_owned()],
+                vec!["swift-cedar".to_owned(), "swift-cedar".to_owned()],
                 "the app did not hear of the last key leaving"
             );
             assert!(

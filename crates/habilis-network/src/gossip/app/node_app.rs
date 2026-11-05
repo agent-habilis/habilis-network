@@ -1,8 +1,8 @@
 use super::{AppClass, InboundApp};
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
-use crate::protocol::Nickname;
 use crate::protocol::messages::Authored;
+use crate::protocol::{AuthorKey, Nickname};
 
 /// The seam the engine drives for application-payload handling. The engine
 /// owns [`EventLoopState`] and hands the app the frame plus the loop context
@@ -75,23 +75,26 @@ pub trait NodeApp: Send {
     }
 
     /// A peer broadcast a graceful `Left` and was removed from the roster.
-    /// Fired for a `Left` stamped after our join, whether or not the arrival of
-    /// the peer was shown, unless another key still holds the nickname of the
-    /// departed peer: the app tracks peers by nickname, so it keeps its state
-    /// while a live key uses that nickname. An app that reads the whole roster
-    /// (`live_nicknames`) holds state for a peer that is not shown yet, and must
-    /// release it. Never fired for a relayed pre-join `Left`, and never from the
-    /// silence-timeout sweep: a quiet peer may return, so its app-side state
-    /// must survive a mere timeout.
+    /// Fired once for every key that leaves, with a `Left` stamped after our
+    /// join, whether or not the arrival of the peer was shown. Another key that
+    /// still holds the nickname does not change that: a nickname is a label,
+    /// and the state of the key that left is not valid for its twin. `nickname`
+    /// is the one that the roster recorded for `key`; the roster has dropped it
+    /// when the hook runs, so `state.nickname_of(key)` gives `None` here. An app
+    /// that reads the whole roster (`live_nicknames`) holds state for a peer
+    /// that is not shown yet, and must release it. Never fired for a relayed
+    /// pre-join `Left`, and never from the silence-timeout sweep: a quiet peer
+    /// may return, so its app-side state must survive a mere timeout.
     ///
     /// Defaults to a no-op — an app holding no per-peer state has nothing to
     /// release.
     async fn on_peer_left(
         &mut self,
+        key: &AuthorKey,
         nickname: &Nickname,
         state: &mut EventLoopState,
         context: &HandlerCtx<'_>,
     ) {
-        let _ = (nickname, state, context);
+        let _ = (key, nickname, state, context);
     }
 }

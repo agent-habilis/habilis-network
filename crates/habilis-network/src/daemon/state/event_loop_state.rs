@@ -1337,14 +1337,6 @@ impl EventLoopState {
         self.names.get(key).cloned()
     }
 
-    /// Whether a key of the roster, live or quiet, uses `nickname`.
-    pub(crate) fn nickname_is_held(&self, nickname: &Nickname) -> bool {
-        let roster = self.peers.iter().chain(self.quiet.iter());
-        roster
-            .filter_map(|key| self.names.get(key))
-            .any(|name| name == nickname)
-    }
-
     /// Remember that `key` said goodbye. A key is minted per run, so it never speaks again.
     pub(crate) fn note_left(&mut self, key: AuthorKey) {
         self.left_keys.peers.insert(key);
