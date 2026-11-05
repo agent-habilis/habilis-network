@@ -38,6 +38,10 @@ enum StateOp<'merge> {
         /// The mark of a state seed root (wire key `s`). Left out of every other body.
         #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
         seed: Option<SeedMark>,
+        /// The Lamport time of the change (wire key `t`). Only a state channel with state epochs
+        /// writes it, and every other body is the body from before the time.
+        #[serde(rename = "t", default, skip_serializing_if = "Option::is_none")]
+        time: Option<u64>,
     },
     /// The pre-automerge RFC 7386 merge shape. Retained only so a body still
     /// composes for the adversarial harness; the automerge engine ignores it (a
@@ -123,6 +127,21 @@ pub fn change_body_seed(
     epoch: u64,
     seed: Option<&SeedMark>,
 ) -> Result<MessageBody, DocError> {
+    change_body_timed(change, merge, epoch, seed, None)
+}
+
+/// [`change_body_seed`] with the Lamport time of the change (wire key `t`). A body of a channel
+/// that has no state epochs carries none, so its bytes are those of a body from before the time.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_timed(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+    seed: Option<&SeedMark>,
+    time: Option<u64>,
+) -> Result<MessageBody, DocError> {
     let tagged: Option<u64> = (epoch != 0).then_some(epoch);
     let mark: Option<SeedMark> = seed.cloned();
     let json = serde_json::to_string(&StateOp::Change {
@@ -130,6 +149,7 @@ pub fn change_body_seed(
         merge: merge.map(Cow::Borrowed),
         epoch: tagged,
         seed: mark,
+        time,
     })
     .map_err(DocError::encode)?;
     Ok(MessageBody::try_new(&json)?)
@@ -167,11 +187,16 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
     let op: StateOp<'_> = serde_json::from_str(body).ok()?;
     match op {
         StateOp::Change {
-            data, epoch, seed, ..
+            data,
+            epoch,
+            seed,
+            time,
+            ..
         } => Some(ParsedChange {
             bytes: bs58::decode(&data).into_vec().ok()?,
             epoch: epoch.unwrap_or(0),
             seed,
+            time,
         }),
         StateOp::Merge { .. } | StateOp::Enc { .. } => None,
     }
@@ -250,8 +275,8 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SeedMark, change_body, change_body_at, change_body_seed, decrypt_body, encrypt_body,
-        merge_body, parse_change, parse_change_body, parse_change_full,
+        SeedMark, change_body, change_body_at, change_body_seed, change_body_timed, decrypt_body,
+        encrypt_body, merge_body, parse_change, parse_change_body, parse_change_full,
     };
     use habilis_network_protocol::SymmetricKey;
 
@@ -277,6 +302,33 @@ mod tests {
         assert!(
             !plain.as_str().contains("\"s\""),
             "a body without a mark adds nothing to the wire"
+        );
+    }
+
+    #[test]
+    fn a_change_time_reads_back_and_a_body_without_one_adds_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let timed = change_body_timed(&[1, 2, 3], None, 0, None, Some(7)).expect("a body");
+        assert_eq!(
+            timed.as_str(),
+            r#"{"k":"change","c":"Ldp","t":7}"#,
+            "the time is the wire key t"
+        );
+        assert_eq!(
+            parse_change_full(timed.as_str()).expect("it parses").time,
+            Some(7),
+            "the time reads back"
+        );
+        let plain = change_body_timed(&[1, 2, 3], None, 0, None, None).expect("a body");
+        assert_eq!(
+            plain.as_str(),
+            r#"{"k":"change","c":"Ldp"}"#,
+            "a body with no time is the body from before the time"
+        );
+        assert_eq!(
+            parse_change_full(plain.as_str()).expect("it parses").time,
+            None,
+            "a body with no time reads with none"
         );
     }
 

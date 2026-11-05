@@ -12,4 +12,6 @@ pub struct ParsedChange {
     pub epoch: u64,
     /// The mark of a seed root, `None` for any other change.
     pub seed: Option<SeedMark>,
+    /// The Lamport time of the change, `None` when the body has none.
+    pub time: Option<u64>,
 }

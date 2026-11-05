@@ -175,7 +175,8 @@ impl Sim {
         let numbered: Vec<(usize, &Vec<u8>)> = chain.changes.iter().enumerate().collect();
         for (position, bytes) in numbered {
             let mark = (position == 0).then_some(&chain.mark);
-            let body = wire::change_body_seed(bytes, None, epoch, mark).expect("a body");
+            let body = wire::change_body_timed(bytes, None, epoch, mark, Some(chain.time))
+                .expect("a body");
             frames.push(signed(&name, body));
         }
         for frame in &frames {

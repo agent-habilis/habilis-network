@@ -18,6 +18,7 @@ use crate::{DocError, split_entry, wire};
 
 use automerge::transaction;
 use std::mem;
+use std::sync::atomic::{AtomicU64, Ordering};
 /// Matches the receive path these drops happen on, so a reader filtering the
 /// gossip target sees the orphan buffer alongside the frames feeding it.
 const LOG_TARGET: &str = "habilis_network::gossip";
@@ -182,7 +183,13 @@ pub struct SeedChain {
     /// that is not listed has its changes counted as not in the seed, so its author writes again
     /// the leaves of its own that differ. The caller warns once and counts it.
     pub truncated: bool,
+    /// The Lamport time of the frames of the chain: the cutter takes one time for the whole seed.
+    pub time: u64,
 }
+
+/// The highest Lamport time that a state change can carry: 2^53, the largest whole number that a
+/// JSON number keeps exact. A change with a higher time is refused, which bounds the clock.
+const DOC_TIME_MAX: u64 = 1 << 53;
 
 /// The root frame of a higher epoch that the document keeps until it adopts the epoch.
 #[derive(Debug)]
@@ -399,6 +406,13 @@ pub struct MeshDoc {
     /// Whether the document is applying the frames of the seed that it adopts, which the rule for
     /// a rival seed must not see.
     adopting: bool,
+    /// The Lamport clock of a state channel with state epochs: the highest time that this node
+    /// wrote or saw. A change takes the time `clock + 1`, so it is above every change that its
+    /// author saw. It never goes down and it does not restart at an epoch. At most `DOC_TIME_MAX`:
+    /// a change with a higher time is refused, so one integer is all the memory it needs.
+    clock: AtomicU64,
+    /// The state changes that were refused for want of a valid time: one integer, which saturates.
+    refused_without_time: u64,
     /// The author of the root of the seed that this document adopted for its epoch, `None` when
     /// it holds no seed. A rival root of the same epoch with a lower key replaces that seed.
     seed_author: Option<AuthorKey>,
@@ -477,6 +491,8 @@ impl MeshDoc {
             owner: None,
             carried: Vec::new(),
             adopting: false,
+            clock: AtomicU64::new(0),
+            refused_without_time: 0,
             seed_author: None,
             seed_hashes: HashSet::new(),
             refused_rivals: Vec::new(),
@@ -597,7 +613,9 @@ impl MeshDoc {
         ),
         DocError,
     > {
-        let plain = wire::change_body_at(change, merge, self.epoch)?;
+        let time: Option<u64> =
+            (self.state_epochs && self.gate.is_none()).then(|| self.next_time());
+        let plain = wire::change_body_timed(change, merge, self.epoch, None, time)?;
         let wire = match self.key.as_ref() {
             Some(key) => wire::encrypt_body(&plain, key)?,
             None => plain.clone(),
@@ -662,6 +680,33 @@ impl MeshDoc {
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// The Lamport clock of this document: the highest time that it wrote or saw.
+    #[must_use]
+    pub fn clock(&self) -> u64 {
+        self.clock.load(Ordering::Relaxed)
+    }
+
+    /// How many state changes this document refused for want of a valid time. A caller reads it
+    /// for a gauge, so a refusal is never silent.
+    #[must_use]
+    pub fn refused_without_time(&self) -> u64 {
+        self.refused_without_time
+    }
+
+    /// Take the time of the next change of this node: one above the clock, which then holds it.
+    /// [`Self::compose_wire_body`] and [`Self::build_seed`] call it, and so does a caller that
+    /// builds a body by hand.
+    pub fn next_time(&self) -> u64 {
+        let taken = self
+            .clock
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                Some(held.saturating_add(1).min(DOC_TIME_MAX))
+            });
+        taken.map_or(DOC_TIME_MAX, |held| {
+            held.saturating_add(1).min(DOC_TIME_MAX)
+        })
     }
 
     /// Whether a candidate seed waits to be adopted. A node that holds one adopts it after the wait
@@ -934,6 +979,7 @@ impl MeshDoc {
             changes,
             mark: SeedMark::new(frames, last).with_cut(cut),
             truncated,
+            time: self.next_time(),
         })
     }
 
@@ -1132,7 +1178,7 @@ impl MeshDoc {
         let Some(parsed) = self.change_bytes(frame) else {
             return Ingested::Ignored;
         };
-        let (epoch, mark) = (parsed.epoch, parsed.seed);
+        let (epoch, mark, time) = (parsed.epoch, parsed.seed, parsed.time);
         let Ok(change) = Change::from_bytes(parsed.bytes) else {
             return Ingested::Ignored;
         };
@@ -1144,6 +1190,20 @@ impl MeshDoc {
                 tracing::warn!(target: LOG_TARGET, changes, author = %frame.author, "dropping a channel change whose actor is not its signer's key");
             }
             return Ingested::Ignored;
+        }
+        if self.state_epochs && self.gate.is_none() {
+            // A state change names its Lamport time, and a node that cannot place it before or
+            // after its own writes would break the order of the replay rule.
+            let Some(stamped) = time.filter(|stamped| *stamped <= DOC_TIME_MAX) else {
+                self.refused_without_time = self.refused_without_time.saturating_add(1);
+                if let Some(refused) =
+                    self.warn_due("a state change with no valid time was refused")
+                {
+                    tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "a state change with no valid time was refused");
+                }
+                return Ingested::Ignored;
+            };
+            self.clock.fetch_max(stamped, Ordering::Relaxed);
         }
         if epoch != self.epoch {
             return self.ingest_other_epoch(epoch, &change, frame, mark);
@@ -1922,7 +1982,7 @@ mod tests {
         Ingested, MeshDoc, SelfWriteGate,
     };
     use crate::DocError;
-    use crate::wire::{SeedMark, change_body_seed, encrypt_body, parse_change_full};
+    use crate::wire::{SeedMark, change_body_timed, encrypt_body, parse_change_full};
     use automerge::Change;
     use automerge::transaction::Transactable;
     use habilis_network_protocol::messages::Verified;
@@ -3425,7 +3485,8 @@ mod tests {
         let numbered: Vec<(usize, &Vec<u8>)> = chain.changes.iter().enumerate().collect();
         for (index, bytes) in numbered {
             let mark = (index == 0).then_some(&chain.mark);
-            let plain = change_body_seed(bytes, None, epoch, mark).expect("a body");
+            let plain =
+                change_body_timed(bytes, None, epoch, mark, Some(chain.time)).expect("a body");
             let wire = match key {
                 Some(sealing) => encrypt_body(&plain, sealing).expect("sealed"),
                 None => plain,
@@ -3516,7 +3577,7 @@ mod tests {
         tx.commit();
         let mut changes = doc.get_changes(&heads);
         let change: Vec<u8> = changes.pop().expect("a change").raw_bytes().to_vec();
-        let plain = change_body_seed(&change, None, 3, None).expect("a body");
+        let plain = change_body_timed(&change, None, 3, None, Some(1)).expect("a body");
         let who = signer(cutter);
         let message =
             Message::new_channel_event(&MeshId::from("test"), cutter, plain, Channel::State);
@@ -3666,6 +3727,101 @@ mod tests {
         );
     }
 
+    /// The Lamport time that the plain body of `frame` carries.
+    fn time_of(frame: &Verified) -> Option<u64> {
+        parse_change_full(frame.body.as_str()).and_then(|parsed| parsed.time)
+    }
+
+    #[test]
+    fn a_state_change_carries_a_time_above_every_time_that_its_node_saw() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other) = (nick("me"), nick("other"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let first = write(&mut doc, &me, &json!({ "a": 1 }));
+        let second = write(&mut doc, &me, &json!({ "a": 2 }));
+        assert_eq!(time_of(&first), Some(1), "the first change of a node");
+        assert_eq!(time_of(&second), Some(2), "the next one is above it");
+        // A node with a far higher clock writes, and this document sees it.
+        let mut ahead = MeshDoc::new_ungated().state_epochs();
+        for _ in 0..49 {
+            let _ = ahead.next_time();
+        }
+        let late = write(&mut ahead, &other, &json!({ "z": 1 }));
+        assert_eq!(time_of(&late), Some(50), "the other node is at 50");
+        assert!(
+            matches!(doc.ingest(&late), Ingested::Applied { .. }),
+            "the change of the other node applies"
+        );
+        assert_eq!(
+            doc.clock(),
+            50,
+            "the clock takes the time of a change that it saw"
+        );
+        let after = write(&mut doc, &me, &json!({ "a": 3 }));
+        assert_eq!(time_of(&after), Some(51), "a write after it is above it");
+    }
+
+    #[test]
+    fn the_clock_does_not_restart_at_an_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for count in 0..9 {
+            write(&mut doc, &me, &json!({ "n": count }));
+        }
+        assert_eq!(doc.clock(), 9, "nine writes");
+        for frame in &seed_frames(&cutter, &live_state(), 3, None) {
+            let _ = doc.ingest(frame);
+        }
+        ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(doc.epoch(), 3, "the document adopted the seed");
+        let after = write(&mut doc, &me, &json!({ "again": 1 }));
+        assert!(
+            time_of(&after) > Some(9),
+            "a write of the new epoch is above the old clock: {:?}",
+            time_of(&after)
+        );
+    }
+
+    #[test]
+    fn a_state_change_with_no_time_is_refused_when_state_epochs_are_on() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a state change with no valid time was refused",
+        );
+        let me = nick("me");
+        let timeless = MeshDoc::new_ungated();
+        let bytes = timeless
+            .build_change(&json!({ "a": 1 }), &pad_seed(me.as_str().as_bytes()))
+            .expect("applies")
+            .expect("a change");
+        let body = super::wire::change_body_at(&bytes, None, 0).expect("a body");
+        let key = signer(&me);
+        let frame = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &me, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        let mut off = MeshDoc::new_ungated();
+        assert!(
+            matches!(off.ingest(&frame), Ingested::Applied { .. }),
+            "a document with state epochs off takes it, as before"
+        );
+        let mut on = MeshDoc::new_ungated().state_epochs();
+        let taken = on.ingest(&frame);
+        assert!(
+            matches!(taken, Ingested::Ignored),
+            "a state epoch document refuses a change with no time: {taken:?}"
+        );
+        assert_eq!(on.to_json(), json!({}), "nothing was applied");
+        assert_eq!(
+            on.refused_without_time(),
+            1,
+            "the refusal is counted, so it is never silent"
+        );
+    }
+
     #[test]
     fn a_node_adopts_only_a_complete_seed_chain() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -3786,7 +3942,8 @@ mod tests {
             .expect("the live json splits");
         let too_many = u32::try_from(DOC_SEED_FRAMES_MAX + 1).expect("fits");
         let mark = SeedMark::new(too_many, chain.mark.last.clone());
-        let plain = change_body_seed(&chain.changes[0], None, 3, Some(&mark)).expect("a body");
+        let plain = change_body_timed(&chain.changes[0], None, 3, Some(&mark), Some(chain.time))
+            .expect("a body");
         let who = signer(&cutter);
         let message =
             Message::new_channel_event(&MeshId::from("test"), &cutter, plain, Channel::State);
