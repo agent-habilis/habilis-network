@@ -254,6 +254,10 @@ struct OpSpan {
 /// change by binary search.
 type OpIndex = HashMap<Vec<u8>, Vec<OpSpan>>;
 
+/// The object that each parent path names, read once for each call of `stamps_of`: the paths of
+/// one call mostly share a few parents, so the walk from the root is made once for each of them.
+type ParentObjects = HashMap<Vec<String>, Option<ObjId>>;
+
 /// The bound of the Lamport time of a state change: 2^53, the largest whole number that a JSON
 /// number keeps exact. A change with a time at or above it is refused, so the clock stays below it
 /// and `next_time` never saturates in practice. This does not stop a signed member from writing a
@@ -882,9 +886,10 @@ impl MeshDoc {
             spans.sort_by_key(|span| span.start);
         }
         let mut rebuilt: RebuiltStamps = HashMap::new();
+        let mut parents: ParentObjects = HashMap::new();
         paths
             .iter()
-            .map(|path| self.stamp_at(path, &index, &mut rebuilt))
+            .map(|path| self.stamp_at(path, &index, &mut rebuilt, &mut parents))
             .collect()
     }
 
@@ -909,20 +914,15 @@ impl MeshDoc {
         path: &[String],
         index: &OpIndex,
         rebuilt: &mut RebuiltStamps,
+        parents: &mut ParentObjects,
     ) -> Option<Stamp> {
-        let mut object: ObjId = ROOT;
-        let mut holder: Option<ObjId> = None;
-        for (position, key) in path.iter().enumerate() {
-            let (value, id) = self.doc.get(&object, key.as_str()).ok()??;
-            if position + 1 == path.len() {
-                holder = Some(id);
-                break;
-            }
-            if !matches!(value, automerge::Value::Object(_)) {
-                return None;
-            }
-            object = id;
+        let (leaf_key, parent_path) = path.split_last()?;
+        if !parents.contains_key(parent_path) {
+            parents.insert(parent_path.to_vec(), self.object_at(parent_path));
         }
+        let parent: ObjId = parents.get(parent_path)?.clone()?;
+        let (_, id) = self.doc.get(&parent, leaf_key.as_str()).ok()??;
+        let holder = Some(id);
         let ObjId::Id(counter, actor, _) = holder? else {
             return None;
         };
@@ -950,6 +950,19 @@ impl MeshDoc {
             .and_then(|frame| self.change_bytes(frame))?
             .time?;
         Some(Stamp::new(time, actor_tag(&actor)))
+    }
+
+    /// The object that `path` names, `None` when the path holds no object.
+    fn object_at(&self, path: &[String]) -> Option<ObjId> {
+        let mut object: ObjId = ROOT;
+        for key in path {
+            let (value, id) = self.doc.get(&object, key.as_str()).ok()??;
+            if !matches!(value, automerge::Value::Object(_)) {
+                return None;
+            }
+            object = id;
+        }
+        Some(object)
     }
 
     /// How many paths of a seed got the stamp 0 for want of a time, since the document began. A
@@ -1974,31 +1987,42 @@ impl MeshDoc {
     fn lowered_leaves(&self, after: &Automerge, named: &[(Vec<String>, Stamp)]) -> Vec<Lowered> {
         let named_stamps: HashMap<&Vec<String>, &Stamp> =
             named.iter().map(|(path, stamp)| (path, stamp)).collect();
-        let mut held: BTreeMap<Vec<String>, Option<Value>> = BTreeMap::new();
+        let paths: Vec<&[String]> = named.iter().map(|(path, _)| path.as_slice()).collect();
+        let mut before_reader = PathReader::new(&self.doc, &paths);
+        let mut after_reader = PathReader::new(after, &paths);
+        // For each leaf that differs: the value that this node held (`None` for a leaf that the
+        // frame names with no value held), and whether the document has a value there after the frame.
+        let mut held: BTreeMap<Vec<String>, (Option<Value>, bool)> = BTreeMap::new();
         for (path, _) in named {
-            if let Some(before) = json_at(&self.doc, path) {
+            let before = before_reader.value_at(path);
+            let now = after_reader.value_at(path);
+            if let Some(object) = &before {
                 let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
-                collect_leaves(&before, &mut path.clone(), &mut leaves);
+                collect_leaves(object, &mut path.clone(), &mut leaves);
                 for (leaf, value) in leaves {
-                    if json_at(after, &leaf).as_ref() != Some(&value) {
-                        held.insert(leaf, Some(value));
+                    let there = now
+                        .as_ref()
+                        .and_then(|after_value| lookup(after_value, &leaf[path.len()..]));
+                    if there != Some(&value) {
+                        held.insert(leaf, (Some(value), there.is_some()));
                     }
                 }
             }
             // A leaf that the frame names: a delete that the frame undoes shows here.
-            if json_at(after, path).is_some_and(|value| !is_full_object(&value)) {
-                held.entry(path.clone()).or_insert(None);
+            if now.as_ref().is_some_and(|value| !is_full_object(value)) {
+                held.entry(path.clone()).or_insert((None, true));
             }
         }
-        let paths: Vec<Vec<String>> = held.keys().cloned().collect();
-        let before = self.stamps_of(&paths);
-        paths
+        let leaf_paths: Vec<Vec<String>> = held.keys().cloned().collect();
+        let before = self.stamps_of(&leaf_paths);
+        leaf_paths
             .into_iter()
             .zip(before)
             .map(|(path, before_stamp)| {
-                let value = held.get(&path).cloned().flatten();
-                let after_stamp = json_at(after, &path)
-                    .and_then(|_| named_stamps.get(&path).map(|stamp| (*stamp).clone()));
+                let (value, present) = held.remove(&path).unwrap_or((None, false));
+                let after_stamp = present
+                    .then(|| named_stamps.get(&path).map(|stamp| (*stamp).clone()))
+                    .flatten();
                 Lowered {
                     path,
                     value,
@@ -2596,10 +2620,65 @@ fn is_full_object(value: &Value) -> bool {
     matches!(value, Value::Object(fields) if !fields.is_empty())
 }
 
-/// The value at `path` in `doc`, read from the path and the subtree below it, without hydrating
-/// the rest of the document.
+/// Reads values of one document by path. A parent object that several of the paths share is read
+/// once as JSON, because a read of each path walks the parent again; a path with no sibling is read
+/// by its walk, so a leaf in a large object costs no pass over it.
+struct PathReader<'doc> {
+    doc: &'doc Automerge,
+    /// The parents that at least `PATH_READER_SHARED_MIN` of the paths share.
+    shared: HashSet<Vec<String>>,
+    read: HashMap<Vec<String>, Option<Value>>,
+}
+
+/// The number of paths with one parent from which the parent is read once.
+const PATH_READER_SHARED_MIN: usize = 4;
+
+impl<'doc> PathReader<'doc> {
+    fn new(doc: &'doc Automerge, paths: &[&[String]]) -> Self {
+        let mut counts: HashMap<&[String], usize> = HashMap::new();
+        for path in paths {
+            if let Some((_, parent)) = path.split_last() {
+                *counts.entry(parent).or_default() += 1;
+            }
+        }
+        let shared = counts
+            .into_iter()
+            .filter(|(_, count)| *count >= PATH_READER_SHARED_MIN)
+            .map(|(parent, _)| parent.to_vec())
+            .collect();
+        Self {
+            doc,
+            shared,
+            read: HashMap::new(),
+        }
+    }
+
+    fn value_at(&mut self, path: &[String]) -> Option<Value> {
+        let doc = self.doc;
+        let (key, parent) = path.split_last()?;
+        if !self.shared.contains(parent) {
+            return json_at(doc, path);
+        }
+        self.read
+            .entry(parent.to_vec())
+            .or_insert_with(|| json_at(doc, parent))
+            .as_ref()
+            .and_then(|object| object.get(key.as_str()))
+            .cloned()
+    }
+}
+
+/// The value at `path` in `doc`: a walk down the path, and one pass over the subtree below it. The
+/// empty path is the whole document.
 fn json_at(doc: &Automerge, path: &[String]) -> Option<Value> {
     let mut object: ObjId = ROOT;
+    if path.is_empty() {
+        return Some(subtree_json(
+            doc,
+            &automerge::Value::Object(ObjType::Map),
+            &object,
+        ));
+    }
     for (position, key) in path.iter().enumerate() {
         let (value, id) = doc.get(&object, key.as_str()).ok()??;
         if position + 1 == path.len() {
@@ -2613,29 +2692,29 @@ fn json_at(doc: &Automerge, path: &[String]) -> Option<Value> {
     None
 }
 
-/// The JSON of one value of `doc` and of everything below it. The state JSON holds numbers,
-/// strings, booleans, `null`, lists and objects, so any other scalar reads as `null`.
+/// The JSON of one value of `doc` and of everything below it, in one pass over each object. The
+/// state JSON holds numbers, strings, booleans, `null`, lists and objects, so any other scalar
+/// reads as `null`.
 fn subtree_json(doc: &Automerge, value: &automerge::Value<'_>, id: &ObjId) -> Value {
     match value {
-        automerge::Value::Object(ObjType::List) => {
-            let mut items: Vec<Value> = Vec::new();
-            for position in 0..doc.length(id) {
-                if let Ok(Some((inner, inner_id))) = doc.get(id, position) {
-                    items.push(subtree_json(doc, &inner, &inner_id));
-                }
-            }
-            Value::Array(items)
-        }
+        automerge::Value::Object(ObjType::List) => Value::Array(
+            doc.list_range(id, ..)
+                .map(|item| {
+                    let child = item.id();
+                    subtree_json(doc, &item.value.into_value(), &child)
+                })
+                .collect(),
+        ),
         automerge::Value::Object(ObjType::Text) => Value::String(doc.text(id).unwrap_or_default()),
-        automerge::Value::Object(ObjType::Map | ObjType::Table) => {
-            let mut fields: Map<String, Value> = Map::new();
-            for key in doc.keys(id) {
-                if let Ok(Some((inner, inner_id))) = doc.get(id, key.as_str()) {
-                    fields.insert(key, subtree_json(doc, &inner, &inner_id));
-                }
-            }
-            Value::Object(fields)
-        }
+        automerge::Value::Object(ObjType::Map | ObjType::Table) => Value::Object(
+            doc.map_range(id, ..)
+                .map(|item| {
+                    let child = item.id();
+                    let json = subtree_json(doc, &item.value.into_value(), &child);
+                    (item.key.into_owned(), json)
+                })
+                .collect(),
+        ),
         automerge::Value::Scalar(scalar) => scalar_json(scalar),
     }
 }
