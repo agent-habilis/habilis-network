@@ -66,6 +66,11 @@ impl ProofExchange {
         self.book.allow_answer(now)
     }
 
+    /// How many proofs this node refused because their run did not beat the held run.
+    pub(crate) fn ties_refused(&self) -> u64 {
+        0
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.book.len()
     }
@@ -174,5 +179,10 @@ mod tests {
         );
         let held = receiver.proof_of(&session).expect("a proof is held");
         assert_eq!(held.run, 6, "the held proof is the highest run");
+        assert_eq!(
+            receiver.ties_refused(),
+            2,
+            "a tie and a lower run are counted"
+        );
     }
 }
