@@ -2679,6 +2679,40 @@ mod tests {
         );
     }
 
+    /// A refused signer that advertises a new endpoint replaces the retained one. The address of
+    /// the displaced endpoint was handed to the book and the pool, and it goes unless a hint or
+    /// another refused signer still names it.
+    #[test]
+    fn a_replaced_refused_endpoint_leaves_the_book_unless_another_signer_names_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second, shared) = (
+            iroh::EndpointAddr::new(endpoint_id(1)),
+            iroh::EndpointAddr::new(endpoint_id(2)),
+            iroh::EndpointAddr::new(endpoint_id(3)),
+        );
+        for address in [&first, &second, &shared] {
+            state.unicast_pool.note_addr(address);
+        }
+        state.retain_refused_endpoint(test_key("rival"), first.clone());
+        state.retain_refused_endpoint(test_key("other"), shared.clone());
+        state.retain_refused_endpoint(test_key("rival"), shared.clone());
+
+        assert!(
+            !state.unicast_pool.remembers_address(&first),
+            "the displaced endpoint stayed in the book"
+        );
+        state.retain_refused_endpoint(test_key("rival"), second.clone());
+        assert!(
+            state.unicast_pool.remembers_address(&shared),
+            "the displaced endpoint left the book while another signer retains it"
+        );
+        assert!(
+            state.unicast_pool.remembers_address(&second),
+            "the new retained endpoint is not in the book"
+        );
+    }
+
     // After a failover the rendezvous keeps its id, but a refusal from the old
     // holder says nothing about the new one: the wait starts over.
     #[test]

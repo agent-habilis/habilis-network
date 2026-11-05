@@ -1569,7 +1569,7 @@ async fn handle_peer_info(
     let changed = !state.unicast_pool.remembers_address(&peer_addr);
     if may_bind {
         state.bind_peer_endpoint(message.key(), message.author.clone(), peer_addr.clone());
-        state.refused_endpoints.remove(&hinter);
+        state.release_refused_endpoint(&hinter);
     } else if !state.key_said_goodbye(hinter) {
         state.retain_refused_endpoint(hinter, peer_addr.clone());
     }
@@ -3255,6 +3255,51 @@ mod first_contact_tests {
             assert!(
                 !state.refused_endpoints.contains_key(&second.author_key()),
                 "the retained endpoint stayed after the rebind"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A refused key binds a hint at last, when the key that held the nickname is gone from the
+    /// roster. The endpoint that it had retained is not a hint, and its address leaves the book.
+    #[test]
+    fn a_refused_key_that_binds_releases_the_endpoint_it_had_retained() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::peer_addr_error;
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let twin = nick("twin");
+            let (held, bound) = (endpoint_id(54), endpoint_id(55));
+            let (first, second) = (Identity::generate(), Identity::generate());
+            let mut state = fresh_state();
+            for run in [&first, &second] {
+                state.names.insert(run.author_key(), twin.clone());
+                state.peers.insert(run.author_key());
+            }
+            let advertise = |run: &Identity, endpoint| {
+                let json =
+                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+                let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+                Message::new_peer_info(&node.mesh, &twin, body).sign(run)
+            };
+            super::handle_peer_info(&advertise(&first, endpoint_id(53)), &mut state, &context)
+                .await;
+            super::handle_peer_info(&advertise(&second, held), &mut state, &context).await;
+            assert!(
+                state.refused_endpoints.contains_key(&second.author_key()),
+                "the second key was not refused"
+            );
+            state.peers.remove(&first.author_key());
+
+            super::handle_peer_info(&advertise(&second, bound), &mut state, &context).await;
+
+            assert!(
+                !state
+                    .unicast_pool
+                    .remembers_address(&iroh::EndpointAddr::new(held)),
+                "the endpoint that the key had retained stayed in the book after it bound"
             );
             node.endpoint.close().await;
         });
