@@ -28,9 +28,9 @@ State: `peers`. Code: `lifecycle/membership.rs`.
 
 Layer: membership. Keyed by author key.
 
-A message with one recipient. The frame names the recipient by author key, in the signed `to` field. A nickname is a label and names no member, so two live keys that use one nickname are two recipients. A caller that holds only a nickname asks `key_of`. It gives the one live key of the nickname, or the reason it cannot: no live key, or two or more. A receiver reads a directed frame only if `to` is its own key. An app hook that names a peer takes the key: `on_peer_left` gives the key and the nickname that the roster recorded, and it fires for each key that leaves.
+A message with one recipient. The frame names the recipient by author key, in the signed `to` field. A nickname is a label and names no member, so two live keys that use one nickname are two recipients. A caller that holds only a nickname asks `key_of`. It gives the one live key of the nickname, or the reason it cannot: no live key, or two or more. A receiver reads a directed frame only if `to` is its own key. An app hook that names a peer takes the key. `on_peer_left` gives the key and the nickname that the roster recorded, and it fires for each key that leaves. `on_meta_applied` gives the key of the author, and the meta slot of each key is the lowercase hex of that key.
 
-Code: `EventLoopState::key_of`, `Messaging::SendToKey`, `sole_addressee`, `NodeApp::on_peer_left`.
+Code: `EventLoopState::key_of`, `Messaging::SendToKey`, `sole_addressee`, `NodeApp::on_peer_left`, `NodeApp::on_meta_applied`.
 
 ### mesh
 
