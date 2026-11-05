@@ -546,6 +546,27 @@ mod tests {
     }
 
     #[test]
+    fn a_seed_mark_with_a_cut_vector_is_no_mark() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mark = SeedMark::new(3, "ab".repeat(32));
+        let body = change_body_seed(&[1, 2], None, 4, Some(&mark)).expect("a seed root body");
+        let plain = format!(r#"{{"n":3,"l":"{}"}}"#, "ab".repeat(32));
+        assert!(
+            body.as_str().contains(&plain),
+            "the mark of a seed names its frames and its last change only: {}",
+            body.as_str()
+        );
+        let old = body.as_str().replace(
+            &plain,
+            &format!(r#"{{"n":3,"l":"{}","c":[["aa",2]]}}"#, "ab".repeat(32)),
+        );
+        assert!(
+            parse_change_full(&old).is_none(),
+            "a mark with the old cut vector key is refused"
+        );
+    }
+
+    #[test]
     fn an_epoch_above_zero_reads_back_and_epoch_zero_adds_nothing_to_the_body() {
         let _guard = ::habilis_network_test_tracing::init();
         let before_epochs = r#"{"k":"change","c":"Ldp"}"#;
