@@ -112,6 +112,65 @@ impl Identity {
     }
 }
 
+/// An identity's proof that a session (its session key) speaks as a nickname on a mesh, for a run.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct IdentityProof {
+    /// The identity key that signed the proof.
+    pub identity: PublicKey,
+    /// The run counter of the session. A newer run of an identity supersedes the older ones.
+    pub run: u64,
+    /// The identity's signature over the session, nickname, mesh and run.
+    pub signature: Signature,
+}
+
+/// What the identity signs: a domain label, then the session key, the nickname, the mesh and the
+/// run, each field separated, so no two different claims share bytes.
+fn proof_bytes(session: &AuthorKey, nickname: &str, mesh: &str, run: u64) -> Vec<u8> {
+    let mut bytes = b"habilis-mesh/identity-proof/v1".to_vec();
+    bytes.extend_from_slice(session.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(nickname.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(mesh.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&run.to_be_bytes());
+    bytes
+}
+
+impl Identity {
+    /// Prove that `session` speaks as `nickname` on `mesh`, in run `run`.
+    #[must_use]
+    pub fn prove(
+        &self,
+        session: &AuthorKey,
+        nickname: &str,
+        mesh: &str,
+        run: u64,
+    ) -> IdentityProof {
+        IdentityProof {
+            identity: self.public(),
+            run,
+            signature: self.sign(&proof_bytes(session, nickname, mesh, run)),
+        }
+    }
+}
+
+/// Whether `proof` is the identity's proof of `session` as `nickname` on `mesh`, for its run.
+#[must_use]
+pub fn verify_proof(
+    proof: &IdentityProof,
+    session: &AuthorKey,
+    nickname: &str,
+    mesh: &str,
+) -> bool {
+    verify(
+        &proof.identity,
+        &proof_bytes(session, nickname, mesh, proof.run),
+        &proof.signature,
+    )
+}
+
 /// KDF label deriving the X25519 encryption key from the Ed25519 identity seed —
 /// distinct from every other `derive_secret` label so the keys stay independent.
 const SEAL_ENC_LABEL: &[u8] = b"habilis-mesh/x25519-enc/v1";
@@ -311,10 +370,19 @@ mod tests {
         let identity = Identity::generate();
         let session = AuthorKey::from([7u8; 32]);
         let proof = identity.prove(&session, "alice", "mesh", 3);
-        assert!(super::verify_proof(&proof, &session, "alice", "mesh"), "the proof verifies");
-        assert!(!super::verify_proof(&proof, &session, "bob", "mesh"), "another nickname fails");
-        let other_run = super::IdentityProof { run: 4, ..proof.clone() };
-        assert!(!super::verify_proof(&other_run, &session, "alice", "mesh"), "another run fails");
+        assert!(
+            super::verify_proof(&proof, &session, "alice", "mesh"),
+            "the proof verifies"
+        );
+        assert!(
+            !super::verify_proof(&proof, &session, "bob", "mesh"),
+            "another nickname fails"
+        );
+        let other_run = super::IdentityProof { run: 4, ..proof };
+        assert!(
+            !super::verify_proof(&other_run, &session, "alice", "mesh"),
+            "another run fails"
+        );
     }
 
     /// The identity key is the one a restarted member keeps: its seed round-trips, so the
