@@ -286,6 +286,17 @@ pub enum Messaging {
         /// Gets `Ok` when the request is done, or the error text.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Send one `msg` to the member that holds an author key. Two live members can use one
+    /// nickname, and [`Messaging::Send`] refuses such a nickname; a key names one member. Build
+    /// `body` with [`msg_body`].
+    SendToKey {
+        /// The author key of the recipient.
+        to: AuthorKey,
+        /// The body of the message (sealed for a directed frame on a passworded mesh).
+        body: MessageBody,
+        /// Gets `Ok` when the request is done, or the error text.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Merge a change into the shared state.
     StateMerge {
         /// The RFC 7386 merge to apply.
@@ -810,6 +821,47 @@ impl NodeDriver for MembershipApp {
 }
 
 impl MembershipApp {
+    /// Send one `msg` frame to `to` (a broadcast for `None`) and answer `reply` with the outcome.
+    /// Returns `true`: a frame that went out is a live frame.
+    async fn send_msg(
+        &mut self,
+        state: &mut EventLoopState,
+        context: &HandlerCtx<'_>,
+        to: Option<AuthorKey>,
+        body: MessageBody,
+        reply: oneshot::Sender<Result<(), String>>,
+    ) -> bool {
+        let frame = app_frame(
+            context,
+            AppFrameParams::new(
+                AppTag::try_new(MSG_TAG).expect("a valid app tag"),
+                to,
+                None,
+                body,
+            ),
+        );
+        let class = self.classify(&frame.authored());
+        match send_app(state, context, frame, class).await {
+            Ok(Delivered::Done) => {
+                let _ = reply.send(Ok(()));
+            }
+            Ok(Delivered::Pending(handle)) => {
+                // The dial runs on a task, and so does the wait for its outcome: the loop
+                // serves the next request meanwhile.
+                task::spawn(async move {
+                    let outcome = handle.await.unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!("the send ended without an outcome"))
+                    });
+                    let _ = reply.send(outcome.map_err(|error| error.to_string()));
+                });
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error.to_string()));
+            }
+        }
+        true
+    }
+
     async fn handle_messaging(
         &mut self,
         request: Messaging,
@@ -825,35 +877,10 @@ impl MembershipApp {
                         return false;
                     }
                 };
-                let frame = app_frame(
-                    context,
-                    AppFrameParams::new(
-                        AppTag::try_new(MSG_TAG).expect("a valid app tag"),
-                        to,
-                        None,
-                        body,
-                    ),
-                );
-                let class = self.classify(&frame.authored());
-                match send_app(state, context, frame, class).await {
-                    Ok(Delivered::Done) => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    Ok(Delivered::Pending(handle)) => {
-                        // The dial runs on a task, and so does the wait for its outcome: the loop
-                        // serves the next request meanwhile.
-                        task::spawn(async move {
-                            let outcome = handle.await.unwrap_or_else(|_| {
-                                Err(anyhow::anyhow!("the send ended without an outcome"))
-                            });
-                            let _ = reply.send(outcome.map_err(|error| error.to_string()));
-                        });
-                    }
-                    Err(error) => {
-                        let _ = reply.send(Err(error.to_string()));
-                    }
-                }
-                true
+                self.send_msg(state, context, to, body, reply).await
+            }
+            Messaging::SendToKey { to, body, reply } => {
+                self.send_msg(state, context, Some(to), body, reply).await
             }
             Messaging::StateMerge { merge, reply } => {
                 let merged = broadcast_state_merge(
@@ -1575,6 +1602,10 @@ mod tests {
         MSG_TAG, MembershipApp, MessageBody, Messaging, Nickname, Request, mpsc, msg_body,
         msg_fits, recipient_key,
     };
+    #[cfg(feature = "host")]
+    use crate::daemon::state::Standing;
+    #[cfg(feature = "host")]
+    use crate::protocol::messages::sole_addressee;
     use crate::protocol::{AuthorKey, Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
     #[cfg(feature = "host")]
@@ -1760,6 +1791,67 @@ mod tests {
             assert!(
                 !live,
                 "a state merge is a durable write and does not refresh the keepalive clock"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// Two live keys use one nickname. A send by nickname is refused, because the engine never
+    /// picks one of them. A send to a key reaches the key that the caller names.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_send_to_a_key_reaches_one_of_two_keys_that_share_a_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            state.standing.remove(&Standing::Meshed);
+            let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+            for key in [first, second] {
+                state.names.insert(key, Nickname::from("twin"));
+                state.peers.insert(key);
+            }
+            let (inbound, _queue) = mpsc::channel(1);
+            let mut app = MembershipApp::new(inbound);
+
+            let (reply, by_nickname) = oneshot::channel();
+            let request = Request::Messaging(Messaging::Send {
+                to: Some(Nickname::from("twin")),
+                body: MessageBody::from("hi"),
+                reply,
+            });
+            app.handle_session(request, &mut state, &context).await;
+            let refused = by_nickname
+                .await
+                .expect("the request is answered")
+                .expect_err("a send to a nickname of two live keys");
+            assert!(
+                refused.contains("two or more live peers use this nickname"),
+                "the refusal does not name the cause: {refused}"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the refused send was buffered"
+            );
+
+            let (key_reply, by_key) = oneshot::channel();
+            let to_key = Request::Messaging(Messaging::SendToKey {
+                to: second,
+                body: MessageBody::from("hi"),
+                reply: key_reply,
+            });
+            app.handle_session(to_key, &mut state, &context).await;
+            assert_eq!(
+                by_key.await.expect("the request is answered"),
+                Ok(()),
+                "the send to a key of the nickname was refused"
+            );
+            let buffered = state.pending_outbound.take();
+            assert_eq!(buffered.len(), 1, "the accepted frame is in the buffer");
+            assert_eq!(
+                sole_addressee(&buffered[0].0.kind),
+                Some(&second),
+                "the frame does not name the key that the caller chose"
             );
             node.endpoint.close().await;
         });
