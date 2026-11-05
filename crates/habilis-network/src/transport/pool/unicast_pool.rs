@@ -75,6 +75,10 @@ pub(in crate::transport::pool) struct PoolInner {
     /// operation is inert, so a directed send simply errors instead of dialing.
     pub(in crate::transport::pool) endpoint: Option<Endpoint>,
     pub(in crate::transport::pool) conns: Mutex<HashMap<EndpointId, Pooled>>,
+    /// The bytes of every frame written to a pooled connection, so a test can count what a node
+    /// puts on the wire beside gossip.
+    #[cfg(test)]
+    pub(in crate::transport::pool) tap: std_Mutex<Vec<Vec<u8>>>,
     /// How long a pooled connection may go unused before it is closed. The
     /// peer's acceptor closes an unused connection on its own side too, so a
     /// link that nobody sends on does not hold its two ends open for ever.
@@ -152,6 +156,8 @@ impl UnicastPool {
             inner: Arc::new(PoolInner {
                 endpoint: Some(endpoint),
                 conns: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                tap: std_Mutex::default(),
                 idle,
                 probe_hold,
                 sweeping: AtomicBool::new(false),
@@ -187,7 +193,25 @@ impl UnicastPool {
         bytes: &[u8],
     ) -> Result<()> {
         let busy = self.inner.admission.get().map(|table| table.busy(eid));
-        send_one(connection, bytes, busy, self.inner.tally.get()).await
+        #[cfg(test)]
+        let recorded = bytes.to_vec();
+        send_one(connection, bytes, busy, self.inner.tally.get()).await?;
+        // The tap holds only the frames that were written, or a redial counts a frame twice.
+        #[cfg(test)]
+        if let Ok(mut tap) = self.inner.tap.lock() {
+            tap.push(recorded);
+        }
+        Ok(())
+    }
+
+    /// The frames written to pooled connections so far, as they went on the wire.
+    #[cfg(test)]
+    pub(crate) fn sent_frames(&self) -> Vec<Vec<u8>> {
+        self.inner
+            .tap
+            .lock()
+            .map(|tap| tap.clone())
+            .unwrap_or_default()
     }
 
     /// A detached pool with no endpoint — every operation is a no-op. The
@@ -200,6 +224,8 @@ impl UnicastPool {
             inner: Arc::new(PoolInner {
                 endpoint: None,
                 conns: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                tap: std_Mutex::default(),
                 idle: DIRECT_IDLE_BACKSTOP,
                 probe_hold: PROBE_HOLD,
                 sweeping: AtomicBool::new(false),
@@ -266,6 +292,32 @@ impl UnicastPool {
         if let Ok(mut addrs) = self.inner.addrs.lock() {
             addrs.insert(address.id, address.clone());
         }
+    }
+
+    /// Whether `address` is the dial address remembered for its endpoint. Only `note_addr` writes
+    /// it, next to the address book, so a dial hint that names the address does not count.
+    pub(crate) fn remembers_address(&self, address: &EndpointAddr) -> bool {
+        self.inner
+            .addrs
+            .lock()
+            .is_ok_and(|addrs| addrs.get(&address.id) == Some(address))
+    }
+
+    /// Drop the remembered dial address of `eid`. The pooled connection stays open: the caller
+    /// uses this when only the address has no owner left.
+    pub(crate) fn forget_addr(&self, eid: EndpointId) {
+        if let Ok(mut addrs) = self.inner.addrs.lock() {
+            addrs.remove(&eid);
+        }
+    }
+
+    /// Whether a dial address of `eid` is remembered.
+    #[cfg(test)]
+    pub(crate) fn has_addr(&self, eid: EndpointId) -> bool {
+        self.inner
+            .addrs
+            .lock()
+            .is_ok_and(|addrs| addrs.contains_key(&eid))
     }
 
     /// The open pooled connection to `eid`, whoever opened it. A contended lock

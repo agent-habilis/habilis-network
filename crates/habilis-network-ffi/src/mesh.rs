@@ -164,7 +164,7 @@ impl Mesh {
         self.await_reply(answer)
     }
 
-    /// How many peers other than us are in the mesh right now — the cheap
+    /// How many members are in the mesh right now, us included — the cheap
     /// question a caller waiting for company actually has, without a JSON
     /// round-trip through [`Mesh::peers_json`].
     ///

@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use iroh::{EndpointId, SecretKey, Signature};
 
 use crate::protocol::identity::{decode_hex, encode_hex};
-use crate::protocol::{AuthorKey, MeshId};
+use crate::protocol::{AuthorKey, MeshId, UnixSecs};
 
 const DOMAIN: &[u8] = b"habilis-network/peerinfo-endpoint-proof/1";
 
@@ -58,6 +58,11 @@ pub(crate) struct ProvenEndpoints {
     by_signer: HashMap<AuthorKey, EndpointId>,
     order: VecDeque<AuthorKey>,
     cap: usize,
+    /// The endpoint of each roster key whose proof was checked, for the trust in a link vector.
+    /// It has no cap and no order: the roster bounds it, and the sweep drops a key that left.
+    trusted: HashMap<AuthorKey, EndpointId>,
+    /// The stamp of the newest `PeerInfo` that proved each endpoint of `by_signer`.
+    stamps: HashMap<EndpointId, UnixSecs>,
 }
 
 impl ProvenEndpoints {
@@ -66,20 +71,66 @@ impl ProvenEndpoints {
             by_signer: HashMap::new(),
             order: VecDeque::new(),
             cap,
+            trusted: HashMap::new(),
+            stamps: HashMap::new(),
         }
+    }
+
+    /// The endpoint that `signer`, a key of the roster, proved.
+    pub(crate) fn trusted(&self, signer: &AuthorKey) -> Option<EndpointId> {
+        self.trusted.get(signer).copied()
+    }
+
+    /// Keep the trust in `signer` at `endpoint`, in place of the trust in any other signer of that
+    /// endpoint: an endpoint has one signer. The caller admits roster keys only.
+    pub(crate) fn trust(&mut self, signer: AuthorKey, endpoint: EndpointId) {
+        self.trusted
+            .retain(|other, trusted| *other == signer || *trusted != endpoint);
+        self.trusted.insert(signer, endpoint);
+    }
+
+    /// Drop the trust in each key that `keep` refuses.
+    pub(crate) fn retain_trusted(&mut self, keep: impl Fn(&AuthorKey) -> bool) {
+        self.trusted.retain(|signer, _| keep(signer));
+    }
+
+    /// Drop the trust in `signer`.
+    pub(crate) fn forget_trust(&mut self, signer: &AuthorKey) {
+        self.trusted.remove(signer);
     }
 
     pub(crate) fn get(&self, signer: &AuthorKey) -> Option<EndpointId> {
         self.by_signer.get(signer).copied()
     }
 
-    /// Record that `signer` proved `endpoint`.
+    /// Record that `signer` proved `endpoint` in a `PeerInfo` stamped `stamp`. Another signer
+    /// takes an endpoint over only with a newer stamp: a restart keeps the key of the endpoint
+    /// and makes a new signing key, and a replay of the old `PeerInfo` must not put it back.
     pub(crate) fn insert(
         &mut self,
         signer: AuthorKey,
         endpoint: EndpointId,
+        stamp: UnixSecs,
         linked: &HashSet<EndpointId>,
     ) {
+        let held = self.stamps.get(&endpoint).copied();
+        if self.by_signer.get(&signer) != Some(&endpoint) && held.is_some_and(|held| stamp <= held)
+        {
+            return;
+        }
+        self.place(signer, endpoint, linked);
+        if self.by_signer.get(&signer) == Some(&endpoint) {
+            self.stamps
+                .insert(endpoint, stamp.max(held.unwrap_or(stamp)));
+        }
+        // A trusted endpoint keeps its stamp when the cap takes its pair out: the stamp is what
+        // refuses an older `PeerInfo` that would move the trust to another signer.
+        let mut live: HashSet<EndpointId> = self.by_signer.values().copied().collect();
+        live.extend(self.trusted.values().copied());
+        self.stamps.retain(|eid, _| live.contains(eid));
+    }
+
+    fn place(&mut self, signer: AuthorKey, endpoint: EndpointId, linked: &HashSet<EndpointId>) {
         self.by_signer
             .retain(|other, eid| *other == signer || *eid != endpoint);
         let by_signer = &self.by_signer;
@@ -108,6 +159,7 @@ impl ProvenEndpoints {
     /// endpoint by nickname, which a signer can take over; a pair missed that
     /// way is no longer linked, so the cap evicts it later.
     pub(crate) fn forget_endpoint(&mut self, endpoint: EndpointId) {
+        self.trusted.retain(|_, eid| *eid != endpoint);
         self.by_signer.retain(|_, eid| *eid != endpoint);
         let by_signer = &self.by_signer;
         self.order.retain(|signer| by_signer.contains_key(signer));
@@ -126,7 +178,7 @@ mod tests {
     use iroh::SecretKey;
 
     use super::{ProvenEndpoints, sign, verifies};
-    use crate::protocol::{AuthorKey, MeshId};
+    use crate::protocol::{AuthorKey, MeshId, UnixSecs};
 
     fn key(byte: u8) -> AuthorKey {
         AuthorKey::from([byte; 32])
@@ -164,9 +216,14 @@ mod tests {
         let mut proven = ProvenEndpoints::new(cap);
         let linked_one = SecretKey::generate().public();
         let linked: HashSet<_> = [linked_one].into_iter().collect();
-        proven.insert(key(0), linked_one, &linked);
+        proven.insert(key(0), linked_one, UnixSecs::from(1), &linked);
         for byte in 1..=u8::try_from(cap * 2).expect("small") {
-            proven.insert(key(byte), SecretKey::generate().public(), &linked);
+            proven.insert(
+                key(byte),
+                SecretKey::generate().public(),
+                UnixSecs::from(1),
+                &linked,
+            );
         }
         assert_eq!(
             proven.len(),
@@ -192,7 +249,7 @@ mod one_signer_tests {
     use iroh::SecretKey;
 
     use super::ProvenEndpoints;
-    use crate::protocol::AuthorKey;
+    use crate::protocol::{AuthorKey, UnixSecs};
 
     /// Many signers can prove one endpoint, since whoever holds that endpoint's
     /// key makes as many signing keys as it likes. Kept as separate pairs, a
@@ -205,10 +262,11 @@ mod one_signer_tests {
         let attacker = SecretKey::generate().public();
         let linked: HashSet<_> = [attacker].into_iter().collect();
         for byte in 1..=5u8 {
-            proven.insert(AuthorKey::from([byte; 32]), attacker, &linked);
+            let stamp = UnixSecs::from(i64::from(byte));
+            proven.insert(AuthorKey::from([byte; 32]), attacker, stamp, &linked);
         }
         let honest = SecretKey::generate().public();
-        proven.insert(AuthorKey::from([9; 32]), honest, &linked);
+        proven.insert(AuthorKey::from([9; 32]), honest, UnixSecs::from(1), &linked);
 
         assert_eq!(
             proven.get(&AuthorKey::from([9; 32])),
@@ -220,6 +278,58 @@ mod one_signer_tests {
             proven.get(&AuthorKey::from([5; 32])),
             Some(attacker),
             "its latest signer"
+        );
+
+        proven.insert(
+            AuthorKey::from([6; 32]),
+            attacker,
+            UnixSecs::from(5),
+            &linked,
+        );
+        assert_eq!(
+            proven.get(&AuthorKey::from([5; 32])),
+            Some(attacker),
+            "a signer with an equal stamp does not take the endpoint over"
+        );
+        assert_eq!(
+            proven.get(&AuthorKey::from([6; 32])),
+            None,
+            "the signer with the equal stamp holds nothing"
+        );
+    }
+
+    /// The cap can take a pair out of `by_signer` while the endpoint is still trusted. The stamp
+    /// of that endpoint must stay: without it an older `PeerInfo` of another signer reclaims the
+    /// endpoint, and the trust moves from the current signer to the replayed one.
+    #[test]
+    fn the_replay_stamp_of_a_trusted_endpoint_outlives_its_pair() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut proven = ProvenEndpoints::new(1);
+        let current = AuthorKey::from([1; 32]);
+        let held = SecretKey::generate().public();
+        let none = HashSet::new();
+        proven.insert(current, held, UnixSecs::from(10), &none);
+        proven.trust(current, held);
+
+        let other = SecretKey::generate().public();
+        proven.insert(AuthorKey::from([2; 32]), other, UnixSecs::from(1), &none);
+        assert_eq!(
+            proven.get(&current),
+            None,
+            "the cap took the pair of the current signer out"
+        );
+
+        let replayed = AuthorKey::from([3; 32]);
+        proven.insert(replayed, held, UnixSecs::from(5), &none);
+        assert_eq!(
+            proven.get(&replayed),
+            None,
+            "a PeerInfo older than the proof of the trusted signer does not reclaim the endpoint"
+        );
+        assert_eq!(
+            proven.trusted(&current),
+            Some(held),
+            "the current signer stays trusted"
         );
     }
 }

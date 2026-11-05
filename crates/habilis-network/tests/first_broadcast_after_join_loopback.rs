@@ -201,7 +201,7 @@ trait Peer: Sized {
     fn saw_broadcast(&mut self, text: &str) -> bool;
     /// How many messages the member holds in the log that anti-entropy serves from.
     async fn log_len(&self) -> usize;
-    /// How many other members this one lists; a member does not list itself.
+    /// How many members this one counts, itself included.
     async fn peer_count(&self) -> usize;
     async fn leave(self);
 }
@@ -304,7 +304,7 @@ impl NodeDriver for Chat {
                 false
             }
             ChatSession::PeerCount(reply) => {
-                let _ = reply.send(state.roster_snapshot().peers.len());
+                let _ = reply.send(state.member_count());
                 false
             }
         }
@@ -450,11 +450,11 @@ fn report(
     )
 }
 
-/// Wait until every member lists the other two; the roster does not list its owner.
+/// Wait until every member counts all three members, itself included.
 async fn wait_until_meshed<Participant: Peer>(members: [&Participant; 3]) {
     let deadline = Instant::now() + MESH_DEADLINE;
     for member in members {
-        while member.peer_count().await < members.len() - 1 {
+        while member.peer_count().await < members.len() {
             assert!(Instant::now() < deadline, "the mesh did not settle");
             time::sleep(Duration::from_millis(250)).await;
         }

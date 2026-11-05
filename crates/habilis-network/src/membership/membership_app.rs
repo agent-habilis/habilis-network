@@ -318,7 +318,8 @@ pub enum Inspect {
         /// Gets the text of the answer.
         reply: oneshot::Sender<String>,
     },
-    /// How many members there are.
+    /// How many members are in the mesh now, this member included: the shown peers that are not
+    /// quiet, and this member. A member that is alone reads 1.
     PeerCount {
         /// Gets the count.
         reply: oneshot::Sender<usize>,
@@ -837,7 +838,9 @@ impl MembershipApp {
                 .await;
                 let outcome = merged.map_err(|error| error.to_string());
                 let _ = reply.send(outcome);
-                true
+                // A durable write is not a live frame: it proves life only within one alive
+                // timeout of the clock of the reader, so it must not hold back the `alive`.
+                false
             }
         }
     }
@@ -908,10 +911,8 @@ impl MembershipApp {
                 false
             }
             Inspect::PeerCount { reply } => {
-                // `peers.len()`, not the snapshot's `count` — that one includes
-                // self, and a caller asking "is anyone else here?" wants zero
-                // when it is alone.
-                let _ = reply.send(state.roster_snapshot().peers.len());
+                // The one count of the engine: see `EventLoopState::member_count`.
+                let _ = reply.send(state.member_count());
                 false
             }
         }
@@ -1449,15 +1450,109 @@ fn route_diag(state: &EventLoopState) -> String {
 }
 
 #[cfg(test)]
+mod peer_count_tests {
+    use std::sync::atomic::Ordering;
+
+    use super::{Inspect, MembershipApp};
+    use crate::daemon::setup::LiveCount;
+    use crate::daemon::state::EventLoopState;
+    use crate::testing::{fresh_state, test_key};
+    use tokio::sync::oneshot;
+
+    /// How many members the consumer reads for `Inspect::PeerCount`.
+    fn peer_count_of(state: &mut EventLoopState) -> usize {
+        let (reply, mut answer) = oneshot::channel();
+        MembershipApp::handle_inspect(Inspect::PeerCount { reply }, state);
+        answer.try_recv().expect("the handler answers at once")
+    }
+
+    /// `PeerCount` answers "how many members are in the mesh right now, this node included". A
+    /// quiet peer is a row of the roster, but it is not in the mesh now: a member whose only peer
+    /// went quiet reads 1, the same as a member that is alone.
+    #[test]
+    fn the_peer_count_leaves_out_quiet_peers() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peer_for_test("swift-cedar");
+        state.surfaced_for_test("swift-cedar");
+        state.quiet_for_test("lost-heron");
+
+        assert_eq!(
+            peer_count_of(&mut state),
+            2,
+            "a quiet peer counts as a member that is in the mesh"
+        );
+
+        state.peers.remove(&test_key("swift-cedar"));
+        state.quiet_for_test("swift-cedar");
+        assert_eq!(
+            peer_count_of(&mut state),
+            1,
+            "a member whose peers are all quiet reads as alone"
+        );
+    }
+
+    /// A member that is alone counts itself.
+    #[test]
+    fn a_lone_member_counts_itself() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+
+        assert_eq!(peer_count_of(&mut state), 1, "a lone member reads 0, not 1");
+    }
+
+    /// One algorithm for every surface that shows a count. The state has a shown peer, a peer
+    /// that is surfaced and quiet, a live peer that is not shown yet, and a peer that left. Only
+    /// the shown peer and this node count, so the answer is 2 everywhere: the member count, the
+    /// peer count of the embed, the count of the roster snapshot, the non-quiet rows plus this
+    /// node, and the live counter (which the state file and the directory advert read).
+    #[test]
+    fn every_surface_shows_the_same_count() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let live = LiveCount::default();
+        state.live_count = Some(live.clone());
+        state.peer_for_test("swift-cedar");
+        state.surfaced_for_test("swift-cedar");
+        state.surfaced_for_test("lost-heron");
+        state.quiet_for_test("lost-heron");
+        state.peer_for_test("calm-otter");
+        state.write_peer_count();
+
+        let roster = state.roster_snapshot();
+        let live_rows = roster.peers.iter().filter(|entry| !entry.quiet).count();
+        let quiet_rows = roster.peers.iter().filter(|entry| entry.quiet).count();
+        assert_eq!(quiet_rows, 1, "the quiet peer is a row with quiet: true");
+        let counts = [
+            ("member_count", state.member_count()),
+            ("Inspect::PeerCount", peer_count_of(&mut state)),
+            ("roster count", roster.count),
+            ("non-quiet rows plus this node", live_rows + 1),
+            ("live counter", live.load(Ordering::Relaxed)),
+        ];
+        for (surface, count) in counts {
+            assert_eq!(count, 2, "{surface} disagrees with the member count");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         AppFrameParams, AppTag, ENVELOPE_RESERVE, ESCAPED_BUDGET, MAX_MESSAGE_SIZE, MAX_MSG,
-        MSG_TAG, MembershipApp, MessageBody, Nickname, mpsc, msg_body, msg_fits,
+        MSG_TAG, MembershipApp, MessageBody, Messaging, Nickname, Request, mpsc, msg_body,
+        msg_fits,
     };
     use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
+    #[cfg(feature = "host")]
+    use crate::testing::LaneNode;
 
+    #[cfg(feature = "host")]
+    use super::NodeDriver;
     use std::iter;
+    #[cfg(feature = "host")]
+    use tokio::sync::oneshot;
     /// The longest nickname there is: 32 four-byte scalars.
     fn widest_nick(seed: char) -> Nickname {
         let text: String = iter::repeat_n(seed, 32).collect();
@@ -1563,5 +1658,38 @@ mod tests {
             [false, true, false, false, false, true],
             "a stall surfaces once until the queue drains"
         );
+    }
+
+    /// The loop refreshes the keepalive clock when a session request reports a broadcast. A
+    /// durable write is stamped by the clock of the writer and does not prove life to a peer that
+    /// is quiet, so it must not hold back the `alive` that does.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_state_merge_does_not_report_a_live_broadcast() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            let (inbound, _queue) = mpsc::channel(1);
+            let mut app = MembershipApp::new(inbound);
+            let (reply, answer) = oneshot::channel();
+            let request = Request::Messaging(Messaging::StateMerge {
+                merge: serde_json::json!({"note": "durable"}),
+                reply,
+            });
+
+            let live = app.handle_session(request, &mut state, &context).await;
+
+            assert_eq!(
+                answer.await.expect("the request is answered"),
+                Ok(()),
+                "the merge was made and broadcast"
+            );
+            assert!(
+                !live,
+                "a state merge is a durable write and does not refresh the keepalive clock"
+            );
+            node.endpoint.close().await;
+        });
     }
 }

@@ -511,8 +511,8 @@ pub unsafe extern "C" fn habilis_network_mesh_peers_json(
     }
 }
 
-/// The number of peers **other than you** in the mesh right now; `0` means you
-/// are alone. -1 on failure.
+/// The number of members in the mesh right now, **you included**; `1` means you
+/// are alone. It is the `count` of the roster JSON. -1 on failure.
 ///
 /// # Safety
 /// `handle` must be a live handle from [`habilis_network_mesh_open`], or NULL.

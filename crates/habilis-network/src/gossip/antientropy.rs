@@ -255,17 +255,18 @@ fn report_unreadable_digest(message: &Verified, state: &mut EventLoopState) {
 /// so a per-window `have` would re-send a message the sender holds but listed
 /// under the *other* window — wasting the shared resend budget on messages the
 /// peer already has and starving the genuinely-missing tail.
-pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: &Nickname) {
+pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_key: &AuthorKey) {
     let decoded: serde_json::Result<DigestBody> = serde_json::from_str(message.body.as_str());
     let Ok(body) = decoded else {
         report_unreadable_digest(message, state);
         return;
     };
-    // Only a few members answer one digest (see `answers_digest`). A digest that came to this node
-    // alone, by unicast, is for it to answer.
+    // Only a few members answer one digest (see `answers_digest`). The rank is by author key, so
+    // two live keys of one nickname are two members. A digest that came to this node alone, by
+    // unicast, is for it to answer.
     let asked_alone = state.state_digest_serves.unicast.arrived_from.is_some();
-    let members = state.peers.iter().chain(iter::once(me));
-    if !asked_alone && !answers_digest(me, &message.author, message.id.as_str(), members) {
+    let members = state.peers.iter().chain(iter::once(our_key));
+    if !asked_alone && !answers_digest(our_key, &message.key(), message.id.as_str(), members) {
         return;
     }
     // One serve per author per window. Answering costs up to
@@ -374,22 +375,22 @@ fn resend_one_to(
 
 /// A member's place in the line for one digest: lower answers first.
 ///
-/// A hash of the digest id and the member, so it is the same on every member
+/// A hash of the digest id and the member key, so it is the same on every member
 /// that knows both, with no message to agree on it, and it changes with each
 /// digest. SHA-256 and not `DefaultHasher`, whose output may differ between
-/// builds: members on different builds would then pick different answerers.
-fn answer_rank(digest_id: &str, member: &Nickname) -> (u64, String) {
+/// builds: members on different builds would then pick different answerers. The key and not the
+/// nickname: a nickname is a label, so two live keys of one nickname would tie and both answer.
+fn answer_rank(digest_id: &str, member: &AuthorKey) -> (u64, AuthorKey) {
     use sha2::{Digest as _, Sha256};
 
     let hasher: Sha256 = Sha256::new()
         .chain_update(digest_id.as_bytes())
         .chain_update([0]);
-    let member_bytes = member.as_str().as_bytes();
-    let hash = hasher.chain_update(member_bytes).finalize();
+    let hash = hasher.chain_update(member.as_bytes()).finalize();
     let mut head = [0u8; 8];
     head.copy_from_slice(&hash[..8]);
-    // The name breaks a tie, so the order is total.
-    (u64::from_be_bytes(head), member.as_str().to_owned())
+    // The key breaks a tie, so the order is total.
+    (u64::from_be_bytes(head), *member)
 }
 
 /// Whether `me` is one of the [`ANTIENTROPY_ANSWERERS`] members that answer this
@@ -398,15 +399,15 @@ fn answer_rank(digest_id: &str, member: &Nickname) -> (u64, String) {
 ///
 /// Every member that holds what the asker lacks used to answer, and all but the
 /// first copy of each message were waste. A uniform rule that needs no talk
-/// between members: each one hashes the digest id with every member name and
+/// between members: each one hashes the digest id with every member key and
 /// answers when it is among the lowest. Members that know slightly different
 /// rosters can pick slightly different sets, and that costs a duplicate or a
 /// missing answer, which the next digest repairs: a new digest id picks again.
 pub(crate) fn answers_digest<'a>(
-    me: &Nickname,
-    asker: &Nickname,
+    me: &AuthorKey,
+    asker: &AuthorKey,
     digest_id: &str,
-    members: impl Iterator<Item = &'a Nickname>,
+    members: impl Iterator<Item = &'a AuthorKey>,
 ) -> bool {
     let mine = answer_rank(digest_id, me);
     let ahead = members
@@ -1279,6 +1280,7 @@ mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
     use std::collections::HashSet;
+    use std::iter;
 
     use super::{
         ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, HeadsBody, WireWindow,
@@ -1291,17 +1293,84 @@ mod tests {
     use crate::protocol::{
         AuthorKey, Channel, DedupKey, Identity, MeshId, Message, MessageBody, Nickname, UnixSecs,
     };
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
 
     use crate::protocol::messages;
     use crate::transport::Resend;
     use crate::util::{consts, tuning};
     use crate::{gossip, protocol, transport};
     use tokio::sync::mpsc;
-    fn members(count: usize) -> Vec<Nickname> {
+    fn members(count: usize) -> Vec<AuthorKey> {
         (0..count)
-            .map(|index| nick(&format!("member-{index:02}")))
+            .map(|index| test_key(&format!("member-{index:02}")))
             .collect()
+    }
+
+    /// Every digest is answered by exactly `ANTIENTROPY_ANSWERERS` members, also when two live
+    /// keys hold one nickname. The rank used to be by nickname: the two keys tied and both
+    /// answered, so 4 of the first 200 digests of this fleet had one answerer too many.
+    #[test]
+    fn two_live_keys_of_one_nickname_are_two_members_in_the_rank() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut fleet = members(48);
+        // The second live key of the nickname `member-01`.
+        fleet[47] = test_key("member-01#second-run");
+        let asker = fleet[0];
+        let mut wrong = Vec::new();
+        for round in 0..200 {
+            let id = format!("digest-{round}");
+            let others = fleet.iter().skip(1);
+            let answering: usize = others
+                .filter(|me| super::answers_digest(me, &asker, &id, fleet.iter()))
+                .count();
+            if answering != tuning::ANTIENTROPY_ANSWERERS {
+                wrong.push((round, answering));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "digests with a wrong answerer count (round, count): {wrong:?}"
+        );
+    }
+
+    /// `handle_digest` answers when `answers_digest` says so over the keys of the roster and this
+    /// node, with the signer of the digest as the asker. A digest that is answered and one that
+    /// is not both occur, so the check is not vacuous.
+    #[test]
+    fn handle_digest_ranks_the_roster_by_author_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let roster = members(47);
+        let our_key = test_key("holder");
+        let (mut answered, mut held_back) = (0, 0);
+        for _ in 0..100 {
+            let digest = digest_of_an_empty_log(&nick("asker"));
+            let members = roster.iter().chain(iter::once(&our_key));
+            let expected =
+                super::answers_digest(&our_key, &digest.key(), digest.id.as_str(), members);
+            let mut state = fresh_state();
+            state.peers.extend(roster.iter().copied());
+            state.message_log.push(chat_at("kept", 1_700_000_000));
+            let (outbox, _undrained) = transport::ResendOutbox::new(4);
+            state.resend_outbox = outbox;
+
+            super::handle_digest(&digest, &mut state, &our_key);
+
+            assert_eq!(
+                state.resend_outbox.queued() > 0,
+                expected,
+                "the digest {} is answered when the key rank says so",
+                digest.id.as_str()
+            );
+            if expected {
+                answered += 1;
+            } else {
+                held_back += 1;
+            }
+        }
+        assert!(
+            answered > 0 && held_back > 0,
+            "both outcomes occur: answered {answered}, held back {held_back}"
+        );
     }
 
     /// One digest is answered by `ANTIENTROPY_ANSWERERS` members, not by every
@@ -1337,7 +1406,7 @@ mod tests {
                     continue;
                 }
                 if super::answers_digest(me, asker, &id, members.iter()) {
-                    had_a_turn.insert(me.clone());
+                    had_a_turn.insert(*me);
                 }
             }
         }
@@ -1440,9 +1509,9 @@ mod tests {
     #[test]
     fn a_digest_answer_does_not_wait_for_a_full_outbox() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (me, asker) = (nick("holder"), nick("asker"));
+        let (me, asker) = (test_key("holder"), nick("asker"));
         let mut state = fresh_state();
-        state.peers.insert(asker.clone());
+        state.peer_for_test(asker.as_str());
         for index in 0..100 {
             state
                 .message_log

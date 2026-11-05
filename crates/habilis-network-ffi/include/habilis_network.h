@@ -125,12 +125,11 @@ long habilis_network_mesh_state_json(habilis_network_mesh *handle, char *buffer,
 long habilis_network_mesh_peers_json(habilis_network_mesh *handle, char *buffer, size_t cap);
 
 /*
- * How many peers other than you are in the mesh right now; 0 means you are
+ * How many members are in the mesh right now, you included; 1 means you are
  * alone. -1 on failure.
  *
- * Deliberately NOT the roster JSON's own "count" field, which includes you and
- * so never reads 0. This is the question a sender waiting for company has, and
- * the answer it can loop on.
+ * The same number as the roster JSON's "count" field. A sender waiting for
+ * company loops until it reads 2 or more.
  */
 long habilis_network_mesh_peer_count(habilis_network_mesh *handle);
 

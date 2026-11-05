@@ -18,9 +18,9 @@ State: `linked_endpoints` in `daemon/state.rs`.
 
 ### peer
 
-Layer: membership. Keyed by nickname.
+Layer: membership. Keyed by author key.
 
-A member of the mesh other than yourself. The roster is the set of peers. The live count includes you, so it is `peers.len() + 1`.
+A member of the mesh other than yourself. One author key is one peer. A nickname is a label, so two live keys that use one nickname are two peers. The roster is the set of peers. The live count includes you and each peer whose arrival was shown, so it is the number of shown peers plus one. A roster peer whose arrival was not shown is not counted.
 
 State: `peers`. Code: `lifecycle/membership.rs`.
 
@@ -98,7 +98,7 @@ Code: `protocol::identity`, `AuthorKey`.
 
 ### surfaced
 
-Layer: presentation. Keyed by nickname.
+Layer: presentation. Keyed by author key.
 
 A peer whose arrival was shown to the operator or the agent. `surfaced` is a subset of `peers`. It gates what is shown. The roster stays complete for anti-entropy.
 
@@ -106,7 +106,7 @@ State: `surfaced`.
 
 ### quiet
 
-Layer: heartbeat. Keyed by nickname.
+Layer: heartbeat. Keyed by author key.
 
 A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return.
 
@@ -169,6 +169,16 @@ Arrival and departure are surfaced once each, as `joined` and `left`, keyed by n
 ### Lookups are independently sufficient
 
 Each lookup bootstraps a mesh and runs it with no other lookup present. An added lookup adds reliability and never a feature.
+
+## Correctness
+
+Correctness is imperative. Choose the correct design, whatever the size of the refactor.
+Do not keep a workaround, a heuristic, or a smaller change when it hides a wrong model.
+If the correct fix is large, split it into small steps. Each step compiles and passes the tests.
+
+## Compatibility
+
+Until version 1.0, we do not care about backward compatibility. Before 1.0, break compatibility when it gives a better design, better performance, or better reliability. Do not keep a shim, an alias, or a fallback only for old versions.
 
 ## Logging
 

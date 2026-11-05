@@ -47,6 +47,6 @@ pub(crate) use merge_ctx::{broadcast_peer_info, send_second_probe, write_entry_a
 pub(crate) use path_summary::PathSummary;
 
 pub(crate) use recv::{
-    drain_dead_receiver, drain_queued, flush_pending, handle_gossip_event, ingest_from,
+    drain_dead_receiver, drain_queued, flush_pending, handle_gossip_event, ingest, ingest_from,
     requeue_failed, retain_own_broadcast,
 };

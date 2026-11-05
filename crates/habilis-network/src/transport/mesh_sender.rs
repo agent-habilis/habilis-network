@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 
 use iroh::EndpointId;
@@ -33,6 +35,10 @@ pub struct MeshSender {
     /// Where the sent frames are counted: the tally of the loop that owns this sender. A sender
     /// that no loop owns counts into a tally that nobody reads.
     tally: WireOutTally,
+    /// The bytes of every broadcast frame, in order, so a test can count what a node puts on the
+    /// wire.
+    #[cfg(test)]
+    tap: Arc<Mutex<Vec<Vec<u8>>>>, // shared with every clone of the sender, so a test counts them all
 }
 
 impl MeshSender {
@@ -41,6 +47,8 @@ impl MeshSender {
             // the sender is shared by the mesh handles, which swap the gossip under it
             gossip: Arc::new(RwLock::new(gossip)),
             tally: WireOutTally::default(),
+            #[cfg(test)]
+            tap: Arc::default(),
         }
     }
 
@@ -49,6 +57,12 @@ impl MeshSender {
     pub(crate) fn counting(mut self, tally: WireOutTally) -> Self {
         self.tally = tally;
         self
+    }
+
+    /// The frames broadcast so far, as they went on the wire.
+    #[cfg(test)]
+    pub(crate) fn broadcast_frames(&self) -> Vec<Vec<u8>> {
+        self.tap.lock().expect("the tap lock").clone()
     }
 
     /// The current gossip handle. Cloned out of the lock, so no lock is held
@@ -63,9 +77,16 @@ impl MeshSender {
     /// The gossip topic has been closed, or the send buffer is full.
     pub async fn broadcast(&self, message: WireFrame) -> Result<(), ApiError> {
         let bytes = message.into_bytes();
+        #[cfg(test)]
+        let recorded = bytes.to_vec();
         let sent = self.current().broadcast(bytes.clone()).await;
         if sent.is_ok() {
             self.tally.note(&bytes);
+            // The tap holds only the frames that were sent, or a test counts bytes that never left.
+            #[cfg(test)]
+            if let Ok(mut tap) = self.tap.lock() {
+                tap.push(recorded);
+            }
         }
         sent
     }

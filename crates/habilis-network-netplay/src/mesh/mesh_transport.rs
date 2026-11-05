@@ -121,6 +121,17 @@ impl<T: Config> MeshTransport<T> {
             .is_ok_and(|directory| directory.contains_key(pubkey))
     }
 
+    /// The peers that the engine refuses to address, because two or more live peers use their
+    /// nickname. A packet to such a peer is not sent, and a resend does not change that: the
+    /// peer is addressable again when only one key uses the nickname. A frame loop reads this to
+    /// say why a match does not start.
+    pub fn unaddressable(&self) -> impl Iterator<Item = AuthorKey> {
+        let refused = self.mailboxes.unaddressable.lock();
+        let peers: Vec<AuthorKey> =
+            refused.map_or_else(|_| Vec::new(), |set| set.iter().copied().collect());
+        peers.into_iter()
+    }
+
     /// Every peer we can address, as `(public key, nickname)`.
     pub fn known_peers(&self) -> impl Iterator<Item = (AuthorKey, Nickname)> {
         let peers: Vec<(AuthorKey, Nickname)> = self
