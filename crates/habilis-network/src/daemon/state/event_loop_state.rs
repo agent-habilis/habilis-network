@@ -1142,9 +1142,9 @@ impl EventLoopState {
 
     /// Whether a dial hint of any nickname names `endpoint`.
     pub(crate) fn endpoint_is_bound(&self, endpoint: EndpointId) -> bool {
-        self.peer_endpoints
-            .values()
-            .any(|address| address.id == endpoint)
+        let retained = self.refused_endpoints.values();
+        let hinted = self.peer_endpoints.values();
+        hinted.chain(retained).any(|address| address.id == endpoint)
     }
 
     /// Drop the state of an endpoint that no nickname binds any more. A linked endpoint keeps its
@@ -2119,12 +2119,13 @@ impl EventLoopState {
         let Some(address) = self.refused_endpoints.remove(key) else {
             return;
         };
-        let shared = self
-            .refused_endpoints
-            .values()
-            .any(|other| other.id == address.id);
-        if !shared && !self.endpoint_is_bound(address.id) {
-            self.release_unbound_endpoint(address.id);
+        self.release_if_unowned(address.id);
+    }
+
+    /// Drop the state of `endpoint` unless a dial hint or a retained endpoint names it.
+    fn release_if_unowned(&mut self, endpoint: EndpointId) {
+        if !self.endpoint_is_bound(endpoint) {
+            self.release_unbound_endpoint(endpoint);
         }
     }
 

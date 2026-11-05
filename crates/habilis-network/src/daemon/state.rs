@@ -2651,6 +2651,34 @@ mod tests {
         );
     }
 
+    /// A key owns the hint of a nickname, and another key of the nickname is refused a hint for
+    /// the same endpoint (a node that restarted with a new signing key). The state of the endpoint
+    /// stays while the refused endpoint waits for its key.
+    #[test]
+    fn forgetting_a_hint_keeps_the_state_of_an_endpoint_that_a_refused_key_retains() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(1);
+        state.bind_peer_endpoint(
+            test_key("old-bob"),
+            nick("bob"),
+            iroh::EndpointAddr::new(shared),
+        );
+        state.retain_refused_endpoint(test_key("new-bob"), iroh::EndpointAddr::new(shared));
+        state.direct.insert(shared, DirectState::Direct);
+
+        state.forget_peer_endpoint("bob");
+
+        assert!(
+            state.direct.contains_key(&shared),
+            "the state of an endpoint that a retained endpoint names was dropped"
+        );
+        assert!(
+            state.endpoint_is_bound(shared),
+            "a retained endpoint is not counted as bound"
+        );
+    }
+
     // After a failover the rendezvous keeps its id, but a refusal from the old
     // holder says nothing about the new one: the wait starts over.
     #[test]
