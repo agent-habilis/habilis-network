@@ -1307,6 +1307,13 @@ impl MeshDoc {
         self.candidate.is_some()
     }
 
+    /// Whether the local writes of this document still wait for the end of the first sync (see
+    /// [`Self::awaiting_first_sync`]).
+    #[must_use]
+    pub fn is_awaiting_first_sync(&self) -> bool {
+        self.awaiting_sync
+    }
+
     /// Whether the candidate seed that this document waits to adopt holds every frame of its chain,
     /// so that the node can adopt it after the wait. False when there is no candidate.
     #[must_use]
@@ -6813,7 +6820,7 @@ mod tests {
     fn small_state_doc(leaves: usize) -> MeshDoc {
         let mut doc = MeshDoc::new_ungated().state_epochs();
         write_leaves(&mut doc, &nick("me"), 0, leaves);
-        doc.limits(Limits::from_seed_frames(40))
+        doc.limits(Limits::with_seed_frames(40))
     }
 
     /// Write the leaves `first` to `first + count` of the map `live`, 100 in each frame.
@@ -6841,7 +6848,7 @@ mod tests {
             !doc.cut_due(0),
             "{} operations are below the ceiling of {}",
             doc.ops_held(),
-            Limits::from_seed_frames(40).ops.ceiling
+            Limits::with_seed_frames(40).ops.ceiling
         );
     }
 
@@ -6904,7 +6911,7 @@ mod tests {
         let frames = seed_frames_of(&big, &cutter, 3, None);
         let mut doc = MeshDoc::new_ungated()
             .state_epochs()
-            .limits(Limits::from_seed_frames(40));
+            .limits(Limits::with_seed_frames(40));
         for frame in &frames {
             doc.ingest(frame);
         }
@@ -6913,7 +6920,7 @@ mod tests {
         }
         assert_eq!(doc.epoch(), 3, "the document adopted the seed");
         assert!(
-            doc.seed_ops() >= Limits::from_seed_frames(40).ops.ceiling,
+            doc.seed_ops() >= Limits::with_seed_frames(40).ops.ceiling,
             "the seed itself is above the ceiling: {} operations",
             doc.seed_ops()
         );
@@ -6931,7 +6938,7 @@ mod tests {
         assert!(
             doc.cut_due(0),
             "200 operations of growth are above the growth of {}",
-            Limits::from_seed_frames(40).ops.growth
+            Limits::with_seed_frames(40).ops.growth
         );
     }
 
@@ -6988,7 +6995,7 @@ mod tests {
     fn full_state_doc(leaves: usize) -> MeshDoc {
         let mut doc = MeshDoc::new_ungated().state_epochs();
         write_leaves(&mut doc, &nick("me"), 0, leaves);
-        doc.limits(Limits::from_seed_frames(40))
+        doc.limits(Limits::with_seed_frames(40))
     }
 
     #[test]
@@ -7167,7 +7174,7 @@ mod tests {
     #[test]
     fn a_document_with_no_state_epochs_has_no_lines() {
         let _guard = ::habilis_network_test_tracing::init();
-        let plain = MeshDoc::new_ungated().limits(Limits::from_seed_frames(40));
+        let plain = MeshDoc::new_ungated().limits(Limits::with_seed_frames(40));
         let merge = {
             let mut deep = json!(1);
             for level in 0..20 {
@@ -7206,7 +7213,7 @@ mod tests {
             refuser.ingest(frame);
             holder.ingest(frame);
         }
-        let refuser = refuser.limits(Limits::from_seed_frames(40));
+        let refuser = refuser.limits(Limits::with_seed_frames(40));
         (author, refuser, holder)
     }
 
@@ -7254,7 +7261,7 @@ mod tests {
             "a frame was refused: the state document is over its remote line",
         );
         let (author, mut refuser, _holder) = trio_with_a_refuser_over_the_remote_line();
-        let cap = Limits::from_seed_frames(40).refused_max;
+        let cap = Limits::with_seed_frames(40).refused_max;
         for index in 0..(10 * cap) {
             // Each frame follows the history that the refuser holds, not the frame before it, so
             // none of them waits for a dependency that it refused.

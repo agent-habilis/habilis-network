@@ -10,7 +10,7 @@ pub use crate::gossip::{
 };
 pub use crate::transport::{Delivered, MeshSender, PendingSend, deliver, deliver_in_background};
 
-use crate::daemon::state_cut;
+use crate::daemon::seed_job;
 use crate::embed::{EventLoopState, HandlerCtx};
 use crate::transport::SendError;
 
@@ -24,7 +24,7 @@ pub async fn state_cut_now(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) -> Result<usize, SendError> {
-    state_cut::cut_now(state, context.author, context.mesh, context.sender)
+    seed_job::cut_now(state, context.author, context.mesh, context.sender)
         .await
         .map_err(SendError::internal)
 }

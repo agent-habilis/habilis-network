@@ -20,7 +20,8 @@ use crate::protocol::messages::{Verified, WireFrame};
 use crate::protocol::{Channel, MeshId, Message, Nickname, SymmetricKey};
 use crate::transport::MeshSender;
 use crate::util::bounded_fifo_set::BoundedFifoSet;
-use crate::util::consts::{DOC_EPOCH_FRAME_MARGIN, MAX_MESSAGE_SIZE};
+use crate::util::clock::Instant as ClockInstant;
+use crate::util::consts::{DOC_EPOCH_FRAME_MARGIN, DOC_STATE_SYNC_WAIT, MAX_MESSAGE_SIZE};
 
 use super::state::EventLoopState;
 
@@ -297,6 +298,34 @@ fn job_for(state: &EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u64) -> 
     }
 }
 
+/// A peer showed its heads for `channel` and this node holds all of them: it is not behind that
+/// peer, so every time that the peer has seen is in the history of this node and its clock is above
+/// them. That ends the wait of the state document for its first sync (the first full answer to the
+/// digest, or an answer that has nothing to give: a peer with no heads is held too).
+pub(crate) fn peer_heads_seen(state: &mut EventLoopState, channel: Channel, heads: &[String]) {
+    if channel != Channel::State {
+        return;
+    }
+    let doc = state.doc_mut(channel);
+    if doc.is_awaiting_first_sync() && doc.holds_heads(heads) {
+        doc.finish_sync();
+        tracing::debug!(target: "habilis_network::gossip", "the state channel synced with a peer, and its writes go on");
+    }
+}
+
+/// The end of the wait for the first sync at its deadline, on the sweep tick: the node writes with
+/// the clock that it has, and warns. Without it a node with no peer, or a mesh whose peers are all
+/// down, would hold every write for ever.
+pub(crate) fn sync_deadline(state: &mut EventLoopState) {
+    let doc = state.doc(Channel::State);
+    if !doc.is_awaiting_first_sync() || ClockInstant::now() < state.state_sync_deadline {
+        return;
+    }
+    state.doc_mut(Channel::State).finish_sync();
+    let limit_secs = DOC_STATE_SYNC_WAIT.as_secs();
+    tracing::warn!(target: "habilis_network::gossip", limit_secs, "no peer answered the digest of the state channel within the time limit, so the node writes with the clock that it has; a write that it made before a restart can win against its new ones");
+}
+
 /// A cut that failed: the document holds the next one back, and the node warns once.
 pub(crate) fn cut_failed(state: &mut EventLoopState, error: &impl Display) {
     state.doc_mut(Channel::State).note_cut_failed();
@@ -363,9 +392,13 @@ mod tests {
 
     use serde_json::{Map, Value, json};
 
-    use super::{SeedJob, SeedOutcome, finish, rank_of, spawn_build, tick};
+    use super::{
+        ClockInstant, SeedJob, SeedOutcome, finish, peer_heads_seen, rank_of, spawn_build,
+        sync_deadline, tick,
+    };
     use tokio::time::interval;
 
+    use crate::daemon::state::EventLoopState;
     use crate::doc::{DocError, Ingested, Limits, MeshDoc};
     use crate::protocol::identity::Identity;
     use crate::protocol::{Channel, MeshId, Message, Nickname};
@@ -549,7 +582,7 @@ mod tests {
         let mut doc = MeshDoc::new_state(None);
         doc.finish_sync();
         write_leaves(&mut doc, &identity, &me, 1_700);
-        state.state_doc = doc.limits(Limits::from_seed_frames(40));
+        state.state_doc = doc.limits(Limits::with_seed_frames(40));
         state.doc_mut(Channel::State).tick_epoch(&me);
         assert!(
             state.doc(Channel::State).cut_due(0),
@@ -579,7 +612,7 @@ mod tests {
         let mut doc = MeshDoc::new_state(None);
         doc.finish_sync();
         write_leaves(&mut doc, &identity, &me, 1_700);
-        state.state_doc = doc.limits(Limits::from_seed_frames(40));
+        state.state_doc = doc.limits(Limits::with_seed_frames(40));
 
         tick(&mut state, &me, &mesh);
         assert!(
@@ -593,7 +626,7 @@ mod tests {
         );
 
         let mut small = testing::fresh_state();
-        let mut few = MeshDoc::new_state(None).limits(Limits::from_seed_frames(40));
+        let mut few = MeshDoc::new_state(None).limits(Limits::with_seed_frames(40));
         few.finish_sync();
         write_leaves(&mut few, &identity, &me, 300);
         small.state_doc = few;
@@ -605,6 +638,81 @@ mod tests {
         assert!(
             plain.seed_job.is_none(),
             "a state document with no state epochs (the daemon today) starts no build"
+        );
+    }
+
+    /// A state document that waits for its first sync, inside a state.
+    fn state_that_waits_for_the_first_sync() -> EventLoopState {
+        let mut state = testing::fresh_state();
+        state.state_doc = MeshDoc::new_state(None);
+        state
+    }
+
+    #[test]
+    fn the_heads_of_a_peer_that_this_node_holds_end_the_wait_for_the_first_sync() {
+        let mut state = state_that_waits_for_the_first_sync();
+        assert!(
+            state.doc(Channel::State).is_awaiting_first_sync(),
+            "the node waits"
+        );
+        let ours: Vec<String> = state.doc(Channel::State).heads().collect();
+        let unknown = vec!["3yMApqCuCjXDWPrbjfR5mjCPTHqFG8Pux1TxQrEM35jj".to_owned()];
+        peer_heads_seen(&mut state, Channel::State, &unknown);
+        assert!(
+            state.doc(Channel::State).is_awaiting_first_sync(),
+            "a peer that is ahead of this node (heads that it does not hold) does not end the wait"
+        );
+        peer_heads_seen(&mut state, Channel::Meta, &ours);
+        assert!(
+            state.doc(Channel::State).is_awaiting_first_sync(),
+            "the heads of the meta channel say nothing of the clock of the state channel"
+        );
+        peer_heads_seen(&mut state, Channel::State, &ours);
+        assert!(
+            !state.doc(Channel::State).is_awaiting_first_sync(),
+            "heads that this node holds end the wait"
+        );
+    }
+
+    #[test]
+    fn a_peer_with_no_heads_is_an_empty_answer_and_ends_the_wait() {
+        let mut state = state_that_waits_for_the_first_sync();
+        peer_heads_seen(&mut state, Channel::State, &[]);
+        assert!(
+            !state.doc(Channel::State).is_awaiting_first_sync(),
+            "a peer that holds nothing has nothing that this node lacks"
+        );
+    }
+
+    #[test]
+    fn the_wait_for_the_first_sync_ends_at_its_deadline_with_a_warning_that_names_the_limit() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "no peer answered the digest of the state channel within the time limit",
+        );
+        let mut state = state_that_waits_for_the_first_sync();
+        sync_deadline(&mut state);
+        assert!(
+            state.doc(Channel::State).is_awaiting_first_sync(),
+            "the deadline is 30 s from the start: a node that just started still waits"
+        );
+        state.state_sync_deadline = ClockInstant::now();
+        sync_deadline(&mut state);
+        assert!(
+            !state.doc(Channel::State).is_awaiting_first_sync(),
+            "at the deadline the node writes with the clock that it has"
+        );
+    }
+
+    #[test]
+    fn a_node_with_no_state_epochs_has_nothing_to_wait_for_at_the_deadline() {
+        let mut state = testing::fresh_state();
+        state.state_sync_deadline = ClockInstant::now();
+        sync_deadline(&mut state);
+        assert!(
+            !state.doc(Channel::State).is_awaiting_first_sync(),
+            "the daemon today: no wait, no warning"
         );
     }
 }

@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
+use crate::daemon::seed_job;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::messages::{Verified, WireFrame};
 use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
@@ -510,6 +511,7 @@ async fn ask_back(
         return;
     };
     if state.doc(channel).holds_heads(&body.heads) {
+        seed_job::peer_heads_seen(state, channel, &body.heads);
         return;
     }
     let key = digest.key();

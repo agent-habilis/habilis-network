@@ -36,7 +36,7 @@ use crate::protocol::{
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
-use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
+use crate::util::consts::{DOC_EPOCH_WRITE_ATTEMPTS, DOC_STATE_SYNC_WAIT};
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
@@ -56,7 +56,7 @@ use iroh::address_lookup::memory;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::daemon::state_cut::SeedOutcome;
+use crate::daemon::seed_job::SeedOutcome;
 
 use crate::{beacon, gossip, protocol, transport};
 /// All mutable state owned by the event loop.
@@ -462,6 +462,10 @@ pub struct EventLoopState {
     /// The build of the seed of a cut that runs on a blocking thread, one at a time. The event loop
     /// waits for it in its `select!` and then signs and sends the chain.
     pub(crate) seed_job: Option<JoinHandle<SeedOutcome>>,
+    /// When the state document stops waiting for its first sync and writes with the clock that it
+    /// has (see `DOC_STATE_SYNC_WAIT`): counted from the start of the node, so a node with no peer
+    /// is not held for ever.
+    pub(crate) state_sync_deadline: Instant,
     /// The `meta` channel's document — a second, independent shared-state channel.
     /// Gates foreign-card writes (unlike `state`), since a `meta` card carries a
     /// peer's cryptographic identity.
@@ -678,6 +682,7 @@ impl EventLoopState {
                 Arc::new(key.derive(b"state-doc"))
             }),
             seed_job: None,
+            state_sync_deadline: Instant::now() + DOC_STATE_SYNC_WAIT,
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
             identity: init.keys.session,
