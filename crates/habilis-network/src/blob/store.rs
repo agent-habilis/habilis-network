@@ -17,7 +17,7 @@ use std::path::Path;
 use anyhow::Context;
 
 #[cfg(test)]
-use crate::util::consts::MAX_BLOB_STORE_BYTES;
+use crate::util::consts::{MAX_BLOB_STORE_BYTES, MAX_BLOB_STORE_ENTRIES};
 
 pub(crate) use blob_entry::BlobEntry;
 pub(crate) use blob_store::BlobStore;
@@ -313,6 +313,54 @@ mod tests {
 
         assert!(store.get(&oldest).is_some(), "the claimed blob stays");
         assert!(store.get(&next_oldest).is_none(), "the next oldest goes");
+
+        fs::remove_dir_all(&src_dir).ok();
+        Ok(())
+    }
+
+    /// Blobs of a few bytes never meet the byte budget, so the entry budget
+    /// holds the map.
+    #[test]
+    fn ten_times_the_entry_cap_of_tiny_blobs_leaves_the_cap_and_drops_the_oldest()
+    -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"x")?;
+
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let group = ContentId::new("blob-test-group");
+        let digest = |index: usize| {
+            let mut bytes = [0u8; HASH_LEN];
+            bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            BlobDigest::from(bytes)
+        };
+        let total = 10 * super::MAX_BLOB_STORE_ENTRIES;
+        for index in 0..total {
+            let meta = ContentMeta {
+                sha256: digest(index),
+                size: 1,
+                content_id: group.clone(),
+            };
+            store.snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))?;
+        }
+
+        assert_eq!(
+            store.map.len(),
+            super::MAX_BLOB_STORE_ENTRIES,
+            "the store holds the entry cap and no more"
+        );
+        assert!(store.get(&digest(0)).is_none(), "the oldest blob is gone");
+        assert!(
+            store.get(&digest(total - 1)).is_some(),
+            "the newest blob stays"
+        );
+        let spooled = fs::read_dir(&store.spool_dir)?.count();
+        assert_eq!(
+            spooled,
+            super::MAX_BLOB_STORE_ENTRIES,
+            "an evicted blob loses its spool file"
+        );
 
         fs::remove_dir_all(&src_dir).ok();
         Ok(())

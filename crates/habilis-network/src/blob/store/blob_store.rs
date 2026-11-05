@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::util::consts::MAX_BLOB_STORE_BYTES;
+use crate::util::consts::{MAX_BLOB_STORE_BYTES, MAX_BLOB_STORE_ENTRIES};
 
 use crate::blob::{BlobDigest, ContentId};
 
@@ -127,9 +127,9 @@ impl BlobStore {
     }
 
     /// Unlink the least recently registered or claimed blob first, until the
-    /// store is within `MAX_BLOB_STORE_BYTES`.
+    /// store is within `MAX_BLOB_STORE_BYTES` and `MAX_BLOB_STORE_ENTRIES`.
     fn evict_to_budget(&mut self) {
-        while self.total_bytes > MAX_BLOB_STORE_BYTES {
+        while self.total_bytes > MAX_BLOB_STORE_BYTES || self.map.len() > MAX_BLOB_STORE_ENTRIES {
             let Some(oldest) = self
                 .map
                 .iter()

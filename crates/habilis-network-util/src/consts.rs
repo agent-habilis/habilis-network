@@ -200,6 +200,14 @@ pub const MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 #[cfg(feature = "host")]
 pub const MAX_BLOB_STORE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
+/// Entry budget of the same store. The byte budget counts size, so blobs of a
+/// few bytes would grow the map without a limit. 4096 entries leave 1 MiB per
+/// blob inside `MAX_BLOB_STORE_BYTES`, so a normal blob never meets this cap,
+/// and the map holds at most about 4 MiB. The oldest blob goes first, the same
+/// as under the byte budget.
+#[cfg(feature = "host")]
+pub const MAX_BLOB_STORE_ENTRIES: usize = 4096;
+
 /// Capacity of the unicast inbound channel — frames the `UNICAST_ALPN` acceptor
 /// forwards to the event loop for `gossip::ingest`. Bounded so a peer flooding a
 /// unicast stream can't back-pressure the loop; over the cap a frame is dropped
