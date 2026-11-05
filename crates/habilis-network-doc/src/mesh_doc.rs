@@ -1973,20 +1973,24 @@ impl MeshDoc {
     /// The values that this node must write again because a replay of another node set a lower
     /// stamp on them, and the deletes that a replay undid: a merge and the stamp of each path, for
     /// [`Self::compose_replay_body`]. The live stamps are read again here, so a value that a
-    /// newer write has overtaken in the meantime is not written. `None` when there is nothing to
-    /// write. The glue calls it on each tick.
+    /// newer write, or a delete of a higher stamp, has overtaken in the meantime is not written.
+    /// `None` when there is nothing to write. The glue calls it on each tick.
     pub fn take_restores(&mut self) -> Option<Restores> {
         let held: Vec<(Vec<String>, (Value, Stamp))> =
             mem::take(&mut self.restores).into_iter().collect();
         let paths: Vec<Vec<String>> = held.iter().map(|(path, _)| path.clone()).collect();
         let live = self.stamps_of(&paths);
+        let floors = self.tombstone_floors(&paths);
         let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
         let mut stamps: Vec<(Vec<String>, Stamp)> = Vec::new();
-        for ((path, (value, stamp)), now) in held.into_iter().zip(live) {
-            let stale = match &now {
-                Some(current) => *current >= stamp,
-                None => value.is_null(),
-            };
+        for (((path, (value, stamp)), now), floor) in held.into_iter().zip(live).zip(floors) {
+            // A delete of a higher stamp governs the path: a value is not written over it.
+            let deleted = !value.is_null() && floor.is_some_and(|dead| dead >= stamp);
+            let stale = deleted
+                || match &now {
+                    Some(current) => *current >= stamp,
+                    None => value.is_null(),
+                };
             if !stale {
                 leaves.push((path.clone(), value));
                 stamps.push((path, stamp));
@@ -5175,6 +5179,25 @@ mod tests {
                 Stamp::new(7, "aa".to_owned())
             ],
             "the object has no write of its own, and the leaf keeps its stamp"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_a_delete_of_a_higher_stamp_overtook_is_not_written() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = doc_with_clock_at(9);
+        write(&mut doc, &me, &json!({ "shared": 1 }));
+        // A restore of `shared = 2` at the stamp 50 waits, and then a delete of the leaf with the
+        // stamp 60 arrives: the delete is the newer write, and the restore must not bring 2 back.
+        let path = vec!["shared".to_owned()];
+        doc.restores
+            .insert(path.clone(), (json!(2), Stamp::new(50, "aa".to_owned())));
+        doc.add_tombstone(path, Stamp::new(60, "bb".to_owned()));
+        assert_eq!(
+            doc.take_restores(),
+            None,
+            "a delete of a higher stamp governs the leaf, so the restore is stale"
         );
     }
 
