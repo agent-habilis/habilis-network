@@ -350,9 +350,8 @@ mod tests {
                 alive: index == survivor,
             })
             .collect();
-        let roster = nicks
-            .iter()
-            .enumerate()
+        let slots = nicks.iter().enumerate();
+        let roster: Vec<(String, String)> = slots
             .map(|(index, nick)| (format!("key-{index}"), (*nick).to_owned()))
             .collect();
         Snapshot {
