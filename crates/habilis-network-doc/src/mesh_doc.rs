@@ -224,8 +224,7 @@ impl SeedPlan {
     /// object that the merge writes, as the plan holds them (the stamp 0 for a path that it holds
     /// none for). A caller that measures the frames of a seed uses them, so the frames come out as
     /// full as they can be and not as full as the worst stamp lets them be.
-    #[must_use]
-    pub fn stamps_for(&self, merge: &Value) -> Vec<Stamp> {
+    pub fn stamps_for(&self, merge: &Value) -> impl Iterator<Item = Stamp> + use<> {
         let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
         collect_leaves(merge, &mut Vec::new(), &mut leaves);
         let mut objects: Vec<(Vec<String>, Value)> = Vec::new();
@@ -238,7 +237,7 @@ impl SeedPlan {
         for (path, _) in &objects {
             stamps.push(self.stamps.get(path).unwrap_or(&none).clone());
         }
-        stamps
+        stamps.into_iter()
     }
 
     /// Build the chain of the seed of `epoch` from this plan: the live JSON cut by leaf path into
@@ -7428,18 +7427,16 @@ mod tests {
         write(&mut doc, &other, &json!({ "n": 8 }));
         let plan = doc.seed_plan().expect("a plan");
         let merge = json!({ "n": 8, "board": { "title": "t" } });
-        let stamps = plan.stamps_for(&merge);
-        let paths = vec![
-            vec!["board".to_owned()],
-            vec!["board".to_owned(), "title".to_owned()],
-            vec!["n".to_owned()],
-        ];
-        let held: Vec<Stamp> = doc
-            .stamps_of(&paths)
-            .into_iter()
-            .map(|stamp| stamp.expect("a stamp"))
-            .collect();
-        let mut expected = held;
+        let stamps: Vec<Stamp> = plan.stamps_for(&merge).collect();
+        let board: Vec<String> = vec!["board".to_owned()];
+        let title: Vec<String> = vec!["board".to_owned(), "title".to_owned()];
+        let number: Vec<String> = vec!["n".to_owned()];
+        let paths: Vec<Vec<String>> = vec![board, title, number];
+        let found = doc.stamps_of(&paths);
+        let mut expected: Vec<Stamp> = Vec::new();
+        for stamp in found {
+            expected.push(stamp.expect("a stamp"));
+        }
         expected.sort();
         let mut got = stamps;
         got.sort();
@@ -7447,7 +7444,7 @@ mod tests {
             got, expected,
             "the object, the leaf under it and the other leaf, each with the stamp of its write"
         );
-        let unknown = plan.stamps_for(&json!({ "nowhere": 1 }));
+        let unknown: Vec<Stamp> = plan.stamps_for(&json!({ "nowhere": 1 })).collect();
         assert_eq!(
             unknown,
             vec![Stamp::new(0, "0000000000000000".to_owned())],

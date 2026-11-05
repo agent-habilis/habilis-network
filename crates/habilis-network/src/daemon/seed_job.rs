@@ -93,7 +93,7 @@ fn mix(nickname: &Nickname, epoch: u64) -> u64 {
 /// under a message. It is the check of the daemon for a seed: a frame that fits here fits at the
 /// send, and it is as full as the real stamps let it be.
 fn seed_frame_fits(job: &SeedJob, plan: &SeedPlan, merge: &serde_json::Value) -> bool {
-    let stamps = plan.stamps_for(merge);
+    let stamps: Vec<Stamp> = plan.stamps_for(merge).collect();
     frame_fits_with(job, merge, &stamps)
 }
 
