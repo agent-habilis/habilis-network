@@ -337,6 +337,10 @@ pub struct MeshDoc {
     settled_bytes: usize,
     /// The frame bytes that start a reset, before the settled size is known.
     frame_cap: usize,
+    /// Whether an ungated document keeps the root of a higher epoch as a candidate. Off by
+    /// default, so a state channel refuses such a frame, as it did before the state epochs, until
+    /// the node ticks the state channel (see [`Self::state_epochs`]).
+    state_epochs: bool,
     /// This channel's per-peer write gate, when it has one (`meta` does; `state`
     /// is free-form and carries no per-peer identity, so it does not).
     gate: Option<SelfWriteGate>,
@@ -394,6 +398,7 @@ impl MeshDoc {
             epoch_ticks: 0,
             settled_bytes: 0,
             frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
+            state_epochs: false,
             gate,
             key: None,
         }
@@ -446,6 +451,15 @@ impl MeshDoc {
         let author_name = author.as_str();
         let mut nicks = before.keys().chain(after.keys());
         nicks.any(|nick| nick.as_str() != author_name && before.get(nick) != after.get(nick))
+    }
+
+    /// Let this ungated document keep the root of a higher epoch as a candidate. Call it only on a
+    /// node that ticks the state channel, because a candidate that no tick adopts or drops holds
+    /// its frames for ever.
+    #[must_use]
+    pub fn state_epochs(mut self) -> Self {
+        self.state_epochs = true;
+        self
     }
 
     /// Set this channel's encryption key (the daemon's per-channel
@@ -939,6 +953,9 @@ impl MeshDoc {
             }
             None
         } else {
+            if !self.state_epochs {
+                return self.refuse_frame(frame);
+            }
             let named: usize = mark.as_ref().map_or(0, |named| named.frames as usize);
             if named == 0 || named > DOC_SEED_FRAMES_MAX {
                 return self.refuse_frame(frame);
@@ -2922,13 +2939,37 @@ mod tests {
     }
 
     #[test]
+    fn a_state_document_refuses_a_seed_until_state_epochs_are_on() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let cutter = nick("cutter");
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let mut doc = MeshDoc::new_ungated();
+        for frame in &frames {
+            let taken = doc.ingest(frame);
+            assert!(
+                matches!(taken, Ingested::Ignored),
+                "refused while the policy is off: {taken:?}"
+            );
+        }
+        assert!(
+            doc.candidate.is_none(),
+            "no candidate is held, so no memory is pinned"
+        );
+        let forgotten: Vec<DedupKey> = dropped_keys(&mut doc);
+        assert!(
+            forgotten.contains(&frames[0].dedup_key()),
+            "the key of the root is forgotten"
+        );
+    }
+
+    #[test]
     fn a_state_seed_chain_is_held_whole_and_adopted_after_the_wait() {
         let _guard = ::habilis_network_test_tracing::init();
         let (me, cutter) = (nick("me"), nick("cutter"));
         let live = live_state();
         let frames = seed_frames(&cutter, &live, 3, None);
         assert!(frames.len() > 2, "the seed has a tail: {}", frames.len());
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         for frame in &frames {
             let taken = doc.ingest(frame);
             assert!(
@@ -2960,7 +3001,7 @@ mod tests {
         );
         let (me, cutter) = (nick("me"), nick("cutter"));
         let frames = seed_frames(&cutter, &live_state(), 3, None);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         write(&mut doc, &me, &json!({ "mine": 1 }));
         for frame in &frames[..frames.len() - 1] {
             doc.ingest(frame);
@@ -2986,7 +3027,7 @@ mod tests {
         );
         let (me, cutter) = (nick("me"), nick("cutter"));
         let frames = seed_frames(&cutter, &live_state(), 3, None);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         for frame in &frames[..frames.len() - 1] {
             doc.ingest(frame);
         }
@@ -3010,7 +3051,7 @@ mod tests {
         );
         let (me, cutter) = (nick("me"), nick("cutter"));
         let frames = seed_frames(&cutter, &live_state(), 3, None);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         write(&mut doc, &me, &json!({ "mine": 1 }));
         doc.ingest(&frames[0]);
         assert!(
@@ -3025,7 +3066,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (me, cutter) = (nick("me"), nick("cutter"));
         let frames = seed_frames(&cutter, &live_state(), 3, None);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         write(&mut doc, &me, &json!({ "mine": 1 }));
         for frame in &frames[..frames.len() - 1] {
             let taken = doc.ingest(frame);
@@ -3047,7 +3088,7 @@ mod tests {
         let (me, cutter) = (nick("me"), nick("cutter"));
         let live = live_state();
         let frames = seed_frames(&cutter, &live, 3, None);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         doc.ingest(&frames[0]);
         let reversed: Vec<&Verified> = frames[1..].iter().rev().collect();
         for frame in reversed {
@@ -3076,7 +3117,7 @@ mod tests {
         let message =
             Message::new_channel_event(&MeshId::from("test"), &cutter, plain, Channel::State);
         let root = Verified::fixture_unchecked(message.unverified_key(who), who);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         assert!(
             matches!(doc.ingest(&root), Ingested::Ignored),
             "a forged count is refused"
@@ -3094,7 +3135,7 @@ mod tests {
         let (cutter, mallory) = (nick("cutter"), nick("mallory"));
         let frames = seed_frames(&cutter, &live_state(), 3, None);
         let foreign = seed_frames(&mallory, &live_state(), 3, None);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         doc.ingest(&frames[0]);
         let taken = doc.ingest(&foreign[1]);
         assert!(
@@ -3112,7 +3153,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let cutter = nick("cutter");
         let frames = seed_frames(&cutter, &live_state(), 3, None);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         for _ in 0..10 {
             for frame in &frames {
                 doc.ingest(frame);
@@ -3135,7 +3176,7 @@ mod tests {
         let (me, cutter) = (nick("me"), nick("cutter"));
         let live = live_state();
         let frames = seed_frames(&cutter, &live, 3, None);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         let own = signer(&me);
         for frame in &frames[..frames.len() - 1] {
             doc.ingest(frame);
@@ -3157,7 +3198,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (me, cutter) = (nick("me"), nick("cutter"));
         let frames = seed_frames(&cutter, &live_state(), 3, None);
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         for frame in &frames {
             doc.ingest(frame);
         }
@@ -3176,7 +3217,7 @@ mod tests {
         let key = SymmetricKey::from([7u8; 32]);
         let live = live_state();
         let frames = seed_frames(&cutter, &live, 3, Some(&key));
-        let mut doc = MeshDoc::new_ungated().key(Some(key));
+        let mut doc = MeshDoc::new_ungated().state_epochs().key(Some(key));
         for frame in &frames {
             doc.ingest(frame);
         }

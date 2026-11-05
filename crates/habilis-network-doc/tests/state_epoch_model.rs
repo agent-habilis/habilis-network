@@ -79,7 +79,7 @@ impl Sim {
         for index in 0..NODES {
             nodes.push(Node {
                 name: nick(&format!("n{index}")),
-                doc: MeshDoc::new_ungated(),
+                doc: MeshDoc::new_ungated().state_epochs(),
             });
         }
         Self {
