@@ -50,11 +50,10 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
     /// Hold the proof of a session. At the cap, the oldest session that `is_live` denies goes first.
     /// If every held session is live, the proof is refused and counted.
     pub(crate) fn insert_evicting(&mut self, key: K, value: V, is_live: impl Fn(&K) -> bool) {
-        if !self.held.contains_key(&key)
-            && self.held.len() >= self.cap
-            && let Some(dead) = self.order.iter().find(|held| !is_live(held)).cloned()
-        {
-            self.remove(&dead);
+        let full = !self.held.contains_key(&key) && self.held.len() >= self.cap;
+        let mut dead_ones = self.order.iter().filter(|held| !is_live(held));
+        if full && let Some(oldest_dead) = dead_ones.next().cloned() {
+            self.remove(&oldest_dead);
         }
         self.insert(key, value);
     }
