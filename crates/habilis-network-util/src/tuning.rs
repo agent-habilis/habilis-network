@@ -162,6 +162,38 @@ pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// than two of those intervals is of no use, and its slot goes to another signer.
 pub const PARKED_LINK_STATE_TTL: Duration = LINKSTATE_INTERVAL.saturating_mul(2);
 
+/// The least time between two `PeerInfo` floods of a node that sends no other reason to flood. A
+/// `PeerInfo` that a member missed is not in the message log, so no digest repairs it: only the
+/// flood of its sender does. The refresh sends it again, so a lost one is back within a period.
+pub const PEERINFO_REFRESH_MIN: Duration = Duration::from_mins(5);
+
+/// The refresh period grows with the roster by this much per live member, so the whole mesh sends
+/// at most 1 refresh per this span, however many members it holds.
+pub const PEERINFO_REFRESH_PER_PEER: Duration = Duration::from_secs(5);
+
+/// The time after the last `PeerInfo` flood at which a node floods it again, for a roster of
+/// `members` live members (itself included): the larger of [`PEERINFO_REFRESH_MIN`] and
+/// [`PEERINFO_REFRESH_PER_PEER`] for each member, as set by the tuning. The caller spreads the
+/// value by a random factor so that the members do not flood together.
+///
+/// # Examples
+///
+/// A small roster refreshes at the least period.
+///
+/// ```
+/// use habilis_network_util::tuning::{PEERINFO_REFRESH_MIN, peerinfo_refresh_period};
+///
+/// assert_eq!(peerinfo_refresh_period(3), PEERINFO_REFRESH_MIN);
+/// ```
+#[must_use]
+pub fn peerinfo_refresh_period(members: usize) -> Duration {
+    let tuning = current();
+    let grown = tuning
+        .peerinfo_refresh_per_peer
+        .saturating_mul(u32::try_from(members).unwrap_or(u32::MAX));
+    tuning.peerinfo_refresh_min.max(grown)
+}
+
 /// How long a peer can go unheard before the sweeper evicts it.
 /// Must exceed `ALIVE_INTERVAL` comfortably — 3x absorbs one or
 /// two lost gossip rounds. Worst-case ghost window is
@@ -347,6 +379,10 @@ pub struct Tuning {
     pub rendezvous_periodic_return: Duration,
     /// Whether a topic mesh looks up peers over mDNS only.
     pub topic_mdns_only: bool,
+    /// The least time between two refreshes of the `PeerInfo` of a node.
+    pub peerinfo_refresh_min: Duration,
+    /// How much a live member adds to the refresh period.
+    pub peerinfo_refresh_per_peer: Duration,
 }
 
 impl Tuning {
@@ -382,6 +418,27 @@ impl Tuning {
     #[must_use]
     pub fn heal_interval(mut self, heal_interval: Duration) -> Self {
         self.heal_interval = heal_interval;
+        self
+    }
+
+    /// Set how often the sweeper looks for expired peers.
+    #[must_use]
+    pub fn sweep_interval(mut self, sweep_interval: Duration) -> Self {
+        self.sweep_interval = sweep_interval;
+        self
+    }
+
+    /// Set the least time between two refreshes of the `PeerInfo` of a node.
+    #[must_use]
+    pub fn peerinfo_refresh_min(mut self, peerinfo_refresh_min: Duration) -> Self {
+        self.peerinfo_refresh_min = peerinfo_refresh_min;
+        self
+    }
+
+    /// Set how much a live member adds to the refresh period.
+    #[must_use]
+    pub fn peerinfo_refresh_per_peer(mut self, peerinfo_refresh_per_peer: Duration) -> Self {
+        self.peerinfo_refresh_per_peer = peerinfo_refresh_per_peer;
         self
     }
 
@@ -429,6 +486,8 @@ impl Tuning {
         rival_recheck_alone: RIVAL_RECHECK_ALONE,
         rendezvous_periodic_return: RENDEZVOUS_PERIODIC_RETURN,
         topic_mdns_only: false,
+        peerinfo_refresh_min: PEERINFO_REFRESH_MIN,
+        peerinfo_refresh_per_peer: PEERINFO_REFRESH_PER_PEER,
     };
 }
 
