@@ -652,12 +652,9 @@ fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
         tracing::warn!(target: "habilis_network::lifecycle", "identity key file has the wrong length; a new key replaces it");
     }
     let identity = identity::Identity::generate();
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&key_path)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true).mode(0o600);
+    let mut file = options.open(&key_path)?;
     file.write_all(identity.seed().as_slice())?;
     Ok(identity)
 }
@@ -676,10 +673,11 @@ fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> 
 /// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
 /// would start the same actor again at sequence 1.
 fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
-    let member = sync::Arc::new(load_or_create_identity(state)?);
     Ok(RunKeys {
-        session: sync::Arc::clone(&member),
-        member,
+        // shared with the loop and its handlers, which hold clones
+        session: sync::Arc::new(identity::Identity::generate()),
+        // shared with the loop and its handlers, which hold clones
+        member: sync::Arc::new(load_or_create_identity(state)?),
     })
 }
 
@@ -1211,14 +1209,16 @@ mod tests {
     /// sequence number, and every write of the restarted member is lost.
     #[test]
     fn a_restarted_session_writes_under_a_new_actor() {
+        use crate::daemon::state::RunKeys;
         use crate::doc::{Ingested, MeshDoc};
         use crate::protocol::{Channel, MeshId, Message};
+        use crate::testing;
         let dir = env::temp_dir().join(format!("habilis-restart-actor-{}", process::id()));
         fs::create_dir_all(&dir).expect("a temp dir");
         let state = dir.join("session.json");
         let mesh = MeshId::from("💬test");
-        let author = crate::testing::nick("alice");
-        let write = |keys: &crate::daemon::state::RunKeys, value: u8| {
+        let author = testing::nick("alice");
+        let write = |keys: &RunKeys, value: u8| {
             let doc = MeshDoc::new_ungated();
             let seed = *keys.session.public().as_bytes();
             let change = doc

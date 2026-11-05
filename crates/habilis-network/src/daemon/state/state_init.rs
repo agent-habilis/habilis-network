@@ -13,7 +13,9 @@ use crate::{doc, transport};
 /// signs only the proof that the session speaks as the member.
 #[derive(Debug, Clone)]
 pub(crate) struct RunKeys {
+    // shared with the loop and its handlers, which hold clones
     pub(crate) session: Arc<Identity>,
+    // shared with the loop and its handlers, which hold clones
     pub(crate) member: Arc<Identity>,
 }
 

@@ -103,7 +103,7 @@ mod tests {
     /// the mesh. The session key signs frames, so a proof signed by it would prove nothing.
     #[test]
     fn the_proof_of_a_session_is_signed_by_the_member_key() {
-        use crate::protocol::identity::verify_proof;
+        use crate::protocol::identity;
         let state = fresh_state();
         let mesh = MeshId::from("💬test");
         let proof = state.own_proof(&nick("alice"), &mesh, 7);
@@ -113,7 +113,7 @@ mod tests {
             "the member key signs the proof"
         );
         assert!(
-            verify_proof(&proof, &state.identity.author_key(), "alice", mesh.as_ref()),
+            identity::verify_proof(&proof, &state.identity.author_key(), "alice", mesh.as_ref()),
             "the proof binds the session key, the nickname and the mesh"
         );
     }

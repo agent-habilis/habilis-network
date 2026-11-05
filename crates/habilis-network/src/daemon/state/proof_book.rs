@@ -1,4 +1,11 @@
 //! The proofs of sessions this node has verified, and the answers it sends for the ones it is asked.
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the event loop state holds the book in the next commit"
+    )
+)]
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -29,9 +36,7 @@ impl<K: Eq + Hash, V> ProofBook<K, V> {
     }
 
     pub(crate) fn insert(&mut self, key: K, value: V) {
-        if self.held.contains_key(&key) {
-            self.held.insert(key, value);
-        } else if self.held.len() < self.cap {
+        if self.held.contains_key(&key) || self.held.len() < self.cap {
             self.held.insert(key, value);
         } else {
             self.refused += 1;
@@ -71,6 +76,7 @@ impl<K: Eq + Hash, V> ProofBook<K, V> {
 #[cfg(test)]
 mod tests {
     use super::ProofBook;
+    use std::time::Instant;
 
     /// The book holds at most its cap of proofs: a proof past the cap is refused and counted, and a
     /// proof already held is never evicted.
@@ -89,7 +95,7 @@ mod tests {
     #[test]
     fn answers_are_capped_per_window() {
         let mut book: ProofBook<u8, u8> = ProofBook::with_cap(4);
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         let allowed = (0..100).filter(|_| book.allow_answer(now)).count();
         assert_eq!(
             allowed,
@@ -98,7 +104,8 @@ mod tests {
         );
         assert_eq!(
             book.answers_refused(),
-            100 - super::ANSWERS_PER_MINUTE as u64
+            100 - super::ANSWERS_PER_MINUTE as u64,
+            "every answer past the cap is counted"
         );
     }
 }

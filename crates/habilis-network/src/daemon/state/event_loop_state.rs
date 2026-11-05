@@ -546,6 +546,10 @@ impl EventLoopState {
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
     /// per-channel keys are derived, rather than lingering in the caller.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the member key is one field over the limit; the constructor is split in a later commit"
+    )]
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
         let MeshSecrets {
             password: mesh_password,
@@ -1710,8 +1714,15 @@ impl EventLoopState {
 
     /// The proof that this session speaks as `nickname` on `mesh` in run `run`.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the joined message carries the proof in a later commit"
+        )
+    )]
     pub(crate) fn own_proof(&self, nickname: &Nickname, mesh: &MeshId, run: u64) -> IdentityProof {
-        self.identity.prove(
+        self.member_identity.prove(
             &self.identity.author_key(),
             nickname.as_ref(),
             mesh.as_ref(),

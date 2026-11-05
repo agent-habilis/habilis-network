@@ -53,7 +53,9 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
             state_file: None,
             // the keys are shared with the loop and its handlers, which hold clones
             keys: RunKeys {
+                // shared with the loop and its handlers, which hold clones
                 session: Arc::new(Identity::generate()),
+                // shared with the loop and its handlers, which hold clones
                 member: Arc::new(Identity::generate()),
             },
             secrets: MeshSecrets::default(),
