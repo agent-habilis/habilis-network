@@ -5096,6 +5096,89 @@ mod tests {
     }
 
     #[test]
+    fn a_restore_that_a_newer_write_overtook_is_not_written() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other, third) = (nick("aaa"), nick("zzz"), nick("mmm"));
+        // This node holds `shared = 9` at the stamp 100.
+        let mut doc = doc_with_clock_at(99);
+        let first = write(&mut doc, &mine, &json!({ "shared": 9 }));
+        // A replay of another node sets `shared = 5` at the stamp 50, and automerge keeps it (the
+        // actor of that node is the higher one), so this node plans to write 9 again.
+        let replayer = MeshDoc::new_ungated().state_epochs();
+        let change = replayer
+            .build_change(
+                &json!({ "shared": 5 }),
+                &pad_seed(other.as_str().as_bytes()),
+            )
+            .expect("applies")
+            .expect("a change");
+        let stamps = vec![(
+            vec!["shared".to_owned()],
+            Stamp::new(50, "7a7a7a7a00000000".to_owned()),
+        )];
+        let body = replayer
+            .compose_replay_body(&change, &stamps)
+            .expect("a replay body");
+        let key = signer(&other);
+        let replay = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &other, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        assert!(matches!(doc.ingest(&replay), Ingested::Applied { .. }));
+        assert!(
+            doc.has_restores(),
+            "the replay lowered the stamp, so a restore waits"
+        );
+        // Before the restore goes out, a third node that saw both writes a newer value.
+        let mut newer = doc_with_clock_at(120);
+        let _ = newer.ingest(&first);
+        let _ = newer.ingest(&replay);
+        let latest = write(&mut newer, &third, &json!({ "shared": 7 }));
+        assert!(matches!(doc.ingest(&latest), Ingested::Applied { .. }));
+        assert_eq!(
+            doc.take_restores(),
+            None,
+            "the live stamp is read again, so the restore of 9 is not written over the newer 7"
+        );
+        assert_eq!(
+            doc.to_json(),
+            json!({ "shared": 7 }),
+            "the newer write stays"
+        );
+    }
+
+    #[test]
+    fn an_object_that_a_replay_makes_for_a_leaf_gets_the_stamp_zero() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let doc = MeshDoc::new_ungated().state_epochs();
+        let change = doc
+            .build_change(
+                &json!({ "o": { "x": 1 } }),
+                &pad_seed(me.as_str().as_bytes()),
+            )
+            .expect("applies")
+            .expect("a change");
+        let stamps = vec![(
+            vec!["o".to_owned(), "x".to_owned()],
+            Stamp::new(7, "aa".to_owned()),
+        )];
+        let body = doc
+            .compose_replay_body(&change, &stamps)
+            .expect("a replay body");
+        let parsed = parse_change_full(body.as_str()).expect("it parses");
+        assert_eq!(
+            parsed.origins,
+            vec![
+                Stamp::new(0, "0000000000000000".to_owned()),
+                Stamp::new(7, "aa".to_owned())
+            ],
+            "the object has no write of its own, and the leaf keeps its stamp"
+        );
+    }
+
+    #[test]
     fn a_gated_channel_never_writes_a_time() {
         let _guard = ::habilis_network_test_tracing::init();
         let me = nick("me");
