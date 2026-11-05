@@ -2114,9 +2114,10 @@ impl EventLoopState {
     /// Keep the endpoint of a `PeerInfo` of `key` that bound no dial hint, for the day `key` is
     /// the only live key of its nickname.
     pub(crate) fn retain_refused_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
-        let displaced = self.refused_endpoints.insert(key, endpoint.clone());
+        let id = endpoint.id;
+        let displaced = self.refused_endpoints.insert(key, endpoint);
         if let Some(old) = displaced
-            && old.id != endpoint.id
+            && old.id != id
         {
             self.release_if_unowned(old.id);
         }
