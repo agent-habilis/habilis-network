@@ -8,11 +8,13 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::future::pending;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+#[cfg(target_family = "wasm")]
+use n0_future::task::spawn;
+use n0_future::task::{JoinError, JoinHandle};
 #[cfg(not(target_family = "wasm"))]
 use tokio::task::spawn_blocking;
-use tokio::task::{JoinError, JoinHandle};
 
 use crate::doc::{DocError, MeshDoc, SeedChain, SeedPlan, Stamp, StampedPaths, wire};
 use crate::protocol::identity::Identity;
@@ -20,8 +22,9 @@ use crate::protocol::messages::{Verified, WireFrame};
 use crate::protocol::{Channel, MeshId, Message, Nickname, SymmetricKey};
 use crate::transport::MeshSender;
 use crate::util::bounded_fifo_set::BoundedFifoSet;
-use crate::util::clock::Instant as ClockInstant;
-use crate::util::consts::{DOC_EPOCH_FRAME_MARGIN, DOC_STATE_SYNC_WAIT, MAX_MESSAGE_SIZE};
+use crate::util::clock::Instant;
+use crate::util::consts::{DOC_EPOCH_FRAME_MARGIN, MAX_MESSAGE_SIZE};
+use crate::util::tuning;
 
 use super::state::EventLoopState;
 
@@ -143,7 +146,7 @@ pub(crate) fn spawn_build(plan: SeedPlan, job: SeedJob) -> JoinHandle<SeedOutcom
     }
     #[cfg(target_family = "wasm")]
     {
-        tokio::spawn(async move { build() })
+        spawn(async move { build() })
     }
 }
 
@@ -274,10 +277,13 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     if !state.doc(Channel::State).cut_due(rank) {
         return;
     }
-    let plan = match state.doc(Channel::State).seed_plan() {
+    let planned = state.doc(Channel::State).seed_plan();
+    // A candidate that the node holds is adopted, not cut over.
+    if matches!(planned, Err(DocError::CandidateHeld)) {
+        return;
+    }
+    let plan = match planned {
         Ok(plan) => plan,
-        // A candidate that the node holds is adopted, not cut over.
-        Err(DocError::CandidateHeld) => return,
         Err(error) => {
             cut_failed(state, &error);
             return;
@@ -321,11 +327,11 @@ pub(crate) fn peer_heads_seen(state: &mut EventLoopState, channel: Channel, head
 /// down, would hold every write for ever.
 pub(crate) fn sync_deadline(state: &mut EventLoopState) {
     let doc = state.doc(Channel::State);
-    if !doc.is_awaiting_first_sync() || ClockInstant::now() < state.state_sync_deadline {
+    if !doc.is_awaiting_first_sync() || Instant::now() < state.state_sync_deadline {
         return;
     }
     state.doc_mut(Channel::State).finish_sync();
-    let limit_secs = DOC_STATE_SYNC_WAIT.as_secs();
+    let limit_secs = tuning::state_sync_wait().as_secs();
     tracing::warn!(target: "habilis_network::gossip", limit_secs, "no peer answered the digest of the state channel within the time limit, so the node writes with the clock that it has; a write that it made before a restart can win against its new ones");
 }
 
@@ -446,6 +452,17 @@ pub(crate) async fn send_replays(
     }
 }
 
+/// The creator of a mesh has nothing to sync with: the mesh is new, so the node wrote nothing
+/// before and its clock cannot be below an earlier write of its own. Its state document ends the
+/// wait for the first sync at once. A node that joins keeps the wait (a restart is a join: only the
+/// creating session holds the issuer key).
+pub(crate) fn creator_has_nothing_to_sync(state: &mut EventLoopState, is_creator: bool) {
+    // A wait of zero (a test that writes at once) ends at the start too.
+    if is_creator || tuning::state_sync_wait().is_zero() {
+        state.doc_mut(Channel::State).finish_sync();
+    }
+}
+
 /// A cut that failed: the document holds the next one back, and the node warns once.
 pub(crate) fn cut_failed(state: &mut EventLoopState, error: &impl Display) {
     state.state_cuts_failed = state.state_cuts_failed.saturating_add(1);
@@ -515,8 +532,9 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        ClockInstant, LARGEST_TIME, SeedJob, SeedOutcome, finish, frame_fits_with, peer_heads_seen,
-        queue_replay, rank_of, replay_frames, spawn_build, sync_deadline, tick,
+        Instant, LARGEST_TIME, SeedJob, SeedOutcome, creator_has_nothing_to_sync, finish,
+        frame_fits_with, peer_heads_seen, queue_replay, rank_of, replay_frames, spawn_build,
+        sync_deadline, tick,
     };
     use tokio::time::interval;
 
@@ -778,18 +796,17 @@ mod tests {
         assert!(small.seed_job.is_none(), "a small document starts no build");
 
         let mut plain = testing::fresh_state();
+        plain.state_doc = MeshDoc::new_ungated();
         tick(&mut plain, &me, &mesh);
         assert!(
             plain.seed_job.is_none(),
-            "a state document with no state epochs (the daemon today) starts no build"
+            "a state document with no state epochs starts no build"
         );
     }
 
     /// A state document that waits for its first sync, inside a state.
     fn state_that_waits_for_the_first_sync() -> EventLoopState {
-        let mut state = testing::fresh_state();
-        state.state_doc = MeshDoc::new_state(None);
-        state
+        testing::fresh_state_that_waits()
     }
 
     #[test]
@@ -841,7 +858,7 @@ mod tests {
             state.doc(Channel::State).is_awaiting_first_sync(),
             "the deadline is 30 s from the start: a node that just started still waits"
         );
-        state.state_sync_deadline = ClockInstant::now();
+        state.state_sync_deadline = Instant::now();
         sync_deadline(&mut state);
         assert!(
             !state.doc(Channel::State).is_awaiting_first_sync(),
@@ -850,13 +867,47 @@ mod tests {
     }
 
     #[test]
-    fn a_node_with_no_state_epochs_has_nothing_to_wait_for_at_the_deadline() {
+    fn the_creator_of_a_mesh_writes_at_once_and_a_joiner_waits() {
+        let mut creator = state_that_waits_for_the_first_sync();
+        creator_has_nothing_to_sync(&mut creator, true);
+        assert!(
+            !creator.doc(Channel::State).is_awaiting_first_sync(),
+            "the creator of a new mesh has nothing to sync with"
+        );
+        let mut joiner = state_that_waits_for_the_first_sync();
+        creator_has_nothing_to_sync(&mut joiner, false);
+        assert!(
+            joiner.doc(Channel::State).is_awaiting_first_sync(),
+            "a node that joins waits for its first sync"
+        );
+    }
+
+    #[test]
+    fn a_node_whose_wait_has_ended_has_nothing_to_wait_for_at_the_deadline() {
         let mut state = testing::fresh_state();
-        state.state_sync_deadline = ClockInstant::now();
+        state.state_sync_deadline = Instant::now();
         sync_deadline(&mut state);
         assert!(
             !state.doc(Channel::State).is_awaiting_first_sync(),
-            "the daemon today: no wait, no warning"
+            "a node that already synced: no wait, no warning"
+        );
+    }
+
+    /// The daemon builds its state document in one place, `EventLoopState::new`, and a node starts
+    /// with state epochs on and the wait for the first sync (gate item 7: no node of this version
+    /// has epochs off, so none writes a body with no time that another node would refuse).
+    #[test]
+    fn the_state_document_of_the_daemon_starts_with_epochs_and_the_wait_for_the_first_sync() {
+        let state = testing::fresh_state_that_waits();
+        let doc = state.doc(Channel::State);
+        assert!(doc.has_state_epochs(), "the state channel has epochs");
+        assert!(
+            doc.is_awaiting_first_sync(),
+            "and it waits for the first sync"
+        );
+        assert!(
+            !state.doc(Channel::Meta).has_state_epochs(),
+            "the meta channel is not a state channel: it keeps its own epochs"
         );
     }
 

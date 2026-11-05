@@ -35,8 +35,8 @@ use std::time::Duration;
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr, RelayUrl, Watcher as _};
 use iroh_gossip::api::{ApiError, Event, GossipReceiver, GossipTopic};
+use n0_future::task::JoinError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tokio::task::JoinError;
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
@@ -431,6 +431,8 @@ fn initial_state(
         started,
     );
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
+    let is_creator = state.mint_mesh.is_some();
+    seed_job::creator_has_nothing_to_sync(&mut state, is_creator);
     state
 }
 

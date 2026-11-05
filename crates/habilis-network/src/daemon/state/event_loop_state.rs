@@ -37,7 +37,7 @@ use crate::protocol::{
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
-use crate::util::consts::{DOC_EPOCH_WRITE_ATTEMPTS, DOC_STATE_SYNC_WAIT};
+use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
@@ -54,8 +54,8 @@ use crate::transport::underlay_webrtc;
 use crate::transport::{graft_backoff, probe, proven_endpoints};
 use crate::util::tuning;
 use iroh::address_lookup::memory;
+use n0_future::task::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
 
 use crate::daemon::seed_job::SeedOutcome;
 
@@ -473,7 +473,7 @@ pub struct EventLoopState {
     pub(crate) state_cuts: u64,
     pub(crate) state_cuts_failed: u64,
     /// When the state document stops waiting for its first sync and writes with the clock that it
-    /// has (see `DOC_STATE_SYNC_WAIT`): counted from the start of the node, so a node with no peer
+    /// has (see `tuning::STATE_SYNC_WAIT`): counted from the start of the node, so a node with no peer
     /// is not held for ever.
     pub(crate) state_sync_deadline: Instant,
     /// The `meta` channel's document — a second, independent shared-state channel.
@@ -686,7 +686,7 @@ impl EventLoopState {
             reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
-            state_doc: MeshDoc::new_ungated().key(state_key),
+            state_doc: MeshDoc::new_state(state_key),
             state_seal: mesh_key.as_ref().map(|key| {
                 // Shared with the job that builds a seed on a blocking thread.
                 Arc::new(key.derive(b"state-doc"))
@@ -695,7 +695,7 @@ impl EventLoopState {
             replay_queue: BoundedQueue::new(REPLAY_QUEUE_CAP),
             state_cuts: 0,
             state_cuts_failed: 0,
-            state_sync_deadline: Instant::now() + DOC_STATE_SYNC_WAIT,
+            state_sync_deadline: Instant::now() + tuning::state_sync_wait(),
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
             identity: init.keys.session,
