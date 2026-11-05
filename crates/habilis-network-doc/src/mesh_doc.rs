@@ -390,6 +390,12 @@ pub struct MeshDoc {
     settled_bytes: usize,
     /// The frame bytes that start a reset, before the settled size is known.
     frame_cap: usize,
+    /// The values that this node wrote in the epoch before the seed that it adopted last, for the
+    /// leaves of a rival seed that wins later: a node that cut its own seed holds the leaves of
+    /// that seed only here, and a rival can come at any time, after a partition for one. It is
+    /// replaced at the next adoption, and it holds no more than the values of the node, so the
+    /// bound is the live size of the document.
+    carried: Vec<(Vec<String>, Value)>,
     /// Whether the document is applying the frames of the seed that it adopts, which the rule for
     /// a rival seed must not see.
     adopting: bool,
@@ -469,6 +475,7 @@ impl MeshDoc {
             frame_cap: DOC_EPOCH_FRAME_CAP_BYTES,
             state_epochs: false,
             owner: None,
+            carried: Vec::new(),
             adopting: false,
             seed_author: None,
             seed_hashes: HashSet::new(),
@@ -696,6 +703,7 @@ impl MeshDoc {
     /// state epoch work lands (`state-epoch-design.md`).
     pub fn tick_epoch(&mut self, me: &Nickname) -> Option<EpochSwitch> {
         self.epoch_ticks = self.epoch_ticks.saturating_add(1);
+
         if self.candidate.is_some() {
             self.candidate_ticks = self.candidate_ticks.saturating_add(1);
             if self.candidate_ticks >= DOC_EPOCH_ADOPT_WAIT_TICKS {
@@ -743,15 +751,35 @@ impl MeshDoc {
             }
             return None;
         };
-        // A rival seed of the epoch that the document holds covers none of the writes made in
-        // this epoch, so the whole cut is out of it. A seed of a higher epoch covers what its
-        // cut vector says.
+        // The cut vector of a seed counts the sequence numbers of the document of its cutter, which
+        // held the epoch before the seed. It covers what this document holds only when this
+        // document is at that epoch. A rival seed of the epoch that the document holds, and a seed
+        // that jumps over an epoch, are not in that case: no cut is known, so every change of the
+        // node above the seed that it adopted is written again, and a value that the new epoch
+        // holds as it is stays unsent.
+        let consecutive = candidate.epoch == self.epoch + 1;
         let rival = candidate.epoch == self.epoch;
-        let leaves: Vec<(Vec<String>, Value)> = match candidate.mark.as_ref() {
-            Some(_) if rival => self.replay_leaves(&[], &self.seed_hashes),
-            Some(mark) => self.replay_leaves(&mark.cut, &self.seed_hashes),
+        let now: Value = self.to_json();
+        let paths = self.own_leaf_paths(&self.seed_hashes);
+        let no_cut: Vec<(String, u64)> = Vec::new();
+        let mut leaves: Vec<(Vec<String>, Value)> = match candidate.mark.as_ref() {
+            Some(mark) if consecutive => Self::leaves_for(&paths, &mark.cut, &now),
+            Some(_) => Self::leaves_for(&paths, &no_cut, &now),
             None => Vec::new(),
         };
+        // The values of this node in the epoch that the seed replaces, with no cut: if a rival seed
+        // of the new epoch wins in the wait that follows, the leaves of the seed that this node
+        // adopted come from here, since the document no longer holds them.
+        let carried_now: Vec<(Vec<String>, Value)> = match candidate.mark.as_ref() {
+            Some(_) => Self::leaves_for(&paths, &no_cut, &now),
+            None => Vec::new(),
+        };
+        if rival {
+            let mut merged: Vec<(Vec<String>, Value)> = mem::take(&mut self.carried);
+            merged.extend(leaves);
+            merged.sort_by_key(|(path, _)| path.len());
+            leaves = merged;
+        }
         let mut seed_hashes: HashSet<ChangeHash> = candidate.tail.keys().copied().collect();
         seed_hashes.insert(candidate.root_hash);
         let mut switch = self.switch_to(candidate.epoch, me);
@@ -768,6 +796,7 @@ impl MeshDoc {
             }
         }
         self.adopting = false;
+        self.carried = carried_now;
         if candidate.mark.is_some() {
             self.seed_author = Some(candidate.frame.key());
             self.seed_hashes = seed_hashes;
@@ -790,7 +819,7 @@ impl MeshDoc {
                 None => value.is_null(),
             };
             if !same {
-                set_path(&mut merge, &path, value);
+                set_path(&mut merge, &path, replace_with(&value, holds));
                 lacking = true;
             }
         }
@@ -919,51 +948,60 @@ impl MeshDoc {
         (cut, truncated)
     }
 
-    /// The leaves that the changes above `cut` wrote, with the value that each holds now (`null`
-    /// for a leaf that is gone). A leaf inside another leaf of the list is left out, because the
-    /// outer one carries it.
-    fn replay_leaves(
-        &self,
-        cut: &[(String, u64)],
-        skip: &HashSet<ChangeHash>,
-    ) -> Vec<(Vec<String>, Value)> {
+    /// The leaves that the changes of this node wrote, one item for each leaf of each change: the
+    /// tag of the actor, the sequence number of the change, and the path. A change of the seed
+    /// that the document adopted is no write of the node, so `skip` leaves it out.
+    fn own_leaf_paths(&self, skip: &HashSet<ChangeHash>) -> Vec<(String, u64, Vec<String>)> {
         let Some(owner) = self.owner.as_ref() else {
             return Vec::new();
         };
-        let mut covered: HashMap<&str, u64> = HashMap::new();
-        for (tag, seq) in cut {
-            covered.insert(tag.as_str(), *seq);
-        }
-        let mut paths: Vec<Vec<String>> = Vec::new();
+        let mut found: Vec<(String, u64, Vec<String>)> = Vec::new();
         for change in self.doc.get_changes(&[]) {
             let mine: bool = change.actor_id().to_bytes() == owner.as_bytes().as_slice();
             if !mine || skip.contains(&change.hash()) {
                 continue;
             }
             let tag = actor_tag(change.actor_id());
-            let held: u64 = covered.get(tag.as_str()).copied().unwrap_or(0);
-            if change.seq() <= held {
-                continue;
-            }
             let deps: Vec<ChangeHash> = change.deps().to_vec();
             for patch in self.doc.diff(&deps, &[change.hash()]) {
                 let path = leaf_path(&patch);
-                if !path.is_empty() && !paths.contains(&path) {
-                    paths.push(path);
+                if !path.is_empty() {
+                    found.push((tag.clone(), change.seq(), path));
                 }
             }
         }
-        paths.sort_by_key(Vec::len);
+        found
+    }
+
+    /// The leaves of `paths` that the changes above `cut` wrote, with the value that each holds in
+    /// `now` (`null` for a leaf that is gone). A leaf inside another leaf is left out, because the
+    /// outer one carries it.
+    fn leaves_for(
+        paths: &[(String, u64, Vec<String>)],
+        cut: &[(String, u64)],
+        now: &Value,
+    ) -> Vec<(Vec<String>, Value)> {
+        let mut covered: HashMap<&str, u64> = HashMap::new();
+        for (tag, seq) in cut {
+            covered.insert(tag.as_str(), *seq);
+        }
+        let mut open: Vec<Vec<String>> = Vec::new();
+        for (tag, seq, path) in paths {
+            let held: u64 = covered.get(tag.as_str()).copied().unwrap_or(0);
+            if *seq > held && !open.contains(path) {
+                open.push(path.clone());
+            }
+        }
+        open.sort_by_key(Vec::len);
         let mut kept: Vec<Vec<String>> = Vec::new();
-        for path in paths {
+        for path in open {
             if !kept.iter().any(|outer| path.starts_with(outer)) {
                 kept.push(path);
             }
         }
-        let now: Value = self.to_json();
         let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
         for path in kept {
-            let value: Value = lookup(&now, &path).cloned().unwrap_or(Value::Null);
+            let value: Value = lookup(now, &path).cloned().unwrap_or(Value::Null);
             leaves.push((path, value));
         }
         leaves
@@ -1604,6 +1642,24 @@ fn peers_genesis(map: &str, epoch: u64) -> Change {
 /// every node, so all nodes end in one seed.
 fn beats(rival: &AuthorKey, held: &AuthorKey) -> bool {
     rival.as_bytes() < held.as_bytes()
+}
+
+/// The merge that makes the value `held` into `desired`. A merge of an object only adds and
+/// changes keys, so a key that `held` has and `desired` lacks is deleted with a `null`.
+fn replace_with(desired: &Value, held: Option<&Value>) -> Value {
+    let (Value::Object(wanted), Some(Value::Object(present))) = (desired, held) else {
+        return desired.clone();
+    };
+    let mut merge: Map<String, Value> = Map::new();
+    for (key, value) in wanted {
+        merge.insert(key.clone(), replace_with(value, present.get(key)));
+    }
+    for key in present.keys() {
+        if !wanted.contains_key(key) {
+            merge.insert(key.clone(), Value::Null);
+        }
+    }
+    Value::Object(merge)
 }
 
 /// A tag of the actor of a change for the cut vector: the first 8 bytes, in hex.
