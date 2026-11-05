@@ -1546,6 +1546,33 @@ mod tests {
         );
     }
 
+    /// A card names a nickname and no key. A live key and a quiet key can share a nickname, and
+    /// only the live one answers there: the hint goes to it, as a send by nickname does.
+    #[test]
+    fn a_card_hint_goes_to_the_live_key_when_a_quiet_key_shares_the_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let live = test_key("bob");
+        state.peer_for_test("bob");
+        let quiet = AuthorKey::from_bytes([77; 32]);
+        state.names.insert(quiet, nick("bob"));
+        state.quiet.insert(quiet);
+        let card = iroh::EndpointAddr::new(endpoint_id(1));
+
+        state.note_peer_endpoint(nick("bob"), card.clone());
+
+        assert_eq!(
+            state.peer_endpoints.get("bob"),
+            Some(&card),
+            "a quiet key made the card of a nickname that one live key uses ambiguous"
+        );
+        assert_eq!(
+            state.hint_owner.get("bob"),
+            Some(&live),
+            "the live key does not own the hint"
+        );
+    }
+
     /// The dial hint of a nickname has one owner. The roster has a row for each live key, and only
     /// the owner reads `Direct`.
     #[test]

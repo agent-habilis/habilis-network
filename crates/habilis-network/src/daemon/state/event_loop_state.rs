@@ -2087,9 +2087,13 @@ impl EventLoopState {
     /// nickname; with no such key yet it has no owner; with two live keys the card does not say
     /// which one it is, so it binds no hint.
     pub fn note_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
-        let owner = match self.keys_named(&nickname).as_slice() {
-            [] => None,
-            [only] => Some(*only),
+        let (live, quiet): (Vec<AuthorKey>, Vec<AuthorKey>) = self
+            .keys_named(&nickname)
+            .into_iter()
+            .partition(|key| self.peers.contains(key));
+        let owner = match (live.as_slice(), quiet.as_slice()) {
+            ([only], _) | ([], [only]) => Some(*only),
+            ([], []) => None,
             _ambiguous => return,
         };
         let id = endpoint.id;
