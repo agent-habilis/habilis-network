@@ -197,11 +197,14 @@ type SeedStamps = HashMap<ChangeHash, Vec<(Vec<String>, Stamp)>>;
 /// The ops that one change holds: which actor wrote them, the counter of the first, and how many.
 /// A scan of the history makes one per change, so an op id finds its change.
 struct OpSpan {
-    actor: automerge::ActorId,
     start: u64,
     len: u64,
     hash: ChangeHash,
 }
+
+/// The spans of every actor, each list sorted by the counter of its first op, so an op id finds its
+/// change by binary search.
+type OpIndex = HashMap<Vec<u8>, Vec<OpSpan>>;
 
 /// The bound of the Lamport time of a state change: 2^53, the largest whole number that a JSON
 /// number keeps exact. A change with a time at or above it is refused, so the clock stays below it
@@ -435,6 +438,8 @@ pub struct MeshDoc {
     clock: AtomicU64,
     /// The state changes that were refused for want of a valid time: one integer, which saturates.
     refused_time: u64,
+    /// The paths of a seed that got the stamp 0 (see [`Self::unstamped_paths`]).
+    unstamped: AtomicU64,
     /// Whether local writes wait for the end of the first sync (see [`Self::awaiting_first_sync`]).
     awaiting_sync: bool,
     /// The stamps that the changes of the adopted seed name, for each change and each path that it
@@ -521,6 +526,7 @@ impl MeshDoc {
             adopting: false,
             clock: AtomicU64::new(0),
             refused_time: 0,
+            unstamped: AtomicU64::new(0),
             awaiting_sync: false,
             origins: HashMap::new(),
             seed_author: None,
@@ -729,25 +735,42 @@ impl MeshDoc {
     /// epochs, or the genesis). One scan of the history builds the index for all the paths.
     #[must_use]
     pub fn stamps_of(&self, paths: &[Vec<String>]) -> Vec<Option<Stamp>> {
-        let index: Vec<OpSpan> = self
-            .doc
-            .get_changes(&[])
-            .iter()
-            .map(|change| OpSpan {
-                actor: change.actor_id().clone(),
-                start: change.start_op().get(),
-                len: u64::try_from(change.len()).unwrap_or(u64::MAX),
-                hash: change.hash(),
-            })
-            .collect();
+        let mut index: OpIndex = HashMap::new();
+        for change in self.doc.get_changes(&[]) {
+            index
+                .entry(change.actor_id().to_bytes().to_vec())
+                .or_default()
+                .push(OpSpan {
+                    start: change.start_op().get(),
+                    len: u64::try_from(change.len()).unwrap_or(u64::MAX),
+                    hash: change.hash(),
+                });
+        }
+        for spans in index.values_mut() {
+            spans.sort_by_key(|span| span.start);
+        }
         paths
             .iter()
             .map(|path| self.stamp_at(path, &index))
             .collect()
     }
 
+    /// The stamps that the stored frame of the change `hash` names, for each path that the change
+    /// writes. `None` when the frame is not stored, names none, or names them wrongly.
+    fn stamps_of_frame(&self, hash: &ChangeHash) -> Option<Vec<(Vec<String>, Stamp)>> {
+        let frame = self.frames.get(hash)?;
+        let parsed = self.change_bytes(frame)?;
+        if parsed.origins.is_empty() {
+            return None;
+        }
+        let change = Change::from_bytes(parsed.bytes).ok()?;
+        let paths = change_leaves(&self.doc, &change);
+        (paths.len() == parsed.origins.len())
+            .then(|| paths.into_iter().zip(parsed.origins).collect())
+    }
+
     /// The stamp of the value at `path`, from the op that holds it.
-    fn stamp_at(&self, path: &[String], index: &[OpSpan]) -> Option<Stamp> {
+    fn stamp_at(&self, path: &[String], index: &OpIndex) -> Option<Stamp> {
         let mut object: ObjId = ROOT;
         let mut holder: Option<ObjId> = None;
         for (position, key) in path.iter().enumerate() {
@@ -764,10 +787,19 @@ impl MeshDoc {
         let ObjId::Id(counter, actor, _) = holder? else {
             return None;
         };
-        let span = index.iter().find(|span| {
-            span.actor == actor && span.start <= counter && counter - span.start < span.len
-        })?;
-        let named = self.origins.get(&span.hash);
+        let spans = index.get(actor.to_bytes())?;
+        let after = spans.partition_point(|span| span.start <= counter);
+        let span = spans[..after]
+            .last()
+            .filter(|span| counter - span.start < span.len)?;
+        // The record of the stamps lives in memory only. A frame of a seed or a replay that is
+        // stored carries them, so a node that lost the record reads them from the frame.
+        let rebuilt: Option<Vec<(Vec<String>, Stamp)>> = match self.origins.get(&span.hash) {
+            Some(_) => None,
+            None => self.stamps_of_frame(&span.hash),
+        };
+        let named: Option<&Vec<(Vec<String>, Stamp)>> =
+            self.origins.get(&span.hash).or(rebuilt.as_ref());
         if let Some(stamp) = named.and_then(|list| list.iter().find(|(held, _)| held == path)) {
             return Some(stamp.1.clone());
         }
@@ -777,6 +809,14 @@ impl MeshDoc {
             .and_then(|frame| self.change_bytes(frame))?
             .time?;
         Some(Stamp::new(time, actor_tag(&actor)))
+    }
+
+    /// How many paths of a seed got the stamp 0 for want of a time, since the document began. A
+    /// value that gets 0 loses to every replay, so the count says that a cut read a value with no
+    /// time.
+    #[must_use]
+    pub fn unstamped_paths(&self) -> u64 {
+        self.unstamped.load(Ordering::Relaxed)
     }
 
     /// How many state changes this document refused for want of a valid time: none, or above `DOC_TIME_MAX`. A caller reads it
@@ -1158,13 +1198,21 @@ impl MeshDoc {
         let all: Vec<Vec<String>> = per_change.iter().flatten().cloned().collect();
         let mut found = self.stamps_of(&all).into_iter();
         let none = Stamp::new(0, "0000000000000000".to_owned());
+        let mut zeros: u64 = 0;
         let mut origins: Vec<Vec<Stamp>> = Vec::with_capacity(per_change.len());
         for paths in &per_change {
             let mut stamps: Vec<Stamp> = Vec::with_capacity(paths.len());
             for _ in paths {
-                stamps.push(found.next().flatten().unwrap_or_else(|| none.clone()));
+                stamps.push(found.next().flatten().unwrap_or_else(|| {
+                    zeros += 1;
+                    none.clone()
+                }));
             }
             origins.push(stamps);
+        }
+        if zeros > 0 {
+            self.unstamped.fetch_add(zeros, Ordering::Relaxed);
+            tracing::warn!(target: LOG_TARGET, zeros, "a seed path got the stamp 0 for want of a time");
         }
         Ok(origins)
     }
@@ -1968,7 +2016,8 @@ fn set_path(root: &mut Map<String, Value>, path: &[String], value: Value) {
 }
 
 /// The path of the leaf that a patch of one change touched. A patch inside a list gives the path
-/// of the list, because a list is written whole.
+/// of the list, because a list is written whole. A counter or a conflict patch gives the path of
+/// its parent: the state JSON has no counters, so no value of it is a counter.
 fn leaf_path(patch: &automerge::Patch) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
     for (_, prop) in &patch.path {
@@ -2211,7 +2260,7 @@ mod tests {
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
     };
     use serde_json::{Map, Value, json};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn nick(name: &str) -> Nickname {
         Nickname::from(name)
@@ -3558,7 +3607,7 @@ mod tests {
     }
 
     fn state_doc_with(live: &Value) -> MeshDoc {
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         let me = nick("me");
         write(&mut doc, &me, live);
         doc
@@ -3631,7 +3680,7 @@ mod tests {
     #[test]
     fn a_seed_for_more_writers_than_the_cut_vector_lists_is_cut_with_the_busiest() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut doc = MeshDoc::new_ungated();
+        let mut doc = MeshDoc::new_ungated().state_epochs();
         for index in 0..=DOC_SEED_CUT_MAX {
             let writer = nick(&format!("w{index}"));
             write(&mut doc, &writer, &json!({ format!("w{index}"): 1 }));
@@ -4277,6 +4326,144 @@ mod tests {
             "over the cap: {taken:?}"
         );
         assert_eq!(doc.to_json(), json!({}), "nothing was applied");
+    }
+
+    #[test]
+    fn the_stamp_of_a_seed_leaf_is_rebuilt_from_the_stored_frame_when_the_record_is_gone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (left, right, cutter, me) = (nick("left"), nick("right"), nick("cutter"), nick("me"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let first = write(&mut doc, &left, &json!({ "shared": 1 }));
+        let mut other = MeshDoc::new_ungated().state_epochs();
+        assert!(matches!(other.ingest(&first), Ingested::Applied { .. }));
+        let second = write(&mut other, &right, &json!({ "shared": 2 }));
+        assert!(matches!(doc.ingest(&second), Ingested::Applied { .. }));
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            let _ = adopter.ingest(frame);
+        }
+        ticks(&mut adopter, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        let tag = super::actor_tag(&super::actor_for(&pad_seed(right.as_str().as_bytes())));
+        let paths = vec![vec!["shared".to_owned()]];
+        let expected = vec![Some(Stamp::new(2, tag))];
+        assert_eq!(adopter.stamps_of(&paths), expected, "read from the record");
+        // The record lives in memory only. The frame of the seed carries the stamps, so a node
+        // that lost the record reads the same stamps from the frame that it stores.
+        adopter.origins = HashMap::new();
+        assert_eq!(
+            adopter.stamps_of(&paths),
+            expected,
+            "rebuilt from the stored frame"
+        );
+    }
+
+    #[test]
+    fn the_node_that_cut_a_seed_reads_the_stamps_of_the_original_writes_after_its_own_switch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (left, right, cutter) = (nick("left"), nick("right"), nick("cutter"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let first = write(&mut doc, &left, &json!({ "shared": 1 }));
+        let mut other = MeshDoc::new_ungated().state_epochs();
+        assert!(matches!(other.ingest(&first), Ingested::Applied { .. }));
+        let second = write(&mut other, &right, &json!({ "shared": 2 }));
+        assert!(matches!(doc.ingest(&second), Ingested::Applied { .. }));
+        // The cutter sends the seed to itself, as every node does, and adopts it after the wait.
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = doc
+            .build_seed(3, &actor, within(600))
+            .expect("the live json splits");
+        let frames = seed_frames_of(&doc, &cutter, 3, None);
+        assert_eq!(
+            chain.origins.len(),
+            frames.len(),
+            "one stamp list for each frame"
+        );
+        for frame in &frames {
+            let _ = doc.ingest(frame);
+        }
+        ticks(&mut doc, &cutter, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        let tag = super::actor_tag(&super::actor_for(&pad_seed(right.as_str().as_bytes())));
+        assert_eq!(
+            doc.stamps_of(&[vec!["shared".to_owned()]]),
+            vec![Some(Stamp::new(2, tag))],
+            "the cutter keeps the stamp of the original write"
+        );
+    }
+
+    #[test]
+    fn a_seed_of_more_than_the_cap_of_paths_is_cut_into_frames_inside_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let mut wide = Map::new();
+        for index in 0..130 {
+            wide.insert(format!("k{index:03}"), json!(index));
+        }
+        let live = Value::Object(wide);
+        let doc = state_doc_with(&live);
+        let actor = pad_seed(cutter.as_str().as_bytes());
+        let chain = doc
+            .build_seed(3, &actor, |_| true)
+            .expect("the live json splits");
+        assert!(chain.changes.len() >= 2, "130 paths need 2 frames or more");
+        for stamps in &chain.origins {
+            assert!(
+                stamps.len() <= super::DOC_REPLAY_ENTRIES_MAX,
+                "a frame names at most the cap: {}",
+                stamps.len()
+            );
+        }
+        let mut adopter = MeshDoc::new_ungated().state_epochs();
+        let who = signer(&cutter);
+        for (index, bytes) in chain.changes.iter().enumerate() {
+            let mark = (index == 0).then_some(&chain.mark);
+            let body = change_body_stamped(
+                bytes,
+                None,
+                3,
+                mark,
+                Some(chain.time),
+                &chain.origins[index],
+            )
+            .expect("a body");
+            let frame = Verified::fixture_unchecked(
+                Message::new_channel_event(&MeshId::from("test"), &cutter, body, Channel::State)
+                    .unverified_key(who),
+                who,
+            );
+            let _ = adopter.ingest(&frame);
+        }
+        ticks(&mut adopter, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).expect("adopted");
+        assert_eq!(adopter.to_json(), live, "the node holds the 130 leaves");
+    }
+
+    #[test]
+    fn a_seed_path_with_no_time_gets_the_stamp_zero_and_is_counted() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a seed path got the stamp 0 for want of a time",
+        );
+        let me = nick("me");
+        // A document with state epochs off writes bodies with no time.
+        let mut doc = MeshDoc::new_ungated();
+        write(&mut doc, &me, &json!({ "a": 1, "b": { "c": 2 } }));
+        let actor = pad_seed(me.as_str().as_bytes());
+        let chain = doc
+            .build_seed(3, &actor, within(600))
+            .expect("the live json splits");
+        let zeros: usize = chain
+            .origins
+            .iter()
+            .flatten()
+            .filter(|stamp| stamp.time == 0)
+            .count();
+        assert!(zeros > 0, "the paths have the stamp 0");
+        assert_eq!(
+            doc.unstamped_paths(),
+            u64::try_from(zeros).unwrap_or(u64::MAX),
+            "each one is counted"
+        );
     }
 
     #[test]
