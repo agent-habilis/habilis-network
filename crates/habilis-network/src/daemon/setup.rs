@@ -1246,7 +1246,11 @@ mod tests {
             ahead + 1,
             "a counter ahead of any clock still rises"
         );
-        assert_eq!(super::next_run(None).expect("no state file"), 1, "no file means run 1");
+        assert_eq!(
+            super::next_run(None).expect("no state file"),
+            1,
+            "no file means run 1"
+        );
         fs::remove_dir_all(&dir).expect("remove the temp dir");
     }
 
@@ -1261,10 +1265,23 @@ mod tests {
         let state = dir.join("session.json");
         fs::write(state.with_extension("run"), b"").expect("a cut short file");
         let run = super::next_run(Some(&state)).expect("a run number");
-        assert!(run > 1_000_000_000, "the run after a cut short file is {run}");
-        let mode = fs::metadata(state.with_extension("run")).expect("the file").permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "the counter file is private, like the key file");
-        assert!(!state.with_extension("run.tmp").exists(), "no temp file stays");
+        assert!(
+            run > 1_000_000_000,
+            "the run after a cut short file is {run}"
+        );
+        let mode: u32 = fs::metadata(state.with_extension("run"))
+            .expect("the file")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the counter file is private, like the key file"
+        );
+        assert!(
+            !state.with_extension("run.tmp").exists(),
+            "no temp file stays"
+        );
         fs::remove_dir_all(&dir).expect("remove the temp dir");
     }
 
