@@ -664,6 +664,13 @@ impl MeshDoc {
         self.epoch
     }
 
+    /// Whether a candidate seed waits to be adopted. A node that holds one adopts it after the wait
+    /// and does not cut an epoch of its own, so the glue and the model ask before they cut.
+    #[must_use]
+    pub fn has_candidate(&self) -> bool {
+        self.candidate.is_some()
+    }
+
     /// Set the frame bytes that start a reset, before the size of a settled epoch is known (the
     /// default is `DOC_EPOCH_FRAME_CAP_BYTES`).
     #[must_use]

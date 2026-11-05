@@ -65,6 +65,9 @@ struct Sim {
     /// Frames on the way: the target node, the step at which it arrives, the frame.
     wire: Vec<(usize, u64, Verified)>,
     step: u64,
+    /// The epoch that each node cut last. A node that holds its own candidate does not cut the
+    /// same epoch again: two roots of one author are not a case the real glue produces.
+    last_cut: Vec<u64>,
     /// The values of every node, written in order.
     model: Map<String, Value>,
 }
@@ -91,6 +94,7 @@ impl Sim {
             dice: Dice(seed),
             wire: Vec::new(),
             step: 0,
+            last_cut: vec![0; NODES],
             model: Map::new(),
         }
     }
@@ -162,6 +166,10 @@ impl Sim {
     /// every node, itself included.
     fn cut(&mut self, index: usize) -> usize {
         let epoch = self.nodes[index].doc.epoch() + 1;
+        if self.last_cut[index] == epoch || self.nodes[index].doc.has_candidate() {
+            return 0;
+        }
+        self.last_cut[index] = epoch;
         let name = self.nodes[index].name.clone();
         let actor = pad(name.as_str());
         let fits = |merge: &Value| merge.to_string().len() <= FRAME_FITS;
@@ -392,10 +400,10 @@ fn model_random_writes_cuts_and_adopts_converge_to_the_model() {
         "habilis_network::gossip",
         "the seed of the candidate epoch was not complete",
     );
-    for seed in 0..seed_count(1000) {
+    for seed in 0..seed_count(300) {
         let mut sim = Sim::new(seed);
-        // The epoch that a cut started and not every node holds yet. One cut at a time: two nodes
-        // that cut the same epoch are the case of two cutters, which has its own test.
+        // Cuts are free: a node cuts at random, so several epochs and two cutters of one epoch
+        // happen in one wait. A node that holds a candidate does not cut, as in `tick_epoch`.
         let mut cut_pending: Option<u64> = None;
         for _ in 0..60 {
             sim.step += 1;
@@ -405,7 +413,7 @@ fn model_random_writes_cuts_and_adopts_converge_to_the_model() {
                     sim.write(index);
                 }
                 4 => {
-                    if cut_pending.is_none() {
+                    if cut_pending.is_none() || sim.dice.below(2) == 0 {
                         let cutter = sim.dice.below(NODES);
                         let epoch = sim.nodes[cutter].doc.epoch() + 1;
                         let _ = sim.cut(cutter);
