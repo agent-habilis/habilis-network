@@ -165,6 +165,13 @@ pub const DOC_REPLAY_ENTRIES_MAX: usize = 128;
 /// 1024 entries of at most `DOC_TOMBSTONE_PATH_BYTES_MAX` bytes of path are under 300 kibibytes.
 pub const DOC_SEED_TOMBSTONES_MAX: usize = 1024;
 
+/// The most values that a state document keeps to write again after a replay (restores). A restore
+/// holds a value that the node held, so the restores of a node are at most the live state, which
+/// the epoch budget of `DOC_STATE_EPOCH_FRAME_CAP_BYTES` keeps near 40000 leaves of 100 bytes. The
+/// cap is above that, at about 10 mebibytes of values and paths. A restore beyond it is dropped and
+/// counted, because more live state than the budget allows cannot exist.
+pub const DOC_RESTORES_MAX: usize = 65_536;
+
 /// The longest path (the bytes of its keys) that gets a tombstone. A delete of a longer path is
 /// written and counted, and has no tombstone.
 pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;

@@ -7,12 +7,9 @@
 //! Filling a document through normal writes costs a hydration of the whole document for each
 //! frame (the gate check of every ingest), so the fill takes minutes at 100000 leaves.
 
-#![allow(
+#![expect(
     unsafe_code,
-    clippy::allow_attributes,
-    clippy::allow_attributes_without_reason,
-    clippy::undocumented_unsafe_blocks,
-    missing_docs
+    reason = "a counting allocator needs an unsafe GlobalAlloc impl that only forwards to the system allocator"
 )]
 
 use std::alloc::{GlobalAlloc, Layout, System};

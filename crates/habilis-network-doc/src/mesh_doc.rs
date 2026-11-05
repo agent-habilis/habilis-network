@@ -10,8 +10,9 @@ use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
 use habilis_network_util::consts::{
     DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
-    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_SEED_FRAMES_MAX,
-    DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX, DOC_TOMBSTONE_PATH_BYTES_MAX,
+    DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_RESTORES_MAX,
+    DOC_SEED_FRAMES_MAX, DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX,
+    DOC_TOMBSTONE_PATH_BYTES_MAX,
 };
 
 use crate::wire::SeedMark;
@@ -502,7 +503,7 @@ pub struct MeshDoc {
     unstamped: AtomicU64,
     /// The values that this node holds with a stamp above the live stamp that a replay of another
     /// node just set: the replay won in automerge but has the lower stamp, so this node writes its
-    /// value again (see [`Self::take_restores`]). At most `DOC_SEED_TOMBSTONES_MAX` paths.
+    /// value again (see [`Self::take_restores`]). At most `DOC_RESTORES_MAX` paths.
     restores: BTreeMap<Vec<String>, (Value, Stamp)>,
     /// The restores that were dropped because the map was full (see [`Self::dropped_restores`]).
     restores_dropped: u64,
@@ -2064,10 +2065,10 @@ impl MeshDoc {
     }
 
     /// Keep a restore for `path`, unless one with a higher stamp waits. A restore that finds the map
-    /// full (`DOC_SEED_TOMBSTONES_MAX` paths) is dropped, which is a newer write that the node
+    /// full (`DOC_RESTORES_MAX` paths) is dropped, which is a newer write that the node
     /// cannot write again: it is counted and warned, never silent.
     fn keep_restore(&mut self, path: Vec<String>, kept: (Value, Stamp)) {
-        if self.restores.len() >= DOC_SEED_TOMBSTONES_MAX && !self.restores.contains_key(&path) {
+        if self.restores.len() >= DOC_RESTORES_MAX && !self.restores.contains_key(&path) {
             self.restores_dropped = self.restores_dropped.saturating_add(1);
             if let Some(dropped) =
                 self.warn_due("a restore was dropped: the map of restores is full")
@@ -5545,7 +5546,7 @@ mod tests {
         );
         let mut doc = MeshDoc::new_ungated().state_epochs();
         let stamp = Stamp::new(5, "aa".to_owned());
-        for index in 0..super::DOC_SEED_TOMBSTONES_MAX {
+        for index in 0..super::DOC_RESTORES_MAX {
             doc.keep_restore(vec![format!("k{index}")], (json!(index), stamp.clone()));
         }
         assert_eq!(
@@ -5572,6 +5573,31 @@ mod tests {
             doc.dropped_restores(),
             1,
             "a path that is there is updated, not dropped"
+        );
+    }
+
+    #[test]
+    fn the_restores_stay_inside_the_cap_at_ten_times_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a restore was dropped: the map of restores is full",
+        );
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let stamp = Stamp::new(5, "aa".to_owned());
+        let total = super::DOC_RESTORES_MAX * 10;
+        for index in 0..total {
+            doc.keep_restore(vec![format!("k{index}")], (json!(index), stamp.clone()));
+        }
+        assert_eq!(
+            doc.restores.len(),
+            super::DOC_RESTORES_MAX,
+            "the map stays at the cap"
+        );
+        assert_eq!(
+            doc.dropped_restores(),
+            u64::try_from(total - super::DOC_RESTORES_MAX).unwrap_or(0),
+            "every other one is counted"
         );
     }
 
@@ -5801,6 +5827,25 @@ mod tests {
             None,
             "the write of the author carries the same stamp, so the holder has nothing to write"
         );
+    }
+
+    #[test]
+    fn a_replay_that_hides_an_object_of_1100_leaves_loses_no_restore() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mine, other) = (nick("aaa"), nick("zzz"));
+        let mut doc = doc_with_clock_at(99);
+        for round in 0..11 {
+            let mut part = Map::new();
+            for leaf in 0..100 {
+                part.insert(format!("k{:04}", round * 100 + leaf), json!(leaf));
+            }
+            write(&mut doc, &mine, &json!({ "obj": Value::Object(part) }));
+        }
+        let (merge, stamps) = replay_makes_obj_x();
+        doc.ingest(&replay_frame_of(&other, &merge, &stamps));
+        assert_eq!(doc.dropped_restores(), 0, "no newer write is dropped");
+        let (_, written) = doc.take_restores().expect("the leaves are written again");
+        assert_eq!(written.len(), 1100, "all 1100 leaves come back");
     }
 
     #[test]
