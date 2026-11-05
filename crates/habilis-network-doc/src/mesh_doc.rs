@@ -194,6 +194,9 @@ pub struct SeedChain {
 /// The stamps that the changes of a seed name: for each change, its paths with a stamp each.
 type SeedStamps = HashMap<ChangeHash, Vec<(Vec<String>, Stamp)>>;
 
+/// The stamps that stored frames name, read once for each call of `stamps_of`.
+type RebuiltStamps = HashMap<ChangeHash, Option<Vec<(Vec<String>, Stamp)>>>;
+
 /// The ops that one change holds: which actor wrote them, the counter of the first, and how many.
 /// A scan of the history makes one per change, so an op id finds its change.
 struct OpSpan {
@@ -348,6 +351,8 @@ pub struct DocCensus {
     pub peer_nicks: Option<Vec<String>>,
     /// The state changes that were refused for want of a valid time, since the document began.
     pub refused_time: u64,
+    /// The paths of a seed that got the stamp 0 for want of a time, since the document began.
+    pub unstamped_paths: u64,
 }
 
 /// The bytes of a frame on the wire, 0 for a frame that does not serialize.
@@ -705,6 +710,7 @@ impl MeshDoc {
             json_bytes,
             peer_nicks,
             refused_time: self.refused_time,
+            unstamped_paths: self.unstamped.load(Ordering::Relaxed),
         }
     }
 
@@ -749,14 +755,16 @@ impl MeshDoc {
         for spans in index.values_mut() {
             spans.sort_by_key(|span| span.start);
         }
+        let mut rebuilt: RebuiltStamps = HashMap::new();
         paths
             .iter()
-            .map(|path| self.stamp_at(path, &index))
+            .map(|path| self.stamp_at(path, &index, &mut rebuilt))
             .collect()
     }
 
     /// The stamps that the stored frame of the change `hash` names, for each path that the change
-    /// writes. `None` when the frame is not stored, names none, or names them wrongly.
+    /// writes. `None` when the frame is not stored, names none, or names a different number of stamps
+    /// than the change has leaves.
     fn stamps_of_frame(&self, hash: &ChangeHash) -> Option<Vec<(Vec<String>, Stamp)>> {
         let frame = self.frames.get(hash)?;
         let parsed = self.change_bytes(frame)?;
@@ -770,7 +778,12 @@ impl MeshDoc {
     }
 
     /// The stamp of the value at `path`, from the op that holds it.
-    fn stamp_at(&self, path: &[String], index: &OpIndex) -> Option<Stamp> {
+    fn stamp_at(
+        &self,
+        path: &[String],
+        index: &OpIndex,
+        rebuilt: &mut RebuiltStamps,
+    ) -> Option<Stamp> {
         let mut object: ObjId = ROOT;
         let mut holder: Option<ObjId> = None;
         for (position, key) in path.iter().enumerate() {
@@ -794,12 +807,14 @@ impl MeshDoc {
             .filter(|span| counter - span.start < span.len)?;
         // The record of the stamps lives in memory only. A frame of a seed or a replay that is
         // stored carries them, so a node that lost the record reads them from the frame.
-        let rebuilt: Option<Vec<(Vec<String>, Stamp)>> = match self.origins.get(&span.hash) {
-            Some(_) => None,
-            None => self.stamps_of_frame(&span.hash),
+        // One frame names many paths, so the list that a frame gives is read once for each call.
+        let named: Option<&Vec<(Vec<String>, Stamp)>> = match self.origins.get(&span.hash) {
+            Some(list) => Some(list),
+            None => rebuilt
+                .entry(span.hash)
+                .or_insert_with(|| self.stamps_of_frame(&span.hash))
+                .as_ref(),
         };
-        let named: Option<&Vec<(Vec<String>, Stamp)>> =
-            self.origins.get(&span.hash).or(rebuilt.as_ref());
         if let Some(stamp) = named.and_then(|list| list.iter().find(|(held, _)| held == path)) {
             return Some(stamp.1.clone());
         }
@@ -4358,6 +4373,9 @@ mod tests {
         );
     }
 
+    /// A guard for step 4: the cutter adopts its own seed through `adopt`, which keeps the record
+    /// of the stamps, so this passes without the rebuild from the stored frame and pins nothing
+    /// new today. A glue that switches the cutter some other way must keep it passing.
     #[test]
     fn the_node_that_cut_a_seed_reads_the_stamps_of_the_original_writes_after_its_own_switch() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -4463,6 +4481,11 @@ mod tests {
             doc.unstamped_paths(),
             u64::try_from(zeros).unwrap_or(u64::MAX),
             "each one is counted"
+        );
+        assert_eq!(
+            doc.census(false).unstamped_paths,
+            doc.unstamped_paths(),
+            "the census carries the count, so it is not only a log line"
         );
     }
 
