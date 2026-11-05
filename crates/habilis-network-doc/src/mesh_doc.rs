@@ -381,7 +381,7 @@ pub struct MeshDoc {
     /// The best root frame of a higher epoch that passed every check, and the document has not
     /// adopted. One frame at most, so it is bounded; a frame that does not take the place is
     /// forgotten by the receive path.
-    candidate: Option<Candidate>,
+    candidate: Option<Box<Candidate>>,
     /// The ticks since the candidate took its place.
     candidate_ticks: u32,
     /// The ticks since the epoch began.
@@ -1234,7 +1234,7 @@ impl MeshDoc {
             _ => {}
         }
         let kept = Candidate::new(epoch, frame.clone(), change, mark);
-        match self.candidate.replace(kept) {
+        match self.candidate.replace(Box::new(kept)) {
             Some(beaten) => self.dropped.extend(beaten.keys()),
             None => self.candidate_ticks = 0,
         }
@@ -1307,7 +1307,7 @@ impl MeshDoc {
             return self.refuse_frame(frame);
         }
         let kept = Candidate::new(self.epoch, frame.clone(), change, mark);
-        match self.candidate.replace(kept) {
+        match self.candidate.replace(Box::new(kept)) {
             Some(beaten) => self.dropped.extend(beaten.keys()),
             None => self.candidate_ticks = 0,
         }
@@ -3169,12 +3169,12 @@ mod tests {
                 .bytes,
         )
         .expect("a change");
-        doc.candidate = Some(super::Candidate::new(
+        doc.candidate = Some(Box::new(super::Candidate::new(
             1,
             forged.clone(),
             &forged_change,
             None,
-        ));
+        )));
         let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
         assert_eq!(switch.epoch, 1, "the node still goes to the epoch");
         assert!(
