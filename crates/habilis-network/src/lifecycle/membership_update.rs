@@ -107,7 +107,7 @@ fn stamped_after_last_heard(key: AuthorKey, timestamp: UnixSecs, state: &EventLo
 /// peer returns. One replayed frame, or one frame repeated, never gets there. Three is the least
 /// that tells a clock that stepped back (a peer that keeps sending) from a relay that re-sends one
 /// or two old frames.
-const STEP_BACK_FRAMES: u8 = 3;
+pub(crate) const STEP_BACK_FRAMES: u8 = 3;
 
 /// A frame of a quiet peer counts toward a step back only if it arrives this long after the last
 /// one that counted, on our clock. A live peer sends a frame every alive interval, so half of it
@@ -318,7 +318,8 @@ fn advance_run(
 /// [`compute_for`] for the receive path, which may also complete a step back (see
 /// [`note_step_back`]): a live frame of a quiet peer, stale only because its stamp is not after
 /// the newest one on record, that closes a run of rising frames drops the old stamp, and the
-/// update is computed again. A key that said goodbye never returns this way.
+/// update is computed again. A key that said goodbye never returns this way. A live peer whose
+/// clock steps back drops its stamps the same way, so that its nickname follows its frames.
 #[cfg(test)]
 pub(crate) fn compute_observed(message: &Verified, state: &mut EventLoopState) -> MembershipUpdate {
     let proves = proves_presence(&message.kind, message.timestamp);
@@ -339,10 +340,27 @@ pub(crate) fn compute_observed_proving(
         && proves
         && is_live_kind(&message.kind);
     if steps_back && note_step_back(key, message.timestamp, state) {
-        state.peer_stamp.remove(&key);
+        drop_stamps(key, state);
         return compute_for_proving(proves, message, state);
     }
+    // A live peer steps its clock back too. Its frames stay behind the stamps on record and refresh
+    // the sweep, but they would not set a nickname until they pass those stamps.
+    let live_steps_back: bool = !update.stale
+        && state.peers.contains(&key)
+        && proves
+        && is_live_kind(&message.kind)
+        && !stamped_after_last_heard(key, message.timestamp, state);
+    if live_steps_back && note_step_back(key, message.timestamp, state) {
+        drop_stamps(key, state);
+    }
     update
+}
+
+/// Drop the stamps on record for `key`, once a run of paced frames has shown that its clock stepped
+/// back: the presence stamp and the stamp of its nickname both belong to the old base.
+fn drop_stamps(key: AuthorKey, state: &mut EventLoopState) {
+    state.peer_stamp.remove(&key);
+    state.clock_evidence.name_stamp.remove(&key);
 }
 
 /// Apply a membership update to the mutable state. Mirror of the

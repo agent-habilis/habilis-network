@@ -90,12 +90,21 @@ pub(crate) fn observe(
         if proves {
             // The newest stamp of the key, on its own clock: the test of a return compares two
             // stamps of one clock, so a skew between that clock and ours cancels.
+            let behind = state
+                .peer_stamp
+                .get(&key)
+                .is_some_and(|newest| message.timestamp <= *newest);
             let newest = state.peer_stamp.entry(key).or_insert(message.timestamp);
             *newest = (*newest).max(message.timestamp);
             if membership_update::is_live_kind(&message.kind) {
                 heartbeat::confirm_suspend(state, message.timestamp);
             }
-            state.clock_evidence.step_back.remove(&key);
+            // A frame that rises past the newest stamp breaks the run of a clock that stepped
+            // back. A frame behind it is a step of that run, which `compute_observed_proving` has
+            // counted, so it keeps the run.
+            if !behind {
+                state.clock_evidence.step_back.remove(&key);
+            }
         }
     }
     if update.returned || update.joined_new {
@@ -244,6 +253,7 @@ mod churn_red {
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
+    use crate::lifecycle::membership_update::STEP_BACK_FRAMES;
     use iroh_gossip::net::Gossip;
     use iroh_gossip::proto;
 
@@ -2661,6 +2671,55 @@ mod churn_red {
             Message::new_channel_event(mesh, who, MessageBody::from("{}"), Channel::Meta);
         message.timestamp = at;
         message.sign(by)
+    }
+
+    /// The clock of a live peer steps back (it is set right after it ran ahead) while the peer
+    /// changes its nickname. Its frames rise from a base below the stamps on record, so the
+    /// nickname would stay the old one until they pass those stamps. A paced run of such frames
+    /// shows the step back: the watermarks are dropped, as they are for a quiet peer, and the new
+    /// nickname is taken.
+    #[test]
+    fn a_live_peer_that_steps_its_clock_back_and_renames_is_known_by_its_new_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let identity = Identity::generate();
+            let key = identity.author_key();
+            let now = UnixSecs::now();
+            let mut state = fresh_state();
+            let ahead = alive(
+                &rig.mesh,
+                &nick("old-name"),
+                &identity,
+                now + Duration::from_mins(50),
+            );
+            assert!(
+                receive(&ahead, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(state.peers.contains(&key), "the peer is live");
+            for index in 0..STEP_BACK_FRAMES {
+                let stamp = now + Duration::from_secs(u64::from(index) * 20);
+                let frame = alive(&rig.mesh, &nick("new-name"), &identity, stamp);
+                assert!(
+                    receive(&frame, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+                // The next frame comes one alive interval later on our clock.
+                if let Some(run) = state.clock_evidence.step_back.get_mut(&key) {
+                    run.at = run
+                        .at
+                        .checked_sub(Duration::from_secs(20))
+                        .expect("past 20 s");
+                }
+            }
+            assert_eq!(
+                state.names.get(&key),
+                Some(&nick("new-name")),
+                "a run of paced frames from the new base shows the step back, and the name follows"
+            );
+            rig.endpoint.close().await;
+        });
     }
 
     /// A durable frame older than one alive timeout proves no presence, so it leaves the stamp of
