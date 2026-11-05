@@ -17,4 +17,7 @@ pub struct ParsedChange {
     /// The stamps of the writes that a seed or a replay frame carries, one for each leaf of the
     /// change, in the order of the paths of the leaves. Empty for any other change.
     pub origins: Vec<Stamp>,
+    /// The tombstones that the root frame of a state seed carries: a path that was deleted, with
+    /// the stamp of the delete. Empty for any other change.
+    pub tombstones: Vec<(Vec<String>, Stamp)>,
 }

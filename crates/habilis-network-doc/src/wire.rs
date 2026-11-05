@@ -46,6 +46,10 @@ enum StateOp<'merge> {
         /// leaf, the time and an index into the tag table `a`.
         #[serde(rename = "o", default, skip_serializing_if = "Vec::is_empty")]
         origins: Vec<(u64, u32)>,
+        /// The tombstones of a seed root (wire key `x`): for each deleted path, the path, the time
+        /// of the delete, and an index into the tag table `a`.
+        #[serde(rename = "x", default, skip_serializing_if = "Vec::is_empty")]
+        tombstones: Vec<(Vec<String>, u64, u32)>,
         /// The tags of the actors that `o` names (wire key `a`), each one once.
         #[serde(rename = "a", default, skip_serializing_if = "Vec::is_empty")]
         tags: Vec<String>,
@@ -166,20 +170,40 @@ pub fn change_body_stamped(
     time: Option<u64>,
     origins: &[Stamp],
 ) -> Result<MessageBody, DocError> {
+    change_body_tombstoned(change, merge, epoch, seed, time, origins, &[])
+}
+
+/// [`change_body_stamped`] with the tombstones of the root frame of a state seed (wire key `x`):
+/// each one is a path that was deleted, and the stamp of the delete. The tag table `a` lists the
+/// tags of `origins` first and then those of the tombstones, each one once, in the order of first
+/// use.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_tombstoned(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+    seed: Option<&SeedMark>,
+    time: Option<u64>,
+    origins: &[Stamp],
+    tombstones: &[(Vec<String>, Stamp)],
+) -> Result<MessageBody, DocError> {
     let mut tags: Vec<String> = Vec::new();
+    let mut index_of = |tag: &String| -> Result<u32, DocError> {
+        let position = tags.iter().position(|held| held == tag).unwrap_or_else(|| {
+            tags.push(tag.clone());
+            tags.len() - 1
+        });
+        u32::try_from(position).map_err(DocError::encode)
+    };
     let mut named: Vec<(u64, u32)> = Vec::with_capacity(origins.len());
     for stamp in origins {
-        let position = tags
-            .iter()
-            .position(|tag| *tag == stamp.tag)
-            .unwrap_or_else(|| {
-                tags.push(stamp.tag.clone());
-                tags.len() - 1
-            });
-        named.push((
-            stamp.time,
-            u32::try_from(position).map_err(DocError::encode)?,
-        ));
+        named.push((stamp.time, index_of(&stamp.tag)?));
+    }
+    let mut dead: Vec<(Vec<String>, u64, u32)> = Vec::with_capacity(tombstones.len());
+    for (path, stamp) in tombstones {
+        dead.push((path.clone(), stamp.time, index_of(&stamp.tag)?));
     }
     let tagged: Option<u64> = (epoch != 0).then_some(epoch);
     let mark: Option<SeedMark> = seed.cloned();
@@ -190,6 +214,7 @@ pub fn change_body_stamped(
         seed: mark,
         time,
         origins: named,
+        tombstones: dead,
         tags,
     })
     .map_err(DocError::encode)?;
@@ -233,13 +258,15 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
             seed,
             time,
             origins,
+            tombstones,
             tags,
             ..
         } => {
-            // One body for one meaning: a stamp needs the time of the change, the table names each
-            // tag once, and every tag of the table is used.
-            if (!origins.is_empty() && time.is_none())
-                || (origins.is_empty() && !tags.is_empty())
+            // One body for one meaning: a stamp or a tombstone needs the time of the change, the
+            // table names each tag once, and every tag of the table is used.
+            let named_any = !origins.is_empty() || !tombstones.is_empty();
+            if (named_any && time.is_none())
+                || (!named_any && !tags.is_empty())
                 || tags
                     .iter()
                     .enumerate()
@@ -247,11 +274,11 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
             {
                 return None;
             }
-            // The table is in the order of first use, so the same stamps have one body: a stamp
-            // names a tag that was used before, or the next one of the table.
+            // The table is in the order of first use (the stamps first, then the tombstones), so
+            // the same stamps have one body: a stamp names a tag that was used before, or the
+            // next one of the table.
             let mut next_new: usize = 0;
-            let mut stamps: Vec<Stamp> = Vec::with_capacity(origins.len());
-            for (at, index) in origins {
+            let mut resolve = |index: u32| -> Option<String> {
                 let position = usize::try_from(index).ok()?;
                 let tag = tags.get(position)?;
                 if position > next_new {
@@ -260,7 +287,15 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
                 if position == next_new {
                     next_new += 1;
                 }
-                stamps.push(Stamp::new(at, tag.clone()));
+                Some(tag.clone())
+            };
+            let mut stamps: Vec<Stamp> = Vec::with_capacity(origins.len());
+            for (at, index) in origins {
+                stamps.push(Stamp::new(at, resolve(index)?));
+            }
+            let mut dead: Vec<(Vec<String>, Stamp)> = Vec::with_capacity(tombstones.len());
+            for (path, at, index) in tombstones {
+                dead.push((path, Stamp::new(at, resolve(index)?)));
             }
             if next_new != tags.len() {
                 return None;
@@ -271,6 +306,7 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
                 seed,
                 time,
                 origins: stamps,
+                tombstones: dead,
             })
         }
         StateOp::Merge { .. } | StateOp::Enc { .. } => None,
@@ -351,8 +387,8 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 mod tests {
     use super::{
         SeedMark, Stamp, change_body, change_body_at, change_body_seed, change_body_stamped,
-        change_body_timed, decrypt_body, encrypt_body, merge_body, parse_change, parse_change_body,
-        parse_change_full,
+        change_body_timed, change_body_tombstoned, decrypt_body, encrypt_body, merge_body,
+        parse_change, parse_change_body, parse_change_full,
     };
     use habilis_network_protocol::SymmetricKey;
 
@@ -438,6 +474,39 @@ mod tests {
         assert!(
             parse_change_full(broken).is_none(),
             "a stamp that names a tag outside the table is no body"
+        );
+    }
+
+    #[test]
+    fn the_tombstones_of_a_seed_root_read_back_and_share_the_tag_table() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let stamps = vec![Stamp::new(5, "aa".to_owned())];
+        let tombstones = vec![
+            (vec!["k".to_owned()], Stamp::new(9, "bb".to_owned())),
+            (
+                vec!["m".to_owned(), "n".to_owned()],
+                Stamp::new(8, "aa".to_owned()),
+            ),
+        ];
+        let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &stamps, &tombstones)
+            .expect("a body");
+        assert_eq!(
+            body.as_str(),
+            r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0]],"x":[[["k"],9,1],[["m","n"],8,0]],"a":["aa","bb"]}"#,
+            "the tombstones are the key x, and the tags of o and x share the table a"
+        );
+        let parsed = parse_change_full(body.as_str()).expect("it parses");
+        assert_eq!(parsed.origins, stamps, "the stamps read back");
+        assert_eq!(parsed.tombstones, tombstones, "the tombstones read back");
+        let unused = r#"{"k":"change","c":"Ldp","t":7,"x":[[["k"],9,0]],"a":["bb","cc"]}"#;
+        assert!(
+            parse_change_full(unused).is_none(),
+            "a tag that no stamp and no tombstone uses is no body"
+        );
+        let no_time = r#"{"k":"change","c":"Ldp","x":[[["k"],9,0]],"a":["bb"]}"#;
+        assert!(
+            parse_change_full(no_time).is_none(),
+            "tombstones with no time of the change are no body"
         );
     }
 
