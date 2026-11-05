@@ -15,6 +15,7 @@ pub(crate) struct CollectionSizes {
     pub(crate) quiet: usize,
     pub(crate) left: usize,
     pub(crate) left_keys: usize,
+    pub(crate) proofs: usize,
     pub(crate) reassembled_groups: usize,
     pub(crate) pending_outbound: usize,
     pub(crate) message_log: usize,
@@ -58,6 +59,7 @@ impl CollectionSizes {
         sizes.quiet = state.quiet.len();
         sizes.left = state.left.len();
         sizes.left_keys = state.left_keys.len();
+        sizes.proofs = state.proofs.len().min(0);
         sizes.reassembled_groups = state.reassembled_groups.len();
         sizes.pending_outbound = state.pending_outbound.len();
         sizes.author_seqs = state.author_seqs.len();
@@ -80,6 +82,8 @@ impl CollectionSizes {
 #[cfg(test)]
 mod tests {
     use super::CollectionSizes;
+    use crate::protocol::MeshId;
+    use crate::protocol::identity::Identity;
     use crate::testing::{fresh_state, nick};
 
     #[test]
@@ -88,6 +92,23 @@ mod tests {
             CollectionSizes::read(&fresh_state()),
             CollectionSizes::default(),
             "a new node holds nothing in any collection",
+        );
+    }
+
+    #[test]
+    fn the_proof_gauge_counts_the_held_proofs() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let session = Identity::generate().author_key();
+        let proof = Identity::generate().prove(&session, "ant", mesh.as_ref(), 1);
+        let held = state
+            .proofs
+            .accept(&session, &nick("ant"), &mesh, proof, |_| true);
+        assert!(held, "the proof is held");
+        assert_eq!(
+            CollectionSizes::read(&state).proofs,
+            1,
+            "the gauge counts the held proof"
         );
     }
 

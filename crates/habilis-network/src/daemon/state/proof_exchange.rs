@@ -17,6 +17,7 @@ use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
 /// unicast request, so a calm mesh carries no proof bytes beyond the `joined` frames.
 ///
 /// Between two proofs for one session, the one with the higher run wins. On a tie the first stays.
+#[derive(Debug)]
 pub(crate) struct ProofExchange {
     book: ProofBook<AuthorKey, IdentityProof>,
     // one request per session: a bound like the book, so a flood of new sessions cannot grow it
@@ -58,6 +59,10 @@ impl ProofExchange {
         }
         self.book.insert_evicting(session.clone(), proof, is_live);
         self.book.get(session).is_some()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.book.len()
     }
 
     pub(crate) fn proof_of(&self, session: &AuthorKey) -> Option<&IdentityProof> {

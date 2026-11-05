@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 pub(crate) const ANSWERS_PER_MINUTE: usize = 30;
 const ANSWER_WINDOW: Duration = Duration::from_secs(60);
 
+#[derive(Debug)]
 pub(crate) struct ProofBook<K, V> {
     cap: usize,
     held: HashMap<K, V>,

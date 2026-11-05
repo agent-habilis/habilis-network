@@ -4,6 +4,7 @@ use super::ParkedLinkStates;
 use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
+use super::proof_exchange::ProofExchange;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, Latch, MeshSecrets, PingRound, Reach,
     RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
@@ -259,6 +260,10 @@ pub struct EventLoopState {
     /// more than `QUIET_CAP` departures ago, that this node never held, counts as an arrival
     /// until its author goes quiet.
     pub(crate) left_keys: BoundedFifoSet<AuthorKey>,
+    /// The identity proofs of the sessions this node verified, and the sessions it asked for one.
+    /// Bounded by `QUIET_CAP`: a full book drops its oldest dead session, and refuses a new proof
+    /// when every held session is live.
+    pub(crate) proofs: ProofExchange,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
@@ -608,6 +613,7 @@ impl EventLoopState {
             left: BoundedFifoSet::new(QUIET_CAP),
             left_at: HashMap::new(),
             left_keys: BoundedFifoSet::new(QUIET_CAP),
+            proofs: ProofExchange::with_cap(QUIET_CAP),
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
