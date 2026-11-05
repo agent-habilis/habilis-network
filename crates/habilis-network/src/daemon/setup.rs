@@ -713,8 +713,9 @@ fn next_run(state: Option<&Path>) -> Result<u64> {
 #[cfg(all(unix, feature = "host"))]
 fn counter_lost() -> u64 {
     use crate::protocol::UnixSecs;
-    tracing::warn!(target: "habilis_network::lifecycle", "run counter file is unreadable; the count restarts from the clock");
-    u64::try_from(UnixSecs::now().as_secs()).unwrap_or(1).max(1)
+    let run = u64::try_from(UnixSecs::now().as_secs()).unwrap_or(1).max(1);
+    tracing::warn!(target: "habilis_network::lifecycle", new_run = run, "run counter file is unreadable, so its old run is unknown; the count restarts from the clock");
+    run
 }
 
 /// A target with no files has no state to count in, so each start is run 1.
