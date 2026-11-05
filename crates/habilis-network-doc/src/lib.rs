@@ -64,6 +64,6 @@ pub use limits::{Axis, Limits};
 mod mesh_doc;
 
 pub use mesh_doc::{
-    DocCensus, EpochSwitch, Ingested, MeshDoc, ReplayMerges, Restores, SeedChain, SelfWriteGate,
-    StampedPaths,
+    DocCensus, EpochSwitch, Ingested, MeshDoc, ReplayMerges, Restores, SeedChain, SeedPlan,
+    SelfWriteGate, StampedPaths,
 };
