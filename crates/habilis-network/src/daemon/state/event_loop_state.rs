@@ -849,7 +849,7 @@ impl EventLoopState {
                     // `last_seen`, not `heard`.
                     last_seen_secs_ago: heard_at(key).map(secs_since),
                     quiet: false,
-                    reach: self.reach_of(key, nick),
+                    reach: self.reach_of(key),
                     transport: lane(key),
                 })
             })
@@ -879,7 +879,7 @@ impl EventLoopState {
         }
     }
 
-    /// `Direct` only when this nickname's last self-advertised endpoint is a
+    /// `Direct` only when the address that a send to this key dials is a
     /// live link right now; otherwise `Gossip`. A live link is a neighbor in
     /// `linked_endpoints`, or the rendezvous itself when we're linked to it —
     /// the beacon gossips *as* the rendezvous, so a joiner's only link to the
@@ -887,13 +887,11 @@ impl EventLoopState {
     /// whose link dropped) reads `Gossip` and flips to `Direct` once its next
     /// advertisement lands.
     ///
-    /// The dial hint of a nickname belongs to the key that sent the last `PeerInfo` under it, so
-    /// only that key reads `Direct`. A second live key of the nickname has no hint of its own.
-    fn reach_of(&self, key: &AuthorKey, nick: &Nickname) -> Reach {
-        if self.hint_owner.get(nick) != Some(key) {
-            return Reach::Gossip;
-        }
-        let linked: bool = self.peer_endpoints.get(nick).is_some_and(|endpoint| {
+    /// The address is the one of [`address_of`](Self::address_of): the dial hint when the key made
+    /// it, else the endpoint the key proved or retained. A second live key of a nickname owns no
+    /// hint, and reads the link of its own endpoint.
+    fn reach_of(&self, key: &AuthorKey) -> Reach {
+        let linked: bool = self.address_of(key).is_some_and(|endpoint| {
             self.linked_endpoints.contains(&endpoint.id)
                 || (self.rendezvous_id == Some(endpoint.id)
                     && self.rendezvous_flags.contains(&RendezvousFlag::Linked))

@@ -820,6 +820,51 @@ mod tests {
         );
     }
 
+    /// A row reads `Direct` when the address that a send to its key dials is a live link. The
+    /// second live key of a nickname owns no dial hint, and its retained endpoint is the address
+    /// of a send to it, so the row reads the link of that endpoint.
+    #[test]
+    fn the_reach_of_a_row_follows_the_address_that_a_send_to_its_key_dials() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second, lonely) = (
+            test_key("bob#first"),
+            test_key("bob#second"),
+            test_key("lonely"),
+        );
+        let (first_endpoint, second_endpoint) = (endpoint_id(1), endpoint_id(2));
+        for (key, name) in [(first, "bob"), (second, "bob"), (lonely, "lonely")] {
+            state.names.insert(key, nick(name));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+        state.retain_refused_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+        state.linked_endpoints.insert(second_endpoint);
+
+        let snapshot = state.roster_snapshot();
+        let reach_of_key = |key: AuthorKey| {
+            let row = snapshot.peers.iter().find(|entry| entry.key == key);
+            row.expect("the row of a shown live key").reach
+        };
+
+        assert_eq!(
+            reach_of_key(second),
+            Reach::Direct,
+            "the retained endpoint of the second key is linked"
+        );
+        assert_eq!(
+            reach_of_key(first),
+            Reach::Gossip,
+            "the hint of the first key is not linked"
+        );
+        assert_eq!(
+            reach_of_key(lonely),
+            Reach::Gossip,
+            "a key with no address reads gossip"
+        );
+    }
+
     /// A directed frame waits in the buffer for the endpoint of its key. When that key leaves the
     /// roster nothing can deliver it, and it would be requeued at every flush until the buffer
     /// is full. It goes with the key. The frames of other keys and the broadcasts stay, in order.
