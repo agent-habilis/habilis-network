@@ -12,6 +12,7 @@ use habilis_network_util::consts::{
     DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
     DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_SEED_FRAMES_MAX,
     DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX, DOC_TOMBSTONE_PATH_BYTES_MAX,
+    DOC_WATCH_PATHS_MAX,
 };
 
 use crate::wire::SeedMark;
@@ -487,6 +488,8 @@ pub struct MeshDoc {
     restores: BTreeMap<Vec<String>, (Value, Stamp)>,
     /// The restores that were dropped because the map was full (see [`Self::dropped_restores`]).
     restores_dropped: u64,
+    /// The replay frames whose watch was cut at `DOC_WATCH_PATHS_MAX` paths.
+    watch_truncated: u64,
     /// Whether local writes wait for the end of the first sync (see [`Self::awaiting_first_sync`]).
     awaiting_sync: bool,
     /// The stamps that the changes of the adopted seed name, for each change and each path that it
@@ -578,6 +581,7 @@ impl MeshDoc {
             unstamped: AtomicU64::new(0),
             restores: BTreeMap::new(),
             restores_dropped: 0,
+            watch_truncated: 0,
             awaiting_sync: false,
             origins: HashMap::new(),
             tombstones: BTreeMap::new(),
@@ -1873,20 +1877,7 @@ impl MeshDoc {
         // lower stamp than the value that this node held, and the node writes its value again.
         let watch: Option<Watch> = named.as_ref().map(|list| {
             let json: Value = self.to_json();
-            let mut paths: Vec<Vec<String>> = list.iter().map(|(path, _)| path.clone()).collect();
-            // A replay that names an object can make it again beside the one that this node
-            // holds, and the keys that this node wrote below it are hidden. Every leaf below an
-            // object that the replay names is watched as well.
-            let named_paths: Vec<Vec<String>> = paths.clone();
-            for path in named_paths {
-                if let Some(below) = lookup(&json, &path).filter(|held| held.is_object()) {
-                    let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
-                    collect_leaves(below, &mut path.clone(), &mut leaves);
-                    paths.extend(leaves.into_iter().map(|(leaf, _)| leaf));
-                }
-            }
-            paths.sort();
-            paths.dedup();
+            let paths = self.watched_paths(list, &json);
             let before = self.stamps_of(&paths);
             (paths, before, json)
         });
@@ -1926,6 +1917,49 @@ impl MeshDoc {
                     .cloned()
             })
             .collect()
+    }
+
+    /// The paths whose stamps a node reads when it applies a replay frame that names `named`: those
+    /// paths, and every leaf below an object that the frame names, since a replay can make that
+    /// object again beside the one that this node holds and hide the keys that it wrote below it.
+    /// At most `DOC_WATCH_PATHS_MAX`: the leaves over it are not watched, and are counted
+    /// (`MeshDoc::watch_truncated`) and warned.
+    fn watched_paths(&mut self, named: &[(Vec<String>, Stamp)], json: &Value) -> Vec<Vec<String>> {
+        let mut paths: Vec<Vec<String>> = named.iter().map(|(path, _)| path.clone()).collect();
+        let named_paths: Vec<Vec<String>> = paths.clone();
+        let mut over = false;
+        for path in named_paths {
+            let Some(below) = lookup(json, &path).filter(|held| held.is_object()) else {
+                continue;
+            };
+            let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+            collect_leaves(below, &mut path.clone(), &mut leaves);
+            for (leaf, _) in leaves {
+                if paths.len() >= DOC_WATCH_PATHS_MAX {
+                    over = true;
+                    break;
+                }
+                paths.push(leaf);
+            }
+        }
+        if over {
+            self.watch_truncated = self.watch_truncated.saturating_add(1);
+            if let Some(truncated) =
+                self.warn_due("a replay names an object with more leaves than a node watches")
+            {
+                tracing::warn!(target: LOG_TARGET, truncated, "a replay names an object with more leaves than a node watches");
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// How many replay frames named an object with more leaves below it than a node watches, since
+    /// the document began.
+    #[must_use]
+    pub fn watch_truncated(&self) -> u64 {
+        self.watch_truncated
     }
 
     /// Keep what this node must write again after a replay was applied: a value that it held with
@@ -5265,6 +5299,37 @@ mod tests {
             1,
             "a path that is there is updated, not dropped"
         );
+    }
+
+    #[test]
+    fn a_replay_that_names_a_large_object_is_watched_inside_the_bound_and_counted() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a replay names an object with more leaves than a node watches",
+        );
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let mut wide = Map::new();
+        for index in 0..10 * super::DOC_WATCH_PATHS_MAX {
+            wide.insert(format!("k{index:05}"), json!(index));
+        }
+        let live = json!({ "o": Value::Object(wide) });
+        let named = vec![(vec!["o".to_owned()], Stamp::new(1, "aa".to_owned()))];
+        let paths = doc.watched_paths(&named, &live);
+        assert_eq!(
+            paths.len(),
+            super::DOC_WATCH_PATHS_MAX,
+            "the watch stops at the bound"
+        );
+        assert_eq!(doc.watch_truncated(), 1, "and the cut is counted");
+        let small = json!({ "o": { "a": 1, "b": 2 } });
+        let kept = doc.watched_paths(&named, &small);
+        assert_eq!(
+            kept.len(),
+            3,
+            "a small object is watched whole: itself and its 2 leaves"
+        );
+        assert_eq!(doc.watch_truncated(), 1, "and no cut is counted");
     }
 
     #[test]

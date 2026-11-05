@@ -175,6 +175,13 @@ pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;
 /// its frames can hold. Each tombstone counts against `DOC_REPLAY_ENTRIES_MAX` with the stamps.
 pub const DOC_SEED_TOMBSTONE_FRAME_BYTES: usize = 1024;
 
+/// The most paths that a node reads the stamp of when it applies one replay frame: the paths that
+/// the frame names (at most `DOC_REPLAY_ENTRIES_MAX`) and the leaves below the objects that it
+/// names, 4 times that in all. A replay that names an object with more leaves below it is watched
+/// for the first of them and counted, so one frame cannot make a node read the stamp of every leaf
+/// of a large document twice.
+pub const DOC_WATCH_PATHS_MAX: usize = 4 * DOC_REPLAY_ENTRIES_MAX;
+
 /// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged
 /// epoch number cannot lock the channel: the forger raises the epoch by this much per adoption.
 pub const DOC_EPOCH_JUMP_MAX: u64 = 131_072;
