@@ -838,7 +838,9 @@ impl MembershipApp {
                 .await;
                 let outcome = merged.map_err(|error| error.to_string());
                 let _ = reply.send(outcome);
-                true
+                // A durable write is not a live frame: it proves life only within one alive
+                // timeout of the clock of the reader, so it must not hold back the `alive`.
+                false
             }
         }
     }
@@ -1538,12 +1540,19 @@ mod peer_count_tests {
 mod tests {
     use super::{
         AppFrameParams, AppTag, ENVELOPE_RESERVE, ESCAPED_BUDGET, MAX_MESSAGE_SIZE, MAX_MSG,
-        MSG_TAG, MembershipApp, MessageBody, Nickname, mpsc, msg_body, msg_fits,
+        MSG_TAG, MembershipApp, MessageBody, Messaging, Nickname, Request, mpsc, msg_body,
+        msg_fits,
     };
     use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
+    #[cfg(feature = "host")]
+    use crate::testing::LaneNode;
 
+    #[cfg(feature = "host")]
+    use super::NodeDriver;
     use std::iter;
+    #[cfg(feature = "host")]
+    use tokio::sync::oneshot;
     /// The longest nickname there is: 32 four-byte scalars.
     fn widest_nick(seed: char) -> Nickname {
         let text: String = iter::repeat_n(seed, 32).collect();
@@ -1649,5 +1658,38 @@ mod tests {
             [false, true, false, false, false, true],
             "a stall surfaces once until the queue drains"
         );
+    }
+
+    /// The loop refreshes the keepalive clock when a session request reports a broadcast. A
+    /// durable write is stamped by the clock of the writer and does not prove life to a peer that
+    /// is quiet, so it must not hold back the `alive` that does.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_state_merge_does_not_report_a_live_broadcast() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            let (inbound, _queue) = mpsc::channel(1);
+            let mut app = MembershipApp::new(inbound);
+            let (reply, answer) = oneshot::channel();
+            let request = Request::Messaging(Messaging::StateMerge {
+                merge: serde_json::json!({"note": "durable"}),
+                reply,
+            });
+
+            let live = app.handle_session(request, &mut state, &context).await;
+
+            assert_eq!(
+                answer.await.expect("the request is answered"),
+                Ok(()),
+                "the merge was made and broadcast"
+            );
+            assert!(
+                !live,
+                "a state merge is a durable write and does not refresh the keepalive clock"
+            );
+            node.endpoint.close().await;
+        });
     }
 }
