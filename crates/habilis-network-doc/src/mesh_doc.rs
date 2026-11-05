@@ -412,7 +412,7 @@ pub struct MeshDoc {
     /// a change with a higher time is refused, so one integer is all the memory it needs.
     clock: AtomicU64,
     /// The state changes that were refused for want of a valid time: one integer, which saturates.
-    refused_without_time: u64,
+    refused_time: u64,
     /// The author of the root of the seed that this document adopted for its epoch, `None` when
     /// it holds no seed. A rival root of the same epoch with a lower key replaces that seed.
     seed_author: Option<AuthorKey>,
@@ -492,7 +492,7 @@ impl MeshDoc {
             carried: Vec::new(),
             adopting: false,
             clock: AtomicU64::new(0),
-            refused_without_time: 0,
+            refused_time: 0,
             seed_author: None,
             seed_hashes: HashSet::new(),
             refused_rivals: Vec::new(),
@@ -688,11 +688,11 @@ impl MeshDoc {
         self.clock.load(Ordering::Relaxed)
     }
 
-    /// How many state changes this document refused for want of a valid time. A caller reads it
+    /// How many state changes this document refused for want of a valid time: none, or above `DOC_TIME_MAX`. A caller reads it
     /// for a gauge, so a refusal is never silent.
     #[must_use]
-    pub fn refused_without_time(&self) -> u64 {
-        self.refused_without_time
+    pub fn refused_time(&self) -> u64 {
+        self.refused_time
     }
 
     /// Take the time of the next change of this node: one above the clock, which then holds it.
@@ -1195,7 +1195,7 @@ impl MeshDoc {
             // A state change names its Lamport time, and a node that cannot place it before or
             // after its own writes would break the order of the replay rule.
             let Some(stamped) = time.filter(|stamped| *stamped <= DOC_TIME_MAX) else {
-                self.refused_without_time = self.refused_without_time.saturating_add(1);
+                self.refused_time = self.refused_time.saturating_add(1);
                 if let Some(refused) =
                     self.warn_due("a state change with no valid time was refused")
                 {
@@ -3762,6 +3762,20 @@ mod tests {
     }
 
     #[test]
+    fn a_gated_channel_never_writes_a_time() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let mut doc = MeshDoc::new_gated(card_gate()).state_epochs();
+        let frame = write(&mut doc, &me, &entry("me", "mine"));
+        assert_eq!(
+            time_of(&frame),
+            None,
+            "a body of the meta channel is the body from before the time"
+        );
+        assert_eq!(doc.clock(), 0, "a gated channel keeps no clock");
+    }
+
+    #[test]
     fn the_clock_does_not_restart_at_an_epoch() {
         let _guard = ::habilis_network_test_tracing::init();
         let (me, cutter) = (nick("me"), nick("cutter"));
@@ -3816,7 +3830,7 @@ mod tests {
         );
         assert_eq!(on.to_json(), json!({}), "nothing was applied");
         assert_eq!(
-            on.refused_without_time(),
+            on.refused_time(),
             1,
             "the refusal is counted, so it is never silent"
         );
