@@ -153,6 +153,23 @@ fn test_pong_round_trip() {
 }
 
 #[test]
+fn test_proof_request_round_trip() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let target = nick("calm-otter");
+    let message = Message::new_proof_request(&sid(), &nick("word-word"), target.clone());
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    assert_eq!(
+        parsed.kind,
+        MessageKind::ProofRequest { to: target },
+        "the parsed kind is a proof request to the target"
+    );
+    assert_eq!(parsed.body.as_str(), "", "a proof request has an empty body");
+}
+
+#[test]
 fn test_task_status_round_trip() {
     let _guard = ::habilis_network_test_tracing::init();
     let target = nick("calm-otter");
