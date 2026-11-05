@@ -910,6 +910,39 @@ mod tests {
         );
     }
 
+    /// The roster keeps the name of a quiet key, because a quiet peer may return and a line about
+    /// it still prints its name. A key that left the roster has no name: `forget_key` drops it.
+    #[test]
+    fn a_quiet_key_keeps_its_known_nickname_and_a_forgotten_key_has_none() {
+        let mut state = fresh_state();
+        let (live, quiet, gone) = (test_key("live"), test_key("quiet"), test_key("gone"));
+        seat(&mut state, live, "live", true);
+        seat(&mut state, quiet, "quiet", false);
+        seat(&mut state, gone, "gone", true);
+        state.forget_key(gone);
+
+        assert_eq!(
+            state.known_nickname_of(&live),
+            Some(nick("live")),
+            "a live key has its name"
+        );
+        assert_eq!(
+            state.known_nickname_of(&quiet),
+            Some(nick("quiet")),
+            "a quiet key keeps its name"
+        );
+        assert_eq!(
+            state.known_nickname_of(&gone),
+            None,
+            "a forgotten key has no name"
+        );
+        assert_eq!(
+            state.known_nickname_of(&test_key("stranger")),
+            None,
+            "a key we never saw has no name"
+        );
+    }
+
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
     #[test]

@@ -1276,6 +1276,15 @@ impl EventLoopState {
             .then_some(address)
     }
 
+    /// The nickname that the roster holds for `key`, live or quiet. A quiet peer may return and a
+    /// line about it still prints its name, so unlike [`nickname_of`](Self::nickname_of) this
+    /// keeps answering for a quiet key. A key that left the roster has none: `forget_key` drops
+    /// it, and an app that wants the name of a departed key keeps what `on_peer_left` gave it.
+    #[must_use]
+    pub fn known_nickname_of(&self, key: &AuthorKey) -> Option<Nickname> {
+        self.names.get(key).cloned()
+    }
+
     /// Whether `key` is a member we can still reach: a live peer, a quiet peer that may return, or
     /// a key with an address to dial. A directed frame to any other key has no one to wait for.
     pub(crate) fn knows_key(&self, key: &AuthorKey) -> bool {
