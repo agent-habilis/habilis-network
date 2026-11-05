@@ -2190,10 +2190,17 @@ impl EventLoopState {
         let linked = self.linked_endpoints.clone();
         self.proven_endpoints
             .insert(signer, endpoint, stamp, &linked);
-        // Anyone can mint keys, so only a key of the roster is trusted: the roster bounds the map.
-        // The table must also hold the proof: it refuses a replay of an older stamp.
+        // The table can refuse a replay of an older stamp, so the trust follows what it holds.
+        self.promote_stored_proof(signer);
+    }
+
+    /// Trust the proof that the table holds for `signer`, if `signer` is in the roster, and feed
+    /// the vector that waited for it. A proof can come before its signer is admitted, and then no
+    /// further `PeerInfo` is due: the admission calls this. Anyone can mint keys, so only a key of
+    /// the roster is trusted, and the roster bounds the map.
+    pub(crate) fn promote_stored_proof(&mut self, signer: AuthorKey) {
         let in_roster = self.peers.contains(&signer) || self.quiet.contains(&signer);
-        if in_roster && self.proven_endpoints.get(&signer) == Some(endpoint) {
+        if in_roster && let Some(endpoint) = self.proven_endpoints.get(&signer) {
             self.proven_endpoints.trust(signer, endpoint);
         }
         #[cfg(feature = "multihop")]

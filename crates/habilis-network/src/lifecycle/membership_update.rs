@@ -361,6 +361,7 @@ pub(crate) fn apply(update: &MembershipUpdate, key: AuthorKey, state: &mut Event
         state.peers.insert(key);
     }
     if update.returned || update.joined_new {
+        state.promote_stored_proof(key);
         state.write_peer_count();
         tracing::debug!(
             key = %key,
@@ -381,7 +382,10 @@ mod tests {
     use crate::protocol::identity::Identity;
     use crate::protocol::{AuthorKey, MeshId, Message, MessageBody, Verified};
 
+    use std::collections::HashSet;
     use std::time::Duration;
+
+    use iroh::{EndpointId, SecretKey};
 
     use crate::util::clock::Instant;
 
@@ -514,6 +518,58 @@ mod tests {
         assert!(
             state.peers.contains(&test_key("swift-cedar")),
             "applying a returned update puts the peer in the roster"
+        );
+    }
+
+    /// A proof that the table holds for `key` before `key` is in the roster, so nothing trusts it.
+    fn state_holding_a_proof_of(key: AuthorKey) -> (EventLoopState, EndpointId) {
+        let mut state = fresh_state();
+        let endpoint = SecretKey::generate().public();
+        state
+            .proven_endpoints
+            .insert(key, endpoint, UnixSecs::now(), &HashSet::new());
+        assert_eq!(
+            state.proven_endpoints.trusted(&key),
+            None,
+            "a key outside the roster is not trusted"
+        );
+        (state, endpoint)
+    }
+
+    #[test]
+    fn a_new_peer_with_a_stored_proof_is_trusted_when_it_joins() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let key = test_key("swift-cedar");
+        let (mut state, endpoint) = state_holding_a_proof_of(key);
+        let update = MembershipUpdate {
+            returned: false,
+            joined_new: true,
+            stale: false,
+        };
+        apply(&update, key, &mut state);
+        assert_eq!(
+            state.proven_endpoints.trusted(&key),
+            Some(endpoint),
+            "the stored proof makes the trust as soon as the key is in the roster"
+        );
+    }
+
+    #[test]
+    fn a_returning_peer_with_a_stored_proof_is_trusted_when_it_returns() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let key = test_key("swift-cedar");
+        let (mut state, endpoint) = state_holding_a_proof_of(key);
+        state.quiet.insert(key);
+        let update = MembershipUpdate {
+            returned: true,
+            joined_new: false,
+            stale: false,
+        };
+        apply(&update, key, &mut state);
+        assert_eq!(
+            state.proven_endpoints.trusted(&key),
+            Some(endpoint),
+            "the stored proof makes the trust when the key returns to the roster"
         );
     }
 
