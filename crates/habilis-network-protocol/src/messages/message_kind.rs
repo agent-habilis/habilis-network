@@ -74,6 +74,12 @@ pub enum MessageKind {
         /// The probe that this pong answers.
         probe: MessageId,
     },
+    /// Asks `to` for its identity proof: a receiver that holds no proof for this author's session
+    /// sends it. Unicast, never gossiped, empty body. Plumbing like `Ping`.
+    ProofRequest {
+        /// The member whose proof is asked for.
+        to: Nickname,
+    },
     /// A durable `state`-channel event: one Base58 automerge change
     /// (`{"k":"change",…}`) applied to the channel's `MeshDoc`
     /// CRDT. Carried on the gossip topic like everything else; the signed frame
@@ -116,6 +122,7 @@ impl fmt::Display for MessageKind {
             MessageKind::Digest => write!(f, "digest"),
             MessageKind::Ping => write!(f, "ping"),
             MessageKind::Pong { .. } => write!(f, "pong"),
+            MessageKind::ProofRequest { .. } => write!(f, "proof_request"),
             MessageKind::State => write!(f, "state"),
             MessageKind::StateDigest => write!(f, "state_digest"),
             MessageKind::Meta => write!(f, "meta"),
@@ -138,6 +145,7 @@ impl MessageKind {
             | MessageKind::Digest
             | MessageKind::Ping
             | MessageKind::Pong { .. }
+            | MessageKind::ProofRequest { .. }
             | MessageKind::State
             | MessageKind::StateDigest
             | MessageKind::Meta

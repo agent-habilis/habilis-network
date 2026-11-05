@@ -167,6 +167,12 @@ impl Message {
         )
     }
 
+    /// A request for the identity proof of `to`, sent to that member alone. It has no body.
+    #[must_use]
+    pub fn new_proof_request(mesh: &MeshId, author: &Nickname, to: Nickname) -> Self {
+        Self::new(mesh, author, MessageKind::ProofRequest { to }, empty_body())
+    }
+
     /// A liveness probe (broadcast). Receivers auto-respond with a
     /// `Pong` addressed back to `author`.
     #[must_use]

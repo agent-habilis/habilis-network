@@ -692,6 +692,7 @@ pub(crate) async fn ingest_from(
         | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
+        | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::StateDigest
         | MessageKind::Meta
@@ -826,7 +827,7 @@ async fn dispatch_infra(
             .await;
         }
         MessageKind::App { .. } => unreachable!("the app seam is handled by `ingest`"),
-        _ => {}
+        MessageKind::ProofRequest { .. } | _ => {}
     }
     ControlFlow::Continue(())
 }
