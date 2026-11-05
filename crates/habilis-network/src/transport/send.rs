@@ -69,7 +69,6 @@ mod tests {
         state.standing.insert(Standing::Meshed);
         let bob = endpoint_id(1);
         state.names.insert(test_key("bob"), nick("bob"));
-        state.names.insert(test_key("bob"), nick("bob"));
         state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.direct.insert(bob, DirectState::Direct);
         (state, bob)

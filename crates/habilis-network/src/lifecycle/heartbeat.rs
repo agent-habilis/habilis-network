@@ -442,6 +442,15 @@ mod tests {
             "the endpoint of the survivor was not bound when the holder went quiet"
         );
         assert_eq!(
+            state.hint_owner.get(&twin),
+            Some(&survivor),
+            "the hint is not owned by the survivor after the sweep"
+        );
+        assert!(
+            !state.refused_endpoints.contains_key(&survivor),
+            "the survivor still waits for an endpoint that the sweep bound"
+        );
+        assert_eq!(
             state.address_of(&survivor).map(|address| address.id),
             Some(retained.id),
             "a send to the survivor does not reach the endpoint that it retained"
