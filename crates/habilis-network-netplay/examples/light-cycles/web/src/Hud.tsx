@@ -16,6 +16,7 @@
 import { component, type Signal } from 'visage-dom'
 
 import { colorFor } from './colors.ts'
+import { playerLabel } from './player_label.ts'
 import type { GameEvent, HudDto } from './types.ts'
 
 /// Formats the outcome the wasm side already decided. Deliberately not
@@ -33,7 +34,7 @@ function outcomeLabel(hud: HudDto | null): string {
     case 'draw':
       return 'draw'
     case 'winner':
-      return `${hud.roster[hud.outcome.index]?.nick ?? '?'} wins`
+      return `${playerLabel(hud.roster, hud.outcome.index)} wins`
   }
 }
 
