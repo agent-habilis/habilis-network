@@ -145,6 +145,7 @@ pub fn expect_warn(target: &str, text: &str) {
     slot.expected.lock().push(Expectation {
         target: target.to_owned(),
         text: text.to_owned(),
+        level: Level::WARN,
         seen: false,
         optional: false,
     });
@@ -168,6 +169,7 @@ pub fn allow_warn(target: &str, text: &str) {
     slot.expected.lock().push(Expectation {
         target: target.to_owned(),
         text: text.to_owned(),
+        level: Level::WARN,
         seen: false,
         optional: true,
     });
@@ -369,6 +371,7 @@ impl Guard {
         self.slot.expected.lock().push(Expectation {
             target: target.to_owned(),
             text: text.to_owned(),
+            level: Level::WARN,
             seen: false,
             optional: false,
         });
@@ -379,6 +382,19 @@ impl Guard {
         self.slot.expected.lock().push(Expectation {
             target: target.to_owned(),
             text: text.to_owned(),
+            level: Level::WARN,
+            seen: false,
+            optional: true,
+        });
+    }
+
+    /// Like [`Self::allow_warn`], for an ERROR event of a dependency that the test cannot avoid.
+    /// The ERROR may also not come. Any other ERROR, and any WARN, still fails the test.
+    pub fn allow_error(&self, target: &str, text: &str) {
+        self.slot.expected.lock().push(Expectation {
+            target: target.to_owned(),
+            text: text.to_owned(),
+            level: Level::ERROR,
             seen: false,
             optional: true,
         });
@@ -416,9 +432,7 @@ impl Slot {
         let mut expected = self.expected.lock();
         let mut problems = Vec::new();
         for logged in self.events.lock().iter() {
-            let hit = expected
-                .iter_mut()
-                .find(|want| logged.level == Level::WARN && want.matches(logged));
+            let hit = expected.iter_mut().find(|want| want.matches(logged));
             match hit {
                 Some(want) if logged.after.is_none() => want.seen = true,
                 _ if logged.after.is_some() => problems.push(late_line(logged)),
@@ -457,6 +471,7 @@ fn target_is_within(logged: &str, wanted: &str) -> bool {
 struct Expectation {
     target: String,
     text: String,
+    level: Level,
     seen: bool,
     /// The WARN may come or not: a test that allows it does not fail when it is absent.
     optional: bool,
@@ -464,7 +479,9 @@ struct Expectation {
 
 impl Expectation {
     fn matches(&self, logged: &Logged) -> bool {
-        target_is_within(&logged.target, &self.target) && logged.text.contains(&self.text)
+        logged.level == self.level
+            && target_is_within(&logged.target, &self.target)
+            && logged.text.contains(&self.text)
     }
 }
 
