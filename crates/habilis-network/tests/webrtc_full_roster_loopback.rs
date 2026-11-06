@@ -286,9 +286,17 @@ fn holder_names(log: &str) -> Vec<&str> {
         };
         last_is_up.insert(local, up);
     }
+    // The host serves the rendezvous and never releases it, so its own link events after the
+    // crash say nothing about a return.
+    let hosts: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("beacon role active"))
+        .filter_map(|line| line.split("node=").nth(1))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .collect();
     let mut names: Vec<&str> = last_is_up
         .into_iter()
-        .filter(|(_, up)| *up)
+        .filter(|(local, up)| *up && !hosts.contains(local))
         .map(|(local, _)| local)
         .collect();
     names.sort_unstable();
@@ -368,6 +376,27 @@ fn a_member_that_the_beacon_dropped_holds_no_link() {
         rendezvous_holders(&log),
         2,
         "one and the returned three, not the member that stayed"
+    );
+}
+
+/// The beacon host serves the rendezvous and never releases it, so its link events after the
+/// crash, a down and an up, make it no holder.
+#[test]
+fn the_beacon_host_is_no_holder_when_its_own_link_flaps_after_the_crash() {
+    let rendezvous = "endpoint_id=aa is_rendezvous=true";
+    let log: String = [
+        "beacon role active: serving the rendezvous node=host".to_owned(),
+        format!("gossip neighbor up local=host {rendezvous}"),
+        "member crashed".to_owned(),
+        format!("gossip neighbor down local=host {rendezvous}"),
+        format!("gossip neighbor up local=host {rendezvous}"),
+        format!("gossip neighbor up local=one {rendezvous}"),
+    ]
+    .join("\n");
+    assert_eq!(
+        holder_names(&log),
+        vec!["one"],
+        "only the member that came back holds the link"
     );
 }
 
