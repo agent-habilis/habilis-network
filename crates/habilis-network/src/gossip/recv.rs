@@ -539,13 +539,7 @@ const VERSION_TEXT_MAX: usize = 16;
 fn report_unparsed(error: &MessageError, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     if let MessageError::UnsupportedVersion(wire_version) = error {
         let version = printable_prefix(wire_version);
-        if state
-            .receive_memory
-            .refused_versions
-            .insert(version.clone())
-        {
-            let line =
-                format!("A peer sent protocol version {version}, which this build does not read");
+        if let Some(line) = state.receive_memory.refused_version_line(&version) {
             context.sink.emit(NodeEvent::Error(line));
         }
         tracing::warn!(target: "habilis_network::gossip", %version, "dropping a frame of an unsupported protocol version");
@@ -2971,6 +2965,64 @@ mod first_contact_tests {
             assert!(
                 line.len() < 120 && printable,
                 "the line is long or holds a control byte: {line:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A sender that makes up versions gets a bounded number of error lines. The frame is not
+    /// verified, so a version set that evicts its oldest entry lets a cycle of `cap + 1` versions
+    /// name each frame again. After the cap, the set takes no new version and one line says that
+    /// many versions are unknown.
+    #[test]
+    fn a_sender_that_cycles_versions_gets_at_most_cap_plus_one_lines() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "dropping a frame of an unsupported protocol version",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let frame = Message::new_app(
+                &node.mesh,
+                &nick("alice"),
+                AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("cycle"),
+                ),
+            )
+            .sign(&Identity::generate());
+            let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
+            let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
+            let cap = tuning::UNSUPPORTED_VERSION_CAP;
+
+            // Two passes over `cap + 1` versions: an evicting set names every frame of both.
+            for version in (0..=cap).chain(0..=cap) {
+                let other = text.replacen(r#""v":"13.0""#, &format!(r#""v":"v{version}""#), 1);
+                ingest(Bytes::from(other), &mut state, &mut app, &context).await;
+            }
+
+            let seen: Vec<String> = {
+                let held = lines.0.lock().expect("the lines lock is not poisoned");
+                held.clone()
+            };
+            assert_eq!(
+                seen.len(),
+                cap + 1,
+                "one line for each of the first {cap} versions and one for the rest: {seen:?}"
+            );
+            let last = seen.last().expect("the lines are not empty");
+            assert!(
+                last.contains("many unknown versions"),
+                "the last line says that many versions are unknown: {last:?}"
             );
             node.endpoint.close().await;
         });

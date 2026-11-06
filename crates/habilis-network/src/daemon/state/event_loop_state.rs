@@ -102,14 +102,40 @@ pub(crate) struct ReceiveMemory {
     /// Groups are rare and short-lived.
     pub(crate) reassembled_groups: BoundedFifoSet<ShardGroup>,
     /// The protocol versions of frames that did not parse, each one named once in an error line.
-    pub(crate) refused_versions: BoundedFifoSet<String>,
+    /// The set stops at [`UNSUPPORTED_VERSION_CAP`] and evicts nothing, so a sender that makes up
+    /// versions cannot get a line for each frame.
+    refused_versions: HashSet<String>,
+    /// Whether the one line that says that many versions are unknown went out.
+    many_versions_told: bool,
+}
+
+impl ReceiveMemory {
+    /// The error line for a frame of a version that this build does not read, or nothing when the
+    /// version was named already or the line for the versions past the cap went out.
+    pub(crate) fn refused_version_line(&mut self, version: &str) -> Option<String> {
+        if self.refused_versions.contains(version) {
+            return None;
+        }
+        if self.refused_versions.len() < UNSUPPORTED_VERSION_CAP {
+            self.refused_versions.insert(version.to_owned());
+            return Some(format!(
+                "A peer sent protocol version {version}, which this build does not read"
+            ));
+        }
+        if self.many_versions_told {
+            return None;
+        }
+        self.many_versions_told = true;
+        Some("Peers sent many unknown versions; this build names the first ones only".to_owned())
+    }
 }
 
 impl Default for ReceiveMemory {
     fn default() -> Self {
         Self {
             reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
-            refused_versions: BoundedFifoSet::new(UNSUPPORTED_VERSION_CAP),
+            refused_versions: HashSet::new(),
+            many_versions_told: false,
         }
     }
 }

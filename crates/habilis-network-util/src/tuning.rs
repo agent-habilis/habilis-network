@@ -738,7 +738,8 @@ pub const QUIET_CAP: usize = 1024;
 
 /// Max protocol versions that the loop has named in an error line. A frame that names another
 /// version does not parse, so the key of its sender is not proven: the line is once for each
-/// version, and a sender that makes up versions pushes the oldest out of this set, not memory.
+/// version. The set takes no version past the cap, and one line says that many are unknown, so a
+/// sender that makes up versions gets neither memory nor a line for each frame.
 pub const UNSUPPORTED_VERSION_CAP: usize = 16;
 
 /// Minimum gap between our own re-dial + `PeerInfo` re-flood of the *same*
