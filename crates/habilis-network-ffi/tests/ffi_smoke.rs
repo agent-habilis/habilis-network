@@ -656,6 +656,50 @@ fn the_v2_recv_refuses_a_size_below_its_struct_and_keeps_the_message() {
     }
 }
 
+/// A text that does not fit in the buffer gives -2 from the v2 receive. The call writes the
+/// length of the text into `out->len` and keeps the message, and the retry with a buffer of
+/// `out->len + 1` bytes gets the same message with the same key.
+#[test]
+fn the_v2_recv_reports_a_small_buffer_and_the_retry_gets_the_same_key() {
+    let (alice, bob) = pair();
+    // SAFETY: live handle, NUL-terminated strings.
+    let sent =
+        unsafe { habilis_network_msg_send(alice, ptr::null(), c"a text of some length".as_ptr()) };
+    assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
+
+    let (too_small, short_meta, _) = recv_v2(bob, 4, 20_000);
+    assert_eq!(too_small, -2, "a buffer of 4 bytes was enough");
+    assert_eq!(
+        short_meta.len,
+        "a text of some length".len(),
+        "the call does not say how long the text is"
+    );
+
+    let (got, meta, text) = recv_v2(bob, short_meta.len + 1, 20_000);
+    assert_eq!(got, 1, "the retry lost the message: {:?}", last_error());
+    assert_eq!(text, "a text of some length", "the retry gets another text");
+    assert_eq!(
+        key_of(&meta),
+        key_of(&short_meta),
+        "the retry gets another key"
+    );
+    assert_eq!(key_of(&meta).len(), 64, "the key is not 64 digits");
+
+    // SAFETY: each handle came from `habilis_network_mesh_open` and is not used after this.
+    unsafe {
+        assert_eq!(
+            habilis_network_mesh_close(bob),
+            0,
+            "bob's close returns zero"
+        );
+        assert_eq!(
+            habilis_network_mesh_close(alice),
+            0,
+            "alice's close returns zero"
+        );
+    }
+}
+
 fn nick_of_v2(message: &HabilisNetworkMsgV2) -> String {
     // SAFETY: `write_nick` always NUL-terminates inside the array.
     unsafe { CStr::from_ptr(message.nick.as_ptr()) }
