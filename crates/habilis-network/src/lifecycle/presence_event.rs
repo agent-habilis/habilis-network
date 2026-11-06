@@ -130,12 +130,10 @@ pub(crate) async fn handle_presence(
             gossip::flush_pending(state, context, "peer left").await;
         }
         // App cleanup last, with the roster already consistent. The app hears of every key that
-        // leaves, whoever else holds its nickname. Gated on `surfaceable`: a relayed pre-join
-        // `Left` must never cancel live work — the same join-horizon symmetry as the
-        // announcement above.
-        if surfaceable {
-            app.on_peer_left(&key, &departed, state, context).await;
-        }
+        // leaves, whoever else holds its nickname. Not gated on `surfaceable`: the key was in the
+        // roster, so a goodbye ends it whatever the clock of its sender says. The join horizon
+        // hides a line from the user, and it does not hide a fact from the app.
+        app.on_peer_left(&key, &departed, state, context).await;
     } else if subtype == PresenceSubtype::Joined && !update.stale {
         // Every `joined` re-floods our `PeerInfo`, newcomer and rejoin
         // alike. A newcomer linked to the *rendezvous*, so no `NeighborUp`

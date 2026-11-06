@@ -81,16 +81,18 @@ pub trait NodeApp: Send {
     }
 
     /// A peer broadcast a graceful `Left` and was removed from the roster.
-    /// Fired once for every key that leaves, with a `Left` stamped after our
-    /// join, whether or not the arrival of the peer was shown. Another key that
+    /// Fired once for every key of the roster that says goodbye, whether or not
+    /// the arrival of the peer was shown, and whatever the stamp of the goodbye:
+    /// the clock of the sender can run slow. Another key that
     /// still holds the nickname does not change that: a nickname is a label,
     /// and the state of the key that left is not valid for its twin. `nickname`
     /// is the one that the roster recorded for `key`; the roster has dropped it
     /// when the hook runs, so `state.nickname_of(key)` gives `None` here. An app
     /// that reads the whole roster (`live_nicknames`) holds state for a peer
-    /// that is not shown yet, and must release it. Never fired for a relayed
-    /// pre-join `Left`, and never from the silence-timeout sweep: a quiet peer
-    /// may return, so its app-side state must survive a mere timeout.
+    /// that is not shown yet, and must release it. Never fired for the goodbye
+    /// of a key that is not in the roster, and never from the silence-timeout
+    /// sweep: a quiet peer may return, so its app-side state must survive a
+    /// mere timeout.
     ///
     /// Defaults to a no-op — an app holding no per-peer state has nothing to
     /// release.

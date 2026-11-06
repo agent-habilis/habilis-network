@@ -2186,6 +2186,40 @@ mod churn_red {
         });
     }
 
+    /// A peer that we showed has a clock that runs slow, and its goodbye is stamped before our
+    /// join. It was a peer of the roster, so the app hears that its key left: the app holds work
+    /// for it, and the join horizon hides frames from the user, not facts from the app.
+    #[test]
+    fn the_app_hears_the_goodbye_of_a_shown_peer_with_a_slow_clock() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("slow-clock");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            let mut app = Leaves::default();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(1);
+
+            let beat = alive(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&beat, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let key = state.key_named(who.as_str());
+            assert!(state.surfaced.contains(&key), "the peer was not shown");
+
+            let before_join = state.joined_at - Duration::from_hours(1);
+            say_goodbye_at(&peer, &who, before_join, &rig, &mut state, &mut app).await;
+
+            assert_eq!(
+                app.0,
+                vec!["slow-clock".to_owned()],
+                "the app did not hear the goodbye of a shown peer"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
     /// A durable frame (state or meta) of a nickname that we have not seen does not put the
     /// nickname in the roster, so it must not show an arrival either: the arrival would be a
     /// peer that the count and the rows leave out. The next live frame of the peer shows it.
@@ -3126,8 +3160,22 @@ mod churn_red {
         state: &mut EventLoopState,
         app: &mut dyn NodeApp,
     ) {
+        say_goodbye_at(by, who, UnixSecs::now(), rig, state, app).await;
+    }
+
+    /// [`say_goodbye`] with a goodbye stamped at `at`, as the clock of `by` reads.
+    async fn say_goodbye_at(
+        by: &Identity,
+        who: &Nickname,
+        at: UnixSecs,
+        rig: &Rig,
+        state: &mut EventLoopState,
+        app: &mut dyn NodeApp,
+    ) {
         let context = rig.context();
-        let left = Message::new_left(&rig.mesh, who).sign(by);
+        let mut left = Message::new_left(&rig.mesh, who);
+        left.timestamp = at;
+        let left = left.sign(by);
         assert!(!state.mark_seen(&left), "the frame is new to the seen set");
         let observed = observe(&left, state, &context);
         handle_presence(
