@@ -18,7 +18,7 @@ use iroh::{EndpointId, SecretKey};
 
 use crate::daemon::state::{EventLoopState, MeshSecrets, RunKeys, StateInit};
 use crate::protocol::identity::Identity;
-use crate::protocol::{AuthorKey, Nickname};
+use crate::protocol::{AuthorKey, Channel, Nickname};
 use crate::util::clock::Instant;
 
 use iroh::address_lookup::memory;
@@ -47,6 +47,18 @@ pub(crate) fn fresh_state() -> EventLoopState {
 
 /// [`fresh_state`] with the given address book.
 pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> EventLoopState {
+    let mut state = fresh_state_that_waits_with_book(address_book);
+    // A test that is not about the first sync writes at once: the wait ends here.
+    state.doc_mut(Channel::State).finish_sync();
+    state
+}
+
+/// [`fresh_state`] as the daemon starts: the state document waits for its first sync.
+pub(crate) fn fresh_state_that_waits() -> EventLoopState {
+    fresh_state_that_waits_with_book(memory::MemoryLookup::new())
+}
+
+fn fresh_state_that_waits_with_book(address_book: memory::MemoryLookup) -> EventLoopState {
     EventLoopState::new(
         StateInit {
             #[cfg(feature = "host")]

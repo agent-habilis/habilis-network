@@ -18,7 +18,7 @@ use habilis_network::protocol::{
     AppFrameParams, AppTag, Channel, LookupOpts, MessageBody, Nickname,
 };
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh, tuning,
 };
 use tokio::sync::oneshot;
 use tokio::{sync, time};
@@ -128,6 +128,8 @@ fn nick(name: &str) -> Nickname {
 }
 
 async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Read) {
+    // These tests write state at once: the wait for the first sync ends at the start.
+    tuning::init(tuning::Tuning::DEFAULTS.state_sync_wait(Duration::ZERO));
     // The same handle goes to the app and comes back to the caller.
     let read = Arc::new(Mutex::new(Vec::new()));
     let mesh =

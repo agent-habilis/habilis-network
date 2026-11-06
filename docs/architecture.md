@@ -451,6 +451,13 @@ A receiver compares the window with its own log and re-sends what the sender mis
 The CRDT channels repair differently: their digests carry automerge heads.
 A receiver computes the missing changes and re-broadcasts the original frames with the original signatures intact.
 A cold joiner pulls the whole document history over successive rounds.
+The body of a state digest is `{"heads": [...]}`, with two optional flags that are left out when false.
+`closing` marks the heads that end a point-to-point answer: information on how far the holder is, not a request.
+`first` marks a request of a node that waits for its first sync of the state channel.
+A holder with nothing missing answers a `first` request with one `closing` digest alone, point-to-point.
+The waiting node ends its wait on a `closing` digest that came point-to-point and whose heads it holds.
+A digest on gossip never ends the wait.
+An old node ignores `first`, so its asker waits for the 30 s deadline.
 
 ### 7.6 Multipart bodies
 

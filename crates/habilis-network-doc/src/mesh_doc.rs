@@ -220,6 +220,26 @@ pub struct SeedPlan {
 }
 
 impl SeedPlan {
+    /// The stamps that a frame of this seed would carry for `merge`: one for each leaf and each
+    /// object that the merge writes, as the plan holds them (the stamp 0 for a path that it holds
+    /// none for). A caller that measures the frames of a seed uses them, so the frames come out as
+    /// full as they can be and not as full as the worst stamp lets them be.
+    pub fn stamps_for(&self, merge: &Value) -> impl Iterator<Item = Stamp> + use<> {
+        let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_leaves(merge, &mut Vec::new(), &mut leaves);
+        let mut objects: Vec<(Vec<String>, Value)> = Vec::new();
+        collect_objects(merge, &mut Vec::new(), &mut objects);
+        let none = Stamp::new(0, "0000000000000000".to_owned());
+        let mut stamps: Vec<Stamp> = Vec::with_capacity(leaves.len() + objects.len());
+        for (path, _) in &leaves {
+            stamps.push(self.stamps.get(path).unwrap_or(&none).clone());
+        }
+        for (path, _) in &objects {
+            stamps.push(self.stamps.get(path).unwrap_or(&none).clone());
+        }
+        stamps.into_iter()
+    }
+
     /// Build the chain of the seed of `epoch` from this plan: the live JSON cut by leaf path into
     /// merges that each fit one frame, written as a chain of changes on the genesis of `epoch`.
     /// `fits` takes one merge and says whether its frame is small enough, as [`pack_entry`] does.
@@ -547,6 +567,16 @@ pub struct DocCensus {
     pub replay_unsettled: u64,
     /// The frames that the document refused over its remote line, since it began.
     pub refused_remote: u64,
+    /// The local writes that the lines of the document refused, since it began.
+    pub refused_local: u64,
+    /// The writes that waited for the first sync, since the document began.
+    pub held_writes: u64,
+    /// The operations of the changes that the document holds in this epoch.
+    pub ops_held: usize,
+    /// The frame bytes and the operations right after the seed of this epoch was applied.
+    pub seed_bytes: usize,
+    /// See `seed_bytes`.
+    pub seed_ops: usize,
 }
 
 /// The bytes of a frame on the wire, 0 for a frame that does not serialize.
@@ -639,6 +669,12 @@ pub struct MeshDoc {
     refused: BoundedFifoSet<ChangeHash>,
     /// The frames refused over the remote line since the document began.
     refused_remote: u64,
+    /// The local writes that the lines of the document refused (full, too deep, too large for a
+    /// seed frame), and the writes that waited for the first sync (`ClockNotReady`), since the
+    /// document began. One integer each, which saturates, kept with atomics because the checks
+    /// that count them read the document and do not change it.
+    refused_local: AtomicU64,
+    held_writes: AtomicU64,
     /// The ticks since the size of this document first crossed the cut ceiling, `None` while it
     /// is below it.
     crossed_ticks: Option<u32>,
@@ -758,6 +794,8 @@ impl MeshDoc {
             limits: Limits::real(),
             refused: BoundedFifoSet::new(Limits::real().refused_max),
             refused_remote: 0,
+            refused_local: AtomicU64::new(0),
+            held_writes: AtomicU64::new(0),
             crossed_ticks: None,
             cut_wait: 0,
             cut_backoff: DOC_CUT_BACKOFF_FIRST,
@@ -889,6 +927,7 @@ impl MeshDoc {
     > {
         let timed: bool = self.state_epochs && self.gate.is_none();
         if timed && self.awaiting_sync {
+            self.held_writes.fetch_add(1, Ordering::Relaxed);
             return Err(DocError::ClockNotReady);
         }
         let time: Option<u64> = timed.then(|| self.next_time());
@@ -914,6 +953,7 @@ impl MeshDoc {
         stamps: &[(Vec<String>, Stamp)],
     ) -> Result<habilis_network_protocol::MessageBody, DocError> {
         if self.awaiting_sync {
+            self.held_writes.fetch_add(1, Ordering::Relaxed);
             return Err(DocError::ClockNotReady);
         }
         let parsed = Change::from_bytes(change.to_vec()).map_err(DocError::encode)?;
@@ -1017,6 +1057,11 @@ impl MeshDoc {
             dropped_restores: self.restores_dropped,
             replay_unsettled,
             refused_remote: self.refused_remote,
+            refused_local: self.refused_local.load(Ordering::Relaxed),
+            held_writes: self.held_writes.load(Ordering::Relaxed),
+            ops_held: self.ops_held,
+            seed_bytes: self.seed_bytes,
+            seed_ops: self.seed_ops,
         }
     }
 
@@ -1986,6 +2031,20 @@ impl MeshDoc {
     /// `null`, or an empty object) is refused when the next seed would pass the refusal line, on
     /// the bytes or on the operations. A delete is exempt from the refusal line and from the depth.
     fn check_lines(&self, merge: &Value, change: &Change, restoring: bool) -> Result<(), DocError> {
+        let checked = self.check_lines_of(merge, change, restoring);
+        if checked.is_err() {
+            self.refused_local.fetch_add(1, Ordering::Relaxed);
+        }
+        checked
+    }
+
+    /// The checks of [`Self::check_lines`], without the count of a refusal.
+    fn check_lines_of(
+        &self,
+        merge: &Value,
+        change: &Change,
+        restoring: bool,
+    ) -> Result<(), DocError> {
         if !self.state_epochs || self.gate.is_some() {
             return Ok(());
         }
@@ -7172,6 +7231,60 @@ mod tests {
     }
 
     #[test]
+    fn the_census_counts_the_local_writes_that_the_lines_refused_and_the_writes_that_were_held() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let doc = full_state_doc(1_900);
+        assert!(
+            write_error(&doc, &leaves_merge(5_000, 5)).is_some(),
+            "an add above the refusal line is refused"
+        );
+        let mut deep = json!(1);
+        for level in 0..13 {
+            deep = json!({ format!("k{level}"): deep });
+        }
+        assert!(write_error(&doc, &deep).is_some(), "13 levels are refused");
+        let mut counted = doc;
+        assert_eq!(
+            counted.census(false).refused_local,
+            2,
+            "both refusals are counted"
+        );
+        let waiting = MeshDoc::new_state(None);
+        let change = change_of(&waiting, &json!({ "a": 1 }), &pad_seed(b"me"));
+        assert!(
+            waiting.compose_wire_body(&change, None).is_err(),
+            "a write waits"
+        );
+        let mut held = waiting;
+        assert_eq!(
+            held.census(false).held_writes,
+            1,
+            "the held write is counted"
+        );
+    }
+
+    #[test]
+    fn the_census_reports_the_operations_and_the_counts_of_the_seed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (cutter, joiner) = (nick("cutter"), nick("joiner"));
+        let big = small_state_doc(300);
+        let frames = seed_frames_of(&big, &cutter, 3, None);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        ticks(&mut doc, &joiner, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        let census = doc.census(false);
+        assert_eq!(census.ops_held, doc.ops_held(), "the operations held");
+        assert_eq!(
+            (census.seed_bytes, census.seed_ops),
+            (doc.seed_bytes(), doc.seed_ops()),
+            "the counts of the seed"
+        );
+        assert!(census.seed_ops > 0, "the seed has operations");
+    }
+
+    #[test]
     fn a_document_with_no_state_epochs_has_no_lines() {
         let _guard = ::habilis_network_test_tracing::init();
         let plain = MeshDoc::new_ungated().limits(Limits::with_seed_frames(40));
@@ -7397,6 +7510,40 @@ mod tests {
         assert_eq!(planned.origins, direct.origins, "the same stamps");
         assert_eq!(planned.tombstones, direct.tombstones, "the same tombstones");
         assert_eq!(planned.mark, direct.mark, "the same mark: count and tip");
+    }
+
+    #[test]
+    fn the_stamps_of_a_merge_are_the_stamps_that_the_plan_holds_for_its_paths() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other) = (nick("me"), nick("other"));
+        let mut doc = state_doc_with(&live_state());
+        write(&mut doc, &other, &json!({ "n": 8 }));
+        let plan = doc.seed_plan().expect("a plan");
+        let merge = json!({ "n": 8, "board": { "title": "t" } });
+        let stamps: Vec<Stamp> = plan.stamps_for(&merge).collect();
+        let board: Vec<String> = vec!["board".to_owned()];
+        let title: Vec<String> = vec!["board".to_owned(), "title".to_owned()];
+        let number: Vec<String> = vec!["n".to_owned()];
+        let paths: Vec<Vec<String>> = vec![board, title, number];
+        let found = doc.stamps_of(&paths);
+        let mut expected: Vec<Stamp> = Vec::new();
+        for stamp in found {
+            expected.push(stamp.expect("a stamp"));
+        }
+        expected.sort();
+        let mut got = stamps;
+        got.sort();
+        assert_eq!(
+            got, expected,
+            "the object, the leaf under it and the other leaf, each with the stamp of its write"
+        );
+        let unknown: Vec<Stamp> = plan.stamps_for(&json!({ "nowhere": 1 })).collect();
+        assert_eq!(
+            unknown,
+            vec![Stamp::new(0, "0000000000000000".to_owned())],
+            "a path that the plan does not hold gets the stamp 0"
+        );
+        let _ = me;
     }
 
     #[test]

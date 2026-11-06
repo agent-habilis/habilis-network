@@ -547,6 +547,8 @@ struct Assembled {
     /// The invite-only creator's mesh (with its in-memory issuer key + root),
     /// retained so `invite` can mint. `Some` only on an invite-only creator.
     mint_mesh: Option<Mesh>,
+    /// True for the node that created the mesh: it has no peer to sync its state with.
+    is_creator: bool,
     /// The multi-hop transport handle when the mesh policy has `multihop`, threaded
     /// into `EventLoopState` so the link-state tick can feed its routing table.
     /// Present with the `multihop` feature; the native underlay builder that fills
@@ -741,6 +743,15 @@ fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
     })
 }
 
+/// The caller owns an endpoint that it injected; the engine owns the one that it binds.
+fn owner_of(injected: Option<&InjectedEndpoint>) -> EndpointOwner {
+    if injected.is_none() {
+        EndpointOwner::Engine
+    } else {
+        EndpointOwner::Caller
+    }
+}
+
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -756,11 +767,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         transports,
         per_peer_gate,
     } = params;
-    let endpoint_owner = if injected.is_none() {
-        EndpointOwner::Engine
-    } else {
-        EndpointOwner::Caller
-    };
+    let endpoint_owner = owner_of(injected.as_ref());
     let (max_peers, max_direct) = resolve_caps(max_peers, max_direct);
     // The localhost binding is owned + bound by the caller; the engine only needs
     // the resolved port for the `ready` event. `Some(0)` (ephemeral) is resolved
@@ -777,7 +784,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // rung 0 (empty ladder ⇒ `None`).
     let ladder: Vec<_> = relay_ladder(&lookups.relay_lookup).collect();
     let (rung_tx, rung_rx) = watch::channel(ladder.first().cloned());
-
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
 
     let build = SetupBuild {
@@ -810,6 +816,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         mesh_password,
         mesh_key,
         mint_mesh,
+        is_creator,
         #[cfg(feature = "multihop")]
             multihop: multihop_handle,
         #[cfg(feature = "multihop")]
@@ -821,7 +828,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         webrtc_ice,
         topic_string,
     } = assemble(kind, &build, injected).await?;
-
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
 
@@ -831,6 +837,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             name: mesh_name,
             topic_string,
             mint_mesh,
+            is_creator,
             author,
             // The mesh spec and the loop state both hold the keys, so they are shared.
             keys: run_keys(state_file.as_deref())?,
@@ -1091,6 +1098,7 @@ async fn setup_create(
         mesh_password,
         mesh_key,
         mint_mesh,
+        is_creator: true,
         #[cfg(feature = "multihop")]
         multihop,
         #[cfg(feature = "multihop")]
@@ -1200,6 +1208,7 @@ async fn setup_join(
         // A joiner holds no issuer key, so it can never mint — even after
         // redeeming an invite-only mesh.
         mint_mesh: None,
+        is_creator: false,
         #[cfg(feature = "multihop")]
         multihop,
         #[cfg(feature = "multihop")]

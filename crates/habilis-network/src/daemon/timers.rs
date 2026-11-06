@@ -379,6 +379,7 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
     let peer_nicks = meta.peer_nicks.as_deref().unwrap_or_default();
     let absent = absent_entries(peer_nicks, &state.peers, me);
     let peer_entries = peer_nicks.len();
+    let replay_waiting = state.replay_queue.len();
     tracing::info!(
         target: "habilis_network::lifecycle",
         doc_meta_epoch = meta.epoch,
@@ -398,6 +399,15 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
         doc_state_unstamped_paths = shared.unstamped_paths,
         doc_state_dropped_restores = shared.dropped_restores,
         doc_state_replay_unsettled = shared.replay_unsettled,
+        doc_state_ops = shared.ops_held,
+        doc_state_seed_bytes = shared.seed_bytes,
+        doc_state_seed_ops = shared.seed_ops,
+        doc_state_remote_refused = shared.refused_remote,
+        doc_state_full_refused = shared.refused_local,
+        doc_state_held_writes = shared.held_writes,
+        doc_state_cuts = state.state_cuts,
+        doc_state_cuts_failed = state.state_cuts_failed,
+        doc_state_replay_queue = replay_waiting,
         doc_save_taken = heavy,
         "doc census"
     );

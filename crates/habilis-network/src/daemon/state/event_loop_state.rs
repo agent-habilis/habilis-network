@@ -15,6 +15,7 @@ use crate::daemon::probe_backoff::ProbeBackoff;
 use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
 use crate::doc;
+use crate::doc::StampedPaths;
 
 use crate::transport::UdpTransport;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -36,7 +37,7 @@ use crate::protocol::{
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
-use crate::util::consts::{DOC_EPOCH_WRITE_ATTEMPTS, DOC_STATE_SYNC_WAIT};
+use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
@@ -53,8 +54,8 @@ use crate::transport::underlay_webrtc;
 use crate::transport::{graft_backoff, probe, proven_endpoints};
 use crate::util::tuning;
 use iroh::address_lookup::memory;
+use n0_future::task::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
 
 use crate::daemon::seed_job::SeedOutcome;
 
@@ -462,8 +463,17 @@ pub struct EventLoopState {
     /// The build of the seed of a cut that runs on a blocking thread, one at a time. The event loop
     /// waits for it in its `select!` and then signs and sends the chain.
     pub(crate) seed_job: Option<JoinHandle<SeedOutcome>>,
+    /// The values that the state channel must write again after an epoch switch (the replay of
+    /// the writes that the seed lacks) or as a restore: a merge and the stamp of each path. The
+    /// loop drains it after each tick and sends the frames. Bounded by `REPLAY_QUEUE_CAP`: when it
+    /// is full the new item is refused and counted, and the node warns.
+    pub(crate) replay_queue: BoundedQueue<(serde_json::Value, StampedPaths)>,
+    /// The cuts of the state channel that this node made (a seed built, signed and sent), and the
+    /// cuts that failed, since the node started: one integer each, for the census line.
+    pub(crate) state_cuts: u64,
+    pub(crate) state_cuts_failed: u64,
     /// When the state document stops waiting for its first sync and writes with the clock that it
-    /// has (see `DOC_STATE_SYNC_WAIT`): counted from the start of the node, so a node with no peer
+    /// has (see `tuning::STATE_SYNC_WAIT`): counted from the start of the node, so a node with no peer
     /// is not held for ever.
     pub(crate) state_sync_deadline: Instant,
     /// The `meta` channel's document — a second, independent shared-state channel.
@@ -676,13 +686,16 @@ impl EventLoopState {
             reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
-            state_doc: MeshDoc::new_ungated().key(state_key),
+            state_doc: MeshDoc::new_state(state_key),
             state_seal: mesh_key.as_ref().map(|key| {
                 // Shared with the job that builds a seed on a blocking thread.
                 Arc::new(key.derive(b"state-doc"))
             }),
             seed_job: None,
-            state_sync_deadline: Instant::now() + DOC_STATE_SYNC_WAIT,
+            replay_queue: BoundedQueue::new(REPLAY_QUEUE_CAP),
+            state_cuts: 0,
+            state_cuts_failed: 0,
+            state_sync_deadline: Instant::now() + tuning::state_sync_wait(),
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
             identity: init.keys.session,
@@ -1642,6 +1655,11 @@ impl EventLoopState {
 /// Max `parents` stamped on a `Msg` — bounds the wire size of the causal
 /// links. A quiet mesh has one head; this only bites under heavy concurrency.
 const MAX_DAG_PARENTS: usize = 16;
+
+/// How many replays and restores of the state channel wait for the loop to send them. A tick adds
+/// at most 2 (the replay of a switch and the restores that are due), and the loop sends them after
+/// the tick, so 8 is room for 4 ticks of a loop that is slow.
+const REPLAY_QUEUE_CAP: usize = 8;
 
 // ── Consumer surface ───────────────────────────────────────────────────────
 //
