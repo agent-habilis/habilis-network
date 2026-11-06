@@ -1966,6 +1966,44 @@ mod tests {
         });
     }
 
+    /// A key that no roster, quiet set or address holds has no one to wait for. A meshed node
+    /// refuses a send to it with that cause, as an unmeshed node does. The cause "no known endpoint
+    /// (`PeerInfo` not yet received)" would tell a caller with a mistyped key to wait.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_send_to_a_key_that_nobody_holds_names_that_cause_on_a_meshed_node() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            state.standing.insert(Standing::Meshed);
+            let (inbound, _queue) = mpsc::channel(1);
+            let mut app = MembershipApp::new(inbound);
+
+            let (reply, answer) = oneshot::channel();
+            let request = Request::Messaging(Messaging::SendToKey {
+                to: test_key("nobody#holds-this"),
+                body: MessageBody::from("hi"),
+                reply,
+            });
+            app.handle_session(request, &mut state, &context).await;
+
+            let refused = answer
+                .await
+                .expect("the request is answered")
+                .expect_err("a send to a key that nobody holds");
+            assert!(
+                refused.contains("no roster, quiet set or known address holds this key"),
+                "the refusal does not name the cause: {refused}"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the refused send was buffered"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// The engine hands a directed frame for another key to the app too. A member that shares a
     /// nickname with that key is another peer, so its queue holds only the frames for its own
     /// key, and the broadcasts.

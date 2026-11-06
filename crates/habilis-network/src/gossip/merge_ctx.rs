@@ -101,6 +101,15 @@ pub async fn send_app(
             frame.wire_len()
         )));
     }
+    // A key that nobody holds can never be delivered to, so the caller hears that now, meshed or
+    // not: the later "no known endpoint" cause would tell it to wait for a `PeerInfo`.
+    if let Some(key) = sole_addressee(&frame.kind)
+        && !state.knows_key(key)
+    {
+        return Err(transport::SendError::Undeliverable(format!(
+            "directed message to {key} undeliverable: no roster, quiet set or known address holds this key"
+        )));
+    }
     let bytes = frame
         .serialize()
         .map_err(|error| transport::SendError::Internal(error.into()))?;
@@ -122,15 +131,7 @@ pub async fn send_app(
             }
         }
     } else {
-        // An unmeshed node buffers a directed frame for the meshed edge. A key that nobody holds
-        // can never be delivered to, so the caller hears that now.
-        if let Some(key) = sole_addressee(&frame.kind)
-            && !state.knows_key(key)
-        {
-            return Err(transport::SendError::Undeliverable(format!(
-                "directed message to {key} undeliverable: no roster, quiet set or known address holds this key"
-            )));
-        }
+        // An unmeshed node buffers a directed frame for the meshed edge.
         park_and_offer(state, context, &frame, &bytes);
     }
     if state.pending_outbound.push((frame.clone(), bytes)) {
