@@ -324,17 +324,23 @@ fn job_for(state: &EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u64) -> 
     }
 }
 
-/// A peer showed its heads for `channel` and this node holds all of them: it is not behind that
-/// peer, so every time that the peer has seen is in the history of this node and its clock is above
-/// them. That ends the wait of the state document for its first sync. A peer with no heads proves
-/// nothing (a peer that also just started holds none, and the holder of the old writes of this node
-/// has not answered yet), so the wait of a node that meets only empty peers ends at its deadline.
-pub(crate) fn peer_heads_seen(state: &mut EventLoopState, channel: Channel, heads: &[String]) {
-    if channel != Channel::State {
+/// A closing digest of a peer for `channel` came in. It ends the wait of the state document for
+/// its first sync when it came point-to-point and this node holds all of its heads: the peer
+/// answered the request of this node (frames, then the closing heads, or the closing heads alone
+/// when it had nothing to send), so every time that the peer has seen is in the history of this
+/// node and its clock is above them. A plain request or a digest on gossip never ends the wait: a
+/// node that only announces its heads has answered nobody. The deadline stays the outer bound.
+pub(crate) fn closing_digest_seen(
+    state: &mut EventLoopState,
+    channel: Channel,
+    heads: &[String],
+    on_unicast: bool,
+) {
+    if channel != Channel::State || !on_unicast {
         return;
     }
     let doc = state.doc_mut(channel);
-    if doc.is_awaiting_first_sync() && !heads.is_empty() && doc.holds_heads(heads) {
+    if doc.is_awaiting_first_sync() && doc.holds_heads(heads) {
         doc.finish_sync();
         tracing::debug!(target: "habilis_network::gossip", "the state channel synced with a peer, and its writes go on");
     }
@@ -557,8 +563,8 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        Instant, LARGEST_TIME, SeedJob, SeedOutcome, buffer_frame, creator_has_nothing_to_sync,
-        finish, frame_fits_with, peer_heads_seen, queue_replay, rank_of, replay_frames,
+        Instant, LARGEST_TIME, SeedJob, SeedOutcome, buffer_frame, closing_digest_seen,
+        creator_has_nothing_to_sync, finish, frame_fits_with, queue_replay, rank_of, replay_frames,
         spawn_build, sync_deadline, tick,
     };
     use tokio::time::interval;
@@ -925,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn the_heads_of_a_peer_that_this_node_holds_end_the_wait_for_the_first_sync() {
+    fn a_closing_digest_on_unicast_with_heads_that_this_node_holds_ends_the_wait() {
         let mut state = state_that_waits_for_the_first_sync();
         assert!(
             state.doc(Channel::State).is_awaiting_first_sync(),
@@ -943,30 +949,40 @@ mod tests {
         let ours: Vec<String> = state.doc(Channel::State).heads().collect();
         assert!(!ours.is_empty(), "the node holds a change");
         let unknown = vec!["3yMApqCuCjXDWPrbjfR5mjCPTHqFG8Pux1TxQrEM35jj".to_owned()];
-        peer_heads_seen(&mut state, Channel::State, &unknown);
+        closing_digest_seen(&mut state, Channel::State, &unknown, true);
         assert!(
             state.doc(Channel::State).is_awaiting_first_sync(),
             "a peer that is ahead of this node (heads that it does not hold) does not end the wait"
         );
-        peer_heads_seen(&mut state, Channel::Meta, &ours);
+        closing_digest_seen(&mut state, Channel::Meta, &ours, true);
         assert!(
             state.doc(Channel::State).is_awaiting_first_sync(),
             "the heads of the meta channel say nothing of the clock of the state channel"
         );
-        peer_heads_seen(&mut state, Channel::State, &ours);
+        closing_digest_seen(&mut state, Channel::State, &ours, false);
+        assert!(
+            state.doc(Channel::State).is_awaiting_first_sync(),
+            "a closing digest on gossip is not the answer to the request of this node"
+        );
+        closing_digest_seen(&mut state, Channel::State, &ours, true);
         assert!(
             !state.doc(Channel::State).is_awaiting_first_sync(),
-            "heads that this node holds end the wait"
+            "a closing digest on unicast with heads that this node holds ends the wait"
         );
     }
 
     #[test]
-    fn a_peer_with_no_heads_proves_nothing_and_does_not_end_the_wait() {
+    fn the_empty_answer_of_a_peer_that_had_nothing_to_send_ends_the_wait_only_on_unicast() {
         let mut state = state_that_waits_for_the_first_sync();
-        peer_heads_seen(&mut state, Channel::State, &[]);
+        closing_digest_seen(&mut state, Channel::State, &[], false);
         assert!(
             state.doc(Channel::State).is_awaiting_first_sync(),
-            "a peer that also just started holds nothing: it does not say that this node is synced"
+            "empty heads on gossip are a node that announces itself: no answer"
+        );
+        closing_digest_seen(&mut state, Channel::State, &[], true);
+        assert!(
+            !state.doc(Channel::State).is_awaiting_first_sync(),
+            "a peer that answered the request with nothing to send had its chance"
         );
     }
 

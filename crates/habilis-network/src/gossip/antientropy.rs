@@ -144,13 +144,18 @@ struct DigestBody {
 /// windowing. Replaces the windowed [`DigestBody`] for these two channels.
 ///
 /// `closing` marks the heads that end a point-to-point answer: information on
-/// how far the holder is, not a request. Left out when false, so a request's
-/// bytes and its heads key are what they always were.
+/// how far the holder is, not a request. `first` marks a request of a node that
+/// waits for its first sync: a holder with nothing missing answers it with a
+/// closing digest alone, so the node knows that a holder had the chance to send.
+/// Both are left out when false, so a plain request keeps its bytes and its
+/// heads key. An old node ignores `first`, and its asker waits for its deadline.
 #[derive(Serialize, Deserialize)]
 struct HeadsBody {
     heads: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     closing: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    first: bool,
 }
 
 /// Broadcast an anti-entropy digest: an **open-ended newest** window (so
@@ -490,7 +495,12 @@ fn heads_digest(
         return None;
     }
     let heads: Vec<_> = state.doc(channel).heads().collect();
-    let body = super::json_body(&HeadsBody { heads, closing })?;
+    let first = !closing && state.doc(channel).is_awaiting_first_sync();
+    let body = super::json_body(&HeadsBody {
+        heads,
+        closing,
+        first,
+    })?;
     Some(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
             .sign(&state.identity),
@@ -511,7 +521,6 @@ async fn ask_back(
         return;
     };
     if state.doc(channel).holds_heads(&body.heads) {
-        seed_job::peer_heads_seen(state, channel, &body.heads);
         return;
     }
     let key = digest.key();
@@ -539,6 +548,7 @@ fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
     let heads = HeadsBody {
         heads: heads_list,
         closing: false,
+        first: state.doc(channel).is_awaiting_first_sync(),
     };
     let mut hasher = hash_map::DefaultHasher::new();
     serde_json::to_string(&heads)
@@ -647,7 +657,12 @@ pub(crate) async fn handle_state_digest(
 ) -> Answered {
     ask_back(channel, message, state, context).await;
     let decoded: serde_json::Result<HeadsBody> = serde_json::from_str(message.body.as_str());
-    if decoded.is_ok_and(|body| body.closing) {
+    let Ok(body) = decoded else {
+        return Answered::default();
+    };
+    if body.closing {
+        let on_unicast = state.state_digest_serves.unicast.arrived_from.is_some();
+        seed_job::closing_digest_seen(state, channel, &body.heads, on_unicast);
         return Answered::default();
     }
     let now = Instant::now();
@@ -685,6 +700,10 @@ pub(crate) async fn handle_state_digest(
     let frames: Vec<WireFrame> = missing.iter().filter_map(serialize).collect();
     let mut answered = Answered::default();
     if frames.is_empty() {
+        if body.first {
+            answer_first_request(state, context, channel, target).await;
+            state.state_digest_serves.note(serve(plane), heads, now);
+        }
         return answered;
     }
     let count = frames.len();
@@ -750,6 +769,36 @@ pub(crate) async fn handle_state_digest(
         "state anti-entropy: resent frames a peer lacked"
     );
     answered
+}
+
+/// A request of a node that waits for its first sync found nothing missing: answer it with one
+/// closing digest, point-to-point. On gossip it would read as the answer of every node that sees
+/// it, so with no unicast path there is no answer, and the asker waits for its deadline.
+async fn answer_first_request(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    channel: Channel,
+    target: Option<EndpointId>,
+) {
+    let Some(eid) = target else {
+        tracing::debug!(me = %context.author, ?channel, "state anti-entropy: no unicast path for the empty answer to a first request, so the asker waits for its deadline");
+        return;
+    };
+    let origin = DigestOrigin {
+        mesh: context.mesh,
+        author: context.author,
+    };
+    let closing = heads_digest(state, origin, channel, true).and_then(|ours| ours.serialize().ok());
+    let sent = match closing {
+        Some(frame) => {
+            state
+                .unicast_pool
+                .send_batch_in_background(eid, vec![frame])
+                .await
+        }
+        None => false,
+    };
+    tracing::debug!(me = %context.author, ?channel, sent, "state anti-entropy: answered a first request with nothing to send");
 }
 
 /// The signed change frames the author of `digest` lacks on `channel`, up to
@@ -1977,6 +2026,33 @@ mod tests {
     /// a bounded frontier (a handful of 32-byte hashes), so unlike the windowed
     /// chat digest there is no overflow risk as the doc's history grows.
     #[test]
+    fn a_plain_request_keeps_its_bytes_and_a_first_request_adds_one_flag() {
+        let heads = vec!["h1".to_owned()];
+        let plain = serde_json::to_string(&HeadsBody {
+            heads: heads.clone(),
+            closing: false,
+            first: false,
+        })
+        .expect("serialize");
+        assert_eq!(plain, r#"{"heads":["h1"]}"#, "a plain request is as it was");
+        let first = serde_json::to_string(&HeadsBody {
+            heads,
+            closing: false,
+            first: true,
+        })
+        .expect("serialize");
+        assert_eq!(
+            first, r#"{"heads":["h1"],"first":true}"#,
+            "a first request adds one flag"
+        );
+        let old: HeadsBody = serde_json::from_str(r#"{"heads":[]}"#).expect("an old body parses");
+        assert!(
+            !old.first && !old.closing,
+            "a body without flags is a plain request"
+        );
+    }
+
+    #[test]
     fn state_heads_digest_round_trips_and_is_small() {
         let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from(
@@ -1989,6 +2065,7 @@ mod tests {
         let json = serde_json::to_string(&HeadsBody {
             heads: heads.clone(),
             closing: false,
+            first: false,
         })
         .expect("serialize heads body");
         let back: HeadsBody = serde_json::from_str(&json).expect("round-trip");
