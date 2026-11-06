@@ -195,7 +195,7 @@ export function createEngine(
       return status()
     }
     const code = lib.call(
-      'habilis_network_msg_recv_v2',
+      'habilis_network_msg_recv',
       handle,
       payload,
       BigInt(payload.byteLength),
@@ -225,7 +225,7 @@ export function createEngine(
     } else if (code < 0n) {
       // A recv failure is terminal: the engine's inbound channel is gone, and
       // pretending otherwise would spin on the same error 20 times a second.
-      const reason = lastError('habilis_network_msg_recv_v2')
+      const reason = lastError('habilis_network_msg_recv')
       lib.call('habilis_network_mesh_close', handle)
       handle = null
       closed = true

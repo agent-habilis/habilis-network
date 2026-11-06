@@ -15,7 +15,6 @@
 mod habilis_network_mesh;
 use std::{fmt, panic, ptr, slice, str};
 mod habilis_network_msg;
-mod habilis_network_msg_v2;
 mod habilis_network_opts;
 mod habilis_network_producer;
 mod habilis_network_reader;
@@ -33,7 +32,6 @@ use crate::streams::{Read, Streams};
 
 pub use habilis_network_mesh::HabilisNetworkMesh;
 pub use habilis_network_msg::HabilisNetworkMsg;
-pub use habilis_network_msg_v2::HabilisNetworkMsgV2;
 pub use habilis_network_opts::HabilisNetworkOpts;
 pub use habilis_network_producer::HabilisNetworkProducer;
 pub use habilis_network_reader::HabilisNetworkReader;
@@ -44,7 +42,7 @@ pub use habilis_network_streams::HabilisNetworkStreams;
 /// short words; a longer chosen one is truncated to 63 bytes.
 const NICK_CAP: usize = 64;
 
-/// Capacity of [`HabilisNetworkMsgV2::key`]: the 64 hex digits of an author key and the NUL.
+/// Capacity of [`HabilisNetworkMsg::key`]: the 64 hex digits of an author key and the NUL.
 const KEY_CAP: usize = 65;
 
 thread_local! {
@@ -217,7 +215,7 @@ fn write_nick(field: &mut [c_char; NICK_CAP], nick: &str) {
     field[take] = 0;
 }
 
-/// Fill `HabilisNetworkMsgV2::key` with the 64 hex digits of an author key, NUL-terminated.
+/// Fill `HabilisNetworkMsg::key` with the 64 hex digits of an author key, NUL-terminated.
 fn write_key(field: &mut [c_char; KEY_CAP], hex: &[u8; 64]) {
     let destination: *mut u8 = field.as_mut_ptr().cast();
     // SAFETY: the 64 hex bytes fit the first 64 elements of an array of 65, from a distinct
@@ -452,13 +450,10 @@ unsafe fn deliver(
 }
 
 /// Take the next inbound message, waiting up to `timeout_ms`. Returns 1 with
-/// the text NUL-terminated in `buf` and `out` filled, 0 on timeout, -1 on
+/// the text NUL-terminated in `buf` and `out` filled (nickname, key, directed flag, length), 0 on timeout, -1 on
 /// failure, or -2 when the text does not fit in `cap`: nothing is written, the
 /// message stays queued, and `out->len` holds its length — retry with a buffer
 /// of at least `out->len + 1` bytes.
-///
-/// The struct has 80 bytes and no size field, so it cannot grow: a caller built with it
-/// would overrun. [`habilis_network_msg_recv_v2`] adds the key of the sender.
 ///
 /// # Safety
 /// `handle` must be live and not used concurrently from another thread; `buf`
@@ -489,68 +484,13 @@ pub unsafe extern "C" fn habilis_network_msg_recv(
         };
         let mut meta = HabilisNetworkMsg {
             nick: [0; NICK_CAP],
-            directed: c_int::from(message.directed),
-            len: message.text.len(),
-        };
-        write_nick(&mut meta.nick, &message.nick);
-        // SAFETY: non-NULL (checked) and writable per the contract above.
-        unsafe { out.write(meta) }
-        // SAFETY: `buffer` is non-NULL (checked) and writable for `cap` bytes per the contract.
-        unsafe { deliver(handle, message, buffer, cap) }
-    })
-}
-
-/// Take the next inbound message with the key of its sender. The same as
-/// [`habilis_network_msg_recv`], with a [`HabilisNetworkMsgV2`]: the caller sets `out->size` to
-/// `sizeof(habilis_network_msg_v2)` first, and a smaller size is refused with -1 before any
-/// message is taken, so the caller's buffer is never written beyond the size it gave.
-///
-/// # Safety
-/// `handle` must be live and not used concurrently from another thread; `buf`
-/// writable for `cap` bytes; `out` writable for `out->size` bytes, and `out->size` readable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn habilis_network_msg_recv_v2(
-    handle: *mut HabilisNetworkMesh,
-    buffer: *mut c_char,
-    cap: usize,
-    timeout_ms: c_int,
-    out: *mut HabilisNetworkMsgV2,
-) -> c_long {
-    guard(-1, || {
-        clear_error();
-        // SAFETY: live, exclusively-owned handle per the contract above.
-        let Some(handle) = (unsafe { handle.as_mut() }) else {
-            set_error("habilis_network_msg_recv_v2: handle is NULL");
-            return -1;
-        };
-        if out.is_null() || buffer.is_null() {
-            set_error("habilis_network_msg_recv_v2: buf or out is NULL");
-            return -1;
-        }
-        // SAFETY: non-NULL (checked); `size` is the first field, and the contract makes it readable.
-        let offered = unsafe { (&raw const (*out).size).read() };
-        let needed = size_of::<HabilisNetworkMsgV2>();
-        if offered < needed {
-            set_error(&format!(
-                "habilis_network_msg_recv_v2: out->size is {offered}, the struct needs {needed}: set out->size = sizeof(habilis_network_msg_v2) before the call"
-            ));
-            return -1;
-        }
-        let message = match dequeue(handle, timeout_ms) {
-            Ok(Some(message)) => message,
-            Ok(None) => return 0,
-            Err(()) => return -1,
-        };
-        let mut meta = HabilisNetworkMsgV2 {
-            size: offered,
-            nick: [0; NICK_CAP],
             key: [0; KEY_CAP],
             directed: c_int::from(message.directed),
             len: message.text.len(),
         };
         write_nick(&mut meta.nick, &message.nick);
         write_key(&mut meta.key, &message.key.hex());
-        // SAFETY: non-NULL (checked) and writable for `needed` bytes, which `out->size` covers.
+        // SAFETY: non-NULL (checked) and writable per the contract above.
         unsafe { out.write(meta) }
         // SAFETY: `buffer` is non-NULL (checked) and writable for `cap` bytes per the contract.
         unsafe { deliver(handle, message, buffer, cap) }

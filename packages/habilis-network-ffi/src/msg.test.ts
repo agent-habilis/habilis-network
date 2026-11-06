@@ -24,15 +24,15 @@ describe('decodeMsg', () => {
 
   test('stops at the NUL rather than trailing the rest of the field', () => {
     const bytes = encodeMsg({ nick: 'ana', key: KEY, directed: false, len: 3 })
-    // Garbage after the terminator, as a reused buffer would hold. The nick starts at 8.
-    bytes.set([0x7a, 0x7a], 16)
+    // Garbage after the terminator, as a reused buffer would hold. The nick starts at 0.
+    bytes.set([0x7a, 0x7a], 8)
 
     expect(decodeMsg(bytes).nick).toBe('ana')
   })
 
   test('an unterminated nick is an error, not a read into the integers', () => {
     const bytes = encodeMsg({ nick: 'ana', key: KEY, directed: false, len: 3 })
-    bytes.fill(0x61, 8, 72)
+    bytes.fill(0x61, 0, 64)
 
     expect(() => decodeMsg(bytes)).toThrow(/NUL-terminated/)
   })
@@ -49,7 +49,7 @@ describe('decodeMsg', () => {
     expect(decodeMsg(scratch.subarray(MSG_BYTES))).toEqual(meta)
   })
 
-  test('reads the key of the author, 64 digits at offset 72', () => {
+  test('reads the key of the author, 64 digits at offset 64', () => {
     const other = 'f'.repeat(64)
 
     expect(decodeMsg(encodeMsg({ nick: 'twin', key: other, directed: true, len: 2 })).key).toBe(other)
@@ -57,19 +57,24 @@ describe('decodeMsg', () => {
 
   test('a key that is not 64 digits and a NUL is an error, not a read into the padding', () => {
     const bytes = encodeMsg({ nick: 'ana', key: KEY, directed: false, len: 3 })
-    bytes.fill(0x61, 72, 137)
+    bytes.fill(0x61, 64, 129)
 
     expect(() => decodeMsg(bytes)).toThrow(/key is not 64 digits/)
   })
 
-  test('the caller sets the size of the struct, which the engine checks', () => {
-    const bytes = encodeMsg({ nick: 'ana', key: KEY, directed: false, len: 3 })
+  test('the fields are where the C layout puts them', () => {
+    const bytes = encodeMsg({ nick: 'ana', key: KEY, directed: true, len: 7 })
+    const view = new DataView(bytes.buffer)
 
-    expect(new DataView(bytes.buffer).getBigUint64(0, true)).toBe(152n)
+    expect(new TextDecoder().decode(bytes.subarray(0, 3))).toBe('ana')
+    expect(new TextDecoder().decode(bytes.subarray(64, 128))).toBe(KEY)
+    expect(bytes[128]).toBe(0)
+    expect(view.getInt32(132, true)).toBe(1)
+    expect(view.getBigUint64(136, true)).toBe(7n)
   })
 
-  test('the struct is 152 bytes, which is what the C layout says', () => {
-    expect(MSG_BYTES).toBe(152)
-    expect(encodeMsg({ nick: '', key: KEY, directed: false, len: 0 }).byteLength).toBe(152)
+  test('the struct is 144 bytes, which is what the C layout says', () => {
+    expect(MSG_BYTES).toBe(144)
+    expect(encodeMsg({ nick: '', key: KEY, directed: false, len: 0 }).byteLength).toBe(144)
   })
 })

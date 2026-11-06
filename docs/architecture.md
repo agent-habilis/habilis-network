@@ -703,9 +703,8 @@ The socket module compiles out on wasm32, and a browser binds nothing.
 A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages and reads the shared state as JSON.
 A send names a nickname (`habilis_network_msg_send`) or an author key (`habilis_network_msg_send_to_key`).
 Two live members can use one nickname, so a nickname names no member, and a key does.
-A receive with `habilis_network_msg_recv_v2` gives the key of the author in a `habilis_network_msg_v2`, and the caller sets the size of that struct first.
-`habilis_network_msg_recv` and its 80-byte struct stay for callers that were built before the key.
-The caller allocates the struct, so a longer struct would overrun the stack of such a caller.
+A receive with `habilis_network_msg_recv` gives the key of the author in `habilis_network_msg.key`.
+The struct has 144 bytes on a 64-bit target and no size field, so a caller built with an older header must be rebuilt.
 A stream node (`habilis_network_streams_*`, `habilis_network_stream_*`) creates and opens byte streams (§9.4).
 Panics stop at the boundary through `catch_unwind`.
 For this reason the release profile keeps unwinding and does not set `panic = "abort"`.

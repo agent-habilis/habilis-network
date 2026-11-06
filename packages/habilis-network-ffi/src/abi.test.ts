@@ -31,9 +31,9 @@ describe('the signature table and the header', () => {
     expect(declared(header).size).toBeGreaterThan(10)
   })
 
-  test('the scrape reads a name with a digit, as habilis_network_msg_recv_v2 has', () => {
-    expect(declared('long habilis_network_msg_recv_v2(habilis_network_mesh *h);')).toEqual(
-      new Set(['habilis_network_msg_recv_v2']),
+  test('the scrape reads a name with a digit', () => {
+    expect(declared('long habilis_network_msg_recv2(habilis_network_mesh *h);')).toEqual(
+      new Set(['habilis_network_msg_recv2']),
     )
   })
 

@@ -42,11 +42,6 @@ export const ABI = {
    * too small: the message stays queued and `out.len` says how big to retry.
    */
   habilis_network_msg_recv: { args: ['ptr', 'buf', 'usize', 'i32', 'buf'], returns: 'isize' },
-  /**
-   * `habilis_network_msg_recv` with the key of the author. The caller sets `out.size` to the
-   * size of the struct first, and a smaller size returns -1 and takes no message.
-   */
-  habilis_network_msg_recv_v2: { args: ['ptr', 'buf', 'usize', 'i32', 'buf'], returns: 'isize' },
 
   habilis_network_mesh_state_merge: { args: ['ptr', 'cstr'], returns: 'i32' },
   habilis_network_mesh_state_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },

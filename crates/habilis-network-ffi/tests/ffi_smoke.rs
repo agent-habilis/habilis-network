@@ -13,17 +13,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use habilis_network_ffi::ffi::{
-    HabilisNetworkMesh, HabilisNetworkMsg, HabilisNetworkMsgV2, HabilisNetworkOpts,
-    HabilisNetworkProducer, HabilisNetworkStreamOpts, HabilisNetworkStreams,
-    habilis_network_last_error, habilis_network_max_msg, habilis_network_mesh_close,
-    habilis_network_mesh_id, habilis_network_mesh_name, habilis_network_mesh_nickname,
-    habilis_network_mesh_open, habilis_network_mesh_peer_count, habilis_network_mesh_peers_json,
+    HabilisNetworkMesh, HabilisNetworkMsg, HabilisNetworkOpts, HabilisNetworkProducer,
+    HabilisNetworkStreamOpts, HabilisNetworkStreams, habilis_network_last_error,
+    habilis_network_max_msg, habilis_network_mesh_close, habilis_network_mesh_id,
+    habilis_network_mesh_name, habilis_network_mesh_nickname, habilis_network_mesh_open,
+    habilis_network_mesh_peer_count, habilis_network_mesh_peers_json,
     habilis_network_mesh_state_json, habilis_network_mesh_state_merge, habilis_network_msg_recv,
-    habilis_network_msg_recv_v2, habilis_network_msg_send, habilis_network_msg_send_to_key,
-    habilis_network_reader_close, habilis_network_stream_close, habilis_network_stream_create,
-    habilis_network_stream_hash, habilis_network_stream_open, habilis_network_stream_read,
-    habilis_network_stream_write, habilis_network_streams_bind, habilis_network_streams_close,
-    habilis_network_version,
+    habilis_network_msg_send, habilis_network_msg_send_to_key, habilis_network_reader_close,
+    habilis_network_stream_close, habilis_network_stream_create, habilis_network_stream_hash,
+    habilis_network_stream_open, habilis_network_stream_read, habilis_network_stream_write,
+    habilis_network_streams_bind, habilis_network_streams_close, habilis_network_version,
 };
 
 use std::ptr;
@@ -374,12 +373,21 @@ fn empty_msg() -> HabilisNetworkMsg {
 /// Receive one message into a buffer of `cap` bytes, waiting up to 20 s.
 /// Returns the call's result, the metadata, and the text when it was written.
 fn recv(handle: *mut HabilisNetworkMesh, cap: usize) -> (c_long, HabilisNetworkMsg, String) {
+    recv_within(handle, cap, 20_000)
+}
+
+/// [`recv`], waiting up to `millis`.
+fn recv_within(
+    handle: *mut HabilisNetworkMesh,
+    cap: usize,
+    millis: c_int,
+) -> (c_long, HabilisNetworkMsg, String) {
     let mut message = empty_msg();
     let mut buffer = vec![0_u8; cap];
     let destination: *mut c_char = buffer.as_mut_ptr().cast();
     // SAFETY: live handle, buffer writable for `cap` bytes, `out` writable.
     let got =
-        unsafe { habilis_network_msg_recv(handle, destination, cap, 20_000, &raw mut message) };
+        unsafe { habilis_network_msg_recv(handle, destination, cap, millis, &raw mut message) };
     let text: String = if got == 1 {
         let source: *const c_char = buffer.as_ptr().cast();
         // SAFETY: a result of 1 means `buf` holds a NUL-terminated text.
@@ -526,115 +534,21 @@ fn pair() -> (*mut HabilisNetworkMesh, *mut HabilisNetworkMesh) {
     (alice, bob)
 }
 
-/// A caller built before the key existed allocates 80 bytes for `habilis_network_msg` and
-/// passes no size, so `habilis_network_msg_recv` must write nothing past byte 80. A longer
-/// struct would overrun that caller's stack.
+/// A receive gives the nickname, the key and the text of a message. The key is 64 lowercase hex
+/// digits, the address of a reply.
 #[test]
-fn the_old_recv_writes_only_the_80_bytes_of_the_old_struct() {
-    const OLD_STRUCT: usize = 80;
-    const GUARD: usize = 144;
-    /// The struct and its guard bytes, on the 8-byte boundary that `size_t` needs: a plain byte
-    /// array has alignment 1, and a write through a cast pointer to it can be misaligned.
-    #[repr(align(8))]
-    struct Region([u8; OLD_STRUCT + GUARD]);
+fn the_recv_gives_the_nickname_the_key_and_the_text() {
     let (alice, bob) = pair();
     // SAFETY: live handle, NUL-terminated strings.
     let sent = unsafe { habilis_network_msg_send(alice, ptr::null(), c"hello".as_ptr()) };
     assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
 
-    let mut region = Region([0xaa_u8; OLD_STRUCT + GUARD]);
-    region.0[..OLD_STRUCT].fill(0);
-    let mut buffer = [0_u8; 64];
-    let destination: *mut c_char = buffer.as_mut_ptr().cast();
-    let out: *mut HabilisNetworkMsg = (&raw mut region).cast();
-    // SAFETY: live handle, a writable buffer of 64 bytes, and `out` points at 80 zeroed bytes
-    // followed by guard bytes: the caller of the old ABI owns exactly those 80.
-    let got = unsafe { habilis_network_msg_recv(bob, destination, buffer.len(), 20_000, out) };
-    assert_eq!(got, 1, "bob heard nothing: {:?}", last_error());
-    assert_eq!(
-        size_of::<HabilisNetworkMsg>(),
-        OLD_STRUCT,
-        "habilis_network_msg is no longer 80 bytes, so a caller built with 80 overruns it"
-    );
-    assert!(
-        region.0[OLD_STRUCT..].iter().all(|byte| *byte == 0xaa),
-        "habilis_network_msg_recv wrote past the 80 bytes of the old struct"
-    );
-
-    // SAFETY: each handle came from `habilis_network_mesh_open` and is not used after this.
-    unsafe {
-        assert_eq!(
-            habilis_network_mesh_close(bob),
-            0,
-            "bob's close returns zero"
-        );
-        assert_eq!(
-            habilis_network_mesh_close(alice),
-            0,
-            "alice's close returns zero"
-        );
-    }
-}
-
-/// Receive one message with the key of its sender into a buffer of `cap` bytes, waiting up to
-/// `millis`. Returns the call's result, the metadata, and the text when it was written.
-fn recv_v2(
-    handle: *mut HabilisNetworkMesh,
-    cap: usize,
-    millis: c_int,
-) -> (c_long, HabilisNetworkMsgV2, String) {
-    let mut message = HabilisNetworkMsgV2::empty();
-    let mut buffer = vec![0_u8; cap];
-    let destination: *mut c_char = buffer.as_mut_ptr().cast();
-    // SAFETY: live handle, buffer writable for `cap` bytes, `out` writable and sized.
-    let got =
-        unsafe { habilis_network_msg_recv_v2(handle, destination, cap, millis, &raw mut message) };
-    let text: String = if got == 1 {
-        let source: *const c_char = buffer.as_ptr().cast();
-        // SAFETY: a result of 1 means `buf` holds a NUL-terminated text.
-        unsafe { CStr::from_ptr(source) }
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        String::new()
-    };
-    (got, message, text)
-}
-
-/// The v2 receive refuses a struct smaller than its own before it takes a message, and then
-/// gives the nickname, the key and the text of the message that stayed queued.
-#[test]
-fn the_v2_recv_refuses_a_size_below_its_struct_and_keeps_the_message() {
-    let (alice, bob) = pair();
-    // SAFETY: live handle, NUL-terminated strings.
-    let sent = unsafe { habilis_network_msg_send(alice, ptr::null(), c"hello".as_ptr()) };
-    assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
-
-    let mut small = HabilisNetworkMsgV2::empty();
-    small.size = size_of::<HabilisNetworkMsg>();
-    let mut buffer = [0_u8; 64];
-    let destination: *mut c_char = buffer.as_mut_ptr().cast();
-    // SAFETY: live handle, a writable buffer, and `out` writable for its whole struct.
-    let refused = unsafe {
-        habilis_network_msg_recv_v2(bob, destination, buffer.len(), 20_000, &raw mut small)
-    };
-    assert_eq!(refused, -1, "a size of 80 bytes was accepted");
-    assert!(
-        last_error().is_some_and(|reason| reason.contains("out->size is 80")),
-        "the refusal does not say why: {:?}",
-        last_error()
-    );
-    assert!(
-        small.key.iter().all(|byte| *byte == 0) && small.len == 0,
-        "a refused call wrote into the struct"
-    );
-
-    let (got, meta, text) = recv_v2(bob, 64, 20_000);
+    let (got, meta, text) = recv(bob, 64);
     assert_eq!(got, 1, "the message was lost: {:?}", last_error());
     assert_eq!(
-        (nick_of_v2(&meta).as_str(), meta.directed, text.as_str()),
+        (nick_of(&meta).as_str(), meta.directed, text.as_str()),
         ("alice", 0, "hello"),
-        "the v2 receive does not give the message"
+        "the receive does not give the message"
     );
     let key = key_of(&meta);
     assert!(
@@ -660,18 +574,18 @@ fn the_v2_recv_refuses_a_size_below_its_struct_and_keeps_the_message() {
     }
 }
 
-/// A text that does not fit in the buffer gives -2 from the v2 receive. The call writes the
+/// A text that does not fit in the buffer gives -2 from the receive. The call writes the
 /// length of the text into `out->len` and keeps the message, and the retry with a buffer of
 /// `out->len + 1` bytes gets the same message with the same key.
 #[test]
-fn the_v2_recv_reports_a_small_buffer_and_the_retry_gets_the_same_key() {
+fn the_recv_reports_a_small_buffer_and_the_retry_gets_the_same_key() {
     let (alice, bob) = pair();
     // SAFETY: live handle, NUL-terminated strings.
     let sent =
         unsafe { habilis_network_msg_send(alice, ptr::null(), c"a text of some length".as_ptr()) };
     assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
 
-    let (too_small, short_meta, _) = recv_v2(bob, 4, 20_000);
+    let (too_small, short_meta, _) = recv_within(bob, 4, 20_000);
     assert_eq!(too_small, -2, "a buffer of 4 bytes was enough");
     assert_eq!(
         short_meta.len,
@@ -679,7 +593,7 @@ fn the_v2_recv_reports_a_small_buffer_and_the_retry_gets_the_same_key() {
         "the call does not say how long the text is"
     );
 
-    let (got, meta, text) = recv_v2(bob, short_meta.len + 1, 20_000);
+    let (got, meta, text) = recv_within(bob, short_meta.len + 1, 20_000);
     assert_eq!(got, 1, "the retry lost the message: {:?}", last_error());
     assert_eq!(text, "a text of some length", "the retry gets another text");
     assert_eq!(
@@ -704,14 +618,7 @@ fn the_v2_recv_reports_a_small_buffer_and_the_retry_gets_the_same_key() {
     }
 }
 
-fn nick_of_v2(message: &HabilisNetworkMsgV2) -> String {
-    // SAFETY: `write_nick` always NUL-terminates inside the array.
-    unsafe { CStr::from_ptr(message.nick.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn key_of(message: &HabilisNetworkMsgV2) -> String {
+fn key_of(message: &HabilisNetworkMsg) -> String {
     // SAFETY: the receive call always NUL-terminates `key` inside the array.
     unsafe { CStr::from_ptr(message.key.as_ptr()) }
         .to_string_lossy()
@@ -761,16 +668,16 @@ fn a_send_to_a_key_reaches_one_of_two_members_that_share_a_nickname() {
         // SAFETY: live handle, NUL-terminated strings.
         let sent = unsafe { habilis_network_msg_send(twin, ptr::null(), c"i am a twin".as_ptr()) };
         assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
-        let (got, meta, _) = recv_v2(sender, 256, 20_000);
+        let (got, meta, _) = recv_within(sender, 256, 20_000);
         assert_eq!(got, 1, "the sender heard no twin: {:?}", last_error());
-        assert_eq!(nick_of_v2(&meta), "twin", "the message names the nickname");
+        assert_eq!(nick_of(&meta), "twin", "the message names the nickname");
         keys.push(key_of(&meta));
     }
     assert_eq!(keys[0].len(), 64, "the key of a message is 64 hex digits");
     assert_ne!(keys[0], keys[1], "the two twins have one key");
     // Each twin heard the broadcast of the other: drain it, so the next read is the send.
     for twin in [first, second] {
-        let (got, meta, _) = recv_v2(twin, 256, 20_000);
+        let (got, meta, _) = recv_within(twin, 256, 20_000);
         assert_eq!(
             (got, meta.directed),
             (1, 0),
@@ -792,14 +699,14 @@ fn a_send_to_a_key_reaches_one_of_two_members_that_share_a_nickname() {
     let by_key =
         unsafe { habilis_network_msg_send_to_key(sender, first_key.as_ptr(), c"for one".as_ptr()) };
     assert_eq!(by_key, 0, "send to a key failed: {:?}", last_error());
-    let (got, meta, body) = recv_v2(first, 256, 20_000);
+    let (got, meta, body) = recv_within(first, 256, 20_000);
     assert_eq!(got, 1, "the chosen twin got nothing: {:?}", last_error());
     assert_eq!(
         (meta.directed, body.as_str()),
         (1, "for one"),
         "the chosen twin gets a directed message"
     );
-    let (other, _, _) = recv_v2(second, 256, 2_000);
+    let (other, _, _) = recv_within(second, 256, 2_000);
     assert_eq!(other, 0, "the other twin got the message of the first");
 
     // SAFETY: live handles, NUL-terminated strings and NULL where the contract allows it.

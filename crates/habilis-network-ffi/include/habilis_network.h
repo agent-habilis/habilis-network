@@ -71,42 +71,30 @@ typedef struct {
 } habilis_network_opts;
 
 /*
- * Metadata for one received message. The text lands NUL-terminated in the
- * caller's buffer; `len` is its length in bytes, excluding the NUL.
+ * Metadata for one received message, with the key of its author. The text lands
+ * NUL-terminated in the caller's buffer; `len` is its length in bytes, excluding
+ * the NUL. Two members can use one nickname, so a nickname names no author; the
+ * key does, and habilis_network_msg_send_to_key() sends to it.
+ *
+ * The struct has no size field: the caller allocates it with this header. It has
+ * 144 bytes and alignment 8 on a 64-bit target (140 bytes with a 4-byte size_t):
+ *
+ *   offset   0  char nick[64]   the author's nickname, truncated to 63 bytes
+ *   offset  64  char key[65]    64 lowercase hex digits and the NUL
+ *   offset 129  3 bytes of padding
+ *   offset 132  int directed
+ *   offset 136  size_t len
+ *
+ * This layout replaced one of 80 bytes that had no key (nick at 0, directed at 64,
+ * len at 72). Every caller built with the old header must be rebuilt: an old
+ * caller allocates 80 bytes, and habilis_network_msg_recv() writes 144.
  */
 typedef struct {
-  char nick[64];  /* the author's nickname, truncated to 63 bytes if longer */
-  int directed;   /* 1 = addressed to us specifically, 0 = broadcast */
-  size_t len;
-} habilis_network_msg;
-
-/*
- * Metadata for one received message, with the key of its author. Two members can
- * use one nickname, so a nickname names no author; the key does, and
- * habilis_network_msg_send_to_key() sends to it.
- *
- * The caller allocates this struct and sets `size` to sizeof(habilis_network_msg_v2)
- * before every call; habilis_network_msg_recv_v2() refuses a smaller size. The
- * struct has 152 bytes and alignment 8 on a 64-bit target (144 bytes with a 4-byte
- * size_t):
- *
- *   offset   0  size_t size     the size the caller allocated
- *   offset   8  char nick[64]   as in habilis_network_msg
- *   offset  72  char key[65]    64 lowercase hex digits and the NUL
- *   offset 137  3 bytes of padding
- *   offset 140  int directed
- *   offset 144  size_t len
- *
- * habilis_network_msg has no size field and keeps its 80 bytes, so a caller built
- * with it is safe; it cannot receive the key.
- */
-typedef struct {
-  size_t size;
   char nick[64];
   char key[65];
   int directed;   /* 1 = addressed to us specifically, 0 = broadcast */
   size_t len;
-} habilis_network_msg_v2;
+} habilis_network_msg;
 
 /* Create or join a mesh. NULL on failure. */
 habilis_network_mesh *habilis_network_mesh_open(const habilis_network_opts *options);
@@ -127,7 +115,7 @@ int habilis_network_msg_send(habilis_network_mesh *handle, const char *to, const
 
 /*
  * Send one message to the member that holds an author key. `key` is 64 lowercase
- * hex digits: the `key` of a received habilis_network_msg_v2, or of a roster row.
+ * hex digits: the `key` of a received habilis_network_msg, or of a roster row.
  * Two members can use one nickname, and habilis_network_msg_send() refuses such a
  * nickname; a key names one member. 0 on success, -1 on failure: a text that is
  * not a key, or a message that does not fit one frame, is refused.
@@ -143,15 +131,6 @@ int habilis_network_msg_send_to_key(habilis_network_mesh *handle, const char *ke
  */
 long habilis_network_msg_recv(habilis_network_mesh *handle, char *buffer, size_t cap, int timeout_ms,
                      habilis_network_msg *out);
-
-/*
- * The same as habilis_network_msg_recv(), with a habilis_network_msg_v2 that also
- * holds the key of the author. Set `out->size = sizeof(habilis_network_msg_v2)`
- * before the call. A smaller size returns -1 and takes no message: nothing is
- * written to `out` or `buffer`, and the message stays queued.
- */
-long habilis_network_msg_recv_v2(habilis_network_mesh *handle, char *buffer, size_t cap, int timeout_ms,
-                     habilis_network_msg_v2 *out);
 
 /*
  * The shared state document — a JSON object every peer in the mesh converges on

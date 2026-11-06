@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { NativeLibrary, NativePointer, NativeValue } from './dlopen/native.ts'
 import { createEngine } from './engine.ts'
-import { MSG_BYTES, encodeMsg } from './msg.ts'
+import { encodeMsg } from './msg.ts'
 import type { Command, FromWorker, OpenReply, WireOpts } from './protocol.ts'
 
 const OPTS: WireOpts = {
@@ -90,13 +90,9 @@ function fakeLib(
           state.sendsToKey.push({ key: args[1] as string, text: args[2] as string })
           return overrides.sendResult ?? 0
         }
-        case 'habilis_network_msg_recv_v2': {
+        case 'habilis_network_msg_recv': {
           const next = recvQueue[0]
           const meta = args[4] as Uint8Array
-          // As the engine of the library does: a struct whose size field is below its own is refused.
-          if (new DataView(meta.buffer, meta.byteOffset).getBigUint64(0, true) < BigInt(MSG_BYTES)) {
-            return -1n
-          }
           if (next === undefined) {
             return 0n
           }
@@ -220,7 +216,7 @@ describe('createEngine', () => {
     const engine = createEngine(lib, port, () => 0)
     engine.handle(OPEN)
     expect(engine.pumpOnce()).toBe('closed')
-    expect(posted[1]).toEqual({ t: 'closed', reason: 'habilis_network_msg_recv_v2: engine gone' })
+    expect(posted[1]).toEqual({ t: 'closed', reason: 'habilis_network_msg_recv: engine gone' })
     expect(state.closes).toBe(1)
     // Terminal for commands too.
     engine.handle({ t: 'send', id: 9, to: null, text: 'late' })

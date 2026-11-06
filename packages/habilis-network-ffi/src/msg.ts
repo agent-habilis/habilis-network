@@ -1,42 +1,37 @@
 /**
- * `habilis_network_msg_v2`, decoded by hand.
+ * `habilis_network_msg`, decoded by hand.
  *
  * ```c
  * typedef struct {
- *   size_t size;
  *   char nick[64];
  *   char key[65];
  *   int directed;
  *   size_t len;
- * } habilis_network_msg_v2;
+ * } habilis_network_msg;
  * ```
  *
- * 152 bytes, alignment 8: `size` at 0, `nick` at 8, `key` at 72 (64 lowercase hex digits and the
- * NUL), three bytes of padding, `directed` at 140, `len` at 144. The caller sets `size` before
- * every call, and `habilis_network_msg_recv_v2` refuses a smaller one. The old
- * `habilis_network_msg` has no size field and keeps its 80 bytes for the callers built with it;
- * this package uses the v2 struct only.
- * `crates/habilis-network-ffi/src/ffi/habilis_network_msg_v2.rs` pins the same offsets at
- * compile time.
+ * 144 bytes, alignment 8: `nick` at 0, `key` at 64 (64 lowercase hex digits and the NUL), three
+ * bytes of padding, `directed` at 132, `len` at 136. The struct has no size field.
+ * `crates/habilis-network-ffi/src/ffi/habilis_network_msg.rs` pins the same offsets at compile
+ * time.
  *
  * Neither `bun:ffi` nor Deno's FFI decodes C structs at all. koffi could, and
  * deliberately does not, so a change to the layout breaks in exactly one place
  * instead of one place per runtime.
  *
  * 32-bit targets are out of scope — `size_t` is four bytes there and the struct
- * is 144 (size 0, nick 4, key 68, directed 136, len 140).
+ * is 140 (nick 0, key 64, directed 132, len 136).
  */
 
-const SIZE_OFFSET = 0
-const NICK_OFFSET = 8
+const NICK_OFFSET = 0
 const NICK_CAP = 64
-const KEY_OFFSET = 72
+const KEY_OFFSET = 64
 const KEY_HEX = 64
 const KEY_CAP = KEY_HEX + 1
-const DIRECTED_OFFSET = 140
-const LEN_OFFSET = 144
+const DIRECTED_OFFSET = 132
+const LEN_OFFSET = 136
 
-export const MSG_BYTES = 152
+export const MSG_BYTES = 144
 
 /**
  * Computed rather than assumed, so a big-endian port fails a test instead of
@@ -57,7 +52,7 @@ export interface MsgMeta {
 }
 
 /**
- * Read one `habilis_network_msg_v2` out of a scratch buffer the engine just wrote.
+ * Read one `habilis_network_msg` out of a scratch buffer the engine just wrote.
  *
  * @throws if `meta` is not message-sized, or if `nick` has no terminator —
  * `write_nick` truncates at 63 bytes and always writes the NUL, so its absence
@@ -91,8 +86,7 @@ export function decodeMsg(meta: Uint8Array): MsgMeta {
 }
 
 /**
- * Build a `habilis_network_msg_v2` in memory, with `size` set as a caller sets it. The engine
- * calls it for the scratch buffer too, so the size is never forgotten.
+ * Build a `habilis_network_msg` in memory, for a test that stands in for the library.
  */
 export function encodeMsg(meta: MsgMeta): Uint8Array {
   const bytes = new Uint8Array(MSG_BYTES)
@@ -107,7 +101,6 @@ export function encodeMsg(meta: MsgMeta): Uint8Array {
   }
   bytes.set(key, KEY_OFFSET)
   const view = new DataView(bytes.buffer)
-  view.setBigUint64(SIZE_OFFSET, BigInt(MSG_BYTES), LITTLE_ENDIAN)
   view.setInt32(DIRECTED_OFFSET, meta.directed ? 1 : 0, LITTLE_ENDIAN)
   view.setBigUint64(LEN_OFFSET, BigInt(meta.len), LITTLE_ENDIAN)
   return bytes
