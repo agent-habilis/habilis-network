@@ -27,7 +27,7 @@ mod tests {
     use crate::daemon::state::Standing;
     use std::sync::Arc;
 
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::UdpTransport;
 
     use iroh::EndpointId;
@@ -35,7 +35,9 @@ mod tests {
     use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified, WireFrame};
-    use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
+    use crate::protocol::{
+        AppTag, AuthorKey, CorrId, Identity, MeshId, Message, MessageBody, MessageId, UnixSecs,
+    };
 
     use crate::daemon::handler_ctx;
     use crate::daemon::state::DirectState;
@@ -66,17 +68,21 @@ mod tests {
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.direct.insert(bob, DirectState::Direct);
         (state, bob)
     }
 
     /// A directed frame addressed to `bob` — a `Pong` is the simplest one.
     fn directed_msg() -> Verified {
-        Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
-            .sign(&Identity::generate())
+        Message::new_pong(
+            &mesh(),
+            &nick("alice"),
+            test_key("bob"),
+            &MessageId::random(),
+        )
+        .sign(&Identity::generate())
     }
 
     fn open_broadcast() -> Verified {
@@ -102,7 +108,9 @@ mod tests {
         state.standing.insert(Standing::Meshed);
         state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
-        state.peer_endpoints.insert(
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url")),
@@ -129,6 +137,42 @@ mod tests {
         assert!(state.lane_session_wanted(bob, now), "the held frame asks");
     }
 
+    /// Two live keys use one nickname, and the second is a lane peer whose endpoint the roster
+    /// keeps by key. A frame held for the second key asks for the session of the second key: the
+    /// member list of the transport plane has one row for each key, not one for each nickname.
+    #[test]
+    fn a_frame_held_for_the_second_key_of_a_nickname_marks_its_session_wanted() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        state.local_udp_transport = UdpTransport::Present;
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint) = (endpoint_id(1), endpoint_id(2));
+        for key in [first, second] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        let lane = |id: EndpointId| {
+            iroh::EndpointAddr::new(id)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url"))
+        };
+        state.bind_peer_endpoint(first, nick("bob"), lane(first_endpoint));
+        state.retain_refused_endpoint(second, lane(second_endpoint));
+
+        let error = resolve(
+            &directed_msg_to(second),
+            directed_msg_to(second).serialize().expect("serialize"),
+            &state,
+        )
+        .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(
+            state.lane_session_wanted(second_endpoint, clock::Instant::now()),
+            "the held frame of the second key did not ask for its session"
+        );
+    }
+
     /// A peer with an IP path is held too on a lookup-only relay, but its direct path comes
     /// from the probe, so no session is wanted for it.
     #[test]
@@ -136,7 +180,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.remove(&bob);
-        state.peer_endpoints.insert(
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
@@ -166,7 +212,9 @@ mod tests {
 
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
-        state.peer_endpoints.insert(
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
@@ -293,7 +341,8 @@ mod tests {
         state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
         state.direct.insert(bob_addr.id, DirectState::Direct);
         lookup::add_peer_addr(&lookup::address_book(endpoint), bob_addr.clone());
-        state.peer_endpoints.insert(nick("bob"), bob_addr);
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob_addr);
         state
     }
 
@@ -540,7 +589,7 @@ mod tests {
             &nick("alice"),
             AppFrameParams::new(
                 AppTag::try_new("app_req").expect("a valid app tag"),
-                Some(nick("bob")),
+                Some(test_key("bob")),
                 Some(
                     CorrId::try_new("00000000-0000-0000-0000-0000000000aa")
                         .expect("a valid correlation id"),
@@ -549,8 +598,13 @@ mod tests {
             ),
         )
         .sign(&Identity::generate());
-        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
-            .sign(&Identity::generate());
+        let pong = Message::new_pong(
+            &mesh(),
+            &nick("alice"),
+            test_key("bob"),
+            &MessageId::random(),
+        )
+        .sign(&Identity::generate());
         assert_eq!(
             route(&request, &state),
             Route::Unicast(bob),
@@ -575,6 +629,162 @@ mod tests {
             route(&directed_msg(), &state),
             Route::Unicast(bob),
             "a known peer takes unicast even while unmeshed"
+        );
+    }
+
+    // ── addressee by key ──────────────────────────────────────────────
+
+    /// The frame that these tests send to a key: a `Pong`, the simplest directed kind.
+    fn directed_msg_to(key: AuthorKey) -> Verified {
+        Message::new_pong(&mesh(), &nick("alice"), key, &MessageId::random())
+            .sign(&Identity::generate())
+    }
+
+    /// Two live keys use one nickname. A frame names its recipient by key, so each key has its
+    /// own route: the first to the dial hint that it owns, the second to the endpoint that it
+    /// retained. The engine does not refuse either, and does not mix them up.
+    #[test]
+    fn a_directed_message_to_either_key_of_a_nickname_of_two_live_keys_takes_its_own_route() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint) = (endpoint_id(1), endpoint_id(2));
+        for key in [first, second] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.names.insert(first, nick("bob"));
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+        state.retain_refused_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+        state.direct.insert(first_endpoint, DirectState::Direct);
+        state.direct.insert(second_endpoint, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg_to(first), &state),
+            Route::Unicast(first_endpoint),
+            "the key that owns the hint follows the hint"
+        );
+        assert_eq!(
+            route(&directed_msg_to(second), &state),
+            Route::Unicast(second_endpoint),
+            "the other key follows the endpoint that it retained"
+        );
+        assert_eq!(
+            lane_for(&second, &state),
+            Lane::Unicast,
+            "the roster offers the lane of the retained endpoint to the second key"
+        );
+    }
+
+    /// The proof of a key is a route when no hint is its own: the second key of a nickname has
+    /// proved its endpoint, and kept no hint.
+    #[test]
+    fn a_key_with_no_hint_of_its_own_follows_the_endpoint_that_it_proved() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let proven = endpoint_id(3);
+        for key in [first, second] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.names.insert(first, nick("bob"));
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(endpoint_id(1)));
+        state.note_proven_endpoint(second, proven, UnixSecs::from(1));
+        state.direct.insert(proven, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg_to(second), &state),
+            Route::Unicast(proven),
+            "the key with no hint did not follow its proof"
+        );
+    }
+
+    /// A quiet key that shares the nickname of a live key does not change the route of the live
+    /// key, because the route is read from the key and not from the nickname.
+    #[test]
+    fn a_quiet_key_of_the_nickname_does_not_change_the_route_of_the_live_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_bob();
+        let (live, quiet) = (test_key("bob#live"), test_key("bob#quiet"));
+        for key in [live, quiet] {
+            state.names.insert(key, nick("bob"));
+        }
+        state.peers.insert(live);
+        state.quiet.insert(quiet);
+        state.names.insert(live, nick("bob"));
+        state.bind_peer_endpoint(live, nick("bob"), iroh::EndpointAddr::new(bob));
+
+        assert_eq!(
+            route(&directed_msg_to(live), &state),
+            Route::Unicast(bob),
+            "one live key and one quiet key is one member"
+        );
+    }
+
+    /// The dial hint of a nickname belongs to one key. When that key is quiet and another key is
+    /// live under the nickname, the live key does not follow the hint of the quiet one: its frame
+    /// waits for an endpoint of its own. The quiet key keeps its hint, because it may return.
+    #[test]
+    fn a_key_does_not_follow_the_hint_of_another_key_of_its_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let dead = endpoint_id(1);
+        let (owner, live) = (test_key("bob#owner"), test_key("bob#live"));
+        for key in [owner, live] {
+            state.names.insert(key, nick("bob"));
+        }
+        state.quiet.insert(owner);
+        state.peers.insert(live);
+        state.names.insert(owner, nick("bob"));
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(dead));
+        state.direct.insert(dead, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg_to(live), &state),
+            Route::Undeliverable,
+            "the live key followed the hint of a quiet key to a dead endpoint"
+        );
+        assert_eq!(
+            route(&directed_msg_to(owner), &state),
+            Route::Unicast(dead),
+            "a quiet peer that may return keeps its hint"
+        );
+    }
+
+    /// A process that restarts keeps its endpoint and mints a new author key. Until the silence
+    /// timeout the old key is still live, and its hint still names the endpoint. The new key has
+    /// proved that endpoint with a newer stamp, so the endpoint is the new key's: a send to the old
+    /// key must not reach the new process.
+    #[test]
+    fn a_send_to_the_old_key_of_a_restarted_process_does_not_reach_the_new_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let (old, new) = (test_key("bob#old"), test_key("bob#new"));
+        let endpoint = endpoint_id(7);
+        for key in [old, new] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.bind_peer_endpoint(old, nick("bob"), iroh::EndpointAddr::new(endpoint));
+        state.note_proven_endpoint(old, endpoint, UnixSecs::from(1));
+        state.note_proven_endpoint(new, endpoint, UnixSecs::from(2));
+        state.retain_refused_endpoint(new, iroh::EndpointAddr::new(endpoint));
+        state.direct.insert(endpoint, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg_to(old), &state),
+            Route::Undeliverable,
+            "the send to the old key reached the process of the new key"
+        );
+        assert_eq!(
+            route(&directed_msg_to(new), &state),
+            Route::Unicast(endpoint),
+            "the new key lost its own endpoint"
         );
     }
 
@@ -614,9 +824,13 @@ mod tests {
         let rendezvous = endpoint_id(9);
         state.rendezvous_id = Some(rendezvous);
         // bob's advertised endpoint *is* the rendezvous pseudo-node.
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(rendezvous));
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
+            nick("bob"),
+            iroh::EndpointAddr::new(rendezvous),
+        );
         assert_eq!(
             route(&directed_msg(), &state),
             Route::Undeliverable,
@@ -674,7 +888,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (state, _) = state_knowing_bob();
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::Unicast,
             "a meshed known peer takes the unicast lane"
         );
@@ -686,7 +900,7 @@ mod tests {
         let (mut state, _) = state_knowing_bob();
         state.standing.remove(&Standing::Meshed);
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::Multihop,
             "a known but unmeshed peer takes the multihop lane"
         );
@@ -703,19 +917,19 @@ mod tests {
         state.direct.insert(bob, DirectState::RelayOnly);
         state.relay_transport = PayloadPath::RelayAllowed;
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::Unicast,
             "a peer on a lookup-only relay starts on the unicast lane"
         );
         state.relay_transport = PayloadPath::DirectOnly;
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::RelayOnly,
             "a lookup-only relay peer takes the relay-only lane"
         );
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::Unicast,
             "a peer that proves a direct path returns to the unicast lane"
         );
@@ -726,7 +940,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (state, _) = state_knowing_bob();
         assert_eq!(
-            lane_for(&nick("carol"), &state),
+            lane_for(&test_key("carol"), &state),
             Lane::Unreachable,
             "an unknown peer is unreachable"
         );
@@ -740,8 +954,8 @@ mod tests {
         let bob = endpoint_id(1);
         let bob_key = "bb".repeat(32);
         let carol_key = "cc".repeat(32);
-        let bob_signer = protocol::AuthorKey::decode_hex(&bob_key).expect("a key");
-        let carol_signer = protocol::AuthorKey::decode_hex(&carol_key).expect("a key");
+        let bob_signer = AuthorKey::decode_hex(&bob_key).expect("a key");
+        let carol_signer = AuthorKey::decode_hex(&carol_key).expect("a key");
         let linked = || {
             let mut state = fresh_state();
             prove(&mut state, &bob_key, bob);
@@ -786,9 +1000,11 @@ mod tests {
     /// Record, as a verified `PeerInfo` proof would, that the signing key
     /// `pubkey` (hex) owns `endpoint`.
     fn prove(state: &mut EventLoopState, pubkey: &str, endpoint: EndpointId) {
-        let signer = protocol::AuthorKey::decode_hex(pubkey).expect("a 32-byte key");
+        let signer = AuthorKey::decode_hex(pubkey).expect("a 32-byte key");
         let linked = state.linked_endpoints.clone();
-        state.proven_endpoints.insert(signer, endpoint, &linked);
+        state
+            .proven_endpoints
+            .insert(signer, endpoint, UnixSecs::from(1), &linked, |_| true);
     }
 
     /// [`prove`] for the key of `identity`.
@@ -805,7 +1021,7 @@ mod tests {
         sender: transport::MeshSender,
         mesh: MeshId,
         identity: Identity,
-        our_pubkey: protocol::AuthorKey,
+        our_pubkey: AuthorKey,
         author: protocol::Nickname,
         sink: event::SilentSink,
     }

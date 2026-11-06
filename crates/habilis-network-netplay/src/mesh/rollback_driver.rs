@@ -1,13 +1,13 @@
 //! The engine-facing half: mailboxes, framing, and the only `send_app` call.
 
-use habilis_network::protocol::messages::Authored;
+use habilis_network::protocol::messages::{Authored, sole_addressee};
 use std::sync::Arc;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
 use habilis_network::protocol::messages::Verified;
-use habilis_network::protocol::{AppFrameParams, AppTag, MessageBody, Nickname};
+use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody, Nickname};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -124,16 +124,20 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
         &mut self,
         frame: InboundApp<'_>,
         _state: &mut EventLoopState,
-        _ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
         let Some(tag) = frame.message.kind.app_tag().map(AppTag::as_str) else {
             return false;
         };
+        // The engine gives the app a frame that a relay forwards for another key. A nickname is a
+        // label, so that key can be a twin of ours, and its packet is not ours to act on.
+        if sole_addressee(&frame.message.kind).is_some_and(|to| *to != context.our_pubkey) {
+            return false;
+        }
         let pubkey = frame.message.key();
 
         // Learn the pubkey -> nickname pairing from any frame. The signed
-        // pubkey is the identity; the nickname is only how `send_app`
-        // addresses it.
+        // pubkey is the identity; the nickname is a label to show.
         if let Ok(mut directory) = self.mailboxes.directory.lock() {
             directory.insert(pubkey, frame.message.author.clone());
         }
@@ -155,6 +159,20 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
             _ => {}
         }
         false
+    }
+
+    /// A key that left the mesh leaves the directory. A peer that restarts brings a new key, so
+    /// the directory would otherwise keep one entry for each run of each peer.
+    async fn on_peer_left(
+        &mut self,
+        key: &AuthorKey,
+        _nickname: &Nickname,
+        _state: &mut EventLoopState,
+        _ctx: &HandlerCtx<'_>,
+    ) {
+        if let Ok(mut directory) = self.mailboxes.directory.lock() {
+            directory.remove(key);
+        }
     }
 }
 
@@ -182,24 +200,9 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
     ) -> bool {
         match request {
             Outbound::Rollback { to, payload } => {
-                // Resolve and release the lock *before* awaiting: holding a
-                // `std::sync::Mutex` guard across an await is denied
-                // workspace-wide, and rightly so.
-                let nickname: Option<Nickname> = {
-                    let book = self.mailboxes.directory.lock().ok();
-                    book.and_then(|directory| directory.get(&to).cloned())
-                };
-                let Some(nickname) = nickname else {
-                    // We have never heard from this peer, so we cannot
-                    // address it. The lobby only admits peers we have heard
-                    // from, so this means they left mid-match.
-                    tracing::debug!(
-                        peer = %to,
-                        "dropped a rollback packet for a peer with no known nickname"
-                    );
-                    return false;
-                };
-                let Some(frame) = frame_for(context, ROLLBACK_TAG, Some(nickname), &payload) else {
+                // The engine routes by key and answers a key that is not live with an error, which
+                // `send` swallows: a peer that left mid-match is a lost packet, as on any other loss.
+                let Some(frame) = frame_for(context, ROLLBACK_TAG, Some(to), &payload) else {
                     return false;
                 };
                 let class = self.classify(&frame.authored());
@@ -210,12 +213,9 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                 // gossip broadcast. Besides the resend hazard, `send_app`'s
                 // broadcast bodies are not mesh-key-sealed, so on a
                 // passworded mesh receivers drop them outright.
-                let peers: Vec<Nickname> = state
-                    .roster_snapshot()
-                    .peers
-                    .into_iter()
-                    .map(|peer| peer.nickname)
-                    .collect();
+                // A quiet member has a dead endpoint, so it is not a roster member to address.
+                let roster = state.roster_snapshot();
+                let peers: Vec<AuthorKey> = roster.addressee_keys().copied().collect();
                 let mut delivered = false;
                 for peer in peers {
                     let Some(frame) = frame_for(context, LOBBY_TAG, Some(peer), &payload) else {
@@ -234,7 +234,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
 fn frame_for(
     context: &HandlerCtx<'_>,
     tag: &str,
-    to: Option<Nickname>,
+    to: Option<AuthorKey>,
     payload: &str,
 ) -> Option<Verified> {
     let (Ok(tag), Ok(body)) = (AppTag::try_new(tag), MessageBody::try_new(payload)) else {

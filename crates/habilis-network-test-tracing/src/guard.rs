@@ -145,6 +145,7 @@ pub fn expect_warn(target: &str, text: &str) {
     slot.expected.lock().push(Expectation {
         target: target.to_owned(),
         text: text.to_owned(),
+        level: Level::WARN,
         seen: false,
         optional: false,
     });
@@ -168,6 +169,7 @@ pub fn allow_warn(target: &str, text: &str) {
     slot.expected.lock().push(Expectation {
         target: target.to_owned(),
         text: text.to_owned(),
+        level: Level::WARN,
         seen: false,
         optional: true,
     });
@@ -178,18 +180,31 @@ pub fn allow_warn(target: &str, text: &str) {
 /// WARN with [`Guard::expect_warn`] polls it to wait until the WARN came.
 #[must_use]
 pub fn saw_warn(target: &str, text: &str) -> bool {
+    warn_count(target, text) > 0
+}
+
+/// How many WARN events the test of the calling thread has logged from `target` (a module path: the
+/// target itself or a module below it) whose message contains `text`. A test that bounds the
+/// output of a flood asserts on this count.
+#[must_use]
+pub fn warn_count(target: &str, text: &str) -> usize {
     let current = thread::current();
     let name = current.name().unwrap_or_default();
     LIVE.lock()
         .iter()
         .filter(|slot| slot.thread == name)
-        .any(|slot| {
-            slot.events.lock().iter().any(|logged| {
-                logged.level == Level::WARN
-                    && target_is_within(&logged.target, target)
-                    && logged.text.contains(text)
-            })
+        .map(|slot| {
+            slot.events
+                .lock()
+                .iter()
+                .filter(|logged| {
+                    logged.level == Level::WARN
+                        && target_is_within(&logged.target, target)
+                        && logged.text.contains(text)
+                })
+                .count()
         })
+        .sum()
 }
 
 /// Registers what the test must close, for example `at_end(async move { endpoint.close().await })`.
@@ -369,6 +384,7 @@ impl Guard {
         self.slot.expected.lock().push(Expectation {
             target: target.to_owned(),
             text: text.to_owned(),
+            level: Level::WARN,
             seen: false,
             optional: false,
         });
@@ -379,6 +395,19 @@ impl Guard {
         self.slot.expected.lock().push(Expectation {
             target: target.to_owned(),
             text: text.to_owned(),
+            level: Level::WARN,
+            seen: false,
+            optional: true,
+        });
+    }
+
+    /// Like [`Self::allow_warn`], for an ERROR event of a dependency that the test cannot avoid.
+    /// The ERROR may also not come. Any other ERROR, and any WARN, still fails the test.
+    pub fn allow_error(&self, target: &str, text: &str) {
+        self.slot.expected.lock().push(Expectation {
+            target: target.to_owned(),
+            text: text.to_owned(),
+            level: Level::ERROR,
             seen: false,
             optional: true,
         });
@@ -416,9 +445,7 @@ impl Slot {
         let mut expected = self.expected.lock();
         let mut problems = Vec::new();
         for logged in self.events.lock().iter() {
-            let hit = expected
-                .iter_mut()
-                .find(|want| logged.level == Level::WARN && want.matches(logged));
+            let hit = expected.iter_mut().find(|want| want.matches(logged));
             match hit {
                 Some(want) if logged.after.is_none() => want.seen = true,
                 _ if logged.after.is_some() => problems.push(late_line(logged)),
@@ -457,6 +484,7 @@ fn target_is_within(logged: &str, wanted: &str) -> bool {
 struct Expectation {
     target: String,
     text: String,
+    level: Level,
     seen: bool,
     /// The WARN may come or not: a test that allows it does not fail when it is absent.
     optional: bool,
@@ -464,7 +492,9 @@ struct Expectation {
 
 impl Expectation {
     fn matches(&self, logged: &Logged) -> bool {
-        target_is_within(&logged.target, &self.target) && logged.text.contains(&self.text)
+        logged.level == self.level
+            && target_is_within(&logged.target, &self.target)
+            && logged.text.contains(&self.text)
     }
 }
 

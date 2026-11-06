@@ -18,11 +18,19 @@ State: `linked_endpoints` in `daemon/state.rs`.
 
 ### peer
 
-Layer: membership. Keyed by nickname.
+Layer: membership. Keyed by author key.
 
-A member of the mesh other than yourself. The roster is the set of peers. The live count includes you, so it is `peers.len() + 1`.
+A member of the mesh other than yourself. One author key is one peer. A nickname is a label, so two live keys that use one nickname are two peers. The roster is the set of peers. The live count includes you and each peer whose arrival was shown, so it is the number of shown peers plus one. A roster peer whose arrival was not shown is not counted.
 
 State: `peers`. Code: `lifecycle/membership.rs`.
+
+### directed send
+
+Layer: membership. Keyed by author key.
+
+A message with one recipient. The frame names the recipient by author key, in the signed `to` field. A nickname is a label and names no member, so two live keys that use one nickname are two recipients. A caller that holds only a nickname asks `key_of`. It gives the one live key of the nickname, or the reason it cannot: no live key, or two or more. A send asks `addressee_key`, because a quiet peer that may return is a recipient too. It gives the one live key, else the one quiet key, and it fails when the nickname names no key or two or more keys. To print a line about a key, ask `known_nickname_of`: it gives the name of a live or quiet key, and nothing for a key that left. `live_keys` lists the live keys. `note_key_endpoint` binds the endpoint that a meta card names to its key, by the rule of a `PeerInfo`: a second live key of a nickname gets the endpoint kept for it and binds no hint. The engine can pass a directed frame of another key to `NodeApp::on_app_frame`, so an app acts on a directed frame only if `to` is its own key. An app hook that names a peer takes the key. `on_peer_left` gives the key and the nickname that the roster recorded, and it fires for each key that leaves. `on_meta_applied` gives the key of the author, and the meta slot of each key is the lowercase hex of that key.
+
+Code: `EventLoopState::key_of`, `EventLoopState::addressee_key`, `EventLoopState::known_nickname_of`, `EventLoopState::live_keys`, `EventLoopState::note_key_endpoint`, `Messaging::SendToKey`, `sole_addressee`, `NodeApp::on_peer_left`, `NodeApp::on_meta_applied`.
 
 ### mesh
 
@@ -98,7 +106,7 @@ Code: `protocol::identity`, `AuthorKey`.
 
 ### surfaced
 
-Layer: presentation. Keyed by nickname.
+Layer: presentation. Keyed by author key.
 
 A peer whose arrival was shown to the operator or the agent. `surfaced` is a subset of `peers`. It gates what is shown. The roster stays complete for anti-entropy.
 
@@ -106,7 +114,7 @@ State: `surfaced`.
 
 ### quiet
 
-Layer: heartbeat. Keyed by nickname.
+Layer: heartbeat. Keyed by author key.
 
 A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return.
 
@@ -169,6 +177,16 @@ Arrival and departure are surfaced once each, as `joined` and `left`, keyed by n
 ### Lookups are independently sufficient
 
 Each lookup bootstraps a mesh and runs it with no other lookup present. An added lookup adds reliability and never a feature.
+
+## Correctness
+
+Correctness is imperative. Choose the correct design, whatever the size of the refactor.
+Do not keep a workaround, a heuristic, or a smaller change when it hides a wrong model.
+If the correct fix is large, split it into small steps. Each step compiles and passes the tests.
+
+## Compatibility
+
+Until version 1.0, we do not care about backward compatibility. Before 1.0, break compatibility when it gives a better design, better performance, or better reliability. Do not keep a shim, an alias, or a fallback only for old versions.
 
 ## Logging
 
@@ -408,7 +426,6 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R15 | `SplitMix64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/split_mix64.rs` | a PRNG state: a Copy would fork its stream, so it derives Clone only |
 | R15 | `Fnv1a64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/round.rs` | a hasher state: a Copy would fork its stream, so it derives Clone only |
 | R13 | `BenchError` | `habilis-network-iroh-webrtc-transport/src/bench_error.rs` | holds error sources that are not Copy, such as `endpoint::BindError` | |
-| R13 | `LobbyError` | `habilis-network-netplay/src/mesh/lobby.rs` | holds a `Nickname`, which owns a `String` | |
 | R13 | `TestRelayError` | `habilis-network/src/lookup/test_relay/test_relay_error.rs` | holds error sources that are not Copy, such as `server::SpawnError` | |
 | R16 | `ChunkError` | `habilis-network-chunks/src/chunk_error.rs` | holds a field type that is not Clone |
 | R16 | `DiskOrigin` | `habilis-network-chunks/src/fs/disk_origin.rs` | holds a `Mutex` field, which is not Clone |

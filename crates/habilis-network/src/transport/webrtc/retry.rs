@@ -45,8 +45,8 @@ pub(crate) fn retry_sessions(state: &mut state::EventLoopState, context: &Handle
     let own_addr = context.endpoint.addr();
     let own_needs_lane = lane_needs::needs_webrtc_lane(&own_addr);
     let mut peers: Vec<EndpointAddr> = state
-        .peer_endpoints
-        .values()
+        .member_addresses()
+        .iter()
         .filter(|address| address.id != context.rendezvous_id)
         .filter(|address| {
             session_policy::wants_session(
@@ -130,11 +130,8 @@ pub(crate) fn detach_idle_sessions_at(
     let window = tuning::DIRECT_IDLE_BACKSTOP;
     let mut detached = Vec::new();
     for peer in state.webrtc_admission.idle_sessions(now, window) {
-        let kept = state.linked_endpoints.contains(&peer)
-            || !state
-                .peer_endpoints
-                .values()
-                .any(|address| address.id == peer);
+        let kept =
+            state.linked_endpoints.contains(&peer) || state.member_address_of(peer).is_none();
         if kept || !handle.detach(&peer) {
             continue;
         }

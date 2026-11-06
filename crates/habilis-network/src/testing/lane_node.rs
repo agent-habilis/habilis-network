@@ -115,7 +115,11 @@ impl LaneNode {
         state.webrtc = Some(self.handle.clone());
         state.local_udp_transport = UdpTransport::Absent;
         state.unicast_pool = transport::UnicastPool::new(self.endpoint.clone(), false);
-        state.peer_endpoints.insert(
+        state
+            .names
+            .insert(super::test_key("bob"), super::nick("bob"));
+        state.bind_peer_endpoint(
+            super::test_key("bob"),
             super::nick("bob"),
             iroh::EndpointAddr::new(self.bob)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url")),
@@ -127,7 +131,7 @@ impl LaneNode {
         protocol::Message::new_pong(
             &self.mesh,
             &self.author,
-            super::nick("bob"),
+            super::test_key("bob"),
             &protocol::MessageId::random(),
         )
         .sign(&self.identity)

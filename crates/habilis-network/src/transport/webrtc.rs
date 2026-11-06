@@ -1760,9 +1760,9 @@ mod tests {
             ::habilis_network_test_tracing::init(),
             2,
             async {
-                idle_session_detaches(|id| {
+                Box::pin(idle_session_detaches(|id| {
                     EndpointAddr::new(id).with_ip_addr("127.0.0.1:4000".parse().expect("addr"))
-                })
+                }))
                 .await;
             },
         );
@@ -1776,10 +1776,10 @@ mod tests {
             ::habilis_network_test_tracing::init(),
             2,
             async {
-                idle_session_detaches(|id| {
+                Box::pin(idle_session_detaches(|id| {
                     EndpointAddr::new(id)
                         .with_relay_url("https://relay.invalid".parse().expect("relay url"))
-                })
+                }))
                 .await;
             },
         );

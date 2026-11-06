@@ -761,9 +761,9 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
         "the repair ticket targets the stalled big group"
     );
     assert_eq!(
-        tickets[0].author.as_str(),
-        "author",
-        "the repair ticket names the author"
+        tickets[0].author,
+        author_of("a"),
+        "the repair ticket names the key that sent the shards"
     );
     assert!(
         !tickets[0].missing.contains(&0),
@@ -791,6 +791,43 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
         next_tickets.len(),
         1,
         "the next window issues one repair ticket"
+    );
+}
+
+/// Two keys use one nickname. Each stalls a big group, and each ticket names the key that sent
+/// the shards, so the repair ask goes to the key that holds them.
+#[test]
+fn a_repair_ticket_of_a_twin_nickname_goes_to_the_key_that_sent_the_shards() {
+    use habilis_network_util::consts::{LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_REPAIR_IDLE};
+    let _guard = ::habilis_network_test_tracing::init();
+    let start = Instant::now();
+    let mut store = ReassemblyStore::default();
+    let old_group = group("00000000-0000-4000-8000-0000000000a1");
+    let new_group = group("00000000-0000-4000-8000-0000000000a2");
+    for (key, shard_group) in [("old", &old_group), ("new", &new_group)] {
+        let shard = Shard {
+            group: shard_group.clone(),
+            index: 0,
+            total: LOGGED_SHARD_GROUP_MAX_TOTAL + 4,
+        };
+        ingest(&mut store, &shard_msg("body", key, shard), start);
+    }
+
+    let mut tickets: Vec<_> = store
+        .repair_tickets(start + REASSEMBLY_REPAIR_IDLE)
+        .collect();
+    tickets.sort_by_key(|ticket| ticket.group.to_string());
+
+    assert_eq!(tickets.len(), 2, "each stalled group has a ticket");
+    assert_eq!(
+        tickets[0].author,
+        author_of("old"),
+        "the ticket of the first group names a key other than the one that sent its shards"
+    );
+    assert_eq!(
+        tickets[1].author,
+        author_of("new"),
+        "the ticket of the second group names a key other than the one that sent its shards"
     );
 }
 
