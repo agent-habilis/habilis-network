@@ -137,6 +137,42 @@ mod tests {
         assert!(state.lane_session_wanted(bob, now), "the held frame asks");
     }
 
+    /// Two live keys use one nickname, and the second is a lane peer whose endpoint the roster
+    /// keeps by key. A frame held for the second key asks for the session of the second key: the
+    /// member list of the transport plane has one row for each key, not one for each nickname.
+    #[test]
+    fn a_frame_held_for_the_second_key_of_a_nickname_marks_its_session_wanted() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        state.local_udp_transport = UdpTransport::Present;
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint) = (endpoint_id(1), endpoint_id(2));
+        for key in [first, second] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        let lane = |id: EndpointId| {
+            iroh::EndpointAddr::new(id)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url"))
+        };
+        state.bind_peer_endpoint(first, nick("bob"), lane(first_endpoint));
+        state.retain_refused_endpoint(second, lane(second_endpoint));
+
+        let error = resolve(
+            &directed_msg_to(second),
+            directed_msg_to(second).serialize().expect("serialize"),
+            &state,
+        )
+        .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(
+            state.lane_session_wanted(second_endpoint, clock::Instant::now()),
+            "the held frame of the second key did not ask for its session"
+        );
+    }
+
     /// A peer with an IP path is held too on a lookup-only relay, but its direct path comes
     /// from the probe, so no session is wanted for it.
     #[test]

@@ -1681,7 +1681,7 @@ async fn handle_peer_info(
     // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
     // rendezvous here, which returned above.
     let below = state.linked_endpoints.len()
-        < peer_info_graft_below(context.max_peers, state.peer_endpoints.len() + 1);
+        < peer_info_graft_below(context.max_peers, state.member_addresses().len() + 1);
     if !defer_first_dial
         && below
         && !state.linked_endpoints.contains(&peer_id)

@@ -334,6 +334,8 @@ pub struct EventLoopState {
     /// signature is the only thing tying a nickname to an endpoint (the
     /// signing key is deliberately not the transport key), so this is the one
     /// place the roster can tell whether a peer is a live link.
+    /// This is a store of hints, not the member list: a nickname holds one hint, and two live keys
+    /// can share it. The transport plane reads the members through [`Self::member_addresses`].
     /// Last-writer-wins (a restart re-advertises a new endpoint under the same
     /// name). Pruned with `peers`, so it stays bounded by the roster.
     /// Feeds only the derived `reach` boolean in `roster_snapshot` — the node
@@ -968,11 +970,7 @@ impl EventLoopState {
         {
             return None;
         }
-        let address = self
-            .peer_endpoints
-            .values()
-            .find(|address| address.id == peer)?
-            .clone();
+        let address = self.member_address_of(peer)?;
         self.want_lane_session(peer, now);
         Some(address)
     }
@@ -1274,6 +1272,33 @@ impl EventLoopState {
         holder
             .is_none_or(|signer| signer == *key)
             .then_some(address)
+    }
+
+    /// The dial address of each member of the roster: one for each key that is a peer, quiet or
+    /// lapsed, as [`address_of`](Self::address_of) gives it, and the hint of a nickname that no key
+    /// of the roster uses yet. A nickname is a label that two live keys can share, so a list
+    /// by nickname holds one row where the roster holds two members. Two members never share an
+    /// endpoint here: a row appears once for each endpoint.
+    pub(crate) fn member_addresses(&self) -> Vec<EndpointAddr> {
+        let mut candidates: Vec<EndpointAddr> = Vec::new();
+        for key in self.names.keys() {
+            candidates.extend(self.address_of(key));
+        }
+        for (nickname, address) in &self.peer_endpoints {
+            if !self.hint_owner.contains_key(nickname) {
+                candidates.push(address.clone());
+            }
+        }
+        let mut seen: HashSet<EndpointId> = HashSet::new();
+        candidates.retain(|address| seen.insert(address.id));
+        candidates
+    }
+
+    /// The dial address of the member whose endpoint is `endpoint`, if the roster has one.
+    pub(crate) fn member_address_of(&self, endpoint: EndpointId) -> Option<EndpointAddr> {
+        self.member_addresses()
+            .into_iter()
+            .find(|address| address.id == endpoint)
     }
 
     /// The key that a send by nickname goes to: the one live key that uses `nickname`, as

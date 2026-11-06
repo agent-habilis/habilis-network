@@ -567,18 +567,17 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
     }
 }
 
-/// The endpoints that [`unicast_farewell`] dials: the dial hint of each live peer that made it, once
-/// for each endpoint, whatever the nicknames that bind it. The rendezvous pseudo-node is never a directed target, and a quiet or ghost peer's stale hint
-/// isn't worth a dial at shutdown.
+/// The endpoints that [`unicast_farewell`] dials: the dial address of each live peer, once for each
+/// endpoint, whatever the keys that use it. The rendezvous pseudo-node is never a directed target,
+/// and a quiet or ghost peer's stale address isn't worth a dial at shutdown.
 fn farewell_targets(state: &EventLoopState) -> Vec<iroh::EndpointId> {
     let mut targets: Vec<iroh::EndpointId> = Vec::new();
-    for (nick, address) in &state.peer_endpoints {
-        let owner_is_peer = state
-            .hint_owner
-            .get(nick)
-            .is_some_and(|key| state.peers.contains(key));
+    for key in &state.peers {
+        let Some(address) = state.address_of(key) else {
+            continue;
+        };
         let new_target = !targets.contains(&address.id);
-        if state.rendezvous_id != Some(address.id) && owner_is_peer && new_target {
+        if state.rendezvous_id != Some(address.id) && new_target {
             targets.push(address.id);
         }
     }

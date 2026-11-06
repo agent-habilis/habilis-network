@@ -1138,8 +1138,8 @@ impl MembershipApp {
             Routing::SessionsToNonNeighbors { reply } => {
                 let sessions: usize = state.webrtc.as_ref().map_or(0, |webrtc| {
                     state
-                        .peer_endpoints
-                        .values()
+                        .member_addresses()
+                        .iter()
                         .filter(|address| {
                             webrtc.has_session(&address.id)
                                 && !state.linked_endpoints.contains(&address.id)
@@ -1160,8 +1160,8 @@ impl MembershipApp {
             Routing::RedialCounts { reply } => {
                 let now = clock::Instant::now();
                 let ids: Vec<_> = state
-                    .peer_endpoints
-                    .values()
+                    .member_addresses()
+                    .iter()
                     .map(|address| address.id)
                     .collect();
                 for id in ids {
@@ -1224,7 +1224,7 @@ impl MembershipApp {
                 );
                 // iroh re-selects only on path events: nudge every peer so the
                 // new set takes effect now.
-                for address in state.peer_endpoints.values() {
+                for address in &state.member_addresses() {
                     let endpoint = context.endpoint.clone();
                     let peer = address.id;
                     task::spawn(async move {
@@ -1246,7 +1246,7 @@ impl MembershipApp {
                 );
                 // iroh re-selects only on path events: nudge every peer so the
                 // change takes effect now.
-                for address in state.peer_endpoints.values() {
+                for address in &state.member_addresses() {
                     let endpoint = context.endpoint.clone();
                     let peer = address.id;
                     task::spawn(async move {
@@ -1309,7 +1309,7 @@ impl MembershipApp {
             }
             Blocking::BlockUdp { blocked, reply } => {
                 habilis_network_iroh_webrtc_transport::block_ip_paths(blocked);
-                for address in state.peer_endpoints.values() {
+                for address in &state.member_addresses() {
                     let endpoint = context.endpoint.clone();
                     let peer = address.id;
                     task::spawn(async move {

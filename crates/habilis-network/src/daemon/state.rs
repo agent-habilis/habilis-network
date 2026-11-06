@@ -1110,6 +1110,39 @@ mod tests {
         );
     }
 
+    /// The member list of the transport plane has one row for each key. Two live keys that use
+    /// one nickname are two rows, the hint of a nickname that no key uses yet is a row, and an
+    /// endpoint that two rows name is listed once.
+    #[test]
+    fn the_member_list_has_one_row_for_each_key_and_one_for_each_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint, card_endpoint) =
+            (endpoint_id(1), endpoint_id(2), endpoint_id(3));
+        seat(&mut state, first, "bob", true);
+        seat(&mut state, second, "bob", true);
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+        state.retain_refused_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("carol"), iroh::EndpointAddr::new(card_endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("dave"), iroh::EndpointAddr::new(first_endpoint));
+
+        let mut listed: Vec<EndpointId> = state
+            .member_addresses()
+            .iter()
+            .map(|address| address.id)
+            .collect();
+        listed.sort_unstable();
+        let mut want = vec![first_endpoint, second_endpoint, card_endpoint];
+        want.sort_unstable();
+
+        assert_eq!(listed, want, "the member list is not one row for each key");
+    }
+
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
     #[test]
@@ -1121,6 +1154,7 @@ mod tests {
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         let node = |direct: Option<DirectState>, kind: PathKind| {
             let mut node = fresh_state();
+            node.names.insert(test_key("bob"), nick("bob"));
             node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
             node.direct.extend(direct.map(|verdict| (bob, verdict)));
             node.path_kinds.insert(bob, kind);
@@ -1170,6 +1204,7 @@ mod tests {
         let address = iroh::EndpointAddr::new(bob)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         let mut node = fresh_state();
+        node.names.insert(test_key("bob"), nick("bob"));
         node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
         node.direct.insert(bob, DirectState::Direct);
         node.path_kinds.insert(bob, PathKind::Gossip);

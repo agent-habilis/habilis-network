@@ -181,13 +181,9 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
     let SendError::Held { eid } = error else {
         return;
     };
-    let needs_lane = state
-        .peer_endpoints
-        .values()
-        .find(|address| address.id == *eid)
-        .is_some_and(|address| {
-            webrtc::session_policy::pair_needs_lane(address, state.local_udp_transport)
-        });
+    let needs_lane = state.member_address_of(*eid).is_some_and(|address| {
+        webrtc::session_policy::pair_needs_lane(&address, state.local_udp_transport)
+    });
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.
     let reads_as_relay = state.pair_path_kind(*eid) == Some(PathKind::Relay);
