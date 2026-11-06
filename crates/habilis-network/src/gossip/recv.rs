@@ -519,11 +519,26 @@ fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Verified) -> boo
     false
 }
 
+/// The first [`VERSION_TEXT_MAX`] characters of a version that a sender chose, each one that is not
+/// printable ASCII replaced by `?`. The frame is not verified, so the text is hostile: this bounds
+/// the error line and the set of named versions, whatever the sender wrote.
+fn printable_prefix(version: &str) -> String {
+    version
+        .chars()
+        .take(VERSION_TEXT_MAX)
+        .map(|ch| if ch.is_ascii_graphic() { ch } else { '?' })
+        .collect()
+}
+
+/// The longest version text that an error line names.
+const VERSION_TEXT_MAX: usize = 16;
+
 /// Say that an inbound frame did not parse. A frame of another protocol version names it, once for
 /// each version: the key of the sender is not proven before the frame parses, so a sender could
 /// make up keys, and the set of named versions is bounded.
 fn report_unparsed(error: &MessageError, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    if let MessageError::UnsupportedVersion(version) = error {
+    if let MessageError::UnsupportedVersion(wire_version) = error {
+        let version = printable_prefix(wire_version);
         if state
             .receive_memory
             .refused_versions
@@ -2899,6 +2914,59 @@ mod first_contact_tests {
                 naming.len(),
                 1,
                 "the version of the frame is named once: {seen:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The version of a frame that does not parse is chosen by its sender, and the frame is not
+    /// verified. A version of 500 characters with control bytes gives a short line of printable
+    /// characters, and the set of named versions holds the cut text.
+    #[test]
+    fn the_version_in_the_error_line_is_cut_and_printable() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "dropping a frame of an unsupported protocol version",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let frame = Message::new_app(
+                &node.mesh,
+                &nick("alice"),
+                AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("hostile"),
+                ),
+            )
+            .sign(&Identity::generate());
+            let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
+            let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
+            let version = format!(r"\u0007\u001b[31m{}", "x".repeat(500));
+            let hostile = text.replacen(r#""v":"13.0""#, &format!(r#""v":"{version}""#), 1);
+
+            ingest(Bytes::from(hostile), &mut state, &mut app, &context).await;
+
+            let seen: Vec<String> = {
+                let held = lines.0.lock().expect("the lines lock is not poisoned");
+                held.clone()
+            };
+            assert_eq!(seen.len(), 1, "one line for the frame: {seen:?}");
+            let line = &seen[0];
+            let printable: bool = line
+                .chars()
+                .all(|ch| ch.is_ascii() && !ch.is_ascii_control());
+            assert!(
+                line.len() < 120 && printable,
+                "the line is long or holds a control byte: {line:?}"
             );
             node.endpoint.close().await;
         });
