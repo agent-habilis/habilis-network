@@ -721,10 +721,7 @@ fn next_run(_state: Option<&Path>) -> Result<u64> {
 /// The member key of this node, kept in the state file. A target with no files (wasm, or a build
 /// without `host`) has none: a key made at each start would prove nothing across restarts.
 #[cfg(all(unix, feature = "host"))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the same signature as the version for a target with no files"
-)]
+// the key is shared with the loop and its handlers, which hold clones
 fn member_key(state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identity>>> {
     // shared with the loop and its handlers, which hold clones
     Ok(Some(sync::Arc::new(load_or_create_identity(state)?)))
@@ -736,6 +733,7 @@ fn member_key(state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identit
     clippy::unnecessary_wraps,
     reason = "the same signature as the version for a target with files"
 )]
+// the key is shared with the loop and its handlers, which hold clones
 fn member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identity>>> {
     Ok(None)
 }
@@ -1226,8 +1224,15 @@ async fn setup_join(
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    use crate::daemon::state::RunKeys;
+    use crate::protocol::AuthorKey;
     use std::path::{Path, PathBuf};
     use std::{env, fs, process};
+
+    fn member_of(keys: &RunKeys) -> AuthorKey {
+        let member = keys.member.as_ref().expect("a member key");
+        member.author_key()
+    }
 
     /// A temp dir that goes away when the test ends, also when an assert fails.
     struct TempDir(PathBuf);
@@ -1340,8 +1345,8 @@ mod tests {
         let first = super::run_keys(Some(&state)).expect("first start");
         let second = super::run_keys(Some(&state)).expect("restart");
         assert_eq!(
-            first.member.as_ref().expect("a member key").author_key(),
-            second.member.as_ref().expect("a member key").author_key(),
+            member_of(&first),
+            member_of(&second),
             "the restart keeps the member key"
         );
         assert_ne!(
@@ -1351,7 +1356,7 @@ mod tests {
         );
         assert_ne!(
             first.session.author_key(),
-            first.member.as_ref().expect("a member key").author_key(),
+            member_of(&first),
             "the session key is not the member key"
         );
         assert_eq!(

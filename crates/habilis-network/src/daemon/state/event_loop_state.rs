@@ -1749,8 +1749,8 @@ impl EventLoopState {
         mesh: &MeshId,
         run: u64,
     ) -> Option<IdentityProof> {
-        let signer = self.member_identity.as_ref().unwrap_or(&self.identity);
-        Some(signer.prove(
+        let member = self.member_identity.as_ref()?;
+        Some(member.prove(
             &self.identity.author_key(),
             nickname.as_ref(),
             mesh.as_ref(),
