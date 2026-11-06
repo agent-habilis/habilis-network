@@ -15,8 +15,9 @@ use crate::{doc, transport};
 pub(crate) struct RunKeys {
     // shared with the loop and its handlers, which hold clones
     pub(crate) session: Arc<Identity>,
-    // shared with the loop and its handlers, which hold clones
-    pub(crate) member: Arc<Identity>,
+    // shared with the loop and its handlers, which hold clones; none on a platform with no file to keep
+    // the key in, where a proof would prove nothing across restarts
+    pub(crate) member: Option<Arc<Identity>>,
     /// The run number of this start, which the proof of the session names.
     pub(crate) run: u64,
 }

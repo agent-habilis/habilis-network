@@ -107,10 +107,16 @@ mod tests {
         use crate::protocol::identity;
         let state = fresh_state();
         let mesh = MeshId::from("💬test");
-        let proof = state.own_proof(&nick("alice"), &mesh, 7);
+        let proof = state
+            .own_proof(&nick("alice"), &mesh, 7)
+            .expect("a member key");
         assert_eq!(
             proof.identity,
-            state.member_identity.public(),
+            state
+                .member_identity
+                .as_ref()
+                .expect("a member key")
+                .public(),
             "the member key signs the proof"
         );
         assert!(
@@ -130,7 +136,9 @@ mod tests {
         let own: Message = Message::new_joined_with_proof(
             &mesh,
             &nick("alice"),
-            &sender.own_proof(&nick("alice"), &mesh, 1),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
         );
         receiver.note_joined_proof(&own.sign(&sender.identity), &mesh);
         assert!(
@@ -142,7 +150,9 @@ mod tests {
         let forged = Message::new_joined_with_proof(
             &mesh,
             &nick("bob"),
-            &sender.own_proof(&nick("alice"), &mesh, 1),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
         );
         other.note_joined_proof(&forged.sign(&sender.identity), &mesh);
         assert!(
@@ -153,7 +163,9 @@ mod tests {
         let stolen = Message::new_joined_with_proof(
             &mesh,
             &nick("alice"),
-            &sender.own_proof(&nick("alice"), &mesh, 1),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
         )
         .sign(&thief.identity);
         other.note_joined_proof(&stolen, &mesh);
@@ -387,6 +399,26 @@ mod tests {
                 .proof_of(&sender.identity.author_key())
                 .is_some(),
             "the receiver holds the proof from the first frame"
+        );
+    }
+
+    /// A node with no member key (a target with no files, such as wasm) sends an empty `joined`
+    /// body: a proof made with a key of this start would prove nothing across restarts. It answers
+    /// no proof request either.
+    #[test]
+    fn a_node_with_no_member_key_sends_an_empty_joined_body() {
+        let mut state = fresh_state();
+        state.member_identity = None;
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let joined: messages::Verified = state.own_joined(&mesh, &me);
+        assert!(joined.joined_proof().is_none(), "the joined body is empty");
+        let asker = AuthorKey::from([9u8; 32]);
+        assert!(
+            state
+                .proof_answer(&me, &asker, &me, &mesh, Instant::now())
+                .is_none(),
+            "a node with no member key answers no request"
         );
     }
     use crate::util::clock::Instant;

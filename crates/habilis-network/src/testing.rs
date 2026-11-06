@@ -56,7 +56,7 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
                 // shared with the loop and its handlers, which hold clones
                 session: Arc::new(Identity::generate()),
                 // shared with the loop and its handlers, which hold clones
-                member: Arc::new(Identity::generate()),
+                member: Some(Arc::new(Identity::generate())),
                 run: 1,
             },
             secrets: MeshSecrets::default(),
