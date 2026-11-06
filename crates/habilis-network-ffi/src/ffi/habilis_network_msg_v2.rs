@@ -41,7 +41,7 @@ impl HabilisNetworkMsgV2 {
 
 /// The layout `packages/habilis-network-ffi/src/msg.ts` hand-decodes, pinned like
 /// [`super::HabilisNetworkMsg`]: `size` at 0, `nick` at 8, `key` at 72, three bytes of padding,
-/// `directed` at 140, `len` at 144, 152 bytes in all.
+/// `directed` at 140, `len` at 144, 152 bytes in all on a 64-bit target.
 const _: () = {
     use std::mem::{align_of, offset_of};
 

@@ -87,7 +87,8 @@ typedef struct {
  *
  * The caller allocates this struct and sets `size` to sizeof(habilis_network_msg_v2)
  * before every call; habilis_network_msg_recv_v2() refuses a smaller size. The
- * struct has 152 bytes and alignment 8:
+ * struct has 152 bytes and alignment 8 on a 64-bit target (144 bytes with a 4-byte
+ * size_t):
  *
  *   offset   0  size_t size     the size the caller allocated
  *   offset   8  char nick[64]   as in habilis_network_msg

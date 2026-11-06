@@ -24,7 +24,7 @@
  * instead of one place per runtime.
  *
  * 32-bit targets are out of scope — `size_t` is four bytes there and the struct
- * is 148.
+ * is 144 (size 0, nick 4, key 68, directed 136, len 140).
  */
 
 const SIZE_OFFSET = 0
