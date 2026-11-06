@@ -813,23 +813,6 @@ mod tests {
     }
 
     #[test]
-    fn directed_frames_count_against_the_log_cap() {
-        // A relay retains the directed frames of other keys, so a flood of them must evict like
-        // any other frame and never grow the log past its capacity.
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut log = MessageLog::new(4);
-        for ts in 10..30 {
-            log.push(msg_to(&format!("private-{ts}"), ts, "bob"));
-        }
-        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 100, &key("bob")));
-        assert_eq!(
-            gap.len(),
-            4,
-            "the log holds no more directed frames than its cap"
-        );
-    }
-
-    #[test]
     fn directed_frame_does_not_consume_a_third_party_resend_budget() {
         // Why the gate lives inside the filter rather than at the call site:
         // iteration is newest-first and `max` is a shared budget, so a directed

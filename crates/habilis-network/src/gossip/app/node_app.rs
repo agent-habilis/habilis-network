@@ -28,13 +28,13 @@ pub trait NodeApp: Send {
     fn classify(&self, message: &Authored) -> AppClass;
 
     /// Dispatch an inbound `App` frame after the engine's generic prefix. The frame can be
-    /// addressed to us, broadcast, or directed to **another key** that this node relays for
-    /// anti-entropy: the engine does not filter by recipient, and a nickname is a label, so the
-    /// other key of a shared nickname is another peer. An app that acts on a directed frame must
-    /// check that `to` is `context.our_pubkey` itself, and return `false` for a frame that is not
-    /// for it. Returns `true` when the engine should retain/index the frame (a relay then holds
-    /// it, and gives it only to its addressee in an anti-entropy answer), `false` when it must
-    /// stop and not retain it (plumbing like an RPC leg, or a directed leg addressed elsewhere).
+    /// addressed to us, broadcast, or directed to **another key** that this node forwards: the
+    /// engine does not filter by recipient, and a nickname is a label, so the other key of a
+    /// shared nickname is another peer. An app that acts on a directed frame must check that `to`
+    /// is `context.our_pubkey` itself, and return `false` for a frame that is not for it. Returns
+    /// `true` when the engine should proceed to retain/index the frame, `false` when it must stop
+    /// (plumbing like an RPC leg, or a directed leg addressed elsewhere). The engine keeps no
+    /// directed frame of another key, whatever this returns.
     async fn on_app_frame(
         &mut self,
         frame: InboundApp<'_>,

@@ -501,8 +501,8 @@ impl NodeDriver for Probe {
     }
 }
 
-/// The engine gives the app a directed frame that is for another key, because a relay holds it for
-/// anti-entropy. A nickname is a label, so that other key can be a twin of this node. The driver
+/// The engine gives the app a directed frame that is for another key, because a relay forwards
+/// it and does not filter by recipient. A nickname is a label, so that other key can be a twin of this node. The driver
 /// must act only on a frame for its own key: a packet for the twin must not reach our session.
 #[test]
 fn a_rollback_frame_for_another_key_does_not_reach_our_session() {
