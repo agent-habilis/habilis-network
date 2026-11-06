@@ -198,8 +198,10 @@ fn escaped_len(text: &str) -> usize {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Inbound {
-    /// The author's nickname.
+    /// The author's nickname. Two live members can use one nickname, so it names no author.
     pub nick: String,
+    /// The author's key. A reply goes to this key with [`Messaging::SendToKey`].
+    pub key: AuthorKey,
     /// The message was addressed to us specifically, not broadcast.
     pub directed: bool,
     /// The body of the message, as UTF-8.
@@ -752,10 +754,13 @@ impl NodeApp for MembershipApp {
         {
             return false;
         }
+        let directed = matches!(message.kind, MessageKind::App { to: Some(_), .. });
+        let text = message.body.as_str().to_owned();
         let inbound = Inbound {
             nick: message.author.to_string(),
-            directed: matches!(message.kind, MessageKind::App { to: Some(_), .. }),
-            text: message.body.as_str().to_owned(),
+            key: message.key(),
+            directed,
+            text,
         };
         // Full or closed: the caller is not draining. Dropping is the only
         // option that neither blocks the event loop nor grows without bound.
@@ -1954,6 +1959,53 @@ mod tests {
                     "the queue of the member took, or missed, the frame {text:?}"
                 );
             }
+            node.endpoint.close().await;
+        });
+    }
+
+    /// Two members can use one nickname, so the nickname of an inbound message names no
+    /// author. The message carries the key, and a reply to that key reaches only its author.
+    #[cfg(feature = "host")]
+    #[test]
+    fn an_inbound_message_names_the_key_of_its_author() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            let (inbound, mut queue) = mpsc::channel(4);
+            let mut app = MembershipApp::new(inbound);
+            let twins = [Identity::generate(), Identity::generate()];
+
+            let mesh = MeshId::from("test");
+            let nickname = Nickname::from("twin");
+            for twin in &twins {
+                let params = AppFrameParams::new(
+                    AppTag::try_new(MSG_TAG).expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("hello"),
+                );
+                let frame = Message::new_app(&mesh, &nickname, params).sign(twin);
+                app.on_app_frame(
+                    InboundApp {
+                        message: &frame.authored(),
+                        surfaceable: true,
+                    },
+                    &mut state,
+                    &context,
+                )
+                .await;
+            }
+
+            let keys: Vec<AuthorKey> = vec![
+                queue.try_recv().expect("the first message is queued").key,
+                queue.try_recv().expect("the second message is queued").key,
+            ];
+            assert_eq!(
+                keys,
+                [twins[0].author_key(), twins[1].author_key()],
+                "an inbound message does not name the key of its author"
+            );
             node.endpoint.close().await;
         });
     }
