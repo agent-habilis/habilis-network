@@ -121,11 +121,15 @@ export interface Message {
 
 export type MeshEvent =
   | { kind: 'ready' }
-  | { kind: 'joined'; nick: string }
-  | { kind: 'left'; nick: string }
+  /**
+   * `key` is the author key, 64 lowercase hex digits. Two live peers can share a nickname, so
+   * `nick` alone cannot tell the events of the two apart: `key` can.
+   */
+  | { kind: 'joined'; nick: string; key: string }
+  | { kind: 'left'; nick: string; key: string }
   /** Heartbeat-evicted but still in the roster (`quiet: true`) — not `left`. */
-  | { kind: 'quiet'; nick: string }
-  | { kind: 'returned'; nick: string }
+  | { kind: 'quiet'; nick: string; key: string }
+  | { kind: 'returned'; nick: string; key: string }
   /** A peer's per-author hash chain forked: two signed messages at one seq. */
   | { kind: 'fork'; nick: string; pubkey: string; seq: number }
   | { kind: 'info'; message: string }

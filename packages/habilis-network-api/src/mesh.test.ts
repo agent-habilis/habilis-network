@@ -114,7 +114,10 @@ describe('identity and the opening snapshot', () => {
     const events = drain(mesh.events(), 2)
     sink.roster(roster('ana', 'bo', 'cy'))
 
-    expect(await events).toEqual([{ kind: 'ready' }, { kind: 'joined', nick: 'cy' }])
+    expect(await events).toEqual([
+      { kind: 'ready' },
+      { kind: 'joined', nick: 'cy', key: keyFor('cy') },
+    ])
   })
 })
 
@@ -177,19 +180,19 @@ describe('presence', () => {
 
     expect(await events).toEqual([
       { kind: 'ready' },
-      { kind: 'joined', nick: 'bo' },
-      { kind: 'left', nick: 'ana' },
+      { kind: 'joined', nick: 'bo', key: keyFor('bo') },
+      { kind: 'left', nick: 'ana', key: keyFor('ana') },
     ])
   })
 
   test('a backend that is told keeps its own events and the diff stays quiet', async () => {
     const { mesh, sink } = await fake({ pushesPresence: true, peers: ['ana'] })
     const events = drain(mesh.events(), 2)
-    sink.presence({ kind: 'joined', nick: 'bo' })
+    sink.presence({ kind: 'joined', nick: 'bo', key: keyFor('bo') })
     // The roster catches up afterwards; it must not announce `bo` a second time.
     sink.roster(roster('ana', 'bo'))
 
-    expect(await events).toEqual([{ kind: 'ready' }, { kind: 'joined', nick: 'bo' }])
+    expect(await events).toEqual([{ kind: 'ready' }, { kind: 'joined', nick: 'bo', key: keyFor('bo') }])
     expect(mesh.peers.map((peer) => peer.nick)).toEqual(['ana', 'bo'])
   })
 
@@ -199,7 +202,7 @@ describe('presence', () => {
     sink.roster(roster('ana'))
     sink.roster(roster('ana', 'bo'))
 
-    expect(await events).toEqual([{ kind: 'ready' }, { kind: 'joined', nick: 'bo' }])
+    expect(await events).toEqual([{ kind: 'ready' }, { kind: 'joined', nick: 'bo', key: keyFor('bo') }])
   })
 
   test('an unreadable roster is an error and the old one survives', async () => {

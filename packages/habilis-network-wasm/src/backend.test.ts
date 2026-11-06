@@ -130,7 +130,7 @@ describe('openWasm', () => {
   test('messages and events reach the sink', async () => {
     const wasm = fake()
     const msgs: BackendMsg[] = []
-    const presence: { kind: string; nick: string }[] = []
+    const presence: { kind: string; nick: string; key: string }[] = []
     const states: string[] = []
     const extras: MeshEvent[] = []
     const opened = await openWasm(wasm.module, '{}')({
@@ -144,7 +144,7 @@ describe('openWasm', () => {
     })
 
     wasm.msgs.put(JSON.stringify({ nick: 'bob', key: KEY, directed: true, text: 'hi' }))
-    wasm.events.put(JSON.stringify({ kind: 'joined', nick: 'bob' }))
+    wasm.events.put(JSON.stringify({ kind: 'joined', nick: 'bob', key: KEY }))
     wasm.events.put(
       JSON.stringify({
         kind: 'state_changed',
@@ -154,13 +154,13 @@ describe('openWasm', () => {
         is_self: false,
       }),
     )
-    wasm.events.put(JSON.stringify({ kind: 'quiet', nick: 'bob', last_seen_secs_ago: 99 }))
+    wasm.events.put(JSON.stringify({ kind: 'quiet', nick: 'bob', key: KEY, last_seen_secs_ago: 99 }))
     await settle()
 
     expect(msgs).toEqual([{ from: 'bob', key: KEY, text: 'hi', directed: true }])
-    expect(presence).toEqual([{ kind: 'joined', nick: 'bob' }])
+    expect(presence).toEqual([{ kind: 'joined', nick: 'bob', key: KEY }])
     expect(states).toEqual(['{"a":1}'])
-    expect(extras).toEqual([{ kind: 'quiet', nick: 'bob' }])
+    expect(extras).toEqual([{ kind: 'quiet', nick: 'bob', key: KEY }])
     await opened.backend.close()
   })
 

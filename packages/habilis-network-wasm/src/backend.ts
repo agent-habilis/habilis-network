@@ -23,10 +23,10 @@ interface WireMsg {
 
 type WireEvent =
   | { kind: 'ready' }
-  | { kind: 'joined'; nick: string }
-  | { kind: 'left'; nick: string }
-  | { kind: 'quiet'; nick: string; last_seen_secs_ago: number }
-  | { kind: 'returned'; nick: string }
+  | { kind: 'joined'; nick: string; key: string }
+  | { kind: 'left'; nick: string; key: string }
+  | { kind: 'quiet'; nick: string; key: string; last_seen_secs_ago: number }
+  | { kind: 'returned'; nick: string; key: string }
   | { kind: 'fork'; nick: string; pubkey: string; seq: number }
   | { kind: 'state_changed'; channel: string; author: string; document: unknown; is_self: boolean }
   | { kind: 'info'; text: string }
@@ -76,12 +76,12 @@ export function openWasm(module: HabilisNetworkWasmModule, optsJson: string): Op
             break
           case 'joined':
           case 'left':
-            sink.presence({ kind: event.kind, nick: event.nick })
+            sink.presence({ kind: event.kind, nick: event.nick, key: event.key })
             await pushRoster()
             break
           case 'quiet':
           case 'returned':
-            sink.event?.({ kind: event.kind, nick: event.nick })
+            sink.event?.({ kind: event.kind, nick: event.nick, key: event.key })
             await pushRoster()
             break
           case 'fork':

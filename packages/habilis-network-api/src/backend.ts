@@ -38,7 +38,7 @@ export interface BackendSink {
    * A peer arrived or departed, for a backend that is told rather than one that
    * has to notice. Only called when [`BackendOpen.pushesPresence`] is set.
    */
-  presence(event: { kind: 'joined' | 'left'; nick: string }): void
+  presence(event: { kind: 'joined' | 'left'; nick: string; key: string }): void
   /** A failure with no caller waiting on it. Surfaces as `error`; the mesh stays open. */
   failed(message: string): void
   /**

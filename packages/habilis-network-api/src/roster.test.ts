@@ -80,8 +80,8 @@ describe('rosterPresence', () => {
     const after = parseRoster(roster('bo', 'cy'))
 
     expect(rosterPresence(before, after)).toEqual([
-      { kind: 'left', nick: 'ana' },
-      { kind: 'joined', nick: 'cy' },
+      { kind: 'left', nick: 'ana', key: keyFor('ana') },
+      { kind: 'joined', nick: 'cy', key: keyFor('cy') },
     ])
   })
 
@@ -96,10 +96,10 @@ describe('rosterPresence', () => {
     const after = parseRoster(roster('rex', 'bo'))
 
     expect(rosterPresence(before, after)).toEqual([
-      { kind: 'left', nick: 'ana' },
-      { kind: 'left', nick: 'zoe' },
-      { kind: 'joined', nick: 'bo' },
-      { kind: 'joined', nick: 'rex' },
+      { kind: 'left', nick: 'ana', key: keyFor('ana') },
+      { kind: 'left', nick: 'zoe', key: keyFor('zoe') },
+      { kind: 'joined', nick: 'bo', key: keyFor('bo') },
+      { kind: 'joined', nick: 'rex', key: keyFor('rex') },
     ])
   })
 
@@ -109,8 +109,12 @@ describe('rosterPresence', () => {
     const alone = parseRoster(rosterOf(first))
     const both = parseRoster(rosterOf(first, second))
 
-    expect(rosterPresence(alone, both)).toEqual([{ kind: 'joined', nick: 'twin' }])
-    expect(rosterPresence(both, alone)).toEqual([{ kind: 'left', nick: 'twin' }])
+    expect(rosterPresence(alone, both)).toEqual([
+      { kind: 'joined', nick: 'twin', key: second.key },
+    ])
+    expect(rosterPresence(both, alone)).toEqual([
+      { kind: 'left', nick: 'twin', key: second.key },
+    ])
   })
 
   test('a key that changes its nickname is neither a departure nor an arrival', () => {

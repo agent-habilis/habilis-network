@@ -76,7 +76,7 @@ export function rosterPresence(before: readonly Peer[], after: readonly Peer[]):
   const left = before.filter((peer) => !has.has(peer.key)).sort(byNickThenKey)
   const joined = after.filter((peer) => !had.has(peer.key)).sort(byNickThenKey)
   return [
-    ...left.map((peer): MeshEvent => ({ kind: 'left', nick: peer.nick })),
-    ...joined.map((peer): MeshEvent => ({ kind: 'joined', nick: peer.nick })),
+    ...left.map((peer): MeshEvent => ({ kind: 'left', nick: peer.nick, key: peer.key })),
+    ...joined.map((peer): MeshEvent => ({ kind: 'joined', nick: peer.nick, key: peer.key })),
   ]
 }
