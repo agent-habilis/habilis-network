@@ -81,14 +81,15 @@ impl ProofExchange {
     }
 
     /// A proof came for `session`. It is held if it verifies for this nickname and mesh, and if it
-    /// does not lower the run of a proof already held.
+    /// does not lower the run of a proof already held. `is_live` says whether a held session is a
+    /// live peer: at the cap the oldest dead session goes first, and a book of live sessions refuses.
     pub(crate) fn accept(
         &mut self,
         session: &AuthorKey,
         nickname: &Nickname,
         mesh: &MeshId,
         proof: IdentityProof,
-        is_live: impl Fn(&Nickname) -> bool,
+        is_live: impl Fn(&AuthorKey) -> bool,
     ) -> bool {
         // The run is compared first: a copy of the held proof, which comes with each resent or
         // re-announced `joined` frame, costs no signature check.
@@ -107,9 +108,7 @@ impl ProofExchange {
             return false;
         }
         self.book
-            .insert_evicting(*session, (nickname.clone(), proof), |_, (held, _)| {
-                is_live(held)
-            });
+            .insert_evicting(*session, (nickname.clone(), proof), |held, _| is_live(held));
         self.book.get(session).is_some()
     }
 
@@ -374,6 +373,51 @@ mod tests {
             receiver.ties_refused(),
             2,
             "a rival tie and a lower run are counted, the copy is not"
+        );
+    }
+
+    /// A restarted member has a dead session and a live one under one nickname. The book must tell
+    /// them apart: the dead session goes first when the book is full, so the proof of a new member
+    /// still lands. A nickname alone cannot tell them apart, because the live session keeps it live.
+    #[test]
+    fn the_dead_session_of_a_restarted_member_does_not_block_a_full_book() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let member = Identity::generate();
+        let (old, new) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(4);
+        for (session, run) in [(old, 1), (new, 2)] {
+            let proof = member.prove(&session, alice.as_ref(), mesh.as_ref(), run);
+            assert!(
+                book.accept(&session, &alice, &mesh, proof, |_| true),
+                "the book has room"
+            );
+        }
+        for name in ["bob", "carol"] {
+            let (nickname, session) = (Nickname::from(name), Identity::generate().author_key());
+            let proof = Identity::generate().prove(&session, nickname.as_ref(), mesh.as_ref(), 1);
+            assert!(
+                book.accept(&session, &nickname, &mesh, proof, |_| true),
+                "the book has room"
+            );
+        }
+        assert_eq!(book.len(), 4, "the book is full");
+
+        let (dave, session) = (Nickname::from("dave"), Identity::generate().author_key());
+        let proof = Identity::generate().prove(&session, dave.as_ref(), mesh.as_ref(), 1);
+        // The roster has a live session under each nickname, and the old session of alice is dead.
+        let held = book.accept(&session, &dave, &mesh, proof, |held| *held != old);
+
+        assert!(
+            held,
+            "the dead old session of alice goes, and the proof of dave lands"
+        );
+        assert!(
+            book.proof_of(&old).is_none() && book.proof_of(&new).is_some(),
+            "the dead session is gone and the live session stays"
         );
     }
 }

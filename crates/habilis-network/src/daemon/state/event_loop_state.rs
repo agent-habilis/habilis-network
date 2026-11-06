@@ -2355,12 +2355,12 @@ impl EventLoopState {
             return;
         };
         let key = message.key();
-        // A member that left the roster is dead, whether it said goodbye or crashed. The roster is
-        // keyed by session key, so a nickname is live while any live key uses it.
-        let (peers, names) = (&self.peers, &self.names);
+        // A session that left the roster is dead, whether it said goodbye or crashed, and the
+        // session of a restart is another key: the old one does not stay live under the new one.
+        let peers = &self.peers;
         self.proofs
-            .accept(&key, &message.author, mesh, proof, |nickname| {
-                peers.iter().any(|live| names.get(live) == Some(nickname))
+            .accept(&key, &message.author, mesh, proof, |session| {
+                peers.contains(session)
             });
     }
 

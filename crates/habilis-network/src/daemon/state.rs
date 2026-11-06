@@ -315,6 +315,33 @@ mod tests {
         assert_eq!(answered, 96, "every asker of a mesh of 96 gets its answer");
     }
 
+    /// Two live sessions can share a nickname. Each one holds the proof of its own session, and the
+    /// proof of one is no proof for the other: the book is keyed by the session key.
+    #[test]
+    fn two_live_sessions_under_one_nickname_each_hold_their_own_proof() {
+        let (first, second) = (fresh_state(), fresh_state());
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let shared = nick("alice");
+        for sender in [&first, &second] {
+            receiver.peers.insert(sender.identity.author_key());
+            let joined: messages::Verified = sender.own_joined(&mesh, &shared);
+            receiver.note_joined_proof(&joined, &mesh);
+        }
+
+        let held_first = receiver.proofs.proof_of(&first.identity.author_key());
+        let held_second = receiver.proofs.proof_of(&second.identity.author_key());
+        assert!(
+            held_first.is_some() && held_second.is_some(),
+            "both sessions hold a proof"
+        );
+        assert_ne!(
+            held_first.map(|proof| proof.identity),
+            held_second.map(|proof| proof.identity),
+            "each proof names the member key of its own session"
+        );
+    }
+
     /// A nickname is a label that two live sessions can share. A request names one session, and only
     /// that session answers it: the other one holds the same nickname and stays silent.
     #[test]
