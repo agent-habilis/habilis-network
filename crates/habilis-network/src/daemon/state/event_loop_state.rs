@@ -1304,25 +1304,28 @@ impl EventLoopState {
     /// by nickname holds one row where the roster holds two members. Two members never share an
     /// endpoint here: a row appears once for each endpoint.
     pub(crate) fn member_addresses(&self) -> Vec<EndpointAddr> {
-        let mut candidates: Vec<EndpointAddr> = Vec::new();
-        for key in self.names.keys() {
-            candidates.extend(self.address_of(key));
-        }
-        for (nickname, address) in &self.peer_endpoints {
-            if !self.hint_owner.contains_key(nickname) {
-                candidates.push(address.clone());
-            }
-        }
         let mut seen: HashSet<EndpointId> = HashSet::new();
-        candidates.retain(|address| seen.insert(address.id));
-        candidates
+        let mut addresses: Vec<EndpointAddr> = self.member_address_stream().collect();
+        addresses.retain(|address| seen.insert(address.id));
+        addresses
     }
 
-    /// The dial address of the member whose endpoint is `endpoint`, if the roster has one.
+    /// The dial address of the member whose endpoint is `endpoint`, if the roster has one. It
+    /// builds no list: the walk stops at the first row that names the endpoint.
     pub(crate) fn member_address_of(&self, endpoint: EndpointId) -> Option<EndpointAddr> {
-        self.member_addresses()
-            .into_iter()
+        self.member_address_stream()
             .find(|address| address.id == endpoint)
+    }
+
+    /// The rows of [`Self::member_addresses`] before the removal of repeats: the address of each
+    /// key of the roster, then the hint of each nickname that no key owns yet.
+    fn member_address_stream(&self) -> impl Iterator<Item = EndpointAddr> + '_ {
+        let by_key = self.names.keys().filter_map(|key| self.address_of(key));
+        let unowned = self
+            .peer_endpoints
+            .iter()
+            .filter(|(nickname, _)| !self.hint_owner.contains_key(*nickname));
+        by_key.chain(unowned.map(|(_, address)| address.clone()))
     }
 
     /// The key that a send by nickname goes to: the one live key that uses `nickname`, as
