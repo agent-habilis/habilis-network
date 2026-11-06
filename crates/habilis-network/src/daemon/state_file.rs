@@ -710,7 +710,7 @@ mod tests {
         ] {
             fields.insert(key.into(), serde_json::json!("from the app"));
         }
-        fields.insert("a2a_port".into(), serde_json::json!(7));
+        fields.insert("extra".into(), serde_json::json!(7));
         state_file.set_discovery(fields);
         state_file.write(3, true);
         let parsed: serde_json::Value =
@@ -755,7 +755,7 @@ mod tests {
             parsed.get("topic").is_none() && parsed.get("owner_pid").is_none(),
             "a discovery field stood in for a key that the daemon does not write"
         );
-        assert_eq!(parsed["a2a_port"], 7, "a field of the application was lost");
+        assert_eq!(parsed["extra"], 7, "a field of the application was lost");
         state_file.remove();
     }
 

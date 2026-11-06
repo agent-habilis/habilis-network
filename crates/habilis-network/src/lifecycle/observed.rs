@@ -1079,8 +1079,8 @@ mod churn_red {
     }
 
     /// The roster and the count agree: a peer known only from a frame older than our join is in
-    /// neither, because the app skills list the rows of the roster and a user can pick a row as the
-    /// target of a task. The same peer is in both once its arrival is shown.
+    /// neither, because a caller that lists the rows of the roster can offer a row as a recipient.
+    /// The same peer is in both once its arrival is shown.
     #[test]
     fn the_roster_and_the_count_agree_on_a_pre_join_ghost() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
