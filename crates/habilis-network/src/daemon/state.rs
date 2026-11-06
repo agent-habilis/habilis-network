@@ -2046,6 +2046,35 @@ mod tests {
         );
     }
 
+    /// Two live peers use one nickname. The roster JSON names the key of each row, in the field
+    /// `key` (64 lowercase hex digits), so a client of the roster can send to one of them by key.
+    #[test]
+    fn the_roster_json_of_two_peers_with_one_nickname_names_both_keys() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+        for key in [first, second] {
+            state.names.insert(key, nick("twin"));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+
+        let json = serde_json::to_value(state.roster_snapshot()).expect("a roster serializes");
+
+        let rows = json["peers"]
+            .as_array()
+            .expect("the roster has a peers array");
+        let key_of = |row: &serde_json::Value| row["key"].as_str().map(str::to_owned);
+        let mut keys: Vec<String> = rows.iter().filter_map(key_of).collect();
+        keys.sort();
+        let mut want = vec![first.to_string(), second.to_string()];
+        want.sort();
+        assert_eq!(
+            keys, want,
+            "the rows of the roster do not name both keys: {json}"
+        );
+    }
+
     /// The dial hint of a nickname has one owner, and the lane of a row is the lane of that hint.
     /// A quiet key under the same nickname owns no hint, so its row reads no lane.
     #[test]

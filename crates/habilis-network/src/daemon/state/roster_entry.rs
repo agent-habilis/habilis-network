@@ -28,9 +28,8 @@ use crate::transport;
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct RosterEntry {
-    /// The author key of the member. A nickname is a label that two live members can share, and
-    /// a directed send names the key. Not part of the JSON.
-    #[serde(skip)]
+    /// The author key of the member, in the JSON as `key`: 64 lowercase hex digits. A nickname is
+    /// a label that two live members can share, and a directed send names the key.
     pub key: AuthorKey,
     /// The nickname of the member.
     pub nickname: Nickname,
