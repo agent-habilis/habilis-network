@@ -173,6 +173,12 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
     let guard = habilis_network_test_tracing::init_capturing(
         "habilis_network=info,habilis_network::transport=debug",
     );
+    // Iroh drops a transmit to a relay address that its map no longer holds, when a member closes
+    // its endpoint. It is a lost datagram, and this test checks the roster, not iroh.
+    guard.allow_error(
+        "iroh::socket::transports",
+        "unknown RelayMappedAddr, dropped transmit",
+    );
     habilis_network_test_tracing::run_multi_thread(guard, 8, async {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
