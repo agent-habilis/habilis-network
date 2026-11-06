@@ -8,7 +8,7 @@ mod window_range;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::messages::{Verified, sole_addressee};
-use crate::protocol::{AuthorKey, DedupKey, MessageKind, Nickname, PresenceSubtype, UnixSecs};
+use crate::protocol::{AuthorKey, DedupKey, MessageKind, PresenceSubtype, UnixSecs};
 
 pub(crate) use bound::Bound;
 pub(crate) use digest_window::DigestWindow;
@@ -410,7 +410,7 @@ impl MessageLog {
 /// does **not** filter: a directed frame the addressee holds must keep
 /// appearing in its digest ids, or the author would see it as perpetually
 /// missing and re-send it every round forever.
-fn resendable_to(message: &Verified, requester: &Nickname) -> bool {
+fn resendable_to(message: &Verified, requester: &AuthorKey) -> bool {
     sole_addressee(&message.kind).is_none_or(|to| to == requester)
 }
 
@@ -437,10 +437,9 @@ fn eviction_key(message: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) 
 mod tests {
     use std::collections::HashSet;
 
-    use super::{
-        AuthorKey, DedupKey, MessageLog, MissingQuery, Nickname, UnixSecs, Verified, WindowRange,
-    };
-    use crate::protocol::Message;
+    use super::{AuthorKey, DedupKey, MessageLog, MissingQuery, UnixSecs, Verified, WindowRange};
+    use crate::protocol::{Message, Nickname};
+    use crate::testing;
 
     use crate::protocol;
     /// A whole-log gap query for `requester` with nothing already held — the
@@ -448,7 +447,7 @@ mod tests {
     fn all_missing_for<'a>(
         have: &'a HashSet<DedupKey>,
         max: usize,
-        requester: &'a Nickname,
+        requester: &'a AuthorKey,
     ) -> MissingQuery<'a> {
         MissingQuery {
             range: super::seconds(UnixSecs::ZERO, UnixSecs::MAX),
@@ -687,7 +686,7 @@ mod tests {
             &Nickname::from("author"),
             protocol::AppFrameParams::new(
                 protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                Some(Nickname::from(to)),
+                Some(key(to)),
                 None,
                 protocol::MessageBody::from(body),
             ),
@@ -696,8 +695,8 @@ mod tests {
         message
     }
 
-    fn nick(name: &str) -> Nickname {
-        Nickname::from(name)
+    fn key(name: &str) -> AuthorKey {
+        testing::test_key(name)
     }
 
     /// Everything, for a requester with no directed frames in play.
@@ -774,7 +773,7 @@ mod tests {
             },
             have: &have,
             max: 10,
-            requester: &nick(ANYONE),
+            requester: &key(ANYONE),
         });
         let bodies: Vec<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(
@@ -826,7 +825,7 @@ mod tests {
             range: super::seconds(UnixSecs::from(20), UnixSecs::from(40)),
             have: &have,
             max: 10,
-            requester: &nick(ANYONE),
+            requester: &key(ANYONE),
         });
         let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         // ts 20 and 40 are in-window and missing; 30 is in `have`; 10 and 50
@@ -846,7 +845,7 @@ mod tests {
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
-        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &nick("carol")));
+        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &key("carol")));
         let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(
             bodies,
@@ -864,7 +863,7 @@ mod tests {
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
-        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &nick("bob")));
+        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &key("bob")));
         let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(
             bodies,
@@ -883,7 +882,7 @@ mod tests {
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob")); // newest → seen first
-        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 1, &nick("carol")));
+        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 1, &key("carol")));
         let bodies: Vec<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(bodies, vec!["public"], "the budget went to a usable frame");
     }
@@ -943,7 +942,7 @@ mod tests {
             },
             have: &have,
             max: 100,
-            requester: &nick(ANYONE),
+            requester: &key(ANYONE),
         });
         let mut offered: HashSet<String> = HashSet::new();
         for message in &missing {

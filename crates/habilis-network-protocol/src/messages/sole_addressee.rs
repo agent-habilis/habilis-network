@@ -1,6 +1,6 @@
 //! The routing address of a frame: the one peer it is sent to, if any.
 
-use crate::nickname_error::Nickname;
+use crate::AuthorKey;
 
 use super::MessageKind;
 
@@ -24,12 +24,14 @@ use super::MessageKind;
 /// assert!(sole_addressee(&MessageKind::Meta).is_none());
 /// ```
 #[must_use]
-pub fn sole_addressee(kind: &MessageKind) -> Option<&Nickname> {
+pub fn sole_addressee(kind: &MessageKind) -> Option<&AuthorKey> {
     match kind {
-        MessageKind::Pong { to, .. } | MessageKind::ProofRequest { to } => Some(to),
+        MessageKind::Pong { to, .. } => Some(to),
         MessageKind::App { to, .. } => to.as_ref(),
         MessageKind::Presence { .. }
         | MessageKind::PeerInfo
+        // names a nickname, not a key: it goes by `send_best_effort`, never by the router
+        | MessageKind::ProofRequest { .. }
         | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::State

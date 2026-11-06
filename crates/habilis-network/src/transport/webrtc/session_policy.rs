@@ -97,9 +97,9 @@ pub(crate) async fn detach_sessions_under_udp(
     if handle.session_count() == 0 {
         return;
     }
-    let holders: Vec<(EndpointId, bool)> = state
-        .peer_endpoints
-        .values()
+    let members = state.member_addresses();
+    let holders: Vec<(EndpointId, bool)> = members
+        .iter()
         .filter(|address| address.id != context.rendezvous_id && handle.has_session(&address.id))
         .map(|address| {
             (

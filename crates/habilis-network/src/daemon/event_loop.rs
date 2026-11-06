@@ -375,7 +375,8 @@ fn host_state_file<Driver: NodeDriver>(
         })
         .map(|path| {
             let owner_pid = runtime.owner.map(shutdown::Owner::pid);
-            let file = StateFile::new(path, &mesh.mesh, &mesh.author, &mesh.name)
+            let pubkey = mesh.keys.session.author_key();
+            let file = StateFile::new(path, &mesh.mesh, &mesh.author, &mesh.name, &pubkey)
                 .base(runtime.runtime_base.clone());
             file.topic(mesh.topic_string.as_deref())
                 .owner_pid(owner_pid)
@@ -789,12 +790,14 @@ pub(crate) async fn linkstate_now(state: &mut EventLoopState, context: &HandlerC
 /// The sweep-tick arm: note the gap, then evict silent peers. The app's own
 /// timers that ride this cadence run via [`NodeDriver::on_tick`] right after.
 fn sweep_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, sink: &dyn NodeSink) {
-    timers::note_tick_gap(
+    let (mono_gap, wall_gap) = timers::note_tick_gap(
         "sweep",
         &mut anchors.sweep,
         &mut anchors.sweep_wall,
         sweep_interval(),
     );
+    lifecycle::heartbeat::forgive_stall(state, mono_gap.max(wall_gap));
+    lifecycle::heartbeat::note_suspend(state, wall_gap.saturating_sub(mono_gap));
     lifecycle::heartbeat::tick_sweep(state, sink);
 }
 
@@ -1152,9 +1155,9 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.prune += 1;
         timers::tick_prune(&mut self.state, self.parts.sink);
         let context = self.parts.handler_ctx(&self.sender);
-        timers::tick_epoch(&mut self.state, context.author);
+        timers::tick_epoch(&mut self.state, &context.our_pubkey);
         seed_job::tick(&mut self.state, context.author, context.mesh);
-        timers::tick_doc_census(&mut self.state, context.author);
+        timers::tick_doc_census(&mut self.state, &context.our_pubkey);
         timers::tick_collection_census(&self.state);
     }
 
@@ -1207,6 +1210,17 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.sweep += 1;
         sweep_arm(&mut self.anchors, &mut self.state, self.parts.sink);
         let context = self.parts.handler_ctx(&self.sender);
+        // The sweep can end a nickname clash, and a directed frame waits in the buffer for that.
+        if self.state.standing.contains(&Standing::Meshed)
+            && !self.state.pending_outbound.is_empty()
+        {
+            gossip::flush_pending(&mut self.state, &context, "silence sweep").await;
+        }
+        // A `PeerInfo` that a member missed is repaired by no digest: send it again by period.
+        if self.state.peerinfo_refresh_due(Instant::now()) {
+            gossip::broadcast_peer_info(&mut self.state, &context).await;
+            self.state.last_sent_at = Instant::now();
+        }
         probe::prove_routed_pairs(&mut self.state, &context).await;
         self.app.on_tick(&mut self.state, &context).await;
         let write = gossip::MergeCtx {
@@ -1874,10 +1888,14 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
     // multihop metric is a future enhancement.)
     let mut peers: Vec<(Nickname, u64)> = round
         .pongs
-        .into_iter()
-        .map(|(nickname, rtt)| (nickname, millis_saturating(rtt)))
+        .into_values()
+        .map(|pong| (pong.nickname, millis_saturating(pong.rtt)))
         .collect();
-    peers.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+    // Two keys of one nickname are two rows, so the RTT breaks the tie and the order is fixed.
+    peers.sort_by(|left, right| {
+        let by_nickname = left.0.as_str().cmp(right.0.as_str());
+        by_nickname.then(left.1.cmp(&right.1))
+    });
     // The in-process `ping` request waits on this channel (no event stream to
     // read the report from); the CLI/IPC path leaves it unset and consumes the
     // `ping_report` event below instead.
@@ -1887,7 +1905,7 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
     // `known` must never be less than the number that responded: a peer can
     // pong and then leave the roster before this ~10s finalize, which would
     // otherwise report responded > known. Clamp so the count stays coherent.
-    let known = state.peers.len().max(peers.len());
+    let known = (state.member_count() - 1).max(peers.len());
     sink.emit(NodeEvent::PingReport { peers, known });
 }
 
@@ -2021,6 +2039,336 @@ mod tests {
     use tokio::sync::oneshot;
 
     use n0_future::time;
+    use n0_future::time::Instant as TokioInstant;
+    use std::sync::Mutex;
+
+    use super::TickAnchors;
+    use crate::daemon::state::{EventLoopState, PingRound};
+    use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
+    use crate::lifecycle;
+    use crate::protocol::{AuthorKey, MeshId, Message, Nickname, UnixSecs};
+    use crate::testing::{fresh_state, nick, test_key};
+    use crate::util::clock::Instant;
+    use crate::util::tuning;
+
+    /// One `PingReport` that the engine emitted: the rows and the `known` count.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Report {
+        peers: Vec<(Nickname, u64)>,
+        known: usize,
+    }
+
+    /// Keeps each `PingReport` that the engine emits.
+    #[derive(Default)]
+    struct ReportSink(Mutex<Vec<Report>>);
+
+    impl NodeSink for ReportSink {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::PingReport { peers, known } = event {
+                self.0
+                    .lock()
+                    .expect("the sink lock")
+                    .push(Report { peers, known });
+            }
+        }
+    }
+
+    /// A state with one peer that was last heard `alive_timeout() + 10 s` ago: due for eviction.
+    fn state_with_a_silent_peer() -> EventLoopState {
+        let mut state = fresh_state();
+        state.peer_for_test("swift-cedar");
+        state.surfaced_for_test("swift-cedar");
+        let silent = Instant::now()
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
+        state.last_seen.insert(test_key("swift-cedar"), silent);
+        state
+    }
+
+    /// The report lists each peer that answered, and two live keys of one nickname are two peers.
+    /// The clamp keeps `known` at least as large as the rows.
+    #[test]
+    fn the_ping_report_has_a_row_for_each_key_that_answered() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let started = TokioInstant::now();
+        let probe = Message::new_ping(&MeshId::from("test"), &nick("us"));
+        let (reply, mut report) = oneshot::channel();
+        let mut round = PingRound::new(
+            &probe,
+            started,
+            started + Duration::from_secs(10),
+            Some(reply),
+        );
+        for (name, key, millis) in [
+            ("twin", test_key("twin#first"), 30),
+            ("twin", test_key("twin#second"), 20),
+        ] {
+            let arrival = started + Duration::from_millis(millis);
+            assert!(
+                round.record_pong(key, nick(name), &probe.id, arrival),
+                "a pong that names the probe is recorded"
+            );
+        }
+        state.arm_ping_round(round);
+        let sink = ReportSink::default();
+
+        super::finalize_ping_round(&mut state, &sink);
+
+        let rows = report.try_recv().expect("the round delivers its report");
+        let expected = vec![(nick("twin"), 20), (nick("twin"), 30)];
+        assert_eq!(
+            rows, expected,
+            "each key that answered is a row, in a fixed order"
+        );
+        assert_eq!(
+            *sink.0.lock().expect("the sink lock"),
+            vec![Report {
+                peers: expected,
+                known: 2
+            }],
+            "the event carries the same rows, and `known` is not below the rows that answered"
+        );
+    }
+
+    /// `known` is the roster that was shown, read from the roster and not from the pongs: a shown
+    /// peer that sent no pong is known, and a live peer whose arrival was not shown is not.
+    #[test]
+    fn the_ping_report_counts_a_shown_peer_that_sent_no_pong_and_not_an_unshown_one() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        for name in ["answering", "silent", "unshown"] {
+            state.peer_for_test(name);
+        }
+        for name in ["answering", "silent"] {
+            state.surfaced_for_test(name);
+        }
+        let started = TokioInstant::now();
+        let probe = Message::new_ping(&MeshId::from("test"), &nick("us"));
+        let mut round = PingRound::new(&probe, started, started + Duration::from_secs(10), None);
+        assert!(
+            round.record_pong(
+                test_key("answering"),
+                nick("answering"),
+                &probe.id,
+                started + Duration::from_millis(30)
+            ),
+            "a pong that names the probe is recorded"
+        );
+        state.arm_ping_round(round);
+        let sink = ReportSink::default();
+
+        super::finalize_ping_round(&mut state, &sink);
+
+        assert_eq!(
+            *sink.0.lock().expect("the sink lock"),
+            vec![Report {
+                peers: vec![(nick("answering"), 30)],
+                known: 2
+            }],
+            "one row for the peer that answered; `known` counts the silent shown peer, not the unshown one"
+        );
+    }
+
+    /// Control. A punctual sweep tick evicts the peer that is silent past the alive timeout.
+    #[test]
+    fn a_punctual_sweep_tick_evicts_a_silent_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = state_with_a_silent_peer();
+        let mut anchors = TickAnchors::now();
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains(&test_key("swift-cedar"))
+                && !state.peers.contains(&test_key("swift-cedar")),
+            "a punctual tick must evict a silent peer"
+        );
+    }
+
+    /// A sweep tick that comes late on the monotonic clock (the process was starved) gives every
+    /// peer a new timeout: the silence is ours.
+    #[test]
+    fn a_sweep_tick_late_on_the_monotonic_clock_keeps_the_peer() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = state_with_a_silent_peer();
+        let mut anchors = TickAnchors::now();
+        anchors.sweep = Instant::now()
+            .checked_sub(tuning::alive_timeout() * 2)
+            .expect("the monotonic clock has run past two alive timeouts since boot");
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.peers.contains(&test_key("swift-cedar"))
+                && !state.quiet.contains(&test_key("swift-cedar")),
+            "a stalled sweep evicted a peer whose silence is ours"
+        );
+    }
+
+    /// The monotonic clock stops during a suspend on some hosts, so the quiet TTL on that clock
+    /// would hold a quiet peer through a long sleep. The wall-clock time that the monotonic clock
+    /// missed counts toward the TTL: a peer quiet for 30 min that sleeps for 40 min is gone.
+    #[test]
+    fn a_suspend_ages_a_quiet_peer_toward_the_quiet_ttl() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        for name in ["swift-cedar", "lost-heron"] {
+            state.quiet_for_test(name);
+            state.quiet_since.insert(test_key(name), half_hour_ago);
+        }
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - Duration::from_mins(40);
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+        // A live peer whose clock agrees with ours vouches for the sleep: it was a sleep.
+        lifecycle::heartbeat::confirm_suspend(&mut state, UnixSecs::now());
+        lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
+
+        let kept: Vec<&AuthorKey> = state.quiet_since.keys().collect();
+        assert!(
+            state.quiet.is_empty() && kept.is_empty(),
+            "a quiet peer survived 70 min of real silence: {kept:?}"
+        );
+    }
+
+    /// A live frame whose stamp is 2 h off our clock does not vouch for the stretch: our clock is
+    /// the one that is wrong, so the quiet peer keeps its time.
+    #[test]
+    fn a_frame_that_disagrees_with_our_clock_does_not_vouch_for_a_suspend() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        state.quiet_for_test("swift-cedar");
+        state
+            .quiet_since
+            .insert(test_key("swift-cedar"), half_hour_ago);
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - Duration::from_hours(2);
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+        lifecycle::heartbeat::confirm_suspend(
+            &mut state,
+            UnixSecs::now() - Duration::from_hours(2),
+        );
+        lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains(&test_key("swift-cedar")),
+            "a frame 2 h behind our clock vouched for a wall-clock step"
+        );
+    }
+
+    /// A vouching frame that comes after the wait is too late: the note lapses after one alive
+    /// timeout, so a later frame cannot turn a step that was long ago into a sleep.
+    #[test]
+    fn a_vouching_frame_after_the_wait_ages_nothing() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        state.quiet_for_test("swift-cedar");
+        state
+            .quiet_since
+            .insert(test_key("swift-cedar"), half_hour_ago);
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - Duration::from_hours(2);
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+        let pending = state
+            .clock_evidence
+            .suspend
+            .as_mut()
+            .expect("the sweep noted the stretch");
+        pending.at = pending
+            .at
+            .checked_sub(tuning::alive_timeout() * 2)
+            .expect("the monotonic clock has run past the wait since boot");
+        lifecycle::heartbeat::confirm_suspend(&mut state, UnixSecs::now());
+        lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains(&test_key("swift-cedar")),
+            "a vouching frame after the wait aged a quiet peer"
+        );
+    }
+
+    /// A step of the wall clock that the monotonic clock did not see looks like a long sleep. No
+    /// peer vouches for it, so a quiet peer of 30 min stays: the step must not remove a peer
+    /// early.
+    #[test]
+    fn a_forward_wall_clock_step_does_not_age_a_quiet_peer() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        state.quiet_for_test("swift-cedar");
+        state
+            .quiet_since
+            .insert(test_key("swift-cedar"), half_hour_ago);
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - Duration::from_hours(2);
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains(&test_key("swift-cedar")),
+            "a wall-clock step of 2 h removed a peer that was quiet for 30 min"
+        );
+    }
+
+    /// Control: a punctual sweep leaves a quiet peer of 30 min where it is.
+    #[test]
+    fn a_punctual_sweep_keeps_a_quiet_peer_inside_the_quiet_ttl() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        state.quiet_for_test("swift-cedar");
+        state
+            .quiet_since
+            .insert(test_key("swift-cedar"), half_hour_ago);
+        let mut anchors = TickAnchors::now();
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains(&test_key("swift-cedar")),
+            "a quiet peer of 30 min left the roster"
+        );
+    }
+
+    /// A sweep tick that comes late only on the wall clock (the process was suspended, and the
+    /// monotonic clock stopped with it) gives every peer a new timeout too.
+    #[test]
+    fn a_sweep_tick_late_on_the_wall_clock_keeps_the_peer() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = state_with_a_silent_peer();
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - tuning::alive_timeout() * 2;
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.peers.contains(&test_key("swift-cedar"))
+                && !state.quiet.contains(&test_key("swift-cedar")),
+            "a suspended sweep evicted a peer whose silence is ours"
+        );
+    }
     /// The wake for the close of a shed beacon: pending with no shed, ready when the close reports,
     /// ready when the close task is lost.
     async fn wakes_within_a_moment(closing: &mut Option<oneshot::Receiver<()>>) -> bool {

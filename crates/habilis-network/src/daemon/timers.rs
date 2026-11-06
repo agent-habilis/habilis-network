@@ -21,7 +21,7 @@ use crate::util::{resident_memory, tuning, unix_secs};
 
 use crate::gossip::PathSummary;
 use crate::net;
-use crate::protocol::{Channel, Nickname};
+use crate::protocol::{AuthorKey, Channel};
 use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -308,13 +308,12 @@ fn in_join_phase(joined_at: unix_secs::UnixSecs, now: unix_secs::UnixSecs) -> bo
 }
 
 /// The entries of the per-peer map that belong to nobody on the roster and are not ours: members
-/// that left and whose entry stays in the document for good.
-fn absent_entries(nicks: &[String], roster: &HashSet<Nickname>, me: &Nickname) -> usize {
-    let absent = |nick: &&String| {
-        let owner = Nickname::try_new(nick);
-        owner.is_ok_and(|owner| owner != *me && !roster.contains(&owner))
-    };
-    nicks.iter().filter(absent).count()
+/// that left and whose entry stays in the document for good. An entry is named by the lowercase hex
+/// of the key of its owner.
+fn absent_entries(slots: &[String], roster: &HashSet<AuthorKey>, me: &AuthorKey) -> usize {
+    let on_roster = |slot: &str| roster.iter().any(|key| key.matches_hex(slot));
+    let absent = |slot: &&String| !me.matches_hex(slot) && !on_roster(slot);
+    slots.iter().filter(absent).count()
 }
 
 /// Every how many doc censuses the heavy part runs: the JSON, the save and the per-peer map cost
@@ -355,9 +354,9 @@ fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: us
 /// One tick of the minute timer for the epoch of the meta document: it adopts a higher epoch after
 /// its wait, or starts a new one when its frames reach the threshold. The sweep tick writes the
 /// entry of this node again.
-pub(crate) fn tick_epoch(state: &mut EventLoopState, me: &Nickname) {
+pub(crate) fn tick_epoch(state: &mut EventLoopState, own: &AuthorKey) {
     let doc = state.doc_mut(Channel::Meta);
-    let switch = doc.tick_epoch(me);
+    let switch = doc.tick_epoch(own);
     for key in doc.take_dropped() {
         state.seen.remove(&key);
     }
@@ -371,7 +370,7 @@ pub(crate) fn tick_epoch(state: &mut EventLoopState, me: &Nickname) {
 /// save, and the entries of the per-peer map of members that are gone, every
 /// [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read 0. A reader of the numbers can tell
 /// what a keyframe scheme would save.
-pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
+pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &AuthorKey) {
     let run = DOC_CENSUS_RUNS.fetch_add(1, Ordering::Relaxed);
     let heavy = is_heavy_run(run);
     let meta = state.doc_mut(Channel::Meta).census(heavy);
@@ -422,7 +421,6 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_seen = sizes.seen,
         col_known_endpoints = sizes.known_endpoints,
         col_quiet = sizes.quiet,
-        col_left = sizes.left,
         col_left_keys = sizes.left_keys,
         col_proofs = sizes.proofs,
         col_proofs_refused = sizes.proofs_refused,
@@ -444,7 +442,6 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_peers = sizes.peers,
         col_last_seen = sizes.last_seen,
         col_peer_endpoints = sizes.peer_endpoints,
-        col_left_at = sizes.left_at,
         col_quiet_since = sizes.quiet_since,
         col_surfaced = sizes.surfaced,
         col_direct = sizes.direct,
@@ -550,9 +547,11 @@ mod tests {
     /// An entry of the per-peer map is absent when its owner is neither on the roster nor us.
     #[test]
     fn an_entry_of_a_member_off_the_roster_is_absent() {
-        let me = testing::nick("me");
-        let roster: HashSet<_> = [testing::nick("alice")].into_iter().collect();
-        let entries: Vec<String> = ["me", "alice", "bob", "carol"].map(str::to_owned).into();
+        let me = testing::test_key("me");
+        let roster: HashSet<_> = [testing::test_key("alice")].into_iter().collect();
+        let entries: Vec<String> = ["me", "alice", "bob", "carol"]
+            .map(|name| String::from_utf8_lossy(&testing::test_key(name).hex()).into_owned())
+            .into();
 
         assert_eq!(
             super::absent_entries(&entries, &roster, &me),
@@ -579,7 +578,10 @@ mod tests {
         let gate = SelfWriteGate::new("peers".to_owned(), "card");
         let mut writer = MeshDoc::new_gated(gate).epoch_cap(0);
         for _ in 0..epoch {
-            assert!(writer.tick_epoch(&author).is_some(), "a reset");
+            assert!(
+                writer.tick_epoch(&testing::test_key(name)).is_some(),
+                "a reset"
+            );
         }
         let seed = *identity.public().as_bytes();
         let merge = serde_json::json!({"peers": {name: {"card": "mine"}}});
@@ -610,7 +612,7 @@ mod tests {
         state.doc_mut(Channel::Meta).ingest(&second);
         state.seen.insert(first.dedup_key());
 
-        super::tick_epoch(&mut state, &testing::nick("me"));
+        super::tick_epoch(&mut state, &testing::test_key("me"));
 
         assert!(
             !state.seen.contains(&first.dedup_key()),

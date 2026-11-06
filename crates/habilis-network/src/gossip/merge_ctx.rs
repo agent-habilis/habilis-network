@@ -5,7 +5,7 @@
 //! carries the generic transport primitives the app rides. Inbound dispatch
 //! lives in [`super::recv`].
 
-use crate::daemon::state::{Latch, RendezvousFlag, Standing};
+use crate::daemon::state::{Latch, PeerInfoFlood, RendezvousFlag, Standing};
 use std::fmt;
 
 use crate::transport::MeshSender;
@@ -70,7 +70,11 @@ use tokio::sync::oneshot;
 ///
 /// # Errors
 /// Refuses a body too large for one frame, propagates a serialize/deliver
-/// failure, and errors if the unmeshed buffer is full.
+/// failure, and errors if the unmeshed buffer is full. A directed frame names its recipient by
+/// author key, so two live peers that use one nickname are two addressees, and neither send is
+/// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. An unmeshed
+/// node refuses a directed frame to a key that no roster, quiet set or known address holds
+/// ([`crate::transport::SendError::Undeliverable`]), because nobody can deliver it later.
 ///
 /// # Examples
 ///
@@ -98,6 +102,15 @@ pub async fn send_app(
             frame.wire_len()
         )));
     }
+    // A key that nobody holds can never be delivered to, so the caller hears that now, meshed or
+    // not: the later "no known endpoint" cause would tell it to wait for a `PeerInfo`.
+    if let Some(key) = sole_addressee(&frame.kind)
+        && !state.knows_key(key)
+    {
+        return Err(transport::SendError::Undeliverable(format!(
+            "directed message to {key} undeliverable: no roster, quiet set or known address holds this key"
+        )));
+    }
     let bytes = frame
         .serialize()
         .map_err(|error| transport::SendError::Internal(error.into()))?;
@@ -119,6 +132,7 @@ pub async fn send_app(
             }
         }
     } else {
+        // An unmeshed node buffers a directed frame for the meshed edge.
         park_and_offer(state, context, &frame, &bytes);
     }
     if state.pending_outbound.push((frame.clone(), bytes)) {
@@ -298,18 +312,19 @@ impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
 }
 
 /// The merges that write the entry of a switch to a new epoch again, as
-/// `{ <map>: { <me>: <part> } }`, each one for a frame that `fits` accepts. An item is an error for a
-/// value that cannot be cut to a frame; the other items are still there.
+/// `{ <map>: { <slot>: <part> } }`, each one for a frame that `fits` accepts. The slot is the
+/// lowercase hex of the key of the owner. An item is an error for a value that cannot be cut to a
+/// frame; the other items are still there.
 pub(crate) fn entry_merges<Fits: FnMut(&serde_json::Value) -> bool>(
     switch: &EpochSwitch,
-    me: &Nickname,
+    slot: &str,
     mut fits: Fits,
 ) -> Vec<Result<serde_json::Value, DocError>> {
     let Some(entry) = switch.own_entry.as_ref() else {
         return Vec::new();
     };
     let map = switch.map.as_str();
-    let wrapped = |part: &serde_json::Value| serde_json::json!({ map: { me.as_str(): part } });
+    let wrapped = |part: &serde_json::Value| serde_json::json!({ map: { slot: part } });
     let cuts = split_entry(entry, |part| fits(&wrapped(part)));
     cuts.map(|cut| cut.map(|part| wrapped(&part))).collect()
 }
@@ -318,12 +333,13 @@ pub(crate) fn entry_merges<Fits: FnMut(&serde_json::Value) -> bool>(
 /// back what the app deleted or changed between the switch and the sweep.
 /// It patches only when a switch waits and has kept an entry: with no switch, or a switch that kept
 /// none, it does nothing.
-fn follow_own_write(state: &mut EventLoopState, merge: &serde_json::Value, author: &Nickname) {
+fn follow_own_write(state: &mut EventLoopState, merge: &serde_json::Value) {
+    let slot = state.identity.author_key().to_string();
     let Some(switch) = state.epoch_write.switch.as_mut() else {
         return;
     };
     let peers = merge.get(&switch.map);
-    let patch = peers.and_then(|peers| peers.get(author.as_str()));
+    let patch = peers.and_then(|peers| peers.get(slot.as_str()));
     if let (Some(patch), Some(entry)) = (patch, switch.own_entry.as_mut()) {
         apply_merge_patch(entry, patch);
     }
@@ -418,14 +434,14 @@ pub(crate) async fn write_entry_again(state: &mut EventLoopState, context: &Merg
     };
     let json = state.doc(Channel::Meta).to_json();
     let peers = json.get(&taken.map);
-    let held = peers.and_then(|peers| peers.get(context.author.as_str()));
+    let slot = state.identity.author_key().to_string();
+    let held = peers.and_then(|peers| peers.get(slot.as_str()));
     let entry = taken.own_entry.as_ref();
     let rest: Option<serde_json::Value> = entry.and_then(|entry| unwritten(entry, held));
     let switch = EpochSwitch::new(taken.epoch, taken.map.clone(), rest);
-    let cuts: Vec<Result<serde_json::Value, DocError>> =
-        entry_merges(&switch, context.author, |merge| {
-            frame_fits(state, context.mesh, context.author, merge)
-        });
+    let cuts: Vec<Result<serde_json::Value, DocError>> = entry_merges(&switch, &slot, |merge| {
+        frame_fits(state, context.mesh, context.author, merge)
+    });
     for cut in cuts {
         let merge = match cut {
             Ok(merge) => merge,
@@ -521,7 +537,8 @@ pub enum Farewell {
     /// The frame goes over gossip only.
     #[default]
     GossipOnly,
-    /// The frame also goes to each rostered peer by unicast.
+    /// The frame also goes by unicast to each live peer whose key made its dial hint with a
+    /// `PeerInfo`. A peer known only by a card has no such hint and gets the frame by gossip only.
     UnicastMirror,
 }
 
@@ -615,7 +632,7 @@ pub async fn broadcast_state_merge(
         Ingested::Duplicate => return Ok(()),
         Ingested::Rejected => {
             return Err(transport::SendError::internal(anyhow::anyhow!(
-                "write rejected: a member may only write its own /peers/<nick>/card"
+                "write rejected: a member may only write the gated field of the slot that its own key names"
             )));
         }
         Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
@@ -630,7 +647,7 @@ pub async fn broadcast_state_merge(
         }
     };
     if channel == Channel::Meta {
-        follow_own_write(state, &merge, author);
+        follow_own_write(state, &merge);
     }
 
     // A departure is mirrored before gossip takes the frame: once gossip has it, the frame is
@@ -666,8 +683,11 @@ pub async fn broadcast_state_merge(
     Ok(())
 }
 
-/// Mirror a farewell frame over the unicast plane to every rostered peer —
-/// fire-and-forget dials racing the shutdown propagation sleep. The gossip
+/// Mirror a farewell frame over the unicast plane to every live peer whose key made its dial hint
+/// with a `PeerInfo` — fire-and-forget dials racing the shutdown propagation sleep. A hint from a
+/// card has no verified key, and dialing it would open dials to addresses that no admitted key
+/// owns, so a peer known only by its card is left to gossip. The same holds for a second key under a
+/// nickname whose hint another key owns. The gossip
 /// overlay can be silently linkless (a post-join flap heals in seconds, but a
 /// leaver exits first), and a farewell that dies with the leaver can never be
 /// healed by anti-entropy — no live replica holds it. Receiver-side dedup
@@ -683,7 +703,7 @@ pub async fn broadcast_state_merge(
 ///
 /// # Examples
 ///
-/// It sends a farewell frame to each peer that has an endpoint. The doc test compiles it but does not run it.
+/// It sends a farewell frame to each live peer that owns a dial hint. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::embed::EventLoopState;
@@ -695,14 +715,8 @@ pub async fn broadcast_state_merge(
 /// # }
 /// ```
 pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
-    for (nick, endpoint_id) in &state.peer_endpoints {
-        // The rendezvous pseudo-node is never a directed target, and a
-        // quiet/ghost peer's stale hint isn't worth a dial at shutdown.
-        if state.rendezvous_id == Some(endpoint_id.id) || !state.peers.contains(nick) {
-            continue;
-        }
+    for endpoint_id in farewell_targets(state) {
         let pool = state.unicast_pool.clone();
-        let endpoint_id = endpoint_id.id;
         let bytes = bytes.clone();
         task::spawn(async move {
             if let Err(error) = pool.dial_and_send(endpoint_id, bytes.into_bytes()).await {
@@ -710,6 +724,23 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
             }
         });
     }
+}
+
+/// The endpoints that [`unicast_farewell`] dials: the dial address of each live peer, once for each
+/// endpoint, whatever the keys that use it. The rendezvous pseudo-node is never a directed target,
+/// and a quiet or ghost peer's stale address isn't worth a dial at shutdown.
+fn farewell_targets(state: &EventLoopState) -> Vec<iroh::EndpointId> {
+    let mut targets: Vec<iroh::EndpointId> = Vec::new();
+    for key in &state.peers {
+        let Some(address) = state.address_of(key) else {
+            continue;
+        };
+        let new_target = !targets.contains(&address.id);
+        if state.rendezvous_id != Some(address.id) && new_target {
+            targets.push(address.id);
+        }
+    }
+    targets
 }
 
 /// The body of our `PeerInfo`: our address, the proof that we own it, and, while we hold the
@@ -731,10 +762,11 @@ pub(crate) fn peer_info_json(
 /// dial us directly. Unlike `joined`, `PeerInfo` never enters the
 /// message log (`handle_peer_info` returns before the log push), so
 /// re-sending it is invisible to `poll`/`fetch_messages` consumers —
-/// safe to repeat on every new neighbor. Stamps `peerinfo_flooded_at`, the
-/// window the `joined` re-flood gate reads.
+/// safe to repeat on every new neighbor. Stamps `peerinfo_flood`, the
+/// window the `joined` re-flood gate and the periodic refresh read, and draws the spread of the
+/// next refresh period.
 pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    state.peerinfo_flooded_at = Some(clock::Instant::now());
+    state.peerinfo_flood = Some(PeerInfoFlood::at(clock::Instant::now()));
     state.latches.remove(&Latch::PeerInfoDeferred);
     let our_addr = context.endpoint.addr();
     state.last_flooded_addr = Some(our_addr.clone());
@@ -814,10 +846,10 @@ pub(crate) fn park_and_offer(
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
 fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
-    let Some(nick) = sole_addressee(&frame.kind) else {
+    let Some(key) = sole_addressee(&frame.kind) else {
         return;
     };
-    let Some(address) = state.peer_endpoints.get(nick).cloned() else {
+    let Some(address) = state.address_of(key) else {
         return;
     };
     if state.lane_session_wanted(address.id, clock::Instant::now()) {
@@ -831,11 +863,12 @@ mod tests {
     use crate::transport::UdpTransport;
 
     use super::{
-        entry_merges, frame_fits, mark_parked, peer_info_json, unwritten, write_entry_again,
+        entry_merges, farewell_targets, frame_fits, mark_parked, peer_info_json, unwritten,
+        write_entry_again,
     };
     use crate::doc::EpochSwitch;
     use crate::protocol::{MeshId, Message};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
 
     use crate::protocol;
@@ -844,6 +877,75 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::testing;
     use crate::util::clock;
+    /// The mirror dials the hint of a live peer whose key made it. It skips a hint from a card (no
+    /// verified key, even when a key is admitted under the nickname later), a hint of a quiet key,
+    /// and the rendezvous.
+    #[test]
+    fn the_farewell_mirror_dials_only_the_hints_that_a_live_key_made() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (owned, card, quiet, rendezvous) = (
+            endpoint_id(1),
+            endpoint_id(2),
+            endpoint_id(3),
+            endpoint_id(9),
+        );
+        state.rendezvous_id = Some(rendezvous);
+        // A live key made its hint with a PeerInfo.
+        state.peer_for_test("owned");
+        state.names.insert(test_key("owned"), nick("owned"));
+        state.bind_peer_endpoint(
+            test_key("owned"),
+            nick("owned"),
+            iroh::EndpointAddr::new(owned),
+        );
+        // A card names a nickname that no key uses yet; a key is admitted under it afterwards.
+        state.note_peer_endpoint(nick("card"), iroh::EndpointAddr::new(card));
+        state.peer_for_test("card");
+        // The key that made a hint went quiet.
+        state.quiet_for_test("quiet");
+        state.names.insert(test_key("quiet"), nick("quiet"));
+        state.bind_peer_endpoint(
+            test_key("quiet"),
+            nick("quiet"),
+            iroh::EndpointAddr::new(quiet),
+        );
+        // A live key advertised the rendezvous.
+        state.peer_for_test("beacon");
+        state.names.insert(test_key("beacon"), nick("beacon"));
+        state.bind_peer_endpoint(
+            test_key("beacon"),
+            nick("beacon"),
+            iroh::EndpointAddr::new(rendezvous),
+        );
+
+        assert_eq!(
+            farewell_targets(&state),
+            vec![owned],
+            "the mirror dialed a hint that no live key made, or the rendezvous"
+        );
+    }
+
+    /// Two nicknames can bind one endpoint (a node that restarted under a new name, both keys
+    /// live). The mirror dials the endpoint once, not once per nickname.
+    #[test]
+    fn the_farewell_mirror_dials_an_endpoint_once_whatever_the_nicknames_that_bind_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(1);
+        for name in ["swift-cedar", "lost-heron"] {
+            state.peer_for_test(name);
+            state.names.insert(test_key(name), nick(name));
+            state.bind_peer_endpoint(test_key(name), nick(name), iroh::EndpointAddr::new(shared));
+        }
+
+        assert_eq!(
+            farewell_targets(&state),
+            vec![shared],
+            "the mirror dialed the same endpoint once for each nickname that binds it"
+        );
+    }
+
     /// A departure written with a farewell reaches each peer by unicast at once. The overlay is
     /// not meshed, so gossip carries nothing: only the unicast mirror can deliver the frame, and
     /// no anti-entropy round is needed.
@@ -898,8 +1000,9 @@ mod tests {
                 let mut state = fresh_state();
                 state.unicast_pool = UnicastPool::new(node.clone(), false);
                 lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
-                state.peer_endpoints.insert(nick("bob"), server.addr());
-                state.peers.insert(nick("bob"));
+                state.names.insert(test_key("bob"), nick("bob"));
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), server.addr());
+                state.peer_for_test("bob");
 
                 let mesh = MeshId::from("test");
                 let author = nick("alice");
@@ -944,7 +1047,7 @@ mod tests {
         let mut switch = EpochSwitch::new(1, "peers".to_owned(), Some(entry));
         let fits =
             |merge: &serde_json::Value| serde_json::to_vec(merge).expect("json").len() <= 1_000;
-        let cuts = entry_merges(&switch, &nick("alice"), fits);
+        let cuts = entry_merges(&switch, "alice", fits);
         assert!(cuts.len() >= 2, "{} merges", cuts.len());
         for cut in cuts {
             let merge = cut.expect("every part fits");
@@ -956,7 +1059,7 @@ mod tests {
         }
         switch = EpochSwitch::new(1, "peers".to_owned(), None);
         assert!(
-            entry_merges(&switch, &nick("alice"), fits).is_empty(),
+            entry_merges(&switch, "alice", fits).is_empty(),
             "an entry of none gives no merge"
         );
     }
@@ -1000,11 +1103,13 @@ mod tests {
                 };
 
                 let mut state = fresh_state();
+                let own_key = state.identity.author_key();
+                let slot = own_key.to_string();
                 state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
                     .epoch_cap(1_000);
                 let fields = [("card", 'c'), ("host", 'h'), ("cwd", 'w')];
                 for (field, fill) in fields {
-                    let merge = serde_json::json!({"peers": {"alice": {field: fill.to_string().repeat(600)}}});
+                    let merge = serde_json::json!({"peers": {slot.as_str(): {field: fill.to_string().repeat(600)}}});
                     let params =
                         StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
                     broadcast_state_merge(&mut state, params)
@@ -1014,7 +1119,7 @@ mod tests {
                 let before = state.doc(Channel::Meta).to_json();
                 let switch = state
                     .doc_mut(Channel::Meta)
-                    .tick_epoch(&author)
+                    .tick_epoch(&own_key)
                     .expect("over the cap: a reset");
                 assert_eq!(
                     state.doc(Channel::Meta).to_json(),
@@ -1129,13 +1234,15 @@ mod tests {
         ];
 
         let mut state = fresh_state();
+        let own_key = state.identity.author_key();
+        let slot = own_key.to_string();
         state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
             .key(key)
             .epoch_cap(1_000);
         let mut writes = pieces.to_vec();
         writes.extend((0..3).map(|index| serde_json::json!({ "pad": noise(pad_len, index) })));
         for piece in writes {
-            let merge = serde_json::json!({"peers": {"alice": piece}});
+            let merge = serde_json::json!({"peers": {slot.as_str(): piece}});
             let params = StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
             broadcast_state_merge(&mut state, params)
                 .await
@@ -1144,7 +1251,7 @@ mod tests {
         let before = state.doc(Channel::Meta).to_json();
         let switch = state
             .doc_mut(Channel::Meta)
-            .tick_epoch(&author)
+            .tick_epoch(&own_key)
             .expect("over the cap: a reset");
         state.note_epoch_switch(switch);
 
@@ -1196,6 +1303,8 @@ mod tests {
                     sink: &SilentSink,
                 };
                 let mut state = fresh_state();
+                let own_key = state.identity.author_key();
+                let slot = own_key.to_string();
                 state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
                     .epoch_cap(1_000);
                 let first = [
@@ -1205,7 +1314,7 @@ mod tests {
                     serde_json::json!({"pad3": "c".repeat(1_800)}),
                 ];
                 for piece in first {
-                    let merge = serde_json::json!({"peers": {"alice": piece}});
+                    let merge = serde_json::json!({"peers": {slot.as_str(): piece}});
                     let params =
                         StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
                     broadcast_state_merge(&mut state, params)
@@ -1214,11 +1323,11 @@ mod tests {
                 }
                 let switch = state
                     .doc_mut(Channel::Meta)
-                    .tick_epoch(&author)
+                    .tick_epoch(&own_key)
                     .expect("over the cap: a reset");
                 state.note_epoch_switch(switch);
                 // The agent writes a new status before the sweep.
-                let newer = serde_json::json!({"peers": {"alice": {"status": "busy"}}});
+                let newer = serde_json::json!({"peers": {slot.as_str(): {"status": "busy"}}});
                 let params =
                     StateMergeParams::new(write.clone(), Channel::Meta, newer).surface(false);
                 broadcast_state_merge(&mut state, params)
@@ -1228,7 +1337,7 @@ mod tests {
                 write_entry_again(&mut state, &write).await;
 
                 let json = state.doc(Channel::Meta).to_json();
-                let entry = &json["peers"]["alice"];
+                let entry = &json["peers"][slot.as_str()];
                 assert_eq!(entry["status"], "busy", "the newer write stays");
                 assert_eq!(
                     entry["model"], "m",
@@ -1529,7 +1638,9 @@ mod tests {
         state.standing.remove(&Standing::Meshed);
         state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
-        state.peer_endpoints.insert(
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url")),
@@ -1537,7 +1648,7 @@ mod tests {
         let frame = Message::new_pong(
             &MeshId::from("test"),
             &nick("alice"),
-            nick("bob"),
+            test_key("bob"),
             &protocol::MessageId::random(),
         )
         .sign(&protocol::Identity::generate());
@@ -1560,9 +1671,8 @@ mod tests {
         let mut state = fresh_state();
         state.standing.remove(&Standing::Meshed);
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         let frame = Message::new_app(
             &MeshId::from("test"),
             &nick("alice"),

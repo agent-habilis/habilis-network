@@ -306,7 +306,7 @@ fn adoption_time(frames: &[Verified], epoch: u64) -> Duration {
     let mut took = Duration::ZERO;
     for _ in 0..6 {
         let started = Instant::now();
-        let switch = adopter.tick_epoch(&me);
+        let switch = adopter.tick_epoch(&AuthorKey::from(pad(me.as_str())));
         if switch.is_some() {
             took = started.elapsed();
         }

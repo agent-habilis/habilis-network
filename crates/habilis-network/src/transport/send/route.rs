@@ -1,9 +1,9 @@
 //! The plane a message's addressing chooses, and the rule that picks it.
 
 use crate::daemon::state::DirectState;
-use crate::protocol::Nickname;
 
 use crate::daemon::state::EventLoopState;
+use crate::protocol::AuthorKey;
 use crate::protocol::messages::{Verified, sole_addressee};
 use iroh::EndpointId;
 
@@ -26,10 +26,10 @@ pub(super) enum Route {
 }
 
 pub(super) fn route(message: &Verified, state: &EventLoopState) -> Route {
-    let Some(nick) = sole_addressee(&message.kind) else {
+    let Some(key) = sole_addressee(&message.kind) else {
         return Route::Broadcast;
     };
-    match directed_endpoint(nick, state) {
+    match directed_endpoint(key, state) {
         Some(eid) if held(eid, state) => Route::Held(eid),
         Some(eid) => Route::Unicast(eid),
         None => Route::Undeliverable,
@@ -43,11 +43,12 @@ pub(super) fn held(eid: EndpointId, state: &EventLoopState) -> bool {
     !state.relay_transport.relay_allowed() && state.direct.get(&eid) != Some(&DirectState::Direct)
 }
 
-/// The endpoint a directed message to `nick` can be sent to, or `None` for an
-/// addressee we hold no endpoint for or the rendezvous pseudo-node (never a
-/// directed target). Reachability is left to iroh's connect (direct or multihop).
-pub(super) fn directed_endpoint(nick: &Nickname, state: &EventLoopState) -> Option<EndpointId> {
-    let eid = state.peer_endpoints.get(nick)?.id;
+/// The endpoint a directed message to `key` can be sent to, or `None` for a key we hold no
+/// endpoint for, and for the rendezvous pseudo-node (never a directed target). The sources are
+/// the ones of [`EventLoopState::address_of`]. Reachability is left to iroh's connect (direct or
+/// multihop).
+pub(super) fn directed_endpoint(key: &AuthorKey, state: &EventLoopState) -> Option<EndpointId> {
+    let eid = state.address_of(key)?.id;
     if state.rendezvous_id == Some(eid) {
         return None;
     }

@@ -15,12 +15,7 @@ use crate::{lookup, transport};
 /// the heal tick would leave the pair apart for 10 to 15 s.
 pub(crate) async fn regraft_due(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     for peer in state.take_regrafts_due(Instant::now()) {
-        let Some(address) = state
-            .peer_endpoints
-            .values()
-            .find(|address| address.id == peer)
-            .cloned()
-        else {
+        let Some(address) = state.member_address_of(peer) else {
             continue;
         };
         state.note_relink(peer, Instant::now());
@@ -50,10 +45,10 @@ pub(crate) fn next_fill(
     if state.linked_endpoints.len() >= max_peers {
         return None;
     }
-    let peer_addresses = state.peer_endpoints.values();
-    let candidates = peer_addresses
-        .filter(|address| address.id != rendezvous_id)
-        .filter(|address| !state.linked_endpoints.contains(&address.id));
+    let peer_addresses = state.member_addresses();
+    let candidates = peer_addresses.iter().filter(|address| {
+        address.id != rendezvous_id && !state.linked_endpoints.contains(&address.id)
+    });
     let cooled = candidates.filter(|address| !state.relink_on_cooldown(address.id, now));
     let mut free: Vec<&iroh::EndpointAddr> = cooled
         .filter(|address| !state.graft_blocked(address.id, now))
@@ -162,10 +157,11 @@ pub(crate) fn retry_candidates_at(
     if !distrust_links && state.linked_endpoints.len() >= max_peers {
         return Vec::new();
     }
-    let peer_addresses = state.peer_endpoints.values();
-    let candidates = peer_addresses
-        .filter(|address| address.id != rendezvous_id)
-        .filter(|address| distrust_links || !state.linked_endpoints.contains(&address.id));
+    let peer_addresses = state.member_addresses();
+    let candidates = peer_addresses.iter().filter(|address| {
+        address.id != rendezvous_id
+            && (distrust_links || !state.linked_endpoints.contains(&address.id))
+    });
     let webrtc_session = |address: &iroh::EndpointAddr| {
         state
             .webrtc

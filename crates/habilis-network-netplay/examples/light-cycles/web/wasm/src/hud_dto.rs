@@ -13,8 +13,6 @@ pub(crate) struct HudDto {
     /// A peer's state checksum disagreed with ours. Should never happen;
     /// if it does, the two are no longer playing the same game.
     pub(crate) desynced: bool,
-    /// Why the lobby cannot start a match, when waiting will not fix it.
-    pub(crate) blocked: Option<String>,
     /// The session is up but still aligning frame numbers with its peers.
     pub(crate) syncing: bool,
     /// The authoritative match outcome, from `sim::outcome`. Sent rather

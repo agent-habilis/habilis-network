@@ -110,15 +110,9 @@ export const Game = component<{ peer: LightCyclesPeer }>(function* (props) {
         {hud.value?.waiting === true && (
           <div class="attract">
             <p class="attract__headline">
-              {hud.value?.blocked != null
-                ? 'cannot start'
-                : (hud.value?.present ?? 1) > 1
-                  ? 'get ready'
-                  : 'waiting for a player'}
+              {(hud.value?.present ?? 1) > 1 ? 'get ready' : 'waiting for a player'}
             </p>
-            {hud.value?.blocked == null && (
-              <p class="attract__hint">send this link to whoever is playing</p>
-            )}
+            <p class="attract__hint">send this link to whoever is playing</p>
             {/* The whole URL, not just the code: the room round-trips
                 through `location.hash` (see `Lobby.tsx`), so this link is
                 all the other player needs — and it is the one thing on

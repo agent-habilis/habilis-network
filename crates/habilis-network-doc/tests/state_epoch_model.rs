@@ -365,7 +365,7 @@ impl Sim {
         let mut replays: Vec<(usize, Value, StampedPaths)> = Vec::new();
         for (index, node) in self.nodes.iter_mut().enumerate() {
             let me = node.name.clone();
-            let switched = node.doc.tick_epoch(&me);
+            let switched = node.doc.tick_epoch(&AuthorKey::from(pad(me.as_str())));
             if let Some(switch) = switched
                 && let Some(patch) = switch.replay
             {

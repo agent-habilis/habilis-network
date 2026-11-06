@@ -17,7 +17,7 @@ use tokio::task::spawn_blocking;
 use crate::doc::{DocError, MeshDoc, SeedChain, SeedPlan, Stamp, StampedPaths, wire};
 use crate::protocol::identity::Identity;
 use crate::protocol::messages::{Verified, WireFrame};
-use crate::protocol::{Channel, MeshId, Message, Nickname, SymmetricKey};
+use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname, SymmetricKey};
 use crate::transport::MeshSender;
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::clock::Instant;
@@ -55,35 +55,36 @@ pub(crate) struct SeedOutcome {
 }
 
 /// The position of this node among the nodes that it sees alive, in the order that the epoch gives:
-/// the nicknames of the live peers and our own are mixed with the epoch and sorted, so the nodes
+/// the keys of the live peers and our own are mixed with the epoch and sorted, so the nodes
 /// that hold the same roster agree on who is first, and the first one cuts at once (see
 /// `MeshDoc::cut_due`). A node that is quiet does not count. The view is soft: a node that
 /// misses a peer delays or doubles a cut and never blocks it.
 pub(crate) fn rank_of(
-    me: &Nickname,
-    peers: &HashSet<Nickname>,
-    quiet: &BoundedFifoSet<Nickname>,
+    me: &AuthorKey,
+    peers: &HashSet<AuthorKey>,
+    quiet: &BoundedFifoSet<AuthorKey>,
     epoch: u64,
 ) -> usize {
-    let mine = (mix(me, epoch), me.as_str());
+    let mine = (mix(me, epoch), me);
     let mut ahead = 0;
     for peer in peers {
         if peer == me || quiet.contains(peer) {
             continue;
         }
-        if (mix(peer, epoch), peer.as_str()) < mine {
+        if (mix(peer, epoch), peer) < mine {
             ahead += 1;
         }
     }
     ahead
 }
 
-/// A hash of the nickname and the epoch that every node computes alike (FNV-1a over the bytes of
-/// the nickname, then the epoch spread over the 64 bits).
-fn mix(nickname: &Nickname, epoch: u64) -> u64 {
+/// A hash of the key and the epoch that every node computes alike (FNV-1a over the bytes of the
+/// key, then the epoch spread over the 64 bits). The rank is by key, so two live keys of one
+/// nickname are two nodes.
+fn mix(key: &AuthorKey, epoch: u64) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in nickname.as_str().bytes() {
-        hash ^= u64::from(byte);
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash ^ epoch.wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -255,9 +256,10 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     if !state.doc(Channel::State).has_state_epochs() {
         return;
     }
+    let own_key = state.identity.author_key();
     let doc = state.doc_mut(Channel::State);
     let epoch = doc.epoch();
-    let switch = doc.tick_epoch(me);
+    let switch = doc.tick_epoch(&own_key);
     for key in doc.take_dropped() {
         state.seen.remove(&key);
     }
@@ -278,7 +280,7 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     if state.seed_job.is_some() || !state.overlay_reachable() {
         return;
     }
-    let rank = rank_of(me, &state.peers, &state.quiet, epoch);
+    let rank = rank_of(&own_key, &state.peers, &state.quiet, epoch);
     if !state.doc(Channel::State).cut_due(rank) {
         return;
     }
@@ -573,16 +575,16 @@ mod tests {
     use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp};
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::Verified;
-    use crate::protocol::{Channel, MeshId, Message, Nickname};
+    use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
     use crate::testing;
     use crate::util::bounded_fifo_set::BoundedFifoSet;
     use crate::util::tuning::PENDING_OUTBOUND_CAP;
 
-    fn roster(names: &[&str]) -> HashSet<Nickname> {
-        names.iter().map(|name| testing::nick(name)).collect()
+    fn roster(names: &[&str]) -> HashSet<AuthorKey> {
+        names.iter().map(|name| testing::test_key(name)).collect()
     }
 
-    fn no_quiet() -> BoundedFifoSet<Nickname> {
+    fn no_quiet() -> BoundedFifoSet<AuthorKey> {
         BoundedFifoSet::new(16)
     }
 
@@ -592,7 +594,7 @@ mod tests {
         let names = ["alice", "bob", "carol", "dave", "erin"];
         let mut ranks: Vec<usize> = Vec::new();
         for name in names {
-            let me = testing::nick(name);
+            let me = testing::test_key(name);
             let others: Vec<&str> = names
                 .iter()
                 .copied()
@@ -610,11 +612,11 @@ mod tests {
 
     #[test]
     fn a_quiet_peer_does_not_count_and_the_epoch_changes_the_order() {
-        let me = testing::nick("alice");
+        let me = testing::test_key("alice");
         let peers = roster(&["bob", "carol", "dave"]);
         let mut quiet = no_quiet();
         for peer in &peers {
-            quiet.insert(peer.clone());
+            quiet.insert(*peer);
         }
         assert_eq!(
             rank_of(&me, &peers, &quiet, 3),
@@ -746,7 +748,7 @@ mod tests {
         for (signed, _bytes) in &frames {
             joiner.ingest(signed);
         }
-        let waiting = testing::nick("joiner");
+        let waiting = testing::test_key("joiner");
         for _ in 0..5 {
             joiner.tick_epoch(&waiting);
         }
@@ -856,7 +858,9 @@ mod tests {
         doc.finish_sync();
         write_leaves(&mut doc, &identity, &me, 1_700);
         state.state_doc = doc.limits(Limits::with_seed_frames(40));
-        state.doc_mut(Channel::State).tick_epoch(&me);
+        state
+            .doc_mut(Channel::State)
+            .tick_epoch(&identity.author_key());
         assert!(
             state.doc(Channel::State).cut_due(0),
             "the document is over the ceiling, so a cut is due"
@@ -1176,7 +1180,7 @@ mod tests {
         for frame in &seed {
             third.ingest(frame);
         }
-        let waiter = testing::nick("third");
+        let waiter = testing::test_key("third");
         for _ in 0..5 {
             third.tick_epoch(&waiter);
         }
@@ -1238,7 +1242,7 @@ mod tests {
             third.ingest(frame);
         }
         for _ in 0..5 {
-            third.tick_epoch(&testing::nick("third"));
+            third.tick_epoch(&testing::test_key("third"));
         }
         for (frame, _bytes) in &frames {
             third.ingest(frame);
