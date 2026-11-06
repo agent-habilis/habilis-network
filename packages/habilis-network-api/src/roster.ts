@@ -58,20 +58,25 @@ export function parseRoster(json: string): Peer[] {
 }
 
 /**
- * The arrivals and departures between two rosters.
+ * The arrivals and departures between two rosters, by key.
  *
- * Sorted, so two peers watching the same mesh print the same transcript in the
- * same order. Leaves before joins, because a nickname that was released and
- * retaken in one interval reads as a departure followed by an arrival, not the
- * reverse.
+ * A nickname is a label that two live peers can share, so a diff by nickname would give one
+ * arrival for two keys. A key that changes its nickname is the same peer and gives no event.
+ *
+ * Sorted, so two peers watching the same mesh print the same transcript in the same order. Leaves
+ * before joins, because a nickname that was released and retaken in one interval reads as a
+ * departure followed by an arrival, not the reverse. Two events of one nickname are ordered by key.
  */
 export function rosterPresence(before: readonly Peer[], after: readonly Peer[]): MeshEvent[] {
-  const had = new Set(before.map((peer) => peer.nick))
-  const has = new Set(after.map((peer) => peer.nick))
-  const left = [...had].filter((nick) => !has.has(nick)).sort()
-  const joined = [...has].filter((nick) => !had.has(nick)).sort()
+  const had = new Set(before.map((peer) => peer.key))
+  const has = new Set(after.map((peer) => peer.key))
+  // Code-unit order, as the default sort was: the same transcript on every locale.
+  const order = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+  const byNickThenKey = (a: Peer, b: Peer) => order(a.nick, b.nick) || order(a.key, b.key)
+  const left = before.filter((peer) => !has.has(peer.key)).sort(byNickThenKey)
+  const joined = after.filter((peer) => !had.has(peer.key)).sort(byNickThenKey)
   return [
-    ...left.map((nick): MeshEvent => ({ kind: 'left', nick })),
-    ...joined.map((nick): MeshEvent => ({ kind: 'joined', nick })),
+    ...left.map((peer): MeshEvent => ({ kind: 'left', nick: peer.nick })),
+    ...joined.map((peer): MeshEvent => ({ kind: 'joined', nick: peer.nick })),
   ]
 }

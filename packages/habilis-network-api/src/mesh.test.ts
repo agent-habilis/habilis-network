@@ -9,11 +9,16 @@ function keyOf(index: number): string {
   return index.toString(16).padStart(64, '0')
 }
 
+/** The key of a nickname in a fixture: the same on every roster, so a peer keeps its key. */
+function keyFor(nick: string): string {
+  return Buffer.from(nick).toString('hex').padEnd(64, '0')
+}
+
 function roster(...peers: string[]): string {
   return JSON.stringify({
-    peers: peers.map((nickname, index) => ({
+    peers: peers.map((nickname) => ({
       nickname,
-      key: keyOf(index),
+      key: keyFor(nickname),
       last_seen_secs_ago: 1,
       quiet: false,
       reach: 'direct',
@@ -148,7 +153,7 @@ describe('messages', () => {
   test('a peer of the roster carries its key', async () => {
     const { mesh } = await fake({ peers: ['ana', 'bo'] })
 
-    expect(mesh.peers.map((peer) => peer.key)).toEqual([keyOf(0), keyOf(1)])
+    expect(mesh.peers.map((peer) => peer.key)).toEqual([keyFor('ana'), keyFor('bo')])
   })
 
   test('send hands the text and the addressee to the backend', async () => {
