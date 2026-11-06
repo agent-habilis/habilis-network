@@ -782,7 +782,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
 /// [`retain_own_broadcast`](super::recv::retain_own_broadcast) for why a node
 /// that does not hold its own presence makes anti-entropy unconvergeable.
 pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
+    let joined = state.own_joined(context.mesh, context.author);
     broadcast_msg(context.sender, &joined).await;
     super::recv::retain_own_broadcast(state, joined);
     broadcast_peer_info(state, context).await;

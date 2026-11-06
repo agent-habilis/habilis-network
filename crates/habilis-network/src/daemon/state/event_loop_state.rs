@@ -497,7 +497,7 @@ pub struct EventLoopState {
     /// non-unique display label (see `docs/history-integrity.md`).
     pub(crate) identity: Arc<Identity>,
     /// The key that survives a restart. It signs the proof of this session and nothing else.
-    pub(crate) member_identity: Arc<Identity>,
+    pub(crate) member_identity: Option<Arc<Identity>>,
     /// Our own per-author log cursor (Phase 2): `self_seq` is the next
     /// `Msg` sequence number to emit, `self_prev` the content hash of our
     /// last sent `Msg` (`None` until the first). Advanced on every send so
@@ -1758,15 +1758,32 @@ impl EventLoopState {
         self.mint_mesh.as_ref()
     }
 
-    /// The proof that this session speaks as `nickname` on `mesh` in run `run`.
+    /// The proof that this session speaks as `nickname` on `mesh` in run `run`. A node with no
+    /// member key has none.
     #[must_use]
-    pub(crate) fn own_proof(&self, nickname: &Nickname, mesh: &MeshId, run: u64) -> IdentityProof {
-        self.member_identity.prove(
+    pub(crate) fn own_proof(
+        &self,
+        nickname: &Nickname,
+        mesh: &MeshId,
+        run: u64,
+    ) -> Option<IdentityProof> {
+        let member = self.member_identity.as_ref()?;
+        Some(member.prove(
             &self.identity.author_key(),
             nickname.as_ref(),
             mesh.as_ref(),
             run,
-        )
+        ))
+    }
+
+    /// The `joined` frame this node announces: signed by the session key, with the proof of the
+    /// session in the body.
+    pub(crate) fn own_joined(&self, mesh: &MeshId, nickname: &Nickname) -> Verified {
+        let joined = match self.own_proof(nickname, mesh, self.run) {
+            Some(proof) => Message::new_joined_with_proof(mesh, nickname, &proof),
+            None => Message::new_joined(mesh, nickname),
+        };
+        joined.sign(&self.identity)
     }
 
     /// The request to send for an `alive` frame whose session this node holds no proof for. It asks
@@ -1805,7 +1822,7 @@ impl EventLoopState {
         if request_to != own || !self.proofs.may_answer(asker, now, self.peers.len()) {
             return None;
         }
-        let proof = self.own_proof(own, mesh, self.run);
+        let proof = self.own_proof(own, mesh, self.run)?;
         Some(Message::new_joined_with_proof(mesh, own, &proof).sign(&self.identity))
     }
 

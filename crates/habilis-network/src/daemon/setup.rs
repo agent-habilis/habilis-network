@@ -661,16 +661,6 @@ fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
     Ok(identity)
 }
 
-/// A target with no files (wasm, or a build without `host`) mints a new key, as it always did.
-#[cfg(not(all(unix, feature = "host")))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the same signature as the file-backed version, so the caller is one call"
-)]
-fn load_or_create_identity(_state: Option<&Path>) -> Result<identity::Identity> {
-    Ok(identity::Identity::generate())
-}
-
 /// The run number of this start, kept in `<state>.run`. It counts up by 1 at each start and never
 /// reads the clock, so a clock that went back cannot make a newer run look older. The one exception
 /// is a lost file: then the count restarts from the clock (see `counter_lost`). No state file means
@@ -730,6 +720,26 @@ fn next_run(_state: Option<&Path>) -> Result<u64> {
     Ok(1)
 }
 
+/// The member key of this node, kept in the state file. A target with no files (wasm, or a build
+/// without `host`) has none: a key made at each start would prove nothing across restarts.
+#[cfg(all(unix, feature = "host"))]
+// the key is shared with the loop and its handlers, which hold clones
+fn member_key(state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identity>>> {
+    // shared with the loop and its handlers, which hold clones
+    Ok(Some(sync::Arc::new(load_or_create_identity(state)?)))
+}
+
+/// A target with no files has no member key.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the version for a target with files"
+)]
+// the key is shared with the loop and its handlers, which hold clones
+fn member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identity>>> {
+    Ok(None)
+}
+
 /// The keys of this run. The member key comes from the state file. The session key is the one that
 /// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
 /// would start the same actor again at sequence 1.
@@ -737,8 +747,7 @@ fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
     Ok(RunKeys {
         // shared with the loop and its handlers, which hold clones
         session: sync::Arc::new(identity::Identity::generate()),
-        // shared with the loop and its handlers, which hold clones
-        member: sync::Arc::new(load_or_create_identity(state)?),
+        member: member_key(state)?,
         run: next_run(state)?,
     })
 }
@@ -1224,8 +1233,15 @@ async fn setup_join(
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    use crate::daemon::state::RunKeys;
+    use crate::protocol::AuthorKey;
     use std::path::{Path, PathBuf};
     use std::{env, fs, process};
+
+    fn member_of(keys: &RunKeys) -> AuthorKey {
+        let member = keys.member.as_ref().expect("a member key");
+        member.author_key()
+    }
 
     /// A temp dir that goes away when the test ends, also when an assert fails.
     struct TempDir(PathBuf);
@@ -1338,8 +1354,8 @@ mod tests {
         let first = super::run_keys(Some(&state)).expect("first start");
         let second = super::run_keys(Some(&state)).expect("restart");
         assert_eq!(
-            first.member.author_key(),
-            second.member.author_key(),
+            member_of(&first),
+            member_of(&second),
             "the restart keeps the member key"
         );
         assert_ne!(
@@ -1349,7 +1365,7 @@ mod tests {
         );
         assert_ne!(
             first.session.author_key(),
-            first.member.author_key(),
+            member_of(&first),
             "the session key is not the member key"
         );
         assert_eq!(
