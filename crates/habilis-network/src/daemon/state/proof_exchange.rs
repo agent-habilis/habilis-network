@@ -118,7 +118,9 @@ impl ProofExchange {
         self.book.allow_answer_to(asker, now, cap)
     }
 
-    /// How many proofs this node refused because their run did not beat the held run.
+    /// How many proofs this node refused because their run did not beat the held run. A proof is
+    /// counted before its signature is checked, so a bad proof of a held session counts too; only
+    /// the holder of the session key can send one. A copy of the held proof is not counted.
     pub(crate) fn ties_refused(&self) -> u64 {
         self.ties_refused
     }
