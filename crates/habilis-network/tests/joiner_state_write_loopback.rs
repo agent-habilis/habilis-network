@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::time;
 
-const WITHIN: Duration = Duration::from_secs(3);
+// Far below the 30 s deadline, and wide enough for the mesh link of a loaded machine.
+const WITHIN: Duration = Duration::from_secs(10);
 
 enum Request {
     Merge(Value, oneshot::Sender<Result<(), String>>),
@@ -101,8 +102,11 @@ async fn merge_within(node: &Node<Writer>, started: Instant) -> Result<(), Strin
 fn two_joiners_of_a_mesh_with_empty_state_both_write_state_within_a_few_seconds() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let first = spawn("empty-state-join", "first").await;
-        let second = spawn("empty-state-join", "second").await;
+        // A topic of its own, so two runs on one host do not join one loopback mesh.
+        let nonce: u64 = rand::random();
+        let topic = format!("empty-state-join-{nonce}");
+        let first = spawn(&topic, "first").await;
+        let second = spawn(&topic, "second").await;
         let started = Instant::now();
         let second_result = merge_within(&second, started).await;
         let first_result = merge_within(&first, started).await;

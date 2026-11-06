@@ -356,12 +356,6 @@ pub(crate) fn sync_deadline(state: &mut EventLoopState) {
     }
     state.doc_mut(Channel::State).finish_sync();
     let limit_secs = tuning::state_sync_wait().as_secs();
-    // A node with no peer (the first member of a topic, or a mesh that has not met yet) had nobody
-    // to answer: that is no fault, so only a node with peers warns.
-    if state.peers.is_empty() {
-        tracing::info!(target: "habilis_network::gossip", limit_secs, "the node has no peer to sync the state channel with, so it writes with the clock that it has");
-        return;
-    }
     tracing::warn!(target: "habilis_network::gossip", limit_secs, "no peer answered the digest of the state channel within the time limit, so the node writes with the clock that it has; a write that it made before a restart can win against its new ones");
 }
 
@@ -716,7 +710,7 @@ mod tests {
         assert!(outcome.chain.is_ok(), "the seed is built");
         // The build runs on a thread: the loop ticks for at least half of the time that it took,
         // however fast the machine builds. A build on the loop would give 1 tick.
-        let expected = outcome.took.as_millis() / 10;
+        let expected = (outcome.took.as_millis() / 10).max(4);
         assert!(
             u128::from(ticks) * 2 >= expected,
             "the loop ticked {ticks} times while the seed of 3 000 leaves was built in {:?}",
@@ -1000,7 +994,6 @@ mod tests {
             "no peer answered the digest of the state channel within the time limit",
         );
         let mut state = state_that_waits_for_the_first_sync();
-        state.peers.insert(testing::nick("peer"));
         sync_deadline(&mut state);
         assert!(
             state.doc(Channel::State).is_awaiting_first_sync(),
@@ -1011,20 +1004,6 @@ mod tests {
         assert!(
             !state.doc(Channel::State).is_awaiting_first_sync(),
             "at the deadline the node writes with the clock that it has"
-        );
-    }
-
-    /// A node with no peer at its deadline has nobody that did not answer: no warning (the guard of
-    /// the test tracing fails a test on a WARN that it did not expect).
-    #[test]
-    fn a_node_with_no_peer_ends_the_wait_at_its_deadline_without_a_warning() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = state_that_waits_for_the_first_sync();
-        state.state_sync_deadline = Instant::now();
-        sync_deadline(&mut state);
-        assert!(
-            !state.doc(Channel::State).is_awaiting_first_sync(),
-            "the node writes with the clock that it has"
         );
     }
 

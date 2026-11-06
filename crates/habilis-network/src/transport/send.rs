@@ -993,6 +993,45 @@ mod tests {
         });
     }
 
+    /// The closing digest of a peer ends the first-sync wait only when it came point-to-point: on
+    /// gossip it is the answer of no request of this node.
+    #[test]
+    fn a_closing_digest_ends_the_first_sync_wait_only_when_it_came_on_unicast() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::doc::MeshDoc;
+            use crate::gossip::antientropy;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_doc = MeshDoc::new_state(None);
+            let bob = Identity::generate();
+            let body = MessageBody::try_new(
+                &serde_json::json!({ "heads": [], "closing": true }).to_string(),
+            )
+            .expect("a JSON body");
+            let closing =
+                Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State)
+                    .sign(&bob);
+
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
+                .await;
+            assert!(
+                state.doc(Channel::State).is_awaiting_first_sync(),
+                "a closing digest on gossip is no answer to the request of this node"
+            );
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
+                .await;
+            assert!(
+                !state.doc(Channel::State).is_awaiting_first_sync(),
+                "on unicast it is the answer"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
     /// A peer holds every change it signed, since a change's actor is its
     /// signer's key and a session key lives no longer than its document. So
     /// its own changes are never missing from it, even when it advertises

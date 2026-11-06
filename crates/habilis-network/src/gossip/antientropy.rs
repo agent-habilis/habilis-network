@@ -632,7 +632,9 @@ async fn ask(
 }
 
 /// A digest's heads as the serve budget keys them: its body is the heads. The
-/// same heads in another order hash differently and get one more answer.
+/// same heads in another order hash differently and get one more answer, and so
+/// does a `first` request, whose body differs from a plain request with the
+/// same heads by the flag: it has its own key, and at most one more answer.
 fn heads_key(digest: &Message) -> u64 {
     let mut hasher = hash_map::DefaultHasher::new();
     digest.body.as_str().hash(&mut hasher);
