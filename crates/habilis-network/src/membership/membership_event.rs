@@ -48,11 +48,15 @@ pub enum MembershipEvent {
     Joined {
         /// The nickname of the member.
         nick: String,
+        /// The key of the member: 64 lowercase hex digits. Two members can share a nickname.
+        key: String,
     },
     /// A member left.
     Left {
         /// The nickname of the member.
         nick: String,
+        /// The key of the member: 64 lowercase hex digits. Two members can share a nickname.
+        key: String,
     },
     /// Heartbeat-evicted past `ALIVE_TIMEOUT`. Deliberately **not** `left`:
     /// the peer is still in the roster with `quiet: true`, and folding the two
@@ -61,6 +65,8 @@ pub enum MembershipEvent {
     Quiet {
         /// The nickname of the member.
         nick: String,
+        /// The key of the member: 64 lowercase hex digits. Two members can share a nickname.
+        key: String,
         /// Seconds since the member was last heard from.
         last_seen_secs_ago: u64,
     },
@@ -68,6 +74,8 @@ pub enum MembershipEvent {
     Returned {
         /// The nickname of the member.
         nick: String,
+        /// The key of the member: 64 lowercase hex digits. Two members can share a nickname.
+        key: String,
     },
     /// A peer's per-author hash chain forked — two signed messages at one `seq`.
     Fork {
@@ -121,7 +129,7 @@ fn classify(event: NodeEvent) -> Option<MembershipEvent> {
                 nick: nickname.to_string(),
             })
         }
-        NodeEvent::Presence { message, .. } => {
+        NodeEvent::Presence { message, peer, .. } => {
             // The engine emits this for a peer's own `joined` frame, for a
             // `Left`, and — the reliable case — for the *first frame of any
             // kind* from a peer it has not surfaced yet, since a one-shot
@@ -129,6 +137,7 @@ fn classify(event: NodeEvent) -> Option<MembershipEvent> {
             // `crates/habilis-network/src/lifecycle/mod.rs`. A `matches!` splits them; a
             // `match` would need a wildcard over every `MessageKind`.
             let nick = message.author.to_string();
+            let key = peer.to_string();
             Some(
                 if matches!(
                     message.kind,
@@ -136,22 +145,24 @@ fn classify(event: NodeEvent) -> Option<MembershipEvent> {
                         subtype: PresenceSubtype::Left
                     }
                 ) {
-                    MembershipEvent::Left { nick }
+                    MembershipEvent::Left { nick, key }
                 } else {
-                    MembershipEvent::Joined { nick }
+                    MembershipEvent::Joined { nick, key }
                 },
             )
         }
         NodeEvent::PeerTimeout {
             nickname,
+            key,
             last_seen_secs_ago,
-            ..
         } => Some(MembershipEvent::Quiet {
             nick: nickname.to_string(),
+            key: key.to_string(),
             last_seen_secs_ago,
         }),
-        NodeEvent::PeerReturn { nickname, .. } => Some(MembershipEvent::Returned {
+        NodeEvent::PeerReturn { nickname, key } => Some(MembershipEvent::Returned {
             nick: nickname.to_string(),
+            key: key.to_string(),
         }),
         NodeEvent::Fork {
             nickname,
@@ -235,4 +246,73 @@ pub fn json_sink() -> (Arc<impl NodeSink>, mpsc::UnboundedReceiver<String>) {
     let (events, queue) = mpsc::unbounded_channel();
     // the sink is shared with the caller, which passes it to join
     (Arc::new(JsonSink { events }), queue)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::embed::{NodeEvent, NodeSink};
+    use crate::membership;
+    use crate::protocol::{Identity, MeshId, Message, Nickname};
+
+    /// The JSON that the sink queues for `event`.
+    fn emitted(event: NodeEvent) -> serde_json::Value {
+        let (sink, mut queue) = membership::json_sink();
+        sink.emit(event);
+        let json = queue.try_recv().expect("the sink queued the event");
+        serde_json::from_str(&json).expect("the event is JSON")
+    }
+
+    /// A nickname is a label that two live peers can share, so an event that names a peer by its
+    /// nickname alone cannot tell the two apart. Each event about a peer carries its key.
+    #[test]
+    fn each_event_about_a_peer_names_its_key() {
+        let identity = Identity::generate();
+        let key = identity.author_key();
+        let hex: String = key.to_string();
+        let nickname = Nickname::from("twin");
+        let mesh = MeshId::from("test");
+        let joined = Message::new_joined(&mesh, &nickname).sign(&identity);
+        let left = Message::new_left(&mesh, &nickname).sign(&identity);
+        let events: [(&str, NodeEvent); 4] = [
+            (
+                "joined",
+                NodeEvent::Presence {
+                    message: Box::new(joined.authored()),
+                    peer: key,
+                    synthetic: false,
+                },
+            ),
+            (
+                "left",
+                NodeEvent::Presence {
+                    message: Box::new(left.authored()),
+                    peer: key,
+                    synthetic: false,
+                },
+            ),
+            (
+                "quiet",
+                NodeEvent::PeerTimeout {
+                    nickname: nickname.clone(),
+                    key,
+                    last_seen_secs_ago: 95,
+                },
+            ),
+            ("returned", NodeEvent::PeerReturn { nickname, key }),
+        ];
+        for (kind, event) in events {
+            let json = emitted(event);
+            assert_eq!(json["kind"].as_str(), Some(kind), "the kind of the event");
+            assert_eq!(
+                json["key"].as_str(),
+                Some(hex.as_str()),
+                "the {kind} event does not name the key: {json}"
+            );
+            assert_eq!(
+                json["nick"].as_str(),
+                Some("twin"),
+                "the {kind} event lost its nickname: {json}"
+            );
+        }
+    }
 }
