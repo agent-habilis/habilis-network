@@ -163,6 +163,7 @@ async fn run_checked<Driver: NodeDriver>(
         started,
         state_file,
     );
+    seed_job::creator_has_nothing_to_sync(&mut state, mesh.is_creator);
     let owned = OwnedEndpoints {
         router: endpoints.router,
         owner: endpoints.endpoint_owner,
@@ -431,8 +432,6 @@ fn initial_state(
         started,
     );
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
-    let is_creator = state.mint_mesh.is_some();
-    seed_job::creator_has_nothing_to_sync(&mut state, is_creator);
     state
 }
 

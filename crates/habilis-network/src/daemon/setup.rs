@@ -547,6 +547,8 @@ struct Assembled {
     /// The invite-only creator's mesh (with its in-memory issuer key + root),
     /// retained so `invite` can mint. `Some` only on an invite-only creator.
     mint_mesh: Option<Mesh>,
+    /// True for the node that created the mesh: it has no peer to sync its state with.
+    is_creator: bool,
     /// The multi-hop transport handle when the mesh policy has `multihop`, threaded
     /// into `EventLoopState` so the link-state tick can feed its routing table.
     /// Present with the `multihop` feature; the native underlay builder that fills
@@ -810,6 +812,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         mesh_password,
         mesh_key,
         mint_mesh,
+        is_creator,
         #[cfg(feature = "multihop")]
             multihop: multihop_handle,
         #[cfg(feature = "multihop")]
@@ -821,7 +824,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         webrtc_ice,
         topic_string,
     } = assemble(kind, &build, injected).await?;
-
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
 
@@ -831,6 +833,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             name: mesh_name,
             topic_string,
             mint_mesh,
+            is_creator,
             author,
             // The mesh spec and the loop state both hold the keys, so they are shared.
             keys: run_keys(state_file.as_deref())?,
@@ -1091,6 +1094,7 @@ async fn setup_create(
         mesh_password,
         mesh_key,
         mint_mesh,
+        is_creator: true,
         #[cfg(feature = "multihop")]
         multihop,
         #[cfg(feature = "multihop")]
@@ -1200,6 +1204,7 @@ async fn setup_join(
         // A joiner holds no issuer key, so it can never mint — even after
         // redeeming an invite-only mesh.
         mint_mesh: None,
+        is_creator: false,
         #[cfg(feature = "multihop")]
         multihop,
         #[cfg(feature = "multihop")]

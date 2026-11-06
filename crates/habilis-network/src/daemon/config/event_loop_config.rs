@@ -77,6 +77,9 @@ pub(crate) struct MeshSpec {
     /// only on the creator of an invite-only mesh; `None` everywhere else (a
     /// joiner holds no issuer key, so it could never mint).
     pub(crate) mint_mesh: Option<Mesh>,
+    /// True on the node that created the mesh (invite-only or not): it has no peer to sync its
+    /// state with, so its state document does not wait for a first sync.
+    pub(crate) is_creator: bool,
     pub(crate) author: Nickname,
     /// The two keys of this run (Ed25519), made in `setup_mesh`: a session key that is new each
     /// run, and a member key that a restart keeps (see [`crate::protocol::identity`]).
