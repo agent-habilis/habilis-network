@@ -294,10 +294,10 @@ fn holder_names(log: &str) -> Vec<&str> {
     }
     // The host serves the rendezvous and never releases it, so its own link events after the
     // crash say nothing about a return.
-    let hosts = beacon_hosts(log);
+    let host = current_beacon_host(log);
     let mut names: Vec<&str> = Vec::new();
     for (local, up) in last_is_up {
-        if up && !hosts.contains(&local) {
+        if up && Some(local) != host {
             names.push(local);
         }
     }
@@ -305,19 +305,15 @@ fn holder_names(log: &str) -> Vec<&str> {
     names
 }
 
-/// The nodes that serve the rendezvous, by name: those that log "beacon role active".
-fn beacon_hosts(log: &str) -> Vec<&str> {
-    let mut hosts = Vec::new();
-    for line in log.lines() {
-        if !line.contains("beacon role active") {
-            continue;
-        }
-        let rest = line.split("node=").nth(1);
-        if let Some(host) = rest.and_then(|rest| rest.split_whitespace().next()) {
-            hosts.push(host);
-        }
-    }
-    hosts
+/// The node that serves the rendezvous at the end of the log: the last one that logs "beacon role
+/// active". A node that held the role before and lost it is a member like any other.
+fn current_beacon_host(log: &str) -> Option<&str> {
+    let line: &str = log
+        .lines()
+        .rev()
+        .find(|line| line.contains("beacon role active"))?;
+    let rest = line.split("node=").nth(1)?;
+    rest.split_whitespace().next()
 }
 
 /// For each member that still holds the rendezvous, its events about the rendezvous after the
@@ -414,6 +410,26 @@ fn the_beacon_host_is_no_holder_when_its_own_link_flaps_after_the_crash() {
         holder_names(&log),
         vec!["one"],
         "only the member that came back holds the link"
+    );
+}
+
+/// The beacon role can move. A node that held it before the crash and lost it is a member like
+/// any other, and its link to the rendezvous after the crash is a return that must end.
+#[test]
+fn a_node_that_lost_the_beacon_role_is_a_holder_again() {
+    let rendezvous = "endpoint_id=aa is_rendezvous=true";
+    let log: String = [
+        "beacon role active: serving the rendezvous node=old".to_owned(),
+        "member crashed".to_owned(),
+        "beacon role active: serving the rendezvous node=new".to_owned(),
+        format!("gossip neighbor up local=old {rendezvous}"),
+        format!("gossip neighbor up local=new {rendezvous}"),
+    ]
+    .join("\n");
+    assert_eq!(
+        holder_names(&log),
+        vec!["old"],
+        "the host at the end is no holder, and the node that lost the role is one"
     );
 }
 
