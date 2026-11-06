@@ -479,7 +479,7 @@ pub async fn broadcast_state_merge(
         Ingested::Duplicate => return Ok(()),
         Ingested::Rejected => {
             return Err(transport::SendError::internal(anyhow::anyhow!(
-                "write rejected: a member may only write its own /peers/<nick>/card"
+                "write rejected: a member may only write the gated field of the slot that its own key names"
             )));
         }
         Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),

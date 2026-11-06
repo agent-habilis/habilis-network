@@ -46,9 +46,8 @@ export const ABI = {
   habilis_network_mesh_peers_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },
   /**
    * Bound because the header declares it, and never called: `mesh.peers` needs
-   * the whole roster anyway, and this one excludes self where the roster
-   * document's own `count` includes it. Calling both would be two sources of
-   * truth that disagree by one.
+   * the whole roster anyway, and this count is the roster document's own
+   * `count`, self included. Calling both would read one fact twice.
    */
   habilis_network_mesh_peer_count: { args: ['ptr'], returns: 'isize' },
 
