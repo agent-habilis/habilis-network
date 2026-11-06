@@ -3005,7 +3005,7 @@ mod first_contact_tests {
             let text = frame.serialize().expect("serialize").into_bytes();
             let old = String::from_utf8(text.to_vec())
                 .expect("a frame is text")
-                .replacen(r#""v":"13.0""#, r#""v":"12.0""#, 1);
+                .replacen(r#""v":"14.0""#, r#""v":"12.0""#, 1);
             assert!(old.contains("12.0"), "the test frame names version 12.0");
 
             ingest(Bytes::from(old.clone()), &mut state, &mut app, &context).await;
@@ -3058,7 +3058,7 @@ mod first_contact_tests {
             let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
             let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
             let version = format!(r"\u0007\u001b[31m{}", "x".repeat(500));
-            let hostile = text.replacen(r#""v":"13.0""#, &format!(r#""v":"{version}""#), 1);
+            let hostile = text.replacen(r#""v":"14.0""#, &format!(r#""v":"{version}""#), 1);
 
             ingest(Bytes::from(hostile), &mut state, &mut app, &context).await;
 
@@ -3115,7 +3115,7 @@ mod first_contact_tests {
 
             // Two passes over `cap + 1` versions: an evicting set names every frame of both.
             for version in (0..=cap).chain(0..=cap) {
-                let other = text.replacen(r#""v":"13.0""#, &format!(r#""v":"v{version}""#), 1);
+                let other = text.replacen(r#""v":"14.0""#, &format!(r#""v":"v{version}""#), 1);
                 ingest(Bytes::from(other), &mut state, &mut app, &context).await;
             }
 
@@ -5684,11 +5684,10 @@ mod dedup_counter_tests {
             "the reset"
         );
         let seed = *sender_identity.public().as_bytes();
+        let slot = sender_identity.author_key().to_string();
+        let merge = json!({"peers": {(slot.clone()): {"card": "from epoch 1"}}});
         let change = writer
-            .build_change(
-                &json!({"peers": {"sender": {"card": "from epoch 1"}}}),
-                &seed,
-            )
+            .build_change(&merge, &seed)
             .expect("a JSON object merges")
             .expect("a non-empty merge yields a change");
         let (body, _plain) = writer
@@ -5707,7 +5706,7 @@ mod dedup_counter_tests {
         assert_eq!(doc.epoch(), 1, "the reader adopted the epoch");
         assert_eq!(
             doc.to_json(),
-            json!({"peers": {"sender": {"card": "from epoch 1"}}}),
+            json!({"peers": {(slot): {"card": "from epoch 1"}}}),
             "the document holds the root frame of the new epoch"
         );
         assert!(

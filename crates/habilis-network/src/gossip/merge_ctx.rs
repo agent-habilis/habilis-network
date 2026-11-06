@@ -1387,6 +1387,7 @@ mod tests {
                     sink: &SilentSink,
                 };
                 let mut state = fresh_state();
+                let slot = state.identity.author_key().to_string();
                 state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
                 // The overlay is up, so a write goes to gossip, and gossip is stopped below.
                 state.standing.insert(Standing::Meshed);
@@ -1420,7 +1421,7 @@ mod tests {
                 );
                 assert_eq!(
                     state.doc(Channel::Meta).to_json(),
-                    serde_json::json!({ "peers": { "alice": entry } }),
+                    serde_json::json!({ "peers": { slot.as_str(): entry } }),
                     "each sweep wrote what was left, and the entry is whole"
                 );
                 node.close().await;
@@ -1484,6 +1485,7 @@ mod tests {
                     sink: &SilentSink,
                 };
                 let mut state = fresh_state();
+                let slot = state.identity.author_key().to_string();
                 state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
                 let entry = serde_json::json!({
                     "card": {"name": "alice"},
@@ -1493,8 +1495,8 @@ mod tests {
                 state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(entry)));
                 // The agent leaves its graph before the sweep, and sets a new status.
                 for merge in [
-                    serde_json::json!({"peers": {"alice": {"graph": null}}}),
-                    serde_json::json!({"peers": {"alice": {"status": "busy"}}}),
+                    serde_json::json!({"peers": {slot.as_str(): {"graph": null}}}),
+                    serde_json::json!({"peers": {slot.as_str(): {"status": "busy"}}}),
                 ] {
                     let params =
                         StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
@@ -1506,7 +1508,7 @@ mod tests {
                 write_entry_again(&mut state, &write).await;
 
                 let json = state.doc(Channel::Meta).to_json();
-                let written = &json["peers"]["alice"];
+                let written = &json["peers"][slot.as_str()];
                 assert!(
                     written.get("graph").is_none(),
                     "the deleted graph stays deleted"

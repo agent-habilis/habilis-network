@@ -579,12 +579,13 @@ mod tests {
         let mut writer = MeshDoc::new_gated(gate).epoch_cap(0);
         for _ in 0..epoch {
             assert!(
-                writer.tick_epoch(&testing::test_key(name)).is_some(),
+                writer.tick_epoch(&identity.author_key()).is_some(),
                 "a reset"
             );
         }
         let seed = *identity.public().as_bytes();
-        let merge = serde_json::json!({"peers": {name: {"card": "mine"}}});
+        let slot = identity.author_key().to_string();
+        let merge = serde_json::json!({"peers": {slot: {"card": "mine"}}});
         let change = writer
             .build_change(&merge, &seed)
             .expect("a JSON object merges")
