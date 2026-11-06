@@ -2320,7 +2320,7 @@ impl EventLoopState {
         {
             return None;
         }
-        Some(Message::new_proof_request(mesh, own, alive.author.clone()).sign(&self.identity))
+        Some(Message::new_proof_request(mesh, own, alive.key()).sign(&self.identity))
     }
 
     /// The request for the proof of `session` went out: its retry clock starts. A request that
@@ -2333,13 +2333,15 @@ impl EventLoopState {
     /// the request is for this node and the answers of the last minute are under the cap.
     pub(crate) fn proof_answer(
         &mut self,
-        request_to: &Nickname,
+        request_to: &AuthorKey,
         asker: &AuthorKey,
         own: &Nickname,
         mesh: &MeshId,
         now: Instant,
     ) -> Option<Verified> {
-        if request_to != own || !self.proofs.may_answer(asker, now, self.peers.len()) {
+        if *request_to != self.identity.author_key()
+            || !self.proofs.may_answer(asker, now, self.peers.len())
+        {
             return None;
         }
         let proof = self.own_proof(own, mesh, self.run)?;

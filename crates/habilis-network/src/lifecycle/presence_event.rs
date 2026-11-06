@@ -180,7 +180,7 @@ async fn ask_for_proof(alive: &Verified, state: &mut EventLoopState, context: &H
     let Some(request) = state.proof_request_for(alive, context.author, context.mesh) else {
         return;
     };
-    let member_endpoint = state.peer_endpoints.get(alive.author.as_str());
+    let member_endpoint = state.address_of(&alive.key());
     let warm_endpoint = member_endpoint
         .map(|address| address.id)
         .filter(|eid| Some(*eid) != state.rendezvous_id);

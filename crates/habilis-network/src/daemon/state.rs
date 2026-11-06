@@ -203,12 +203,12 @@ mod tests {
         let now = Instant::now();
         assert!(
             state
-                .proof_answer(&nick("bob"), &asker, &me, &mesh, now)
+                .proof_answer(&AuthorKey::from([7u8; 32]), &asker, &me, &mesh, now)
                 .is_none(),
             "a request for another node gets no answer"
         );
         let answer: messages::Verified = state
-            .proof_answer(&me, &asker, &me, &mesh, now)
+            .proof_answer(&state.identity.author_key(), &asker, &me, &mesh, now)
             .expect("a request for this node gets an answer");
         let proof = answer.joined_proof().expect("the answer holds a proof");
         assert!(
@@ -225,7 +225,10 @@ mod tests {
             .collect();
         let mut answered = 0;
         for other in &askers {
-            if state.proof_answer(&me, other, &me, &mesh, now).is_some() {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, now)
+                .is_some()
+            {
                 answered += 1;
             }
         }
@@ -252,7 +255,9 @@ mod tests {
             .expect("a roster member without a proof is asked");
         assert_eq!(
             request.kind,
-            protocol::MessageKind::ProofRequest { to: nick("bob") },
+            protocol::MessageKind::ProofRequest {
+                to: peer.identity.author_key()
+            },
             "the request names the member"
         );
         state.note_proof_request_sent(&alive.key());
@@ -300,11 +305,43 @@ mod tests {
         let mut answered = 0;
         for index in 0..96u8 {
             let asker = AuthorKey::from([index; 32]);
-            if state.proof_answer(&me, &asker, &me, &mesh, now).is_some() {
+            if state
+                .proof_answer(&state.identity.author_key(), &asker, &me, &mesh, now)
+                .is_some()
+            {
                 answered += 1;
             }
         }
         assert_eq!(answered, 96, "every asker of a mesh of 96 gets its answer");
+    }
+
+    /// A nickname is a label that two live sessions can share. A request names one session, and only
+    /// that session answers it: the other one holds the same nickname and stays silent.
+    #[test]
+    fn a_request_names_one_session_when_two_live_sessions_share_a_nickname() {
+        let (first, mut second) = (fresh_state(), fresh_state());
+        let mut joiner = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let (shared, joiner_name) = (nick("alice"), nick("bob"));
+        joiner.peers.insert(first.identity.author_key());
+        joiner.peers.insert(second.identity.author_key());
+        let alive: messages::Verified = Message::new_alive(&mesh, &shared).sign(&first.identity);
+
+        let request = joiner
+            .proof_request_for(&alive, &joiner_name, &mesh)
+            .expect("the joiner asks the first session");
+        let protocol::MessageKind::ProofRequest { to } = &request.kind else {
+            panic!("the joiner sent a proof request");
+        };
+        let now = Instant::now();
+        let asker = request.key();
+
+        assert!(
+            second
+                .proof_answer(to, &asker, &shared, &mesh, now)
+                .is_none(),
+            "the second session shares the nickname and is not the one that was asked"
+        );
     }
 
     /// Two nodes, end to end at state level: a joiner that missed the `joined` frame of a member
@@ -358,7 +395,10 @@ mod tests {
         let start = Instant::now();
         let mut answered = Vec::new();
         for other in &askers {
-            if state.proof_answer(&me, other, &me, &mesh, start).is_some() {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, start)
+                .is_some()
+            {
                 answered.push(*other);
             }
         }
@@ -379,7 +419,7 @@ mod tests {
         }
         for other in &refused {
             if state
-                .proof_answer(&me, other, &me, &mesh, retry_at)
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, retry_at)
                 .is_some()
             {
                 answered.push(*other);
@@ -424,7 +464,13 @@ mod tests {
         let asker = AuthorKey::from([9u8; 32]);
         assert!(
             state
-                .proof_answer(&me, &asker, &me, &mesh, Instant::now())
+                .proof_answer(
+                    &state.identity.author_key(),
+                    &asker,
+                    &me,
+                    &mesh,
+                    Instant::now()
+                )
                 .is_none(),
             "a node with no member key answers no request"
         );

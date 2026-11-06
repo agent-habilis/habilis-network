@@ -19,9 +19,7 @@ use crate::lifecycle::membership_update::MembershipUpdate;
 use crate::protocol::messages::{
     Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log,
 };
-use crate::protocol::{
-    AuthorKey, Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype,
-};
+use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
 use crate::{lifecycle, lookup};
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
@@ -984,12 +982,12 @@ async fn auto_pong(message: &Verified, state: &EventLoopState, context: &Handler
 /// fails after the slot was taken keeps the slot and the 60 s window of the asker, so the first retry
 /// that can work is the one at 90 s: the one at 30 s is refused.
 async fn answer_proof_request(
-    to: &Nickname,
+    to: &AuthorKey,
     message: &Verified,
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    let asker_endpoint = state.peer_endpoints.get(message.author.as_str());
+    let asker_endpoint = state.address_of(&message.key());
     let warm_endpoint = asker_endpoint
         .map(|address| address.id)
         .filter(|eid| Some(*eid) != state.rendezvous_id);
