@@ -191,6 +191,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
                     tracing::debug!(nickname = %nickname, age_secs = age, "peer evicted (silence timeout)");
                     sink.emit(NodeEvent::PeerTimeout {
                         nickname,
+                        key,
                         last_seen_secs_ago: age,
                     });
                 }

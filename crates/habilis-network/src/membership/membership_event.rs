@@ -145,11 +145,12 @@ fn classify(event: NodeEvent) -> Option<MembershipEvent> {
         NodeEvent::PeerTimeout {
             nickname,
             last_seen_secs_ago,
+            ..
         } => Some(MembershipEvent::Quiet {
             nick: nickname.to_string(),
             last_seen_secs_ago,
         }),
-        NodeEvent::PeerReturn { nickname } => Some(MembershipEvent::Returned {
+        NodeEvent::PeerReturn { nickname, .. } => Some(MembershipEvent::Returned {
             nick: nickname.to_string(),
         }),
         NodeEvent::Fork {

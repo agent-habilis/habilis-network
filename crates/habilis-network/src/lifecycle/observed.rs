@@ -149,6 +149,7 @@ pub(crate) fn observe(
         state.write_peer_count();
         context.sink.emit(NodeEvent::PeerReturn {
             nickname: message.author.clone(),
+            key,
         });
         tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer returned");
     }
@@ -191,6 +192,7 @@ pub(crate) fn observe(
         if state.clock_evidence.returned_unshown.remove(&key) {
             context.sink.emit(NodeEvent::PeerReturn {
                 nickname: message.author.clone(),
+                key,
             });
             tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer returned");
         } else {
@@ -301,19 +303,33 @@ mod churn_red {
 
     /// Keeps one line per surfaced lifecycle event, so a test reads what the operator would see.
     #[derive(Default)]
-    struct Recorder(Mutex<Vec<String>>);
+    struct Recorder {
+        lines: Mutex<Vec<String>>,
+        keys: Mutex<Vec<AuthorKey>>,
+    }
 
     impl Recorder {
         fn lines(&self) -> Vec<String> {
-            self.0.lock().expect("the recorder lock").clone()
+            self.lines.lock().expect("the recorder lock").clone()
+        }
+
+        /// The key that each timeout and each return named, in order.
+        fn keys(&self) -> Vec<AuthorKey> {
+            self.keys.lock().expect("the recorder lock").clone()
         }
     }
 
     impl NodeSink for Recorder {
         fn emit(&self, event: NodeEvent) {
             let line = match event {
-                NodeEvent::PeerTimeout { nickname, .. } => format!("timeout {nickname}"),
-                NodeEvent::PeerReturn { nickname } => format!("return {nickname}"),
+                NodeEvent::PeerTimeout { nickname, key, .. } => {
+                    self.keys.lock().expect("the recorder lock").push(key);
+                    format!("timeout {nickname}")
+                }
+                NodeEvent::PeerReturn { nickname, key } => {
+                    self.keys.lock().expect("the recorder lock").push(key);
+                    format!("return {nickname}")
+                }
                 NodeEvent::Presence {
                     message, synthetic, ..
                 } => format!(
@@ -327,7 +343,7 @@ mod churn_red {
                 | NodeEvent::PingReport { .. }
                 | NodeEvent::StateChanged { .. } => return,
             };
-            self.0.lock().expect("the recorder lock").push(line);
+            self.lines.lock().expect("the recorder lock").push(line);
         }
     }
 
@@ -2330,6 +2346,52 @@ mod churn_red {
                     .lapsed_quiet
                     .contains(&state.key_named(who.as_str())),
                 "a returned peer was read as lapsed"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The events of a member that goes quiet and returns name its key. A nickname is a label that
+    /// two keys can share, so a consumer that reads only the nickname cannot tell the two apart.
+    #[test]
+    fn a_timeout_and_a_return_name_the_key_of_the_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+
+            let hello = alive(
+                &rig.mesh,
+                &who,
+                &peer,
+                UnixSecs::now() - Duration::from_secs(30),
+            );
+            assert!(
+                receive(&hello, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let key = peer.author_key();
+            assert!(state.surfaced.contains(&key), "the peer was not shown");
+            let silent = Instant::now()
+                .checked_sub(alive_timeout() + Duration::from_secs(10))
+                .expect("the monotonic clock has run past the alive timeout since boot");
+            state.last_seen.insert(key, silent);
+            tick_sweep(&mut state, &rig.sink);
+
+            let back = alive(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&back, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+
+            assert_eq!(
+                rig.sink.keys(),
+                vec![key, key],
+                "the timeout and the return named a key other than the peer: {:?}",
+                rig.sink.lines()
             );
             rig.endpoint.close().await;
         });
