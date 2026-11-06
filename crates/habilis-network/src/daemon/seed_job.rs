@@ -309,14 +309,15 @@ fn job_for(state: &EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u64) -> 
 
 /// A peer showed its heads for `channel` and this node holds all of them: it is not behind that
 /// peer, so every time that the peer has seen is in the history of this node and its clock is above
-/// them. That ends the wait of the state document for its first sync (the first full answer to the
-/// digest, or an answer that has nothing to give: a peer with no heads is held too).
+/// them. That ends the wait of the state document for its first sync. A peer with no heads proves
+/// nothing (a peer that also just started holds none, and the holder of the old writes of this node
+/// has not answered yet), so the wait of a node that meets only empty peers ends at its deadline.
 pub(crate) fn peer_heads_seen(state: &mut EventLoopState, channel: Channel, heads: &[String]) {
     if channel != Channel::State {
         return;
     }
     let doc = state.doc_mut(channel);
-    if doc.is_awaiting_first_sync() && doc.holds_heads(heads) {
+    if doc.is_awaiting_first_sync() && !heads.is_empty() && doc.holds_heads(heads) {
         doc.finish_sync();
         tracing::debug!(target: "habilis_network::gossip", "the state channel synced with a peer, and its writes go on");
     }
@@ -816,7 +817,17 @@ mod tests {
             state.doc(Channel::State).is_awaiting_first_sync(),
             "the node waits"
         );
+        let mut peer = MeshDoc::new_state(None);
+        peer.finish_sync();
+        let written = write_merge(
+            &mut peer,
+            &state.identity,
+            &testing::nick("peer"),
+            &json!({ "a": 1 }),
+        );
+        state.doc_mut(Channel::State).ingest(&written);
         let ours: Vec<String> = state.doc(Channel::State).heads().collect();
+        assert!(!ours.is_empty(), "the node holds a change");
         let unknown = vec!["3yMApqCuCjXDWPrbjfR5mjCPTHqFG8Pux1TxQrEM35jj".to_owned()];
         peer_heads_seen(&mut state, Channel::State, &unknown);
         assert!(
@@ -836,12 +847,12 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_with_no_heads_is_an_empty_answer_and_ends_the_wait() {
+    fn a_peer_with_no_heads_proves_nothing_and_does_not_end_the_wait() {
         let mut state = state_that_waits_for_the_first_sync();
         peer_heads_seen(&mut state, Channel::State, &[]);
         assert!(
-            !state.doc(Channel::State).is_awaiting_first_sync(),
-            "a peer that holds nothing has nothing that this node lacks"
+            state.doc(Channel::State).is_awaiting_first_sync(),
+            "a peer that also just started holds nothing: it does not say that this node is synced"
         );
     }
 
