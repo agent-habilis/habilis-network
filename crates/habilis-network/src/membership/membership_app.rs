@@ -151,6 +151,30 @@ pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, transport::SendErr
         .map_err(|error| transport::SendError::InvalidAddressee(error.to_string()))
 }
 
+/// Parse the author key of an addressee from its 64 lowercase hex digits, the form that
+/// [`Inbound::key`] has in text and that the roster JSON names in `key`.
+///
+/// # Errors
+/// `key` is not 64 lowercase hex digits.
+///
+/// # Examples
+///
+/// A key is 64 lowercase hex digits, and any other text is refused.
+///
+/// ```
+/// use habilis_network::membership::parse_key;
+///
+/// assert!(parse_key(&"ab".repeat(32)).is_ok());
+/// assert!(parse_key("bob").is_err());
+/// ```
+pub fn parse_key(key: &str) -> Result<AuthorKey, transport::SendError> {
+    AuthorKey::decode_hex(key).ok_or_else(|| {
+        transport::SendError::InvalidAddressee(
+            "the author key of an addressee is 64 lowercase hex digits".to_owned(),
+        )
+    })
+}
+
 /// The key a directed send by nickname goes to ([`EventLoopState::addressee_key`]). A frame names
 /// its recipient by key, so a nickname that no key uses, or that two or more keys of one rank
 /// use, is refused here with the text of the cause. No `to` is a broadcast.
@@ -1611,7 +1635,7 @@ mod tests {
     use super::{
         AppFrameParams, AppTag, ENVELOPE_RESERVE, ESCAPED_BUDGET, MAX_MESSAGE_SIZE, MAX_MSG,
         MSG_TAG, MembershipApp, MessageBody, Messaging, Nickname, Request, mpsc, msg_body,
-        msg_fits, recipient_key,
+        msg_fits, parse_key, recipient_key, transport,
     };
     #[cfg(feature = "host")]
     use crate::daemon::state::Standing;
@@ -1780,6 +1804,37 @@ mod tests {
             !msg_fits(&"a".repeat(ESCAPED_BUDGET + 1)),
             "an escaped message past its budget does not fit"
         );
+    }
+
+    /// A caller of a binding holds the key as text. The parse reads the one form the wire
+    /// carries and refuses every other form with the cause, so a bad key is an error and not a send.
+    #[test]
+    fn a_key_is_read_from_64_lowercase_hex_and_nothing_else() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let key = test_key("parse#key");
+        let text: String = String::from_utf8(key.hex().to_vec()).expect("hex is ASCII");
+
+        assert_eq!(
+            parse_key(&text).expect("the hex of a key"),
+            key,
+            "parse_key did not read back the key that the hex was made from"
+        );
+        for (bad, why) in [
+            ("", "an empty text"),
+            (&text[..63], "63 digits"),
+            (&format!("{text}0"), "65 digits"),
+            (&text.to_uppercase(), "uppercase digits"),
+            (&format!("{}g", &text[..63]), "a character that is not hex"),
+            ("alice", "a nickname"),
+        ] {
+            assert!(
+                matches!(
+                    parse_key(bad),
+                    Err(transport::SendError::InvalidAddressee(_))
+                ),
+                "{why} was read as a key"
+            );
+        }
     }
 
     #[test]

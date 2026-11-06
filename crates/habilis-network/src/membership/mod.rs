@@ -29,7 +29,7 @@ pub use membership_app::UnknownPeer;
 pub use membership_app::{Beacons, Blocking, InspectTest, Linking, MessagingTest};
 pub use membership_app::{
     DEPARTURE_GRACE, INBOUND_CAP, Inbound, Inspect, MAX_MSG, MSG_TAG, MembershipApp, Messaging,
-    Request, msg_body, msg_fits, parse_to,
+    Request, msg_body, msg_fits, parse_key, parse_to,
 };
 #[cfg(all(
     feature = "iroh-test-utils",
