@@ -272,6 +272,27 @@ mod tests {
         );
     }
 
+    /// The same proof comes again with each resent or re-announced `joined` frame. A copy of the
+    /// proof held is a duplicate: it is not a refusal and the census does not count it.
+    #[test]
+    fn a_repeated_proof_is_a_duplicate_and_not_a_tie() {
+        let mesh = MeshId::from("💬test");
+        let nickname = Nickname::from("alice");
+        let member = Identity::generate();
+        let session = Identity::generate().author_key();
+        let mut receiver = ProofExchange::with_cap(QUIET_CAP);
+        let proof = member.prove(&session, nickname.as_ref(), mesh.as_ref(), 3);
+        assert!(
+            receiver.accept(&session, &nickname, &mesh, proof, |_| true),
+            "the first copy is held"
+        );
+        assert!(
+            !receiver.accept(&session, &nickname, &mesh, proof, |_| true),
+            "a second copy adds nothing"
+        );
+        assert_eq!(receiver.ties_refused(), 0, "a copy is not a tie");
+    }
+
     /// In a calm mesh every receiver holds the proof of each session, so no alive frame asks for
     /// one: 0 bytes of proof traffic besides the `joined` frames.
     #[test]
