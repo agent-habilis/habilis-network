@@ -3030,8 +3030,9 @@ mod first_contact_tests {
 
     /// A relay forwards a directed frame of another key and keeps no copy, whatever the app
     /// returns. The engine cannot open the body, and no app of the workspace asks to keep such a
-    /// frame, so a copy would be one that only the log cap bounds. A key that was away gets the
-    /// frame from its author again, not from a relay.
+    /// frame, so a copy would be one that only the log cap bounds. The engine gives no repair for a
+    /// directed frame: the author keeps none, and a relay keeps none. A key that was away gets the
+    /// frame only if the app protocol sends it again.
     #[test]
     fn a_relayed_directed_frame_is_not_kept_whatever_the_app_returns() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
