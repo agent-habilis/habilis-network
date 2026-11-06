@@ -17,7 +17,7 @@ use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::MembershipUpdate;
 use crate::protocol::messages::{
-    Authored, MessageBody, Proof, Verified, WireFrame, shard_fits_log,
+    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log,
 };
 use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
@@ -519,6 +519,29 @@ fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Verified) -> boo
     false
 }
 
+/// Say that an inbound frame did not parse. A frame of another protocol version names it, once for
+/// each version: the key of the sender is not proven before the frame parses, so a sender could
+/// make up keys, and the set of named versions is bounded.
+fn report_unparsed(error: &MessageError, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    if let MessageError::UnsupportedVersion(version) = error {
+        if state
+            .receive_memory
+            .refused_versions
+            .insert(version.clone())
+        {
+            let line =
+                format!("A peer sent protocol version {version}, which this build does not read");
+            context.sink.emit(NodeEvent::Error(line));
+        }
+        tracing::warn!(target: "habilis_network::gossip", %version, "dropping a frame of an unsupported protocol version");
+        return;
+    }
+    context
+        .sink
+        .emit(NodeEvent::Error("Failed to parse message".to_owned()));
+    tracing::warn!(target: "habilis_network::gossip", "failed to parse inbound gossip message");
+}
+
 /// Validate + dispatch one inbound wire message, regardless of transport. Both
 /// the gossip event pump (`handle_gossip_event`) and the unicast inbound arm
 /// (`daemon::event_loop`) funnel here, so signature-verify, the mesh gate, and
@@ -532,12 +555,12 @@ pub(crate) async fn ingest(
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
-    let Ok((message, _resend_nonce)) = Message::parse_wire(&frame) else {
-        context
-            .sink
-            .emit(NodeEvent::Error("Failed to parse message".to_owned()));
-        tracing::warn!(target: "habilis_network::gossip", "failed to parse inbound gossip message");
-        return;
+    let (message, _resend_nonce) = match Message::parse_wire(&frame) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            report_unparsed(&error, state, context);
+            return;
+        }
     };
     // Authenticity gate, **before** the self-echo drop, dedup, and every other step: every inbound
     // message must carry a valid signature over its canonical bytes. Verifying before `mark_seen`
@@ -2267,7 +2290,7 @@ mod first_contact_tests {
     use crate::daemon::message_log::{self, MissingQuery};
     use crate::daemon::state::{EventLoopState, PingRound};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::SilentSink;
+    use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
     use crate::lifecycle::membership_update::MembershipUpdate;
     use crate::ops;
     use crate::protocol::identity::Identity;
@@ -2275,6 +2298,7 @@ mod first_contact_tests {
     use crate::protocol::{AuthorKey, Channel, MeshId, Message, MessageKind, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::MeshSender;
+    use bytes::Bytes;
 
     use crate::daemon::state::DirectState;
     #[cfg(feature = "multihop")]
@@ -2810,6 +2834,74 @@ mod first_contact_tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             true
         }
+    }
+
+    /// A sink that keeps the text of each error line.
+    #[derive(Default)]
+    struct ErrorLines(Mutex<Vec<String>>);
+
+    impl NodeSink for ErrorLines {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::Error(text) = event {
+                self.0
+                    .lock()
+                    .expect("the lines lock is not poisoned")
+                    .push(text);
+            }
+        }
+    }
+
+    /// A frame of another protocol version does not parse. The error line names the version that
+    /// the frame carries, so an operator can tell a peer that runs an older build from a corrupt
+    /// frame, and a second frame of the same version adds no line.
+    #[test]
+    fn a_frame_of_another_wire_version_is_reported_by_its_version_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "dropping a frame of an unsupported protocol version",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let frame = Message::new_app(
+                &node.mesh,
+                &nick("alice"),
+                AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("old"),
+                ),
+            )
+            .sign(&Identity::generate());
+            let text = frame.serialize().expect("serialize").into_bytes();
+            let old = String::from_utf8(text.to_vec())
+                .expect("a frame is text")
+                .replacen(r#""v":"13.0""#, r#""v":"12.0""#, 1);
+            assert!(old.contains("12.0"), "the test frame names version 12.0");
+
+            ingest(Bytes::from(old.clone()), &mut state, &mut app, &context).await;
+            ingest(Bytes::from(old), &mut state, &mut app, &context).await;
+
+            let seen = lines
+                .0
+                .lock()
+                .expect("the lines lock is not poisoned")
+                .clone();
+            let naming: Vec<&String> = seen.iter().filter(|line| line.contains("12.0")).collect();
+            assert_eq!(
+                naming.len(),
+                1,
+                "the version of the frame is named once: {seen:?}"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// A directed frame for another key reaches the app of this node, as it did before a frame

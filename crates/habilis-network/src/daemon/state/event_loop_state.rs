@@ -40,7 +40,7 @@ use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, LANE_WANTED, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
-    RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED,
+    RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED, UNSUPPORTED_VERSION_CAP,
 };
 
 use crate::gossip::{antientropy, lan};
@@ -90,6 +90,26 @@ impl Default for Goodbyes {
         Self {
             peers: BoundedFifoSet::new(QUIET_CAP),
             strangers: BoundedFifoSet::new(QUIET_CAP),
+        }
+    }
+}
+
+/// What the receive path remembers about frames it handled or refused. Each set is bounded.
+#[derive(Debug)]
+pub(crate) struct ReceiveMemory {
+    /// Shard groups already reassembled + surfaced, so a body is surfaced once even if a shard
+    /// is re-fetched (via anti-entropy) after its id aged out of [`EventLoopState::seen`].
+    /// Groups are rare and short-lived.
+    pub(crate) reassembled_groups: BoundedFifoSet<ShardGroup>,
+    /// The protocol versions of frames that did not parse, each one named once in an error line.
+    pub(crate) refused_versions: BoundedFifoSet<String>,
+}
+
+impl Default for ReceiveMemory {
+    fn default() -> Self {
+        Self {
+            reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
+            refused_versions: BoundedFifoSet::new(UNSUPPORTED_VERSION_CAP),
         }
     }
 }
@@ -543,10 +563,8 @@ pub struct EventLoopState {
     /// non-advertising case (no shared counter to maintain).
     pub(crate) live_count: Option<LiveCount>,
     pub(crate) message_log: MessageLog,
-    /// Shard groups already reassembled + surfaced, so a body is surfaced
-    /// once even if a shard is re-fetched (via anti-entropy) after its id aged
-    /// out of [`seen`](Self::seen). Bounded — groups are rare and short-lived.
-    pub(crate) reassembled_groups: BoundedFifoSet<ShardGroup>,
+    /// What the receive path remembers about frames it handled or refused, each in a bounded set.
+    pub(crate) receive_memory: ReceiveMemory,
     /// Partial multipart bodies buffering toward reassembly — dedicated and
     /// byte-budgeted, decoupled from the message log so log eviction can
     /// never break reassembly. Swept for stale groups on the prune tick.
@@ -744,7 +762,7 @@ impl EventLoopState {
             state_file: init.state_file,
             live_count: None,
             message_log: MessageLog::new(MESSAGE_LOG_SIZE),
-            reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
+            receive_memory: ReceiveMemory::default(),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
             state_doc: MeshDoc::new_ungated().key(state_key),
@@ -1771,12 +1789,18 @@ impl EventLoopState {
     /// 1-of-N forever.
     pub(crate) fn reassemble(&mut self, trigger: &Verified) -> Option<Authored> {
         let shard = trigger.shard.as_ref()?;
-        if self.reassembled_groups.contains(&shard.group) {
+        if self
+            .receive_memory
+            .reassembled_groups
+            .contains(&shard.group)
+        {
             return None;
         }
         match self.reassembly.ingest(trigger, Instant::now()) {
             ShardIngest::Complete(logical) => {
-                self.reassembled_groups.insert(shard.group.clone());
+                self.receive_memory
+                    .reassembled_groups
+                    .insert(shard.group.clone());
                 Some(*logical)
             }
             ShardIngest::Buffered | ShardIngest::Dropped => {
@@ -1784,7 +1808,9 @@ impl EventLoopState {
                 // The store may still hold a partial buffer for this group
                 // (e.g. just the trigger, post-TTL) — release its budget.
                 self.reassembly.forget(trigger);
-                self.reassembled_groups.insert(shard.group.clone());
+                self.receive_memory
+                    .reassembled_groups
+                    .insert(shard.group.clone());
                 Some(logical)
             }
             _ => None,

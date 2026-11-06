@@ -736,6 +736,11 @@ pub const NO_RUNG_REPEAT: Duration = Duration::from_mins(5);
 /// realistic live roster.
 pub const QUIET_CAP: usize = 1024;
 
+/// Max protocol versions that the loop has named in an error line. A frame that names another
+/// version does not parse, so the key of its sender is not proven: the line is once for each
+/// version, and a sender that makes up versions pushes the oldest out of this set, not memory.
+pub const UNSUPPORTED_VERSION_CAP: usize = 16;
+
 /// Minimum gap between our own re-dial + `PeerInfo` re-flood of the *same*
 /// peer learned via `PeerInfo` (`gossip::recv::handle_peer_info`). Caps the
 /// membership amplifier so a flapping/unstable peer is re-linked at most once
