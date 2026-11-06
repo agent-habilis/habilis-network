@@ -10,8 +10,6 @@ use std::future::pending;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(target_family = "wasm")]
-use n0_future::task::spawn;
 use n0_future::task::{JoinError, JoinHandle};
 #[cfg(not(target_family = "wasm"))]
 use tokio::task::spawn_blocking;
@@ -126,8 +124,9 @@ fn frame_fits_with(job: &SeedJob, merge: &serde_json::Value, stamps: &[Stamp]) -
 }
 
 /// Build the chain from `plan` on a blocking thread, and give back a handle. The event loop keeps
-/// its timers and its sockets while the thread works. A browser has no thread to spare, so there
-/// the build runs as a task of the loop (a state document of a browser is small).
+/// its timers and its sockets while the thread works. A browser has no thread to spare and a build
+/// takes seconds, so a browser never cuts (see [`start_cut`]).
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn spawn_build(plan: SeedPlan, job: SeedJob) -> JoinHandle<SeedOutcome> {
     let build = move || {
         let started = Instant::now();
@@ -140,14 +139,7 @@ pub(crate) fn spawn_build(plan: SeedPlan, job: SeedJob) -> JoinHandle<SeedOutcom
             took: started.elapsed(),
         }
     };
-    #[cfg(not(target_family = "wasm"))]
-    {
-        spawn_blocking(build)
-    }
-    #[cfg(target_family = "wasm")]
-    {
-        spawn(async move { build() })
-    }
+    spawn_blocking(build)
 }
 
 /// The signed frames of `chain`, root first, with their wire bytes: each change in a body with its
@@ -290,6 +282,18 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     if !state.doc(Channel::State).cut_due(rank) {
         return;
     }
+    start_cut(state, me, mesh, epoch);
+}
+
+/// A browser never cuts: the build is one synchronous call of seconds, and the loop of a browser
+/// has no other thread. The nodes of the host cut after their own slots, so a browser ranked ahead
+/// of them costs the mesh a delay of one slot (2 ticks).
+#[cfg(target_family = "wasm")]
+fn start_cut(_state: &mut EventLoopState, _me: &Nickname, _mesh: &MeshId, _epoch: u64) {}
+
+/// Read the document into a plan and start the build on another thread.
+#[cfg(not(target_family = "wasm"))]
+fn start_cut(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u64) {
     let planned = state.doc(Channel::State).seed_plan();
     // A candidate that the node holds is adopted, not cut over.
     if matches!(planned, Err(DocError::CandidateHeld)) {
@@ -350,9 +354,10 @@ pub(crate) fn sync_deadline(state: &mut EventLoopState) {
 }
 
 /// Put a replay or a restore in the queue that the loop drains after the tick. The queue is bounded:
-/// when it is full the new item is refused, and the node warns (the document keeps the value as a
-/// restore of a later tick only for a restore, so a replay that is refused is a write that the
-/// seed lacks and that no node sends: the warning is the signal).
+/// when it is full the new item is refused, and the node warns. The document does not keep a
+/// refused item (`take_restores` empties it), so a replay or a restore that is refused is a write
+/// that the seed lacks and that no node sends: the warning is the signal. The loop drains the queue
+/// on the arm of the tick, so a full queue is not expected.
 fn queue_replay(state: &mut EventLoopState, item: (serde_json::Value, StampedPaths)) {
     if !state.replay_queue.push(item) {
         tracing::warn!(target: "habilis_network::gossip", "the replay of the state channel was dropped: its queue is full");
@@ -522,6 +527,12 @@ pub(crate) fn finish(
             return Vec::new();
         }
     };
+    // A seed came in while the build ran (or the epoch moved on): the rival rule can drop ours.
+    let doc = state.doc(Channel::State);
+    if doc.has_candidate() || doc.epoch() >= outcome.epoch {
+        tracing::info!(target: "habilis_network::gossip", epoch = outcome.epoch, "the seed of the state channel is dropped: another seed came in during the build");
+        return Vec::new();
+    }
     state.doc(Channel::State).note_seed_built(&chain);
     let job = job_for(state, me, mesh, outcome.epoch);
     match signed_frames(&chain, &job) {
@@ -691,8 +702,11 @@ mod tests {
         };
         let outcome = outcome.expect("the build task ends");
         assert!(outcome.chain.is_ok(), "the seed is built");
+        // The build runs on a thread: the loop ticks for at least half of the time that it took,
+        // however fast the machine builds. A build on the loop would give 1 tick.
+        let expected = outcome.took.as_millis() / 10;
         assert!(
-            ticks >= 10,
+            u128::from(ticks) * 2 >= expected,
             "the loop ticked {ticks} times while the seed of 3 000 leaves was built in {:?}",
             outcome.took
         );
@@ -740,6 +754,50 @@ mod tests {
             cutter.to_json(),
             "the joiner holds the document of the cutter"
         );
+    }
+
+    /// A rival root that came in while the build ran: the node holds a candidate, so its own seed
+    /// of the same epoch would be dropped by the rival rule. It sends nothing and fails no cut.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_build_that_ends_after_a_rival_seed_came_in_gives_no_frame() {
+        // Shared with the jobs that build on another thread.
+        let identity = Arc::new(Identity::generate());
+        // The rival signs with its own key, shared with the job that builds on another thread.
+        let rival_identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let mesh = MeshId::from("test");
+        let mut cutter = MeshDoc::new_state(None);
+        cutter.finish_sync();
+        write_leaves(&mut cutter, &identity, &me, 300);
+        let mut rival = testing::fresh_state();
+        rival.identity = Arc::clone(&rival_identity);
+        let rival_outcome = spawn_build(
+            cutter.seed_plan().expect("a plan"),
+            job_of(&rival_identity, 4),
+        )
+        .await;
+        let rival_frames = finish(&mut rival, rival_outcome, &testing::nick("rival"), &mesh);
+        let mut state = testing::fresh_state();
+        state.state_doc = MeshDoc::new_state(None);
+        state.doc_mut(Channel::State).finish_sync();
+        let own = spawn_build(
+            cutter.seed_plan().expect("a plan"),
+            job_of(&state.identity, 4),
+        );
+        for (signed, _bytes) in &rival_frames {
+            state.doc_mut(Channel::State).ingest(signed);
+        }
+        assert!(
+            state.doc(Channel::State).has_candidate(),
+            "the rival seed is a candidate"
+        );
+        let frames = finish(&mut state, own.await, &me, &mesh);
+        assert!(
+            frames.is_empty(),
+            "the node does not send a seed that the rival rule can drop"
+        );
+        assert_eq!(state.state_cuts, 0, "it is no cut");
+        assert_eq!(state.state_cuts_failed, 0, "and no failure");
     }
 
     /// A frame that the buffer of a cut-off node refuses is a seed with a hole: the cut fails, so
