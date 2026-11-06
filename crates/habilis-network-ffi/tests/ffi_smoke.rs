@@ -533,16 +533,20 @@ fn pair() -> (*mut HabilisNetworkMesh, *mut HabilisNetworkMesh) {
 fn the_old_recv_writes_only_the_80_bytes_of_the_old_struct() {
     const OLD_STRUCT: usize = 80;
     const GUARD: usize = 144;
+    /// The struct and its guard bytes, on the 8-byte boundary that `size_t` needs: a plain byte
+    /// array has alignment 1, and a write through a cast pointer to it can be misaligned.
+    #[repr(align(8))]
+    struct Region([u8; OLD_STRUCT + GUARD]);
     let (alice, bob) = pair();
     // SAFETY: live handle, NUL-terminated strings.
     let sent = unsafe { habilis_network_msg_send(alice, ptr::null(), c"hello".as_ptr()) };
     assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
 
-    let mut region = [0xaa_u8; OLD_STRUCT + GUARD];
-    region[..OLD_STRUCT].fill(0);
+    let mut region = Region([0xaa_u8; OLD_STRUCT + GUARD]);
+    region.0[..OLD_STRUCT].fill(0);
     let mut buffer = [0_u8; 64];
     let destination: *mut c_char = buffer.as_mut_ptr().cast();
-    let out: *mut HabilisNetworkMsg = region.as_mut_ptr().cast();
+    let out: *mut HabilisNetworkMsg = (&raw mut region).cast();
     // SAFETY: live handle, a writable buffer of 64 bytes, and `out` points at 80 zeroed bytes
     // followed by guard bytes: the caller of the old ABI owns exactly those 80.
     let got = unsafe { habilis_network_msg_recv(bob, destination, buffer.len(), 20_000, out) };
@@ -553,7 +557,7 @@ fn the_old_recv_writes_only_the_80_bytes_of_the_old_struct() {
         "habilis_network_msg is no longer 80 bytes, so a caller built with 80 overruns it"
     );
     assert!(
-        region[OLD_STRUCT..].iter().all(|byte| *byte == 0xaa),
+        region.0[OLD_STRUCT..].iter().all(|byte| *byte == 0xaa),
         "habilis_network_msg_recv wrote past the 80 bytes of the old struct"
     );
 
