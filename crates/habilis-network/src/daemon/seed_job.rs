@@ -204,12 +204,23 @@ pub(crate) async fn send_frames(
                 cut_failed(state, &error);
                 return sent;
             }
-        } else {
-            state.pending_outbound.push((signed, bytes));
+        } else if !buffer_frame(state, (signed, bytes)) {
+            return sent;
         }
         sent += 1;
     }
     sent
+}
+
+/// Hold a frame for a node that the overlay does not reach yet. The buffer is bounded and shared
+/// with the chat, and a full one refuses the new frame: for a seed that is a hole in the chain, so
+/// the cut fails and the node does not go on with the rest.
+fn buffer_frame(state: &mut EventLoopState, frame: (Verified, WireFrame)) -> bool {
+    if state.pending_outbound.push(frame) {
+        return true;
+    }
+    cut_failed(state, &"the buffer of outbound frames is full");
+    false
 }
 
 /// Cut the state channel now, on the calling thread, and send the seed: the plan, the build, the
@@ -270,7 +281,9 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     if let Some(item) = restores {
         queue_replay(state, item);
     }
-    if state.seed_job.is_some() {
+    // A node that no peer reaches ranks 0 on an empty roster and would cut at once: its chain would
+    // wait in the buffer, and the node would adopt a seed that no peer holds.
+    if state.seed_job.is_some() || !state.overlay_reachable() {
         return;
     }
     let rank = rank_of(me, &state.peers, &state.quiet, epoch);
@@ -533,19 +546,20 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        Instant, LARGEST_TIME, SeedJob, SeedOutcome, creator_has_nothing_to_sync, finish,
-        frame_fits_with, peer_heads_seen, queue_replay, rank_of, replay_frames, spawn_build,
-        sync_deadline, tick,
+        Instant, LARGEST_TIME, SeedJob, SeedOutcome, buffer_frame, creator_has_nothing_to_sync,
+        finish, frame_fits_with, peer_heads_seen, queue_replay, rank_of, replay_frames,
+        spawn_build, sync_deadline, tick,
     };
     use tokio::time::interval;
 
-    use crate::daemon::state::EventLoopState;
+    use crate::daemon::state::{EventLoopState, Standing};
     use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp};
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::Verified;
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing;
     use crate::util::bounded_fifo_set::BoundedFifoSet;
+    use crate::util::tuning::PENDING_OUTBOUND_CAP;
 
     fn roster(names: &[&str]) -> HashSet<Nickname> {
         names.iter().map(|name| testing::nick(name)).collect()
@@ -728,6 +742,40 @@ mod tests {
         );
     }
 
+    /// A frame that the buffer of a cut-off node refuses is a seed with a hole: the cut fails, so
+    /// the node does not adopt a chain that no peer holds whole.
+    #[test]
+    fn a_full_buffer_fails_the_cut_and_the_chain_stops() {
+        let identity = Identity::generate();
+        let me = testing::nick("me");
+        let mut doc = MeshDoc::new_state(None);
+        doc.finish_sync();
+        let frame = write_merge(&mut doc, &identity, &me, &json!({ "a": 1 }));
+        let bytes = frame.serialize().expect("a wire frame");
+        let mut state = testing::fresh_state();
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "the cut of the state channel failed, and the next one waits",
+        );
+        let cap = PENDING_OUTBOUND_CAP;
+        for _ in 0..cap {
+            assert!(
+                buffer_frame(&mut state, (frame.clone(), bytes.clone())),
+                "room"
+            );
+        }
+        assert_eq!(
+            state.state_cuts_failed, 0,
+            "a buffer with room fails no cut"
+        );
+        assert!(
+            !buffer_frame(&mut state, (frame, bytes)),
+            "a full buffer refuses the frame"
+        );
+        assert_eq!(state.state_cuts_failed, 1, "and the cut fails");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_failed_build_gives_no_frame_and_holds_the_next_cut_back() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -777,6 +825,13 @@ mod tests {
         write_leaves(&mut doc, &identity, &me, 1_700);
         state.state_doc = doc.limits(Limits::with_seed_frames(40));
 
+        // A node that no peer reaches is rank 0 at once: it must not cut, or it holds the chain.
+        tick(&mut state, &me, &mesh);
+        assert!(
+            state.seed_job.is_none(),
+            "a node that the overlay does not reach starts no build"
+        );
+        state.standing.insert(Standing::Meshed);
         tick(&mut state, &me, &mesh);
         assert!(
             state.seed_job.is_some(),
@@ -789,6 +844,7 @@ mod tests {
         );
 
         let mut small = testing::fresh_state();
+        small.standing.insert(Standing::Meshed);
         let mut few = MeshDoc::new_state(None).limits(Limits::with_seed_frames(40));
         few.finish_sync();
         write_leaves(&mut few, &identity, &me, 300);
