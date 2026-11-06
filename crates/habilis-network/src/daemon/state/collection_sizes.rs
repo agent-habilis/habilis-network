@@ -125,7 +125,7 @@ mod tests {
         let session = Identity::generate().author_key();
         let member = Identity::generate();
         let held = member.prove(&session, "ant", mesh.as_ref(), 2);
-        let tie = member.prove(&session, "ant", mesh.as_ref(), 2);
+        let tie = Identity::generate().prove(&session, "ant", mesh.as_ref(), 2);
         assert!(
             state
                 .proofs

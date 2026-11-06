@@ -90,15 +90,20 @@ impl ProofExchange {
         proof: IdentityProof,
         is_live: impl Fn(&Nickname) -> bool,
     ) -> bool {
-        if !verify_proof(&proof, session, nickname.as_ref(), mesh.as_ref()) {
+        // The run is compared first: a copy of the held proof, which comes with each resent or
+        // re-announced `joined` frame, costs no signature check.
+        if let Some((_, held)) = self.book.get(session)
+            && held.run >= proof.run
+        {
+            let copy = held.run == proof.run
+                && held.identity == proof.identity
+                && held.signature == proof.signature;
+            if !copy {
+                self.ties_refused += 1;
+            }
             return false;
         }
-        if self
-            .book
-            .get(session)
-            .is_some_and(|(_, held)| held.run >= proof.run)
-        {
-            self.ties_refused += 1;
+        if !verify_proof(&proof, session, nickname.as_ref(), mesh.as_ref()) {
             return false;
         }
         self.book
@@ -346,7 +351,12 @@ mod tests {
         );
         assert!(
             !receiver.accept(&session, &nickname, &mesh, at(5), |_| true),
-            "a tie is not held"
+            "a copy of the held proof is not held again"
+        );
+        let rival = Identity::generate().prove(&session, nickname.as_ref(), mesh.as_ref(), 5);
+        assert!(
+            !receiver.accept(&session, &nickname, &mesh, rival, |_| true),
+            "a tie from another member key is not held"
         );
         assert!(
             !receiver.accept(&session, &nickname, &mesh, at(4), |_| true),
@@ -361,7 +371,7 @@ mod tests {
         assert_eq!(
             receiver.ties_refused(),
             2,
-            "a tie and a lower run are counted"
+            "a rival tie and a lower run are counted, the copy is not"
         );
     }
 }
