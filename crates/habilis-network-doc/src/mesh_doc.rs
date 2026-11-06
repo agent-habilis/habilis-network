@@ -65,9 +65,17 @@ pub enum Ingested {
     Ignored,
 }
 
-/// Declares that a channel holds a **per-peer map** at the document root — one
-/// entry per nickname — in which a single field belongs to the peer that entry
-/// names, and may be written by no one else.
+/// Declares that a channel holds a **per-peer map** at the document root, keyed by the lowercase
+/// hex of an author key. One field of each entry belongs to the key that names the slot, and no
+/// other author may write it.
+///
+/// # What the gate guards
+///
+/// The gate guards the configured field of each slot and nothing else. A write to the field of a
+/// slot that another key names is refused, and so is a write to the field of a slot that is not a
+/// key in hex. Any author can write any other field of any slot, so those fields are open to
+/// forgery. An application that needs a field to belong to its author keeps it inside the
+/// gated field.
 ///
 /// The engine needs two things from this and nothing more: the map's key, so it
 /// can plant a shared genesis change and every replica agrees on that map's
@@ -1884,6 +1892,37 @@ mod tests {
         assert!(
             matches!(victim.ingest(&by_name), Ingested::Rejected),
             "a write to the slot of a nickname was accepted"
+        );
+    }
+
+    /// The gate guards the configured field and no other. Any author can write another field of
+    /// any slot, including a slot that a nickname names. This test pins that limit.
+    #[test]
+    fn a_field_that_is_not_gated_is_open_to_any_author() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let writer = nick("writer");
+        let mut doc = MeshDoc::new_gated(card_gate());
+
+        let _ = author_as(
+            &mut doc,
+            &writer,
+            b"writer",
+            &json!({"peers": {(slot("victim")): {"status": "busy"}}}),
+        );
+        let _ = author_as(
+            &mut doc,
+            &writer,
+            b"writer",
+            &json!({"peers": {"victim": {"status": "busy"}}}),
+        );
+
+        assert_eq!(
+            doc.to_json(),
+            json!({"peers": {
+                (slot("victim")): {"status": "busy"},
+                "victim": {"status": "busy"},
+            }}),
+            "a field other than the gated one was refused"
         );
     }
 

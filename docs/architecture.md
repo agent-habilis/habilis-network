@@ -496,7 +496,8 @@ The `state` channel is free-form.
 The `meta` channel carries a **self-write gate**: a per-peer map where one field belongs to the peer the entry names.
 The slot key of that map is the lowercase hex of the author key, not the nickname.
 A nickname is a label that two live keys can share, so a slot named by nickname would belong to both.
-A key can write only the slot that names it.
+A key can write the gated field only in the slot that names it.
+The other fields of a slot are not gated, so any author can write them.
 The gate matters because a `meta` card carries the cryptographic identity of a peer.
 Ingest applies each foreign change to a throwaway fork first.
 If the change touches the field of any other peer, the gate rejects it.
