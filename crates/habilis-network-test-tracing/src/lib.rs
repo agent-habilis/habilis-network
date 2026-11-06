@@ -35,7 +35,7 @@ mod guard;
 
 pub use guard::{
     Guard, allow_warn, captured_logs, catch_panic, clear_captured_logs, expect_warn, init,
-    init_capturing, init_with_writer, saw_warn,
+    init_capturing, init_with_writer, saw_warn, warn_count,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use guard::{at_end, run, run_multi_thread};

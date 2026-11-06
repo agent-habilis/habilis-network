@@ -539,10 +539,11 @@ const VERSION_TEXT_MAX: usize = 16;
 fn report_unparsed(error: &MessageError, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     if let MessageError::UnsupportedVersion(wire_version) = error {
         let version = printable_prefix(wire_version);
+        // The frame is not verified, so the log obeys the same cap as the error lines.
         if let Some(line) = state.receive_memory.refused_version_line(&version) {
             context.sink.emit(NodeEvent::Error(line));
+            tracing::warn!(target: "habilis_network::gossip", %version, "dropping a frame of an unsupported protocol version");
         }
-        tracing::warn!(target: "habilis_network::gossip", %version, "dropping a frame of an unsupported protocol version");
         return;
     }
     context
@@ -3018,6 +3019,15 @@ mod first_contact_tests {
                 seen.len(),
                 cap + 1,
                 "one line for each of the first {cap} versions and one for the rest: {seen:?}"
+            );
+            let warned = ::habilis_network_test_tracing::warn_count(
+                "habilis_network::gossip",
+                "dropping a frame of an unsupported protocol version",
+            );
+            assert_eq!(
+                warned,
+                cap + 1,
+                "the stderr log of an unauthenticated flood obeys the cap of the error lines"
             );
             let last = seen.last().expect("the lines are not empty");
             assert!(
