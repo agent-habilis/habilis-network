@@ -93,7 +93,10 @@ export type Lane = 'unicast' | 'multihop' | 'relay-only' | 'unreachable'
 export type Reach = 'direct' | 'gossip'
 
 export interface Peer {
+  /** A label. Two live peers can use one, so it names no peer; `key` does. */
   nick: string
+  /** The author key: 64 lowercase hex digits. `sendToKey` takes it. */
+  key: string
   reach: Reach
   transport: Lane
   /** Heartbeat-evicted, but still known and still returnable. */
@@ -107,7 +110,10 @@ export interface Peer {
  * the mesh; they take a stream.
  */
 export interface Message {
+  /** The author's nickname. Two live peers can use one, so it names no author. */
   from: string
+  /** The author's key: 64 lowercase hex digits. A reply goes to this key with `sendToKey`. */
+  key: string
   text: string
   /** True when the message was addressed to us alone. */
   directed: boolean
@@ -152,6 +158,13 @@ export interface Mesh extends AsyncDisposable {
   readonly maxMsg: number
 
   send(text: string, opts?: { to?: string }): Promise<void>
+
+  /**
+   * Send to the one peer that holds an author key (64 lowercase hex digits): the `key` of a
+   * `Message` or of a `Peer`. `send` with `to` refuses a nickname that two live peers use; a
+   * key names one peer.
+   */
+  sendToKey(key: string, text: string): Promise<void>
 
   /**
    * Every message from the moment this iterator was created. Each call gets

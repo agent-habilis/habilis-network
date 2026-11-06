@@ -16,6 +16,7 @@ const ROSTER_POLL_MS = 500
 
 interface WireMsg {
   nick: string
+  key: string
   directed: boolean
   text: string
 }
@@ -55,7 +56,7 @@ export function openWasm(module: HabilisNetworkWasmModule, optsJson: string): Op
           return
         }
         const msg = JSON.parse(json) as WireMsg
-        sink.msg({ from: msg.nick, text: msg.text, directed: msg.directed })
+        sink.msg({ from: msg.nick, key: msg.key, text: msg.text, directed: msg.directed })
       }
     }
 
@@ -119,6 +120,7 @@ export function openWasm(module: HabilisNetworkWasmModule, optsJson: string): Op
         nick: peer.nick(),
         maxMsg: peer.maxMsg(),
         send: (to, text) => peer.send(to ?? undefined, text),
+        sendToKey: (key, text) => peer.sendToKey(key, text),
         stateMerge: (patchJson) => peer.stateMerge(patchJson),
         close: async () => {
           closed = true

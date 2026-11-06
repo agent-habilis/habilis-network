@@ -2,11 +2,14 @@ import { describe, expect, test } from 'bun:test'
 
 import { parseRoster, rosterPresence } from './roster.ts'
 
+const KEY = 'ab'.repeat(32)
+
 /** A roster document exactly as `habilis_network_peers_json` writes one. */
 function roster(...peers: string[]): string {
   return JSON.stringify({
     peers: peers.map((nickname) => ({
       nickname,
+      key: KEY,
       last_seen_secs_ago: 3,
       quiet: false,
       reach: 'direct',
@@ -21,6 +24,7 @@ describe('parseRoster', () => {
     const [peer] = parseRoster(roster('ana'))
     expect(peer).toEqual({
       nick: 'ana',
+      key: KEY,
       reach: 'direct',
       transport: 'unicast',
       quiet: false,
@@ -33,6 +37,7 @@ describe('parseRoster', () => {
       peers: [
         {
           nickname: 'ana',
+          key: KEY,
           last_seen_secs_ago: null,
           quiet: true,
           reach: 'gossip',

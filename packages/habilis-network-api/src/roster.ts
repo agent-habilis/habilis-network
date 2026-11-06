@@ -15,6 +15,8 @@ import type { Lane, MeshEvent, Peer, Reach } from './types.ts'
  */
 interface RawEntry {
   nickname: string
+  /** The author key, 64 lowercase hex digits. */
+  key: string
   last_seen_secs_ago: number | null
   quiet: boolean
   reach: Reach
@@ -40,6 +42,7 @@ export function parseRoster(json: string): Peer[] {
     (peers as RawEntry[]).map((entry) =>
       Object.freeze({
         nick: entry.nickname,
+        key: entry.key,
         reach: entry.reach,
         transport: entry.transport,
         quiet: entry.quiet,

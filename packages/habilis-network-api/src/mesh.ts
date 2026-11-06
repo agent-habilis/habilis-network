@@ -93,7 +93,8 @@ export async function openMesh(open: Opener): Promise<Mesh> {
   }
 
   const sink: BackendSink = {
-    msg: (msg) => messages.push({ from: msg.from, text: msg.text, directed: msg.directed }),
+    msg: (msg) =>
+      messages.push({ from: msg.from, key: msg.key, text: msg.text, directed: msg.directed }),
     roster: (json) => applyRoster(json, announcePresence),
     state: applyState,
     presence: (event) => events.push(event),
@@ -139,6 +140,10 @@ export async function openMesh(open: Opener): Promise<Mesh> {
     send: async (text, opts) => {
       refuseIfClosed()
       await backend.send(opts?.to ?? null, text)
+    },
+    sendToKey: async (key, text) => {
+      refuseIfClosed()
+      await backend.sendToKey(key, text)
     },
     messages: (signal) => messages.iterate(signal),
     events: (signal) => {

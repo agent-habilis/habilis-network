@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { NativeLibrary, NativePointer, NativeValue } from './dlopen/native.ts'
 import { createEngine } from './engine.ts'
-import { encodeMsg } from './msg.ts'
+import { MSG_BYTES, encodeMsg } from './msg.ts'
 import type { Command, FromWorker, OpenReply, WireOpts } from './protocol.ts'
 
 const OPTS: WireOpts = {
@@ -18,8 +18,11 @@ const OPTS: WireOpts = {
 
 const OPEN: Command = { t: 'open', id: 1, opts: OPTS, lib: '/fake' }
 
+const KEY = 'ab'.repeat(32)
+
 interface FakeMsg {
   readonly nick: string
+  readonly key: string
   readonly directed: boolean
   readonly text: string
 }
@@ -41,6 +44,7 @@ function fakeLib(
     roster: '{"count":1,"peers":[]}',
     state: '{}',
     sends: [] as { to: string | null; text: string }[],
+    sendsToKey: [] as { key: string; text: string }[],
     closes: 0,
   }
   const recvQueue = overrides.recv ?? []
@@ -82,8 +86,17 @@ function fakeLib(
           state.state = `{"merged":${JSON.stringify(args[1] as string)}}`
           return 0
         }
-        case 'habilis_network_msg_recv': {
+        case 'habilis_network_msg_send_to_key': {
+          state.sendsToKey.push({ key: args[1] as string, text: args[2] as string })
+          return overrides.sendResult ?? 0
+        }
+        case 'habilis_network_msg_recv_v2': {
           const next = recvQueue[0]
+          const meta = args[4] as Uint8Array
+          // As the engine of the library does: a struct whose size field is below its own is refused.
+          if (new DataView(meta.buffer, meta.byteOffset).getBigUint64(0, true) < BigInt(MSG_BYTES)) {
+            return -1n
+          }
           if (next === undefined) {
             return 0n
           }
@@ -92,8 +105,10 @@ function fakeLib(
             return -1n
           }
           const text = utf8.encode(next.text)
-          const meta = args[4] as Uint8Array
-          meta.set(encodeMsg({ nick: next.nick, directed: next.directed, len: text.byteLength }), 0)
+          meta.set(
+            encodeMsg({ nick: next.nick, key: next.key, directed: next.directed, len: text.byteLength }),
+            0,
+          )
           const buffer = args[1] as Uint8Array
           if (text.byteLength >= Number(args[2] as bigint)) {
             // Kept, as the engine keeps it, for a retry with a bigger buffer.
@@ -108,8 +123,7 @@ function fakeLib(
           state.closes += 1
           return 0
         }
-        case 'habilis_network_msg_send_to_key':
-        case 'habilis_network_msg_recv_v2':
+        case 'habilis_network_msg_recv':
         case 'habilis_network_mesh_open':
         case 'habilis_network_mesh_peer_count':
         case 'habilis_network_streams_bind':
@@ -180,24 +194,24 @@ describe('createEngine', () => {
   })
 
   test('a received message crosses with its author, kind and text', () => {
-    const { lib } = fakeLib({ recv: [{ nick: 'bo', directed: true, text: 'olá' }] })
+    const { lib } = fakeLib({ recv: [{ nick: 'bo', key: KEY, directed: true, text: 'olá' }] })
     const { port, posted } = fakePort()
     const engine = createEngine(lib, port, () => 0)
     engine.handle(OPEN)
     expect(engine.pumpOnce()).toBe('idle')
-    expect(posted[1]).toEqual({ t: 'msg', from: 'bo', directed: true, text: 'olá' })
+    expect(posted[1]).toEqual({ t: 'msg', from: 'bo', key: KEY, directed: true, text: 'olá' })
   })
 
   test('a message too big for the buffer is taken on the next pump, whole', () => {
     const text = 'x'.repeat(5000)
-    const { lib } = fakeLib({ recv: [{ nick: 'bo', directed: false, text }] })
+    const { lib } = fakeLib({ recv: [{ nick: 'bo', key: KEY, directed: false, text }] })
     const { port, posted } = fakePort()
     const engine = createEngine(lib, port, () => 0)
     engine.handle(OPEN)
     engine.pumpOnce()
     expect(posted).toHaveLength(1)
     engine.pumpOnce()
-    expect(posted[1]).toEqual({ t: 'msg', from: 'bo', directed: false, text })
+    expect(posted[1]).toEqual({ t: 'msg', from: 'bo', key: KEY, directed: false, text })
   })
 
   test('a recv failure closes the mesh and the handle', () => {
@@ -206,7 +220,7 @@ describe('createEngine', () => {
     const engine = createEngine(lib, port, () => 0)
     engine.handle(OPEN)
     expect(engine.pumpOnce()).toBe('closed')
-    expect(posted[1]).toEqual({ t: 'closed', reason: 'habilis_network_msg_recv: engine gone' })
+    expect(posted[1]).toEqual({ t: 'closed', reason: 'habilis_network_msg_recv_v2: engine gone' })
     expect(state.closes).toBe(1)
     // Terminal for commands too.
     engine.handle({ t: 'send', id: 9, to: null, text: 'late' })
@@ -221,6 +235,28 @@ describe('createEngine', () => {
     engine.handle({ t: 'send', id: 2, to: 'bo', text: 'hello' })
     expect(posted[1]).toEqual({ t: 'ok', id: 2, value: null })
     expect(state.sends).toEqual([{ to: 'bo', text: 'hello' }])
+  })
+
+  test('sendToKey forwards the key and the text; a failure carries the error', () => {
+    const { lib, state } = fakeLib({ sendResult: 0 })
+    const { port, posted } = fakePort()
+    const engine = createEngine(lib, port, () => 0)
+    engine.handle(OPEN)
+    engine.handle({ t: 'sendToKey', id: 3, key: KEY, text: 'for one of two' })
+    expect(posted[1]).toEqual({ t: 'ok', id: 3, value: null })
+    expect(state.sendsToKey).toEqual([{ key: KEY, text: 'for one of two' }])
+    expect(state.sends).toEqual([])
+
+    const failing = fakeLib({ sendResult: -1, lastError: 'not a key' })
+    const failingPort = fakePort()
+    const failingEngine = createEngine(failing.lib, failingPort.port, () => 0)
+    failingEngine.handle(OPEN)
+    failingEngine.handle({ t: 'sendToKey', id: 4, key: 'bob', text: 'x' })
+    expect(failingPort.posted[1]).toEqual({
+      t: 'err',
+      id: 4,
+      message: 'habilis_network_msg_send_to_key: not a key',
+    })
   })
 
   test('stateMerge replies with the resulting document', () => {

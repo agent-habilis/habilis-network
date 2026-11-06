@@ -4,10 +4,16 @@ import type { BackendSink, Opener } from './backend.ts'
 import { openMesh } from './mesh.ts'
 import type { Mesh, MeshEvent, Message } from './types.ts'
 
+/** The key of the nth peer of a fixture roster: 64 lowercase hex digits. */
+function keyOf(index: number): string {
+  return index.toString(16).padStart(64, '0')
+}
+
 function roster(...peers: string[]): string {
   return JSON.stringify({
-    peers: peers.map((nickname) => ({
+    peers: peers.map((nickname, index) => ({
       nickname,
+      key: keyOf(index),
       last_seen_secs_ago: 1,
       quiet: false,
       reach: 'direct',
@@ -21,6 +27,7 @@ interface Fake {
   readonly mesh: Mesh
   readonly sink: BackendSink
   readonly sent: { to: string | null; text: string }[]
+  readonly sentToKey: { key: string; text: string }[]
   closes: number
   /** What the next `stateMerge` resolves with. */
   nextState: string
@@ -31,8 +38,10 @@ async function fake(
 ): Promise<Fake> {
   let captured: BackendSink | undefined
   const sent: Fake['sent'] = []
+  const sentToKey: Fake['sentToKey'] = []
   const handle = {
     sent,
+    sentToKey,
     closes: 0,
     nextState: options.state ?? '{}',
   } as Fake & { mesh: Mesh; sink: BackendSink }
@@ -47,6 +56,10 @@ async function fake(
         maxMsg: 1408,
         send: (to, text) => {
           sent.push({ to, text })
+          return Promise.resolve()
+        },
+        sendToKey: (key, text) => {
+          sentToKey.push({ key, text })
           return Promise.resolve()
         },
         stateMerge: () => Promise.resolve(handle.nextState),
@@ -101,16 +114,41 @@ describe('identity and the opening snapshot', () => {
 })
 
 describe('messages', () => {
-  test('a message carries its author, its text and whether it was directed', async () => {
+  test('a message carries its author, its key, its text and whether it was directed', async () => {
     const { mesh, sink } = await fake()
     const messages = drain(mesh.messages(), 2)
-    sink.msg({ from: 'ana', text: 'hello', directed: false })
-    sink.msg({ from: 'bo', text: 'just you', directed: true })
+    sink.msg({ from: 'ana', key: keyOf(1), text: 'hello', directed: false })
+    sink.msg({ from: 'bo', key: keyOf(2), text: 'just you', directed: true })
 
     expect(await messages).toEqual([
-      { from: 'ana', text: 'hello', directed: false },
-      { from: 'bo', text: 'just you', directed: true },
+      { from: 'ana', key: keyOf(1), text: 'hello', directed: false },
+      { from: 'bo', key: keyOf(2), text: 'just you', directed: true },
     ] satisfies Message[])
+  })
+
+  test('two authors with one nickname are told apart by their keys', async () => {
+    const { mesh, sink } = await fake()
+    const messages = drain(mesh.messages(), 2)
+    sink.msg({ from: 'twin', key: keyOf(1), text: 'a', directed: false })
+    sink.msg({ from: 'twin', key: keyOf(2), text: 'b', directed: false })
+
+    const [first, second] = await messages
+    expect(first?.from).toBe(second?.from)
+    expect(first?.key).not.toBe(second?.key)
+  })
+
+  test('sendToKey hands the key and the text to the backend, and not the nickname path', async () => {
+    const { mesh, sent, sentToKey } = await fake()
+    await mesh.sendToKey(keyOf(2), 'for one of two')
+
+    expect(sentToKey).toEqual([{ key: keyOf(2), text: 'for one of two' }])
+    expect(sent).toEqual([])
+  })
+
+  test('a peer of the roster carries its key', async () => {
+    const { mesh } = await fake({ peers: ['ana', 'bo'] })
+
+    expect(mesh.peers.map((peer) => peer.key)).toEqual([keyOf(0), keyOf(1)])
   })
 
   test('send hands the text and the addressee to the backend', async () => {

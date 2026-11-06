@@ -28,10 +28,13 @@ class Waiting<T> {
   }
 }
 
+const KEY = 'cd'.repeat(32)
+
 function roster(...nicks: string[]): string {
   return JSON.stringify({
     peers: nicks.map((nickname) => ({
       nickname,
+      key: KEY,
       last_seen_secs_ago: 1,
       quiet: false,
       reach: 'direct',
@@ -46,6 +49,7 @@ interface Fake {
   events: Waiting<string | undefined>
   module: HabilisNetworkWasmModule
   sent: { to: string | undefined; text: string }[]
+  sentToKey: { key: string; text: string }[]
   closes: number
   rosterJson: string
 }
@@ -57,6 +61,7 @@ function fake(): Fake {
     msgs,
     events,
     sent: [],
+    sentToKey: [],
     closes: 0,
     rosterJson: roster(),
     module: undefined as unknown as HabilisNetworkWasmModule,
@@ -68,6 +73,10 @@ function fake(): Fake {
     maxMsg: () => 1408,
     send: (to, text) => {
       handle.sent.push({ to, text })
+      return Promise.resolve()
+    },
+    sendToKey: (key, text) => {
+      handle.sentToKey.push({ key, text })
       return Promise.resolve()
     },
     nextMsg: () => msgs.take(),
@@ -134,7 +143,7 @@ describe('openWasm', () => {
       event: (event) => extras.push(event),
     })
 
-    wasm.msgs.put(JSON.stringify({ nick: 'bob', directed: true, text: 'hi' }))
+    wasm.msgs.put(JSON.stringify({ nick: 'bob', key: KEY, directed: true, text: 'hi' }))
     wasm.events.put(JSON.stringify({ kind: 'joined', nick: 'bob' }))
     wasm.events.put(
       JSON.stringify({
@@ -148,7 +157,7 @@ describe('openWasm', () => {
     wasm.events.put(JSON.stringify({ kind: 'quiet', nick: 'bob', last_seen_secs_ago: 99 }))
     await settle()
 
-    expect(msgs).toEqual([{ from: 'bob', text: 'hi', directed: true }])
+    expect(msgs).toEqual([{ from: 'bob', key: KEY, text: 'hi', directed: true }])
     expect(presence).toEqual([{ kind: 'joined', nick: 'bob' }])
     expect(states).toEqual(['{"a":1}'])
     expect(extras).toEqual([{ kind: 'quiet', nick: 'bob' }])
@@ -188,6 +197,22 @@ describe('openWasm', () => {
     await opened.backend.send('bob', 'two')
     expect(wasm.sent[0]?.to).toBeUndefined()
     expect(wasm.sent[1]?.to).toBe('bob')
+    await opened.backend.close()
+  })
+
+  test('sendToKey passes the key through and not the nickname path', async () => {
+    const wasm = fake()
+    const opened = await openWasm(wasm.module, '{}')({
+      msg: () => {},
+      roster: () => {},
+      state: () => {},
+      presence: () => {},
+      failed: () => {},
+      closed: () => {},
+    })
+    await opened.backend.sendToKey(KEY, 'for one of two')
+    expect(wasm.sentToKey).toEqual([{ key: KEY, text: 'for one of two' }])
+    expect(wasm.sent).toEqual([])
     await opened.backend.close()
   })
 })

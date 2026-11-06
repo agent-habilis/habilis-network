@@ -109,7 +109,27 @@ impl MeshPeer {
             .map_err(|error| to_js_error(&error))
     }
 
-    /// The next inbound message, as JSON: `{"nick","directed","text"}`.
+    /// Send one message to the member that holds an author key, in 64 lowercase hex digits.
+    /// Two members can use one nickname, and `send` refuses such a nickname; a key names one.
+    ///
+    /// # Errors
+    /// `key` is not 64 lowercase hex digits, the message does not fit one frame, the event loop
+    /// has stopped, or the engine refused the frame.
+    #[wasm_bindgen(js_name = sendToKey)]
+    pub async fn send_to_key(&self, key: String, text: String) -> Result<(), JsValue> {
+        let to = membership::parse_key(&key).map_err(|error| to_js_error(&error))?;
+        let body = membership::msg_body(&text).map_err(|error| to_js_error(&error))?;
+        let (reply, answer) = oneshot::channel();
+        self.request(Request::Messaging(Messaging::SendToKey { to, body, reply }))
+            .await?;
+        answer
+            .await
+            .map_err(|_| to_js_error("mesh event loop has stopped"))?
+            .map_err(|error| to_js_error(&error))
+    }
+
+    /// The next inbound message, as JSON: `{"nick","key","directed","text"}`. The key is the 64
+    /// lowercase hex digits of the author key; two members can use one nickname.
     /// `null` once the mesh is gone and the queue is drained.
     #[wasm_bindgen(js_name = nextMsg)]
     pub async fn next_msg(&self) -> Option<String> {
@@ -216,6 +236,7 @@ impl MeshPeer {
 fn msg_json(message: &Inbound) -> String {
     serde_json::json!({
         "nick": message.nick,
+        "key": message.key.to_string(),
         "directed": message.directed,
         "text": message.text,
     })
