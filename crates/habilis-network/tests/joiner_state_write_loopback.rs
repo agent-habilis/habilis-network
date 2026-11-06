@@ -87,25 +87,37 @@ async fn merge(node: &Node<Writer>) -> Result<(), String> {
     written.await.expect("the loop answers")
 }
 
+/// Merge on `node` until it goes through or `WITHIN` has passed, and give the last result.
+async fn merge_within(node: &Node<Writer>, started: Instant) -> Result<(), String> {
+    let mut last = merge(node).await;
+    while last.is_err() && started.elapsed() < WITHIN {
+        time::sleep(Duration::from_millis(100)).await;
+        last = merge(node).await;
+    }
+    last
+}
+
 #[test]
-fn a_joiner_of_a_mesh_with_empty_state_writes_state_within_a_few_seconds() {
+fn two_joiners_of_a_mesh_with_empty_state_both_write_state_within_a_few_seconds() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let first = spawn("empty-state-join", "first").await;
         let second = spawn("empty-state-join", "second").await;
         let started = Instant::now();
-        let mut last = merge(&second).await;
-        while last.is_err() && started.elapsed() < WITHIN {
-            time::sleep(Duration::from_millis(100)).await;
-            last = merge(&second).await;
-        }
+        let second_result = merge_within(&second, started).await;
+        let first_result = merge_within(&first, started).await;
         let took = started.elapsed();
         let _ = second.leave().await;
         let _ = first.leave().await;
         assert_eq!(
-            last,
+            second_result,
             Ok(()),
-            "the joiner has asked a peer that holds nothing: the write goes through within {WITHIN:?} (waited {took:?})"
+            "the second joiner has asked a peer that holds nothing: the write goes through within {WITHIN:?} (waited {took:?})"
+        );
+        assert_eq!(
+            first_result,
+            Ok(()),
+            "the first joiner is answered by the second, which also holds nothing (waited {took:?})"
         );
     });
 }
