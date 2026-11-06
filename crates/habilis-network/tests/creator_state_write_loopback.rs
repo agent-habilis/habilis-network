@@ -50,7 +50,7 @@ impl NodeDriver for Writer {
         let Request::Merge(merge, done) = request;
         let params = StateMergeParams::new(context.into(), Channel::State, merge).surface(false);
         let sent = broadcast_state_merge(state, params).await;
-        let written: Result<(), String> = sent.map(|_| ()).map_err(|error| error.to_string());
+        let written: Result<(), String> = sent.map(|_sent| ()).map_err(|error| error.to_string());
         let _ = done.send(written);
         true
     }
@@ -72,8 +72,8 @@ fn the_creator_of_a_plain_mesh_writes_state_at_once() {
             Nickname::try_new("creator").expect("a nickname"),
             SilentSink::default(),
         );
-        let config = setup_mesh(kind, params).await.expect("a created mesh");
-        let node = Node::spawn(config, Writer, None, SignalHandling::Leave);
+        let loop_config = setup_mesh(kind, params).await.expect("a created mesh");
+        let node = Node::spawn(loop_config, Writer, None, SignalHandling::Leave);
         let (done, written) = oneshot::channel();
         node.send(Request::Merge(json!({ "a": 1 }), done))
             .await
