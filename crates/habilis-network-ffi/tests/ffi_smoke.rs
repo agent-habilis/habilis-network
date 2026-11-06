@@ -8,21 +8,22 @@
     reason = "the surface under test is `unsafe extern \"C\"`; calling it is the test"
 )]
 
-use std::ffi::{CStr, CString, c_char, c_long};
+use std::ffi::{CStr, CString, c_char, c_int, c_long};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use habilis_network_ffi::ffi::{
-    HabilisNetworkMesh, HabilisNetworkMsg, HabilisNetworkOpts, HabilisNetworkProducer,
-    HabilisNetworkStreamOpts, HabilisNetworkStreams, habilis_network_last_error,
-    habilis_network_max_msg, habilis_network_mesh_close, habilis_network_mesh_id,
-    habilis_network_mesh_name, habilis_network_mesh_nickname, habilis_network_mesh_open,
-    habilis_network_mesh_peer_count, habilis_network_mesh_peers_json,
+    HabilisNetworkMesh, HabilisNetworkMsg, HabilisNetworkMsgV2, HabilisNetworkOpts,
+    HabilisNetworkProducer, HabilisNetworkStreamOpts, HabilisNetworkStreams,
+    habilis_network_last_error, habilis_network_max_msg, habilis_network_mesh_close,
+    habilis_network_mesh_id, habilis_network_mesh_name, habilis_network_mesh_nickname,
+    habilis_network_mesh_open, habilis_network_mesh_peer_count, habilis_network_mesh_peers_json,
     habilis_network_mesh_state_json, habilis_network_mesh_state_merge, habilis_network_msg_recv,
-    habilis_network_msg_send, habilis_network_reader_close, habilis_network_stream_close,
-    habilis_network_stream_create, habilis_network_stream_hash, habilis_network_stream_open,
-    habilis_network_stream_read, habilis_network_stream_write, habilis_network_streams_bind,
-    habilis_network_streams_close, habilis_network_version,
+    habilis_network_msg_recv_v2, habilis_network_msg_send, habilis_network_msg_send_to_key,
+    habilis_network_reader_close, habilis_network_stream_close, habilis_network_stream_create,
+    habilis_network_stream_hash, habilis_network_stream_open, habilis_network_stream_read,
+    habilis_network_stream_write, habilis_network_streams_bind, habilis_network_streams_close,
+    habilis_network_version,
 };
 
 use std::ptr;
@@ -498,6 +499,286 @@ fn two_handles_exchange_messages() {
             0,
             "alice's close returns zero"
         );
+    }
+}
+
+/// Two handles on one loopback mesh, each seeing the other: `(alice, bob)`.
+fn pair() -> (*mut HabilisNetworkMesh, *mut HabilisNetworkMesh) {
+    let alice_nick = CString::new("alice").expect("no interior NUL");
+    let alice = open(&create_opts(&alice_nick));
+    assert!(!alice.is_null(), "open failed: {:?}", last_error());
+    // SAFETY: live handle; the id is copied before anything else is called.
+    let id = unsafe { CStr::from_ptr(habilis_network_mesh_id(alice)) }.to_owned();
+    let bob_nick = CString::new("bob").expect("no interior NUL");
+    let bob = open(&create_opts_for_join(&id, &bob_nick));
+    assert!(!bob.is_null(), "open (join) failed: {:?}", last_error());
+    let deadline = Instant::now() + Duration::from_secs(45);
+    // SAFETY: both handles stay live until the caller closes them.
+    while unsafe {
+        habilis_network_mesh_peer_count(alice) < 2 || habilis_network_mesh_peer_count(bob) < 2
+    } {
+        assert!(
+            Instant::now() < deadline,
+            "the two handles never saw each other"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+    (alice, bob)
+}
+
+/// A caller built before the key existed allocates 80 bytes for `habilis_network_msg` and
+/// passes no size, so `habilis_network_msg_recv` must write nothing past byte 80. A longer
+/// struct would overrun that caller's stack.
+#[test]
+fn the_old_recv_writes_only_the_80_bytes_of_the_old_struct() {
+    const OLD_STRUCT: usize = 80;
+    const GUARD: usize = 144;
+    let (alice, bob) = pair();
+    // SAFETY: live handle, NUL-terminated strings.
+    let sent = unsafe { habilis_network_msg_send(alice, ptr::null(), c"hello".as_ptr()) };
+    assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
+
+    let mut region = [0xaa_u8; OLD_STRUCT + GUARD];
+    region[..OLD_STRUCT].fill(0);
+    let mut buffer = [0_u8; 64];
+    let destination: *mut c_char = buffer.as_mut_ptr().cast();
+    let out: *mut HabilisNetworkMsg = region.as_mut_ptr().cast();
+    // SAFETY: live handle, a writable buffer of 64 bytes, and `out` points at 80 zeroed bytes
+    // followed by guard bytes: the caller of the old ABI owns exactly those 80.
+    let got = unsafe { habilis_network_msg_recv(bob, destination, buffer.len(), 20_000, out) };
+    assert_eq!(got, 1, "bob heard nothing: {:?}", last_error());
+    assert_eq!(
+        size_of::<HabilisNetworkMsg>(),
+        OLD_STRUCT,
+        "habilis_network_msg is no longer 80 bytes, so a caller built with 80 overruns it"
+    );
+    assert!(
+        region[OLD_STRUCT..].iter().all(|byte| *byte == 0xaa),
+        "habilis_network_msg_recv wrote past the 80 bytes of the old struct"
+    );
+
+    // SAFETY: each handle came from `habilis_network_mesh_open` and is not used after this.
+    unsafe {
+        assert_eq!(
+            habilis_network_mesh_close(bob),
+            0,
+            "bob's close returns zero"
+        );
+        assert_eq!(
+            habilis_network_mesh_close(alice),
+            0,
+            "alice's close returns zero"
+        );
+    }
+}
+
+/// Receive one message with the key of its sender into a buffer of `cap` bytes, waiting up to
+/// `millis`. Returns the call's result, the metadata, and the text when it was written.
+fn recv_v2(
+    handle: *mut HabilisNetworkMesh,
+    cap: usize,
+    millis: c_int,
+) -> (c_long, HabilisNetworkMsgV2, String) {
+    let mut message = HabilisNetworkMsgV2::empty();
+    let mut buffer = vec![0_u8; cap];
+    let destination: *mut c_char = buffer.as_mut_ptr().cast();
+    // SAFETY: live handle, buffer writable for `cap` bytes, `out` writable and sized.
+    let got =
+        unsafe { habilis_network_msg_recv_v2(handle, destination, cap, millis, &raw mut message) };
+    let text: String = if got == 1 {
+        let source: *const c_char = buffer.as_ptr().cast();
+        // SAFETY: a result of 1 means `buf` holds a NUL-terminated text.
+        unsafe { CStr::from_ptr(source) }
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        String::new()
+    };
+    (got, message, text)
+}
+
+/// The v2 receive refuses a struct smaller than its own before it takes a message, and then
+/// gives the nickname, the key and the text of the message that stayed queued.
+#[test]
+fn the_v2_recv_refuses_a_size_below_its_struct_and_keeps_the_message() {
+    let (alice, bob) = pair();
+    // SAFETY: live handle, NUL-terminated strings.
+    let sent = unsafe { habilis_network_msg_send(alice, ptr::null(), c"hello".as_ptr()) };
+    assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
+
+    let mut small = HabilisNetworkMsgV2::empty();
+    small.size = size_of::<HabilisNetworkMsg>();
+    let mut buffer = [0_u8; 64];
+    let destination: *mut c_char = buffer.as_mut_ptr().cast();
+    // SAFETY: live handle, a writable buffer, and `out` writable for its whole struct.
+    let refused = unsafe {
+        habilis_network_msg_recv_v2(bob, destination, buffer.len(), 20_000, &raw mut small)
+    };
+    assert_eq!(refused, -1, "a size of 80 bytes was accepted");
+    assert!(
+        last_error().is_some_and(|reason| reason.contains("out->size is 80")),
+        "the refusal does not say why: {:?}",
+        last_error()
+    );
+    assert!(
+        small.key.iter().all(|byte| *byte == 0) && small.len == 0,
+        "a refused call wrote into the struct"
+    );
+
+    let (got, meta, text) = recv_v2(bob, 64, 20_000);
+    assert_eq!(got, 1, "the message was lost: {:?}", last_error());
+    assert_eq!(
+        (nick_of_v2(&meta).as_str(), meta.directed, text.as_str()),
+        ("alice", 0, "hello"),
+        "the v2 receive does not give the message"
+    );
+    let key = key_of(&meta);
+    assert!(
+        key.len() == 64
+            && key
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+        "the key is not 64 lowercase hex digits: {key:?}"
+    );
+
+    // SAFETY: each handle came from `habilis_network_mesh_open` and is not used after this.
+    unsafe {
+        assert_eq!(
+            habilis_network_mesh_close(bob),
+            0,
+            "bob's close returns zero"
+        );
+        assert_eq!(
+            habilis_network_mesh_close(alice),
+            0,
+            "alice's close returns zero"
+        );
+    }
+}
+
+fn nick_of_v2(message: &HabilisNetworkMsgV2) -> String {
+    // SAFETY: `write_nick` always NUL-terminates inside the array.
+    unsafe { CStr::from_ptr(message.nick.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn key_of(message: &HabilisNetworkMsgV2) -> String {
+    // SAFETY: the receive call always NUL-terminates `key` inside the array.
+    unsafe { CStr::from_ptr(message.key.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Two members use one nickname. A send to the nickname is refused. A send to the key of one of
+/// them, read from the key of its message, reaches that member and not the other. A text that
+/// is not a key is an error with a reason.
+#[test]
+fn a_send_to_a_key_reaches_one_of_two_members_that_share_a_nickname() {
+    let twin_nick = CString::new("twin").expect("no interior NUL");
+    let first = open(&create_opts(&twin_nick));
+    assert!(!first.is_null(), "open failed: {:?}", last_error());
+    // SAFETY: live handle; the id is copied before anything else is called.
+    let id = unsafe { CStr::from_ptr(habilis_network_mesh_id(first)) }.to_owned();
+    let second = open(&create_opts_for_join(&id, &twin_nick));
+    assert!(
+        !second.is_null(),
+        "open (second) failed: {:?}",
+        last_error()
+    );
+    let sender_nick = CString::new("sender").expect("no interior NUL");
+    let sender = open(&create_opts_for_join(&id, &sender_nick));
+    assert!(
+        !sender.is_null(),
+        "open (sender) failed: {:?}",
+        last_error()
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let sees_fewer_than_three = |handle: &*mut HabilisNetworkMesh| {
+        // SAFETY: the three handles stay live until the end of the test.
+        unsafe { habilis_network_mesh_peer_count(*handle) < 3 }
+    };
+    while [first, second, sender].iter().any(sees_fewer_than_three) {
+        assert!(
+            Instant::now() < deadline,
+            "the three handles never saw each other"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    // Each twin broadcasts alone, so the sender reads the key of each one in a known order.
+    let mut keys: Vec<String> = Vec::new();
+    for twin in [first, second] {
+        // SAFETY: live handle, NUL-terminated strings.
+        let sent = unsafe { habilis_network_msg_send(twin, ptr::null(), c"i am a twin".as_ptr()) };
+        assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
+        let (got, meta, _) = recv_v2(sender, 256, 20_000);
+        assert_eq!(got, 1, "the sender heard no twin: {:?}", last_error());
+        assert_eq!(nick_of_v2(&meta), "twin", "the message names the nickname");
+        keys.push(key_of(&meta));
+    }
+    assert_eq!(keys[0].len(), 64, "the key of a message is 64 hex digits");
+    assert_ne!(keys[0], keys[1], "the two twins have one key");
+    // Each twin heard the broadcast of the other: drain it, so the next read is the send.
+    for twin in [first, second] {
+        let (got, meta, _) = recv_v2(twin, 256, 20_000);
+        assert_eq!(
+            (got, meta.directed),
+            (1, 0),
+            "a twin missed the broadcast of the other"
+        );
+    }
+
+    // SAFETY: live handle, NUL-terminated strings.
+    let by_nickname = unsafe { habilis_network_msg_send(sender, c"twin".as_ptr(), c"x".as_ptr()) };
+    assert_eq!(by_nickname, -1, "a nickname of two live keys was sent to");
+    assert!(
+        last_error().is_some_and(|reason| reason.contains("two or more")),
+        "the refusal does not name the cause: {:?}",
+        last_error()
+    );
+
+    let first_key = CString::new(keys[0].as_str()).expect("hex has no NUL");
+    // SAFETY: live handle, NUL-terminated strings.
+    let by_key =
+        unsafe { habilis_network_msg_send_to_key(sender, first_key.as_ptr(), c"for one".as_ptr()) };
+    assert_eq!(by_key, 0, "send to a key failed: {:?}", last_error());
+    let (got, meta, body) = recv_v2(first, 256, 20_000);
+    assert_eq!(got, 1, "the chosen twin got nothing: {:?}", last_error());
+    assert_eq!(
+        (meta.directed, body.as_str()),
+        (1, "for one"),
+        "the chosen twin gets a directed message"
+    );
+    let (other, _, _) = recv_v2(second, 256, 2_000);
+    assert_eq!(other, 0, "the other twin got the message of the first");
+
+    // SAFETY: live handles, NUL-terminated strings and NULL where the contract allows it.
+    unsafe {
+        assert_eq!(
+            habilis_network_msg_send_to_key(sender, c"twin".as_ptr(), c"x".as_ptr()),
+            -1,
+            "a nickname was read as a key"
+        );
+        assert!(
+            last_error().is_some_and(|reason| reason.contains("64 lowercase hex")),
+            "the refusal does not say what a key is: {:?}",
+            last_error()
+        );
+        assert_eq!(
+            habilis_network_msg_send_to_key(sender, ptr::null(), c"x".as_ptr()),
+            -1,
+            "a NULL key is an error"
+        );
+        assert_eq!(
+            habilis_network_msg_send_to_key(ptr::null_mut(), first_key.as_ptr(), c"x".as_ptr()),
+            -1,
+            "a NULL handle is an error"
+        );
+        for handle in [sender, second, first] {
+            assert_eq!(habilis_network_mesh_close(handle), 0, "close returns zero");
+        }
     }
 }
 

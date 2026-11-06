@@ -108,6 +108,8 @@ function fakeLib(
           state.closes += 1
           return 0
         }
+        case 'habilis_network_msg_send_to_key':
+        case 'habilis_network_msg_recv_v2':
         case 'habilis_network_mesh_open':
         case 'habilis_network_mesh_peer_count':
         case 'habilis_network_streams_bind':

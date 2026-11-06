@@ -80,6 +80,33 @@ typedef struct {
   size_t len;
 } habilis_network_msg;
 
+/*
+ * Metadata for one received message, with the key of its author. Two members can
+ * use one nickname, so a nickname names no author; the key does, and
+ * habilis_network_msg_send_to_key() sends to it.
+ *
+ * The caller allocates this struct and sets `size` to sizeof(habilis_network_msg_v2)
+ * before every call; habilis_network_msg_recv_v2() refuses a smaller size. The
+ * struct has 152 bytes and alignment 8:
+ *
+ *   offset   0  size_t size     the size the caller allocated
+ *   offset   8  char nick[64]   as in habilis_network_msg
+ *   offset  72  char key[65]    64 lowercase hex digits and the NUL
+ *   offset 137  3 bytes of padding
+ *   offset 140  int directed
+ *   offset 144  size_t len
+ *
+ * habilis_network_msg has no size field and keeps its 80 bytes, so a caller built
+ * with it is safe; it cannot receive the key.
+ */
+typedef struct {
+  size_t size;
+  char nick[64];
+  char key[65];
+  int directed;   /* 1 = addressed to us specifically, 0 = broadcast */
+  size_t len;
+} habilis_network_msg_v2;
+
 /* Create or join a mesh. NULL on failure. */
 habilis_network_mesh *habilis_network_mesh_open(const habilis_network_opts *options);
 
@@ -98,6 +125,15 @@ const char *habilis_network_mesh_nickname(const habilis_network_mesh *handle);
 int habilis_network_msg_send(habilis_network_mesh *handle, const char *to, const char *text);
 
 /*
+ * Send one message to the member that holds an author key. `key` is 64 lowercase
+ * hex digits: the `key` of a received habilis_network_msg_v2, or of a roster row.
+ * Two members can use one nickname, and habilis_network_msg_send() refuses such a
+ * nickname; a key names one member. 0 on success, -1 on failure: a text that is
+ * not a key, or a message that does not fit one frame, is refused.
+ */
+int habilis_network_msg_send_to_key(habilis_network_mesh *handle, const char *key, const char *text);
+
+/*
  * Take the next inbound message, waiting up to `timeout_ms`. Returns 1 with the
  * text NUL-terminated in `buffer` and `out` filled, 0 on timeout, -1 on failure,
  * or -2 when the text does not fit in `cap`: nothing is written to `buffer`, the
@@ -106,6 +142,15 @@ int habilis_network_msg_send(habilis_network_mesh *handle, const char *to, const
  */
 long habilis_network_msg_recv(habilis_network_mesh *handle, char *buffer, size_t cap, int timeout_ms,
                      habilis_network_msg *out);
+
+/*
+ * The same as habilis_network_msg_recv(), with a habilis_network_msg_v2 that also
+ * holds the key of the author. Set `out->size = sizeof(habilis_network_msg_v2)`
+ * before the call. A smaller size returns -1 and takes no message: nothing is
+ * written to `out` or `buffer`, and the message stays queued.
+ */
+long habilis_network_msg_recv_v2(habilis_network_mesh *handle, char *buffer, size_t cap, int timeout_ms,
+                     habilis_network_msg_v2 *out);
 
 /*
  * The shared state document — a JSON object every peer in the mesh converges on

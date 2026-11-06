@@ -35,11 +35,18 @@ export const ABI = {
   habilis_network_mesh_nickname: { args: ['ptr'], returns: 'ptr' },
 
   habilis_network_msg_send: { args: ['ptr', 'cstr', 'cstr'], returns: 'i32' },
+  /** The key is 64 lowercase hex digits. Two members can use one nickname; a key names one. */
+  habilis_network_msg_send_to_key: { args: ['ptr', 'cstr', 'cstr'], returns: 'i32' },
   /**
    * 1 = a message is in `buf` and `out`, 0 = timeout, -1 = failure, -2 = `buf`
    * too small: the message stays queued and `out.len` says how big to retry.
    */
   habilis_network_msg_recv: { args: ['ptr', 'buf', 'usize', 'i32', 'buf'], returns: 'isize' },
+  /**
+   * `habilis_network_msg_recv` with the key of the author. The caller sets `out.size` to the
+   * size of the struct first, and a smaller size returns -1 and takes no message.
+   */
+  habilis_network_msg_recv_v2: { args: ['ptr', 'buf', 'usize', 'i32', 'buf'], returns: 'isize' },
 
   habilis_network_mesh_state_merge: { args: ['ptr', 'cstr'], returns: 'i32' },
   habilis_network_mesh_state_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },
