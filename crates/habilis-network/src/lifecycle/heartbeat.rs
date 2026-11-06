@@ -199,6 +199,8 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
                 {
                     state.forget_peer_endpoint(nickname.as_str());
                 }
+                // A ghost is never quiet, so it cannot return: its parked frames have no taker.
+                state.drop_buffered_frames_to(&key);
                 tracing::trace!(
                     key = %key,
                     age_secs = age,
@@ -221,6 +223,9 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         // again leaves first: it is the newest lapse, and the cap must drop an older one before it.
         state.clock_evidence.lapsed_quiet.remove(&key);
         state.clock_evidence.lapsed_quiet.insert(key);
+        // It stayed quiet for the whole TTL, so it is not expected back: the frames parked for it
+        // would be asked for again at each flush for ever.
+        state.drop_buffered_frames_to(&key);
     }
     // Keep `quiet_since` bounded to current `quiet` membership: peers that
     // returned (drained from `quiet`) or fell off the bounded `quiet` FIFO
@@ -371,6 +376,7 @@ mod tests {
     use crate::util::tuning;
     use std::time::Duration;
 
+    use crate::protocol::messages::sole_addressee;
     use crate::{protocol, testing};
     /// A `PeerInfo` of a key that another key shadows binds no hint, but its address goes into
     /// the unicast book. When the key is no peer, quiet or lapsed any more, the sweep releases the
@@ -685,6 +691,73 @@ mod tests {
         assert!(
             state.quiet.contains(&test_key("lost-heron")),
             "a peer quiet for a minute stays"
+        );
+    }
+
+    /// A directed frame parked for `key`, as a send leaves it while the key has no endpoint.
+    fn park_frame_for(state: &mut EventLoopState, key: AuthorKey) {
+        use crate::protocol::identity::Identity;
+        use crate::protocol::messages::Message;
+        use crate::protocol::{MeshId, MessageId};
+        let mesh = MeshId::from("test");
+        let frame = Message::new_pong(&mesh, &nick("alice"), key, &MessageId::random())
+            .sign(&Identity::generate());
+        let bytes = frame.serialize().expect("serialize");
+        assert!(state.pending_outbound.push((frame, bytes)), "room");
+    }
+
+    /// A key that went quiet may return, so its parked frames wait. A key that stayed quiet past
+    /// the quiet TTL is gone for good, and the frames parked for it go with it: the flush would
+    /// ask for them at every tick for ever.
+    #[test]
+    fn a_frame_parked_for_a_key_that_lapsed_is_dropped_and_one_for_a_quiet_key_waits() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let long_gone = Instant::now()
+            .checked_sub(QUIET_TTL + Duration::from_secs(60))
+            .expect("the monotonic clock has run past the quiet TTL since boot");
+        let recent = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("the monotonic clock has run past 60 s since boot");
+        for (name, heard) in [("swift-cedar", long_gone), ("lost-heron", recent)] {
+            state.quiet_for_test(name);
+            state.quiet_since.insert(test_key(name), heard);
+            park_frame_for(&mut state, test_key(name));
+        }
+
+        tick_sweep(&mut state, &SilentSink);
+
+        let parked = state.pending_outbound.take();
+        let waiting: Vec<AuthorKey> = parked
+            .iter()
+            .filter_map(|entry| sole_addressee(&entry.0.kind).copied())
+            .collect();
+        assert_eq!(
+            waiting,
+            vec![test_key("lost-heron")],
+            "only the frame of the key that is still quiet waits"
+        );
+    }
+
+    /// A ghost is evicted without a trace: it was never shown and cannot return as a quiet peer.
+    /// The frames parked for it go too.
+    #[test]
+    fn a_frame_parked_for_an_evicted_ghost_is_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let ghost = test_key("ghost-oak");
+        let expired_at = Instant::now()
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
+        state.last_seen.insert(ghost, expired_at);
+        state.peer_for_test("ghost-oak");
+        park_frame_for(&mut state, ghost);
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.pending_outbound.is_empty(),
+            "the frame parked for an evicted ghost stayed in the buffer"
         );
     }
 

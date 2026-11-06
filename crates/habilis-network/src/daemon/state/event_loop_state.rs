@@ -1232,9 +1232,10 @@ impl EventLoopState {
     }
 
     /// Drop the buffered directed frames whose recipient is `key`, and keep the others in order.
-    /// A key that left the roster has no endpoint to wait for, so a frame to it would be requeued
-    /// at every flush until the buffer is full.
-    fn drop_buffered_frames_to(&mut self, key: &AuthorKey) {
+    /// A key that left the roster, or that cannot return (a ghost, a key quiet past the quiet
+    /// TTL), has no endpoint to wait for, so a frame to it would be requeued at every flush until
+    /// the buffer is full.
+    pub(crate) fn drop_buffered_frames_to(&mut self, key: &AuthorKey) {
         for entry in self.pending_outbound.take() {
             if sole_addressee(&entry.0.kind) != Some(key) {
                 self.pending_outbound.push(entry);
