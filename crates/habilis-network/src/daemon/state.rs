@@ -1143,6 +1143,38 @@ mod tests {
         assert_eq!(listed, want, "the member list is not one row for each key");
     }
 
+    /// A key that renamed keeps its hint under the old nickname until the sweep prunes it. The
+    /// member list follows `address_of`: the key is listed once, by the address that a send to it
+    /// dials, and the stale hint under the old nickname is not a second row.
+    #[test]
+    fn a_key_that_renamed_is_one_row_of_the_member_list() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("renamer");
+        let (old_endpoint, new_endpoint) = (endpoint_id(1), endpoint_id(2));
+        seat(&mut state, key, "old-name", true);
+        state.bind_peer_endpoint(key, nick("old-name"), iroh::EndpointAddr::new(old_endpoint));
+        state.names.insert(key, nick("new-name"));
+        state.bind_peer_endpoint(key, nick("new-name"), iroh::EndpointAddr::new(new_endpoint));
+
+        let listed: Vec<EndpointId> = state
+            .member_addresses()
+            .iter()
+            .map(|address| address.id)
+            .collect();
+
+        assert_eq!(
+            listed,
+            vec![new_endpoint],
+            "the key is one row, by the address that a send to it dials"
+        );
+        assert_eq!(
+            state.address_of(&key).map(|address| address.id),
+            Some(new_endpoint),
+            "the member list and the send route agree"
+        );
+    }
+
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
     #[test]
