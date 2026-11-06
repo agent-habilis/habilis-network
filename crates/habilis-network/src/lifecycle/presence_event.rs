@@ -81,9 +81,6 @@ pub(crate) async fn handle_presence(
         ask_for_proof(message, state, context).await;
         return;
     }
-    if subtype == PresenceSubtype::Joined {
-        state.note_joined_proof(message, context.mesh);
-    }
     if subtype == PresenceSubtype::Left {
         // A key says goodbye once per run. A second copy is a replay that a peer still held.
         let key = message.key();
@@ -176,7 +173,11 @@ pub(crate) async fn handle_presence(
 /// Send the proof request for a session that has no proof here, to that member alone over a warm
 /// path. The retry clock of the session starts only after a send that worked: with no warm path
 /// the next alive frame of the session asks again.
-async fn ask_for_proof(alive: &Verified, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+pub(crate) async fn ask_for_proof(
+    alive: &Verified,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
     let Some(request) = state.proof_request_for(alive, context.author, context.mesh) else {
         return;
     };

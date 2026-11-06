@@ -1,17 +1,11 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the event loop state holds the exchange in the next commit"
-    )
-)]
-
 use std::time::Duration;
 
 use super::proof_book::ProofBook;
 use crate::protocol::identity::{IdentityProof, verify_proof};
 use crate::protocol::{AuthorKey, MeshId, Nickname};
+use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::clock::Instant;
+use iroh::PublicKey;
 
 /// The first retry waits 30 s, and each next one waits twice as long: 30 s, 60 s, 120 s.
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(30);
@@ -41,12 +35,23 @@ struct Retry {
 /// unicast request, so a calm mesh carries no proof bytes beyond the `joined` frames.
 ///
 /// Between two proofs for one session, the one with the higher run wins. On a tie the first stays.
+///
+/// A nickname is bound to the member key that proved it, for as long as a session of that member
+/// is held in the roster. A session that claims a bound nickname with no proof of that member is
+/// not admitted ([`Self::admits`]), and a proof of another member for it is not held. A nickname
+/// that no held session binds is free: a session with no proof is admitted and binds nothing.
 #[derive(Debug)]
 pub(crate) struct ProofExchange {
+    // the proofs, as many as the cap at most; the binding of a nickname is derived from them, so
+    // the bindings are bounded by the same cap
     book: ProofBook<AuthorKey, (Nickname, IdentityProof)>,
     // the requests per session, as many as the book holds at most: when full, the oldest goes
     asked: ProofBook<AuthorKey, Retry>,
+    // the sessions told that their nickname is bound to another member: the oldest goes at the cap
+    told: BoundedFifoSet<AuthorKey>,
     ties_refused: u64,
+    bound_refused: u64,
+    gate_refused: u64,
 }
 
 impl ProofExchange {
@@ -54,8 +59,63 @@ impl ProofExchange {
         Self {
             book: ProofBook::with_cap(cap),
             asked: ProofBook::with_cap(cap),
+            told: BoundedFifoSet::new(cap),
             ties_refused: 0,
+            bound_refused: 0,
+            gate_refused: 0,
         }
+    }
+
+    /// The member key that holds `nickname` now: the proof of a session that `is_held` says is in
+    /// the roster, live or quiet, names the nickname.
+    fn bound_to(
+        &self,
+        nickname: &Nickname,
+        is_held: impl Fn(&AuthorKey) -> bool,
+    ) -> Option<PublicKey> {
+        let mut holders = self.book.iter();
+        let holder = holders.find(|(session, (named, _))| named == nickname && is_held(session));
+        holder.map(|(_, (_, proof))| proof.identity)
+    }
+
+    /// Whether some held session of the roster binds `nickname`.
+    pub(crate) fn is_bound(
+        &self,
+        nickname: &Nickname,
+        is_held: impl Fn(&AuthorKey) -> bool,
+    ) -> bool {
+        self.bound_to(nickname, is_held).is_some()
+    }
+
+    /// Whether the frames of `session` that claim `nickname` reach the roster. They do when the
+    /// session proved the nickname, or when no held session binds it. A bound nickname with no
+    /// proof of its member is the join error of the claimant; the refusal is counted.
+    pub(crate) fn admits(
+        &mut self,
+        session: &AuthorKey,
+        nickname: &Nickname,
+        is_held: impl Fn(&AuthorKey) -> bool,
+    ) -> bool {
+        let proved = self
+            .book
+            .get(session)
+            .is_some_and(|(named, _)| named == nickname);
+        let admitted = proved || self.bound_to(nickname, is_held).is_none();
+        if !admitted {
+            self.gate_refused += 1;
+        }
+        admitted
+    }
+
+    /// A frame was refused the roster because it claims the nickname of this node.
+    pub(crate) fn note_gate_refused(&mut self) {
+        self.gate_refused += 1;
+    }
+
+    /// Whether `session` is told now that its nickname is bound to another member: once for each
+    /// session, so a resent `joined` frame makes one error line and not a stream.
+    pub(crate) fn tell_once(&mut self, session: &AuthorKey) -> bool {
+        self.told.insert(*session)
     }
 
     /// An alive frame came from `session`. True means: send the session a proof request now. A
@@ -80,16 +140,17 @@ impl ProofExchange {
         self.asked.insert_evicting(*session, retry, |_, _| false);
     }
 
-    /// A proof came for `session`. It is held if it verifies for this nickname and mesh, and if it
-    /// does not lower the run of a proof already held. `is_live` says whether a held session is a
-    /// live peer: at the cap the oldest dead session goes first, and a book of live sessions refuses.
+    /// A proof came for `session`. It is held if it verifies for this nickname and mesh, if it does
+    /// not lower the run of a proof already held, and if no held session binds the nickname to
+    /// another member. `is_held` says whether a held session is in the roster: at the cap the
+    /// oldest session that is not goes first, and a book of sessions in the roster refuses.
     pub(crate) fn accept(
         &mut self,
         session: &AuthorKey,
         nickname: &Nickname,
         mesh: &MeshId,
         proof: IdentityProof,
-        is_live: impl Fn(&AuthorKey) -> bool,
+        is_held: impl Fn(&AuthorKey) -> bool,
     ) -> bool {
         // The run is compared first: a copy of the held proof, which comes with each resent or
         // re-announced `joined` frame, costs no signature check.
@@ -107,8 +168,13 @@ impl ProofExchange {
         if !verify_proof(&proof, session, nickname.as_ref(), mesh.as_ref()) {
             return false;
         }
+        let bound = self.bound_to(nickname, &is_held);
+        if bound.is_some_and(|member| member != proof.identity) {
+            self.bound_refused += 1;
+            return false;
+        }
         self.book
-            .insert_evicting(*session, (nickname.clone(), proof), |held, _| is_live(held));
+            .insert_evicting(*session, (nickname.clone(), proof), |held, _| is_held(held));
         self.book.get(session).is_some()
     }
 
@@ -124,7 +190,17 @@ impl ProofExchange {
         self.ties_refused
     }
 
-    /// How many proofs the full book refused because every held session was live.
+    /// How many proofs were refused because another member holds the nickname.
+    pub(crate) fn bound_refused(&self) -> u64 {
+        self.bound_refused
+    }
+
+    /// How many frames were refused the roster because they claim a bound nickname with no proof.
+    pub(crate) fn gate_refused(&self) -> u64 {
+        self.gate_refused
+    }
+
+    /// How many proofs the full book refused because every held session was in the roster.
     pub(crate) fn refused(&self) -> u64 {
         self.book.refused()
     }

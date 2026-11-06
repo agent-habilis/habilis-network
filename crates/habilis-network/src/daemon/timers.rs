@@ -426,6 +426,8 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_proofs_refused = sizes.proofs_refused,
         col_proofs_ties_refused = sizes.proofs_ties_refused,
         col_proofs_answers_refused = sizes.proofs_answers_refused,
+        col_proofs_bound_refused = sizes.proofs_bound_refused,
+        col_proofs_gate_refused = sizes.proofs_gate_refused,
         col_reassembled_groups = sizes.reassembled_groups,
         col_pending_outbound = sizes.pending_outbound,
         col_message_log = sizes.message_log,

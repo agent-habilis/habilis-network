@@ -18,6 +18,8 @@ pub(crate) struct CollectionSizes {
     pub(crate) proofs_refused: usize,
     pub(crate) proofs_ties_refused: usize,
     pub(crate) proofs_answers_refused: usize,
+    pub(crate) proofs_bound_refused: usize,
+    pub(crate) proofs_gate_refused: usize,
     pub(crate) reassembled_groups: usize,
     pub(crate) pending_outbound: usize,
     pub(crate) message_log: usize,
@@ -63,6 +65,8 @@ impl CollectionSizes {
         sizes.proofs_refused = usize::try_from(state.proofs.refused()).unwrap_or(0);
         sizes.proofs_ties_refused = usize::try_from(state.proofs.ties_refused()).unwrap_or(0);
         sizes.proofs_answers_refused = usize::try_from(state.proofs.answers_refused()).unwrap_or(0);
+        sizes.proofs_bound_refused = usize::try_from(state.proofs.bound_refused()).unwrap_or(0);
+        sizes.proofs_gate_refused = usize::try_from(state.proofs.gate_refused()).unwrap_or(0);
         sizes.reassembled_groups = state.receive_memory.reassembled_groups.len();
         sizes.pending_outbound = state.pending_outbound.len();
         sizes.author_seqs = state.author_seqs.len();

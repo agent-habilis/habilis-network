@@ -148,7 +148,7 @@ mod tests {
                 .own_proof(&nick("alice"), &mesh, 1)
                 .expect("a member key"),
         );
-        receiver.note_joined_proof(&own.sign(&sender.identity), &mesh);
+        receiver.note_joined_proof(&own.sign(&sender.identity), &mesh, &nick("reader"));
         assert!(
             receiver.proofs.proof_of(&key).is_some(),
             "the proof is held"
@@ -162,7 +162,7 @@ mod tests {
                 .own_proof(&nick("alice"), &mesh, 1)
                 .expect("a member key"),
         );
-        other.note_joined_proof(&forged.sign(&sender.identity), &mesh);
+        other.note_joined_proof(&forged.sign(&sender.identity), &mesh, &nick("reader"));
         assert!(
             other.proofs.proof_of(&key).is_none(),
             "a proof of another nickname is not held"
@@ -176,7 +176,7 @@ mod tests {
                 .expect("a member key"),
         )
         .sign(&thief.identity);
-        other.note_joined_proof(&stolen, &mesh);
+        other.note_joined_proof(&stolen, &mesh, &nick("reader"));
         assert!(
             other
                 .proofs
@@ -185,7 +185,7 @@ mod tests {
             "a proof body of another session, replayed under a new key, is not held"
         );
         let empty = Message::new_joined(&mesh, &nick("alice")).sign(&sender.identity);
-        other.note_joined_proof(&empty, &mesh);
+        other.note_joined_proof(&empty, &mesh, &nick("reader"));
         assert!(
             other.proofs.proof_of(&key).is_none(),
             "an empty body holds no proof"
@@ -281,7 +281,7 @@ mod tests {
             let proof: protocol::identity::IdentityProof =
                 member.prove(&session.author_key(), name.as_ref(), mesh.as_ref(), 1);
             let joined = Message::new_joined_with_proof(&mesh, &name, &proof).sign(&session);
-            receiver.note_joined_proof(&joined, &mesh);
+            receiver.note_joined_proof(&joined, &mesh, &nick("reader"));
             newest = Some(session.author_key());
         }
         let newest: AuthorKey = newest.expect("the loop ran");
@@ -315,18 +315,21 @@ mod tests {
         assert_eq!(answered, 96, "every asker of a mesh of 96 gets its answer");
     }
 
-    /// Two live sessions can share a nickname. Each one holds the proof of its own session, and the
-    /// proof of one is no proof for the other: the book is keyed by the session key.
+    /// Two live sessions of one member can share a nickname, as a restart that overlaps its old
+    /// session does. Each one holds the proof of its own session, and the proof of one is no proof
+    /// for the other: the book is keyed by the session key.
     #[test]
-    fn two_live_sessions_under_one_nickname_each_hold_their_own_proof() {
-        let (first, second) = (fresh_state(), fresh_state());
+    fn two_live_sessions_of_one_member_each_hold_their_own_proof() {
+        let first = fresh_state();
+        let mut second = fresh_state();
+        second.member_identity = first.member_identity.clone();
         let mut receiver = fresh_state();
         let mesh = MeshId::from("💬test");
         let shared = nick("alice");
         for sender in [&first, &second] {
             receiver.peers.insert(sender.identity.author_key());
             let joined: messages::Verified = sender.own_joined(&mesh, &shared);
-            receiver.note_joined_proof(&joined, &mesh);
+            receiver.note_joined_proof(&joined, &mesh, &nick("reader"));
         }
 
         let held_first = receiver.proofs.proof_of(&first.identity.author_key());
@@ -335,10 +338,77 @@ mod tests {
             held_first.is_some() && held_second.is_some(),
             "both sessions hold a proof"
         );
-        assert_ne!(
+        assert_eq!(
             held_first.map(|proof| proof.identity),
             held_second.map(|proof| proof.identity),
-            "each proof names the member key of its own session"
+            "both proofs name the one member key"
+        );
+        assert_ne!(
+            held_first.map(|proof| proof.signature),
+            held_second.map(|proof| proof.signature),
+            "each proof is signed over its own session key"
+        );
+    }
+
+    /// The nickname is bound to the member key that proved it first. Another member that proves the
+    /// same nickname is not held, while the session of the first is in the roster.
+    #[test]
+    fn a_second_member_cannot_prove_a_nickname_that_a_roster_session_binds() {
+        let (first, second) = (fresh_state(), fresh_state());
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let shared = nick("alice");
+        receiver.peers.insert(first.identity.author_key());
+        receiver.peers.insert(second.identity.author_key());
+        let joined_first: messages::Verified = first.own_joined(&mesh, &shared);
+        let joined_second: messages::Verified = second.own_joined(&mesh, &shared);
+
+        receiver.note_joined_proof(&joined_first, &mesh, &nick("reader"));
+        receiver.note_joined_proof(&joined_second, &mesh, &nick("reader"));
+
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&first.identity.author_key())
+                .is_some(),
+            "the first member binds the nickname"
+        );
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&second.identity.author_key())
+                .is_none(),
+            "the second member's proof for the same nickname is not held"
+        );
+        assert_eq!(receiver.proofs.bound_refused(), 1, "the refusal is counted");
+    }
+
+    /// The nickname of this node is bound to its member key. The first proof of another member for
+    /// it is the join error of this node, told once for each session.
+    #[test]
+    fn a_proof_of_another_member_for_our_nickname_is_the_join_error_once() {
+        let mut ours = fresh_state();
+        let other = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let mine = nick("alice");
+        let joined: messages::Verified = other.own_joined(&mesh, &mine);
+
+        assert!(
+            ours.note_joined_proof(&joined, &mesh, &mine),
+            "the first proof of another member for our nickname is told"
+        );
+        assert!(
+            !ours.note_joined_proof(&joined, &mesh, &mine),
+            "the same session is told once"
+        );
+        assert!(
+            ours.proofs.proof_of(&other.identity.author_key()).is_none(),
+            "the proof is not held: our nickname is not up for binding"
+        );
+        let ours_joined: messages::Verified = ours.own_joined(&mesh, &mine);
+        assert!(
+            !ours.note_joined_proof(&ours_joined, &mesh, &mine),
+            "a proof of our own member key is no error"
         );
     }
 
@@ -394,7 +464,7 @@ mod tests {
         let answer: messages::Verified = member
             .proof_answer(to, &request.key(), &member_name, &mesh, Instant::now())
             .expect("the member answers the request for itself");
-        joiner.note_joined_proof(&answer, &mesh);
+        joiner.note_joined_proof(&answer, &mesh, &nick("reader"));
 
         let held = joiner.proofs.proof_of(&member.identity.author_key());
         assert!(
@@ -467,7 +537,7 @@ mod tests {
         let mut receiver = fresh_state();
         let mesh = MeshId::from("💬test");
         let joined: messages::Verified = sender.own_joined(&mesh, &nick("alice"));
-        receiver.note_joined_proof(&joined, &mesh);
+        receiver.note_joined_proof(&joined, &mesh, &nick("reader"));
         assert!(
             receiver
                 .proofs
