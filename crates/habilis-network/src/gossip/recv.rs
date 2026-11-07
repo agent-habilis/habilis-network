@@ -1111,11 +1111,18 @@ async fn answer_proof_request(
         return;
     };
     messages::log_out(&answer);
-    if let Ok(bytes) = answer.serialize()
-        && !transport::send_best_effort(eid, bytes, state).await
-    {
+    let sent = match answer.serialize() {
+        Ok(bytes) => transport::send_best_effort(eid, bytes, state).await,
+        Err(_) => false,
+    };
+    if !sent {
         tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: the send failed");
+        return;
     }
+    // The answer is a signed \`joined\` frame that the asker holds from now on. This node keeps it too, as
+    // it keeps its other broadcasts: a peer that holds a frame of its author that the author never kept
+    // resends it to her at every digest round, forever.
+    retain_own_broadcast(state, answer);
 }
 
 /// The pong that answers `ping`, and where it goes: the endpoint that the signer of the ping proved
