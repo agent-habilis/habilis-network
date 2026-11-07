@@ -23,6 +23,9 @@ use tokio::{sync, time};
 /// once a heal re-grafts it fails here instead of passing slowly.
 const LINK_DEADLINE: Duration = Duration::from_secs(12);
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(20);
+/// How long the pair may take to select a direct path after its roster reads `unicast`: the bound of the
+/// link itself. The wait took 0.51 s at most in 40 runs beside 16 busy loops, and 0.0003 s in most.
+const DIRECT_DEADLINE: Duration = LINK_DEADLINE;
 
 fn serial() -> &'static sync::Mutex<()> {
     static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
@@ -181,6 +184,21 @@ impl Member {
             .expect("the loop answers");
     }
 
+    /// The rung of the selected path on the pooled connection to `peer`: `ip`, `webrtc`, `multihop` or
+    /// `relay`, and none while no path is selected.
+    async fn rung_to(&self, peer: &str) -> Option<&'static str> {
+        self.membership
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
     async fn state_json(&self) -> String {
         self.membership
             .request(|reply| Request::Inspect(Inspect::StateJson { reply }))
@@ -221,6 +239,31 @@ async fn linked_pair(relay: &RelayUrl, transport: Vec<Transport>) -> (Member, Me
         time::sleep(Duration::from_millis(500)).await;
     }
     (alice, bob)
+}
+
+/// Wait until the pooled connection of each of the pair selects a path that is not the relay, and say how
+/// long it took. On a mesh whose relay is lookup only a payload is refused on a connection that has no
+/// such path yet (the engine refuses a path that is not selected as well as one that is the relay), and the
+/// roster already reads `unicast` for a connection whose data channel is still on its way: a send before
+/// this wait is refused by design, and under load the data channel is late.
+async fn wait_for_a_direct_path(alice: &Member, bob: &Member) -> Duration {
+    let started = Instant::now();
+    loop {
+        let rungs = (alice.rung_to("bob").await, bob.rung_to("alice").await);
+        let direct = |rung: Option<&str>| matches!(rung, Some("ip" | "webrtc"));
+        if direct(rungs.0) && direct(rungs.1) {
+            return started.elapsed();
+        }
+        assert!(
+            started.elapsed() < DIRECT_DEADLINE,
+            "the pair never got a direct path after {:?}: alice reads {:?} to bob, bob reads {:?} to alice\n{}",
+            started.elapsed(),
+            rungs.0,
+            rungs.1,
+            link_trace()
+        );
+        time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// [`linked_pair`] again, until bob's endpoint id has the order given: the ids are random, and
@@ -280,6 +323,8 @@ fn a_webrtc_only_mesh_carries_every_lane_between_natives() {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::WebRtc]).await;
+        let direct_after = wait_for_a_direct_path(&alice, &bob).await;
+        eprintln!("TIMING direct path after {direct_after:?}");
         every_lane_carries(&mut alice, &mut bob).await;
 
         let logs = logs();
