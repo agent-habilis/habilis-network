@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { abGate, phaseGate, startGate } from "./gate.ts";
+import { abGate, phaseGate, startGate, waitForStart } from "./gate.ts";
 
 test("the start gate needs load1 at most 2.0 now and at most 2.5 in the 3 min before", () => {
   expect(startGate([1.2, 1.4, 1.3]).ok).toBe(true);
@@ -26,4 +26,11 @@ test("the A/B gate needs two phase medians within 35 percent", () => {
 test("the A/B gate reads two zero medians as a ratio of 1", () => {
   expect(abGate(0, 0)).toEqual({ ok: true, ratio: 1 });
   expect(abGate(0, 1).ok).toBe(false); // one zero is no match
+});
+
+test("waiting for the start gate returns when 18 samples are quiet, and gives the last load1 when the host never settles", async () => {
+  expect(await waitForStart({ read: () => 1.2, stepMs: 0, maxSteps: 40 })).toEqual({ ok: true, last: 1.2 });
+  expect(await waitForStart({ read: () => 5, stepMs: 0, maxSteps: 40 })).toEqual({ ok: false, last: 5 });
+  // 17 quiet samples are not a window: the gate needs 18.
+  expect(await waitForStart({ read: () => 1.2, stepMs: 0, maxSteps: 17 })).toEqual({ ok: false, last: 1.2 });
 });

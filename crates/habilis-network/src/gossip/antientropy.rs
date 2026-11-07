@@ -550,6 +550,10 @@ async fn ask_back(
     state
         .fast_rounds
         .note_ahead(channel, key, digest.author.clone(), body.heads, now);
+    let arrival = state.state_digest_serves.unicast.arrived_from;
+    if let Some(via) = arrival {
+        state.fast_rounds.note_arrival(channel, &key, via);
+    }
     if state.fast_rounds.may_ask(
         &key,
         channel,
@@ -591,10 +595,18 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &Han
         let doc = state.doc(channel);
         let held_peers = ahead.iter().filter(|peer| doc.holds_heads(&peer.heads));
         let held: Vec<&[String]> = held_peers.map(|peer| peer.heads.as_slice()).collect();
-        let answerable = ahead
+        let proven = |peer: &fast_rounds::Waiting| {
+            transport::unicast_answer_target(&peer.key, state).is_some()
+        };
+        let via_usable = |peer: &fast_rounds::Waiting| {
+            peer.via
+                .is_some_and(|eid| transport::can_unicast(eid, state))
+        };
+        let reachable: Vec<AuthorKey> = ahead
             .iter()
-            .filter(|peer| transport::unicast_answer_target(&peer.key, state).is_some());
-        let reachable: Vec<AuthorKey> = answerable.map(|peer| peer.key).collect();
+            .filter(|peer| proven(peer) || via_usable(peer))
+            .map(|peer| peer.key)
+            .collect();
         let ours = heads_key_of(state, channel);
         let target = state.fast_rounds.retry_target(
             channel,
@@ -606,7 +618,12 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &Han
         let Some((key, author)) = target else {
             continue;
         };
-        if ask(channel, (&key, &author), None, state, context).await {
+        let waiting = state.fast_rounds.ahead(channel);
+        let via: Option<EndpointId> = waiting
+            .iter()
+            .find(|peer| peer.key == key)
+            .and_then(|peer| peer.via);
+        if ask(channel, (&key, &author), via, state, context).await {
             state.idle.fr_retries += 1;
             tracing::debug!(me = %context.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
         }

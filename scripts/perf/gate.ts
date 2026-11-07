@@ -1,3 +1,5 @@
+import { loadavg } from "node:os";
+
 // The load gates of the benchmark, accepted by the leader: see README.md, "Load gates". The phase numbers come
 // from the idle meshes on nyc-macmini1 (8 cores). The start and A/B numbers were widened on 2026-11-02: the host
 // idles at load1 1.5 to 1.76 with none of our daemons, so the first start gate (1.5) never opened.
@@ -26,4 +28,20 @@ export function phaseGate(samples: number[]): { ok: boolean; median: number; max
 export function abGate(medianA: number, medianB: number): { ok: boolean; ratio: number } {
   const ratio = medianA === 0 && medianB === 0 ? 1 : Math.max(medianA, medianB) / Math.min(medianA, medianB);
   return { ok: ratio <= AB_RATIO_MAX, ratio };
+}
+
+// The start gate waits for a quiet host: it reads load1 every `stepMs` (10 s), keeps the last 18 values (3 min)
+// and returns when they pass `startGate`. After `maxSteps` reads (120, 20 min) it gives up with the last load1.
+export async function waitForStart(
+  options: { read?: () => number; stepMs?: number; maxSteps?: number } = {},
+): Promise<{ ok: boolean; last: number }> {
+  const { read = () => loadavg()[0] ?? 0, stepMs = 10_000, maxSteps = 120 } = options;
+  const window: number[] = [];
+  for (let step = 0; step < maxSteps; step++) {
+    window.push(read());
+    if (window.length > 18) window.shift();
+    if (window.length === 18 && startGate(window).ok) return { ok: true, last: window[17] ?? 0 };
+    await Bun.sleep(stepMs);
+  }
+  return { ok: false, last: window.at(-1) ?? 0 };
 }
