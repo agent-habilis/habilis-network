@@ -641,24 +641,37 @@ fn validated_mesh_config(kind: &SetupKind) -> Result<&MeshConfig> {
 #[cfg(all(unix, feature = "host"))]
 fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
     use std::fs;
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
     let Some(state) = state else {
         return Ok(identity::Identity::generate());
     };
     let key_path = state.with_extension("key");
     if let Ok(bytes) = fs::read(&key_path) {
-        if let Ok(seed) = <[u8; 32]>::try_from(bytes.as_slice()) {
+        let seed = bytes
+            .get(..32)
+            .and_then(|seed| <[u8; 32]>::try_from(seed).ok());
+        if let Some(seed) = seed {
             return Ok(identity::Identity::from_seed(&seed));
         }
         tracing::warn!(target: "habilis_network::lifecycle", "identity key file has the wrong length; a new key replaces it");
     }
     let identity = identity::Identity::generate();
+    write_key_file(&key_path, identity.seed().as_slice(), 0)?;
+    Ok(identity)
+}
+
+/// Write the member key file: the 32 bytes of the seed, then the start time of the process that owns
+/// the daemon (0 until the owner is known), as 8 bytes. The file is private to the user.
+#[cfg(all(unix, feature = "host"))]
+fn write_key_file(key_path: &Path, seed: &[u8], owner_start: u64) -> Result<()> {
+    use std::fs;
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true).mode(0o600);
-    let mut file = options.open(&key_path)?;
-    file.write_all(identity.seed().as_slice())?;
-    Ok(identity)
+    let mut file = options.open(key_path)?;
+    file.write_all(seed)?;
+    file.write_all(&owner_start.to_le_bytes())?;
+    Ok(())
 }
 
 /// The run number of this start, kept in `<state>.run`. It counts up by 1 at each start and never
@@ -668,9 +681,8 @@ fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
 /// means run 1.
 #[cfg(all(unix, feature = "host"))]
 fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
-    use std::fs::{self, File, OpenOptions};
-    use std::io::{ErrorKind, Write as _};
-    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::fs;
+    use std::io::ErrorKind;
     let Some(state) = state else {
         return Ok(1);
     };
@@ -686,6 +698,17 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
         Err(error) if error.kind() == ErrorKind::NotFound => 1,
         Err(_) => counter_lost(),
     };
+    write_run(state, run)?;
+    Ok(run)
+}
+
+/// Keep `run` in `<state>.run`.
+#[cfg(all(unix, feature = "host"))]
+fn write_run(state: &Path, run: u64) -> Result<()> {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let run_path = state.with_extension("run");
     // A crash after the write and before the rename leaves the old counter, never a cut short one.
     let tmp_path = state.with_extension("run.tmp");
     let mut options = OpenOptions::new();
@@ -701,7 +724,7 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
     {
         File::open(folder)?.sync_all()?;
     }
-    Ok(run)
+    Ok(())
 }
 
 /// The counter file is unreadable, so the count restarts from the unix seconds: the counter grows by
@@ -744,6 +767,63 @@ fn member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identi
     Ok(None)
 }
 
+/// Bind the member key and the run counter to the process that owns the daemon. The pair is kept in
+/// files so that a restart of the same agent keeps its identity, and the files are named for the pid
+/// of the agent. After a crash a later agent can get the same pid, and it must not take the identity
+/// of the one that crashed. The key file holds the start time of the owner, which differs for two
+/// processes of one pid: they start in different seconds, unless the pid wrapped within one second of
+/// the first. A pair made by this very start is stamped. A pair of another owner, with no stamp, or
+/// with no start time to check against, is not reused: a new member, at run 1.
+#[cfg(all(unix, feature = "host"))]
+pub(crate) fn bind_to_owner(
+    keys: RunKeys,
+    state: Option<&Path>,
+    owner_start: Option<u64>,
+) -> RunKeys {
+    use std::fs;
+    let (Some(state), Some(member)) = (state, keys.member.as_ref()) else {
+        return keys;
+    };
+    let key_path = state.with_extension("key");
+    let bytes = fs::read(&key_path).unwrap_or_default();
+    let tail = bytes
+        .get(32..40)
+        .and_then(|tail| <[u8; 8]>::try_from(tail).ok());
+    let held = tail.map(u64::from_le_bytes);
+    match (owner_start, held) {
+        (Some(start), Some(held)) if held == start => keys,
+        (Some(start), _) if keys.member_new => {
+            if let Err(error) = write_key_file(&key_path, member.seed().as_slice(), start) {
+                tracing::warn!(target: "habilis_network::lifecycle", %error, "the owner of the member key could not be kept");
+            }
+            keys
+        }
+        (None, _) if keys.member_new => keys,
+        _ => replace_member(keys, state, owner_start.unwrap_or(0)),
+    }
+}
+
+/// A new member key and run 1, kept in the files, for a pair that another owner left behind.
+#[cfg(all(unix, feature = "host"))]
+fn replace_member(keys: RunKeys, state: &Path, owner_start: u64) -> RunKeys {
+    let member = identity::Identity::generate();
+    let key_path = state.with_extension("key");
+    let seed = member.seed();
+    let key_written = write_key_file(&key_path, seed.as_slice(), owner_start);
+    let written = key_written.and_then(|()| write_run(state, 1));
+    if let Err(error) = written {
+        tracing::warn!(target: "habilis_network::lifecycle", %error, "the new member key could not be kept");
+    }
+    tracing::warn!(target: "habilis_network::lifecycle", "the member key and the run counter are from another owner, so a new member key replaces them and the run starts at 1");
+    RunKeys {
+        // shared with the loop and its handlers, which hold clones
+        member: Some(sync::Arc::new(member)),
+        run: 1,
+        member_new: true,
+        ..keys
+    }
+}
+
 /// The keys of this run. The member key comes from the state file. The session key is the one that
 /// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
 /// would start the same actor again at sequence 1.
@@ -755,6 +835,7 @@ fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
         session: sync::Arc::new(identity::Identity::generate()),
         member: member_key(state)?,
         run: next_run(state, member_known)?,
+        member_new: !member_known,
     })
 }
 
@@ -1242,7 +1323,12 @@ mod tests {
     use crate::daemon::state::RunKeys;
     use crate::protocol::AuthorKey;
     use std::path::{Path, PathBuf};
-    use std::{env, fs, process};
+    use std::{env, fs, process, thread};
+
+    fn member_key(keys: &RunKeys) -> Option<AuthorKey> {
+        let member = keys.member.as_ref();
+        member.map(|member| member.author_key())
+    }
 
     fn member_of(keys: &RunKeys) -> AuthorKey {
         let member = keys.member.as_ref().expect("a member key");
@@ -1388,6 +1474,82 @@ mod tests {
         let state = dir.path().join("session.json");
         let first = super::run_keys(Some(&state)).expect("the first start");
         assert_eq!(first.run, 1, "a new member starts at run 1");
+    }
+
+    /// The pair of files (the member key and the run counter) is bound to the start time of the process
+    /// that owns the daemon. A restart of the same owner keeps it. Another process that got the same
+    /// pid has another start time, and starts as a new member, at run 1.
+    #[test]
+    fn a_pair_of_files_from_another_owner_is_not_reused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "from another owner",
+        );
+        let dir = TempDir::new("habilis-owner");
+        let state = dir.path().join("session.json");
+        let first = super::bind_to_owner(
+            super::run_keys(Some(&state)).expect("first start"),
+            Some(&state),
+            Some(100),
+        );
+        let restart = super::bind_to_owner(
+            super::run_keys(Some(&state)).expect("restart"),
+            Some(&state),
+            Some(100),
+        );
+        assert_eq!(
+            member_of(&first),
+            member_of(&restart),
+            "the same owner keeps the member key"
+        );
+        assert_eq!(restart.run, 2, "and the run counter goes on");
+
+        let reused_pid = super::bind_to_owner(
+            super::run_keys(Some(&state)).expect("a start of another process"),
+            Some(&state),
+            Some(200),
+        );
+
+        assert_ne!(
+            member_of(&first),
+            member_of(&reused_pid),
+            "another owner start time is a new member"
+        );
+        assert_eq!(reused_pid.run, 1, "and its run counter starts again");
+        let next = super::run_keys(Some(&state)).expect("the start after");
+        assert_eq!(
+            member_of(&reused_pid),
+            member_of(&next),
+            "the new member key is kept, for the restarts of the new owner"
+        );
+    }
+
+    /// An owner whose start time cannot be read gets no reuse of an old pair: the safe side. A pair
+    /// that this start made is kept.
+    #[test]
+    fn with_no_start_time_an_old_pair_is_not_reused_and_a_new_one_is_kept() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "from another owner",
+        );
+        let dir = TempDir::new("habilis-owner-none");
+        let state = dir.path().join("session.json");
+        let made = super::bind_to_owner(
+            super::run_keys(Some(&state)).expect("first start"),
+            Some(&state),
+            None,
+        );
+        let old = super::run_keys(Some(&state)).expect("a start with the pair of the first");
+        let checked = super::bind_to_owner(old.clone(), Some(&state), None);
+
+        assert_eq!(made.run, 1, "a pair made by this start is kept");
+        assert_ne!(
+            member_of(&old),
+            member_of(&checked),
+            "an old pair is not reused with no start time to check"
+        );
     }
 
     /// The member key survives a restart and the session key does not: the session key is the
@@ -1606,6 +1768,86 @@ mod tests {
                     handle.close().await;
                 }
             }
+        });
+    }
+
+    /// A child process that lives until the guard drops: a live pid for an owner.
+    struct Sleeper(process::Child);
+
+    impl Sleeper {
+        fn spawn() -> Self {
+            let child = process::Command::new("sleep")
+                .arg("120")
+                .spawn()
+                .expect("a sleep process");
+            // The start times of two processes differ by a tick at least.
+            thread::sleep(Duration::from_millis(50));
+            Self(child)
+        }
+    }
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            drop(self.0.kill());
+            drop(self.0.wait());
+        }
+    }
+
+    /// The owner of the daemon, set through `set_owner_pid`, binds the pair of files: the same owner
+    /// restarts with its member key and the run goes on, and another process with another start time
+    /// that names the same state file starts as a new member at run 1.
+    #[test]
+    fn set_owner_pid_binds_the_member_key_to_its_owner() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::lifecycle",
+                "from another owner",
+            );
+            let dir = TempDir::new("habilis-owner-wiring");
+            let state = dir.path().join("session.json");
+            let (first_owner, second_owner) = (Sleeper::spawn(), Sleeper::spawn());
+            let start = |owner: u32| {
+                let state = state.clone();
+                async move {
+                    let options = membership::JoinOptions::default();
+                    let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+                    let params = super::SetupParams::new(author, embed::SilentSink)
+                        .max_peers(8)
+                        .state_file(state);
+                    let config = super::setup_mesh(kind, params)
+                        .await
+                        .expect("a loopback mesh sets up");
+                    let config = config.set_owner_pid(owner).expect("a live owner");
+                    let keys = config.mesh.keys.clone();
+                    config
+                        .endpoints
+                        .router
+                        .shutdown()
+                        .await
+                        .expect("the router stops");
+                    if let Some(handle) = config.transports.multihop.as_ref() {
+                        handle.close().await;
+                    }
+                    keys
+                }
+            };
+
+            let first = start(first_owner.0.id()).await;
+            let restart = start(first_owner.0.id()).await;
+            let reused_pid = start(second_owner.0.id()).await;
+
+            assert_eq!(
+                member_key(&first),
+                member_key(&restart),
+                "the same owner keeps the member key"
+            );
+            assert_eq!((first.run, restart.run), (1, 2), "and the run goes on");
+            assert_ne!(
+                member_key(&first),
+                member_key(&reused_pid),
+                "another owner that names the same state file is a new member"
+            );
+            assert_eq!(reused_pid.run, 1, "at run 1");
         });
     }
 
