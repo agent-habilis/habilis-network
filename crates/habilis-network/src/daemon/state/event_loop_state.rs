@@ -642,6 +642,11 @@ pub struct EventLoopState {
     /// has (see `tuning::STATE_SYNC_WAIT`): counted from the start of the node, so a node with no peer
     /// is not held for ever.
     pub(crate) state_sync_deadline: Instant,
+    /// When this node last sent a request for the first sync of the state channel (a digest with
+    /// the flag `first`, on gossip or point-to-point). A closing digest ends the wait only for a
+    /// short time after it (see `seed_job::closing_digest_seen`): a closing digest that arrives
+    /// when this node asked nobody is the answer of no request, and any member can send one.
+    pub(crate) first_asked_at: Option<Instant>,
     /// The `meta` channel's document — a second, independent shared-state channel.
     /// Gates foreign-card writes (unlike `state`), since a `meta` card carries a
     /// peer's cryptographic identity.
@@ -862,6 +867,7 @@ impl EventLoopState {
             state_cuts: 0,
             state_cuts_failed: 0,
             state_sync_deadline: Instant::now() + tuning::state_sync_wait(),
+            first_asked_at: None,
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
             identity: init.keys.session,

@@ -249,8 +249,15 @@ pub const DOC_TOMBSTONE_PATH_BYTES_MAX: usize = 256;
 /// its frames can hold. Each tombstone counts against `DOC_REPLAY_ENTRIES_MAX` with the stamps.
 pub const DOC_SEED_TOMBSTONE_FRAME_BYTES: usize = 1024;
 
-/// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged
-/// epoch number cannot lock the channel: the forger raises the epoch by this much per adoption.
+/// How far above its own epoch a node that holds state adopts one (a tunable). A larger jump is
+/// refused, so a forged epoch number cannot make such a node throw its frames away: the forger
+/// raises the epoch by this much per adoption. A node that holds no frame, or that awaits its first
+/// sync, has nothing to lose, and takes a root above the bound only as the answer of its first
+/// request (a frame that came point-to-point soon after that request): a mesh that a forger lifted
+/// above twice this bound does not lock a new node out. A member that answers the first request
+/// before the honest peers can capture that one node until it restarts. A node that holds frames and
+/// was away while the mesh went up by more than this bound stays locked out until it clears its
+/// state.
 pub const DOC_EPOCH_JUMP_MAX: u64 = 131_072;
 
 /// How many 1-minute ticks a node that holds the frames of others waits before it adopts a higher

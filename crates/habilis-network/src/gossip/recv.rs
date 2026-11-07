@@ -13,6 +13,7 @@ use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
 use crate::daemon::handler_ctx::HandlerCtx;
+use crate::daemon::seed_job;
 use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::MembershipUpdate;
@@ -1356,7 +1357,8 @@ fn dispatch_channel(
         channel, message, ..
     } = event;
     let count_before = state.doc(channel).change_count();
-    match ingest_channel_event(event, state.doc_mut(channel), context) {
+    let far_ok = channel == Channel::State && seed_job::far_jump_allowed(state);
+    match ingest_channel_event(event, state.doc_mut(channel), context, far_ok) {
         ChannelOutcome::Refused => state.idle.state_rejected += 1,
         ChannelOutcome::Repeat => state.idle.wire_in.note_content_dup(),
         ChannelOutcome::Taken => {}
@@ -1402,6 +1404,8 @@ fn ingest_channel_event(
     event: ChannelEvent<'_>,
     doc: &mut doc::MeshDoc,
     context: &HandlerCtx<'_>,
+    // Whether the frame may make a far jump of epoch: the answer of the first request.
+    far_ok: bool,
 ) -> ChannelOutcome {
     use crate::doc::Ingested;
 
@@ -1414,7 +1418,12 @@ fn ingest_channel_event(
     // deps land, retains the signed frame for re-serve, and gates card forgery
     // (the card carries the peer's cryptographic identity) — every recipient
     // applies the same gate, so a forgery converges nowhere.
-    match doc.ingest(message) {
+    let ingested = if far_ok {
+        doc.ingest_far_ok(message)
+    } else {
+        doc.ingest(message)
+    };
+    match ingested {
         Ingested::Applied {
             changed: true,
             doc: after,

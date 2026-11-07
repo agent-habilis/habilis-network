@@ -96,7 +96,8 @@ fn mix(key: &AuthorKey, epoch: u64) -> u64 {
 /// Whether the frame of `merge`, as a seed would carry it (with the stamps of the plan for its
 /// paths, sealed if the mesh has a key, signed and serialized), leaves the margin of the envelope
 /// under a message. It is the check of the daemon for a seed: a frame that fits here fits at the
-/// send, and it is as full as the real stamps let it be.
+/// send. The stamps are the real ones of the plan. A time has 13 digits in production, as many as
+/// `LARGEST_TIME`, so they cost what the worst stamp costs, less the tags that the frame names once.
 fn seed_frame_fits(job: &SeedJob, plan: &SeedPlan, merge: &serde_json::Value) -> bool {
     let stamps: Vec<Stamp> = plan.stamps_for(merge).collect();
     frame_fits_with(job, merge, &stamps)
@@ -287,20 +288,20 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     if !state.doc(Channel::State).cut_due(rank) {
         return;
     }
-    start_cut(state, me, mesh, epoch);
+    start_cut(state, me, mesh);
 }
 
 /// A browser never cuts: the build is one synchronous call of seconds, and the loop of a browser
 /// has no other thread. The nodes of the host cut after their own slots, so a browser ranked ahead
 /// of them costs the mesh a delay of one slot (2 ticks).
 #[cfg(target_family = "wasm")]
-fn start_cut(_state: &mut EventLoopState, _me: &Nickname, _mesh: &MeshId, _epoch: u64) {}
+fn start_cut(_state: &mut EventLoopState, _me: &Nickname, _mesh: &MeshId) {}
 
 /// Read the document into a plan and start the build on another thread.
 #[cfg(not(target_family = "wasm"))]
-fn start_cut(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u64) {
+fn start_cut(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     let planned = state.doc(Channel::State).seed_plan();
-    // A candidate that the node holds is adopted, not cut over.
+    // A whole candidate that the node holds is adopted, not cut over.
     if matches!(planned, Err(DocError::CandidateHeld)) {
         return;
     }
@@ -311,7 +312,7 @@ fn start_cut(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u6
             return;
         }
     };
-    let job = job_for(state, me, mesh, epoch.saturating_add(1));
+    let job = job_for(state, me, mesh, state.doc(Channel::State).cut_epoch());
     state.seed_job = Some(spawn_build(plan, job));
 }
 
@@ -329,19 +330,44 @@ fn job_for(state: &EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u64) -> 
     }
 }
 
+/// How long after a request for the first sync a closing digest still counts as its answer. An
+/// answer takes one round trip, so this is long, and it is short enough that a closing digest that
+/// nobody asked for, at any other time, does not end the wait.
+const FIRST_ANSWER_WINDOW: Duration = Duration::from_secs(5);
+
+/// Whether this node sent a request for the first sync of the state channel within
+/// `FIRST_ANSWER_WINDOW`.
+fn first_answer_open(state: &EventLoopState) -> bool {
+    state
+        .first_asked_at
+        .is_some_and(|at| at.elapsed() <= FIRST_ANSWER_WINDOW)
+}
+
+/// Whether the frame that is being ingested may make a far jump of epoch: it came point-to-point,
+/// in the window of the answer of the first request of this node. A frame that came on gossip, or
+/// at any other time, never does (see `MeshDoc::ingest_far_ok`). The document adds its own
+/// condition: it holds nothing.
+pub(crate) fn far_jump_allowed(state: &EventLoopState) -> bool {
+    state.state_digest_serves.unicast.arrived_from.is_some() && first_answer_open(state)
+}
+
 /// A closing digest of a peer for `channel` came in. It ends the wait of the state document for
-/// its first sync when it came point-to-point and this node holds all of its heads: the peer
-/// answered the request of this node (frames, then the closing heads, or the closing heads alone
-/// when it had nothing to send), so every time that the peer has seen is in the history of this
-/// node and its clock is above them. A plain request or a digest on gossip never ends the wait: a
-/// node that only announces its heads has answered nobody. The deadline stays the outer bound.
+/// its first sync when it came point-to-point, soon after this node asked (`first_asked_at`), and
+/// this node holds all of its heads: the peer answered the request of this node (frames, then the
+/// closing heads, or the closing heads alone when it had nothing to send), so every time that the
+/// peer has seen is in the history of this node and its clock is above them. A plain request, a
+/// digest on gossip, and a closing digest that comes when this node asked nobody never end the
+/// wait: any member can send one. A member that saw the request can still answer it, and is
+/// trusted for the heads that it names: the clock of a state document is the wall clock, so a
+/// node that is released early still writes above every honest write. The deadline stays the outer
+/// bound.
 pub(crate) fn closing_digest_seen(
     state: &mut EventLoopState,
     channel: Channel,
     heads: &[String],
     on_unicast: bool,
 ) {
-    if channel != Channel::State || !on_unicast {
+    if channel != Channel::State || !on_unicast || !first_answer_open(state) {
         return;
     }
     let doc = state.doc_mut(channel);
@@ -365,14 +391,17 @@ pub(crate) fn sync_deadline(state: &mut EventLoopState) {
 }
 
 /// Put a replay or a restore in the queue that the loop drains after the tick. The queue is bounded:
-/// when it is full the new item is refused, and the node warns. The document does not keep a
-/// refused item (`take_restores` empties it), so a replay or a restore that is refused is a write
-/// that the seed lacks and that no node sends: the warning is the signal. The loop drains the queue
-/// on the arm of the tick, so a full queue is not expected.
+/// when it is full the item goes back to the document, which holds it for the next tick (its map of
+/// restores is bounded too, and counts a drop). A replay or a restore that is lost is a write that
+/// the seed lacks and that no node sends. The loop drains the queue on the arm of the tick, so a
+/// full queue is not expected, and the node warns when it happens.
 fn queue_replay(state: &mut EventLoopState, item: (serde_json::Value, StampedPaths)) {
-    if !state.replay_queue.push(item) {
-        tracing::warn!(target: "habilis_network::gossip", "the replay of the state channel was dropped: its queue is full");
+    if state.replay_queue.remaining() == 0 {
+        state.doc_mut(Channel::State).return_restores(item);
+        tracing::warn!(target: "habilis_network::gossip", "the replay of the state channel waits for the next tick: its queue is full");
+        return;
     }
+    let _ = state.replay_queue.push(item);
 }
 
 /// The paths that a merge writes: its leaves and the objects that it makes.
@@ -439,10 +468,12 @@ pub(crate) fn replay_frames(
             return Vec::new();
         }
     };
+    let merges: Vec<serde_json::Value> = merges.into_iter().collect();
+    let numbered: Vec<(usize, &serde_json::Value)> = merges.iter().enumerate().collect();
     let mut frames: Vec<(Verified, WireFrame)> = Vec::new();
-    for merge in merges {
+    for (index, merge) in numbered {
         let doc = state.doc(Channel::State);
-        let change = match doc.build_restore(&merge, &job.actor) {
+        let change = match doc.build_restore(merge, &job.actor) {
             Ok(Some(change)) => change,
             Ok(None) => continue,
             Err(error) => {
@@ -452,6 +483,18 @@ pub(crate) fn replay_frames(
         };
         let body = match doc.compose_replay_body(&change, stamps) {
             Ok(body) => body,
+            Err(error @ DocError::ClockAhead { .. }) => {
+                // No time can be taken now. The queue item is gone, so the frames that were not
+                // made go back to the document, which gives them again at a tick: a write that the
+                // seed lacks and that no other node sends is lost else.
+                tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: a frame of it does not compose");
+                for rest in &merges[index..] {
+                    state
+                        .doc_mut(Channel::State)
+                        .return_restores((rest.clone(), stamps.clone()));
+                }
+                break;
+            }
             Err(error) => {
                 tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: a frame of it does not compose");
                 break;
@@ -540,7 +583,7 @@ pub(crate) fn finish(
     };
     // A seed came in while the build ran (or the epoch moved on): the rival rule can drop ours.
     let doc = state.doc(Channel::State);
-    if doc.has_candidate() || doc.epoch() >= outcome.epoch {
+    if doc.has_whole_candidate() || doc.epoch() >= outcome.epoch {
         tracing::info!(target: "habilis_network::gossip", epoch = outcome.epoch, "the seed of the state channel is dropped: another seed came in during the build");
         return Vec::new();
     }
@@ -563,24 +606,26 @@ pub(crate) fn finish(
 mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     use serde_json::{Map, Value, json};
 
     use super::{
         Instant, LARGEST_TIME, SeedJob, SeedOutcome, buffer_frame, closing_digest_seen,
-        creator_has_nothing_to_sync, finish, frame_fits_with, queue_replay, rank_of, replay_frames,
-        spawn_build, sync_deadline, tick,
+        creator_has_nothing_to_sync, far_jump_allowed, finish, frame_fits_with, queue_replay,
+        rank_of, replay_frames, spawn_build, sync_deadline, tick,
     };
     use tokio::time::interval;
 
     use crate::daemon::state::{EventLoopState, Standing};
-    use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp, TimeSource};
+    use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp, StampedPaths, TimeSource};
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::Verified;
-    use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
+    use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname, SymmetricKey};
     use crate::testing;
     use crate::util::bounded_fifo_set::BoundedFifoSet;
+    use crate::util::consts::MAX_MESSAGE_SIZE;
     use crate::util::tuning::PENDING_OUTBOUND_CAP;
 
     fn roster(names: &[&str]) -> HashSet<AuthorKey> {
@@ -689,6 +734,165 @@ mod tests {
             mesh: MeshId::from("test"),
             author: testing::nick("me"),
         }
+    }
+
+    /// A leaf at depth 12 that the check of a write accepts must be carried by the cut: the frame of
+    /// a seed carries a stamp for each object on the path, and the mesh is sealed. A leaf that the
+    /// write check passes and the cut drops is lost with no error to the writer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_deep_leaf_that_the_write_check_accepts_is_carried_by_the_cut_in_a_sealed_mesh() {
+        // Shared with the job that builds on another thread.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let key = SymmetricKey::from_bytes([7; 32]);
+        let mut doc = MeshDoc::new_state(Some(key.clone()));
+        doc.finish_sync();
+        let path: Vec<String> = (0..12).map(|level| format!("k{level}")).collect();
+        let merge_of = |length: usize| {
+            let leaf = json!("x".repeat(length));
+            path.iter()
+                .rev()
+                .fold(leaf, |inner, name| json!({ (name.as_str()): inner }))
+        };
+        let accepted: usize = (1..2_000)
+            .rev()
+            .step_by(10)
+            .find(|length| {
+                doc.build_change(&merge_of(*length), identity.public().as_bytes())
+                    .is_ok()
+            })
+            .expect("a short leaf passes the check");
+        write_merge(&mut doc, &identity, &me, &merge_of(accepted));
+        let plan = doc.seed_plan().expect("a plan");
+        let mut job = job_of(&identity, 1);
+        // Shared with the job that builds on another thread.
+        job.seal = Some(Arc::new(key));
+
+        let outcome = spawn_build(plan, job).await.expect("the build ends");
+
+        let chain = outcome.chain.expect("the cut works");
+        assert_eq!(
+            chain.left_out, 0,
+            "the leaf of {accepted} bytes passed the write check and the cut left it out"
+        );
+    }
+
+    /// The frames of a seed carry the tombstones of the cutter (up to 1 KB each). A leaf that the
+    /// write check accepts, in a document that has deletes, must still fit a message with them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_frame_of_a_seed_that_carries_tombstones_still_fits_a_message() {
+        // Shared with the job that builds on another thread.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let mut doc = MeshDoc::new_state(None);
+        doc.finish_sync();
+        let doomed: Map<String, Value> = (0..40)
+            .map(|index| (format!("deleted-key-{index:03}"), json!(index)))
+            .collect();
+        write_merge(
+            &mut doc,
+            &identity,
+            &me,
+            &json!({ "gone": Value::Object(doomed) }),
+        );
+        let all_null: Map<String, Value> = (0..40)
+            .map(|index| (format!("deleted-key-{index:03}"), Value::Null))
+            .collect();
+        write_merge(
+            &mut doc,
+            &identity,
+            &me,
+            &json!({ "gone": Value::Object(all_null) }),
+        );
+        let accepted: usize = (1..3_500)
+            .rev()
+            .step_by(10)
+            .find(|length| {
+                let merge = json!({ "a": { "b": "x".repeat(*length) } });
+                doc.build_change(&merge, identity.public().as_bytes())
+                    .is_ok()
+            })
+            .expect("a short leaf passes the check");
+        write_merge(
+            &mut doc,
+            &identity,
+            &me,
+            &json!({ "a": { "b": "x".repeat(accepted) } }),
+        );
+        let plan = doc.seed_plan().expect("a plan");
+        let job = job_of(&identity, 1);
+        let outcome = spawn_build(plan, job_of(&identity, 1))
+            .await
+            .expect("the build ends");
+        let chain = outcome.chain.expect("the cut works");
+
+        let frames = super::signed_frames(&chain, &job).expect("the frames are signed");
+
+        let mut longest: usize = 0;
+        for (_, wire) in &frames {
+            longest = longest.max(wire.as_bytes().len());
+        }
+        assert!(
+            longest <= MAX_MESSAGE_SIZE,
+            "a frame of the seed is {longest} bytes, over the {MAX_MESSAGE_SIZE} of a message"
+        );
+    }
+
+    /// `leaf` inside the objects named by `path`, outermost first.
+    fn nested_merge(path: &[String], leaf: Value) -> Value {
+        let mut merge = leaf;
+        let innermost_first: Vec<&String> = path.iter().rev().collect();
+        for name in innermost_first {
+            merge = json!({ (name.as_str()): merge });
+        }
+        merge
+    }
+
+    /// The frame of a seed names each distinct tag of its stamps once. A path whose objects were
+    /// made by different authors carries up to 13 tags, and the estimate of a write must count them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_deep_leaf_under_objects_of_many_authors_is_carried_by_the_cut_in_a_sealed_mesh() {
+        let key = SymmetricKey::from_bytes([7; 32]);
+        let mut doc = MeshDoc::new_state(Some(key.clone()));
+        doc.finish_sync();
+        let path: Vec<String> = (0..12).map(|level| format!("k{level}")).collect();
+        let merge_of = |depth: usize, leaf: Value| nested_merge(&path[..depth], leaf);
+        // Each object of the path is made by an author of its own.
+        for depth in 1..path.len() {
+            let author = Identity::generate();
+            let who = testing::nick("author");
+            write_merge(&mut doc, &author, &who, &merge_of(depth, json!({})));
+        }
+        // Shared with the job that builds on another thread.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let accepted: usize = (1..2_000)
+            .rev()
+            .step_by(10)
+            .find(|length| {
+                let merge = merge_of(path.len(), json!("x".repeat(*length)));
+                doc.build_change(&merge, identity.public().as_bytes())
+                    .is_ok()
+            })
+            .expect("a short leaf passes the check");
+        write_merge(
+            &mut doc,
+            &identity,
+            &me,
+            &merge_of(path.len(), json!("x".repeat(accepted))),
+        );
+        let plan = doc.seed_plan().expect("a plan");
+        let mut job = job_of(&identity, 1);
+        // Shared with the job that builds on another thread.
+        job.seal = Some(Arc::new(key));
+
+        let outcome = spawn_build(plan, job).await.expect("the build ends");
+
+        let chain = outcome.chain.expect("the cut works");
+        assert_eq!(
+            chain.left_out, 0,
+            "the leaf of {accepted} bytes passed the write check and the cut left it out"
+        );
     }
 
     /// The timers of the loop go on while the seed is built: a ticker of 10 ms counts the ticks that
@@ -940,6 +1144,7 @@ mod tests {
     #[test]
     fn a_closing_digest_on_unicast_with_heads_that_this_node_holds_ends_the_wait() {
         let mut state = state_that_waits_for_the_first_sync();
+        state.first_asked_at = Some(Instant::now());
         assert!(
             state.doc(Channel::State).is_awaiting_first_sync(),
             "the node waits"
@@ -978,9 +1183,135 @@ mod tests {
         );
     }
 
+    /// A replay whose frame meets `ClockAhead` is not lost: the clock of the document is at the
+    /// bound (a frame of a member, or a seed from a cutter ahead of this machine), no time can be
+    /// taken, and the writes that the seed lacks would be gone for good. They go back to the
+    /// document, and the next tick sends them when the wall clock has moved.
+    const NOW_MS: u64 = 1_700_000_000_000;
+
+    #[test]
+    fn a_replay_that_meets_clock_ahead_goes_back_to_the_document_and_is_sent_later() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::allow_warn(
+            "habilis_network::gossip",
+            "the replay of the state channel stopped: a frame of it does not compose",
+        );
+        // Shared: the test moves the wall clock, and the document reads it.
+        let wall = Arc::new(AtomicU64::new(NOW_MS + 7_200_000));
+        let mut state = testing::fresh_state();
+        // The same handle, for the clock of the document.
+        let cell = Arc::clone(&wall);
+        let source = TimeSource::new(move || cell.load(Ordering::Relaxed));
+        state.doc_mut(Channel::State).set_time_source(source);
+        // Shared with the loop state, which signs with it too.
+        let identity = Arc::clone(&state.identity);
+        let me = testing::nick("me");
+        write_merge(
+            state.doc_mut(Channel::State),
+            &identity,
+            &me,
+            &json!({ "own": 1 }),
+        );
+        wall.store(NOW_MS, Ordering::Relaxed);
+        let patch = json!({ "a": 7 });
+        let stamps: StampedPaths = vec![(vec!["a".to_owned()], Stamp::new(5, "aa".to_owned()))];
+        let mesh = MeshId::from("test");
+
+        let first = replay_frames(&mut state, &patch, &stamps, &me, &mesh);
+
+        assert!(first.is_empty(), "no time can be taken: nothing is sent");
+        assert!(
+            state.doc(Channel::State).has_restores(),
+            "the replay waits in the document"
+        );
+        wall.store(NOW_MS + 7_200_000, Ordering::Relaxed);
+        let again: (Value, StampedPaths) = state
+            .doc_mut(Channel::State)
+            .take_restores()
+            .expect("the document gives the replay again");
+        let later = replay_frames(&mut state, &again.0, &again.1, &me, &mesh);
+        assert!(
+            !later.is_empty(),
+            "when the wall clock has moved, it is sent"
+        );
+    }
+
+    /// A replay that finds the queue full goes back to the document, which holds it for the next
+    /// tick: it is a write that the seed lacks and that no other node sends.
+    #[test]
+    fn a_replay_that_finds_the_queue_full_goes_back_to_the_document() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::allow_warn(
+            "habilis_network::gossip",
+            "the replay of the state channel waits for the next tick: its queue is full",
+        );
+        let mut state = testing::fresh_state();
+        let item = (
+            json!({ "a": 7 }),
+            vec![(vec!["a".to_owned()], Stamp::new(9, "aa".to_owned()))],
+        );
+        while state.replay_queue.push(item.clone()) {}
+        assert_eq!(
+            state.replay_queue.remaining(),
+            0,
+            "the premise: the queue is full"
+        );
+
+        queue_replay(&mut state, item);
+
+        assert!(
+            state.doc(Channel::State).has_restores(),
+            "the replay waits in the document for the next tick"
+        );
+    }
+
+    /// A far jump of epoch is allowed to a frame that came point-to-point inside the window of the
+    /// answer of the first request, and to no other.
+    #[test]
+    fn a_far_jump_is_allowed_only_to_a_unicast_frame_in_the_window_of_the_first_answer() {
+        let mut state = state_that_waits_for_the_first_sync();
+        let bob = testing::endpoint_id(9);
+        state.first_asked_at = Some(Instant::now());
+        assert!(
+            !far_jump_allowed(&state),
+            "a frame on gossip, soon after the request"
+        );
+        state.state_digest_serves.unicast.arrived_from = Some(bob);
+        assert!(far_jump_allowed(&state), "unicast, inside the window");
+        state.first_asked_at = Instant::now().checked_sub(Duration::from_secs(6));
+        assert!(
+            !far_jump_allowed(&state),
+            "unicast, outside the window of 5 s"
+        );
+        state.first_asked_at = None;
+        assert!(!far_jump_allowed(&state), "unicast, with no request sent");
+    }
+
+    #[test]
+    fn a_closing_digest_long_after_the_request_is_the_answer_of_no_request() {
+        let mut state = state_that_waits_for_the_first_sync();
+        state.first_asked_at = Instant::now().checked_sub(Duration::from_secs(6));
+        assert!(
+            state.first_asked_at.is_some(),
+            "the premise: a request 6 s ago"
+        );
+        closing_digest_seen(&mut state, Channel::State, &[], true);
+        assert!(
+            state.doc(Channel::State).is_awaiting_first_sync(),
+            "6 s is past the window of an answer"
+        );
+        state.first_asked_at = Some(Instant::now());
+        closing_digest_seen(&mut state, Channel::State, &[], true);
+        assert!(
+            !state.doc(Channel::State).is_awaiting_first_sync(),
+            "the same digest right after a request is its answer"
+        );
+    }
+
     #[test]
     fn the_empty_answer_of_a_peer_that_had_nothing_to_send_ends_the_wait_only_on_unicast() {
         let mut state = state_that_waits_for_the_first_sync();
+        state.first_asked_at = Some(Instant::now());
         closing_digest_seen(&mut state, Channel::State, &[], false);
         assert!(
             state.doc(Channel::State).is_awaiting_first_sync(),
@@ -1274,7 +1605,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         ::habilis_network_test_tracing::expect_warn(
             "habilis_network::gossip",
-            "the replay of the state channel was dropped: its queue is full",
+            "the replay of the state channel waits for the next tick: its queue is full",
         );
         let mut state = testing::fresh_state();
         let cap = state.replay_queue.remaining();
