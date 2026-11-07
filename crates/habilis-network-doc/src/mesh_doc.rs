@@ -483,6 +483,9 @@ struct Candidate {
     mark: Option<SeedMark>,
     /// The later frames of a seed chain, by the hash of their change.
     tail: HashMap<ChangeHash, TailFrame>,
+    /// Whether the root is above the bound of a jump and was taken as the answer of the first
+    /// request (see `MeshDoc::ingest_far_ok`): a far candidate is adopted at once, when it is whole.
+    far: bool,
 }
 
 impl Candidate {
@@ -494,6 +497,7 @@ impl Candidate {
             root_seq: root.seq(),
             mark,
             tail: HashMap::new(),
+            far: false,
         }
     }
 }
@@ -1593,8 +1597,9 @@ impl MeshDoc {
     }
 
     /// Adopt the candidate epoch at once when this node holds no frame of another author: it has
-    /// nothing to lose, so it need not wait. `None` when there is no candidate or the node holds
-    /// the frames of others.
+    /// nothing to lose, so it need not wait. A far candidate (see [`Self::adopt_far`]) is adopted at
+    /// once whatever frames the node holds. `None` when there is no candidate, it is not whole, or
+    /// the node holds the frames of others and the candidate is not far.
     ///
     /// A fresh joiner holds nothing, so one frame can move it to any epoch (see
     /// `Self::takes_far_root`). It holds frames of others after that, so it waits the next time.
@@ -1603,7 +1608,23 @@ impl MeshDoc {
         let held = self.candidate.as_ref()?;
         let alone = self.frames.values().all(|frame| frame.key() == *own);
         let whole = held.chain().is_some();
-        if alone && whole {
+        if (alone || held.far) && whole {
+            self.adopt(own)
+        } else {
+            None
+        }
+    }
+
+    /// Adopt at once a whole candidate that was taken as the answer of the first request above the
+    /// bound of a jump (see [`Self::ingest_far_ok`]), whatever frames the node holds. The node could
+    /// not take that root in any other way, so it has nothing to wait for: the frames of the lower
+    /// epoch never compete with a higher candidate, they are dead if the root is honest and are
+    /// fetched again at the new epoch, and the own entry is handed back. A candidate inside the
+    /// bound, or one whose chain is not whole, is not adopted here. `None` then.
+    pub fn adopt_far(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
+        self.settle_challenger();
+        let held = self.candidate.as_ref()?;
+        if held.far && held.chain().is_some() {
             self.adopt(own)
         } else {
             None
@@ -2542,7 +2563,18 @@ impl MeshDoc {
         if epoch < self.epoch {
             return Ingested::Ignored;
         }
-        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX && !(far_ok && self.takes_far_root()) {
+        // A later frame of the chain of a far candidate that the node holds extends it and opens no
+        // door: a big seed does not come in the 5 s of the window. It is not a root (it has no
+        // mark), and it is of the epoch of the candidate; a root is refused outside the window.
+        let tail_of_far = mark.is_none()
+            && self
+                .candidate
+                .as_ref()
+                .is_some_and(|held| held.far && held.epoch == epoch);
+        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX
+            && !(far_ok && self.takes_far_root())
+            && !tail_of_far
+        {
             return self.refuse_frame(frame);
         }
         let Some(genesis) = self.genesis(epoch) else {
@@ -2600,7 +2632,8 @@ impl MeshDoc {
             }
             _ => {}
         }
-        let kept = Candidate::new(epoch, frame.clone(), change, mark);
+        let mut kept = Candidate::new(epoch, frame.clone(), change, mark);
+        kept.far = epoch - self.epoch > DOC_EPOCH_JUMP_MAX;
         match self.candidate.replace(Box::new(kept)) {
             Some(beaten) => self.dropped.extend(beaten.keys()),
             None => self.candidate_ticks = 0,
@@ -2636,7 +2669,8 @@ impl MeshDoc {
                 return self.refuse_frame(frame);
             }
         }
-        let kept = Candidate::new(epoch, frame.clone(), change, mark);
+        let mut kept = Candidate::new(epoch, frame.clone(), change, mark);
+        kept.far = epoch - self.epoch > DOC_EPOCH_JUMP_MAX;
         if let Some(beaten) = self.challenger.replace(Box::new(kept)) {
             self.dropped.extend(beaten.keys());
         }
@@ -5586,6 +5620,140 @@ mod tests {
         assert!(
             matches!(empty_outcome, Ingested::Ignored),
             "a node that does not await has asked nothing: {empty_outcome:?}"
+        );
+    }
+
+    /// A far candidate that is whole is adopted at once, also when the node holds frames of other
+    /// authors: they are dead if the root is honest (the mesh moved up) and refetched at the new
+    /// epoch, and a lower epoch never competes with a higher candidate, so the 5 ticks protect
+    /// nothing. The own card is handed back. An ordinary candidate (inside the bound) still waits.
+    #[test]
+    fn a_far_candidate_that_is_whole_is_adopted_at_once_with_frames_of_others_held() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, bob, alice) = (nick("me"), nick("bob"), nick("alice"));
+        let far = root_of(3 * super::DOC_EPOCH_JUMP_MAX, &alice, "far");
+        let mut doc = MeshDoc::new_gated(card_gate()).awaiting_far_root();
+        author(
+            &mut doc,
+            &me,
+            &json!({ "peers": { (slot("me")): { "card": 1 } } }),
+        );
+        author(
+            &mut doc,
+            &bob,
+            &json!({ "peers": { (slot("bob")): { "card": 2 } } }),
+        );
+        assert!(
+            matches!(doc.ingest_far_ok(&far), Ingested::NewEpoch { .. }),
+            "the premise: the far root is the candidate"
+        );
+
+        let switch = doc
+            .adopt_if_alone(&signer(&me))
+            .expect("a far candidate that is whole is adopted at once");
+
+        assert_eq!(switch.epoch, 3 * super::DOC_EPOCH_JUMP_MAX, "the far epoch");
+        assert_eq!(
+            switch.own_entry,
+            Some(json!({ "card": 1 })),
+            "the own card is handed back, the card of bob is not"
+        );
+    }
+
+    /// A candidate inside the bound still waits for the ticks when the node holds frames of
+    /// others: only the far one, which the node could not take in any other way, is adopted at once.
+    #[test]
+    fn an_ordinary_candidate_still_waits_when_frames_of_others_are_held() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, bob, alice) = (nick("me"), nick("bob"), nick("alice"));
+        let mut doc = MeshDoc::new_gated(card_gate()).awaiting_far_root();
+        author(
+            &mut doc,
+            &bob,
+            &json!({ "peers": { (slot("bob")): { "card": 2 } } }),
+        );
+        assert!(
+            matches!(
+                doc.ingest(&root_of(1, &alice, "next")),
+                Ingested::NewEpoch { .. }
+            ),
+            "the premise: an ordinary candidate"
+        );
+
+        let at_once = doc.adopt_if_alone(&signer(&me));
+
+        assert!(at_once.is_none(), "it waits for the ticks: {at_once:?}");
+    }
+
+    /// The state channel: a far seed whose chain is whole is adopted at once, also when the node
+    /// holds a frame of another author; a far root whose chain is not whole waits for its frames.
+    #[test]
+    fn a_far_state_seed_is_adopted_at_once_when_whole_and_waits_when_it_is_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other, cutter) = (nick("me"), nick("other"), nick("cutter"));
+        let source = state_doc_with(&live_state());
+        let far_epoch = 3 * super::DOC_EPOCH_JUMP_MAX;
+        let frames = seed_frames_of(&source, &cutter, far_epoch, None);
+        assert!(frames.len() > 1, "the premise: a chain of several frames");
+        let mut writer = MeshDoc::new_ungated().state_epochs();
+        let held = write(&mut writer, &other, &json!({ "kept": 1 }));
+        let mut joiner = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        ingest_applies(&mut joiner, &held);
+        assert!(
+            matches!(joiner.ingest_far_ok(&frames[0]), Ingested::NewEpoch { .. }),
+            "the premise: the root of the far chain is the candidate"
+        );
+
+        let early = joiner.adopt_far(&signer(&me));
+        for frame in &frames[1..] {
+            joiner.ingest_far_ok(frame);
+        }
+        let whole = joiner.adopt_far(&signer(&me));
+
+        assert!(
+            early.is_none(),
+            "a chain that is not whole waits: {early:?}"
+        );
+        assert_eq!(
+            whole.map(|switch| switch.epoch),
+            Some(far_epoch),
+            "the whole chain is adopted at once"
+        );
+    }
+
+    /// A big far seed does not come in 5 s on a slow link. Its root came as the answer of the first
+    /// request, and the later frames of the same chain are taken after the window: they extend a
+    /// candidate that the node holds, and open no door. A root of another far epoch, or a root of
+    /// the same one, is still refused after the window.
+    #[test]
+    fn the_tail_of_a_far_chain_is_taken_after_the_window_and_a_far_root_is_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter, forger) = (nick("me"), nick("cutter"), nick("forger"));
+        let source = state_doc_with(&live_state());
+        let far_epoch = 3 * super::DOC_EPOCH_JUMP_MAX;
+        let frames = seed_frames_of(&source, &cutter, far_epoch, None);
+        assert!(frames.len() > 1, "the premise: a chain of several frames");
+        let mut joiner = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        assert!(
+            matches!(joiner.ingest_far_ok(&frames[0]), Ingested::NewEpoch { .. }),
+            "the premise: the root came as the answer"
+        );
+
+        for frame in &frames[1..] {
+            joiner.ingest(frame);
+        }
+        let other_far = seed_frames_of(&source, &forger, far_epoch + 1, None).remove(0);
+        let rival = joiner.ingest(&other_far);
+
+        let whole = joiner.adopt_far(&signer(&me));
+        assert_eq!(
+            whole.map(|switch| switch.epoch),
+            Some(far_epoch),
+            "the tail that came after the window completed the chain"
+        );
+        assert!(
+            matches!(rival, Ingested::Ignored),
+            "a far root after the window is refused: {rival:?}"
         );
     }
 

@@ -14,7 +14,7 @@ use n0_future::task::{JoinError, JoinHandle};
 #[cfg(not(target_family = "wasm"))]
 use tokio::task::spawn_blocking;
 
-use crate::doc::{DocError, MeshDoc, SeedChain, SeedPlan, Stamp, StampedPaths, wire};
+use crate::doc::{DocError, EpochSwitch, MeshDoc, SeedChain, SeedPlan, Stamp, StampedPaths, wire};
 use crate::protocol::identity::Identity;
 use crate::protocol::messages::{Verified, WireFrame};
 use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname, SymmetricKey};
@@ -264,10 +264,26 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     let doc = state.doc_mut(Channel::State);
     let epoch = doc.epoch();
     let switch = doc.tick_epoch(&own_key);
-    for key in doc.take_dropped() {
+    after_switch(state, switch);
+    // A node that no peer reaches ranks 0 on an empty roster and would cut at once: its chain would
+    // wait in the buffer, and the node would adopt a seed that no peer holds.
+    if state.seed_job.is_some() || !state.overlay_reachable() {
+        return;
+    }
+    let rank = rank_of(&own_key, &state.peers, &state.quiet, epoch);
+    if !state.doc(Channel::State).cut_due(rank) {
+        return;
+    }
+    start_cut(state, me, mesh);
+}
+
+/// What follows a switch of the state document, or a tick that made none: the keys that the document
+/// dropped are forgotten, and the writes that a seed lacks and the restores that are due wait for the
+/// loop to send them.
+fn after_switch(state: &mut EventLoopState, switch: Option<EpochSwitch>) {
+    for key in state.doc_mut(Channel::State).take_dropped() {
         state.seen.remove(&key);
     }
-    // The writes that a seed lacks, and the restores that are due, wait for the loop to send them.
     let restores = state.doc_mut(Channel::State).take_restores();
     let replay = switch.and_then(|switch| {
         let stamps = switch.replay_stamps;
@@ -279,16 +295,17 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     if let Some(item) = restores {
         queue_replay(state, item);
     }
-    // A node that no peer reaches ranks 0 on an empty roster and would cut at once: its chain would
-    // wait in the buffer, and the node would adopt a seed that no peer holds.
-    if state.seed_job.is_some() || !state.overlay_reachable() {
-        return;
+}
+
+/// Adopt at once the far seed that came as the answer of the first request (see
+/// `MeshDoc::adopt_far`), when its chain is whole. A joiner that waited for the minute timer would
+/// hold a document that no peer shares for 5 minutes.
+pub(crate) fn adopt_far(state: &mut EventLoopState) {
+    let own_key = state.identity.author_key();
+    let switch = state.doc_mut(Channel::State).adopt_far(&own_key);
+    if switch.is_some() {
+        after_switch(state, switch);
     }
-    let rank = rank_of(&own_key, &state.peers, &state.quiet, epoch);
-    if !state.doc(Channel::State).cut_due(rank) {
-        return;
-    }
-    start_cut(state, me, mesh);
 }
 
 /// A browser never cuts: the build is one synchronous call of seconds, and the loop of a browser
@@ -1347,6 +1364,56 @@ mod tests {
         assert!(
             !far_jump_allowed(&state, Channel::State),
             "the window of the meta request does not open the state far jump"
+        );
+    }
+
+    /// A joiner that awaits its first sync takes the far seed as the answer of its first request and
+    /// adopts it at once when its chain is whole, also when it holds a frame of another author.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_far_state_seed_is_adopted_at_once_by_a_joiner_that_holds_a_foreign_frame() {
+        const FAR: u64 = 3 * 131_072;
+        let _guard = ::habilis_network_test_tracing::init();
+        // Shared with the job that builds on another thread.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let mut source = MeshDoc::new_state(None);
+        source.finish_sync();
+        write_merge(&mut source, &identity, &me, &json!({ "kept": 1 }));
+        let plan = source.seed_plan().expect("a plan");
+        let chain = spawn_build(plan, job_of(&identity, FAR))
+            .await
+            .expect("the build ends")
+            .chain
+            .expect("the cut works");
+        let frames =
+            super::signed_frames(&chain, &job_of(&identity, FAR)).expect("the frames are signed");
+        let mut state = state_that_waits_for_the_first_sync();
+        let other = Identity::generate();
+        let mut writer = MeshDoc::new_state(None);
+        writer.finish_sync();
+        let foreign = write_merge(
+            &mut writer,
+            &other,
+            &testing::nick("other"),
+            &json!({ "foreign": 1 }),
+        );
+        assert!(
+            matches!(
+                state.doc_mut(Channel::State).ingest(&foreign),
+                Ingested::Applied { .. }
+            ),
+            "the premise: the joiner holds a frame of another author"
+        );
+        for (signed, _) in &frames {
+            let _ = state.doc_mut(Channel::State).ingest_far_ok(signed);
+        }
+
+        super::adopt_far(&mut state);
+
+        assert_eq!(
+            state.doc(Channel::State).epoch(),
+            FAR,
+            "the whole far seed is adopted at once"
         );
     }
 
