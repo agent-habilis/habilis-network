@@ -1849,6 +1849,9 @@ async fn handle_peer_info(
     // path to its node.
     let changed = !state.unicast_pool.remembers_address(&peer_addr);
     state.place_endpoint(hinter, &message.author, peer_addr.clone());
+    // The address of a session that is in the roster with no proof is the warm path that its proof
+    // request was waiting for: ask now, and not at its next alive frame, 30 s or more away.
+    lifecycle::ask_for_proof(message, state, context).await;
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.

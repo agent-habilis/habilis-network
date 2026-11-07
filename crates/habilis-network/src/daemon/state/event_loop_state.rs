@@ -2386,6 +2386,14 @@ impl EventLoopState {
         own: &Nickname,
         mesh: &MeshId,
     ) -> Option<Verified> {
+        self.asks_for_proof(alive)
+            .then(|| Message::new_proof_request(mesh, own, alive.key()).sign(&self.identity))
+    }
+
+    /// Whether a frame of a session that this node holds no proof for asks for one now: the session is in
+    /// the roster or claims a bound nickname, and its retry clock lets a request go. It does not sign
+    /// anything, so a caller that has no path to send over can ask first and pay nothing.
+    pub(crate) fn asks_for_proof(&self, alive: &Verified) -> bool {
         let key = alive.key();
         // A session of a bound nickname with no proof is no peer yet, and it is asked as well: the
         // proof is the way in.
@@ -2393,10 +2401,7 @@ impl EventLoopState {
             || self
                 .proofs
                 .is_bound(&alive.author, |session| self.session_is_held(session));
-        if !asked_for || !self.proofs.wants_proof(&key, Instant::now()) {
-            return None;
-        }
-        Some(Message::new_proof_request(mesh, own, alive.key()).sign(&self.identity))
+        asked_for && self.proofs.wants_proof(&key, Instant::now())
     }
 
     /// The request for the proof of `session` went out: its retry clock starts. A request that
