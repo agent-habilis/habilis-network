@@ -56,7 +56,7 @@ pub(crate) use answered::Answered;
 pub(crate) use digest_trigger::DigestTrigger;
 pub(crate) use fast_rounds::FastRounds;
 pub(crate) use plane::Plane;
-pub(crate) use serve_budget::ServeBudget;
+pub(crate) use serve_budget::{Asker, ServeBudget};
 pub(crate) use unicast_digests::{ChatAsk, UnicastDigests};
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
 /// open-ended), each a timestamp and the id key of the message at that edge, plus
@@ -686,7 +686,11 @@ pub(crate) async fn handle_state_digest(
     let now = Instant::now();
     let heads = heads_key(message);
     let author = message.key();
-    let serve = |plane| (author, channel, plane);
+    // The connection is the asker of a unicast answer, and the author key of a gossip answer.
+    let serve = |plane, target: Option<EndpointId>| match (plane, target) {
+        (Plane::Unicast, Some(eid)) => (Asker::Connection(eid), channel, plane),
+        _ => (Asker::Key(author), channel, plane),
+    };
     // The unicast form: a digest that came by gossip is answered by a few members, as a chat digest is,
     // and every answer goes to the connection that the asker's digest came on, or to its proven endpoint.
     let arrived_from = state.state_digest_serves.unicast.arrived_from;
@@ -708,7 +712,10 @@ pub(crate) async fn handle_state_digest(
         Plane::Gossip
     };
     // Before the query: a refused digest costs no `changes_since`.
-    if !state.state_digest_serves.admits(&serve(plane), heads, now) {
+    if !state
+        .state_digest_serves
+        .admits(&serve(plane, target), heads, now)
+    {
         tracing::debug!(me = %context.author, author = %message.author, ?channel, ?plane, heads, "state digest ignored: this asker was served within the window");
         return Answered::default();
     }
@@ -719,7 +726,9 @@ pub(crate) async fn handle_state_digest(
     if frames.is_empty() {
         if body.first {
             answer_first_request(state, context, channel, target).await;
-            state.state_digest_serves.note(serve(plane), heads, now);
+            state
+                .state_digest_serves
+                .note(serve(plane, target), heads, now);
         }
         return answered;
     }
@@ -751,7 +760,7 @@ pub(crate) async fn handle_state_digest(
         if plane == Plane::Unicast
             && !state
                 .state_digest_serves
-                .admits(&serve(Plane::Gossip), heads, now)
+                .admits(&serve(Plane::Gossip, target), heads, now)
         {
             tracing::debug!(me = %context.author, author = %message.author, ?channel, heads, "state digest ignored: the unicast send could not start and the gossip answers are used up for this window");
             return answered;
@@ -764,12 +773,12 @@ pub(crate) async fn handle_state_digest(
         answered.broadcast = count;
         state
             .state_digest_serves
-            .note(serve(Plane::Gossip), heads, now);
+            .note(serve(Plane::Gossip, target), heads, now);
     } else {
         answered.unicast = count;
         state
             .state_digest_serves
-            .note(serve(Plane::Unicast), heads, now);
+            .note(serve(Plane::Unicast, target), heads, now);
     }
     state.idle.state_answers += 1;
     state.idle.state_frames_unicast += u64::try_from(answered.unicast).unwrap_or(u64::MAX);
@@ -958,7 +967,7 @@ mod budget_tests {
     use crate::daemon::state::Standing;
     use std::time::Duration;
 
-    use super::{FastRounds, Plane, ServeBudget};
+    use super::{Asker, FastRounds, Plane, ServeBudget};
     use crate::protocol::{AuthorKey, Channel};
     use crate::testing::{author_of, nick};
     use crate::util::clock::Instant;
@@ -969,8 +978,12 @@ mod budget_tests {
     use crate::{protocol, testing, transport};
     use iroh::endpoint::presets;
     use iroh_gossip::{net, proto};
-    fn key() -> (AuthorKey, Channel, Plane) {
-        (author_of("asker"), Channel::State, Plane::Unicast)
+    fn key() -> (Asker, Channel, Plane) {
+        (
+            Asker::Key(author_of("asker")),
+            Channel::State,
+            Plane::Unicast,
+        )
     }
 
     #[test]
@@ -978,7 +991,11 @@ mod budget_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let now = Instant::now();
         let mut budget = ServeBudget::default();
-        let gossip = (author_of("asker"), Channel::State, Plane::Gossip);
+        let gossip = (
+            Asker::Key(author_of("asker")),
+            Channel::State,
+            Plane::Gossip,
+        );
         budget.note(gossip, 1, now);
         assert!(
             !budget.admits(&gossip, 2, now),

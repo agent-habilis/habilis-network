@@ -1746,6 +1746,43 @@ mod tests {
         });
     }
 
+    /// A member mints author keys for free, so the unicast budget cannot be keyed by the author key:
+    /// every fresh key would draw a full budget and a batch of its own. The connection that the
+    /// digests come on is the asker. Twenty fresh keys on one connection draw the budget of that
+    /// connection, not twenty budgets.
+    #[test]
+    fn many_fresh_keys_on_one_connection_draw_one_unicast_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+            use crate::util::tuning::ANTIENTROPY_SERVES_PER_WINDOW;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let context = net.context();
+
+            let mut batches = 0;
+            for _ in 0..20 {
+                let fresh = Identity::generate();
+                let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &fresh);
+                let answered =
+                    antientropy::handle_state_digest(Channel::State, &digest, &mut state, &context)
+                        .await;
+                if answered != Answered::default() {
+                    batches += 1;
+                }
+            }
+
+            assert!(
+                batches <= ANTIENTROPY_SERVES_PER_WINDOW,
+                "20 fresh keys on one connection drew {batches} answers, more than the budget of {ANTIENTROPY_SERVES_PER_WINDOW}"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
     /// A digest that came by gossip is answered by a few members, as a chat digest is, when the
     /// unicast form is on. Here the k rule leaves this holder out: it sends nothing.
     #[test]
@@ -1761,7 +1798,8 @@ mod tests {
                 .collect();
             state.peers.extend(members.iter().copied());
             let asker = Identity::generate();
-            let our_key = state.identity.author_key();
+            // the key that the handler ranks: the one of its context
+            let our_key = net.our_pubkey;
             let mut digests =
                 (0..200).map(|_| digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker));
             let leaves_holder_out = |digest: &Verified| {
