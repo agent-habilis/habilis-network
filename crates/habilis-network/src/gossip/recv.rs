@@ -1669,6 +1669,21 @@ fn addressed_to_us(message: &Message, us: &AuthorKey) -> bool {
 /// `surfaceable` keeps pre-join backlog off the inbound push channel too; plumbing
 /// kinds (digest/ping/pong) are excluded. `class` is the caller's once-computed
 /// classification (`None` for an infra frame).
+/// The kinds that infrastructure dispatch consumes and no application subscriber is told about.
+fn is_plumbing(kind: &MessageKind) -> bool {
+    matches!(
+        kind,
+        MessageKind::Digest
+            | MessageKind::StateDigest
+            | MessageKind::MetaDigest
+            | MessageKind::State
+            | MessageKind::Meta
+            | MessageKind::Ping
+            | MessageKind::Pong { .. }
+            | MessageKind::ProofRequest { .. }
+    )
+}
+
 fn maybe_push_inbound(
     context: &HandlerCtx<'_>,
     message: &Authored,
@@ -1684,16 +1699,7 @@ fn maybe_push_inbound(
     if tx.receiver_count() == 0
         || !surfaceable
         || !addressed_to_us(message, &context.our_pubkey)
-        || matches!(
-            message.kind,
-            MessageKind::Digest
-                | MessageKind::StateDigest
-                | MessageKind::MetaDigest
-                | MessageKind::State
-                | MessageKind::Meta
-                | MessageKind::Ping
-                | MessageKind::Pong { .. }
-        )
+        || is_plumbing(&message.kind)
     {
         return;
     }
@@ -5846,6 +5852,17 @@ mod dedup_counter_tests {
         assert!(
             reader.peers.contains(&bound.author_key()),
             "the bound session stays"
+        );
+    }
+
+    /// A proof request is consumed by the infrastructure dispatch: an application subscriber is never told
+    /// about it, like the digests and the pings.
+    #[test]
+    fn a_proof_request_is_not_pushed_to_application_subscribers() {
+        let to = Identity::generate().author_key();
+        assert!(
+            super::is_plumbing(&crate::protocol::MessageKind::ProofRequest { to }),
+            "an admitted peer's fresh proof request would reach the subscribers of the inbound push"
         );
     }
 
