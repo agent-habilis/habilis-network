@@ -2211,15 +2211,23 @@ mod tests {
     /// opened close-on-exec (the default of Rust): a child that outlives the holder frees the key.
     #[test]
     fn a_start_after_the_holder_is_gone_works_even_while_a_child_of_it_lives() {
+        use std::io::{BufRead, BufReader};
         let dir = env::temp_dir().join(format!("habilis-key-lock-child-{}", process::id()));
         fs::create_dir_all(&dir).expect("a temp dir");
         let state = dir.join("child.json");
         let first = super::run_keys(Some(&state)).expect("first start");
         let first_member = member_of(&first);
-        let mut child = process::Command::new("sleep")
-            .arg("30")
+        // The child says that it runs: before its exec it still holds a copy of every descriptor of this
+        // process, the lock file too, and a holder that is dropped in that gap leaves the lock held for it.
+        let mut child = process::Command::new("sh")
+            .args(["-c", "echo ready; sleep 30"])
+            .stdout(process::Stdio::piped())
             .spawn()
             .expect("a child that outlives the holder");
+        let mut ready = String::new();
+        let pipe = child.stdout.take().expect("a pipe");
+        BufRead::read_line(&mut BufReader::new(pipe), &mut ready)
+            .expect("the child says that it runs");
         drop(first);
         let second = super::run_keys(Some(&state));
         child.kill().expect("the child is stopped");
