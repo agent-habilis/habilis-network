@@ -6482,6 +6482,44 @@ mod dedup_counter_tests {
         );
     }
 
+    /// A proof that a node refuses because another member holds the name must not mark its frame as seen
+    /// for good: the answer of a member is one frame for the whole run, and when the holder leaves and the
+    /// member is asked again, the same frame must be read again, not dropped as a duplicate. Otherwise the
+    /// member stays unproven at that node for the rest of the run.
+    #[test]
+    fn the_refused_proof_of_a_member_is_accepted_when_the_holder_has_left_and_the_frame_comes_again()
+     {
+        let (holder, member) = (Identity::generate(), Identity::generate());
+        let (holder_session, member_session) = (Identity::generate(), Identity::generate());
+        let answer = joined_of(&member_session, &member, "alice", 1);
+
+        let reader = reader_with(
+            fresh_state(),
+            vec![
+                joined_of(&holder_session, &holder, "alice", 1),
+                answer.clone(),
+                left_of(&holder_session, "alice"),
+                answer,
+            ],
+        );
+
+        assert!(
+            !reader.peers.contains(&holder_session.author_key()),
+            "the holder left"
+        );
+        assert!(
+            reader
+                .proofs
+                .proof_of(&member_session.author_key())
+                .is_some_and(|proof| proof.identity == member.public()),
+            "the proof of the member is held once the holder is gone"
+        );
+        assert!(
+            reader.peers.contains(&member_session.author_key()),
+            "and the member is a peer"
+        );
+    }
+
     /// A restart of the member that holds the name is no intrusion: its new session replaces the old
     /// one, as before, and a session of another member that claims the name leaves with it.
     #[test]

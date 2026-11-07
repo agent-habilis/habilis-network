@@ -2515,12 +2515,20 @@ impl EventLoopState {
                         .is_none_or(|held_proof| held_proof.identity != member)
             })
             .collect();
+        let refused_before = self.proofs.bound_refused();
         let (peers, quiet) = (&self.peers, &self.quiet);
         let bound = self
             .proofs
             .accept(&key, &message.author, mesh, proof, |session| {
                 peers.contains(session) || quiet.contains(session)
             });
+        if self.proofs.bound_refused() > refused_before {
+            // Another member holds the name, so this proof is refused for now. The frame is not kept as
+            // seen: when the holder leaves and the same frame comes again (the answer of a member is one
+            // frame for its whole run), it must be read again and not dropped as a duplicate. One key
+            // leaves a bounded set, so the set does not grow, and a copy costs a lookup (see `accept`).
+            self.seen.remove(&message.dedup_key());
+        }
         if bound {
             // The nickname is bound to `member` here: a session of another member that was admitted
             // while no proof bound it (or went quiet under it) does not keep the name.

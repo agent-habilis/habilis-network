@@ -250,12 +250,14 @@ impl ProofExchange {
             }
             return false;
         }
-        if !verify_proof(&proof, session, nickname.as_ref(), mesh.as_ref()) {
-            return false;
-        }
+        // The binding is checked before the signature of the proof: a copy of a refused proof (a replay,
+        // or the one answer of a member, which every asker gets) costs a lookup, not a signature check.
         let bound = self.bound_to(nickname, &is_held);
         if bound.is_some_and(|member| member != proof.identity) {
             self.bound_refused += 1;
+            return false;
+        }
+        if !verify_proof(&proof, session, nickname.as_ref(), mesh.as_ref()) {
             return false;
         }
         // A member holds one session, the newest: a restart makes a new session with a higher run,
@@ -336,6 +338,37 @@ mod tests {
     use crate::util::clock::Instant;
     use crate::util::tuning::QUIET_CAP;
     use std::time::Duration;
+
+    /// A proof of a nickname that another member holds is refused at the binding, before its signature is
+    /// read: a replayed copy of a refused frame costs a lookup. A proof whose signature is not valid
+    /// shows it: it is counted as refused for the binding, which is the first check that it meets.
+    #[test]
+    fn a_proof_for_a_held_nickname_is_refused_before_its_signature_is_read() {
+        let mesh = MeshId::from("💬test");
+        let nickname = Nickname::from("alice");
+        let (holder, other) = (Identity::generate(), Identity::generate());
+        let (holder_session, other_session) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let held = holder.prove(&holder_session, nickname.as_ref(), mesh.as_ref(), 1);
+        assert!(
+            book.accept(&holder_session, &nickname, &mesh, held, |_| true),
+            "the holder binds the nickname"
+        );
+        let mut forged = other.prove(&other_session, nickname.as_ref(), mesh.as_ref(), 1);
+        forged.run += 1;
+
+        let accepted = book.accept(&other_session, &nickname, &mesh, forged, |_| true);
+
+        assert!(!accepted, "the proof is refused");
+        assert_eq!(
+            book.bound_refused(),
+            1,
+            "it was refused at the binding, before its signature was checked"
+        );
+    }
 
     /// A joiner that missed the `joined` frame of a member gets the proof by one request.
     #[test]
