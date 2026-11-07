@@ -2283,12 +2283,27 @@ impl MeshDoc {
         Ok(())
     }
 
+    /// [`Self::ingest`] for a frame that the caller knows to be the answer of the first request of
+    /// this node (it came point-to-point, soon after the request): a node that holds nothing may then
+    /// take a root of any epoch. A root above the bound of a jump is taken in no other way, so a
+    /// member that floods one cannot lock out or capture a joiner; one that answers the first
+    /// request before the honest peers can still capture that one joiner until it restarts.
+    pub fn ingest_far_ok(&mut self, frame: &Verified) -> Ingested {
+        self.ingest_with(frame, true)
+    }
+
     /// Ingest one verified frame carrying an automerge change. Verifies causal
     /// readiness and card authorization before applying; buffers orphans (as
     /// frames, so re-serve and the gate both see the original signed frame). The
     /// `Verified` proof means the signature was checked before the frame got here,
     /// so the signer is `frame.key()`, never a field of the body.
     pub fn ingest(&mut self, frame: &Verified) -> Ingested {
+        self.ingest_with(frame, false)
+    }
+
+    /// [`Self::ingest`], with whether the frame may make a far jump of epoch (see
+    /// [`Self::ingest_far_ok`]).
+    fn ingest_with(&mut self, frame: &Verified, far_ok: bool) -> Ingested {
         let Some(parsed) = self.change_bytes(frame) else {
             return Ingested::Ignored;
         };
@@ -2360,7 +2375,7 @@ impl MeshDoc {
                 .fetch_max(stamped.min(self.time_limit(1)), Ordering::Relaxed);
         }
         if epoch != self.epoch {
-            return self.ingest_other_epoch(epoch, &change, frame, mark);
+            return self.ingest_other_epoch(epoch, &change, frame, mark, far_ok);
         }
         if self.state_epochs
             && !self.adopting
@@ -2462,11 +2477,13 @@ impl MeshDoc {
         change: &Change,
         frame: &Verified,
         mark: Option<SeedMark>,
+        // Whether the frame may make a far jump: the answer of the first request of the node.
+        far_ok: bool,
     ) -> Ingested {
         if epoch < self.epoch {
             return Ingested::Ignored;
         }
-        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX && !self.holds_nothing() {
+        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX && !(far_ok && self.holds_nothing()) {
             return self.refuse_frame(frame);
         }
         let Some(genesis) = self.genesis(epoch) else {
@@ -5460,8 +5477,8 @@ mod tests {
         let mut joiner = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
         let mut empty = MeshDoc::new_ungated().state_epochs();
 
-        let joiner_outcome = joiner.ingest(&far);
-        let empty_outcome = empty.ingest(&far);
+        let joiner_outcome = joiner.ingest_far_ok(&far);
+        let empty_outcome = empty.ingest_far_ok(&far);
 
         assert!(
             matches!(joiner_outcome, Ingested::NewEpoch { .. }),
@@ -5470,6 +5487,28 @@ mod tests {
         assert!(
             matches!(empty_outcome, Ingested::NewEpoch { .. }),
             "a node that holds no frame: {empty_outcome:?}"
+        );
+    }
+
+    /// A 1-frame root of a huge epoch is whole at once. A node that took it from anywhere would be
+    /// cut off from every honest frame, for ever: the far jump is not allowed to a plain ingest.
+    #[test]
+    fn a_far_seed_root_is_refused_when_it_does_not_come_as_the_answer_of_the_first_request() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let far = far_root(3 * super::DOC_EPOCH_JUMP_MAX);
+        let mut joiner = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        let mut empty = MeshDoc::new_ungated().state_epochs();
+
+        let joiner_outcome = joiner.ingest(&far);
+        let empty_outcome = empty.ingest(&far);
+
+        assert!(
+            matches!(joiner_outcome, Ingested::Ignored),
+            "a joiner, on a plain ingest: {joiner_outcome:?}"
+        );
+        assert!(
+            matches!(empty_outcome, Ingested::Ignored),
+            "a node that holds no frame, on a plain ingest: {empty_outcome:?}"
         );
     }
 
@@ -5482,7 +5521,7 @@ mod tests {
         let mut holder = MeshDoc::new_ungated().state_epochs();
         write(&mut holder, &nick("me"), &json!({ "kept": 1 }));
 
-        let outcome = holder.ingest(&far);
+        let outcome = holder.ingest_far_ok(&far);
 
         assert!(
             matches!(outcome, Ingested::Ignored),

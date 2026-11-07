@@ -335,6 +335,22 @@ fn job_for(state: &EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u64) -> 
 /// nobody asked for, at any other time, does not end the wait.
 const FIRST_ANSWER_WINDOW: Duration = Duration::from_secs(5);
 
+/// Whether this node sent a request for the first sync of the state channel within
+/// `FIRST_ANSWER_WINDOW`.
+fn first_answer_open(state: &EventLoopState) -> bool {
+    state
+        .first_asked_at
+        .is_some_and(|at| at.elapsed() <= FIRST_ANSWER_WINDOW)
+}
+
+/// Whether the frame that is being ingested may make a far jump of epoch: it came point-to-point,
+/// in the window of the answer of the first request of this node. A frame that came on gossip, or
+/// at any other time, never does (see `MeshDoc::ingest_far_ok`). The document adds its own
+/// condition: it holds nothing.
+pub(crate) fn far_jump_allowed(state: &EventLoopState) -> bool {
+    state.state_digest_serves.unicast.arrived_from.is_some() && first_answer_open(state)
+}
+
 /// A closing digest of a peer for `channel` came in. It ends the wait of the state document for
 /// its first sync when it came point-to-point, soon after this node asked (`first_asked_at`), and
 /// this node holds all of its heads: the peer answered the request of this node (frames, then the
@@ -351,10 +367,7 @@ pub(crate) fn closing_digest_seen(
     heads: &[String],
     on_unicast: bool,
 ) {
-    let asked = state
-        .first_asked_at
-        .is_some_and(|at| at.elapsed() <= FIRST_ANSWER_WINDOW);
-    if channel != Channel::State || !on_unicast || !asked {
+    if channel != Channel::State || !on_unicast || !first_answer_open(state) {
         return;
     }
     let doc = state.doc_mut(channel);
@@ -600,8 +613,8 @@ mod tests {
 
     use super::{
         Instant, LARGEST_TIME, SeedJob, SeedOutcome, buffer_frame, closing_digest_seen,
-        creator_has_nothing_to_sync, finish, frame_fits_with, queue_replay, rank_of, replay_frames,
-        spawn_build, sync_deadline, tick,
+        creator_has_nothing_to_sync, far_jump_allowed, finish, frame_fits_with, queue_replay,
+        rank_of, replay_frames, spawn_build, sync_deadline, tick,
     };
     use tokio::time::interval;
 
@@ -1188,6 +1201,28 @@ mod tests {
             state.doc(Channel::State).has_restores(),
             "the replay waits in the document for the next tick"
         );
+    }
+
+    /// A far jump of epoch is allowed to a frame that came point-to-point inside the window of the
+    /// answer of the first request, and to no other.
+    #[test]
+    fn a_far_jump_is_allowed_only_to_a_unicast_frame_in_the_window_of_the_first_answer() {
+        let mut state = state_that_waits_for_the_first_sync();
+        let bob = testing::endpoint_id(9);
+        state.first_asked_at = Some(Instant::now());
+        assert!(
+            !far_jump_allowed(&state),
+            "a frame on gossip, soon after the request"
+        );
+        state.state_digest_serves.unicast.arrived_from = Some(bob);
+        assert!(far_jump_allowed(&state), "unicast, inside the window");
+        state.first_asked_at = Instant::now().checked_sub(Duration::from_secs(6));
+        assert!(
+            !far_jump_allowed(&state),
+            "unicast, outside the window of 5 s"
+        );
+        state.first_asked_at = None;
+        assert!(!far_jump_allowed(&state), "unicast, with no request sent");
     }
 
     #[test]
