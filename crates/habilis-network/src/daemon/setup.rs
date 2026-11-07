@@ -1,5 +1,7 @@
 use crate::{beacon, transport};
 use iroh_gossip::{api, net, proto};
+#[cfg(not(all(unix, feature = "host")))]
+use std::fs::File;
 #[cfg(all(unix, feature = "host"))]
 use std::fs::{File, OpenOptions};
 #[cfg(all(unix, feature = "host"))]
@@ -818,6 +820,7 @@ fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
 /// the process, and a crash frees the key. The file is opened close-on-exec (the default of Rust), so a child
 /// of the daemon does not keep the lock after the daemon is gone. No state path means no key to keep.
 #[cfg(all(unix, feature = "host"))]
+// the lock is shared with every clone of the keys, and the last one to drop frees it
 fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
     use std::fs::TryLockError;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -829,6 +832,7 @@ fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
     options.write(true).create(true).truncate(false).mode(0o600);
     let lock = options.open(&lock_path)?;
     match lock.try_lock() {
+        // shared with every clone of the keys: the lock goes when the last one drops
         Ok(()) => Ok(Some(sync::Arc::new(lock))),
         Err(TryLockError::WouldBlock) => anyhow::bail!(
             "another daemon holds the member key {}: two live daemons cannot be one member; use another nickname or another --state-file",
@@ -844,6 +848,7 @@ fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
     clippy::unnecessary_wraps,
     reason = "the same signature as the version for a target with files"
 )]
+// the same type as the version for a target with files
 fn hold_member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
     Ok(None)
 }
@@ -2042,8 +2047,9 @@ mod tests {
         let refused = super::run_keys(Some(&state));
         let error = refused.expect_err("a second live start of one state path is refused");
         let text = format!("{error:#}");
+        let key_file = state.with_extension("key").display().to_string();
         assert!(
-            text.contains(&state.with_extension("key").display().to_string())
+            text.contains(&key_file)
                 && text.contains("another nickname")
                 && text.contains("--state-file"),
             "the error names the key file and the way out: {text}"

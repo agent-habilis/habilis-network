@@ -1,4 +1,5 @@
 use super::MeshSecrets;
+use std::fs::File;
 use std::sync::Arc;
 
 #[cfg(feature = "host")]
@@ -34,7 +35,8 @@ pub(crate) struct RunKeys {
         dead_code,
         reason = "the field is held, never read: the lock lives as long as the keys do"
     )]
-    pub(crate) key_lock: Option<Arc<std::fs::File>>,
+    // shared with every clone of the keys: the lock goes when the last one drops
+    pub(crate) key_lock: Option<Arc<File>>,
 }
 
 /// Everything `EventLoopState::new` needs beyond the clock, grouped for the
