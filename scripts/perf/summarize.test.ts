@@ -213,3 +213,43 @@ test("a payload sent before the last loaded census and received after it counts 
   expect(result.stdout.toString()).toContain("loaded_meta_bps_per_daemon=");
 });
 
+test("data attributed to both the loaded phase and idle2 gives one set of ratio fields and the idle2 rate of the metadata bytes", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "summarize-"));
+  const node = [
+    censusLine(30, { idle_wire_in: 1000 }),
+    censusLine(90, { idle_wire_in: 50 }),
+    censusLine(110, { idle_wire_in: 50 }), // the last loaded census
+    censusLine(130, { idle_wire_in: 450 }),
+    censusLine(150, { idle_wire_in: 250 }),
+  ].join("\n") + "\n";
+  writeFileSync(`${dir}/n1.err`, node);
+  writeFileSync(`${dir}/n2.err`, node);
+  writeFileSync(
+    `${dir}/result.json`,
+    JSON.stringify({
+      phases: [
+        { name: "idle1", start_ms: T0, end_ms: T0 + 60_000 },
+        { name: "loaded", start_ms: T0 + 60_000, end_ms: T0 + 120_000 },
+        { name: "idle2", start_ms: T0 + 120_000, end_ms: T0 + 180_000 },
+      ],
+    }),
+  );
+  const sent = (to: string, id: string, bytes: number, ts: number) =>
+    JSON.stringify({ sender: "bench03", kind: "msg", receivers: 1, bytes, seq: 0, ts: T0 + ts, to: [to], payload_id: id });
+  writeFileSync(`${dir}/oracle.jsonl`, [sent("bench01", "0", 100, 100_000), sent("bench02", "1", 200, 100_000)].join("\n") + "\n");
+  writeFileSync(
+    `${dir}/receipts.jsonl`,
+    [
+      JSON.stringify({ to: "bench01", payload_id: "0", ts: T0 + 105_000 }), // the census at 110 holds it: loaded
+      JSON.stringify({ to: "bench02", payload_id: "1", ts: T0 + 125_000 }), // the census at 130 holds it: idle2
+    ].join("\n") + "\n",
+  );
+  const text = run(dir).stdout.toString();
+  expect(text.match(/(?<![\w])delivered_data_bytes=/g)?.length).toBe(1);
+  expect(text.match(/(?<![\w])frame_meta_per_data=/g)?.length).toBe(1);
+  expect(text).toContain("delivered_data_bytes=100");
+  expect(text).toContain("idle2_delivered_data_bytes=200");
+  // idle2 holds 1400 wire bytes (2 nodes x (450 + 250)), 200 of them are the data: 1200 metadata bytes over 60 s and 2 daemons.
+  expect(text).toContain("idle2_meta_bps_per_daemon=10.0");
+});
+
