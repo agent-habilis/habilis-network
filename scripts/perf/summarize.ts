@@ -341,11 +341,14 @@ interface Phase {
 // its arrival. An oracle line with no `to`
 // counts in the phase that holds its `ts`. A census interval that crosses a phase edge lands whole in one phase.
 //
-// - <phase>_meta_bps_per_daemon: for a phase with no data, the received frame bytes per second per daemon.
-// - delivered_data_bytes / frame_meta_per_data / udp_meta_per_data: for a phase with data, the sum of
+// - <phase>_meta_bps_per_daemon: for every phase but the first phase with data, the received frame bytes per
+//   second per daemon, less the data bytes that the phase holds (a late payload can land in idle2).
+// - delivered_data_bytes / frame_meta_per_data / udp_meta_per_data: for the first phase with data, the sum of
 //   bytes x receivers of its oracle lines, and the metadata bytes per data byte at the frame layer
 //   (`idle_wire_in`) and at the UDP layer (`idle_net_recv_*`). The frame layer is asserted: wire bytes
 //   below the data bytes mean that the census or the oracle is wrong, and the run fails.
+//   A later phase with data (a payload that lands after the last loaded census) has the same three fields with
+//   its name as a prefix, as in idle2_delivered_data_bytes, so no field is written twice.
 function phaseReport(run: string): string {
   if (!existsSync(`${run}/result.json`) || !existsSync(`${run}/oracle.jsonl`)) return "";
   const phases: Phase[] = JSON.parse(readFileSync(`${run}/result.json`, "utf8")).phases ?? [];
@@ -399,20 +402,24 @@ function phaseReport(run: string): string {
     }
   }
   const fields: string[] = [];
+  let dataPhase: string | undefined; // the first phase with data: it keeps the plain field names
   for (const phase of phases) {
     const data = delivered.get(phase.name) ?? 0;
     const frames = wire.get(phase.name) ?? 0;
     if (frames < data) {
       throw new Error(`frame layer: phase ${phase.name} received ${frames} wire bytes, below ${data} delivered data bytes`);
     }
-    if (data === 0) {
+    if (data > 0) dataPhase ??= phase.name;
+    if (phase.name !== dataPhase) {
       const seconds = (phase.end_ms - phase.start_ms) / 1000;
-      fields.push(`${phase.name}_meta_bps_per_daemon=${(frames / (seconds * nodes.length)).toFixed(1)}`);
-    } else {
+      fields.push(`${phase.name}_meta_bps_per_daemon=${((frames - data) / (seconds * nodes.length)).toFixed(1)}`);
+    }
+    if (data > 0) {
+      const prefix = phase.name === dataPhase ? "" : `${phase.name}_`;
       fields.push(
-        `delivered_data_bytes=${data}`,
-        `frame_meta_per_data=${((frames - data) / data).toFixed(2)}`,
-        `udp_meta_per_data=${(((udp.get(phase.name) ?? 0) - data) / data).toFixed(2)}`,
+        `${prefix}delivered_data_bytes=${data}`,
+        `${prefix}frame_meta_per_data=${((frames - data) / data).toFixed(2)}`,
+        `${prefix}udp_meta_per_data=${(((udp.get(phase.name) ?? 0) - data) / data).toFixed(2)}`,
       );
     }
   }

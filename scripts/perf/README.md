@@ -103,7 +103,9 @@ The oracle file is the record of the user data that the runner sent. It is the o
 source of the data bytes in the ratio. The engine counters do not name data.
 
 The file is `oracle.jsonl` in the run folder. It has one JSON line per user payload that
-the runner sends. Each line has these keys, and no other key:
+the runner sends. Each line has these keys, and no other key. The keys `to` and
+`payload_id` are present only on a payload for named recipients (`msg`, `task_brief`,
+`task_status`, `task_artifact`):
 
 | Key | Type | Meaning |
 | -- | -- | -- |
@@ -113,9 +115,43 @@ the runner sends. Each line has these keys, and no other key:
 | `bytes` | integer | the length of the user text that the runner sent, in bytes of UTF-8 |
 | `seq` | integer | the number of the line, from 0, one count for the whole run |
 | `ts` | integer | the send time, in milliseconds since the epoch |
+| `to` | array of strings | the nicknames of the recipients, for example `["bench02"]` |
+| `payload_id` | string | the id that the text of the payload carries. A listener finds it in a received message |
 
 The runner writes the line when the send command returns without an error. A payload
 that failed to send has no line.
+
+### Receipt file
+
+The file is `receipts.jsonl` in the run folder. The listener loop of the runner writes one
+JSON line for each payload that a recipient receives. Each line has these keys:
+
+| Key | Type | Meaning |
+| -- | -- | -- |
+| `to` | string | the nickname of the recipient |
+| `payload_id` | string | the id of the payload, as in `oracle.jsonl` |
+| `ts` | integer | the time at which the poll served the payload, in milliseconds since the epoch |
+
+The poll follows the bell, so `ts` is near the arrival time. A payload that a listener
+receives twice has two lines. The summary uses the earliest line.
+
+The summary of an older run has no `receipts.jsonl`. Then the summary uses the send time
+`ts` of the oracle line.
+
+### Phase of a payload
+
+A census line counts in the phase that holds its time stamp. A census interval that
+crosses a phase edge counts whole in one phase.
+
+An oracle line with `to` counts for each recipient. The summary takes the receipt time of
+the recipient, or the send time if there is no receipt. It then takes the first census of
+that recipient at or after that time. The data bytes count in the phase of that census.
+The wire bytes of the payload are in the same census, so the two sides stay in one phase.
+If no census follows, the phase of the time itself is used.
+
+An oracle line with no `to` counts in the phase that holds its send time.
+
+A payload can land after the last loaded census. Then its data bytes count in `idle2`.
 
 ### Rules for the ratio
 
@@ -137,10 +173,15 @@ that failed to send has no line.
 
 ### Two phases
 
-- Idle phase (no workload): the result is the metadata bytes per second per daemon. It
-  is an absolute number. There is no data, so there is no ratio.
+- Idle phase (no workload): the result is `<phase>_meta_bps_per_daemon`, the metadata
+  bytes per second per daemon. It is an absolute number. The summary takes the data bytes
+  of the phase out of the wire bytes first, so a late payload in `idle2` does not count as
+  metadata. There is no ratio.
 - Loaded phase (workload): the result is the metadata bytes per delivered data byte. The
-  window of the phase comes from `result.json`.
+  window of the phase comes from `result.json`. The fields are `delivered_data_bytes`,
+  `frame_meta_per_data` and `udp_meta_per_data`. They are for the first phase with data.
+  If a later phase also holds data, it has the same three fields with its name as a prefix,
+  for example `idle2_delivered_data_bytes`. No field is written twice.
 
 ### Example
 
