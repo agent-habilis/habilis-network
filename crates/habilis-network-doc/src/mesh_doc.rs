@@ -1480,9 +1480,8 @@ impl MeshDoc {
     /// nothing to lose, so it need not wait. `None` when there is no candidate or the node holds
     /// the frames of others.
     ///
-    /// A fresh joiner holds nothing, so one frame can move it up to `DOC_EPOCH_JUMP_MAX` epochs. The
-    /// mesh then follows it within one wait, because that jump is inside the bound of the mesh, and
-    /// the joiner holds frames of others after that, so it waits the next time.
+    /// A fresh joiner holds nothing, so one frame can move it to any epoch (see
+    /// [`Self::holds_nothing`]). It holds frames of others after that, so it waits the next time.
     pub fn adopt_if_alone(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
         let held = self.candidate.as_ref()?;
         let alone = self.frames.values().all(|frame| frame.key() == *own);
@@ -2334,12 +2333,21 @@ impl MeshDoc {
         }
     }
 
+    /// Whether a forged epoch could make this document lose nothing: it holds no frame, or it
+    /// still awaits its first sync. The bound of a jump protects a node that holds state. A node
+    /// that holds none takes the root of any epoch: if two forged roots, 10 minutes apart, put the
+    /// mesh above twice the bound, a new node at epoch 0 would else refuse every seed for ever.
+    fn holds_nothing(&self) -> bool {
+        self.awaiting_sync || self.frames.is_empty()
+    }
+
     /// A frame of another epoch than the one that the document holds.
     ///
     /// A lower epoch is dead: ignored, and its dedup key stays seen, because it can never be of use
     /// again. A higher epoch is never applied here. It becomes the candidate only if the frame is a
     /// root of that epoch (its only dependency is the genesis of the epoch), is no further than
-    /// `DOC_EPOCH_JUMP_MAX` above, and passes the gate on a fresh document of that epoch. Every
+    /// `DOC_EPOCH_JUMP_MAX` above (a document that holds nothing has no bound, see
+    /// [`Self::holds_nothing`]), and passes the gate on a fresh document of that epoch. Every
     /// other refusal forgets the dedup key, so the re-send of the frame is not dropped as a repeat
     /// when it can be taken later.
     fn ingest_other_epoch(
@@ -2352,7 +2360,7 @@ impl MeshDoc {
         if epoch < self.epoch {
             return Ingested::Ignored;
         }
-        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX {
+        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX && !self.holds_nothing() {
             return self.refuse_frame(frame);
         }
         let Some(genesis) = self.genesis(epoch) else {
@@ -5147,6 +5155,54 @@ mod tests {
         let me = nick("me");
         write(&mut doc, &me, live);
         doc
+    }
+
+    /// The seed root of `epoch` that a cutter makes from one leaf, far above any epoch of a node.
+    fn far_root(epoch: u64) -> Verified {
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let mut old = MeshDoc::new_ungated().state_epochs();
+        write(&mut old, &me, &json!({ "a": 1 }));
+        seed_frames_of(&old, &cutter, epoch, None).remove(0)
+    }
+
+    /// Two roots of a forger, 10 minutes apart, put the mesh above 2 x `DOC_EPOCH_JUMP_MAX`. A node
+    /// that holds nothing, or awaits its first sync, has nothing to lose and takes the root of any
+    /// epoch: else it would refuse every seed for ever and could never sync again.
+    #[test]
+    fn a_node_that_holds_nothing_takes_a_seed_root_far_above_its_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let far = far_root(3 * super::DOC_EPOCH_JUMP_MAX);
+        let mut joiner = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        let mut empty = MeshDoc::new_ungated().state_epochs();
+
+        let joiner_outcome = joiner.ingest(&far);
+        let empty_outcome = empty.ingest(&far);
+
+        assert!(
+            matches!(joiner_outcome, Ingested::NewEpoch { .. }),
+            "a joiner that awaits its first sync: {joiner_outcome:?}"
+        );
+        assert!(
+            matches!(empty_outcome, Ingested::NewEpoch { .. }),
+            "a node that holds no frame: {empty_outcome:?}"
+        );
+    }
+
+    /// The bound still protects a node that holds state: a forged epoch must not make it throw
+    /// its frames away.
+    #[test]
+    fn a_node_that_holds_frames_still_refuses_a_seed_root_far_above_its_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let far = far_root(3 * super::DOC_EPOCH_JUMP_MAX);
+        let mut holder = MeshDoc::new_ungated().state_epochs();
+        write(&mut holder, &nick("me"), &json!({ "kept": 1 }));
+
+        let outcome = holder.ingest(&far);
+
+        assert!(
+            matches!(outcome, Ingested::Ignored),
+            "a node with state keeps the bound: {outcome:?}"
+        );
     }
 
     /// Eleven nested keys of 200 bytes, and a leaf below them: the path alone is 2 200 bytes.
