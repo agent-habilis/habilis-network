@@ -2555,6 +2555,13 @@ impl MeshDoc {
     /// The root of a second seed of the epoch of the candidate. The slot of the rival holds one
     /// root: a new root takes it only from a rival whose chain is not whole and whose key is
     /// higher. `Buffered` when the root is held.
+    ///
+    /// Known limit: a member that sends incomplete roots of the epoch of the cut before the honest
+    /// root keeps every honest cut out, because an honest root does not beat an incomplete rival
+    /// of a lower key. The effect is bounded: the state grows to the add line, then a write that
+    /// adds a value is refused until the member stops. Reads, deletes, meta and chat keep working.
+    /// The cost for the member is about 2 frames for each wait. Nothing closes this while a key is
+    /// free to make: more slots only raise the cost from 2 frames to about 8.
     fn take_challenger(
         &mut self,
         epoch: u64,
