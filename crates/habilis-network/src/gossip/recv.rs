@@ -914,6 +914,20 @@ async fn roster_gate(
     if admitted {
         return Some(lifecycle::observe(verified, state, context));
     }
+    // A goodbye is signed by the key that leaves, whatever nickname the frame names: the gate refuses the
+    // nickname, not the departure of a key of the roster, so the session of that key ends.
+    let goodbye = matches!(
+        verified.kind,
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Left
+        }
+    );
+    let key = verified.key();
+    if goodbye && (state.peers.contains(&key) || state.quiet.contains(&key)) {
+        let signed = lifecycle::Goodbye::Signed(verified);
+        lifecycle::end_session(key, signed, state, app, context).await;
+        return None;
+    }
     if !is_membership_kind(&verified.kind) {
         if matches!(verified.kind, MessageKind::PeerInfo) {
             retain_refused_peer_info_address(verified, state);
@@ -5877,6 +5891,34 @@ mod dedup_counter_tests {
             bytes,
             compact.len(),
             "the census counted white space that the log does not hold"
+        );
+    }
+
+    /// A goodbye is signed by the key that leaves, so the key is authenticated whatever nickname the frame
+    /// names. A roster key that says goodbye under a nickname that another member binds still ends its own
+    /// session: the gate refuses the nickname, not the departure of the key.
+    #[test]
+    fn a_roster_key_that_says_goodbye_under_a_bound_nickname_still_leaves() {
+        let bound = Identity::generate();
+        let leaver = Identity::generate();
+        let mut initial = state_with_bound_nickname(&bound, "alice");
+        initial.peers.insert(leaver.author_key());
+        initial.names.insert(leaver.author_key(), nick("carol"));
+        let left = Message::new_left(&MeshId::from("test"), &nick("alice")).sign(&leaver);
+        let frame = (
+            Plane::Gossip,
+            left.serialize().expect("serialize").into_bytes(),
+        );
+
+        let reader = reader_with(initial, vec![frame]);
+
+        assert!(
+            !reader.peers.contains(&leaver.author_key()),
+            "the key said goodbye and stayed in the roster"
+        );
+        assert!(
+            reader.peers.contains(&bound.author_key()),
+            "the goodbye of one key ended the session of another"
         );
     }
 
