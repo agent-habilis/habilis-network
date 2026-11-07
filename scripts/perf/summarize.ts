@@ -335,7 +335,10 @@ interface Phase {
 // A census line counts in the phase that holds its time stamp. An oracle line that names its recipients (`to`)
 // counts, for each recipient, in the phase of the first census of that recipient at or after the `ts` of the
 // line: the census interval that holds the payload, so the wire bytes and the data bytes of a payload that
-// lands after the last loaded census both count in the phase of that census. An oracle line with no `to`
+// lands after the last loaded census both count in the phase of that census. When `receipts.jsonl` names the
+// time at which the recipient received the payload (the poll that served it), that time is used, and not the
+// send time: a payload that is sent before a census and received after it counts with the census that holds
+// its arrival. An oracle line with no `to`
 // counts in the phase that holds its `ts`. A census interval that crosses a phase edge lands whole in one phase.
 //
 // - <phase>_meta_bps_per_daemon: for a phase with no data, the received frame bytes per second per daemon.
@@ -353,6 +356,14 @@ function phaseReport(run: string): string {
   const delivered = new Map<string, number>();
   const censusStamps = new Map<string, number[]>(); // the node name, then its census times in ms, in order
   let sawWire = false;
+  const receipts = new Map<string, number>(); // `<node>:<payload id>`, then the time of the poll that served it
+  if (existsSync(`${run}/receipts.jsonl`)) {
+    for (const line of lines(readFileSync(`${run}/receipts.jsonl`, "utf8"))) {
+      const receipt: { to: string; payload_id: string; ts: number } = JSON.parse(line);
+      const key = `${receipt.to}:${receipt.payload_id}`;
+      receipts.set(key, Math.min(receipts.get(key) ?? receipt.ts, receipt.ts));
+    }
+  }
   const add = (into: Map<string, number>, name: string, value: number) =>
     into.set(name, (into.get(name) ?? 0) + value);
   for (const file of nodes) {
@@ -371,7 +382,7 @@ function phaseReport(run: string): string {
   // A build with no wire counters (a baseline) has no frame layer to compare: no ratio, and no failure.
   if (!sawWire) return "";
   for (const line of lines(readFileSync(`${run}/oracle.jsonl`, "utf8"))) {
-    const sent: { bytes: number; receivers: number; ts: number; to?: string[] } = JSON.parse(line);
+    const sent: { bytes: number; receivers: number; ts: number; to?: string[]; payload_id?: string } = JSON.parse(line);
     if (sent.to === undefined) {
       const phase = phases.find((p) => inPhase(p, sent.ts));
       if (phase) add(delivered, phase.name, sent.bytes * sent.receivers);
@@ -379,7 +390,10 @@ function phaseReport(run: string): string {
     }
     for (const recipient of sent.to) {
       const stamps = censusStamps.get(recipient) ?? [];
-      const holding = stamps.find((stamp) => stamp >= sent.ts) ?? sent.ts; // no census after it: the phase of its ts
+      // The wire bytes of a payload count in the census that holds its arrival, so the data bytes follow the
+      // receipt of the recipient when the runner recorded it, and the send time when it did not.
+      const arrival = receipts.get(`${recipient}:${sent.payload_id ?? ""}`) ?? sent.ts;
+      const holding = stamps.find((stamp) => stamp >= arrival) ?? arrival; // no census after it: the phase of its time
       const phase = phases.find((p) => inPhase(p, holding));
       if (phase) add(delivered, phase.name, sent.bytes);
     }
