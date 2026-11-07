@@ -16,6 +16,7 @@ use habilis_network::iroh::endpoint::presets;
 use habilis_network::membership::{self, Inspect, Membership, Request};
 use habilis_network::protocol::{Mesh, MeshConfig, MeshName, Seed};
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{process, thread};
 use tokio::{task, time};
 const MEET_DEADLINE: Duration = Duration::from_secs(90);
@@ -27,10 +28,20 @@ fn fresh_seed() -> Seed {
         .duration_since(UNIX_EPOCH)
         .expect("after the epoch")
         .as_nanos();
+    fresh_seed_at(nanos)
+}
+
+/// The seed of the instant `nanos`. Each call of the process also mixes in the number of the call, so
+/// two calls at one instant (the tests of this file start together) still give two seeds.
+fn fresh_seed_at(nanos: u128) -> Seed {
+    // a counter of calls: it only grows, and it holds one number
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let call = u128::from(CALLS.fetch_add(1, Ordering::Relaxed));
     let mut bytes = [0u8; 32];
     for (index, chunk) in bytes.chunks_mut(16).enumerate() {
         let value = nanos.rotate_left(u32::try_from(index * 17).expect("small"))
-            ^ u128::from(process::id());
+            ^ u128::from(process::id())
+            ^ call.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         chunk.copy_from_slice(&value.to_le_bytes());
     }
     Seed::new(bytes)
@@ -159,4 +170,19 @@ fn two_members_meet_when_a_foreign_endpoint_holds_the_first_rung() {
             "the two members never met with a foreign endpoint on rung 0 of the ladder {ladder:?}"
         );
     });
+}
+
+/// The two tests of this file run at once in one process, and the clock has a resolution of about a
+/// microsecond, so two seeds can be asked for at the same instant. They must differ: a mesh that both
+/// tests join has two members named alice and two named bob, and each node warns that its nickname is
+/// held by another member.
+#[test]
+fn two_seeds_asked_for_at_the_same_instant_differ() {
+    let first = fresh_seed_at(1_700_000_000_000_000_000);
+    let second = fresh_seed_at(1_700_000_000_000_000_000);
+    assert_ne!(
+        first.as_bytes(),
+        second.as_bytes(),
+        "the two tests of this file would join one mesh"
+    );
 }
