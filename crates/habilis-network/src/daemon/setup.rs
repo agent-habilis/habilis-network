@@ -695,11 +695,16 @@ fn write_key_file(key_path: &Path, seed: &[u8], owner_start: u64) -> Result<()> 
     use std::fs;
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
+    // The last run that the file names stays: the owner of the file changes, the count does not.
+    let last_run = last_recorded_run_in(key_path);
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true).mode(0o600);
     let mut file = options.open(key_path)?;
     file.write_all(seed)?;
     file.write_all(&owner_start.to_le_bytes())?;
+    if let Some(last_run) = last_run {
+        file.write_all(&last_run.to_le_bytes())?;
+    }
     Ok(())
 }
 
@@ -723,17 +728,57 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
     let run = match fs::read(&run_path) {
         Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_slice()) {
             Ok(last) => u64::from_le_bytes(last).saturating_add(1),
-            Err(_) => counter_lost(),
+            Err(_) => counter_lost(state),
         },
         // No counter, but a member key from an earlier start: the counter was deleted. Peers hold
         // runs above 1 for this member, so the count restarts from the clock, as for a bad file.
-        Err(error) if error.kind() == ErrorKind::NotFound && member_known => counter_lost(),
+        Err(error) if error.kind() == ErrorKind::NotFound && member_known => counter_lost(state),
         Err(error) if error.kind() == ErrorKind::NotFound => 1,
-        Err(_) => counter_lost(),
+        Err(_) => counter_lost(state),
     };
     write_run(state, run)?;
+    record_last_run(state, run);
     drop(run_lock);
     Ok(run)
+}
+
+/// Keep `run` in the member key file too, at bytes 40 to 48 (after the seed and the owner start), as the second
+/// record of the counter. A start that loses the counter file a second time, after the clock went back, reads it
+/// there. A key file that is too short to hold it is left as it is.
+#[cfg(all(unix, feature = "host"))]
+fn record_last_run(state: &Path, run: u64) {
+    use std::fs::OpenOptions;
+    use std::io::ErrorKind;
+    use std::os::unix::fs::FileExt as _;
+    let opened = OpenOptions::new()
+        .write(true)
+        .open(state.with_extension("key"));
+    let file = match opened {
+        Ok(file) => file,
+        // No key file, no second record: a state path with no member key keeps the one counter file.
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(target: "habilis_network::lifecycle", %error, "the last run could not be recorded in the key file");
+            return;
+        }
+    };
+    if let Err(error) = file.write_all_at(&run.to_le_bytes(), 40) {
+        tracing::warn!(target: "habilis_network::lifecycle", %error, "the last run could not be recorded in the key file");
+    }
+}
+
+/// The last run that the member key file of `state` names, if it names one.
+#[cfg(all(unix, feature = "host"))]
+fn last_recorded_run(state: &Path) -> Option<u64> {
+    last_recorded_run_in(&state.with_extension("key"))
+}
+
+/// The last run that the key file at `key_path` names, if it names one.
+#[cfg(all(unix, feature = "host"))]
+fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(key_path).ok()?;
+    let tail = bytes.get(40..48)?;
+    <[u8; 8]>::try_from(tail).ok().map(u64::from_le_bytes)
 }
 
 /// Take the exclusive lock on `<state>.run.lock`, which makes the allocation of a run one step across
@@ -775,11 +820,14 @@ fn write_run(state: &Path, run: u64) -> Result<()> {
 }
 
 /// The counter file is unreadable, so the count restarts from the unix seconds: the counter grows by
-/// 1 per start and the seconds grow faster, so the number is above any count that peers kept.
+/// 1 per start and the seconds grow faster, so the number is above any count that peers kept. A clock that went
+/// back since an earlier loss could still give a lower number, so the run is never below the last run that the
+/// key file names, plus one.
 #[cfg(all(unix, feature = "host"))]
-fn counter_lost() -> u64 {
+fn counter_lost(state: &Path) -> u64 {
     use crate::protocol::UnixSecs;
-    let run = u64::try_from(UnixSecs::now().as_secs()).unwrap_or(1).max(1);
+    let clock = u64::try_from(UnixSecs::now().as_secs()).unwrap_or(1).max(1);
+    let run = last_recorded_run(state).map_or(clock, |last| clock.max(last.saturating_add(1)));
     tracing::warn!(target: "habilis_network::lifecycle", new_run = run, "run counter file is unreadable, so its old run is unknown; the count restarts from the clock");
     run
 }
@@ -1517,6 +1565,54 @@ mod tests {
             total,
             "two starts of one state path published one run: peers would keep different sessions"
         );
+    }
+
+    /// The member key file keeps the last run too. When the counter file is lost a second time, after the
+    /// clock went back, the clock alone would give a run below the one that peers hold: the key file is
+    /// the second record, and the new run is above the last run that it names.
+    #[test]
+    fn a_lost_counter_does_not_go_below_the_last_run_that_the_key_file_names() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "run counter file is unreadable",
+        );
+        let dir = TempDir::new("habilis-run-twice-lost");
+        let state = dir.path().join("session.json");
+        let key = state.with_extension("key");
+        let ahead_of_the_clock: u64 = 4_000_000_000_000;
+        let mut bytes = vec![7u8; 32];
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&ahead_of_the_clock.to_le_bytes());
+        fs::write(&key, bytes).expect("a key file that names a last run");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("a private mode");
+
+        let run = super::next_run(Some(&state), true).expect("a run number");
+
+        assert!(
+            run > ahead_of_the_clock,
+            "the run after a lost counter is {run}, not above the last run of the key file"
+        );
+    }
+
+    /// Each start records its run in the key file, beside the counter file.
+    #[test]
+    fn each_start_records_its_run_in_the_key_file() {
+        let dir = TempDir::new("habilis-run-recorded");
+        let state = dir.path().join("session.json");
+        let first = super::run_keys(Some(&state)).expect("the first start");
+        let second = super::run_keys(Some(&state)).expect("the second start");
+
+        let bytes = fs::read(state.with_extension("key")).expect("the key file");
+        let named = bytes
+            .get(40..48)
+            .and_then(|tail| <[u8; 8]>::try_from(tail).ok())
+            .map(u64::from_le_bytes);
+
+        assert_eq!(first.run, 1, "the first start is run 1");
+        assert_eq!(second.run, 2, "the second start is run 2");
+        assert_eq!(named, Some(second.run), "the key file names the last run");
     }
 
     /// A counter file that a crash cut short must not restart the count at 1: a peer that kept a
