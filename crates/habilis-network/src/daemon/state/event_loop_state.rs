@@ -4,6 +4,7 @@ use super::ParkedLinkStates;
 use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
+use super::chat_continuations::ChatContinuations;
 use super::peer_info_flood::PeerInfoFlood;
 use super::proof_exchange::ProofExchange;
 use super::{
@@ -338,12 +339,20 @@ pub struct EventLoopState {
     /// because a digest built with no signature is a valid input of the tests: `None`
     /// is its own bucket, as the empty string was.
     digest_serves: Cooldown<AuthorKey>,
+    /// The chat continuations that an author gets inside its cooldown. Bounded: a run lives for one
+    /// cooldown window, at most `CHAT_CONTINUATION_AUTHORS_MAX` authors hold one, and a new author
+    /// is refused when the table is full (see `ChatContinuations`).
+    chat_continuations: ChatContinuations,
     /// When we last reported an author whose digest we could not read. An `Option` key
     /// for the same reason as `digest_serves`.
     digest_unreadable: Cooldown<AuthorKey>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
     pub(crate) resend_outbox: ResendOutbox,
+    /// Tests only: the next ask of a fast round fails to start, once, as a send does when the
+    /// connection cannot be opened. A default build has no such field.
+    #[cfg(test)]
+    fail_next_ask: bool,
     /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
     /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -799,8 +808,11 @@ impl EventLoopState {
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
             digest_serves: Cooldown::new(tuning::ANTIENTROPY_SERVE_COOLDOWN),
+            chat_continuations: ChatContinuations::default(),
             digest_unreadable: Cooldown::new(super::UNREADABLE_DIGEST_LOG_WINDOW),
             resend_outbox,
+            #[cfg(test)]
+            fail_next_ask: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drop: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -1651,6 +1663,12 @@ impl EventLoopState {
             })
     }
 
+    /// Tests only: the gap of zero links began at `since`, so a test need not wait for a heal.
+    #[cfg(test)]
+    pub(crate) fn start_zero_links_gap_at(&mut self, since: Instant) {
+        self.zero_links_since = Some(since);
+    }
+
     /// Whether a reclaim tick asks another known peer for a link: the fast reclaim window is
     /// open and this member held links and lost every one. A low priority request is refused by
     /// a peer whose view is full, and the peers that were lost are full first; waiting for the
@@ -2497,7 +2515,25 @@ impl EventLoopState {
             return false;
         }
         self.digest_serves.note(author, now);
+        self.chat_continuations
+            .begin(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN);
         true
+    }
+
+    /// Whether a digest of `author` that came by unicast, inside the cooldown that `admit_digest`
+    /// refused it for, is a continuation of its chat ask to serve now: at the pace of the asker, and
+    /// up to its count. Only an author that was served has one. Bounded (see `ChatContinuations`).
+    pub fn admit_chat_continuation(&mut self, author: AuthorKey, now: Instant) -> bool {
+        self.digest_serves.on_cooldown(&author, now)
+            && self
+                .chat_continuations
+                .admit(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN)
+    }
+
+    /// How many authors hold a run of chat continuations: the size gauge of the bound.
+    #[cfg(test)]
+    pub(crate) fn chat_continuations_len(&self) -> usize {
+        self.chat_continuations.len()
     }
 
     /// The selected path of a pair: the path watcher's last report if it has one,
@@ -2762,6 +2798,20 @@ impl EventLoopState {
         let own = self.identity.author_key();
         let switch = self.doc_mut(channel).restart_at_epoch(epoch, &own);
         self.note_epoch_switch(switch);
+    }
+
+    /// Tests only: the next ask of a fast round fails to start, once.
+    #[cfg(test)]
+    pub(crate) fn fail_the_next_ask(&mut self) {
+        self.fail_next_ask = true;
+    }
+
+    /// Tests only: whether the injected failure of an ask is due now. It is spent when it is read.
+    #[cfg(test)]
+    pub(crate) fn take_injected_ask_failure(&mut self) -> bool {
+        let due = self.fail_next_ask;
+        self.fail_next_ask = false;
+        due
     }
 
     /// Tests only: drop the next inbound frame that `what` names, once, before the app reads it.

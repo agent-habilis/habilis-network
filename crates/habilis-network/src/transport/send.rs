@@ -36,7 +36,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, lane_for, note_held, resolve, route};
+    use super::{Lane, Route, can_unicast, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified, WireFrame};
     use crate::protocol::{
@@ -840,6 +840,43 @@ mod tests {
             Route::Undeliverable,
             "the rendezvous addressee is never a directed target"
         );
+    }
+
+    /// A reply goes back on the connection that an unicast frame came by, though no direct path is
+    /// proven for that endpoint yet: the unicast acceptor admits a connection only on a selected
+    /// path that is not the relay when the relay is lookup-only, so the arrival proves what a probe
+    /// would. The exception is for the frame at hand: outside the handling of an unicast frame, and
+    /// for any other endpoint, an unproven path is held as before.
+    #[test]
+    fn a_reply_may_go_back_on_an_admitted_direct_arrival_and_nothing_else_is_let_through() {
+        use crate::daemon::state::DirectState;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_bob();
+        let carol = endpoint_id(2);
+        state.relay_transport = PayloadPath::DirectOnly;
+        state.direct.remove(&bob);
+        assert!(
+            !can_unicast(bob, &state),
+            "the premise: no direct path is proven"
+        );
+
+        state.state_digest_serves.unicast.arrived_from = Some(bob);
+        assert!(
+            can_unicast(bob, &state),
+            "the frame at hand came by unicast from bob"
+        );
+        assert!(
+            !can_unicast(carol, &state),
+            "the arrival of bob opens no path to another endpoint"
+        );
+
+        state.state_digest_serves.unicast.arrived_from = None;
+        assert!(
+            !can_unicast(bob, &state),
+            "outside the handling of a unicast frame the path is held again"
+        );
+        state.direct.insert(bob, DirectState::Direct);
+        assert!(can_unicast(bob, &state), "a proven direct path still goes");
     }
 
     /// With the relay lookup only, a directed frame is parked until a direct
@@ -1939,10 +1976,13 @@ mod tests {
         });
     }
 
-    /// The retry of an ask-back uses the connection that the digest came on, when its signer proved no
-    /// endpoint yet: the first ask-back could not start, and the retry must not wait for the proof.
+    /// The ask-back goes on the connection that the digest came on at once, though no direct path is
+    /// proven for it yet (the arrival proves it), and its signer proved no endpoint. A send that
+    /// comes later, outside the handling of the frame, waits for the proof of the path as before.
+    /// (The retry of an ask-back that could not start, on the connection of the digest, is reached
+    /// only when the send itself fails: a held path no longer stops the first ask-back.)
     #[test]
-    fn the_retry_of_an_ask_back_uses_the_connection_of_the_digest() {
+    fn the_ask_back_goes_on_the_connection_of_the_digest_at_once() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::Channel;
 
@@ -1952,8 +1992,53 @@ mod tests {
             let asker = Identity::generate();
             let ahead = serde_json::json!(["ab".repeat(32)]);
             let digest = digest(&net.mesh, Channel::State, &ahead, &asker);
-            // The path of the connection is held when the digest arrives: no ask-back can start.
+            // The path of the connection is not proven when the digest arrives, but the digest came
+            // by that connection: the ask-back starts on it.
             state.direct.remove(&bob);
+            state.state_digest_serves.unicast.arrived_from = Some(bob);
+            let _ = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+            assert_eq!(
+                state.idle.fr_asks, 1,
+                "the ask-back goes on the connection of the digest at once"
+            );
+
+            // Outside the handling of the frame the path is held again: the retry, when the round
+            // has been quiet for FAST_ROUND_RETRY, waits for the proof.
+            state.state_digest_serves.unicast.arrived_from = None;
+            tokio_time::sleep(std_Duration::from_millis(500)).await;
+            antientropy::resume_fast_rounds(&mut state, &net.context()).await;
+            assert_eq!(state.idle.fr_retries, 0, "no proof of the path, no retry");
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// The retry of an ask-back uses the connection that the digest came on, when its signer proved no
+    /// endpoint yet: the first ask-back could not start (the send failed), and the retry must not
+    /// wait for the proof of the signer. The old form of this test used a held path for the first
+    /// failure; a held path no longer stops the ask-back on an admitted arrival, so the failure of
+    /// the send is injected.
+    #[test]
+    fn the_retry_of_an_ask_back_that_could_not_start_uses_the_connection_of_the_digest() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            // A holder with nothing to answer: the first send to bob is the retry itself, and no dial of
+            // an answer is in flight when it goes.
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 0).await;
+            let bob = bob_endpoint.id();
+            let asker = Identity::generate();
+            let ahead = serde_json::json!(["ab".repeat(32)]);
+            let digest = digest(&net.mesh, Channel::State, &ahead, &asker);
+            // The first ask-back cannot start: the send fails.
+            state.fail_the_next_ask();
             state.state_digest_serves.unicast.arrived_from = Some(bob);
             let _ = antientropy::handle_state_digest(
                 Channel::State,
