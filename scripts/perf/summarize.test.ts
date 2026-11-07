@@ -179,3 +179,37 @@ test("a payload that lands after the last loaded census counts in the phase of t
   expect(result.stdout.toString()).toContain("loaded_meta_bps_per_daemon=");
 });
 
+test("a payload sent before the last loaded census and received after it counts in the phase of the census that holds the receipt", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "summarize-"));
+  const node = (idle2: number) =>
+    [
+      censusLine(30, { idle_wire_in: 1000 }),
+      censusLine(90, { idle_wire_in: 50 }),
+      censusLine(110, { idle_wire_in: 50 }), // the last loaded census
+      censusLine(130, { idle_wire_in: idle2 }),
+      censusLine(150, { idle_wire_in: 300 }),
+    ].join("\n") + "\n";
+  writeFileSync(`${dir}/n1.err`, node(400));
+  writeFileSync(`${dir}/n2.err`, node(500)); // its census at 130 holds the 200 data bytes that it received at 125
+  writeFileSync(
+    `${dir}/result.json`,
+    JSON.stringify({
+      phases: [
+        { name: "idle1", start_ms: T0, end_ms: T0 + 60_000 },
+        { name: "loaded", start_ms: T0 + 60_000, end_ms: T0 + 120_000 },
+        { name: "idle2", start_ms: T0 + 120_000, end_ms: T0 + 180_000 },
+      ],
+    }),
+  );
+  // Sent at 100 (before the last loaded census), received at 125 (after it).
+  writeFileSync(
+    `${dir}/oracle.jsonl`,
+    JSON.stringify({ sender: "bench01", kind: "msg", receivers: 1, bytes: 200, seq: 0, ts: T0 + 100_000, to: ["bench02"], payload_id: "0" }) + "\n",
+  );
+  writeFileSync(`${dir}/receipts.jsonl`, JSON.stringify({ to: "bench02", payload_id: "0", ts: T0 + 125_000 }) + "\n");
+  const result = run(dir);
+  expect(result.exitCode).toBe(0); // by the send time the 200 bytes were loaded data against 100 loaded wire bytes: the frame layer failed
+  expect(result.stdout.toString()).toContain("delivered_data_bytes=200");
+  expect(result.stdout.toString()).toContain("loaded_meta_bps_per_daemon=");
+});
+

@@ -121,6 +121,7 @@ const nick = (i: number) => `bench${String(i).padStart(2, "0")}`;
 mkdirSync(`${OUT}/state`, { recursive: true });
 // An idle-only run sends no workload: the summary still reads the (empty) oracle.
 writeFileSync(`${OUT}/oracle.jsonl`, "");
+writeFileSync(`${OUT}/receipts.jsonl`, "");
 const stateFile = (i: number) => `${OUT}/state/${nick(i)}.json`;
 let gossip = "";
 let seq = 0;
@@ -288,6 +289,9 @@ async function listen(i: number): Promise<void> {
     // The bell (--long) only waits. A plain poll serves the events and moves the read cursor.
     await cli(["poll", "--gossip", gossip, "--nickname", me, "--long", "--max-secs", "60"]);
     const polled = await cli(["poll", "--gossip", gossip, "--nickname", me]);
+    // The time at which the poll served the events: the receipt time of each payload in this batch, which the
+    // bell (the long poll above) brings close to the arrival.
+    const servedAt = Date.now();
     let events: any[] = [];
     try {
       events = JSON.parse(polled.out || "[]");
@@ -297,7 +301,10 @@ async function listen(i: number): Promise<void> {
     for (const event of events) {
       if (event.event === "message" && !event.self) {
         const id = payloadId(String(event.body ?? ""));
-        if (id !== null) received.set(me, (received.get(me) ?? new Set<string>()).add(id));
+        if (id !== null) {
+          received.set(me, (received.get(me) ?? new Set<string>()).add(id));
+          appendFileSync(`${OUT}/receipts.jsonl`, JSON.stringify({ to: me, payload_id: id, ts: servedAt }) + "\n");
+        }
       }
       if (event.event !== "task" || event.self || event.to !== me) continue;
       const task = event.task_id as string;
