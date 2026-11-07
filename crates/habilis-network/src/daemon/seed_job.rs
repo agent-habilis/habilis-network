@@ -96,7 +96,8 @@ fn mix(key: &AuthorKey, epoch: u64) -> u64 {
 /// Whether the frame of `merge`, as a seed would carry it (with the stamps of the plan for its
 /// paths, sealed if the mesh has a key, signed and serialized), leaves the margin of the envelope
 /// under a message. It is the check of the daemon for a seed: a frame that fits here fits at the
-/// send, and it is as full as the real stamps let it be.
+/// send. The stamps are the real ones of the plan. A time has 13 digits in production, as many as
+/// `LARGEST_TIME`, so they cost what the worst stamp costs, less the tags that the frame names once.
 fn seed_frame_fits(job: &SeedJob, plan: &SeedPlan, merge: &serde_json::Value) -> bool {
     let stamps: Vec<Stamp> = plan.stamps_for(merge).collect();
     frame_fits_with(job, merge, &stamps)
@@ -748,6 +749,63 @@ mod tests {
             })
             .expect("a short leaf passes the check");
         write_merge(&mut doc, &identity, &me, &merge_of(accepted));
+        let plan = doc.seed_plan().expect("a plan");
+        let mut job = job_of(&identity, 1);
+        // Shared with the job that builds on another thread.
+        job.seal = Some(Arc::new(key));
+
+        let outcome = spawn_build(plan, job).await.expect("the build ends");
+
+        let chain = outcome.chain.expect("the cut works");
+        assert_eq!(
+            chain.left_out, 0,
+            "the leaf of {accepted} bytes passed the write check and the cut left it out"
+        );
+    }
+
+    /// `leaf` inside the objects named by `path`, outermost first.
+    fn nested_merge(path: &[String], leaf: Value) -> Value {
+        let mut merge = leaf;
+        let innermost_first: Vec<&String> = path.iter().rev().collect();
+        for name in innermost_first {
+            merge = json!({ (name.as_str()): merge });
+        }
+        merge
+    }
+
+    /// The frame of a seed names each distinct tag of its stamps once. A path whose objects were
+    /// made by different authors carries up to 13 tags, and the estimate of a write must count them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_deep_leaf_under_objects_of_many_authors_is_carried_by_the_cut_in_a_sealed_mesh() {
+        let key = SymmetricKey::from_bytes([7; 32]);
+        let mut doc = MeshDoc::new_state(Some(key.clone()));
+        doc.finish_sync();
+        let path: Vec<String> = (0..12).map(|level| format!("k{level}")).collect();
+        let merge_of = |depth: usize, leaf: Value| nested_merge(&path[..depth], leaf);
+        // Each object of the path is made by an author of its own.
+        for depth in 1..path.len() {
+            let author = Identity::generate();
+            let who = testing::nick("author");
+            write_merge(&mut doc, &author, &who, &merge_of(depth, json!({})));
+        }
+        // Shared with the job that builds on another thread.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let accepted: usize = (1..2_000)
+            .rev()
+            .step_by(10)
+            .find(|length| {
+                let merge = merge_of(path.len(), json!("x".repeat(*length)));
+                doc.build_change(&merge, identity.public().as_bytes())
+                    .is_ok()
+            })
+            .expect("a short leaf passes the check");
+        write_merge(
+            &mut doc,
+            &identity,
+            &me,
+            &merge_of(path.len(), json!("x".repeat(accepted))),
+        );
         let plan = doc.seed_plan().expect("a plan");
         let mut job = job_of(&identity, 1);
         // Shared with the job that builds on another thread.

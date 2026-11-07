@@ -240,8 +240,9 @@ pub struct SeedPlan {
 impl SeedPlan {
     /// The stamps that a frame of this seed would carry for `merge`: one for each leaf and each
     /// object that the merge writes, as the plan holds them (the stamp 0 for a path that it holds
-    /// none for). A caller that measures the frames of a seed uses them, so the frames come out as
-    /// full as they can be and not as full as the worst stamp lets them be.
+    /// none for). A caller that measures the frames of a seed uses them: a tag that many stamps share
+    /// is named once in the frame. The times of a node that follows the wall clock have 13 digits,
+    /// so the gain over the worst stamp is in the tag table, not in the digits.
     pub fn stamps_for(&self, merge: &Value) -> impl Iterator<Item = Stamp> + use<> {
         let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
         collect_leaves(merge, &mut Vec::new(), &mut leaves);
@@ -3659,8 +3660,11 @@ fn seed_frame_body_len(path: &[String], value: &Value, seal: Option<&SymmetricKe
     let time: u64 = 9_999_999_999_999;
     // The frame of a seed carries a stamp for each path that its change writes: the leaf and each
     // object on the way to it, so one for each key of the path, and one more for the root of the
-    // change.
-    let worst = vec![Stamp::new(time, "ffffffffffffffff".to_owned()); path.len() + 1];
+    // change. The frame names each distinct tag once, and the objects of a path can be made by
+    // authors of their own, so every stamp has a tag of its own.
+    let worst: Vec<Stamp> = (0..=path.len())
+        .map(|index| Stamp::new(time, format!("{:016x}", u64::MAX - index as u64)))
+        .collect();
     let bytes = change.raw_bytes();
     let plain = wire::change_body_tombstoned(bytes, None, 1, None, Some(time), &worst, &[]);
     // A sealed mesh sends the body sealed, which is longer: the frame is measured as it goes.
@@ -8306,7 +8310,9 @@ mod tests {
         let timeless = MeshDoc::new_ungated();
         let change = change_of(&timeless, &merge, &pad_seed(b"me"));
         let time: u64 = 9_999_999_999_999;
-        let worst = vec![Stamp::new(time, "ffffffffffffffff".to_owned()); path.len() + 1];
+        let worst: Vec<Stamp> = (0..=path.len())
+            .map(|index| Stamp::new(time, format!("{:016x}", u64::MAX - index as u64)))
+            .collect();
         let body = change_body_tombstoned(&change, None, 1, None, Some(time), &worst, &[]);
         body.map_or(usize::MAX, |body| body.as_str().len())
     }
