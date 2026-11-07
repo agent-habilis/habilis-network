@@ -6587,6 +6587,58 @@ mod dedup_counter_tests {
         );
     }
 
+    /// A `joined` frame whose proof is refused for a held nickname, as the verified frame and its bytes.
+    fn proof_frame_of(
+        session: &Identity,
+        member: &Identity,
+        forged: bool,
+    ) -> (Verified, (Plane, Bytes)) {
+        let mesh = MeshId::from("test");
+        let mut proof = member.prove(&session.author_key(), "alice", mesh.as_ref(), 1);
+        if forged {
+            // a run that the member did not sign: the signature of the proof no longer verifies
+            proof.run += 1;
+        }
+        let frame = Message::new_joined_with_proof(&mesh, &nick("alice"), &proof).sign(session);
+        let bytes = (
+            Plane::Gossip,
+            frame.serialize().expect("serialize").into_bytes(),
+        );
+        (frame, bytes)
+    }
+
+    /// Only a proof whose signature verifies, and that is refused for the binding, takes its frame out of
+    /// the seen set: the frame is read again when the holder has left. A forged proof keeps its key, so
+    /// its copies are dropped as duplicates, and no copy costs more than a hash lookup.
+    #[test]
+    fn only_a_valid_refused_proof_takes_its_frame_out_of_the_seen_set() {
+        let (holder, member) = (Identity::generate(), Identity::generate());
+        let (holder_session, member_session) = (Identity::generate(), Identity::generate());
+        let (valid, valid_bytes) = proof_frame_of(&member_session, &member, false);
+        let (forged, forged_bytes) = proof_frame_of(&member_session, &member, true);
+
+        let after_valid = reader_with(
+            fresh_state(),
+            vec![joined_of(&holder_session, &holder, "alice", 1), valid_bytes],
+        );
+        let after_forged = reader_with(
+            fresh_state(),
+            vec![
+                joined_of(&holder_session, &holder, "alice", 1),
+                forged_bytes,
+            ],
+        );
+
+        assert!(
+            !after_valid.seen.contains(&valid.dedup_key()),
+            "a valid proof that is refused for the binding is read again later"
+        );
+        assert!(
+            after_forged.seen.contains(&forged.dedup_key()),
+            "a forged proof keeps its key: its copies are dropped as duplicates"
+        );
+    }
+
     /// A restart of the member that holds the name is no intrusion: its new session replaces the old
     /// one, as before, and a session of another member that claims the name leaves with it.
     #[test]

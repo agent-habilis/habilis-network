@@ -2557,17 +2557,21 @@ impl EventLoopState {
             })
             .collect();
         let refused_before = self.proofs.bound_refused();
+        let to_verify = proof;
         let (peers, quiet) = (&self.peers, &self.quiet);
         let bound = self
             .proofs
             .accept(&key, &message.author, mesh, proof, |session| {
                 peers.contains(session) || quiet.contains(session)
             });
-        if self.proofs.bound_refused() > refused_before {
-            // Another member holds the name, so this proof is refused for now. The frame is not kept as
-            // seen: when the holder leaves and the same frame comes again (the answer of a member is one
-            // frame for its whole run), it must be read again and not dropped as a duplicate. One key
-            // leaves a bounded set, so the set does not grow, and a copy costs a lookup (see `accept`).
+        if self.proofs.bound_refused() > refused_before
+            && verify_proof(&to_verify, &key, message.author.as_ref(), mesh.as_ref())
+        {
+            // Another member holds the name, so this proof, which is signed by its member, is refused for
+            // now. The frame is not kept as seen: when the holder leaves and the same frame comes again
+            // (the answer of a member is one frame for its whole run), it must be read again and not
+            // dropped as a duplicate. A proof that is not signed by its member keeps its key, so its
+            // copies are dropped as duplicates and cost a lookup. One key leaves a bounded set.
             self.seen.remove(&message.dedup_key());
         }
         if bound {

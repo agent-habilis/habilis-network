@@ -324,8 +324,9 @@ mod ask_tests {
 
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::Verified;
-    use crate::protocol::{MeshId, Message};
+    use crate::protocol::{AuthorKey, MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::util::clock::Instant;
     use iroh::EndpointAddr;
 
     /// A `joined` frame that carries no proof, as a session of a free nickname sends it.
@@ -348,21 +349,27 @@ mod ask_tests {
                 &nick(name),
                 EndpointAddr::new(endpoint),
             );
-            state
-                .proofs
-                .defer_ask(session.author_key(), crate::util::clock::Instant::now());
+            state.proofs.defer_ask(session.author_key(), Instant::now());
         }
 
-        let from_x = state.deferred_asks_to_try(Some(at_x));
-        let sweep = state.deferred_asks_to_try(None);
+        let from_x: Vec<AuthorKey> = state
+            .deferred_asks_to_try(Some(at_x))
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        let sweep: Vec<AuthorKey> = state
+            .deferred_asks_to_try(None)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
 
         assert_eq!(
-            from_x.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            from_x,
             vec![alice.author_key()],
             "a frame from X tries the ask at X"
         );
         assert_eq!(
-            sweep.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            sweep,
             vec![bob.author_key()],
             "the ask at Y was not used up: the sweep sends it (and the one at X was just tried)"
         );
