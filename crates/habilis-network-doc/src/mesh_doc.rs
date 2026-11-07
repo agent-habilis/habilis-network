@@ -433,6 +433,16 @@ type ParentObjects = HashMap<Vec<String>, Option<ObjId>>;
 /// do by overwriting them.
 const DOC_TIME_MAX: u64 = 1 << 53;
 
+/// Whether a change names an origin stamp or a tombstone stamp with a time above `own_time`.
+fn names_stamp_above(
+    origins: &[Stamp],
+    tombstones: &[(Vec<String>, Stamp)],
+    own_time: u64,
+) -> bool {
+    let origin = origins.iter().any(|stamp| stamp.time > own_time);
+    origin || tombstones.iter().any(|(_, stamp)| stamp.time > own_time)
+}
+
 /// The root frame of a higher epoch that the document keeps until it adopts the epoch.
 #[derive(Debug)]
 struct Candidate {
@@ -2119,6 +2129,16 @@ impl MeshDoc {
             }
             return Ingested::Ignored;
         }
+        // An honest node stamps a value with a time that it saw, so below the time of the frame
+        // that names the stamp. A stamp above it, such as a delete with `u64::MAX`, would stand for
+        // ever, since no later write can beat it.
+        if names_stamp_above(&parsed.origins, &parsed.tombstones, time.unwrap_or(0)) {
+            self.refused_time = self.refused_time.saturating_add(1);
+            if let Some(refused) = self.warn_due("a frame names a stamp above its own time") {
+                tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "a frame names a stamp above its own time");
+            }
+            return Ingested::Ignored;
+        }
         let Ok(change) = Change::from_bytes(parsed.bytes) else {
             return Ingested::Ignored;
         };
@@ -3619,6 +3639,7 @@ mod tests {
     };
     use serde_json::{Map, Value, json};
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::Ordering;
 
     fn nick(name: &str) -> Nickname {
         Nickname::from(name)
@@ -5475,6 +5496,84 @@ mod tests {
         );
     }
 
+    /// A stamp that no honest node writes: above the time of the frame that carries it. A delete
+    /// with the stamp `u64::MAX` would stand for ever, since no later write can beat it.
+    #[test]
+    fn a_replay_that_names_a_stamp_above_its_own_time_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame names a stamp above its own time",
+        );
+        let (alice, mallory) = (nick("alice"), nick("mallory"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write(&mut doc, &alice, &json!({ "config": { "a": 1 } }));
+        let bytes = change_of(
+            &doc,
+            &json!({ "config": null }),
+            &pad_seed(mallory.as_str().as_bytes()),
+        );
+        let stamp = Stamp::new(u64::MAX, "0000000000000000".to_owned());
+        let body = change_body_stamped(&bytes, None, 0, None, Some(2), &[stamp]).expect("a body");
+        let key = signer(&mallory);
+        let hostile = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &mallory, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+
+        let outcome = doc.ingest(&hostile);
+
+        assert!(
+            matches!(outcome, Ingested::Ignored),
+            "the frame is refused: {outcome:?}"
+        );
+        assert_eq!(
+            doc.to_json(),
+            json!({ "config": { "a": 1 } }),
+            "the delete did not apply"
+        );
+        assert_eq!(doc.refused_time(), 1, "the refusal is counted");
+    }
+
+    /// The same for the tombstones that the root of a seed carries.
+    #[test]
+    fn a_seed_root_that_names_a_tombstone_above_its_own_time_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame names a stamp above its own time",
+        );
+        let mallory = nick("mallory");
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let bytes = change_of(
+            &doc,
+            &json!({ "a": 1 }),
+            &pad_seed(mallory.as_str().as_bytes()),
+        );
+        let dead = [(
+            vec!["config".to_owned()],
+            Stamp::new(u64::MAX, "0000000000000000".to_owned()),
+        )];
+        let stamp = Stamp::new(1, "0000000000000000".to_owned());
+        let body = change_body_tombstoned(&bytes, None, 0, None, Some(1), &[stamp], &dead)
+            .expect("a body");
+        let key = signer(&mallory);
+        let hostile = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &mallory, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+
+        let outcome = doc.ingest(&hostile);
+
+        assert!(
+            matches!(outcome, Ingested::Ignored),
+            "the tombstone of u64::MAX is refused: {outcome:?}"
+        );
+        assert_eq!(doc.tombstones.len(), 0, "no tombstone stands");
+    }
+
     #[test]
     fn a_time_at_the_top_of_the_range_is_refused_so_the_clock_cannot_be_pinned() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -5908,7 +6007,7 @@ mod tests {
 
     /// The tombstones of a document that deleted `count` paths of 40 bytes, with growing stamps.
     fn doc_with_tombstones(count: usize) -> MeshDoc {
-        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let mut doc = doc_with_clock_at(u64::try_from(count).unwrap_or(0));
         for index in 0..count {
             let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
             doc.add_tombstone(vec![format!("{index:040}")], stamp);
@@ -5970,7 +6069,7 @@ mod tests {
     /// The tombstones of a document that deleted `count` paths of 250 bytes (the longest path
     /// that a tombstone keeps is 256 bytes), with growing stamps.
     fn doc_with_long_tombstones(count: usize) -> MeshDoc {
-        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let mut doc = doc_with_clock_at(u64::try_from(count).unwrap_or(0));
         for index in 0..count {
             let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
             doc.add_tombstone(vec![format!("{index:0250}")], stamp);
@@ -6099,6 +6198,7 @@ mod tests {
         );
         // A replay brought back `gone` and `o.gone`, but a delete of a higher stamp governs them.
         let high = Stamp::new(99, "aa".to_owned());
+        doc.clock.fetch_max(99, Ordering::Relaxed);
         doc.add_tombstone(vec!["gone".to_owned()], high.clone());
         doc.add_tombstone(vec!["o".to_owned(), "gone".to_owned()], high);
         let frames = seed_frames_of(&doc, &cutter, 3, None);
@@ -6128,7 +6228,7 @@ mod tests {
         let first = write(&mut doc, &mine, &json!({ "shared": 9 }));
         // A replay of another node sets `shared = 5` at the stamp 50, and automerge keeps it (the
         // actor of that node is the higher one), so this node plans to write 9 again.
-        let replayer = MeshDoc::new_ungated().state_epochs();
+        let replayer = doc_with_clock_at(50);
         let change = change_of(
             &replayer,
             &json!({ "shared": 5 }),
@@ -6288,7 +6388,13 @@ mod tests {
         merge: &Value,
         stamps: &[(Vec<String>, Stamp)],
     ) -> Verified {
-        let replayer = MeshDoc::new_ungated().state_epochs();
+        // A node holds only stamps that it saw, so its clock is at or above every stamp it names.
+        let named: u64 = stamps
+            .iter()
+            .map(|(_, stamp)| stamp.time)
+            .max()
+            .unwrap_or(0);
+        let replayer = doc_with_clock_at(named);
         let change = change_of(&replayer, merge, &pad_seed(other.as_str().as_bytes()));
         let body = replayer
             .compose_replay_body(&change, stamps)
