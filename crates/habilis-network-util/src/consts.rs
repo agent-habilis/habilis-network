@@ -255,7 +255,8 @@ pub const DOC_SEED_TOMBSTONE_FRAME_BYTES: usize = 1024;
 /// channel) or a far root (the meta channel) takes a root above the bound only as the answer of its
 /// first request: a frame that came point-to-point within 5 s of that request, whatever frames the
 /// node holds. A mesh that a forger lifted above twice this bound does not lock a new node out, and
-/// a frame of epoch 0 on gossip cannot shut the door. Residual: a direct neighbour of a joiner that
+/// a frame of epoch 0 on gossip cannot shut the door. Such a root is adopted at once when its chain
+/// is whole (not after the 5 ticks): the frames of the lower epoch never compete with it. Residual: a direct neighbour of a joiner that
 /// sends a far root point-to-point in that 5 s captures that one joiner until it restarts. A node
 /// that holds frames and was away while the mesh went up by more than this bound stays locked out
 /// until it clears its state.

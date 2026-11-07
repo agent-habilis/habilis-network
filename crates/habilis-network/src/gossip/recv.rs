@@ -1365,6 +1365,8 @@ fn dispatch_channel(
     }
     if channel == Channel::Meta {
         adopt_new_epoch(state, context);
+    } else {
+        seed_job::adopt_far(state);
     }
     let changed = state.doc(channel).change_count() > count_before;
     if changed {
