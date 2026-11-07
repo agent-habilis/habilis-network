@@ -828,11 +828,10 @@ mod tests {
 
         let frames = super::signed_frames(&chain, &job).expect("the frames are signed");
 
-        let longest: usize = frames
-            .iter()
-            .map(|(_, wire)| wire.as_bytes().len())
-            .max()
-            .unwrap_or(0);
+        let mut longest: usize = 0;
+        for (_, wire) in &frames {
+            longest = longest.max(wire.as_bytes().len());
+        }
         assert!(
             longest <= MAX_MESSAGE_SIZE,
             "a frame of the seed is {longest} bytes, over the {MAX_MESSAGE_SIZE} of a message"
