@@ -19,7 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(any(feature = "mdns", feature = "dht"))]
-use habilis_network_ffi::ffi::habilis_network_msg_send_to_key;
+use habilis_network_ffi::ffi;
 use habilis_network_ffi::ffi::{
     HabilisNetworkMesh, HabilisNetworkMsg, HabilisNetworkOpts, HabilisNetworkProducer,
     HabilisNetworkStreamOpts, HabilisNetworkStreams, habilis_network_last_error,
@@ -705,8 +705,9 @@ fn a_send_to_a_key_reaches_one_of_two_members() {
 
     let first_key = CString::new(keys[0].as_str()).expect("hex has no NUL");
     // SAFETY: live handle, NUL-terminated strings.
-    let by_key =
-        unsafe { habilis_network_msg_send_to_key(sender, first_key.as_ptr(), c"for one".as_ptr()) };
+    let by_key = unsafe {
+        ffi::habilis_network_msg_send_to_key(sender, first_key.as_ptr(), c"for one".as_ptr())
+    };
     assert_eq!(by_key, 0, "send to a key failed: {:?}", last_error());
     let (got, meta, body) = recv_within(first, 256, 20_000);
     assert_eq!(got, 1, "the chosen member got nothing: {:?}", last_error());
@@ -721,7 +722,7 @@ fn a_send_to_a_key_reaches_one_of_two_members() {
     // SAFETY: live handles, NUL-terminated strings and NULL where the contract allows it.
     unsafe {
         assert_eq!(
-            habilis_network_msg_send_to_key(sender, c"alpha".as_ptr(), c"x".as_ptr()),
+            ffi::habilis_network_msg_send_to_key(sender, c"alpha".as_ptr(), c"x".as_ptr()),
             -1,
             "a nickname was read as a key"
         );
@@ -731,12 +732,16 @@ fn a_send_to_a_key_reaches_one_of_two_members() {
             last_error()
         );
         assert_eq!(
-            habilis_network_msg_send_to_key(sender, ptr::null(), c"x".as_ptr()),
+            ffi::habilis_network_msg_send_to_key(sender, ptr::null(), c"x".as_ptr()),
             -1,
             "a NULL key is an error"
         );
         assert_eq!(
-            habilis_network_msg_send_to_key(ptr::null_mut(), first_key.as_ptr(), c"x".as_ptr()),
+            ffi::habilis_network_msg_send_to_key(
+                ptr::null_mut(),
+                first_key.as_ptr(),
+                c"x".as_ptr()
+            ),
             -1,
             "a NULL handle is an error"
         );
