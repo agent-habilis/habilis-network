@@ -448,6 +448,16 @@ fn names_stamp_above(
     origin || tombstones.iter().any(|(_, stamp)| stamp.time > own_time)
 }
 
+/// How many authors a document remembers whose seed it dropped (see `MeshDoc::shunned`). A mesh
+/// has few cutters at a time; a forger with a new key for each root pushes the oldest out.
+const SHUNNED_AUTHORS_MAX: usize = 64;
+
+/// How long, in waits of `DOC_EPOCH_ADOPT_WAIT_TICKS` ticks, an author whose seed was dropped is
+/// not heard again. A forger that sends a root with no chain once for each wait would else hold the
+/// candidate of every node for ever, and no honest cut could start. A key is free, so this stops
+/// one key, and not a forger that has a new key for each root.
+const SHUNNED_WAITS: u32 = 2;
+
 /// The root frame of a higher epoch that the document keeps until it adopts the epoch.
 #[derive(Debug)]
 struct Candidate {
@@ -765,6 +775,11 @@ pub struct MeshDoc {
     /// The authors of rival roots that lost, so that the rest of their chains is refused at once.
     /// At most 8, the oldest gives way.
     refused_rivals: Vec<AuthorKey>,
+    /// The authors whose root became a candidate that this node dropped (its chain was not whole,
+    /// or its stamps did not match), with the ticks that remain until they are heard again. Their
+    /// frames of a higher epoch are refused meanwhile. At most `SHUNNED_AUTHORS_MAX`: the oldest
+    /// gives way.
+    shunned: VecDeque<(AuthorKey, u32)>,
     /// Whether an ungated document keeps the root of a higher epoch as a candidate. Off by
     /// default, so a state channel refuses such a frame, as it did before the state epochs, until
     /// the node ticks the state channel (see [`Self::state_epochs`]).
@@ -855,6 +870,7 @@ impl MeshDoc {
             seed_author: None,
             seed_hashes: HashSet::new(),
             refused_rivals: Vec::new(),
+            shunned: VecDeque::new(),
             gate,
             key: None,
         }
@@ -1510,6 +1526,10 @@ impl MeshDoc {
     /// state epoch work lands (`state-epoch-design.md`).
     pub fn tick_epoch(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
         self.epoch_ticks = self.epoch_ticks.saturating_add(1);
+        self.shunned.retain_mut(|(_, left)| {
+            *left = left.saturating_sub(1);
+            *left > 0
+        });
         if self.state_epochs && self.gate.is_none() {
             self.watch_size();
         }
@@ -1556,6 +1576,7 @@ impl MeshDoc {
             // the state with a part of its values, so the node keeps its epoch and forgets the
             // frames, and a later digest brings them again.
             self.dropped.extend(candidate.keys());
+            self.shun(candidate.frame.key());
             if let Some(held) = self.warn_due("the seed of the candidate epoch was not complete") {
                 tracing::warn!(target: LOG_TARGET, held, author = %candidate.frame.author, "the seed of the candidate epoch was not complete");
             }
@@ -1566,6 +1587,7 @@ impl MeshDoc {
         let recorded: Option<SeedRead> = if candidate.mark.is_some() {
             let Some(found) = self.read_seed_stamps(candidate.epoch, &frames) else {
                 self.dropped.extend(candidate.keys());
+                self.shun(candidate.frame.key());
                 if let Some(held) =
                     self.warn_due("the stamps of the candidate seed do not match it")
                 {
@@ -2333,6 +2355,17 @@ impl MeshDoc {
         }
     }
 
+    /// Remember that the seed of `author` was dropped: its frames of a higher epoch are refused for
+    /// `SHUNNED_WAITS` waits.
+    fn shun(&mut self, author: AuthorKey) {
+        self.shunned.retain(|(held, _)| *held != author);
+        let ticks = SHUNNED_WAITS.saturating_mul(DOC_EPOCH_ADOPT_WAIT_TICKS);
+        self.shunned.push_back((author, ticks));
+        if self.shunned.len() > SHUNNED_AUTHORS_MAX {
+            self.shunned.pop_front();
+        }
+    }
+
     /// Whether a forged epoch could make this document lose nothing: it holds no frame, or it
     /// still awaits its first sync. The bound of a jump protects a node that holds state. A node
     /// that holds none takes the root of any epoch: if two forged roots, 10 minutes apart, put the
@@ -2366,6 +2399,13 @@ impl MeshDoc {
         let Some(genesis) = self.genesis(epoch) else {
             return self.refuse_frame(frame);
         };
+        if self
+            .shunned
+            .iter()
+            .any(|(author, _)| *author == frame.key())
+        {
+            return self.refuse_frame(frame);
+        }
         if change.deps() != [genesis.hash()] {
             return self.take_tail_frame(epoch, change, frame);
         }
@@ -5155,6 +5195,93 @@ mod tests {
         let me = nick("me");
         write(&mut doc, &me, live);
         doc
+    }
+
+    /// An author whose root left an incomplete seed that the node dropped, is not heard again for
+    /// 2 waits: a forger that sends a root with no chain, once per wait, would else hold the
+    /// candidate of every node for ever, and no honest cut could start.
+    #[test]
+    fn an_author_whose_incomplete_seed_was_dropped_is_not_heard_again_for_two_waits() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "the seed of the candidate epoch was not complete",
+        );
+        let (forger, honest, me) = (nick("forger"), nick("honest"), nick("me"));
+        let source = state_doc_with(&live_state());
+        let root_of_forger = |epoch: u64| seed_frames_of(&source, &forger, epoch, None).remove(0);
+        let mut node = MeshDoc::new_ungated().state_epochs();
+        let first = node.ingest(&root_of_forger(1));
+        assert!(
+            matches!(first, Ingested::NewEpoch { .. }),
+            "the premise: {first:?}"
+        );
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            let switched = node.tick_epoch(&signer(&me));
+            assert!(switched.is_none(), "the chain is not whole: no switch");
+        }
+        assert!(
+            !node.has_candidate(),
+            "the incomplete candidate was dropped"
+        );
+
+        let again = node.ingest(&root_of_forger(2));
+        let other = node.ingest(&seed_frames_of(&source, &honest, 2, None).remove(0));
+
+        assert!(
+            matches!(again, Ingested::Ignored),
+            "the same author: {again:?}"
+        );
+        assert!(
+            matches!(other, Ingested::NewEpoch { .. }),
+            "another author is heard at once: {other:?}"
+        );
+        let mut fresh = MeshDoc::new_ungated().state_epochs();
+        let _ = fresh.ingest(&root_of_forger(1));
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            let _ = fresh.tick_epoch(&signer(&me));
+        }
+        for _ in 0..2 * super::DOC_EPOCH_ADOPT_WAIT_TICKS {
+            let _ = fresh.tick_epoch(&signer(&me));
+        }
+        let later = fresh.ingest(&root_of_forger(2));
+        assert!(
+            matches!(later, Ingested::NewEpoch { .. }),
+            "after 2 waits the author is heard again: {later:?}"
+        );
+    }
+
+    /// A forger with a new key for each root cannot grow the memory of the node: ten times the cap
+    /// of dropped authors leaves the cap, and the oldest give way.
+    #[test]
+    fn the_memory_of_dropped_authors_stays_at_its_cap() {
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let key_of = |index: usize| {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&u64::try_from(index).unwrap_or(0).to_le_bytes());
+            AuthorKey::from(bytes)
+        };
+        let offered = 10 * super::SHUNNED_AUTHORS_MAX;
+
+        for index in 0..offered {
+            doc.shun(key_of(index));
+        }
+
+        assert_eq!(
+            doc.shunned.len(),
+            super::SHUNNED_AUTHORS_MAX,
+            "the cap holds"
+        );
+        assert!(
+            doc.shunned
+                .iter()
+                .any(|(held, _)| *held == key_of(offered - 1)),
+            "the newest author is remembered"
+        );
+        assert!(
+            doc.shunned.iter().all(|(held, _)| *held != key_of(0)),
+            "the oldest gave way"
+        );
     }
 
     /// The seed root of `epoch` that a cutter makes from one leaf, far above any epoch of a node.
