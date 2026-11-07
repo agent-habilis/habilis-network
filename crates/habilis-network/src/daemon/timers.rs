@@ -375,9 +375,9 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &AuthorKey) {
     let heavy = is_heavy_run(run);
     let meta = state.doc_mut(Channel::Meta).census(heavy);
     let shared = state.doc_mut(Channel::State).census(heavy);
-    let peer_nicks = meta.peer_nicks.as_deref().unwrap_or_default();
-    let absent = absent_entries(peer_nicks, &state.peers, me);
-    let peer_entries = peer_nicks.len();
+    let peer_slots = meta.peer_slots.as_deref().unwrap_or_default();
+    let absent = absent_entries(peer_slots, &state.peers, me);
+    let peer_entries = peer_slots.len();
     let replay_waiting = state.replay_queue.len();
     tracing::info!(
         target: "habilis_network::lifecycle",
@@ -426,6 +426,8 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_proofs_refused = sizes.proofs_refused,
         col_proofs_ties_refused = sizes.proofs_ties_refused,
         col_proofs_answers_refused = sizes.proofs_answers_refused,
+        col_proofs_bound_refused = sizes.proofs_bound_refused,
+        col_proofs_gate_refused = sizes.proofs_gate_refused,
         col_reassembled_groups = sizes.reassembled_groups,
         col_pending_outbound = sizes.pending_outbound,
         col_message_log = sizes.message_log,

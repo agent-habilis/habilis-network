@@ -346,40 +346,40 @@ fn collect_tokens(players: &[Player], tokens: &mut [Vec<u32>; 2]) {
     }
 }
 
-/// A nickname is a label, so two live keys can use one. A rollback packet is addressed to a key,
-/// so the key it names gets it and the other key does not.
+/// A rollback packet is addressed to a key, so the key it names gets it and the other key does
+/// not.
 #[test]
-fn a_packet_to_one_key_of_a_shared_nickname_reaches_that_key_only() {
+fn a_packet_to_one_key_reaches_that_key_only() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(
         guard,
         thread::available_parallelism().map_or(1, usize::from),
         async {
-            let topic = format!("habilis-network-netplay-twins-{}", process::id());
+            let topic = format!("habilis-network-netplay-keys-{}", process::id());
             let mut players = vec![
                 spawn(&topic, "alice").await,
                 spawn(&topic, "bob").await,
-                spawn(&topic, "bob").await,
+                spawn(&topic, "carol").await,
             ];
 
-            let twins_of = |group: &[Player]| -> Vec<AuthorKey> {
+            let members_of = |group: &[Player]| -> Vec<AuthorKey> {
                 let transport = group[0]
                     .transport
                     .as_ref()
                     .expect("alice has her transport");
                 let peers = transport.known_peers();
                 peers
-                    .filter(|(_, nickname)| nickname.as_str() == "bob")
+                    .filter(|(_, nickname)| matches!(nickname.as_str(), "bob" | "carol"))
                     .map(|(pubkey, _)| pubkey)
                     .collect()
             };
             let heard: bool = drive(&mut players, Duration::from_secs(30), |players| {
-                twins_of(players).len() >= 2
+                members_of(players).len() >= 2
             })
             .await;
-            assert!(heard, "alice never heard from both peers named bob");
+            assert!(heard, "alice never heard from both peers");
 
-            // The token names the key that the packet is for: 1 for the first bob, 2 for the second.
+            // The token names the key that the packet is for: 1 for bob, 2 for carol.
             // Alice heard from both keys, but the PeerInfo of one can still be on its way. The
             // engine then refuses the send, and the rollback layer resends a lost packet. So this
             // test resends too, until each key has its packet.
@@ -413,10 +413,7 @@ fn a_packet_to_one_key_of_a_shared_nickname_reaches_that_key_only() {
                 tokens.iter().all(|got| !got.is_empty())
             })
             .await;
-            assert!(
-                delivered,
-                "a key of the shared nickname got no packet: {tokens:?}"
-            );
+            assert!(delivered, "a key got no packet: {tokens:?}");
 
             // A packet for the wrong key would arrive late, so keep listening before the check.
             drive(&mut players, Duration::from_secs(2), |players| {

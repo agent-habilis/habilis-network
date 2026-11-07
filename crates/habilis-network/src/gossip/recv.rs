@@ -19,9 +19,7 @@ use crate::lifecycle::membership_update::MembershipUpdate;
 use crate::protocol::messages::{
     Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log,
 };
-use crate::protocol::{
-    AuthorKey, Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype,
-};
+use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
 use crate::{lifecycle, lookup};
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
@@ -660,7 +658,9 @@ pub(crate) async fn ingest_from(
     // layer owns every roster/presentation side effect; the gossip
     // layer only routes by kind below.
     messages::log_in(&verified);
-    let observed = lifecycle::observe(&verified, state, context);
+    let Some(observed) = roster_gate(&verified, state, app, context).await else {
+        return;
+    };
     let surfaceable = observed.surfaceable;
     if observed.update.joined_new {
         greet_new_peer(&verified, state, context).await;
@@ -876,6 +876,72 @@ async fn dispatch_infra(
     ControlFlow::Continue(())
 }
 
+/// The roster gate of a received frame. The proof in a `joined` frame comes first, so a session that
+/// proves its nickname is admitted by the frame that carries the proof. `None` means: drop the
+/// frame, a membership frame of a session that claims a nickname that another member holds. A
+/// refused `alive` still asks the session for its proof, and the answer comes as a `joined` frame
+/// that this gate admits. A refused frame of another kind goes on as a data frame, and changes no
+/// roster entry ([`lifecycle::Observed::refused`]). An admitted frame is observed.
+async fn roster_gate(
+    verified: &Verified,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) -> Option<lifecycle::Observed> {
+    let joined = matches!(
+        verified.kind,
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Joined
+        }
+    );
+    if joined && state.note_joined_proof(verified, context.mesh, context.author) {
+        let line = format!(
+            "The nickname {} is held by another member, whose key proved it first",
+            context.author
+        );
+        tracing::warn!(target: "habilis_network::lifecycle", nickname = %context.author, "our nickname is held by another member");
+        context.sink.emit(NodeEvent::Error(line));
+    }
+    // A newer run of a member ends the older sessions of the member in the roster: a restart leaves
+    // no ghost until the timeout.
+    for older in state.proofs.take_replaced() {
+        let goodbye = lifecycle::Goodbye::Replaced(&verified.author);
+        lifecycle::end_session(older, goodbye, state, app, context).await;
+    }
+    let admitted = state.admits_session(verified, context.author);
+    if admitted {
+        return Some(lifecycle::observe(verified, state, context));
+    }
+    if !is_membership_kind(&verified.kind) {
+        return Some(lifecycle::Observed::refused());
+    }
+    let alive = matches!(
+        verified.kind,
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Alive
+        }
+    );
+    if alive {
+        lifecycle::ask_for_proof(verified, state, context).await;
+    }
+    None
+}
+
+/// Whether a frame of this kind changes the roster or the routes of a peer. The gate refuses these
+/// from a session that claims a nickname that another member holds. A `PeerInfo` is not one of
+/// them: it only gives an address, and a session that asks for a proof needs one. The frames that
+/// carry data (app, state, meta, digests) are never refused here; they are stored and relayed, and
+/// they change no roster entry.
+fn is_membership_kind(kind: &MessageKind) -> bool {
+    matches!(
+        kind,
+        MessageKind::Presence { .. }
+            | MessageKind::Ping
+            | MessageKind::Pong { .. }
+            | MessageKind::LinkState
+    )
+}
+
 /// Fold a received multihop link-state advertisement into the routing table. The
 /// author's own measured links + underlay address (`body` = a serialized
 /// `LinkVector`) supersede the last vector we held for that origin. Dropped
@@ -984,12 +1050,12 @@ async fn auto_pong(message: &Verified, state: &EventLoopState, context: &Handler
 /// fails after the slot was taken keeps the slot and the 60 s window of the asker, so the first retry
 /// that can work is the one at 90 s: the one at 30 s is refused.
 async fn answer_proof_request(
-    to: &Nickname,
+    to: &AuthorKey,
     message: &Verified,
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    let asker_endpoint = state.peer_endpoints.get(message.author.as_str());
+    let asker_endpoint = state.address_of(&message.key());
     let warm_endpoint = asker_endpoint
         .map(|address| address.id)
         .filter(|eid| Some(*eid) != state.rendezvous_id);
@@ -5666,6 +5732,156 @@ mod dedup_counter_tests {
 
     fn wire(frame: &Verified) -> u64 {
         frame.serialize().expect("serialize").len() as u64
+    }
+
+    /// An alive frame of a session, as the bytes that arrive on the gossip plane.
+    fn alive_of(session: &Identity, nickname: &str) -> (Plane, Bytes) {
+        let frame = Message::new_alive(&MeshId::from("test"), &nick(nickname)).sign(session);
+        (
+            Plane::Gossip,
+            frame.serialize().expect("serialize").into_bytes(),
+        )
+    }
+
+    /// A state that holds the proof of the live session `bound`, which a member key made for
+    /// the nickname `nickname`: the nickname is bound to that member key.
+    fn state_with_bound_nickname(bound: &Identity, nickname: &str) -> EventLoopState {
+        let mut state = fresh_state();
+        let session = bound.author_key();
+        let proof =
+            Identity::generate().prove(&session, nickname, MeshId::from("test").as_ref(), 1);
+        state.peers.insert(session);
+        let held = state.proofs.accept(
+            &session,
+            &nick(nickname),
+            &MeshId::from("test"),
+            proof,
+            |_| true,
+        );
+        assert!(held, "the proof of the bound session is held");
+        state
+    }
+
+    /// The nickname of a member is bound to its member key. A session that claims it with no proof
+    /// is no peer: its frames reach no roster.
+    #[test]
+    fn a_session_of_a_bound_nickname_with_no_proof_is_not_admitted() {
+        let bound = Identity::generate();
+        let intruder = Identity::generate();
+        let initial = state_with_bound_nickname(&bound, "alice");
+
+        let reader = reader_with(initial, vec![alive_of(&intruder, "alice")]);
+
+        assert!(
+            !reader.peers.contains(&intruder.author_key()),
+            "a session with no proof, under the nickname of a bound member, is not in the roster"
+        );
+        assert!(
+            reader.peers.contains(&bound.author_key()),
+            "the bound session stays"
+        );
+    }
+
+    /// A joined frame of a session, as the bytes that arrive on the gossip plane, with the proof of
+    /// `member` for its `run`.
+    fn joined_of(
+        session: &Identity,
+        member: &Identity,
+        nickname: &str,
+        run: u64,
+    ) -> (Plane, Bytes) {
+        let proof = member.prove(
+            &session.author_key(),
+            nickname,
+            MeshId::from("test").as_ref(),
+            run,
+        );
+        let frame = Message::new_joined_with_proof(&MeshId::from("test"), &nick(nickname), &proof)
+            .sign(session);
+        (
+            Plane::Gossip,
+            frame.serialize().expect("serialize").into_bytes(),
+        )
+    }
+
+    /// A member restarts: the `joined` frame of its new session, with a higher run, replaces the old
+    /// session in the roster. There is one peer for the member, the new one, and the old key does
+    /// not stay a ghost until its timeout.
+    #[test]
+    fn a_restarted_member_replaces_its_old_session_in_the_roster() {
+        let member = Identity::generate();
+        let (old, new) = (Identity::generate(), Identity::generate());
+        let mesh = MeshId::from("test");
+        let mut initial = fresh_state();
+        initial.peers.insert(old.author_key());
+        initial.names.insert(old.author_key(), nick("alice"));
+        let first = member.prove(&old.author_key(), "alice", mesh.as_ref(), 1);
+        let held = initial
+            .proofs
+            .accept(&old.author_key(), &nick("alice"), &mesh, first, |_| true);
+        assert!(held, "the proof of the old session is held");
+        let (_, second) = joined_of(&new, &member, "alice", 2);
+        let reader = reader_with(initial, vec![(Plane::Gossip, second)]);
+
+        assert!(
+            reader.peers.contains(&new.author_key()),
+            "the new session is a peer"
+        );
+        assert!(
+            !reader.peers.contains(&old.author_key()),
+            "the old session of the same member is not a peer any more"
+        );
+        assert!(
+            reader.proofs.proof_of(&old.author_key()).is_none(),
+            "and its proof is gone"
+        );
+    }
+
+    /// The nickname of this node is held by its member key. A session that claims it with no proof
+    /// is no peer, and the session of the same member (its old run) is.
+    #[test]
+    fn our_own_nickname_admits_only_a_session_of_our_member() {
+        let reader_state = fresh_state();
+        let intruder = Identity::generate();
+        let mut old_run = fresh_state();
+        old_run.member_identity = reader_state.member_identity.clone();
+        let mesh = MeshId::from("test");
+        let proved: Verified = old_run.own_joined(&mesh, &nick("reader"));
+        let joined = (
+            Plane::Gossip,
+            proved.serialize().expect("serialize").into_bytes(),
+        );
+
+        let reader = reader_with(reader_state, vec![alive_of(&intruder, "reader"), joined]);
+
+        assert!(
+            !reader.peers.contains(&intruder.author_key()),
+            "a session with no proof under our nickname is no peer"
+        );
+        assert!(
+            reader.peers.contains(&old_run.identity.author_key()),
+            "a session that our member key proved is a peer"
+        );
+    }
+
+    /// A free nickname is accepted with no proof: a member that has not proved yet, or a client
+    /// that never will, is a peer, and its nickname stays unbound.
+    #[test]
+    fn a_session_of_a_free_nickname_with_no_proof_is_admitted_unbound() {
+        let bound = Identity::generate();
+        let newcomer = Identity::generate();
+        let initial = state_with_bound_nickname(&bound, "alice");
+
+        let reader = reader_with(initial, vec![alive_of(&newcomer, "carol")]);
+
+        assert!(
+            reader.peers.contains(&newcomer.author_key()),
+            "a session under a free nickname is in the roster"
+        );
+        assert!(
+            reader.proofs.proof_of(&newcomer.author_key()).is_none(),
+            "it is unbound: no proof is held for it"
+        );
     }
 
     /// A node that holds nothing from others adopts at once the epoch that a received frame

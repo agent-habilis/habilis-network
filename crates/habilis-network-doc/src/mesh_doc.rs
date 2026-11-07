@@ -572,9 +572,9 @@ pub struct DocCensus {
     pub save_bytes: Option<usize>,
     /// The bytes of the document as JSON, when the caller asked for the heavy census.
     pub json_bytes: Option<usize>,
-    /// The nicknames that have an entry in the per-peer map, when the caller asked for the heavy
-    /// census. Empty for a document with no gate.
-    pub peer_nicks: Option<Vec<String>>,
+    /// The slots that have an entry in the per-peer map (the lowercase hex of a key), when the
+    /// caller asked for the heavy census. Empty for a document with no gate.
+    pub peer_slots: Option<Vec<String>>,
     /// The state changes that were refused for want of a valid time, since the document began.
     pub refused_time: u64,
     /// The paths of a seed that got the stamp 0 for want of a time, since the document began.
@@ -1060,7 +1060,7 @@ impl MeshDoc {
         let json_bytes: Option<usize> = json
             .as_ref()
             .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len()));
-        let peer_nicks = json.as_ref().map(|json| self.gated_nicks(json));
+        let peer_slots = json.as_ref().map(|json| self.gated_slots(json));
         let unstamped_paths: u64 = self.unstamped.load(Ordering::Relaxed);
         let replay_unsettled: u64 = u64::try_from(self.restores.len()).unwrap_or(u64::MAX);
         DocCensus {
@@ -1070,7 +1070,7 @@ impl MeshDoc {
             frame_bytes: self.frame_bytes,
             save_bytes,
             json_bytes,
-            peer_nicks,
+            peer_slots,
             refused_time: self.refused_time,
             unstamped_paths,
             dropped_restores: self.restores_dropped,
@@ -1084,8 +1084,8 @@ impl MeshDoc {
         }
     }
 
-    /// The nicknames with an entry in the gated map of `json`. Empty for a document with no gate.
-    fn gated_nicks(&self, json: &Value) -> Vec<String> {
+    /// The slots with an entry in the gated map of `json`. Empty for a document with no gate.
+    fn gated_slots(&self, json: &Value) -> Vec<String> {
         let Some(gate) = self.gate.as_ref() else {
             return Vec::new();
         };
@@ -3832,7 +3832,7 @@ mod tests {
             "the wire bytes of the frames"
         );
         assert_eq!(
-            (light.json_bytes, light.save_bytes, light.peer_nicks),
+            (light.json_bytes, light.save_bytes, light.peer_slots),
             (None, None, None),
             "the light census reads nothing that costs in proportion to the document"
         );
@@ -3845,11 +3845,11 @@ mod tests {
             Some(167),
             "the 167 bytes of the two-entry document, counted by hand: two slots of 64 hex digits"
         );
-        let mut nicks = heavy.peer_nicks.expect("the heavy census lists the owners");
-        nicks.sort();
+        let mut owners = heavy.peer_slots.expect("the heavy census lists the owners");
+        owners.sort();
         let mut slots = [slot("alice"), slot("bob")];
         slots.sort();
-        assert_eq!(nicks, slots, "the owners of the peer map");
+        assert_eq!(owners, slots, "the owners of the peer map");
         assert!(
             heavy.save_bytes.expect("a save was asked for") > 0,
             "the save has bytes"

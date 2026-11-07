@@ -1,17 +1,12 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the event loop state holds the exchange in the next commit"
-    )
-)]
-
+use std::mem;
 use std::time::Duration;
 
 use super::proof_book::ProofBook;
 use crate::protocol::identity::{IdentityProof, verify_proof};
 use crate::protocol::{AuthorKey, MeshId, Nickname};
+use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::clock::Instant;
+use iroh::PublicKey;
 
 /// The first retry waits 30 s, and each next one waits twice as long: 30 s, 60 s, 120 s.
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(30);
@@ -19,6 +14,10 @@ const RETRIES: u8 = 3;
 /// After the fast retries a session is asked once per 10 minutes, 6 times at most.
 const SLOW_RETRY_WAIT: Duration = Duration::from_secs(600);
 const SLOW_RETRIES: u8 = 6;
+/// The asks of sessions that are not in the roster and claim one bound nickname: 4 open at most. A
+/// session that claims a bound nickname is asked for its proof, and a flood of forged keys under
+/// that nickname must replace its own asks and nobody else's.
+const OPEN_ASKS_PER_NICKNAME: usize = 4;
 
 /// The wait after the ask number `tries` (0 for the first): 30 s, 60 s, 120 s, then 10 minutes.
 fn retry_wait(tries: u8) -> Duration {
@@ -30,10 +29,12 @@ fn retry_wait(tries: u8) -> Duration {
 }
 
 /// How many times a session was asked, and when the next request may go.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Retry {
     tries: u8,
     next_at: Instant,
+    // the bound nickname that a session outside the roster claimed, when it was asked
+    claimed: Option<Nickname>,
 }
 
 /// The proofs this node holds, and the sessions it already asked for one. A proof comes in the
@@ -41,12 +42,27 @@ struct Retry {
 /// unicast request, so a calm mesh carries no proof bytes beyond the `joined` frames.
 ///
 /// Between two proofs for one session, the one with the higher run wins. On a tie the first stays.
+///
+/// A nickname is bound to the member key that proved it, for as long as a session of that member
+/// is held in the roster. A session that claims a bound nickname with no proof of that member is
+/// not admitted ([`Self::admits`]), and a proof of another member for it is not held. A nickname
+/// that no held session binds is free: a session with no proof is admitted and binds nothing.
 #[derive(Debug)]
 pub(crate) struct ProofExchange {
+    // the proofs, as many as the cap at most; the binding of a nickname is derived from them, so
+    // the bindings are bounded by the same cap
     book: ProofBook<AuthorKey, (Nickname, IdentityProof)>,
     // the requests per session, as many as the book holds at most: when full, the oldest goes
     asked: ProofBook<AuthorKey, Retry>,
+    // the sessions told that their nickname is bound to another member: the oldest goes at the cap
+    told: BoundedFifoSet<AuthorKey>,
+    // the sessions that a newer run of their member dropped, until the caller takes them: at most as
+    // many as the book holds, and `roster_gate` takes them on each frame, so it holds a few at most
+    // between two frames
+    replaced: Vec<AuthorKey>,
     ties_refused: u64,
+    bound_refused: u64,
+    gate_refused: u64,
 }
 
 impl ProofExchange {
@@ -54,13 +70,81 @@ impl ProofExchange {
         Self {
             book: ProofBook::with_cap(cap),
             asked: ProofBook::with_cap(cap),
+            told: BoundedFifoSet::new(cap),
+            replaced: Vec::new(),
             ties_refused: 0,
+            bound_refused: 0,
+            gate_refused: 0,
         }
     }
 
+    /// The member key that holds `nickname` now: the proof of a session that `is_held` says is in
+    /// the roster, live or quiet, names the nickname.
+    fn bound_to(
+        &self,
+        nickname: &Nickname,
+        is_held: impl Fn(&AuthorKey) -> bool,
+    ) -> Option<PublicKey> {
+        let mut holders = self.book.iter();
+        let holder = holders.find(|(session, (named, _))| named == nickname && is_held(session));
+        holder.map(|(_, (_, proof))| proof.identity)
+    }
+
+    /// Whether some held session of the roster binds `nickname`.
+    pub(crate) fn is_bound(
+        &self,
+        nickname: &Nickname,
+        is_held: impl Fn(&AuthorKey) -> bool,
+    ) -> bool {
+        self.bound_to(nickname, is_held).is_some()
+    }
+
+    /// Whether the frames of `session` that claim `nickname` reach the roster. They do when the
+    /// session proved the nickname, or when no held session binds it. A bound nickname with no
+    /// proof of its member is the join error of the claimant; the refusal is counted.
+    pub(crate) fn admits(
+        &mut self,
+        session: &AuthorKey,
+        nickname: &Nickname,
+        is_held: impl Fn(&AuthorKey) -> bool,
+    ) -> bool {
+        let proved = self
+            .book
+            .get(session)
+            .is_some_and(|(named, _)| named == nickname);
+        let admitted = proved || self.bound_to(nickname, is_held).is_none();
+        if !admitted {
+            self.gate_refused += 1;
+        }
+        admitted
+    }
+
+    /// Forget the proof of `session`, which said goodbye, and the requests for it.
+    pub(crate) fn forget(&mut self, session: &AuthorKey) {
+        self.book.remove(session);
+        self.asked.remove(session);
+    }
+
+    /// The sessions that a newer run of their member dropped since the last call. The caller ends
+    /// them in the roster.
+    pub(crate) fn take_replaced(&mut self) -> Vec<AuthorKey> {
+        mem::take(&mut self.replaced)
+    }
+
+    /// A frame was refused the roster because it claims the nickname of this node.
+    pub(crate) fn note_gate_refused(&mut self) {
+        self.gate_refused += 1;
+    }
+
+    /// Whether `session` is told now that its nickname is bound to another member: once for each
+    /// session, so a resent `joined` frame makes one error line and not a stream.
+    pub(crate) fn tell_once(&mut self, session: &AuthorKey) -> bool {
+        self.told.insert(*session)
+    }
+
     /// An alive frame came from `session`. True means: send the session a proof request now. A
-    /// request that got no answer is sent again, 3 times at most, with a doubling back-off. The
-    /// caller tells [`Self::note_asked`] when the request went out.
+    /// request that got no answer is sent again, with a doubling back-off (3 fast retries, then 6
+    /// slow ones). The caller tells [`Self::note_asked`] when the request went out.
     pub(crate) fn wants_proof(&self, session: &AuthorKey, now: Instant) -> bool {
         if self.book.get(session).is_some() {
             return false;
@@ -70,25 +154,49 @@ impl ProofExchange {
             .is_none_or(|retry| retry.tries <= RETRIES + SLOW_RETRIES && now >= retry.next_at)
     }
 
-    /// The request for `session` went out at `now`: the retry clock of the session starts.
-    pub(crate) fn note_asked(&mut self, session: &AuthorKey, now: Instant) {
+    /// The request for `session` went out at `now`: the retry clock of the session starts. `claimed`
+    /// is the bound nickname of a session that is not in the roster. At most 4 asks stay open for
+    /// each such nickname, and the oldest of that nickname goes for a new one.
+    pub(crate) fn note_asked(
+        &mut self,
+        session: &AuthorKey,
+        now: Instant,
+        claimed: Option<&Nickname>,
+    ) {
         let tries = self.asked.get(session).map_or(0, |retry| retry.tries);
+        if let Some(nickname) = claimed {
+            let same = |retry: &Retry| retry.claimed.as_ref() == Some(nickname);
+            let open: Vec<AuthorKey> = self
+                .asked
+                .keys_where(same)
+                .into_iter()
+                .filter(|asked| asked != session)
+                .collect();
+            let excess = (open.len() + 1).saturating_sub(OPEN_ASKS_PER_NICKNAME);
+            let oldest_ones = &open[..excess.min(open.len())];
+            for oldest in oldest_ones {
+                self.asked.remove(oldest);
+            }
+        }
         let retry = Retry {
             tries: tries.saturating_add(1),
             next_at: now + retry_wait(tries),
+            claimed: claimed.cloned(),
         };
         self.asked.insert_evicting(*session, retry, |_, _| false);
     }
 
-    /// A proof came for `session`. It is held if it verifies for this nickname and mesh, and if it
-    /// does not lower the run of a proof already held.
+    /// A proof came for `session`. It is held if it verifies for this nickname and mesh, if it does
+    /// not lower the run of a proof already held, and if no held session binds the nickname to
+    /// another member. `is_held` says whether a held session is in the roster: at the cap the
+    /// oldest session that is not goes first, and a book of sessions in the roster refuses.
     pub(crate) fn accept(
         &mut self,
         session: &AuthorKey,
         nickname: &Nickname,
         mesh: &MeshId,
         proof: IdentityProof,
-        is_live: impl Fn(&Nickname) -> bool,
+        is_held: impl Fn(&AuthorKey) -> bool,
     ) -> bool {
         // The run is compared first: a copy of the held proof, which comes with each resent or
         // re-announced `joined` frame, costs no signature check.
@@ -106,10 +214,37 @@ impl ProofExchange {
         if !verify_proof(&proof, session, nickname.as_ref(), mesh.as_ref()) {
             return false;
         }
+        let bound = self.bound_to(nickname, &is_held);
+        if bound.is_some_and(|member| member != proof.identity) {
+            self.bound_refused += 1;
+            return false;
+        }
+        // A member holds one session, the newest: a restart makes a new session with a higher run,
+        // and the sessions of its older runs go. A proof of a run that is not higher than the run
+        // of a session in the roster is a late copy of an older frame, and it does not replace the
+        // newer session. A session that is not in the roster is dead: it never blocks, whatever its
+        // run, so a member that restores an old run file is still held.
+        let others = |held: &AuthorKey, (_, other): &(Nickname, IdentityProof)| {
+            held != session && other.identity == proof.identity
+        };
+        let runs: Vec<(AuthorKey, u64, bool)> = self
+            .book
+            .iter()
+            .filter(|(held, entry)| others(held, entry))
+            .map(|(held, (_, other))| (*held, other.run, is_held(held)))
+            .collect();
+        if runs.iter().any(|(_, run, live)| *live && *run >= proof.run) {
+            self.ties_refused += 1;
+            return false;
+        }
+        for (older, _, live) in runs {
+            self.book.remove(&older);
+            if live {
+                self.replaced.push(older);
+            }
+        }
         self.book
-            .insert_evicting(*session, (nickname.clone(), proof), |_, (held, _)| {
-                is_live(held)
-            });
+            .insert_evicting(*session, (nickname.clone(), proof), |held, _| is_held(held));
         self.book.get(session).is_some()
     }
 
@@ -125,7 +260,17 @@ impl ProofExchange {
         self.ties_refused
     }
 
-    /// How many proofs the full book refused because every held session was live.
+    /// How many proofs were refused because another member holds the nickname.
+    pub(crate) fn bound_refused(&self) -> u64 {
+        self.bound_refused
+    }
+
+    /// How many frames were refused the roster because they claim a bound nickname with no proof.
+    pub(crate) fn gate_refused(&self) -> u64 {
+        self.gate_refused
+    }
+
+    /// How many proofs the full book refused because every held session was in the roster.
     pub(crate) fn refused(&self) -> u64 {
         self.book.refused()
     }
@@ -168,7 +313,7 @@ mod tests {
             joiner.wants_proof(&session, now),
             "an alive frame of a session with no proof asks for it"
         );
-        joiner.note_asked(&session, now);
+        joiner.note_asked(&session, now, None);
         assert!(
             !joiner.wants_proof(&session, Instant::now()),
             "the session is asked once, not at each alive frame"
@@ -199,14 +344,15 @@ mod tests {
             joiner.wants_proof(&session, now),
             "no send, so the session still needs one"
         );
-        joiner.note_asked(&session, now);
+        joiner.note_asked(&session, now, None);
         assert!(
             !joiner.wants_proof(&session, now),
             "after a send the retry clock runs"
         );
     }
 
-    /// A request that got no answer is sent again, 3 times at most, after 30 s, 60 s and 120 s.
+    /// A request that got no answer is sent again 3 times, after 30 s, 60 s and 120 s, and then at a
+    /// slow pace (see the next test).
     #[test]
     fn an_unanswered_request_is_retried_three_times_with_a_back_off() {
         let session = Identity::generate().author_key();
@@ -217,13 +363,13 @@ mod tests {
             joiner.wants_proof(&session, at(0)),
             "the first request goes at once"
         );
-        joiner.note_asked(&session, at(0));
+        joiner.note_asked(&session, at(0), None);
         assert!(
             !joiner.wants_proof(&session, at(29)),
             "no retry before 30 s"
         );
         assert!(joiner.wants_proof(&session, at(30)), "retry 1 after 30 s");
-        joiner.note_asked(&session, at(30));
+        joiner.note_asked(&session, at(30), None);
         assert!(
             !joiner.wants_proof(&session, at(89)),
             "no retry before 60 s more"
@@ -232,7 +378,7 @@ mod tests {
             joiner.wants_proof(&session, at(90)),
             "retry 2 after 60 s more"
         );
-        joiner.note_asked(&session, at(90));
+        joiner.note_asked(&session, at(90), None);
         assert!(
             !joiner.wants_proof(&session, at(209)),
             "no retry before 120 s more"
@@ -241,7 +387,7 @@ mod tests {
             joiner.wants_proof(&session, at(210)),
             "retry 3 after 120 s more"
         );
-        joiner.note_asked(&session, at(210));
+        joiner.note_asked(&session, at(210), None);
         assert!(
             !joiner.wants_proof(&session, at(809)),
             "no fourth fast retry: the next ask waits 10 minutes"
@@ -261,7 +407,7 @@ mod tests {
                 joiner.wants_proof(&session, at(secs)),
                 "a fast ask at {secs} s"
             );
-            joiner.note_asked(&session, at(secs));
+            joiner.note_asked(&session, at(secs), None);
         }
         assert!(
             !joiner.wants_proof(&session, at(809)),
@@ -271,7 +417,7 @@ mod tests {
         for round in 1..=6 {
             last += 600;
             assert!(joiner.wants_proof(&session, at(last)), "slow retry {round}");
-            joiner.note_asked(&session, at(last));
+            joiner.note_asked(&session, at(last), None);
         }
         assert!(
             !joiner.wants_proof(&session, at(last + 100_000)),
@@ -374,6 +520,223 @@ mod tests {
             receiver.ties_refused(),
             2,
             "a rival tie and a lower run are counted, the copy is not"
+        );
+    }
+
+    /// A nickname can have a dead session of a member that left and a live session of the member
+    /// that took it after. The book must tell them apart: the dead session goes first when the book
+    /// is full, so the proof of a new member still lands. A nickname alone cannot tell them apart,
+    /// because the live session keeps it live.
+    #[test]
+    fn the_dead_session_of_a_restarted_member_does_not_block_a_full_book() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let (old, new) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(4);
+        // The first member left: its session is not held, so the nickname is free for the second.
+        for session in [old, new] {
+            let proof = Identity::generate().prove(&session, alice.as_ref(), mesh.as_ref(), 1);
+            assert!(
+                book.accept(&session, &alice, &mesh, proof, |held| *held != old),
+                "the book has room"
+            );
+        }
+        for name in ["bob", "carol"] {
+            let (nickname, session) = (Nickname::from(name), Identity::generate().author_key());
+            let proof = Identity::generate().prove(&session, nickname.as_ref(), mesh.as_ref(), 1);
+            assert!(
+                book.accept(&session, &nickname, &mesh, proof, |_| true),
+                "the book has room"
+            );
+        }
+        assert_eq!(book.len(), 4, "the book is full");
+
+        let (dave, session) = (Nickname::from("dave"), Identity::generate().author_key());
+        let proof = Identity::generate().prove(&session, dave.as_ref(), mesh.as_ref(), 1);
+        // The roster has a live session under each nickname, and the old session of alice is dead.
+        let held = book.accept(&session, &dave, &mesh, proof, |held| *held != old);
+
+        assert!(
+            held,
+            "the dead old session of alice goes, and the proof of dave lands"
+        );
+        assert!(
+            book.proof_of(&old).is_none() && book.proof_of(&new).is_some(),
+            "the dead session is gone and the live session stays"
+        );
+    }
+
+    /// A restart makes a new session with a higher run. The proof of the new session replaces the
+    /// proof of the old one, so a member holds one proof, the newest.
+    #[test]
+    fn a_newer_run_of_a_member_drops_its_older_session() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let member = Identity::generate();
+        let (old, new) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let first = member.prove(&old, alice.as_ref(), mesh.as_ref(), 1);
+        let second = member.prove(&new, alice.as_ref(), mesh.as_ref(), 2);
+
+        assert!(
+            book.accept(&old, &alice, &mesh, first, |_| true),
+            "run 1 is held"
+        );
+        assert!(
+            book.accept(&new, &alice, &mesh, second, |_| true),
+            "run 2 is held"
+        );
+
+        assert!(
+            book.proof_of(&old).is_none(),
+            "the older session is dropped"
+        );
+        assert!(book.proof_of(&new).is_some(), "the newer session is held");
+        assert_eq!(
+            book.take_replaced(),
+            [old],
+            "the caller hears of the dropped session"
+        );
+        assert!(book.take_replaced().is_empty(), "and hears of it once");
+    }
+
+    /// An old `joined` frame that a relay delivers late must not replace the newer session.
+    #[test]
+    fn a_proof_of_an_older_run_of_the_same_member_is_not_held() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let member = Identity::generate();
+        let (old, new) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let newer = member.prove(&new, alice.as_ref(), mesh.as_ref(), 5);
+        let older = member.prove(&old, alice.as_ref(), mesh.as_ref(), 4);
+
+        assert!(
+            book.accept(&new, &alice, &mesh, newer, |_| true),
+            "run 5 is held"
+        );
+        assert!(
+            !book.accept(&old, &alice, &mesh, older, |_| true),
+            "a late proof of run 4 is not held"
+        );
+
+        assert!(book.proof_of(&new).is_some(), "the newer session stays");
+        assert!(book.take_replaced().is_empty(), "nothing was dropped");
+    }
+
+    /// A member that restarts 1100 times, with all its old sessions still in the roster (no goodbye,
+    /// no timeout yet), holds one proof, the newest. The book never fills with its sessions, so the
+    /// proof of the newest session is never refused.
+    #[test]
+    fn a_member_that_restarts_1100_times_holds_its_newest_session() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let member = Identity::generate();
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let mut newest = None;
+        for run in 1..=1100u64 {
+            let session = Identity::generate().author_key();
+            let proof = member.prove(&session, alice.as_ref(), mesh.as_ref(), run);
+            assert!(
+                book.accept(&session, &alice, &mesh, proof, |_| true),
+                "the proof of run {run} is held"
+            );
+            let _ = book.take_replaced();
+            newest = Some(session);
+        }
+
+        let newest = newest.expect("1100 restarts");
+        assert!(
+            book.proof_of(&newest).is_some(),
+            "the newest session is held"
+        );
+        assert_eq!(book.len(), 1, "the sessions of the older runs are gone");
+        assert_eq!(book.refused(), 0, "no proof was refused for want of room");
+    }
+
+    /// A session that is not in the roster is dead. Its proof, with whatever run, does not block the
+    /// proof of the same member: a member that restores an old run file, or moves its state to
+    /// another host, starts with a run that is lower than the dead session's, and must still be held.
+    #[test]
+    fn a_dead_session_with_a_higher_run_does_not_block_the_proof_of_its_member() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let member = Identity::generate();
+        let (dead, new) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let high = member.prove(&dead, alice.as_ref(), mesh.as_ref(), 100);
+        assert!(
+            book.accept(&dead, &alice, &mesh, high, |_| true),
+            "run 100 is held"
+        );
+        let low = member.prove(&new, alice.as_ref(), mesh.as_ref(), 1);
+
+        let held = book.accept(&new, &alice, &mesh, low, |session| *session != dead);
+
+        assert!(
+            held,
+            "the proof of run 1 is held: the session of run 100 is dead"
+        );
+        assert!(book.proof_of(&dead).is_none(), "the dead session is gone");
+        assert!(
+            book.take_replaced().is_empty(),
+            "a dead session needs no end in the roster"
+        );
+    }
+
+    /// A session that said goodbye is forgotten: its proof goes with it.
+    #[test]
+    fn a_forgotten_session_loses_its_proof() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let session = Identity::generate().author_key();
+        let proof = Identity::generate().prove(&session, alice.as_ref(), mesh.as_ref(), 1);
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        assert!(
+            book.accept(&session, &alice, &mesh, proof, |_| true),
+            "the proof is held"
+        );
+
+        book.forget(&session);
+
+        assert!(book.proof_of(&session).is_none(), "the proof is gone");
+    }
+
+    /// Keys that are not members can claim a bound nickname by the thousand, and each one with an
+    /// address is asked for a proof. The asks of such sessions are limited for each nickname, so the
+    /// flood replaces its own asks and pushes no other ask, and no retry clock, out of the book.
+    #[test]
+    fn a_flood_of_forged_keys_under_one_nickname_keeps_the_asks_of_the_members() {
+        let member = Identity::generate().author_key();
+        let claimed = Nickname::from("alice");
+        let mut joiner = ProofExchange::with_cap(QUIET_CAP);
+        let now = Instant::now();
+        joiner.note_asked(&member, now, None);
+        assert!(
+            !joiner.wants_proof(&member, now),
+            "the member waits for its answer"
+        );
+
+        for _ in 0..2_000 {
+            let forged = Identity::generate().author_key();
+            joiner.note_asked(&forged, now, Some(&claimed));
+        }
+
+        assert!(
+            !joiner.wants_proof(&member, now),
+            "the ask of the member is still there, and its retry clock was not reset"
         );
     }
 }

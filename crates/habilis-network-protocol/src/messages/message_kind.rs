@@ -5,7 +5,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{AppTag, CorrId, MessageId, PresenceSubtype};
-use crate::{AuthorKey, Nickname};
+use crate::AuthorKey;
 
 /// Message kind — the frame's routing discriminator. The engine owns the
 /// infrastructure kinds (presence, peer-info, digests, ping/pong, channel
@@ -75,10 +75,11 @@ pub enum MessageKind {
         probe: MessageId,
     },
     /// Sent to `to` alone by a member that holds no proof for the current session of `to`; it asks
-    /// `to` for that proof. Never gossiped, empty body. Routed like `Pong`, addressed by `to`.
+    /// `to` for that proof. Never gossiped, empty body. Addressed by author key, like `Pong`: a
+    /// nickname is a label that two live sessions can share, and only the asked session answers.
     ProofRequest {
-        /// The member whose proof is asked for.
-        to: Nickname,
+        /// The session whose proof is asked for, by author key.
+        to: AuthorKey,
     },
     /// A durable `state`-channel event: one Base58 automerge change
     /// (`{"k":"change",…}`) applied to the channel's `MeshDoc`

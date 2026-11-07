@@ -663,10 +663,11 @@ fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
 
 /// The run number of this start, kept in `<state>.run`. It counts up by 1 at each start and never
 /// reads the clock, so a clock that went back cannot make a newer run look older. The one exception
-/// is a lost file: then the count restarts from the clock (see `counter_lost`). No state file means
-/// run 1.
+/// is a lost file: then the count restarts from the clock (see `counter_lost`). A missing file is a
+/// lost file when a member key exists, since peers hold runs above 1 for that member. No state file
+/// means run 1.
 #[cfg(all(unix, feature = "host"))]
-fn next_run(state: Option<&Path>) -> Result<u64> {
+fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
     use std::fs::{self, File, OpenOptions};
     use std::io::{ErrorKind, Write as _};
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -679,6 +680,9 @@ fn next_run(state: Option<&Path>) -> Result<u64> {
             Ok(last) => u64::from_le_bytes(last).saturating_add(1),
             Err(_) => counter_lost(),
         },
+        // No counter, but a member key from an earlier start: the counter was deleted. Peers hold
+        // runs above 1 for this member, so the count restarts from the clock, as for a bad file.
+        Err(error) if error.kind() == ErrorKind::NotFound && member_known => counter_lost(),
         Err(error) if error.kind() == ErrorKind::NotFound => 1,
         Err(_) => counter_lost(),
     };
@@ -716,7 +720,7 @@ fn counter_lost() -> u64 {
     clippy::unnecessary_wraps,
     reason = "the same signature as the file-backed version, so the caller is one call"
 )]
-fn next_run(_state: Option<&Path>) -> Result<u64> {
+fn next_run(_state: Option<&Path>, _member_known: bool) -> Result<u64> {
     Ok(1)
 }
 
@@ -744,11 +748,13 @@ fn member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identi
 /// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
 /// would start the same actor again at sequence 1.
 fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
+    // read before `member_key` makes the file: a member key that exists is from an earlier start
+    let member_known = state.is_some_and(|state| state.with_extension("key").exists());
     Ok(RunKeys {
         // shared with the loop and its handlers, which hold clones
         session: sync::Arc::new(identity::Identity::generate()),
         member: member_key(state)?,
-        run: next_run(state)?,
+        run: next_run(state, member_known)?,
     })
 }
 
@@ -1294,18 +1300,18 @@ mod tests {
         let dir = TempDir::new("habilis-run-number");
         let state = dir.path().join("session.json");
         let runs: Vec<u64> = (0..3)
-            .map(|_| super::next_run(Some(&state)).expect("a run number"))
+            .map(|_| super::next_run(Some(&state), false).expect("a run number"))
             .collect();
         assert_eq!(runs, [1, 2, 3], "each start counts one more");
         let ahead: u64 = 4_000_000_000_000;
         fs::write(state.with_extension("run"), ahead.to_le_bytes()).expect("a counter ahead");
         assert_eq!(
-            super::next_run(Some(&state)).expect("a run number"),
+            super::next_run(Some(&state), false).expect("a run number"),
             ahead + 1,
             "a counter ahead of any clock still rises"
         );
         assert_eq!(
-            super::next_run(None).expect("no state file"),
+            super::next_run(None, false).expect("no state file"),
             1,
             "no file means run 1"
         );
@@ -1324,7 +1330,7 @@ mod tests {
         let dir = TempDir::new("habilis-run-cut");
         let state = dir.path().join("session.json");
         fs::write(state.with_extension("run"), b"").expect("a cut short file");
-        let run = super::next_run(Some(&state)).expect("a run number");
+        let run = super::next_run(Some(&state), false).expect("a run number");
         assert!(
             run > 1_000_000_000,
             "the run after a cut short file is {run}"
@@ -1342,6 +1348,46 @@ mod tests {
             !state.with_extension("run.tmp").exists(),
             "no temp file stays"
         );
+    }
+
+    /// A member whose run file is deleted keeps its member key. Peers hold the proof of its old
+    /// session with a high run, and they refuse a proof of run 1 as a late copy, so the member would
+    /// be admitted with no proof and its nickname would be free for a forger. The count restarts from
+    /// the clock then, which is above any count of starts.
+    #[test]
+    fn a_member_whose_run_file_is_deleted_restarts_from_the_clock() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "run counter file is unreadable",
+        );
+        let dir = TempDir::new("habilis-run-deleted");
+        let state = dir.path().join("session.json");
+        let first = super::run_keys(Some(&state)).expect("the first start");
+        let second = super::run_keys(Some(&state)).expect("the second start");
+        assert_eq!(
+            (first.run, second.run),
+            (1, 2),
+            "the first starts count 1, 2"
+        );
+        fs::remove_file(state.with_extension("run")).expect("the run file is deleted");
+
+        let third = super::run_keys(Some(&state)).expect("the start after the deletion");
+
+        assert!(
+            third.run > 1_000_000_000,
+            "the run after a deleted file is {}, below the runs that peers hold",
+            third.run
+        );
+    }
+
+    /// A first start has no run file and no member key: the count starts at 1, with no warning.
+    #[test]
+    fn a_first_start_with_no_files_counts_from_1() {
+        let dir = TempDir::new("habilis-run-first");
+        let state = dir.path().join("session.json");
+        let first = super::run_keys(Some(&state)).expect("the first start");
+        assert_eq!(first.run, 1, "a new member starts at run 1");
     }
 
     /// The member key survives a restart and the session key does not: the session key is the

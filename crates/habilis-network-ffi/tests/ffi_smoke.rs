@@ -625,17 +625,17 @@ fn key_of(message: &HabilisNetworkMsg) -> String {
         .into_owned()
 }
 
-/// Two members use one nickname. A send to the nickname is refused. A send to the key of one of
-/// them, read from the key of its message, reaches that member and not the other. A text that
-/// is not a key is an error with a reason.
+/// A send to the key of one of two members, read from the key of its message, reaches that member
+/// and not the other. A text that is not a key is an error with a reason.
 #[test]
-fn a_send_to_a_key_reaches_one_of_two_members_that_share_a_nickname() {
-    let twin_nick = CString::new("twin").expect("no interior NUL");
-    let first = open(&create_opts(&twin_nick));
+fn a_send_to_a_key_reaches_one_of_two_members() {
+    let first_nick = CString::new("alpha").expect("no interior NUL");
+    let second_nick = CString::new("beta").expect("no interior NUL");
+    let first = open(&create_opts(&first_nick));
     assert!(!first.is_null(), "open failed: {:?}", last_error());
     // SAFETY: live handle; the id is copied before anything else is called.
     let id = unsafe { CStr::from_ptr(habilis_network_mesh_id(first)) }.to_owned();
-    let second = open(&create_opts_for_join(&id, &twin_nick));
+    let second = open(&create_opts_for_join(&id, &second_nick));
     assert!(
         !second.is_null(),
         "open (second) failed: {:?}",
@@ -662,37 +662,29 @@ fn a_send_to_a_key_reaches_one_of_two_members_that_share_a_nickname() {
         thread::sleep(Duration::from_millis(200));
     }
 
-    // Each twin broadcasts alone, so the sender reads the key of each one in a known order.
+    // Each member broadcasts alone, so the sender reads the key of each one in a known order.
     let mut keys: Vec<String> = Vec::new();
-    for twin in [first, second] {
+    for (member, name) in [(first, "alpha"), (second, "beta")] {
         // SAFETY: live handle, NUL-terminated strings.
-        let sent = unsafe { habilis_network_msg_send(twin, ptr::null(), c"i am a twin".as_ptr()) };
+        let sent =
+            unsafe { habilis_network_msg_send(member, ptr::null(), c"i am a member".as_ptr()) };
         assert_eq!(sent, 0, "broadcast failed: {:?}", last_error());
         let (got, meta, _) = recv_within(sender, 256, 20_000);
-        assert_eq!(got, 1, "the sender heard no twin: {:?}", last_error());
-        assert_eq!(nick_of(&meta), "twin", "the message names the nickname");
+        assert_eq!(got, 1, "the sender heard no member: {:?}", last_error());
+        assert_eq!(nick_of(&meta), name, "the message names the nickname");
         keys.push(key_of(&meta));
     }
     assert_eq!(keys[0].len(), 64, "the key of a message is 64 hex digits");
-    assert_ne!(keys[0], keys[1], "the two twins have one key");
-    // Each twin heard the broadcast of the other: drain it, so the next read is the send.
-    for twin in [first, second] {
-        let (got, meta, _) = recv_within(twin, 256, 20_000);
+    assert_ne!(keys[0], keys[1], "the two members have two keys");
+    // Each member heard the broadcast of the other: drain it, so the next read is the send.
+    for member in [first, second] {
+        let (got, meta, _) = recv_within(member, 256, 20_000);
         assert_eq!(
             (got, meta.directed),
             (1, 0),
-            "a twin missed the broadcast of the other"
+            "a member missed the broadcast of the other"
         );
     }
-
-    // SAFETY: live handle, NUL-terminated strings.
-    let by_nickname = unsafe { habilis_network_msg_send(sender, c"twin".as_ptr(), c"x".as_ptr()) };
-    assert_eq!(by_nickname, -1, "a nickname of two live keys was sent to");
-    assert!(
-        last_error().is_some_and(|reason| reason.contains("two or more")),
-        "the refusal does not name the cause: {:?}",
-        last_error()
-    );
 
     let first_key = CString::new(keys[0].as_str()).expect("hex has no NUL");
     // SAFETY: live handle, NUL-terminated strings.
@@ -700,19 +692,19 @@ fn a_send_to_a_key_reaches_one_of_two_members_that_share_a_nickname() {
         unsafe { habilis_network_msg_send_to_key(sender, first_key.as_ptr(), c"for one".as_ptr()) };
     assert_eq!(by_key, 0, "send to a key failed: {:?}", last_error());
     let (got, meta, body) = recv_within(first, 256, 20_000);
-    assert_eq!(got, 1, "the chosen twin got nothing: {:?}", last_error());
+    assert_eq!(got, 1, "the chosen member got nothing: {:?}", last_error());
     assert_eq!(
         (meta.directed, body.as_str()),
         (1, "for one"),
-        "the chosen twin gets a directed message"
+        "the chosen member gets a directed message"
     );
     let (other, _, _) = recv_within(second, 256, 2_000);
-    assert_eq!(other, 0, "the other twin got the message of the first");
+    assert_eq!(other, 0, "the other member got the message of the first");
 
     // SAFETY: live handles, NUL-terminated strings and NULL where the contract allows it.
     unsafe {
         assert_eq!(
-            habilis_network_msg_send_to_key(sender, c"twin".as_ptr(), c"x".as_ptr()),
+            habilis_network_msg_send_to_key(sender, c"alpha".as_ptr(), c"x".as_ptr()),
             -1,
             "a nickname was read as a key"
         );
@@ -734,6 +726,42 @@ fn a_send_to_a_key_reaches_one_of_two_members_that_share_a_nickname() {
         for handle in [sender, second, first] {
             assert_eq!(habilis_network_mesh_close(handle), 0, "close returns zero");
         }
+    }
+}
+
+/// A nickname that a member key proved names one member. A second member under it, with another
+/// member key, is no peer: of three handles, two under one nickname and one observer, each sees
+/// one peer besides itself, and not two.
+#[test]
+fn a_second_member_under_a_bound_nickname_is_no_peer() {
+    let shared = CString::new("alpha").expect("no interior NUL");
+    let first = open(&create_opts(&shared));
+    assert!(!first.is_null(), "open failed: {:?}", last_error());
+    // SAFETY: live handle; the id is copied before anything else is called.
+    let id = unsafe { CStr::from_ptr(habilis_network_mesh_id(first)) }.to_owned();
+    let second = open(&create_opts_for_join(&id, &shared));
+    let observer_nick = CString::new("gamma").expect("no interior NUL");
+    let observer = open(&create_opts_for_join(&id, &observer_nick));
+    assert!(
+        !second.is_null() && !observer.is_null(),
+        "open: {:?}",
+        last_error()
+    );
+    let handles = [first, second, observer];
+    // SAFETY: the three handles stay live until the end of the test.
+    let counts = || handles.map(|handle| unsafe { habilis_network_mesh_peer_count(handle) });
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while counts().iter().any(|count| *count < 2) {
+        assert!(Instant::now() < deadline, "the handles never saw a peer");
+        thread::sleep(Duration::from_millis(200));
+    }
+    // A second admission would come with the next frames: give it time, then count.
+    thread::sleep(Duration::from_secs(6));
+    assert_eq!(counts(), [2, 2, 2], "the nickname named two peers");
+    for handle in handles {
+        // SAFETY: live handle.
+        let closed = unsafe { habilis_network_mesh_close(handle) };
+        assert_eq!(closed, 0, "close returns zero");
     }
 }
 

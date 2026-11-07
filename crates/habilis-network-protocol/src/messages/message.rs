@@ -193,9 +193,10 @@ impl Message {
         )
     }
 
-    /// A request for the identity proof of `to`, sent to that member alone. It has no body.
+    /// A request for the identity proof of the session `to`, sent to that session alone. It has no
+    /// body.
     #[must_use]
-    pub fn new_proof_request(mesh: &MeshId, author: &Nickname, to: Nickname) -> Self {
+    pub fn new_proof_request(mesh: &MeshId, author: &Nickname, to: AuthorKey) -> Self {
         Self::new(mesh, author, MessageKind::ProofRequest { to }, empty_body())
     }
 

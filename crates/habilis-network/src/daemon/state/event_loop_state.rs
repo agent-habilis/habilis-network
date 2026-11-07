@@ -29,7 +29,7 @@ use iroh::{EndpointAddr, EndpointId};
 use crate::daemon::message_log::MessageLog;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
-use crate::protocol::identity::{Identity, IdentityProof};
+use crate::protocol::identity::{Identity, IdentityProof, verify_proof};
 use crate::protocol::meshes::Mesh;
 use crate::protocol::messages::{Authored, Verified, WireFrame, sole_addressee};
 use crate::protocol::{
@@ -1346,6 +1346,7 @@ impl EventLoopState {
         self.clock_evidence.heard.remove(&key);
         self.clock_evidence.returned_unshown.remove(&key);
         self.clock_evidence.lapsed_quiet.remove(&key);
+        self.proofs.forget(&key);
         self.proven_endpoints.forget_trust(&key);
         self.rival_holders.remove(&key);
         self.names.remove(&key);
@@ -2307,59 +2308,110 @@ impl EventLoopState {
     }
 
     /// The request to send for an `alive` frame whose session this node holds no proof for. It asks
-    /// once per session, and only for a member of the roster, so a flood of new keys buys no
-    /// request.
+    /// for a member of the roster and for a session that claims a bound nickname, since the proof is
+    /// the way in. A stranger under a free nickname is not asked. The asks of sessions outside the
+    /// roster are limited to 4 open for each nickname, so a flood of forged keys under one bound
+    /// nickname replaces its own asks and no other.
     pub(crate) fn proof_request_for(
         &self,
         alive: &Verified,
         own: &Nickname,
         mesh: &MeshId,
     ) -> Option<Verified> {
-        if !self.peers.contains(&alive.key())
-            || !self.proofs.wants_proof(&alive.key(), Instant::now())
-        {
+        let key = alive.key();
+        // A session of a bound nickname with no proof is no peer yet, and it is asked as well: the
+        // proof is the way in.
+        let asked_for = self.peers.contains(&key)
+            || self
+                .proofs
+                .is_bound(&alive.author, |session| self.session_is_held(session));
+        if !asked_for || !self.proofs.wants_proof(&key, Instant::now()) {
             return None;
         }
-        Some(Message::new_proof_request(mesh, own, alive.author.clone()).sign(&self.identity))
+        Some(Message::new_proof_request(mesh, own, alive.key()).sign(&self.identity))
     }
 
     /// The request for the proof of `session` went out: its retry clock starts. A request that
     /// did not go out, for lack of a warm path, is not noted, so the next alive frame asks again.
-    pub(crate) fn note_proof_request_sent(&mut self, session: &AuthorKey) {
-        self.proofs.note_asked(session, Instant::now());
+    pub(crate) fn note_proof_request_sent(
+        &mut self,
+        session: &AuthorKey,
+        claimed: Option<&Nickname>,
+    ) {
+        self.proofs.note_asked(session, Instant::now(), claimed);
     }
 
     /// The answer to a proof request: a signed `joined` frame with the proof of this session, if
     /// the request is for this node and the answers of the last minute are under the cap.
     pub(crate) fn proof_answer(
         &mut self,
-        request_to: &Nickname,
+        request_to: &AuthorKey,
         asker: &AuthorKey,
         own: &Nickname,
         mesh: &MeshId,
         now: Instant,
     ) -> Option<Verified> {
-        if request_to != own || !self.proofs.may_answer(asker, now, self.peers.len()) {
+        if *request_to != self.identity.author_key()
+            || !self.proofs.may_answer(asker, now, self.peers.len())
+        {
             return None;
         }
         let proof = self.own_proof(own, mesh, self.run)?;
         Some(Message::new_joined_with_proof(mesh, own, &proof).sign(&self.identity))
     }
 
+    /// Whether `session` is in the roster, live or quiet. A quiet peer may return, so it still
+    /// holds its nickname; a session that left or timed out holds nothing.
+    pub(crate) fn session_is_held(&self, session: &AuthorKey) -> bool {
+        self.peers.contains(session) || self.quiet.contains(session)
+    }
+
     /// Hold the proof in the body of a `joined` frame, if it verifies for the author of the frame.
-    /// A frame with an empty or bad body holds none.
-    pub(crate) fn note_joined_proof(&mut self, message: &Verified, mesh: &MeshId) {
+    /// A frame with an empty or bad body holds none. True means: this is the first proof that shows
+    /// our own nickname bound to another member, which is the join error of this node.
+    pub(crate) fn note_joined_proof(
+        &mut self,
+        message: &Verified,
+        mesh: &MeshId,
+        own: &Nickname,
+    ) -> bool {
         let Some(proof) = message.joined_proof() else {
-            return;
+            return false;
         };
         let key = message.key();
-        // A member that left the roster is dead, whether it said goodbye or crashed. The roster is
-        // keyed by session key, so a nickname is live while any live key uses it.
-        let (peers, names) = (&self.peers, &self.names);
+        let ours = self.member_identity.as_ref().map(|member| member.public());
+        if message.author == *own && ours.is_some_and(|ours| proof.identity != ours) {
+            let proved = verify_proof(&proof, &key, message.author.as_ref(), mesh.as_ref());
+            return proved && self.proofs.tell_once(&key);
+        }
+        let (peers, quiet) = (&self.peers, &self.quiet);
         self.proofs
-            .accept(&key, &message.author, mesh, proof, |nickname| {
-                peers.iter().any(|live| names.get(live) == Some(nickname))
+            .accept(&key, &message.author, mesh, proof, |session| {
+                peers.contains(session) || quiet.contains(session)
             });
+        false
+    }
+
+    /// Whether the frames of this session reach the roster. A session that claims a nickname that
+    /// another member holds, with no proof of that member, does not. Our own nickname is held by
+    /// our member key. A refusal is counted.
+    pub(crate) fn admits_session(&mut self, message: &Verified, own: &Nickname) -> bool {
+        let key = message.key();
+        if message.author == *own {
+            let ours = self.member_identity.as_ref().map(|member| member.public());
+            let proved = |proof: &IdentityProof| ours.is_none_or(|ours| proof.identity == ours);
+            let ours_here = key == self.identity.author_key();
+            let admitted =
+                ours_here || ours.is_none() || self.proofs.proof_of(&key).is_some_and(proved);
+            if !admitted {
+                self.proofs.note_gate_refused();
+            }
+            return admitted;
+        }
+        let (peers, quiet) = (&self.peers, &self.quiet);
+        self.proofs.admits(&key, &message.author, |session| {
+            peers.contains(session) || quiet.contains(session)
+        })
     }
 
     /// Stamp the next position on this author's hash chain, advancing it.

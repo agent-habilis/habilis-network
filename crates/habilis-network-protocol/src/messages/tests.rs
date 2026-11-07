@@ -193,8 +193,8 @@ fn a_joined_frame_carries_the_proof_in_its_body() {
 #[test]
 fn test_proof_request_round_trip() {
     let _guard = ::habilis_network_test_tracing::init();
-    let target = nick("calm-otter");
-    let message = Message::new_proof_request(&sid(), &nick("word-word"), target.clone());
+    let target = key_of_seed(9);
+    let message = Message::new_proof_request(&sid(), &nick("word-word"), target);
     let bytes = message
         .serialize()
         .expect("the fixture message is well formed, so it serializes");
@@ -203,6 +203,15 @@ fn test_proof_request_round_trip() {
         parsed.kind,
         MessageKind::ProofRequest { to: target },
         "the parsed kind is a proof request to the target"
+    );
+    assert!(
+        String::from_utf8_lossy(&bytes).contains(&format!(r#""to":"{target}""#)),
+        "the recipient is on the wire as 64 hex digits of the key, like the recipient of a pong"
+    );
+    assert_eq!(
+        sole_addressee(&parsed.kind),
+        Some(&target),
+        "the router addresses the request by the key"
     );
     assert_eq!(
         parsed.body.as_str(),
