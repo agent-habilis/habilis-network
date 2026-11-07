@@ -309,19 +309,18 @@ impl SeedPlan {
             changes.extend(raw_changes(&fork, &heads));
         }
         let (mut origins, unstamped) = seed_origins_from(&self.stamps, &fork, &changes)?;
-        // The tombstones go on the frames in the order of their paths, as many as a frame holds
-        // inside its byte budget and its entry cap. If the frames of the seed are not enough,
-        // carrier changes (a key written and deleted, as for an empty seed) take the rest.
+        // The tombstones go on carrier changes (a key written and deleted, as for an empty seed), in
+        // the order of their paths, as many on a frame as fit its byte budget and its entry cap.
         let mut queue: VecDeque<(Vec<String>, Stamp)> = VecDeque::new();
         for (path, stamp) in &self.tombstones {
             queue.push_back((path.clone(), stamp.clone()));
         }
+        // The frames that hold the values were packed to the size of a message, measured without
+        // tombstones, so they carry none: a leaf near the line, and tombstones of 1 KB on its frame,
+        // would not fit a message. The tombstones go on carrier frames of their own.
         let mut carried: Vec<StampedPaths> = Vec::with_capacity(changes.len());
-        for stamps in &origins {
-            carried.push(take_tombstones(
-                &mut queue,
-                DOC_REPLAY_ENTRIES_MAX - stamps.len(),
-            ));
+        for _ in &origins {
+            carried.push(Vec::new());
         }
         while !queue.is_empty() {
             let heads: Vec<ChangeHash> = fork.get_heads();

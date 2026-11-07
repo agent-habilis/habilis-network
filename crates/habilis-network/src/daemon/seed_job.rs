@@ -625,6 +625,7 @@ mod tests {
     use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname, SymmetricKey};
     use crate::testing;
     use crate::util::bounded_fifo_set::BoundedFifoSet;
+    use crate::util::consts::MAX_MESSAGE_SIZE;
     use crate::util::tuning::PENDING_OUTBOUND_CAP;
 
     fn roster(names: &[&str]) -> HashSet<AuthorKey> {
@@ -773,6 +774,68 @@ mod tests {
         assert_eq!(
             chain.left_out, 0,
             "the leaf of {accepted} bytes passed the write check and the cut left it out"
+        );
+    }
+
+    /// The frames of a seed carry the tombstones of the cutter (up to 1 KB each). A leaf that the
+    /// write check accepts, in a document that has deletes, must still fit a message with them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_frame_of_a_seed_that_carries_tombstones_still_fits_a_message() {
+        // Shared with the job that builds on another thread.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let mut doc = MeshDoc::new_state(None);
+        doc.finish_sync();
+        let doomed: Map<String, Value> = (0..40)
+            .map(|index| (format!("deleted-key-{index:03}"), json!(index)))
+            .collect();
+        write_merge(
+            &mut doc,
+            &identity,
+            &me,
+            &json!({ "gone": Value::Object(doomed) }),
+        );
+        let all_null: Map<String, Value> = (0..40)
+            .map(|index| (format!("deleted-key-{index:03}"), Value::Null))
+            .collect();
+        write_merge(
+            &mut doc,
+            &identity,
+            &me,
+            &json!({ "gone": Value::Object(all_null) }),
+        );
+        let accepted: usize = (1..3_500)
+            .rev()
+            .step_by(10)
+            .find(|length| {
+                let merge = json!({ "a": { "b": "x".repeat(*length) } });
+                doc.build_change(&merge, identity.public().as_bytes())
+                    .is_ok()
+            })
+            .expect("a short leaf passes the check");
+        write_merge(
+            &mut doc,
+            &identity,
+            &me,
+            &json!({ "a": { "b": "x".repeat(accepted) } }),
+        );
+        let plan = doc.seed_plan().expect("a plan");
+        let job = job_of(&identity, 1);
+        let outcome = spawn_build(plan, job_of(&identity, 1))
+            .await
+            .expect("the build ends");
+        let chain = outcome.chain.expect("the cut works");
+
+        let frames = super::signed_frames(&chain, &job).expect("the frames are signed");
+
+        let longest: usize = frames
+            .iter()
+            .map(|(_, wire)| wire.as_bytes().len())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            longest <= MAX_MESSAGE_SIZE,
+            "a frame of the seed is {longest} bytes, over the {MAX_MESSAGE_SIZE} of a message"
         );
     }
 
