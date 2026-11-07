@@ -333,6 +333,41 @@ mod ask_tests {
         Message::new_joined(&MeshId::from("test"), &nick(nickname)).sign(session)
     }
 
+    /// A frame from endpoint X is a reason to try the deferred asks at X, and only those: the asks at another
+    /// endpoint are not marked as tried by it, so the sweep tick still sends them at once.
+    #[test]
+    fn a_frame_from_one_endpoint_does_not_use_up_the_deferred_asks_of_another() {
+        let (alice, bob) = (Identity::generate(), Identity::generate());
+        let (at_x, at_y) = (endpoint_id(7), endpoint_id(8));
+        let mut state = fresh_state();
+        for (session, name, endpoint) in [(&alice, "alice", at_x), (&bob, "bob", at_y)] {
+            state.peers.insert(session.author_key());
+            state.names.insert(session.author_key(), nick(name));
+            state.place_endpoint(
+                session.author_key(),
+                &nick(name),
+                EndpointAddr::new(endpoint),
+            );
+            state
+                .proofs
+                .defer_ask(session.author_key(), crate::util::clock::Instant::now());
+        }
+
+        let from_x = state.deferred_asks_to_try(Some(at_x));
+        let sweep = state.deferred_asks_to_try(None);
+
+        assert_eq!(
+            from_x.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![alice.author_key()],
+            "a frame from X tries the ask at X"
+        );
+        assert_eq!(
+            sweep.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![bob.author_key()],
+            "the ask at Y was not used up: the sweep sends it (and the one at X was just tried)"
+        );
+    }
+
     /// The ask has a target only when an address is known for the session; with none, nothing is
     /// planned and nothing is signed.
     #[test]

@@ -187,19 +187,20 @@ impl ProofExchange {
 
     /// The sessions whose ask waits and may be tried at `now`: the oldest first. The first try of a session
     /// is free, so the ask goes as soon as a path is up; after it, none that was tried less than
-    /// `DEFERRED_ASK_GAP` ago. Each one is marked as tried now.
-    pub(crate) fn take_deferred_to_try(&mut self, now: Instant) -> Vec<AuthorKey> {
-        let due = self.deferred.keys_where(|waiting| {
+    /// `DEFERRED_ASK_GAP` ago. It marks nothing: the caller marks the ones that it tries.
+    pub(crate) fn deferred_due(&self, now: Instant) -> Vec<AuthorKey> {
+        self.deferred.keys_where(|waiting| {
             waiting
                 .tried
                 .is_none_or(|tried| now.saturating_duration_since(tried) >= DEFERRED_ASK_GAP)
-        });
-        for session in &due {
-            if let Some(waiting) = self.deferred.get_mut(session) {
-                waiting.tried = Some(now);
-            }
+        })
+    }
+
+    /// The deferred ask of `session` is tried now.
+    pub(crate) fn mark_deferred_tried(&mut self, session: &AuthorKey, now: Instant) {
+        if let Some(waiting) = self.deferred.get_mut(session) {
+            waiting.tried = Some(now);
         }
-        due
     }
 
     /// Drop the asks that waited `DEFERRED_ASK_TTL` and more: the alive cycle takes those sessions over.
@@ -472,7 +473,7 @@ mod tests {
         }
 
         assert_eq!(book.deferred_len(), DEFERRED_ASKS_MAX, "the cap holds");
-        let waiting = book.take_deferred_to_try(now + DEFERRED_ASK_GAP);
+        let waiting = book.deferred_due(now + DEFERRED_ASK_GAP);
         assert!(
             waiting.contains(&sessions[639]) && !waiting.contains(&sessions[0]),
             "the newest waits and the oldest was dropped"
@@ -490,16 +491,17 @@ mod tests {
         book.defer_ask(session, start);
 
         assert_eq!(
-            book.take_deferred_to_try(start),
+            book.deferred_due(start),
             vec![session],
             "the first try is free: the ask goes as soon as a path is up"
         );
+        book.mark_deferred_tried(&session, start);
         assert!(
-            book.take_deferred_to_try(start).is_empty(),
+            book.deferred_due(start).is_empty(),
             "but not twice in one gap"
         );
         assert_eq!(
-            book.take_deferred_to_try(start + DEFERRED_ASK_GAP),
+            book.deferred_due(start + DEFERRED_ASK_GAP),
             vec![session],
             "after the gap it is tried again"
         );

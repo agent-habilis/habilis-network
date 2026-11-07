@@ -2443,13 +2443,15 @@ impl EventLoopState {
 
     /// The sessions whose ask waits for a warm path and may be tried now, with their nicknames. With an
     /// `arrived` endpoint, only those whose address is that endpoint: a frame that came from it shows
-    /// that a connection to it is up.
+    /// that a connection to it is up. Only the sessions that are returned are marked as tried: the asks at
+    /// another endpoint keep their free first try.
     pub(crate) fn deferred_asks_to_try(
         &mut self,
         arrived: Option<EndpointId>,
     ) -> Vec<(AuthorKey, Nickname)> {
+        let now = Instant::now();
         let mut due = Vec::new();
-        for key in self.proofs.take_deferred_to_try(Instant::now()) {
+        for key in self.proofs.deferred_due(now) {
             let at_endpoint = arrived.is_none_or(|endpoint| {
                 self.address_of(&key).map(|address| address.id) == Some(endpoint)
             });
@@ -2459,6 +2461,9 @@ impl EventLoopState {
                 // a session that the roster forgot: its ask does not wait any more
                 None => self.proofs.undefer(&key),
             }
+        }
+        for (key, _) in &due {
+            self.proofs.mark_deferred_tried(key, now);
         }
         due
     }
