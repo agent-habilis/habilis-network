@@ -1237,11 +1237,47 @@ mod tests {
                 "a closing digest on gossip is no answer to the request of this node"
             );
             state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            state.first_asked_at = Some(clock::Instant::now());
             antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
                 .await;
             assert!(
                 !state.doc(Channel::State).is_awaiting_first_sync(),
-                "on unicast it is the answer"
+                "on unicast, soon after this node asked, it is the answer"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// Any member can unicast a closing digest with no heads. It answers no request of this node,
+    /// so it must not end the wait for the first sync: the node would write with a clock that has
+    /// not heard of the writes before its restart.
+    #[test]
+    fn a_closing_digest_when_this_node_asked_nobody_does_not_end_the_wait() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::doc::MeshDoc;
+            use crate::gossip::antientropy;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_doc = MeshDoc::new_state(None);
+            let bob = Identity::generate();
+            let body = MessageBody::try_new(
+                &serde_json::json!({ "heads": [], "closing": true }).to_string(),
+            )
+            .expect("a JSON body");
+            let closing =
+                Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State)
+                    .sign(&bob);
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
+                .await;
+
+            assert!(
+                state.doc(Channel::State).is_awaiting_first_sync(),
+                "this node asked nobody, so the closing digest is the answer of no request"
             );
             bob_endpoint.close().await;
             net.endpoint.close().await;

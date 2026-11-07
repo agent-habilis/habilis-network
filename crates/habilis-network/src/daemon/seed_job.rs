@@ -329,19 +329,31 @@ fn job_for(state: &EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u64) -> 
     }
 }
 
+/// How long after a request for the first sync a closing digest still counts as its answer. An
+/// answer takes one round trip, so this is long, and it is short enough that a closing digest that
+/// nobody asked for, at any other time, does not end the wait.
+const FIRST_ANSWER_WINDOW: Duration = Duration::from_secs(5);
+
 /// A closing digest of a peer for `channel` came in. It ends the wait of the state document for
-/// its first sync when it came point-to-point and this node holds all of its heads: the peer
-/// answered the request of this node (frames, then the closing heads, or the closing heads alone
-/// when it had nothing to send), so every time that the peer has seen is in the history of this
-/// node and its clock is above them. A plain request or a digest on gossip never ends the wait: a
-/// node that only announces its heads has answered nobody. The deadline stays the outer bound.
+/// its first sync when it came point-to-point, soon after this node asked (`first_asked_at`), and
+/// this node holds all of its heads: the peer answered the request of this node (frames, then the
+/// closing heads, or the closing heads alone when it had nothing to send), so every time that the
+/// peer has seen is in the history of this node and its clock is above them. A plain request, a
+/// digest on gossip, and a closing digest that comes when this node asked nobody never end the
+/// wait: any member can send one. A member that saw the request can still answer it, and is
+/// trusted for the heads that it names: the clock of a state document is the wall clock, so a
+/// node that is released early still writes above every honest write. The deadline stays the outer
+/// bound.
 pub(crate) fn closing_digest_seen(
     state: &mut EventLoopState,
     channel: Channel,
     heads: &[String],
     on_unicast: bool,
 ) {
-    if channel != Channel::State || !on_unicast {
+    let asked = state
+        .first_asked_at
+        .is_some_and(|at| at.elapsed() <= FIRST_ANSWER_WINDOW);
+    if channel != Channel::State || !on_unicast || !asked {
         return;
     }
     let doc = state.doc_mut(channel);
@@ -940,6 +952,7 @@ mod tests {
     #[test]
     fn a_closing_digest_on_unicast_with_heads_that_this_node_holds_ends_the_wait() {
         let mut state = state_that_waits_for_the_first_sync();
+        state.first_asked_at = Some(Instant::now());
         assert!(
             state.doc(Channel::State).is_awaiting_first_sync(),
             "the node waits"
@@ -979,8 +992,30 @@ mod tests {
     }
 
     #[test]
+    fn a_closing_digest_long_after_the_request_is_the_answer_of_no_request() {
+        let mut state = state_that_waits_for_the_first_sync();
+        state.first_asked_at = Instant::now().checked_sub(Duration::from_secs(6));
+        assert!(
+            state.first_asked_at.is_some(),
+            "the premise: a request 6 s ago"
+        );
+        closing_digest_seen(&mut state, Channel::State, &[], true);
+        assert!(
+            state.doc(Channel::State).is_awaiting_first_sync(),
+            "6 s is past the window of an answer"
+        );
+        state.first_asked_at = Some(Instant::now());
+        closing_digest_seen(&mut state, Channel::State, &[], true);
+        assert!(
+            !state.doc(Channel::State).is_awaiting_first_sync(),
+            "the same digest right after a request is its answer"
+        );
+    }
+
+    #[test]
     fn the_empty_answer_of_a_peer_that_had_nothing_to_send_ends_the_wait_only_on_unicast() {
         let mut state = state_that_waits_for_the_first_sync();
+        state.first_asked_at = Some(Instant::now());
         closing_digest_seen(&mut state, Channel::State, &[], false);
         assert!(
             state.doc(Channel::State).is_awaiting_first_sync(),

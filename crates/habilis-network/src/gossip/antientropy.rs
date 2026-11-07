@@ -480,6 +480,7 @@ async fn broadcast_state_digest(
         return;
     };
     state.idle.broadcasts += 1;
+    note_first_ask(state, channel);
     tracing::debug!(me = %origin.author, ?channel, heads = heads_key(&digest), ?trigger, "broadcast a state digest on gossip");
     super::broadcast_msg(sender, &digest).await;
 }
@@ -638,6 +639,7 @@ async fn ask(
     {
         return false;
     }
+    note_first_ask(state, channel);
     let changes = state.doc(channel).change_count();
     state
         .fast_rounds
@@ -645,6 +647,15 @@ async fn ask(
     state.idle.fr_asks += 1;
     tracing::debug!(me = %context.author, peer = %author, ?channel, heads = ours_key, "asked a peer that is ahead for state directly (fast round)");
     true
+}
+
+/// Remember when a request with the flag `first` went out, while the state document waits for its
+/// first sync: the closing digest of its answer ends the wait (see
+/// `seed_job::closing_digest_seen`).
+fn note_first_ask(state: &mut EventLoopState, channel: Channel) {
+    if channel == Channel::State && state.doc(channel).is_awaiting_first_sync() {
+        state.first_asked_at = Some(Instant::now());
+    }
 }
 
 /// A digest's heads as the serve budget keys them: its body is the heads. The
@@ -910,6 +921,9 @@ async fn send_digests(
         .await
     {
         return false;
+    }
+    if set == DigestSet::All {
+        note_first_ask(state, Channel::State);
     }
     if asks_for_chat {
         state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
