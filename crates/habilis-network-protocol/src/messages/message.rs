@@ -338,14 +338,6 @@ impl Message {
         Ok((Self::parse(frame)?, nonce))
     }
 
-    /// The length of the frame in a gossip payload, without the trailer of a resend. It is the length
-    /// that `serialize` gives for the message that the payload parses to, so a receiver that holds the
-    /// payload need not serialize the message again to know it.
-    #[must_use]
-    pub fn frame_len(data: &[u8]) -> usize {
-        split_resend_trailer(data).0.len()
-    }
-
     /// Deterministic, domain-separated, length-prefixed encoding of every
     /// signed field (i.e. all of them **except** `sig`, including
     /// `pubkey` so the key is bound to the message). This — not the JSON —

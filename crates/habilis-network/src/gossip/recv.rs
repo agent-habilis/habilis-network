@@ -752,7 +752,7 @@ pub(crate) async fn ingest_from(
             RetainMeta {
                 canonical: &canonical,
                 class: app_class.as_ref(),
-                wire_len: Some(Message::frame_len(&frame)),
+                wire_len: None,
             },
             state,
             context,
@@ -5852,6 +5852,31 @@ mod dedup_counter_tests {
         assert!(
             reader.peers.contains(&bound.author_key()),
             "the bound session stays"
+        );
+    }
+
+    /// The census counts the bytes of the frame that the log holds, which serialize gives, and not the bytes of
+    /// the frame as it arrived: a signed frame with JSON white space holds the same message.
+    #[test]
+    fn the_log_gauge_counts_the_serialized_frame_not_the_white_space_of_the_arrival() {
+        let sender = Identity::generate();
+        let frame = Message::new_joined(&MeshId::from("test"), &nick("bob")).sign(&sender);
+        let compact = frame.serialize().expect("serialize").into_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&compact).expect("a JSON frame");
+        let pretty = serde_json::to_vec_pretty(&value).expect("pretty JSON");
+        assert!(
+            pretty.len() > compact.len(),
+            "the arrival must carry white space for the test to mean anything"
+        );
+
+        let reader = reader_with(fresh_state(), vec![(Plane::Gossip, Bytes::from(pretty))]);
+
+        let (held, bytes) = reader.message_log.size();
+        assert_eq!(held, 1, "the frame is retained");
+        assert_eq!(
+            bytes,
+            compact.len(),
+            "the census counted white space that the log does not hold"
         );
     }
 
