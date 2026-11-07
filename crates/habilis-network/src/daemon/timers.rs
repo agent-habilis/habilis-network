@@ -5,7 +5,6 @@
 
 use crate::daemon::state::{CollectionSizes, Latch, Standing};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use iroh::Endpoint;
@@ -320,10 +319,15 @@ fn absent_entries(slots: &[String], roster: &HashSet<AuthorKey>, me: &AuthorKey)
 /// CPU in proportion to the document, and their size moves slowly. The light part is O(1).
 const DOC_HEAVY_EVERY: u64 = 15;
 
-static DOC_CENSUS_RUNS: AtomicU64 = AtomicU64::new(0);
-
 fn is_heavy_run(run: u64) -> bool {
     run.is_multiple_of(DOC_HEAVY_EVERY)
+}
+
+/// The number of this doc census, counted for this loop.
+fn census_run(state: &mut EventLoopState) -> u64 {
+    let run = state.doc_census_runs;
+    state.doc_census_runs += 1;
+    run
 }
 
 /// What the socket, the gossip transport and the gossip actor of this loop moved since the last
@@ -371,7 +375,7 @@ pub(crate) fn tick_epoch(state: &mut EventLoopState, own: &AuthorKey) {
 /// [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read 0. A reader of the numbers can tell
 /// what a keyframe scheme would save.
 pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &AuthorKey) {
-    let run = DOC_CENSUS_RUNS.fetch_add(1, Ordering::Relaxed);
+    let run = census_run(state);
     let heavy = is_heavy_run(run);
     let meta = state.doc_mut(Channel::Meta).census(heavy);
     let shared = state.doc_mut(Channel::State).census(heavy);
@@ -601,6 +605,28 @@ mod tests {
         assert!(
             !state.seen.contains(&first.dedup_key()),
             "the key of the beaten candidate is forgotten"
+        );
+    }
+
+    /// Several event loops of one process run their censuses in a stable order. Each document gets a
+    /// heavy census every `DOC_HEAVY_EVERY` ticks of its own loop: a counter that the loops share would
+    /// give all the heavy ones to one loop, and none to the others.
+    #[test]
+    fn each_event_loop_counts_its_own_doc_censuses() {
+        let mut loops: Vec<_> = (0..15).map(|_| testing::fresh_state()).collect();
+        let mut heavy = vec![0usize; loops.len()];
+        for _tick in 0..30 {
+            for (index, state) in loops.iter_mut().enumerate() {
+                if super::is_heavy_run(super::census_run(state)) {
+                    heavy[index] += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            heavy,
+            vec![2usize; 15],
+            "each of the 15 loops has a heavy census in 30 ticks, twice"
         );
     }
 

@@ -320,6 +320,9 @@ pub struct EventLoopState {
     pub(crate) join_fallback_at: Option<Instant>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
+    /// How many doc censuses this loop has run: one in `DOC_HEAVY_EVERY` is heavy. The count is of
+    /// this loop, so that each document of a process that runs several loops gets its heavy census.
+    pub(crate) doc_census_runs: u64,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
     /// session although nothing was sent over a connection yet.
     lane_wanted: HashMap<EndpointId, Instant>,
@@ -748,6 +751,7 @@ impl EventLoopState {
             redials: redial::Redials::default(),
             join_fallback_at: None,
             graft_backoff: graft_backoff::GraftBackoff::default(),
+            doc_census_runs: 0,
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
             digest_serves: Cooldown::new(tuning::ANTIENTROPY_SERVE_COOLDOWN),
