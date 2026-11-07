@@ -2338,7 +2338,11 @@ impl EventLoopState {
         session: &AuthorKey,
         claimed: Option<&Nickname>,
     ) {
-        self.proofs.note_asked(session, Instant::now(), claimed);
+        let (peers, quiet) = (&self.peers, &self.quiet);
+        self.proofs
+            .note_asked(session, Instant::now(), claimed, |asked| {
+                peers.contains(asked) || quiet.contains(asked)
+            });
     }
 
     /// The answer to a proof request: a signed `joined` frame with the proof of this session, if

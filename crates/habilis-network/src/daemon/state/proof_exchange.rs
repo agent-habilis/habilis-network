@@ -156,12 +156,18 @@ impl ProofExchange {
 
     /// The request for `session` went out at `now`: the retry clock of the session starts. `claimed`
     /// is the bound nickname of a session that is not in the roster. At most 4 asks stay open for
-    /// each such nickname, and the oldest of that nickname goes for a new one.
+    /// each such nickname, and the oldest of that nickname goes for a new one. `is_held` says whether
+    /// a session is in the roster. The book holds 1024 records: when it is full, the record of the
+    /// oldest session that is not in the roster goes, so the retry clock of a session that is in it
+    /// is not reset. Only when all 1024 are in the roster does the oldest record go, and that
+    /// session can be asked again, up to 9 more times: the limit of a mesh of more than 1024
+    /// sessions that send no proof.
     pub(crate) fn note_asked(
         &mut self,
         session: &AuthorKey,
         now: Instant,
         claimed: Option<&Nickname>,
+        is_held: impl Fn(&AuthorKey) -> bool,
     ) {
         let tries = self.asked.get(session).map_or(0, |retry| retry.tries);
         if let Some(nickname) = claimed {
@@ -183,7 +189,15 @@ impl ProofExchange {
             next_at: now + retry_wait(tries),
             claimed: claimed.cloned(),
         };
-        self.asked.insert_evicting(*session, retry, |_, _| false);
+        self.asked
+            .insert_evicting(*session, retry.clone(), |asked, _| is_held(asked));
+        if self.asked.get(session).is_none() {
+            // Every record is of a session in the roster: the oldest goes, as it always did.
+            if let Some(oldest) = self.asked.keys_where(|_| true).first() {
+                self.asked.remove(oldest);
+            }
+            self.asked.insert(*session, retry);
+        }
     }
 
     /// A proof came for `session`. It is held if it verifies for this nickname and mesh, if it does
@@ -293,7 +307,7 @@ impl ProofExchange {
 mod tests {
     use super::{ProofExchange, verify_proof};
     use crate::protocol::identity::Identity;
-    use crate::protocol::{MeshId, Nickname};
+    use crate::protocol::{AuthorKey, MeshId, Nickname};
     use crate::util::clock::Instant;
     use crate::util::tuning::QUIET_CAP;
     use std::time::Duration;
@@ -313,7 +327,7 @@ mod tests {
             joiner.wants_proof(&session, now),
             "an alive frame of a session with no proof asks for it"
         );
-        joiner.note_asked(&session, now, None);
+        joiner.note_asked(&session, now, None, |_| true);
         assert!(
             !joiner.wants_proof(&session, Instant::now()),
             "the session is asked once, not at each alive frame"
@@ -344,7 +358,7 @@ mod tests {
             joiner.wants_proof(&session, now),
             "no send, so the session still needs one"
         );
-        joiner.note_asked(&session, now, None);
+        joiner.note_asked(&session, now, None, |_| true);
         assert!(
             !joiner.wants_proof(&session, now),
             "after a send the retry clock runs"
@@ -363,13 +377,13 @@ mod tests {
             joiner.wants_proof(&session, at(0)),
             "the first request goes at once"
         );
-        joiner.note_asked(&session, at(0), None);
+        joiner.note_asked(&session, at(0), None, |_| true);
         assert!(
             !joiner.wants_proof(&session, at(29)),
             "no retry before 30 s"
         );
         assert!(joiner.wants_proof(&session, at(30)), "retry 1 after 30 s");
-        joiner.note_asked(&session, at(30), None);
+        joiner.note_asked(&session, at(30), None, |_| true);
         assert!(
             !joiner.wants_proof(&session, at(89)),
             "no retry before 60 s more"
@@ -378,7 +392,7 @@ mod tests {
             joiner.wants_proof(&session, at(90)),
             "retry 2 after 60 s more"
         );
-        joiner.note_asked(&session, at(90), None);
+        joiner.note_asked(&session, at(90), None, |_| true);
         assert!(
             !joiner.wants_proof(&session, at(209)),
             "no retry before 120 s more"
@@ -387,7 +401,7 @@ mod tests {
             joiner.wants_proof(&session, at(210)),
             "retry 3 after 120 s more"
         );
-        joiner.note_asked(&session, at(210), None);
+        joiner.note_asked(&session, at(210), None, |_| true);
         assert!(
             !joiner.wants_proof(&session, at(809)),
             "no fourth fast retry: the next ask waits 10 minutes"
@@ -407,7 +421,7 @@ mod tests {
                 joiner.wants_proof(&session, at(secs)),
                 "a fast ask at {secs} s"
             );
-            joiner.note_asked(&session, at(secs), None);
+            joiner.note_asked(&session, at(secs), None, |_| true);
         }
         assert!(
             !joiner.wants_proof(&session, at(809)),
@@ -417,7 +431,7 @@ mod tests {
         for round in 1..=6 {
             last += 600;
             assert!(joiner.wants_proof(&session, at(last)), "slow retry {round}");
-            joiner.note_asked(&session, at(last), None);
+            joiner.note_asked(&session, at(last), None, |_| true);
         }
         assert!(
             !joiner.wants_proof(&session, at(last + 100_000)),
@@ -723,7 +737,7 @@ mod tests {
         let claimed = Nickname::from("alice");
         let mut joiner = ProofExchange::with_cap(QUIET_CAP);
         let now = Instant::now();
-        joiner.note_asked(&member, now, None);
+        joiner.note_asked(&member, now, None, |_| true);
         assert!(
             !joiner.wants_proof(&member, now),
             "the member waits for its answer"
@@ -731,12 +745,31 @@ mod tests {
 
         for _ in 0..2_000 {
             let forged = Identity::generate().author_key();
-            joiner.note_asked(&forged, now, Some(&claimed));
+            joiner.note_asked(&forged, now, Some(&claimed), |_| true);
         }
 
         assert!(
             !joiner.wants_proof(&member, now),
             "the ask of the member is still there, and its retry clock was not reset"
+        );
+    }
+
+    /// The book of asks is full, and the oldest record belongs to a session that is still waiting. The
+    /// record of a session that left goes first, so the retry clock of a session in the roster is not
+    /// reset: a session that was asked 9 times is not asked 9 more.
+    #[test]
+    fn a_full_book_of_asks_drops_a_session_that_left_before_one_that_waits() {
+        let sessions: Vec<AuthorKey> = (0..5).map(|_| Identity::generate().author_key()).collect();
+        let [waiting, gone, second, third, newest] = [0, 1, 2, 3, 4].map(|index| sessions[index]);
+        let mut book = ProofExchange::with_cap(4);
+        let now = Instant::now();
+        for session in [waiting, gone, second, third, newest] {
+            book.note_asked(&session, now, None, |held| *held != gone);
+        }
+
+        assert!(
+            !book.wants_proof(&waiting, now),
+            "the oldest record is of a session that waits, and it is still there"
         );
     }
 }
