@@ -545,7 +545,8 @@ async fn ask_back(
         state.doc(channel).change_count(),
         now,
     ) {
-        ask(channel, &key, &digest.author, state, context).await;
+        let via = state.state_digest_serves.unicast.arrived_from;
+        ask(channel, (&key, &digest.author), via, state, context).await;
     } else {
         tracing::debug!(me = %context.author, peer = %digest.author, ?channel, "a peer is ahead, but a fast round waits");
     }
@@ -592,24 +593,27 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &Han
         let Some((key, author)) = target else {
             continue;
         };
-        if ask(channel, &key, &author, state, context).await {
+        if ask(channel, (&key, &author), None, state, context).await {
             state.idle.fr_retries += 1;
             tracing::debug!(me = %context.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
         }
     }
 }
 
-/// Send our digest for `channel` to `author` point-to-point, if it is a linked
-/// neighbor with a usable path. The caller decides whether the round allows
-/// it. Returns whether it went out.
+/// Send our digest for `channel` to `author` point-to-point: on `via`, the connection that its
+/// digest came on, where a unicast can start, else to its proven endpoint. The caller decides
+/// whether the round allows it. Returns whether it went out.
 async fn ask(
     channel: Channel,
-    key: &AuthorKey,
-    author: &Nickname,
+    (key, author): (&AuthorKey, &Nickname),
+    via: Option<EndpointId>,
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) -> bool {
-    let Some(eid) = transport::unicast_answer_target(key, state) else {
+    let target = via
+        .filter(|eid| transport::can_unicast(*eid, state))
+        .or_else(|| transport::unicast_answer_target(key, state));
+    let Some(eid) = target else {
         return false;
     };
     let origin = DigestOrigin {

@@ -1753,6 +1753,34 @@ mod tests {
         });
     }
 
+    /// A unicast digest that is ahead of us is asked back on its connection, though its signer has
+    /// proved no endpoint yet: the ask-back does not wait for the next exchange.
+    #[test]
+    fn a_unicast_digest_that_is_ahead_is_asked_back_on_its_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let asker = Identity::generate();
+            let ahead = serde_json::json!(["ab".repeat(32)]);
+            let digest = digest(&net.mesh, Channel::State, &ahead, &asker);
+
+            let _ = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(state.idle.fr_asks, 1, "one ask-back, on the connection");
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
     /// A digest that came by gossip is answered by a few members, as a chat digest is, when the
     /// unicast form is on. Here the k rule leaves this holder out: it sends nothing.
     #[test]
