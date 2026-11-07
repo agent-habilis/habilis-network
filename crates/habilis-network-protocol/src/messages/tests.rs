@@ -1139,8 +1139,6 @@ fn hex(bytes: &[u8]) -> String {
     identity::encode_hex(bytes)
 }
 
-/// Golden: the bytes of a signed message are fixed. The JSON text, the signed bytes, the content
-/// hash, and the dedup key each equal a literal captured at the base commit.
 #[test]
 fn a_message_of_version_12_is_refused_and_the_error_names_both_versions() {
     let _guard = ::habilis_network_test_tracing::init();
@@ -1183,6 +1181,8 @@ fn a_message_of_version_13_is_refused_and_the_error_names_both_versions() {
     );
 }
 
+/// Golden: the bytes of a signed message are fixed. The JSON text, the signed bytes, the content
+/// hash, and the dedup key each equal a literal captured at the base commit.
 #[test]
 fn a_signed_message_keeps_its_wire_form() {
     let _guard = ::habilis_network_test_tracing::init();
