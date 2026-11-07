@@ -9020,6 +9020,53 @@ mod tests {
         );
     }
 
+    /// A value that a node over its remote line refused is not lost for good: a holder that took the
+    /// frame cuts a seed, the refuser adopts it, and the value is in the refuser with its set of
+    /// refused frames empty, so the frame is not refused again.
+    #[test]
+    fn a_value_that_the_refuser_dropped_comes_back_with_the_seed_of_a_holder() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame was refused: the state document is over its remote line",
+        );
+        let (mut author, mut refuser, mut holder) = trio_with_a_refuser_over_the_remote_line();
+        let frame = write(&mut author, &nick("me"), &json!({ "x": 1 }));
+        assert!(
+            matches!(holder.ingest(&frame), Ingested::Applied { .. }),
+            "the holder is under its line and takes the frame"
+        );
+        assert!(
+            matches!(refuser.ingest(&frame), Ingested::Ignored),
+            "the refuser is over its remote line and drops the frame"
+        );
+        assert!(
+            refuser.to_json().get("x").is_none() && refuser.refused_held() == 1,
+            "the value is not in the refuser, and the frame is in its set of refused frames"
+        );
+
+        let seed = seed_frames_of(&holder, &nick("holder"), 1, None);
+        for part in &seed {
+            refuser.ingest(part);
+        }
+        let me = AuthorKey::from(pad_seed(b"refuser"));
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS + 2 {
+            refuser.tick_epoch(&me);
+        }
+
+        assert_eq!(refuser.epoch(), 1, "the refuser adopted the seed");
+        assert_eq!(
+            refuser.to_json().get("x"),
+            Some(&json!(1)),
+            "the value that the refuser dropped is in it again"
+        );
+        assert_eq!(
+            refuser.refused_held(),
+            0,
+            "the set of refused frames is empty after the switch"
+        );
+    }
+
     #[test]
     fn the_set_of_refused_frames_stays_inside_its_cap_when_it_is_fed_10_times_the_cap() {
         let _guard = ::habilis_network_test_tracing::init();
