@@ -8,13 +8,13 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
+#[cfg(feature = "host")]
+use super::setup;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::TestHold;
 use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 #[cfg(feature = "multihop")]
 use crate::protocol;
-#[cfg(feature = "host")]
-use crate::util;
 use crate::{lookup, transport};
 use iroh_gossip::net;
 use n0_future::{task, time};
@@ -368,10 +368,7 @@ fn host_state_file<Driver: NodeDriver>(
         .take()
         .or_else(|| {
             let base = runtime.runtime_base.as_deref()?;
-            exit_on_quit.then(|| {
-                util::mesh_runtime_dir(base, mesh.mesh.as_str())
-                    .join(format!("{}.state.json", mesh.author))
-            })
+            exit_on_quit.then(|| setup::default_state_path(base, &mesh.mesh, &mesh.author))
         })
         .map(|path| {
             let owner_pid = runtime.owner.map(shutdown::Owner::pid);

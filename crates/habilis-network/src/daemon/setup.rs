@@ -2,7 +2,7 @@ use crate::{beacon, transport};
 use iroh_gossip::{api, net, proto};
 #[cfg(all(unix, feature = "host"))]
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{mem, sync};
 #[cfg(feature = "host")]
 use tokio::task;
@@ -776,7 +776,8 @@ fn last_recorded_run(state: &Path) -> Option<u64> {
 /// The last run that the key file at `key_path` names, if it names one.
 #[cfg(all(unix, feature = "host"))]
 fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
-    let bytes = std::fs::read(key_path).ok()?;
+    use std::fs;
+    let bytes = fs::read(key_path).ok()?;
     let tail = bytes.get(40..48)?;
     <[u8; 8]>::try_from(tail).ok().map(u64::from_le_bytes)
 }
@@ -919,6 +920,70 @@ fn replace_member(keys: RunKeys, state: &Path, owner_start: u64) -> RunKeys {
     }
 }
 
+/// The state path that the member key and the run counter live under: the state file when there is one, and
+/// otherwise, for a caller that asks for it (`keys_in_default_state`), the default state path of the mesh
+/// under the runtime base. `None` keeps ephemeral keys.
+#[cfg_attr(
+    not(feature = "host"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as the host version, which can fail to make the folder"
+    )
+)]
+fn keys_state_path(
+    state_file: Option<&Path>,
+    runtime_base: Option<&Path>,
+    mesh: &MeshId,
+    author: &Nickname,
+    in_default_state: bool,
+) -> Result<Option<PathBuf>> {
+    let explicit = state_file.map(Path::to_path_buf);
+    #[cfg(feature = "host")]
+    {
+        use crate::util;
+        if explicit.is_some() {
+            return Ok(explicit);
+        }
+        let Some(base) = runtime_base.filter(|_| in_default_state) else {
+            return Ok(None);
+        };
+        // The key file goes in the folder of the mesh, which the control socket would make later.
+        util::ensure_mesh_runtime_dir(base, mesh.as_str())?;
+        Ok(Some(default_state_path(base, mesh, author)))
+    }
+    #[cfg(not(feature = "host"))]
+    {
+        let _ = (runtime_base, mesh, author, in_default_state);
+        Ok(explicit)
+    }
+}
+
+/// The default state path of a mesh: `<runtime base>/<mesh folder>/<nickname>.state.json`, where the CLI keeps
+/// the readiness file of a daemon that was given no `--state-file`.
+#[cfg(feature = "host")]
+pub(crate) fn default_state_path(base: &Path, mesh: &MeshId, author: &Nickname) -> PathBuf {
+    use crate::util;
+    util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.state.json"))
+}
+
+/// The keys of this run, under the state path that [`keys_state_path`] gives. `mesh` is the mesh id and the
+/// nickname of this member.
+fn run_keys_for(
+    state_file: Option<&Path>,
+    runtime_base: Option<&Path>,
+    keys_in_default_state: bool,
+    (mesh, author): (&MeshId, &Nickname),
+) -> Result<RunKeys> {
+    let keys_path = keys_state_path(
+        state_file,
+        runtime_base,
+        mesh,
+        author,
+        keys_in_default_state,
+    )?;
+    run_keys(keys_path.as_deref())
+}
+
 /// The keys of this run. The member key comes from the state file. The session key is the one that
 /// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
 /// would start the same actor again at sequence 1.
@@ -943,6 +1008,10 @@ fn owner_of(injected: Option<&InjectedEndpoint>) -> EndpointOwner {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the setup is one assembly of the mesh, in the order that its parts need"
+)]
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -950,6 +1019,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         max_direct,
         runtime_base,
         state_file,
+        keys_in_default_state,
         sink,
         cohost: cohost_override,
         live_count,
@@ -1022,6 +1092,12 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
 
+    let keys = run_keys_for(
+        state_file.as_deref(),
+        runtime_base.as_deref(),
+        keys_in_default_state,
+        (&mesh_id, &author),
+    )?;
     Ok(EventLoopConfig {
         mesh: MeshSpec {
             mesh: mesh_id,
@@ -1031,7 +1107,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             is_creator,
             author,
             // The mesh spec and the loop state both hold the keys, so they are shared.
-            keys: run_keys(state_file.as_deref())?,
+            keys,
             mesh_password,
             mesh_key,
         },
@@ -1613,6 +1689,42 @@ mod tests {
         assert_eq!(first.run, 1, "the first start is run 1");
         assert_eq!(second.run, 2, "the second start is run 2");
         assert_eq!(named, Some(second.run), "the key file names the last run");
+    }
+
+    /// A daemon that the CLI started with no state file keeps its member key and counts its run on, in the
+    /// default state path of its mesh, when the setup asks for it. Without the flag the keys stay ephemeral,
+    /// and an explicit state file wins over the default.
+    #[test]
+    fn a_restart_with_no_state_file_keeps_its_member_key_in_the_default_state_path() {
+        use crate::protocol::{MeshId, Nickname};
+        let dir = TempDir::new("habilis-default-state");
+        let base = dir.path();
+        let (mesh, author) = (MeshId::from("test"), Nickname::from("alice"));
+        let explicit = dir.path().join("explicit.json");
+
+        let path = |state: Option<&Path>, on: bool| {
+            super::keys_state_path(state, Some(base), &mesh, &author, on).expect("a state path")
+        };
+        let default = path(None, true).expect("the flag asks for the default state path");
+        let first = super::run_keys(Some(&default)).expect("the first start");
+        let second = super::run_keys(Some(&default)).expect("the restart");
+
+        assert!(
+            default.starts_with(base),
+            "the default path is under the runtime base"
+        );
+        assert_eq!(
+            member_of(&first),
+            member_of(&second),
+            "the restart made a new member key"
+        );
+        assert_eq!(second.run, first.run + 1, "the run counts on");
+        assert!(path(None, false).is_none(), "no flag keeps ephemeral keys");
+        assert_eq!(
+            path(Some(&explicit), true).as_deref(),
+            Some(explicit.as_path()),
+            "an explicit state file wins"
+        );
     }
 
     /// A counter file that a crash cut short must not restart the count at 1: a peer that kept a
