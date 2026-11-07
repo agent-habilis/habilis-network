@@ -377,14 +377,17 @@ pub(crate) fn sync_deadline(state: &mut EventLoopState) {
 }
 
 /// Put a replay or a restore in the queue that the loop drains after the tick. The queue is bounded:
-/// when it is full the new item is refused, and the node warns. The document does not keep a
-/// refused item (`take_restores` empties it), so a replay or a restore that is refused is a write
-/// that the seed lacks and that no node sends: the warning is the signal. The loop drains the queue
-/// on the arm of the tick, so a full queue is not expected.
+/// when it is full the item goes back to the document, which holds it for the next tick (its map of
+/// restores is bounded too, and counts a drop). A replay or a restore that is lost is a write that
+/// the seed lacks and that no node sends. The loop drains the queue on the arm of the tick, so a
+/// full queue is not expected, and the node warns when it happens.
 fn queue_replay(state: &mut EventLoopState, item: (serde_json::Value, StampedPaths)) {
-    if !state.replay_queue.push(item) {
-        tracing::warn!(target: "habilis_network::gossip", "the replay of the state channel was dropped: its queue is full");
+    if state.replay_queue.remaining() == 0 {
+        state.doc_mut(Channel::State).return_restores(item);
+        tracing::warn!(target: "habilis_network::gossip", "the replay of the state channel waits for the next tick: its queue is full");
+        return;
     }
+    let _ = state.replay_queue.push(item);
 }
 
 /// The paths that a merge writes: its leaves and the objects that it makes.
@@ -991,6 +994,35 @@ mod tests {
         );
     }
 
+    /// A replay that finds the queue full goes back to the document, which holds it for the next
+    /// tick: it is a write that the seed lacks and that no other node sends.
+    #[test]
+    fn a_replay_that_finds_the_queue_full_goes_back_to_the_document() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::allow_warn(
+            "habilis_network::gossip",
+            "the replay of the state channel waits for the next tick: its queue is full",
+        );
+        let mut state = testing::fresh_state();
+        let item = (
+            json!({ "a": 7 }),
+            vec![(vec!["a".to_owned()], Stamp::new(9, "aa".to_owned()))],
+        );
+        while state.replay_queue.push(item.clone()) {}
+        assert_eq!(
+            state.replay_queue.remaining(),
+            0,
+            "the premise: the queue is full"
+        );
+
+        queue_replay(&mut state, item);
+
+        assert!(
+            state.doc(Channel::State).has_restores(),
+            "the replay waits in the document for the next tick"
+        );
+    }
+
     #[test]
     fn a_closing_digest_long_after_the_request_is_the_answer_of_no_request() {
         let mut state = state_that_waits_for_the_first_sync();
@@ -1309,7 +1341,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         ::habilis_network_test_tracing::expect_warn(
             "habilis_network::gossip",
-            "the replay of the state channel was dropped: its queue is full",
+            "the replay of the state channel waits for the next tick: its queue is full",
         );
         let mut state = testing::fresh_state();
         let cap = state.replay_queue.remaining();

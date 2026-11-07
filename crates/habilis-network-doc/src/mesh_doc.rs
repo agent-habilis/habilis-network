@@ -2764,6 +2764,17 @@ impl MeshDoc {
         }
     }
 
+    /// Put back what [`Self::take_restores`] took, when the caller cannot write it now: the values
+    /// wait for the next tick. The map is bounded as for any restore (`DOC_RESTORES_MAX` paths,
+    /// and a drop is counted and warned).
+    pub fn return_restores(&mut self, (patch, stamps): Restores) {
+        for (path, stamp) in stamps {
+            if let Some(value) = lookup(&patch, &path) {
+                self.keep_restore(path, (value.clone(), stamp));
+            }
+        }
+    }
+
     /// How many restores were dropped because the map of restores was full, since the document
     /// began. Each one is a newer write that this node could not write again.
     #[must_use]
@@ -7185,6 +7196,28 @@ mod tests {
             waits,
             vec![vec!["obj".to_owned(), "late".to_owned()]],
             "only the leaf waits: an object as a whole would replace the keys below it"
+        );
+    }
+
+    /// What `take_restores` took goes back, when the caller cannot write it now: the next call gives
+    /// it again.
+    #[test]
+    fn restores_that_were_taken_and_returned_are_taken_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut doc = doc_with_clock_at(9);
+        doc.restores.insert(
+            vec!["a".to_owned()],
+            (json!(7), Stamp::new(50, "aa".to_owned())),
+        );
+        let taken = doc.take_restores().expect("a restore waits");
+        assert!(!doc.has_restores(), "taking empties the map");
+
+        doc.return_restores(taken.clone());
+
+        assert_eq!(
+            doc.take_restores(),
+            Some(taken),
+            "the same patch and the same stamps come again"
         );
     }
 
