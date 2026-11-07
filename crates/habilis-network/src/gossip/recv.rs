@@ -751,6 +751,7 @@ pub(crate) async fn ingest_from(
             RetainMeta {
                 canonical: &canonical,
                 class: app_class.as_ref(),
+                wire_len: Some(Message::frame_len(&frame)),
             },
             state,
             context,
@@ -1148,6 +1149,7 @@ async fn handle_shard(
             RetainMeta {
                 canonical,
                 class: shard_class.as_ref(),
+                wire_len: None,
             },
             state,
             context,
@@ -1195,6 +1197,8 @@ async fn handle_shard(
 struct RetainMeta<'meta> {
     canonical: &'meta [u8],
     class: Option<&'meta AppClass>,
+    // the wire length of the frame, when the caller holds the bytes it came in
+    wire_len: Option<usize>,
 }
 
 /// Whether a frame that membership read goes into the log. A stale presence frame does not: it is
@@ -1217,7 +1221,11 @@ fn retain_and_index(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    let RetainMeta { canonical, class } = meta;
+    let RetainMeta {
+        canonical,
+        class,
+        wire_len,
+    } = meta;
     // App frames carry the app's per-tag policy (`classify`, computed once by the
     // caller and threaded in here); infra kinds (`class == None`) use the engine's
     // own rule. A beat is plumbing — never retained/indexed.
@@ -1246,13 +1254,17 @@ fn retain_and_index(
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, "message timestamp precedes a referenced parent; possible backdating");
         }
     }
-    push_to_log(state, message);
+    push_to_log(state, message, wire_len);
 }
 
 /// Push a retained message into the anti-entropy log, keeping the DAG + fork
 /// indexes bounded with the log window as the push evicts.
-pub(super) fn push_to_log(state: &mut EventLoopState, message: Verified) {
-    if let Some(evicted) = state.message_log.push(message) {
+pub(super) fn push_to_log(state: &mut EventLoopState, message: Verified, wire_len: Option<usize>) {
+    let evicted = match wire_len {
+        Some(len) => state.message_log.push_sized(message, len),
+        None => state.message_log.push(message),
+    };
+    if let Some(evicted) = evicted {
         let evicted_hash = evicted.content_hash();
         state.forget_hash(&evicted_hash);
         if let Some(seq) = evicted.seq {
@@ -1287,7 +1299,7 @@ pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: Verified
     // a peer still running the old resend behaviour is deduped at the gate
     // rather than double-pushed here.
     state.mark_seen(&message);
-    push_to_log(state, message);
+    push_to_log(state, message, None);
 }
 
 /// Keep an app broadcast that this node sent, when the app's class says it is loggable. The same
@@ -1308,7 +1320,7 @@ pub(crate) fn retain_own_app_broadcast(
         return;
     }
     state.mark_seen(message);
-    push_to_log(state, message.clone());
+    push_to_log(state, message.clone(), None);
 }
 
 /// Route a received `State`/`Meta` event to its channel doc, then — for `meta` —
@@ -2259,8 +2271,8 @@ mod retain_own_broadcast_tests {
         let theirs = joined(&them, "them");
         super::retain_own_broadcast(&mut them, theirs.clone());
         // Each side ingests the other's presence, as gossip delivers it.
-        super::push_to_log(&mut us, theirs);
-        super::push_to_log(&mut them, ours);
+        super::push_to_log(&mut us, theirs, None);
+        super::push_to_log(&mut them, ours, None);
 
         // We advertise what we hold; they compute what we are missing.
         let window = us.message_log.recent_window(64).expect("non-empty log");
@@ -5732,6 +5744,29 @@ mod dedup_counter_tests {
 
     fn wire(frame: &Verified) -> u64 {
         frame.serialize().expect("serialize").len() as u64
+    }
+
+    /// The receive path counts the bytes of a frame in the log from the bytes it came in as, and does
+    /// not serialize the message again. The count must be the length of the serialized frame, for a
+    /// frame as it was sent and for a resend, which carries a trailer outside the frame.
+    #[test]
+    fn the_log_counts_a_received_frame_by_the_length_it_came_in_with() {
+        let session = Identity::generate();
+        let frame = Message::new_joined(&MeshId::from("test"), &nick("alice")).sign(&session);
+        let wire = frame.serialize().expect("serialize");
+        let resent = wire.copy_with_resend_nonce(7);
+        let sent_len = wire.as_bytes().len();
+        for (bytes, how) in [(wire.into_bytes(), "sent"), (resent.into_bytes(), "resent")] {
+            let reader = reader_with(fresh_state(), vec![(Plane::Gossip, bytes)]);
+
+            let (held, held_bytes) = reader.message_log.size();
+
+            assert_eq!(held, 1, "a {how} frame is in the log");
+            assert_eq!(
+                held_bytes, sent_len,
+                "a {how} frame counts its serialized length"
+            );
+        }
     }
 
     /// An alive frame of a session, as the bytes that arrive on the gossip plane.

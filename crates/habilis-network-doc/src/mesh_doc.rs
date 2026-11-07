@@ -10,16 +10,18 @@ use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, SymmetricKey};
 use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
 use habilis_network_util::consts::{
-    DOC_CUT_BACKOFF_FIRST, DOC_CUT_BACKOFF_MAX, DOC_CUT_RANKS_SLOTTED, DOC_CUT_SLOT_TICKS,
-    DOC_CUT_SPREAD_TICKS, DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES,
-    DOC_EPOCH_FRAME_MARGIN, DOC_EPOCH_JUMP_MAX, DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
-    DOC_REPLAY_ENTRIES_MAX, DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX, DOC_SEED_TOMBSTONE_FRAME_BYTES,
-    DOC_SEED_TOMBSTONES_MAX, DOC_STATE_DEPTH_MAX, DOC_STATE_ENVELOPE_BYTES,
-    DOC_STATE_EPOCH_FRAME_CAP_BYTES, DOC_TOMBSTONE_PATH_BYTES_MAX, MAX_MESSAGE_SIZE,
+    DOC_CLOCK_WINDOW, DOC_CUT_BACKOFF_FIRST, DOC_CUT_BACKOFF_MAX, DOC_CUT_RANKS_SLOTTED,
+    DOC_CUT_SLOT_TICKS, DOC_CUT_SPREAD_TICKS, DOC_EPOCH_ADOPT_WAIT_TICKS,
+    DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_FRAME_MARGIN, DOC_EPOCH_JUMP_MAX, DOC_PENDING_AUTHOR_MAX,
+    DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX,
+    DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX, DOC_STATE_DEPTH_MAX,
+    DOC_STATE_ENVELOPE_BYTES, DOC_STATE_EPOCH_FRAME_CAP_BYTES, DOC_TOMBSTONE_PATH_BYTES_MAX,
+    MAX_MESSAGE_SIZE,
 };
 
 use crate::wire::SeedMark;
-use crate::{DocError, Limits, Stamp, pack_entry, wire};
+use crate::{DocError, Limits, Stamp, TimeSource, pack_entry, split, wire};
+use habilis_network_util::clock;
 
 use automerge::transaction;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -211,6 +213,12 @@ pub struct SeedChain {
     /// The paths of the chain that got the stamp 0 for want of a time: the cutter adds them to its
     /// count with [`MeshDoc::note_seed_built`].
     pub unstamped: u64,
+    /// The leaves that no frame of a seed can carry, so the chain leaves them out: a remote member
+    /// can make one with a deep object and a large leaf below it, in two frames that each fit.
+    /// The cutter adds them to its count with [`MeshDoc::note_seed_built`].
+    pub left_out: u64,
+    /// The path of the first leaf that the chain left out.
+    pub first_left_out: Option<Vec<String>>,
 }
 
 /// What a seed names: the stamps of its changes, and the tombstones of its root.
@@ -258,9 +266,9 @@ impl SeedPlan {
     /// The plan reads nothing from the document, so this runs on any thread.
     ///
     /// # Errors
-    /// [`DocError::TooLarge`] when one leaf does not fit a frame, [`DocError::SeedTooLong`] when
-    /// the seed needs more frames than a node accepts, and [`DocError::Encode`] when a merge does
-    /// not encode.
+    /// [`DocError::SeedTooLong`] when the seed needs more frames than a node accepts, and
+    /// [`DocError::Encode`] when a merge does not encode. A leaf that no frame can carry is left
+    /// out of the seed and counted in [`SeedChain::left_out`]: it is no error.
     pub fn build(
         &self,
         epoch: u64,
@@ -268,11 +276,9 @@ impl SeedPlan {
         fits: impl FnMut(&Value) -> bool,
     ) -> Result<SeedChain, DocError> {
         let mut within_frame = fits;
-        let cuts: Result<Vec<Value>, DocError> = pack_entry(&self.live, |merge| {
+        let (mut merges, left_out) = split::pack_carryable(&self.live, |merge| {
             count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
-        })
-        .collect();
-        let mut merges: Vec<Value> = cuts?;
+        });
         merges.retain(|merge| !matches!(merge, Value::Object(map) if map.is_empty()));
         if merges.len() > DOC_SEED_FRAMES_MAX {
             // A node refuses the root of such a seed, so the cutter does not send it. The live
@@ -342,6 +348,8 @@ impl SeedPlan {
             origins,
             tombstones: carried,
             unstamped,
+            left_out: left_out.count,
+            first_left_out: left_out.first,
         })
     }
 }
@@ -425,13 +433,20 @@ type OpIndex = HashMap<Vec<u8>, Vec<OpSpan>>;
 /// one call mostly share a few parents, so the walk from the root is made once for each of them.
 type ParentObjects = HashMap<Vec<String>, Option<ObjId>>;
 
-/// The bound of the Lamport time of a state change: 2^53, the largest whole number that a JSON
-/// number keeps exact. A change with a time at or above it is refused, so the clock stays below it
-/// and `next_time` never saturates in practice. This does not stop a signed member from writing a
-/// time far below the bound that is still far above the clock of the others: that member wins
-/// the conflicts of the leaves that it writes, which any member of an ungated channel can already
-/// do by overwriting them.
-const DOC_TIME_MAX: u64 = 1 << 53;
+/// `DOC_CLOCK_WINDOW` in milliseconds, the unit of a time. A signed member can still write a time
+/// inside the window that is above the clock of the others: its leaves win the conflicts for that
+/// long, which any member of an ungated channel can already do by overwriting them.
+const CLOCK_WINDOW_MS: u64 = clock::millis_saturating(DOC_CLOCK_WINDOW);
+
+/// Whether a change names an origin stamp or a tombstone stamp with a time above `own_time`.
+fn names_stamp_above(
+    origins: &[Stamp],
+    tombstones: &[(Vec<String>, Stamp)],
+    own_time: u64,
+) -> bool {
+    let origin = origins.iter().any(|stamp| stamp.time > own_time);
+    origin || tombstones.iter().any(|(_, stamp)| stamp.time > own_time)
+}
 
 /// The root frame of a higher epoch that the document keeps until it adopts the epoch.
 #[derive(Debug)]
@@ -569,6 +584,9 @@ pub struct DocCensus {
     pub refused_time: u64,
     /// The paths of a seed that got the stamp 0 for want of a time, since the document began.
     pub unstamped_paths: u64,
+    /// The leaves that the seeds of this node left out because no frame can carry them, since the
+    /// document began.
+    pub seed_left_out: u64,
     /// The restores that were dropped because the map of restores was full, since the document
     /// began.
     pub dropped_restores: u64,
@@ -700,14 +718,24 @@ pub struct MeshDoc {
     /// a rival seed must not see.
     adopting: bool,
     /// The Lamport clock of a state channel with state epochs: the highest time that this node
-    /// wrote or saw. A change takes the time `clock + 1`, so it is above every change that its
-    /// author saw. It never goes down and it does not restart at an epoch. At most `DOC_TIME_MAX`:
-    /// a change with a higher time is refused, so one integer is all the memory it needs.
+    /// wrote or saw, at most one window above the wall clock (a larger time that a seed brings
+    /// moves it only that far). A change takes the time `max(clock + 1, now)`, so it is above every
+    /// change that its author saw and the times of one author rise for ever, and it is a time of
+    /// the wall clock, a hybrid logical clock. It never goes down and it does not restart at an
+    /// epoch: after the wall clock of a node was wrong and is right again, the node stays
+    /// behind its own clock until the wall clock catches up, or until it restarts. One integer is
+    /// all the memory it needs.
     clock: AtomicU64,
+    /// Where this document reads the wall clock, for the bound of the times that it takes and
+    /// accepts.
+    time_source: TimeSource,
     /// The state changes that were refused for want of a valid time: one integer, which saturates.
     refused_time: u64,
     /// The paths of a seed that got the stamp 0 (see [`Self::unstamped_paths`]).
     unstamped: AtomicU64,
+    /// The leaves that the seeds of this node left out, since the document began (see
+    /// [`Self::seed_left_out`]): one integer.
+    left_out: AtomicU64,
     /// The values that this node holds with a stamp above the live stamp that a replay of another
     /// node just set: the replay won in automerge but has the lower stamp, so this node writes its
     /// value again (see [`Self::take_restores`]). At most `DOC_RESTORES_MAX` paths.
@@ -814,8 +842,10 @@ impl MeshDoc {
             state_epochs: false,
             adopting: false,
             clock: AtomicU64::new(0),
+            time_source: TimeSource::default(),
             refused_time: 0,
             unstamped: AtomicU64::new(0),
+            left_out: AtomicU64::new(0),
             restores: BTreeMap::new(),
             restores_dropped: 0,
             awaiting_sync: false,
@@ -889,6 +919,19 @@ impl MeshDoc {
         self
     }
 
+    /// Read the wall clock from `source`: the default is the clock of this machine.
+    #[must_use]
+    pub fn time_source(mut self, source: TimeSource) -> Self {
+        self.time_source = source;
+        self
+    }
+
+    /// [`Self::time_source`] for a document that is already in use: an embedder or a test that
+    /// owns the clock of the machine moves the source of a running node.
+    pub fn set_time_source(&mut self, source: TimeSource) {
+        self.time_source = source;
+    }
+
     /// Set this channel's encryption key (the daemon's per-channel
     /// mesh-password-derived key). `None` leaves the channel in plaintext.
     #[must_use]
@@ -939,7 +982,7 @@ impl MeshDoc {
             self.held_writes.fetch_add(1, Ordering::Relaxed);
             return Err(DocError::ClockNotReady);
         }
-        let time: Option<u64> = timed.then(|| self.next_time());
+        let time: Option<u64> = if timed { Some(self.next_time()?) } else { None };
         let plain = wire::change_body_timed(change, merge, self.epoch, None, time)?;
         let wire = match self.key.as_ref() {
             Some(key) => wire::encrypt_body(&plain, key)?,
@@ -973,7 +1016,7 @@ impl MeshDoc {
         if paths.len() > DOC_REPLAY_ENTRIES_MAX {
             return Err(DocError::TooLarge { bytes: paths.len() });
         }
-        let time = self.next_time();
+        let time = self.next_time()?;
         let fresh = Stamp::new(time, actor_tag(parsed.actor_id()));
         let named: HashMap<&Vec<String>, &Stamp> =
             stamps.iter().map(|(path, stamp)| (path, stamp)).collect();
@@ -1052,6 +1095,7 @@ impl MeshDoc {
             .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len()));
         let peer_slots = json.as_ref().map(|json| self.gated_slots(json));
         let unstamped_paths: u64 = self.unstamped.load(Ordering::Relaxed);
+        let seed_left_out: u64 = self.left_out.load(Ordering::Relaxed);
         let replay_unsettled: u64 = u64::try_from(self.restores.len()).unwrap_or(u64::MAX);
         DocCensus {
             epoch: self.epoch,
@@ -1063,6 +1107,7 @@ impl MeshDoc {
             peer_slots,
             refused_time: self.refused_time,
             unstamped_paths,
+            seed_left_out,
             dropped_restores: self.restores_dropped,
             replay_unsettled,
             refused_remote: self.refused_remote,
@@ -1326,6 +1371,13 @@ impl MeshDoc {
         Some(object)
     }
 
+    /// How many leaves the seeds of this node left out because no frame can carry them, since the
+    /// document began. A caller reads it for a gauge, so a left-out leaf is never silent.
+    #[must_use]
+    pub fn seed_left_out(&self) -> u64 {
+        self.left_out.load(Ordering::Relaxed)
+    }
+
     /// How many paths of a seed got the stamp 0 for want of a time, since the document began. A
     /// value that gets 0 loses to every replay, so the count says that a cut read a value with no
     /// time.
@@ -1334,24 +1386,45 @@ impl MeshDoc {
         self.unstamped.load(Ordering::Relaxed)
     }
 
-    /// How many state changes this document refused for want of a valid time: none, or above `DOC_TIME_MAX`. A caller reads it
+    /// How many state changes this document refused for want of a valid time: none, or above the clock window. A caller reads it
     /// for a gauge, so a refusal is never silent.
     #[must_use]
     pub fn refused_time(&self) -> u64 {
         self.refused_time
     }
 
-    /// Take the time of the next change of this node: one above the clock, which then holds it.
-    /// [`Self::compose_wire_body`] and [`Self::build_seed`] call it.
-    pub(crate) fn next_time(&self) -> u64 {
+    /// The highest time that this document accepts now: `windows` windows above the wall clock.
+    /// A single change and a replay frame get one window. A seed gets two, since it copies stamps
+    /// that its cutter accepted before, and the clock of an honest node can be behind the cutter.
+    fn time_limit(&self, windows: u64) -> u64 {
+        let ahead = CLOCK_WINDOW_MS.saturating_mul(windows);
+        self.time_source.now().saturating_add(ahead)
+    }
+
+    /// Take the time of the next change of this node: the larger of one above the clock and the
+    /// wall clock. The clock then holds it, so the times of one author rise for ever. A time is
+    /// never cut down to the bound: a time that is the same or lower than the last would break the
+    /// order of the writes of this author, and a write would vanish with no error.
+    ///
+    /// # Errors
+    /// [`DocError::ClockAhead`] when that time would be more than one window above the wall
+    /// clock. The clock is not moved.
+    /// [`Self::compose_wire_body`], [`Self::compose_replay_body`] and [`Self::seed_plan`] call it.
+    pub(crate) fn next_time(&self) -> Result<u64, DocError> {
+        let now = self.time_source.now();
+        let limit = self.time_limit(1);
         let taken = self
             .clock
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
-                Some(held.saturating_add(1).min(DOC_TIME_MAX))
+                let next = held.saturating_add(1).max(now);
+                (next <= limit).then_some(next)
             });
-        taken.map_or(DOC_TIME_MAX, |held| {
-            held.saturating_add(1).min(DOC_TIME_MAX)
-        })
+        match taken {
+            Ok(held) => Ok(held.saturating_add(1).max(now)),
+            Err(held) => Err(DocError::ClockAhead {
+                ahead_ms: held.saturating_add(1).max(now).saturating_sub(limit),
+            }),
+        }
     }
 
     /// Whether a candidate seed waits to be adopted. A node that holds one adopts it after the wait
@@ -1754,7 +1827,7 @@ impl MeshDoc {
             live,
             stamps,
             tombstones,
-            time: self.next_time(),
+            time: self.next_time()?,
         })
     }
 
@@ -1765,6 +1838,19 @@ impl MeshDoc {
             self.unstamped.fetch_add(chain.unstamped, Ordering::Relaxed);
             let zeros = chain.unstamped;
             tracing::warn!(target: LOG_TARGET, zeros, "a seed path got the stamp 0 for want of a time");
+        }
+        if chain.left_out > 0 {
+            self.left_out.fetch_add(chain.left_out, Ordering::Relaxed);
+            let leaves = chain.left_out;
+            let names: Vec<&str> = chain
+                .first_left_out
+                .iter()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            let joined: String = names.join("/");
+            let path: String = joined.chars().take(200).collect();
+            tracing::warn!(target: LOG_TARGET, leaves, path = %path, "a leaf that no frame of a seed can carry was left out of the seed");
         }
     }
 
@@ -1779,9 +1865,9 @@ impl MeshDoc {
     /// and [`Self::note_seed_built`] on the calling thread.
     ///
     /// # Errors
-    /// [`DocError::TooLarge`] when one leaf does not fit a frame, [`DocError::Encode`] when a
-    /// merge does not encode, and [`DocError::CandidateHeld`] when the document waits to adopt a
-    /// candidate seed.
+    /// [`DocError::Encode`] when a merge does not encode, and [`DocError::CandidateHeld`] when the
+    /// document waits to adopt a candidate seed. A leaf that no frame can carry is left out of the
+    /// seed, not an error.
     pub fn build_seed(
         &self,
         epoch: u64,
@@ -2119,6 +2205,16 @@ impl MeshDoc {
             }
             return Ingested::Ignored;
         }
+        // An honest node stamps a value with a time that it saw, so below the time of the frame
+        // that names the stamp. A stamp above it, such as a delete with `u64::MAX`, would stand for
+        // ever, since no later write can beat it.
+        if names_stamp_above(&parsed.origins, &parsed.tombstones, time.unwrap_or(0)) {
+            self.refused_time = self.refused_time.saturating_add(1);
+            if let Some(refused) = self.warn_due("a frame names a stamp above its own time") {
+                tracing::warn!(target: LOG_TARGET, refused, author = %frame.author, "a frame names a stamp above its own time");
+            }
+            return Ingested::Ignored;
+        }
         let Ok(change) = Change::from_bytes(parsed.bytes) else {
             return Ingested::Ignored;
         };
@@ -2134,7 +2230,7 @@ impl MeshDoc {
         if self.state_epochs && self.gate.is_none() {
             // A state change names its Lamport time, and a node that cannot place it before or
             // after its own writes would break the order of the replay rule.
-            let Some(stamped) = time.filter(|stamped| *stamped < DOC_TIME_MAX) else {
+            let Some(stamped) = time else {
                 self.refused_time = self.refused_time.saturating_add(1);
                 if let Some(refused) =
                     self.warn_due("a state change with no valid time was refused")
@@ -2143,7 +2239,31 @@ impl MeshDoc {
                 }
                 return Ingested::Ignored;
             };
-            self.clock.fetch_max(stamped, Ordering::Relaxed);
+            // A seed (a frame of another epoch, or one that the adoption applies) gets two windows.
+            let windows = if epoch != self.epoch || self.adopting {
+                2
+            } else {
+                1
+            };
+            let limit = self.time_limit(windows);
+            if stamped > limit {
+                // A time above the bound is a frame from the future of this node, or a node
+                // whose clock is wrong. The frame is forgotten, so that a digest or an answer
+                // brings it again after the clock was fixed.
+                self.refused_time = self.refused_time.saturating_add(1);
+                self.dropped.push(frame.dedup_key());
+                if let Some(refused) =
+                    self.warn_due("a state change above the clock window was refused")
+                {
+                    let ahead_ms = stamped - limit;
+                    tracing::warn!(target: LOG_TARGET, refused, ahead_ms, author = %frame.author, "a state change above the clock window was refused");
+                }
+                return Ingested::Ignored;
+            }
+            // A seed above one window raises the clock only to the bound of a single change: a
+            // node that is behind its cutter by less than a window must still be able to write.
+            self.clock
+                .fetch_max(stamped.min(self.time_limit(1)), Ordering::Relaxed);
         }
         if epoch != self.epoch {
             return self.ingest_other_epoch(epoch, &change, frame, mark);
@@ -3341,7 +3461,9 @@ fn seed_frame_body_len(path: &[String], value: &Value) -> usize {
     let Some(change) = changes.pop() else {
         return usize::MAX;
     };
-    let time = DOC_TIME_MAX - 1;
+    // The largest time of 13 digits: a time is the wall clock in milliseconds, so it has 13 digits
+    // until the year 2286.
+    let time: u64 = 9_999_999_999_999;
     let worst = [Stamp::new(time, "ffffffffffffffff".to_owned())];
     let bytes = change.raw_bytes();
     let body = wire::change_body_tombstoned(bytes, None, 1, None, Some(time), &worst, &[]);
@@ -3619,6 +3741,8 @@ mod tests {
     };
     use serde_json::{Map, Value, json};
     use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn nick(name: &str) -> Nickname {
         Nickname::from(name)
@@ -5025,6 +5149,74 @@ mod tests {
         doc
     }
 
+    /// Eleven nested keys of 200 bytes, and a leaf below them: the path alone is 2 200 bytes.
+    fn deep_key_path() -> Vec<String> {
+        (0..11)
+            .map(|level| format!("{level:02}{}", "k".repeat(198)))
+            .collect()
+    }
+
+    /// `leaf` at the end of `path`, as a merge from the root.
+    fn merge_at(path: &[String], leaf: &Value) -> Value {
+        path.iter()
+            .rev()
+            .fold(leaf.clone(), |inner, key| json!({ (key.as_str()): inner }))
+    }
+
+    /// A remote member makes a leaf that no frame of a seed can carry, in two frames that each
+    /// pass: the first makes the deep object, the second puts a leaf of 1 KB in it with a change
+    /// whose own path is short. The cut must not fail on it, for ever, on every node.
+    #[test]
+    fn a_leaf_that_no_seed_frame_can_carry_is_left_out_and_the_cut_goes_on() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a leaf that no frame of a seed can carry was left out of the seed",
+        );
+        let (alice, mallory) = (nick("alice"), nick("mallory"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let path = deep_key_path();
+        write(&mut doc, &alice, &merge_at(&path, &json!({ "kept": 1 })));
+        write(&mut doc, &alice, &json!({ "other": "value" }));
+        // The change is built by hand, into the object that frame 1 made: its own path is one key,
+        // so the check of a local write, which reads the path of a merge, cannot see the depth.
+        let mut fork = doc.doc.fork();
+        fork.set_actor(super::actor_for(&pad_seed(mallory.as_str().as_bytes())));
+        let mut object = automerge::ROOT;
+        for key in &path {
+            let (_, id) = automerge::ReadDoc::get(&fork, &object, key.as_str())
+                .expect("a read")
+                .expect("the object that frame 1 made");
+            object = id;
+        }
+        let heads = fork.get_heads();
+        let mut tx = fork.transaction();
+        tx.put(&object, "big", "x".repeat(1000)).expect("a put");
+        tx.commit();
+        let bytes = super::raw_changes(&fork, &heads).remove(0);
+        let body = change_body_timed(&bytes, None, 0, None, Some(doc.clock() + 1)).expect("a body");
+        let key = signer(&mallory);
+        let frame = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &mallory, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        ingest_applies(&mut doc, &frame);
+        // The size of a frame of a seed: the merge, and 1 000 bytes of envelope and margin.
+        let fits = |merge: &Value| merge.to_string().len() + 1000 <= 3840;
+
+        let chain = doc
+            .build_seed(5, b"cutter", fits)
+            .expect("the cut goes on without the leaf");
+
+        assert_eq!(
+            state_doc_of(&chain.changes, 5),
+            json!({ "other": "value", (path[0].as_str()): merge_at(&path[1..], &json!({ "kept": 1 })) }),
+            "the seed holds every leaf but the one that no frame can carry"
+        );
+        assert_eq!(doc.seed_left_out(), 1, "the leaf is counted");
+    }
+
     #[test]
     fn a_seed_chain_rebuilds_the_live_json_on_a_fresh_epoch() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -5106,13 +5298,25 @@ mod tests {
     }
 
     #[test]
-    fn a_leaf_that_does_not_fit_one_frame_is_an_error() {
+    fn a_leaf_that_does_not_fit_one_frame_is_left_out_of_the_seed() {
         let _guard = ::habilis_network_test_tracing::init();
-        let doc = state_doc_with(&json!({ "big": long(500) }));
-        let result = doc.build_seed(2, b"cutter", within(100));
-        assert!(
-            matches!(result, Err(DocError::TooLarge { .. })),
-            "a leaf over the frame cannot be cut: {result:?}"
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a leaf that no frame of a seed can carry was left out of the seed",
+        );
+        let doc = state_doc_with(&json!({ "big": long(500), "small": 1 }));
+        let chain = doc
+            .build_seed(2, b"cutter", within(100))
+            .expect("a leaf over the frame cannot be cut: the cut goes on without it");
+        assert_eq!(
+            state_doc_of(&chain.changes, 2),
+            json!({ "small": 1 }),
+            "the seed holds the leaves that fit"
+        );
+        assert_eq!(
+            (chain.left_out, chain.first_left_out),
+            (1, Some(vec!["big".to_owned()])),
+            "the chain names the leaf it left out"
         );
     }
 
@@ -5475,12 +5679,353 @@ mod tests {
         );
     }
 
+    /// A stamp that no honest node writes: above the time of the frame that carries it. A delete
+    /// with the stamp `u64::MAX` would stand for ever, since no later write can beat it.
     #[test]
-    fn a_time_at_the_top_of_the_range_is_refused_so_the_clock_cannot_be_pinned() {
+    fn a_replay_that_names_a_stamp_above_its_own_time_is_refused() {
         let _guard = ::habilis_network_test_tracing::init();
         ::habilis_network_test_tracing::expect_warn(
             "habilis_network::gossip",
-            "a state change with no valid time was refused",
+            "a frame names a stamp above its own time",
+        );
+        let (alice, mallory) = (nick("alice"), nick("mallory"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        write(&mut doc, &alice, &json!({ "config": { "a": 1 } }));
+        let bytes = change_of(
+            &doc,
+            &json!({ "config": null }),
+            &pad_seed(mallory.as_str().as_bytes()),
+        );
+        let stamp = Stamp::new(u64::MAX, "0000000000000000".to_owned());
+        let body = change_body_stamped(&bytes, None, 0, None, Some(2), &[stamp]).expect("a body");
+        let key = signer(&mallory);
+        let hostile = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &mallory, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+
+        let outcome = doc.ingest(&hostile);
+
+        assert!(
+            matches!(outcome, Ingested::Ignored),
+            "the frame is refused: {outcome:?}"
+        );
+        assert_eq!(
+            doc.to_json(),
+            json!({ "config": { "a": 1 } }),
+            "the delete did not apply"
+        );
+        assert_eq!(doc.refused_time(), 1, "the refusal is counted");
+    }
+
+    /// The same for the tombstones that the root of a seed carries.
+    #[test]
+    fn a_seed_root_that_names_a_tombstone_above_its_own_time_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a frame names a stamp above its own time",
+        );
+        let mallory = nick("mallory");
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let bytes = change_of(
+            &doc,
+            &json!({ "a": 1 }),
+            &pad_seed(mallory.as_str().as_bytes()),
+        );
+        let dead = [(
+            vec!["config".to_owned()],
+            Stamp::new(u64::MAX, "0000000000000000".to_owned()),
+        )];
+        let stamp = Stamp::new(1, "0000000000000000".to_owned());
+        let body = change_body_tombstoned(&bytes, None, 0, None, Some(1), &[stamp], &dead)
+            .expect("a body");
+        let key = signer(&mallory);
+        let hostile = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &mallory, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+
+        let outcome = doc.ingest(&hostile);
+
+        assert!(
+            matches!(outcome, Ingested::Ignored),
+            "the tombstone of u64::MAX is refused: {outcome:?}"
+        );
+        assert_eq!(doc.tombstones.len(), 0, "no tombstone stands");
+    }
+
+    /// The wall clock that the time tests of a document read, in milliseconds.
+    const NOW_MS: u64 = 1_700_000_000_000;
+
+    /// One window in milliseconds, as the document counts it.
+    const WINDOW_MS: u64 = 3_600_000;
+
+    // Shared: the test moves the clock, and the document reads it.
+    type WallClock = Arc<AtomicU64>;
+
+    /// A state document whose wall clock reads `now`, which a test moves with the cell.
+    fn doc_at(now: &WallClock) -> MeshDoc {
+        let cell = WallClock::clone(now);
+        let source = crate::TimeSource::new(move || cell.load(Ordering::Relaxed));
+        MeshDoc::new_ungated().state_epochs().time_source(source)
+    }
+
+    /// The cell that holds the wall clock of a test, at `now`.
+    fn wall_clock_at(now: u64) -> WallClock {
+        WallClock::new(AtomicU64::new(now))
+    }
+
+    /// A frame of `who` that writes `merge` at the time `time`, on a document that holds nothing.
+    fn frame_at(who: &Nickname, merge: &Value, time: u64) -> Verified {
+        let timeless = MeshDoc::new_ungated();
+        let bytes = change_of(&timeless, merge, &pad_seed(who.as_str().as_bytes()));
+        let body = change_body_timed(&bytes, None, 0, None, Some(time)).expect("a body");
+        let key = signer(who);
+        Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), who, body, Channel::State)
+                .unverified_key(key),
+            key,
+        )
+    }
+
+    /// The write that `doc` makes for `merge`: the time of its frame, or the error.
+    fn write_time(doc: &mut MeshDoc, who: &Nickname, merge: &Value) -> Result<u64, DocError> {
+        let seed = pad_seed(who.as_str().as_bytes());
+        let bytes = change_of(doc, merge, &seed);
+        let (wire, _plain) = doc.compose_wire_body(&bytes, None)?;
+        let key = signer(who);
+        let frame = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), who, wire, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        ingest_applies(doc, &frame);
+        Ok(time_of(&frame).expect("a state frame names its time"))
+    }
+
+    /// One frame at the top of the window holds the clock there. The writes of an honest node must
+    /// not stop for good: each one waits until the wall clock moves, never reuses a time, and never
+    /// sends a time above the bound.
+    #[test]
+    fn a_frame_at_the_top_of_the_window_does_not_pin_the_writes_of_an_honest_node() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, mallory) = (nick("me"), nick("mallory"));
+        let now = wall_clock_at(NOW_MS);
+        let mut doc = doc_at(&now);
+        ingest_applies(
+            &mut doc,
+            &frame_at(&mallory, &json!({ "held": 1 }), NOW_MS + WINDOW_MS),
+        );
+
+        let early = write_time(&mut doc, &me, &json!({ "a": 1 }));
+        assert!(
+            matches!(early, Err(DocError::ClockAhead { ahead_ms: 1 })),
+            "the next time would be 1 ms above the bound, so the write waits: {early:?}"
+        );
+        assert_eq!(
+            doc.clock(),
+            NOW_MS + WINDOW_MS,
+            "a refused write moves no clock"
+        );
+        let mut sent: Vec<u64> = Vec::new();
+        for step in 1..=3 {
+            now.store(NOW_MS + step, Ordering::Relaxed);
+            let time = write_time(&mut doc, &me, &json!({ "a": step })).expect("the bound moved");
+            assert!(
+                time <= NOW_MS + step + WINDOW_MS,
+                "no time above the bound is sent: {time}"
+            );
+            sent.push(time);
+        }
+
+        assert_eq!(
+            sent,
+            vec![
+                NOW_MS + WINDOW_MS + 1,
+                NOW_MS + WINDOW_MS + 2,
+                NOW_MS + WINDOW_MS + 3
+            ],
+            "the times of the node rise for ever, one above the frame of the forger"
+        );
+    }
+
+    /// A joiner at clock 0 gets a seed whose times are large but inside the window: it takes the
+    /// seed and its clock goes up to the time of the seed.
+    #[test]
+    fn a_joiner_at_clock_zero_takes_a_seed_with_large_times_inside_the_window() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let now = wall_clock_at(NOW_MS);
+        let mut old = doc_at(&now);
+        write(&mut old, &me, &json!({ "a": 1, "b": { "c": 2 } }));
+        let frames = seed_frames_of(&old, &cutter, 3, None);
+        let mut joiner = doc_at(&now).awaiting_first_sync();
+        assert_eq!(joiner.clock(), 0, "the premise: a joiner holds no time");
+
+        let first = joiner.ingest(&frames[0]);
+
+        assert!(
+            matches!(first, Ingested::NewEpoch { .. }),
+            "the seed passes: {first:?}"
+        );
+        assert_eq!(
+            joiner.clock(),
+            time_of(&frames[0]).expect("a seed root names its time"),
+            "the clock goes up to the time of the seed"
+        );
+        assert!(joiner.clock() >= NOW_MS, "a time is the wall clock");
+    }
+
+    /// A node that was offline for weeks writes above everything that it missed, and the old frames
+    /// that it missed (low times) pass.
+    #[test]
+    fn a_node_that_was_offline_for_weeks_writes_above_what_it_missed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, other) = (nick("me"), nick("other"));
+        let now = wall_clock_at(NOW_MS);
+        let mut busy = doc_at(&now);
+        let missed = write(&mut busy, &other, &json!({ "x": 1 }));
+        let mut offline = doc_at(&now);
+        let three_weeks = 21 * 24 * 3_600_000;
+        now.store(NOW_MS + three_weeks, Ordering::Relaxed);
+
+        ingest_applies(&mut offline, &missed);
+        let time = write_time(&mut offline, &me, &json!({ "y": 2 })).expect("a write");
+
+        assert_eq!(
+            time,
+            NOW_MS + three_weeks,
+            "the write takes the wall clock of today"
+        );
+        assert!(
+            time > time_of(&missed).expect("a time"),
+            "and it is above the frame that it missed"
+        );
+    }
+
+    /// A restart: the document is rebuilt by ingest, then its clock takes the maximum with the wall
+    /// clock, so its next write is above every write of its past.
+    #[test]
+    fn a_restarted_document_writes_above_its_whole_past() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let now = wall_clock_at(NOW_MS);
+        let mut before = doc_at(&now);
+        let mut past = Vec::new();
+        for step in 0..3 {
+            now.store(NOW_MS + step * 10, Ordering::Relaxed);
+            past.push(write(&mut before, &me, &json!({ "k": step })));
+        }
+        let mut restarted = doc_at(&now);
+        for frame in &past {
+            ingest_applies(&mut restarted, frame);
+        }
+
+        let time = write_time(&mut restarted, &me, &json!({ "k": 9 })).expect("a write");
+
+        let highest: u64 = past.iter().filter_map(time_of).max().expect("times");
+        assert!(time > highest, "{time} is above {highest}");
+    }
+
+    /// A seed copies stamps that its cutter accepted: it gets two windows. A seed at 1.5 windows
+    /// passes and a seed at 2.5 windows does not.
+    #[test]
+    fn a_seed_is_accepted_at_one_and_a_half_windows_and_refused_at_two_and_a_half() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a state change above the clock window was refused",
+        );
+        let (cutter, me) = (nick("cutter"), nick("me"));
+        let seed_at = |ahead: u64| {
+            let cutters_now = wall_clock_at(NOW_MS + ahead);
+            let mut doc = doc_at(&cutters_now);
+            write(&mut doc, &me, &json!({ "a": 1 }));
+            seed_frames_of(&doc, &cutter, 3, None)
+        };
+        let receivers_now = wall_clock_at(NOW_MS);
+
+        let near = doc_at(&receivers_now).ingest(&seed_at(WINDOW_MS * 3 / 2)[0]);
+        let mut far_doc = doc_at(&receivers_now);
+        let far = far_doc.ingest(&seed_at(WINDOW_MS * 5 / 2)[0]);
+
+        assert!(
+            matches!(near, Ingested::NewEpoch { .. }),
+            "1.5 windows: {near:?}"
+        );
+        assert!(matches!(far, Ingested::Ignored), "2.5 windows: {far:?}");
+        assert_eq!(far_doc.refused_time(), 1, "the refusal is counted");
+    }
+
+    /// A node whose wall clock is 2 hours ahead is refused by the others and the refusal is
+    /// counted. A frame that came by gossip is forgotten, so that it can come again: after the
+    /// clock of the receiver moved, it is accepted.
+    #[test]
+    fn a_frame_refused_for_its_time_is_accepted_after_the_time_source_moved() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a state change above the clock window was refused",
+        );
+        let (skewed, me) = (nick("skewed"), nick("me"));
+        let skewed_now = wall_clock_at(NOW_MS + 2 * WINDOW_MS);
+        let mut ahead = doc_at(&skewed_now);
+        let frame = write(&mut ahead, &skewed, &json!({ "a": 1 }));
+        let receivers_now = wall_clock_at(NOW_MS);
+        let mut doc = doc_at(&receivers_now);
+
+        let refused = doc.ingest(&frame);
+
+        assert!(
+            matches!(refused, Ingested::Ignored),
+            "2 hours ahead: {refused:?}"
+        );
+        assert_eq!(doc.refused_time(), 1, "the refusal is counted");
+        let forgotten: Vec<DedupKey> = doc.take_dropped().collect();
+        assert_eq!(
+            forgotten,
+            vec![frame.dedup_key()],
+            "the key is forgotten, so the frame can come again"
+        );
+        receivers_now.store(NOW_MS + 2 * WINDOW_MS, Ordering::Relaxed);
+        let accepted = doc.ingest(&frame);
+        assert!(
+            matches!(accepted, Ingested::Applied { .. }),
+            "after the clock moved: {accepted:?}"
+        );
+        let _ = me;
+    }
+
+    /// A node whose wall clock was ahead and is right again keeps its clock: its writes wait
+    /// (typed error, nothing sent) until the wall clock catches up. It never sends a time that it
+    /// already sent.
+    #[test]
+    fn a_node_whose_clock_was_ahead_and_is_fixed_refuses_to_write_until_it_catches_up() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = nick("me");
+        let now = wall_clock_at(NOW_MS + 2 * WINDOW_MS);
+        let mut doc = doc_at(&now);
+        let sent = write_time(&mut doc, &me, &json!({ "a": 1 })).expect("a write");
+        now.store(NOW_MS, Ordering::Relaxed);
+
+        let refused = write_time(&mut doc, &me, &json!({ "a": 2 }));
+
+        assert!(
+            matches!(refused, Err(DocError::ClockAhead { .. })),
+            "the clock is more than a window ahead of the fixed wall clock: {refused:?}"
+        );
+        assert_eq!(doc.clock(), sent, "the clock did not move");
+    }
+
+    #[test]
+    fn a_time_above_the_clock_window_is_refused_so_the_clock_cannot_be_pinned() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a state change above the clock window was refused",
         );
         let me = nick("me");
         let build = |time: u64| {
@@ -5498,14 +6043,15 @@ mod tests {
                 key,
             )
         };
-        let top = super::DOC_TIME_MAX;
-        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let top = NOW_MS + WINDOW_MS;
+        let now = wall_clock_at(NOW_MS);
+        let mut doc = doc_at(&now);
         assert!(
-            matches!(doc.ingest(&build(top - 1)), Ingested::Applied { .. }),
+            matches!(doc.ingest(&build(top)), Ingested::Applied { .. }),
             "the highest time that is allowed"
         );
-        let mut pinned = MeshDoc::new_ungated().state_epochs();
-        for refused in [top, top + 1] {
+        let mut pinned = doc_at(&now);
+        for refused in [top + 1, top + 2] {
             assert!(
                 matches!(pinned.ingest(&build(refused)), Ingested::Ignored),
                 "a time of {refused} is refused"
@@ -5908,7 +6454,7 @@ mod tests {
 
     /// The tombstones of a document that deleted `count` paths of 40 bytes, with growing stamps.
     fn doc_with_tombstones(count: usize) -> MeshDoc {
-        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let mut doc = doc_with_clock_at(u64::try_from(count).unwrap_or(0));
         for index in 0..count {
             let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
             doc.add_tombstone(vec![format!("{index:040}")], stamp);
@@ -5970,7 +6516,7 @@ mod tests {
     /// The tombstones of a document that deleted `count` paths of 250 bytes (the longest path
     /// that a tombstone keeps is 256 bytes), with growing stamps.
     fn doc_with_long_tombstones(count: usize) -> MeshDoc {
-        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let mut doc = doc_with_clock_at(u64::try_from(count).unwrap_or(0));
         for index in 0..count {
             let stamp = Stamp::new(u64::try_from(index).unwrap_or(0) + 1, "aa".to_owned());
             doc.add_tombstone(vec![format!("{index:0250}")], stamp);
@@ -6099,6 +6645,7 @@ mod tests {
         );
         // A replay brought back `gone` and `o.gone`, but a delete of a higher stamp governs them.
         let high = Stamp::new(99, "aa".to_owned());
+        doc.clock.fetch_max(99, Ordering::Relaxed);
         doc.add_tombstone(vec!["gone".to_owned()], high.clone());
         doc.add_tombstone(vec!["o".to_owned(), "gone".to_owned()], high);
         let frames = seed_frames_of(&doc, &cutter, 3, None);
@@ -6128,7 +6675,7 @@ mod tests {
         let first = write(&mut doc, &mine, &json!({ "shared": 9 }));
         // A replay of another node sets `shared = 5` at the stamp 50, and automerge keeps it (the
         // actor of that node is the higher one), so this node plans to write 9 again.
-        let replayer = MeshDoc::new_ungated().state_epochs();
+        let replayer = doc_with_clock_at(50);
         let change = change_of(
             &replayer,
             &json!({ "shared": 5 }),
@@ -6288,7 +6835,13 @@ mod tests {
         merge: &Value,
         stamps: &[(Vec<String>, Stamp)],
     ) -> Verified {
-        let replayer = MeshDoc::new_ungated().state_epochs();
+        // A node holds only stamps that it saw, so its clock is at or above every stamp it names.
+        let named: u64 = stamps
+            .iter()
+            .map(|(_, stamp)| stamp.time)
+            .max()
+            .unwrap_or(0);
+        let replayer = doc_with_clock_at(named);
         let change = change_of(&replayer, merge, &pad_seed(other.as_str().as_bytes()));
         let body = replayer
             .compose_replay_body(&change, stamps)
@@ -7223,7 +7776,7 @@ mod tests {
         }
         let timeless = MeshDoc::new_ungated();
         let change = change_of(&timeless, &merge, &pad_seed(b"me"));
-        let time = super::DOC_TIME_MAX - 1;
+        let time: u64 = 9_999_999_999_999;
         let worst = Stamp::new(time, "ffffffffffffffff".to_owned());
         let body = change_body_tombstoned(&change, None, 1, None, Some(time), &[worst], &[]);
         body.map_or(usize::MAX, |body| body.as_str().len())

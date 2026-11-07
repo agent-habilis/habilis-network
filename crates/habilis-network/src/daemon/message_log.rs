@@ -5,7 +5,7 @@ mod digest_window;
 mod missing_query;
 mod window_range;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use crate::protocol::messages::{Verified, sole_addressee};
 use crate::protocol::{AuthorKey, DedupKey, MessageKind, PresenceSubtype, UnixSecs};
@@ -52,8 +52,9 @@ pub struct MessageLog {
     /// and both mutation sites are in [`Self::push`], so it cannot drift. Every held message is
     /// a [`Verified`], so it has an author key: there is no unsigned entry to special-case.
     per_author: HashMap<AuthorKey, usize>,
-    /// The dedup key of every held message, so a frame that is pushed twice is held once.
-    keys: HashSet<DedupKey>,
+    /// The dedup key of every held message, so a frame that is pushed twice is held once, with the
+    /// wire length of the frame, so that an eviction takes its bytes off the sum with no serialization.
+    lens: HashMap<DedupKey, usize>,
     /// The wire bytes of every held frame, kept as a running sum so that the census gauge costs no
     /// walk. The log holds whole signed frames, so this is what it keeps, not the text of the
     /// bodies: a presence frame has no body.
@@ -71,7 +72,7 @@ impl MessageLog {
             capacity,
             messages: VecDeque::with_capacity(capacity),
             per_author: HashMap::new(),
-            keys: HashSet::new(),
+            lens: HashMap::new(),
             frame_bytes: 0,
         }
     }
@@ -89,11 +90,22 @@ impl MessageLog {
     pub fn push(&mut self, message: Verified) -> Option<Verified> {
         // A frame that is already held is held once: two paths that retain the same frame
         // (an author that logs its own send and a consumer that pushes it too) cost a lookup.
-        if !self.keys.insert(message.dedup_key()) {
+        if self.lens.contains_key(&message.dedup_key()) {
             return None;
         }
+        let len = wire_len(&message);
+        self.push_sized(message, len)
+    }
+
+    /// [`Self::push`] for a frame whose wire length the caller holds, as the receive path does:
+    /// the frame came in as bytes, so the message is not serialized again to count them.
+    pub fn push_sized(&mut self, message: Verified, wire_len: usize) -> Option<Verified> {
+        if self.lens.contains_key(&message.dedup_key()) {
+            return None;
+        }
+        self.lens.insert(message.dedup_key(), wire_len);
         *self.per_author.entry(message.key()).or_default() += 1;
-        self.frame_bytes += wire_len(&message);
+        self.frame_bytes += wire_len;
         self.messages.push_back(message);
         if self.messages.len() <= self.capacity {
             return None;
@@ -101,8 +113,8 @@ impl MessageLog {
         let victim = self.eviction_index();
         let evicted = self.messages.remove(victim);
         if let Some(gone) = &evicted {
-            self.keys.remove(&gone.dedup_key());
-            self.frame_bytes = self.frame_bytes.saturating_sub(wire_len(gone));
+            let held = self.lens.remove(&gone.dedup_key()).unwrap_or(0);
+            self.frame_bytes = self.frame_bytes.saturating_sub(held);
         }
         if let Some(gone) = &evicted
             && let Some(held) = self.per_author.get_mut(&gone.key())
@@ -157,7 +169,7 @@ impl MessageLog {
     }
 
     pub(crate) fn contains(&self, key: &DedupKey) -> bool {
-        self.keys.contains(key)
+        self.lens.contains_key(key)
     }
 
     /// Drop the presence frames of `author` and return them, so the caller can prune the indexes
@@ -186,8 +198,8 @@ impl MessageLog {
             }
         });
         for gone in &dropped {
-            self.keys.remove(&gone.dedup_key());
-            self.frame_bytes = self.frame_bytes.saturating_sub(wire_len(gone));
+            let held = self.lens.remove(&gone.dedup_key()).unwrap_or(0);
+            self.frame_bytes = self.frame_bytes.saturating_sub(held);
         }
         match self.per_author.get_mut(author) {
             Some(held) if *held > dropped.len() => *held -= dropped.len(),

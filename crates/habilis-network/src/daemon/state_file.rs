@@ -277,9 +277,14 @@ impl StateFile {
         fs::rename(&temp, &self.path)
     }
 
-    /// Delete the state file. Safe to call on a path that does not exist.
+    /// Delete the state file, and the member key and the run counter that live beside it. A process
+    /// that leaves takes its identity with it: the next process with the same pid, which names the
+    /// same state file, starts as a new member. Safe to call on a path that does not exist.
     pub(crate) fn remove(&self) {
         let _ = fs::remove_file(&self.path);
+        for extension in ["key", "run", "run.tmp"] {
+            let _ = fs::remove_file(self.path.with_extension(extension));
+        }
     }
 }
 
@@ -886,6 +891,35 @@ mod tests {
         assert!(path.exists(), "the file exists before remove is called");
         state_file.remove();
         assert!(!path.exists(), "remove deletes the file");
+    }
+
+    /// The member key and the run counter live beside the state file, named for it. A process that
+    /// leaves must not leave them for the next process with the same pid: that process would take the
+    /// member identity and the run count of the one that left.
+    #[test]
+    fn remove_clears_the_member_key_and_the_run_counter() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("remove-keys");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        );
+        state_file.write(0, false);
+        let beside: Vec<PathBuf> = ["key", "run", "run.tmp"]
+            .map(|extension| path.with_extension(extension))
+            .into();
+        for file in &beside {
+            fs::write(file, b"x").expect("a file beside the state file");
+        }
+
+        state_file.remove();
+
+        for file in &beside {
+            assert!(!file.exists(), "remove deletes {}", file.display());
+        }
     }
 
     #[test]

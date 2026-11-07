@@ -24,8 +24,9 @@ use crate::protocol::peer_addr_error;
 use crate::transport;
 use crate::transport::{proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
-use n0_future::task;
 use n0_future::time::Instant as n0future_Instant;
+use n0_future::{task, time};
+use std::time::Duration;
 use tokio::sync::oneshot;
 /// Build → sign → deliver one outbound `App` frame — the payload-generic
 /// counterpart to the application's own (chain-stamping, sharding, sealing) chat /
@@ -576,6 +577,39 @@ pub enum Farewell {
 /// # }
 /// ```
 pub async fn broadcast_state_merge(
+    state: &mut EventLoopState,
+    params: StateMergeParams<'_>,
+) -> Result<(), transport::SendError> {
+    let mut waited: u32 = 0;
+    loop {
+        let written = write_state_merge(state, params.clone()).await;
+        let clock_ahead = matches!(
+            written,
+            Err(transport::SendError::State(
+                transport::StateRefusal::ClockAhead
+            ))
+        );
+        if !clock_ahead || waited >= CLOCK_AHEAD_RETRIES {
+            return written;
+        }
+        // The clock of the document is at the top of its window: the next time is 1 ms above the
+        // bound, and the bound moves with the wall clock. Nothing was sent and no time was taken,
+        // so the write waits a millisecond and tries again. The wait is short and bounded: the
+        // loop is held at most `CLOCK_AHEAD_RETRIES` ms, and only while a clock is wrong.
+        waited += 1;
+        time::sleep(CLOCK_AHEAD_STEP).await;
+    }
+}
+
+/// How many times a write that finds the clock of the shared state ahead of this machine tries
+/// again, a millisecond apart, before it gives `ClockAhead` to the caller.
+const CLOCK_AHEAD_RETRIES: u32 = 50;
+
+/// The wait between two tries of a write that found the clock ahead.
+const CLOCK_AHEAD_STEP: Duration = Duration::from_millis(1);
+
+/// One try of [`broadcast_state_merge`].
+async fn write_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
 ) -> Result<(), transport::SendError> {

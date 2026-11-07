@@ -4,6 +4,7 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
+mod batch_slots;
 mod in_flight_dial;
 mod registration;
 mod timeouts;

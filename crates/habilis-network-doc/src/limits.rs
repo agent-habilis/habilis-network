@@ -88,8 +88,9 @@ impl Limits {
     }
 
     /// The bytes that the stamp of one path adds to a seed frame when the clock is at `clock`: the
-    /// digits of the clock and `DOC_STATE_STAMP_BYTES_BASE`. The Lamport time is below `2^53`, so
-    /// the figure is at most 25.
+    /// digits of the clock and `DOC_STATE_STAMP_BYTES_BASE`. A time is the wall clock in
+    /// milliseconds, which has 13 digits until the year 2286, so the figure is 22 for a clock that
+    /// follows the wall clock, and 10 to 16 for the small clocks of a test.
     #[must_use]
     pub fn stamp_bytes(clock: u64) -> usize {
         let digits = usize::try_from(clock.checked_ilog10().unwrap_or(0)).unwrap_or(0) + 1;

@@ -46,7 +46,9 @@
 ///   peer. A `13.0` peer and a `14.0` peer do not form a mesh: each side refuses every frame of
 ///   the other, with an error that names the wire version and its own. Without the bump a node
 ///   that writes no `t` would have all its state writes refused by a node that reads it, with no
-///   report.
+///   report. The meaning of `t` is a time of the wall clock in milliseconds (a hybrid logical
+///   clock): a node takes `max(clock + 1, now)` and refuses a `t` more than 1 hour above its own
+///   wall clock (2 hours for the frames of a seed, which copy the stamps of their cutter).
 /// - `13.0` — the change body of the `state` and `meta` channels may carry an epoch key `e` (left
 ///   out at epoch 0), and the digest window ids are Base64 and not Base58. The recipient of a
 ///   directed frame (`to` of an `app` and of a `pong` frame) is an author key, not a nickname. A

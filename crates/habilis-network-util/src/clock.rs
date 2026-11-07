@@ -24,7 +24,6 @@ pub use web_time::{Instant, SystemTime};
 
 use std::time::Duration;
 
-#[cfg(any(test, feature = "test-fixtures"))]
 use web_time::UNIX_EPOCH;
 
 /// Nanoseconds since the Unix epoch. Returns 0 on pre-1970 clocks
@@ -63,6 +62,14 @@ pub const fn millis_saturating(duration: Duration) -> u64 {
         .as_secs()
         .saturating_mul(1000)
         .saturating_add(duration.subsec_millis() as u64)
+}
+
+/// Milliseconds since the Unix epoch, 0 on a clock before 1970. Portable: it reads the clock of the
+/// browser on wasm32.
+#[must_use]
+pub fn unix_millis() -> u64 {
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok();
+    since_epoch.map_or(0, millis_saturating)
 }
 
 #[cfg(test)]
