@@ -85,6 +85,10 @@ async function runOnce(arm: "plain" | "counters", pair: number, attempt: number,
   }
   const summary = Bun.spawnSync([process.execPath, `${HERE}/summarize.ts`, folder]);
   writeFileSync(`${folder}/summary.txt`, summary.stdout.toString() + summary.stderr.toString());
+  if (summary.exitCode !== 0) {
+    log(`run ${label}: summarization failed; see ${folder}/summary.txt`);
+    process.exit(1);
+  }
   const bad = Object.entries(phases).filter(([, gate]) => !gate.ok).map(([name]) => name);
   log(`run ${label} done: ${Object.entries(phases).map(([n, g]) => `${n} median ${g.median.toFixed(2)} max ${g.max.toFixed(2)}`).join("; ")}${bad.length ? `; VOID (${bad.join(",")})` : ""}`);
   if (bad.length > 0) return { arm, pair, folder: markVoid(folder), phases, void: true };
@@ -137,7 +141,12 @@ for (let pair = 1; pair <= PAIRS; pair++) {
     for (const arm of order) done.push(await runValid(arm, pair));
     const ab = abGate(done[0]!.phases.idle1!.median, done[1]!.phases.idle1!.median);
     log(`pair ${pair} A/B idle1 load1 ratio ${ab.ratio.toFixed(2)} ${ab.ok ? "ok" : "FAILED"}`);
-    if (ab.ok || round === 1) {
+    if (!ab.ok && round === 1) {
+      for (const run of done) run.folder = markVoid(run.folder);
+      log(`pair ${pair}: the A/B gate failed on both attempts, the two pairs are void; stop`);
+      process.exit(1);
+    }
+    if (ab.ok) {
       kept.push(...done);
       pairs.push({ pair, ab, runs: done.map((run) => run.folder) });
       break;
