@@ -347,7 +347,7 @@ fn follow_own_write(state: &mut EventLoopState, merge: &serde_json::Value) {
 
 /// RFC 7386: an object patch merges into `target` key by key, `null` deletes a key, and any other
 /// value replaces what is there.
-fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+pub(crate) fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
     let serde_json::Value::Object(fields) = patch else {
         *target = patch.clone();
         return;
@@ -1431,13 +1431,34 @@ mod tests {
         );
     }
 
-    /// A send that never works does not keep the switch for ever.
+    /// Two switches before the sweep writes: the entry that the first one kept is not lost to the
+    /// partial entry of the second (the document held only the writes since the first switch).
+    #[test]
+    fn a_second_switch_keeps_the_fields_of_the_queued_entry() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let first = serde_json::json!({ "card": 1, "status": "idle", "note": "kept" });
+        let partial = serde_json::json!({ "status": "busy" });
+        state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(first)));
+
+        state.note_epoch_switch(EpochSwitch::new(2, "peers".to_owned(), Some(partial)));
+
+        let kept = state.epoch_write.switch.expect("a switch waits").own_entry;
+        assert_eq!(
+            kept,
+            Some(serde_json::json!({ "card": 1, "status": "busy", "note": "kept" })),
+            "the newer write wins and the older fields stay"
+        );
+    }
+
+    /// A send that never works does not keep the switch for ever: it is given up at the last of
+    /// `DOC_EPOCH_WRITE_ATTEMPTS` failed sweeps.
     #[test]
     fn a_switch_whose_write_keeps_failing_is_given_up() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let switch = || EpochSwitch::new(1, "peers".to_owned(), Some(serde_json::json!({"a": 1})));
-        for attempt in 1..=DOC_EPOCH_WRITE_ATTEMPTS {
+        for attempt in 1..DOC_EPOCH_WRITE_ATTEMPTS {
             assert!(
                 state.retry_epoch_switch(switch()),
                 "attempt {attempt} waits"
