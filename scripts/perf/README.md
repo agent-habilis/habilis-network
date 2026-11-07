@@ -204,7 +204,21 @@ gives 29.7 MB show how the RSS per daemon grows with N.
 - Start gate: load1 is at most 2.0 now, and at most 2.5 in the 3 min before. (First values 1.5 and 2.0: the host idles at 1.5 to 1.76 with no daemon of ours, so that gate never opened.) The driver waits up to 20 min.
 - Phase gate: the median load1 of a phase is at most 4.0, and the max is at most 6.0. A run with a phase over
   the gate is void and runs again, twice at most.
-- A/B gate: the idle1 medians of the two arms of a pair are within 35 percent. A pair that fails runs once more. A void run or a failed pair stays on disk, and its folder name starts with `void-`.
+- Fairness gate: the two arms of a pair start from the same host state. The load1 of the 3 min before each arm
+  started (the start window) must pass the start gate, and the medians of the two windows are within 35 percent. The
+  load that an arm makes is not an input. A pair that fails runs once more. A void run or a failed pair stays on disk,
+  and its folder name starts with `void-`.
+
+### Change of the pair gate, 2026-11-07
+
+The pair gate was changed after it failed. The first version, the A/B gate, compared the median load1 of the idle1
+phase of the two arms (limit 35 percent). It was made for two equal arms. On 2026-11-07 the main run compared
+B-prime with HEAD, and HEAD makes less load. Pair 1 failed the A/B gate twice (ratios 1.59 and 1.92), so the driver
+stopped and the four runs were void. The idle1 load1 medians were 2.25 and 2.45 for B-prime, and 1.41 and 1.28 for
+HEAD. The two attempts agree with each other, so the difference came from the arms and not from the host. A gate that
+wants equal load cannot pass a real improvement. The fairness gate asks for equal host state before the arms start
+and does not look at the load that the arms make. The phase gates did not change. The four void runs stay on disk
+and are reported as repeats that no gate checked, next to the result of the new gate.
 
 `b4.ts` runs pairs of arm a (the plain baseline, for CPU) and arm b (the baseline with counters, for bytes and
 the ratio), in turn, with the order swapped in every second pair. Both arms have the same warm-up (300 s of

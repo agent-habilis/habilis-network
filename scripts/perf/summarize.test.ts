@@ -253,3 +253,18 @@ test("data attributed to both the loaded phase and idle2 gives one set of ratio 
   expect(text).toContain("idle2_meta_bps_per_daemon=10.0");
 });
 
+test("a node whose census says it holds the whole roster counts as full, with no per-node row in summary.txt", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "summarize-"));
+  const census = (roster: number) => `${new Date(T0 + 30_000).toISOString()}  INFO habilis_network::lifecycle: mesh census roster_len=${roster} link_len=${roster}\n`;
+  // Three nodes: the first two hold both other members, the third holds only one.
+  writeFileSync(`${dir}/n1.err`, census(1) + census(2));
+  writeFileSync(`${dir}/n2.err`, census(2));
+  writeFileSync(`${dir}/n3.err`, census(1));
+  // The runner writes one aggregate line to summary.txt, never a per-node row.
+  writeFileSync(`${dir}/summary.txt`, "run1 full=0/3 isolated=0 roster_med=- min=-\n");
+  const text = run(dir).stdout.toString();
+  expect(text).toContain("full=2/3");
+  expect(text).toContain("roster_med=2");
+  expect(text).toContain("min=1");
+});
+

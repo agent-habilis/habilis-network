@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 // The main benchmark run, one step after the other, with the clock time of every step written to
-// <out>/schedule.log: the pairs of HEAD against B-prime, then the CPU curve of B-prime, then the curve of HEAD.
+// <out>/schedule.log: the pairs of HEAD against B-prime, then the CPU curve of HEAD, then the curve of B-prime (the
+// last step is the one to drop when the time is short).
 // It stops at the first step that fails (a stopped b4.ts says why in its own b4.log).
 //
-// usage: bun run-main.ts --head <binary> --bprime <binary> --out <folder> [--pairs 3] [--reps 3]
+// usage: bun run-main.ts --head <binary> --bprime <binary> --out <folder> [--pairs 2] [--reps 3]
 // Run it after `ulimit -n 10240`, under `caffeinate -dimsu`, on the quiet host.
 
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -16,7 +17,7 @@ const need = (name: string) => flags.get(name) ?? (console.error(`missing --${na
 const HEAD = need("head");
 const BPRIME = need("bprime");
 const OUT = need("out");
-const PAIRS = flags.get("pairs") ?? "3";
+const PAIRS = flags.get("pairs") ?? "2";
 const REPS = flags.get("reps") ?? "3";
 const HERE = import.meta.dir;
 mkdirSync(OUT, { recursive: true });
@@ -33,12 +34,12 @@ const steps: { name: string; args: string[] }[] = [
     args: ["--plain", BPRIME, "--plain-loaded", "300", "--counters", HEAD, "--pairs", PAIRS, "--nodes", "16", "--out-root", path.join(OUT, "pairs")],
   },
   {
-    name: "curve-bprime",
-    args: ["--plain", BPRIME, "--counters", BPRIME, "--curve", "8,12,16,20", "--reps", REPS, "--out-root", path.join(OUT, "curve-bprime")],
-  },
-  {
     name: "curve-head",
     args: ["--plain", HEAD, "--counters", HEAD, "--curve", "8,12,16,20", "--reps", REPS, "--out-root", path.join(OUT, "curve-head")],
+  },
+  {
+    name: "curve-bprime",
+    args: ["--plain", BPRIME, "--counters", BPRIME, "--curve", "8,12,16,20", "--reps", REPS, "--out-root", path.join(OUT, "curve-bprime")],
   },
 ];
 
