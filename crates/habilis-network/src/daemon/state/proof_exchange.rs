@@ -363,12 +363,12 @@ mod tests {
             Identity::generate().author_key(),
         );
         let mut book = ProofExchange::with_cap(QUIET_CAP);
-        let first_proof = first.prove(&first_session, nickname.as_ref(), &mesh.as_ref(), 1);
+        let first_proof = first.prove(&first_session, nickname.as_ref(), mesh.as_ref(), 1);
         assert!(
             book.accept(&first_session, &nickname, &mesh, first_proof, |_| false),
             "the proof of the first member is held while no session of it is in the roster"
         );
-        let second_proof = second.prove(&second_session, nickname.as_ref(), &mesh.as_ref(), 1);
+        let second_proof = second.prove(&second_session, nickname.as_ref(), mesh.as_ref(), 1);
         assert!(
             book.accept(&second_session, &nickname, &mesh, second_proof, |key| {
                 *key == second_session

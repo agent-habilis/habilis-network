@@ -69,6 +69,21 @@ impl ServeBudget {
         }
     }
 
+    /// Record an answer that went out on gossip, and, when it fell back from a unicast answer, the serve of
+    /// the connection too.
+    pub(crate) fn note_fallback(
+        &mut self,
+        gossip: (Asker, Channel, Plane),
+        connection: Option<(Asker, Channel, Plane)>,
+        heads: u64,
+        now: Instant,
+    ) {
+        self.note(gossip, heads, now);
+        if let Some(key) = connection {
+            self.note(key, heads, now);
+        }
+    }
+
     /// Record an answer to these heads, dropping windows that have ended.
     pub(crate) fn note(&mut self, key: (Asker, Channel, Plane), heads: u64, now: Instant) {
         self.windows

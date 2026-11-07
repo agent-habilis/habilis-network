@@ -1,5 +1,7 @@
 use crate::{beacon, transport};
 use iroh_gossip::{api, net, proto};
+#[cfg(all(unix, feature = "host"))]
+use std::fs::File;
 use std::path::Path;
 use std::{mem, sync};
 #[cfg(feature = "host")]
@@ -670,13 +672,14 @@ fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
 /// identity of this member, so a file that another user could have planted is not loaded.
 #[cfg(all(unix, feature = "host"))]
 fn untrusted_key_file(key_path: &Path) -> Option<&'static str> {
+    use rustix::process::geteuid;
     use std::fs;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     let meta = fs::symlink_metadata(key_path).ok()?;
     if !meta.file_type().is_file() {
         return Some("it is not a regular file");
     }
-    if meta.uid() != rustix::process::geteuid().as_raw() {
+    if meta.uid() != geteuid().as_raw() {
         return Some("another user owns it");
     }
     if meta.permissions().mode() & 0o077 != 0 {
@@ -736,7 +739,7 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
 /// Take the exclusive lock on `<state>.run.lock`, which makes the allocation of a run one step across
 /// processes and threads. It waits for the holder, and the lock goes with the returned file.
 #[cfg(all(unix, feature = "host"))]
-fn lock_run_counter(state: &Path) -> Result<std::fs::File> {
+fn lock_run_counter(state: &Path) -> Result<File> {
     use std::fs::OpenOptions;
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = OpenOptions::new();

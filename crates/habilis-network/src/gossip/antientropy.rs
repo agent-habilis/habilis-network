@@ -813,17 +813,16 @@ pub(crate) async fn handle_state_digest(
             let _ = context.sender.broadcast(answer).await;
         }
         answered.broadcast = count;
-        state
-            .state_digest_serves
-            .note(serve(Plane::Gossip, target), heads, now);
         // A unicast answer that fell back to gossip still counts against the connection: a member that
         // rotates author keys on one connection has a gossip budget for each key, and without this the
         // eight answers of the connection would never run out.
-        if plane == Plane::Unicast {
-            state
-                .state_digest_serves
-                .note(serve(Plane::Unicast, target), heads, now);
-        }
+        let connection = (plane == Plane::Unicast).then(|| serve(Plane::Unicast, target));
+        state.state_digest_serves.note_fallback(
+            serve(Plane::Gossip, target),
+            connection,
+            heads,
+            now,
+        );
     } else {
         answered.unicast = count;
         state
