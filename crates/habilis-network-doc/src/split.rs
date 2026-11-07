@@ -105,6 +105,21 @@ fn pack(
     packed: &mut Vec<Result<Value, DocError>>,
     left_out: &mut LeftOut,
 ) {
+    // A root that is not an object (a scalar, an array, null) has no key to build a merge around:
+    // it is the one leaf, and `fits` is asked about the value itself. Built into a merge it would be
+    // the empty object, which any frame accepts, and the value would be lost.
+    if !entry.is_object() {
+        if fits(entry) {
+            packed.push(Ok(entry.clone()));
+        } else {
+            packed.push(Err(DocError::TooLarge {
+                bytes: json_len(entry),
+            }));
+            left_out.count = left_out.count.saturating_add(1);
+            left_out.first.get_or_insert_with(Vec::new);
+        }
+        return;
+    }
     let mut leaves: Vec<Leaf> = Vec::new();
     collect_leaves(entry, &mut Vec::new(), &mut leaves);
     if leaves.is_empty() {
@@ -440,6 +455,30 @@ mod tests {
         assert!(
             first[0].get("a").is_some() && first[0].get("b").is_none(),
             "the key that sorts first goes first"
+        );
+    }
+
+    /// An entry whose root is a scalar or an array has no key to build a merge around: it is the one
+    /// leaf, and it is asked about as it is. It was packed as the empty merge, which any frame accepts,
+    /// so the value was lost.
+    #[test]
+    fn a_root_that_is_not_an_object_is_one_leaf_and_is_not_replaced_by_an_empty_merge() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for root in [json!(5), json!("text"), json!([1, 2, 3]), json!(null)] {
+            let items = pack(&root, |_| true);
+
+            assert_eq!(items.len(), 1, "one leaf, one merge: {root}");
+            assert_eq!(
+                items[0].as_ref().ok(),
+                Some(&root),
+                "the value itself, not an empty merge: {root}"
+            );
+        }
+        let big = json!("x".repeat(500));
+        let items = pack(&big, |merge| merge.to_string().len() <= 100);
+        assert!(
+            matches!(items.as_slice(), [Err(DocError::TooLarge { bytes })] if *bytes > 500),
+            "a root that is too large is refused, with its own size: {items:?}"
         );
     }
 

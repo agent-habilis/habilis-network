@@ -26,6 +26,7 @@ import { homedir, loadavg, cpus, hostname, platform } from "node:os";
 import path from "node:path";
 import { availableBytes } from "./avail.ts";
 import { chooseNodes } from "./choose-n.ts";
+import { type OracleLine, missingDeliveries, payloadFor, payloadId } from "./delivery.ts";
 
 const flags = new Map<string, string>();
 const positional: string[] = [];
@@ -62,6 +63,7 @@ const MAX_PEERS = flags.get("max-peers") ?? "";
 const maxPeers = MAX_PEERS ? ["--max-peers", MAX_PEERS] : [];
 const PERIOD = num("period", 30);
 const DRAIN_MAX = 120;
+const DELIVERY_WAIT = 60;
 const PAYLOAD = "x".repeat(200);
 
 const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
@@ -123,8 +125,18 @@ const stateFile = (i: number) => `${OUT}/state/${nick(i)}.json`;
 let gossip = "";
 let seq = 0;
 
-function oracle(sender: string, kind: string, receivers: number, bytes: number): void {
-  appendFileSync(`${OUT}/oracle.jsonl`, JSON.stringify({ sender, kind, receivers, bytes, seq: seq++, ts: Date.now() }) + "\n");
+// A chat send gets its own id at once, before its first await, so two daemons never share one.
+let payloadSeq = 0;
+const nextPayloadId = () => String(payloadSeq++);
+// What each node received: the ids of the chat payloads that its poll served. The delivery proof reads it.
+const received = new Map<string, Set<string>>();
+
+function oracle(sender: string, kind: string, receivers: number, bytes: number, extra: { to?: string[]; payload_id?: string } = {}): void {
+  appendFileSync(`${OUT}/oracle.jsonl`, JSON.stringify({ sender, kind, receivers, bytes, seq: seq++, ts: Date.now(), ...extra }) + "\n");
+}
+
+function oracleLines(): OracleLine[] {
+  return readFileSync(`${OUT}/oracle.jsonl`, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as OracleLine);
 }
 
 // A workload send that fails is no delivery: stop before the oracle counts it.
@@ -283,6 +295,10 @@ async function listen(i: number): Promise<void> {
       continue;
     }
     for (const event of events) {
+      if (event.event === "message" && !event.self) {
+        const id = payloadId(String(event.body ?? ""));
+        if (id !== null) received.set(me, (received.get(me) ?? new Set<string>()).add(id));
+      }
       if (event.event !== "task" || event.self || event.to !== me) continue;
       const task = event.task_id as string;
       appendFileSync(
@@ -293,20 +309,20 @@ async function listen(i: number): Promise<void> {
         // The worker: working, then the artifact. The initiator approves, and then the worker completes.
         open.set(task, event.author);
         await send(["a2a", "status", "--gossip", gossip, "--nickname", me, "--task-id", task, "--state", "working"]);
-        oracle(me, "task_status", 1, 0);
+        oracle(me, "task_status", 1, 0, { to: [event.author] });
         await send(["a2a", "artifact", "--gossip", gossip, "--nickname", me, "--task-id", task, "--text", PAYLOAD]);
-        oracle(me, "task_artifact", 1, PAYLOAD.length);
+        oracle(me, "task_artifact", 1, PAYLOAD.length, { to: [event.author] });
       } else if (event.kind === "artifact-update" && once("approve", task)) {
         // The initiator: approve the result.
         await send([
           "a2a", "call", "--gossip", gossip, "--nickname", me, "--to", event.author,
           "--method", "SendMessage", "--task-id", task, "--text", "approved",
         ]);
-        oracle(me, "task_status", 1, "approved".length);
+        oracle(me, "task_status", 1, "approved".length, { to: [event.author] });
       } else if (event.kind === "message" && event.state === "working" && open.has(task) && once("complete", task)) {
         open.delete(task);
         await send(["a2a", "status", "--gossip", gossip, "--nickname", me, "--task-id", task, "--state", "completed"]);
-        oracle(me, "task_status", 1, 0);
+        oracle(me, "task_status", 1, 0, { to: [event.author] });
         completed++;
       }
     }
@@ -323,12 +339,16 @@ async function load(i: number, until: number): Promise<void> {
     const started = Date.now();
     const others = Array.from({ length: NODES }, (_, k) => nick(k + 1)).filter((n) => n !== me);
     const to = others[Math.floor(random() * others.length)] ?? me;
-    await send(["a2a", "broadcast", "--gossip", gossip, "--nickname", me, "--text", PAYLOAD]);
-    oracle(me, "broadcast", NODES - 1, PAYLOAD.length);
-    await send(["a2a", "msg", "--gossip", gossip, "--nickname", me, "--to", to, "--text", PAYLOAD]);
-    oracle(me, "msg", 1, PAYLOAD.length);
+    const broadcastId = nextPayloadId();
+    const broadcastText = payloadFor(broadcastId);
+    await send(["a2a", "broadcast", "--gossip", gossip, "--nickname", me, "--text", broadcastText]);
+    oracle(me, "broadcast", NODES - 1, broadcastText.length, { to: others, payload_id: broadcastId });
+    const msgId = nextPayloadId();
+    const msgText = payloadFor(msgId);
+    await send(["a2a", "msg", "--gossip", gossip, "--nickname", me, "--to", to, "--text", msgText]);
+    oracle(me, "msg", 1, msgText.length, { to: [to], payload_id: msgId });
     await send(["a2a", "call", "--gossip", gossip, "--nickname", me, "--to", to, "--method", "SendMessage", "--label", "bench", "--text", PAYLOAD]);
-    oracle(me, "task_brief", 1, PAYLOAD.length);
+    oracle(me, "task_brief", 1, PAYLOAD.length, { to: [to] });
     submitted++;
     await sleep(Math.max(0, PERIOD - (Date.now() - started) / 1000));
   }
@@ -367,6 +387,15 @@ await phase("loaded", LOADED, async () => {
   const drainBy = Date.now() + DRAIN_MAX * 1000;
   while (completed < submitted && Date.now() < drainBy) await sleep(1);
   if (completed < submitted) await abort(`${submitted - completed} task exchange(s) still open ${DRAIN_MAX} s after the load stopped`);
+  // The oracle counts a payload for each recipient: a recipient that did not get it (a node that is down, a
+  // lost frame) means that the data bytes are counted for nothing, so the run fails.
+  const proofBy = Date.now() + DELIVERY_WAIT * 1000;
+  let missing = missingDeliveries(oracleLines(), received);
+  while (missing.length > 0 && Date.now() < proofBy) {
+    await sleep(2);
+    missing = missingDeliveries(oracleLines(), received);
+  }
+  if (missing.length > 0) await abort(`${missing.length} payload(s) were counted and not received: ${missing.slice(0, 5).join("; ")}`);
 });
 await phase("idle2", IDLE);
 

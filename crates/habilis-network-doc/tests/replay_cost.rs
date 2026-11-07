@@ -8,10 +8,11 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use habilis_network_doc::{MeshDoc, Stamp, wire};
+use habilis_network_doc::{Ingested, MeshDoc, Stamp, wire};
 use habilis_network_protocol::messages::{MessageBody, Verified};
 use habilis_network_protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
 use serde_json::{Map, Value, json};
@@ -67,6 +68,30 @@ fn parse_size(text: &str) -> Option<usize> {
     text.trim().parse().ok()
 }
 
+/// Ingest `frame` and check that the document took it: the time of a frame that the document
+/// refuses is the time of a refusal, and it is no measurement of the cost of a replay.
+fn take(doc: &mut MeshDoc, frame: &Verified, what: &str) {
+    let outcome = doc.ingest(frame);
+    assert!(
+        matches!(outcome, Ingested::Applied { .. }),
+        "{what}: the document did not take the frame: {outcome:?}"
+    );
+}
+
+/// Ingest `frames` until the document refuses one, and say how many it took. A document that is
+/// full (over the line that refuses a write that adds) refuses what comes: the cost of the frames
+/// that it took is a measurement, and the refused ones are not.
+fn take_until_refused(doc: &mut MeshDoc, frames: &[Verified]) -> usize {
+    let mut taken = 0;
+    for frame in frames {
+        if !matches!(doc.ingest(frame), Ingested::Applied { .. }) {
+            break;
+        }
+        taken += 1;
+    }
+    taken
+}
+
 /// The time and the bytes allocated that `step` took.
 fn measured<Out>(step: impl FnOnce() -> Out) -> (Out, Duration, usize) {
     let before = ALLOCATED.load(Ordering::Relaxed);
@@ -79,15 +104,32 @@ fn measured<Out>(step: impl FnOnce() -> Out) -> (Out, Duration, usize) {
     )
 }
 
-/// A replay frame of 127 leaves under `rep{index}`, written by a node whose actor is above all
-/// the others, so it wins the conflicts, as the worst case.
-fn replay_frame(index: usize) -> Verified {
-    frame_of("zzz", &format!("rep{index:03}"), 5, true)
+/// The writer of frame `index`: one for each frame, since a change is named by its actor and its
+/// sequence number, and two frames of one actor with the same number and other content are refused
+/// by the document. The names start with `z`, so each actor is above every other writer of the
+/// document and wins the conflicts, as the worst case.
+fn writer_of(index: usize) -> String {
+    format!("z{index:03}")
 }
 
-/// The same change as a plain frame, for a document with no state epochs.
+/// The stamp tag of `writer`: the first 8 bytes of its actor, in hex.
+fn tag_of(writer: &str) -> String {
+    pad(writer)[..8]
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("a write to a string");
+            hex
+        })
+}
+
+/// A replay frame of 127 leaves under `rep{index}`, written by the writer of `index`.
+fn replay_frame(index: usize) -> Verified {
+    frame_of(&writer_of(index), &format!("rep{index:03}"), 5, true)
+}
+
+/// The same change by the same writer as a plain frame, for a document with no state epochs.
 fn plain_frame(index: usize) -> Verified {
-    frame_of("zzz", &format!("rep{index:03}"), 5, false)
+    frame_of(&writer_of(index), &format!("rep{index:03}"), 5, false)
 }
 
 /// The frame of one writer for the object `object` with 127 leaves: a replay frame with the stamp
@@ -101,7 +143,7 @@ fn frame_of(writer: &str, object: &str, time: u64, replay: bool) -> Verified {
         leaves.insert(format!("r{leaf:03}"), json!(leaf));
         stamps.push((
             vec![object.to_owned(), format!("r{leaf:03}")],
-            Stamp::new(time, "7a7a7a7a00000000".to_owned()),
+            Stamp::new(time, tag_of(writer)),
         ));
     }
     let merge = json!({ object: Value::Object(leaves) });
@@ -155,8 +197,10 @@ fn the_cost_of_a_replay_frame_and_of_a_burst() {
         let ((), fill_time, fill_bytes) = measured(|| fill(&mut doc, &mut base, leaves));
         let replay = replay_frame(0);
         let plain = plain_frame(0);
-        let (_, replay_time, replay_bytes) = measured(|| doc.ingest(&replay));
-        let (_, plain_time, plain_bytes) = measured(|| base.ingest(&plain));
+        let ((), replay_time, replay_bytes) =
+            measured(|| take(&mut doc, &replay, "the one replay frame"));
+        let ((), plain_time, plain_bytes) =
+            measured(|| take(&mut base, &plain, "the one plain frame"));
         eprintln!(
             "COST leaves={leaves} fill={fill_time:?}/{fill_bytes}B one replay frame: {replay_time:?}/{replay_bytes}B, the same change as a plain frame: {plain_time:?}/{plain_bytes}B"
         );
@@ -165,12 +209,12 @@ fn the_cost_of_a_replay_frame_and_of_a_burst() {
         let plains: Vec<Verified> = (1..=96).map(plain_frame).collect();
         let ((), burst_time, burst_bytes) = measured(|| {
             for frame in &replays {
-                doc.ingest(frame);
+                take(&mut doc, frame, "a replay frame of the burst");
             }
         });
         let ((), plain_burst_time, plain_burst_bytes) = measured(|| {
             for frame in &plains {
-                base.ingest(frame);
+                take(&mut base, frame, "a plain frame of the burst");
             }
         });
         eprintln!(
@@ -180,18 +224,11 @@ fn the_cost_of_a_replay_frame_and_of_a_burst() {
         // object, so every frame hides the leaves of the frames before it.
         let same = same_leaf_burst(true);
         let same_plain = same_leaf_burst(false);
-        let ((), same_time, same_bytes) = measured(|| {
-            for frame in &same {
-                doc.ingest(frame);
-            }
-        });
-        let ((), same_plain_time, same_plain_bytes) = measured(|| {
-            for frame in &same_plain {
-                base.ingest(frame);
-            }
-        });
+        let (same_taken, same_time, same_bytes) = measured(|| take_until_refused(&mut doc, &same));
+        let (same_plain_taken, same_plain_time, same_plain_bytes) =
+            measured(|| take_until_refused(&mut base, &same_plain));
         eprintln!(
-            "COST leaves={leaves} same-leaf burst of 96 replay frames: {same_time:?}/{same_bytes}B, the same as plain frames: {same_plain_time:?}/{same_plain_bytes}B"
+            "COST leaves={leaves} same-leaf burst of 96 replay frames, {same_taken} taken: {same_time:?}/{same_bytes}B, the same as plain frames, {same_plain_taken} taken: {same_plain_time:?}/{same_plain_bytes}B"
         );
     }
 }

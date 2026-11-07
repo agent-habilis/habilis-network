@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use habilis_network_doc::{Ingested, MeshDoc, SeedChain, Stamp, wire};
+use habilis_network_doc::{Ingested, MeshDoc, SeedChain, SeedPlan, wire};
 use habilis_network_protocol::messages::{MessageBody, Verified};
 use habilis_network_protocol::{AuthorKey, Channel, Identity, MeshId, Message, Nickname};
 use habilis_network_util::consts::{DOC_EPOCH_FRAME_MARGIN, MAX_MESSAGE_SIZE};
@@ -18,6 +18,9 @@ use serde_json::{Map, Value, json};
 const MARK_ROOM: usize = 64;
 /// The Lamport clock at the start, so the times have 7 digits, as in a mesh that has run a while.
 const CLOCK_START: u64 = 5_000_000;
+/// The largest time of a frame, 13 digits, as the daemon measures a frame of a seed with (the plan
+/// of a document that follows the wall clock has a time of 13 digits).
+const LARGEST_TIME: u64 = 9_999_999_999_999;
 /// The writers that take turns to write the plain frames, so a seed frame carries many tags.
 const WRITERS: usize = 128;
 /// How many times the seed is built for one document, for the spread of the time.
@@ -100,18 +103,6 @@ fn merge_of(shape: Shape, first: usize, count: usize) -> Value {
     json!({ "live": level })
 }
 
-fn leaf_count(value: &Value) -> usize {
-    match value {
-        Value::Object(fields) if !fields.is_empty() => fields.values().map(leaf_count).sum(),
-        Value::Object(_)
-        | Value::Null
-        | Value::Bool(_)
-        | Value::Number(_)
-        | Value::String(_)
-        | Value::Array(_) => 1,
-    }
-}
-
 /// The key that signs the frames of this measurement.
 fn identity() -> &'static Identity {
     static IDENTITY: OnceLock<Identity> = OnceLock::new();
@@ -129,17 +120,12 @@ fn wire_fits(body: MessageBody) -> bool {
         .is_ok_and(|wire| wire.as_bytes().len() + DOC_EPOCH_FRAME_MARGIN <= MAX_MESSAGE_SIZE)
 }
 
-/// The tag of the writer number `position`, 16 hexadecimal digits.
-fn tag_of(position: usize) -> String {
-    let number = u64::try_from(position).expect("a number");
-    format!("{:016x}", 0x7a7a_0000_0000_0000_u64 + number)
-}
-
-/// Whether the real frame of `merge`, with the stamps of a seed, is inside a frame. The stamps
-/// are those of a mesh that has run a while: a time of 7 digits, and a tag of any of the writers.
-fn frame_fits(merge: &Value) -> bool {
+/// Whether the real frame of `merge`, with the stamps of the plan of the seed, is inside a frame, as
+/// the daemon asks it. The stamps are the plan's own, so the time and the tags of the frame are
+/// those of the document that is measured.
+fn frame_fits(plan: &SeedPlan, merge: &Value) -> bool {
     let call_started = Instant::now();
-    let answer = frame_fits_inner(merge);
+    let answer = frame_fits_inner(plan, merge);
     FITS_CALLS.fetch_add(1, Ordering::Relaxed);
     let nanos = u64::try_from(call_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
     FITS_NANOS.fetch_add(nanos, Ordering::Relaxed);
@@ -150,18 +136,14 @@ fn frame_fits(merge: &Value) -> bool {
 static FITS_CALLS: AtomicUsize = AtomicUsize::new(0);
 static FITS_NANOS: AtomicU64 = AtomicU64::new(0);
 
-fn frame_fits_inner(merge: &Value) -> bool {
+fn frame_fits_inner(plan: &SeedPlan, merge: &Value) -> bool {
     let timeless = MeshDoc::new_ungated();
     let built = timeless.build_change(merge, &pad("seed"));
     let Ok(Some(change)) = built else {
         return true;
     };
-    let mut stamps: Vec<Stamp> = Vec::new();
-    for position in 0..leaf_count(merge) {
-        let time = CLOCK_START + u64::try_from(position).expect("a small number");
-        stamps.push(Stamp::new(time, tag_of(position % WRITERS)));
-    }
-    let root = Some(CLOCK_START);
+    let stamps: Vec<_> = plan.stamps_for(merge).collect();
+    let root = Some(LARGEST_TIME);
     let body = wire::change_body_tombstoned(&change, None, 1, None, root, &stamps, &[]);
     let Ok(body) = body else {
         return false;
@@ -365,7 +347,8 @@ fn measure(shape: Shape, leaves: usize) {
         FITS_CALLS.store(0, Ordering::Relaxed);
         FITS_NANOS.store(0, Ordering::Relaxed);
         let cut_started = Instant::now();
-        let built = doc.build_seed(1, &pad(me.as_str()), frame_fits);
+        let plan = doc.seed_plan().expect("a plan");
+        let built = plan.build(1, &pad(me.as_str()), |merge| frame_fits(&plan, merge));
         builds.push(cut_started.elapsed());
         last = Some(built.expect("the live values split"));
     }

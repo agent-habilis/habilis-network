@@ -726,7 +726,8 @@ The socket module compiles out on wasm32, and a browser binds nothing.
 `habilis-network-ffi` exposes opaque handles and blocking calls, declared in `include/habilis_network.h`.
 A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages and reads the shared state as JSON.
 A send names a nickname (`habilis_network_msg_send`) or an author key (`habilis_network_msg_send_to_key`).
-A nickname that a member key proved names one member. A nickname that no member key proved can be used by two live members, so it names no member, and a key does.
+A nickname names its one live member, whether or not a member key proved it. If no live member uses the nickname, it names the one quiet member that does, because a quiet member can return.
+A send refuses a nickname that two or more live members use, or that two or more quiet members use when no live member does. An author key names exactly one member, and it is the way to reach a member whose nickname is shared.
 A receive with `habilis_network_msg_recv` gives the key of the author in `habilis_network_msg.key`.
 The struct has 144 bytes on a 64-bit target and no size field, so a caller built with an older header must be rebuilt.
 A stream node (`habilis_network_streams_*`, `habilis_network_stream_*`) creates and opens byte streams (§9.4).
