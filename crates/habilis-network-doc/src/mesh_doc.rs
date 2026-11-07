@@ -2504,10 +2504,16 @@ impl MeshDoc {
             _ => adopted,
         };
         if !beats(&frame.key(), &standing) {
-            if self.refused_rivals.len() >= 8 {
-                self.refused_rivals.remove(0);
+            // The author of a seed that stands is no rival of its own seed, and a rival that is
+            // listed has the rest of its chain refused: a second root of the standing author must
+            // not take its later frames from the pending buffer.
+            let own_seed = frame.key() == standing || frame.key() == adopted;
+            if !own_seed {
+                if self.refused_rivals.len() >= 8 {
+                    self.refused_rivals.remove(0);
+                }
+                self.refused_rivals.push(frame.key());
             }
-            self.refused_rivals.push(frame.key());
             return self.refuse_frame(frame);
         }
         let kept = Candidate::new(self.epoch, frame.clone(), change, mark);
@@ -5632,6 +5638,34 @@ mod tests {
             doc.to_json(),
             live,
             "the document holds the live json of the seed"
+        );
+    }
+
+    /// The author of the adopted seed is no rival of its own seed. A second root of the same
+    /// author does not take its place, and it must not put that author on the list of rivals that
+    /// lost: its later frames would be refused instead of kept until their dependencies arrive.
+    #[test]
+    fn a_second_root_of_the_adopted_author_does_not_make_it_a_refused_rival() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter) = (nick("me"), nick("cutter"));
+        let frames = seed_frames(&cutter, &live_state(), 3, None);
+        let writes = writes_after_the_seed(&cutter, &frames, 2);
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        for frame in &frames {
+            doc.ingest(frame);
+        }
+        assert!(
+            ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS).is_some(),
+            "the premise: the seed is adopted"
+        );
+        let second = seed_frames(&cutter, &json!({ "other": 1 }), 3, None).remove(0);
+        doc.ingest(&second);
+
+        let orphan = doc.ingest(&writes[1]);
+
+        assert!(
+            matches!(orphan, Ingested::Buffered),
+            "a write of the author that waits for its dependency is kept: {orphan:?}"
         );
     }
 
