@@ -15,11 +15,14 @@ import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, loadavg } from "node:os";
 import path from "node:path";
 
-const [arm = "", app = "", engine = ""] = process.argv.slice(2);
+const [arm = "", app = "", engineArg = ""] = process.argv.slice(2);
 if (!arm || !app) {
   console.error("usage: build-arm.ts <arm> <app worktree> [<engine worktree>]");
   process.exit(2);
 }
+// Cargo reads the patch paths from the app worktree, so a relative engine path is resolved here, against
+// the folder of the call.
+const engine = engineArg ? path.resolve(engineArg) : "";
 const ENGINE_URL = "https://github.com/agent-habilis/habilis-network";
 
 function run(cmd: string[], cwd: string, env: Record<string, string> = {}): { code: number; out: string } {
@@ -53,30 +56,30 @@ const env = { CARGO_TARGET_DIR: target };
 const cargo = ["cargo", ...overrides, "build", "--release", "-p", "agent-gossip", "--bin", "agent-gossip"];
 const load = loadavg()[0] ?? 0;
 const started = Date.now();
-const build = run(cargo, app, env);
-if (build.code !== 0) {
-  console.error(build.out.split("\n").slice(-30).join("\n"));
+// An override makes cargo rewrite Cargo.lock; every way out puts it back, so the next arm starts from the commit.
+const restoreLock = () => run(["git", "checkout", "--", "Cargo.lock"], app);
+function fail(message: string): never {
+  restoreLock();
+  console.error(message);
   process.exit(1);
 }
+const build = run(cargo, app, env);
+if (build.code !== 0) fail(build.out.split("\n").slice(-30).join("\n"));
 const seconds = Math.round((Date.now() - started) / 1000);
 
 // One copy of the engine must be in the graph: the override replaced the pinned one.
 const tree = run(["cargo", ...overrides, "tree", "-i", "habilis-network"], app, env).out;
 const copies = [...tree.matchAll(/^habilis-network v\S+ \(([^)]*)\)/gm)].map((found) => found[1]);
-if (new Set(copies).size !== 1) {
-  console.error(`expected one habilis-network copy, found: ${copies.join(" | ") || tree}`);
-  process.exit(1);
-}
+if (new Set(copies).size !== 1) fail(`expected one habilis-network copy, found: ${copies.join(" | ") || tree}`);
 // A git copy here means that cargo did not take the override: the binary has the engine that the app pins.
 if (engine && !copies.every((copy) => copy?.startsWith(path.join(engine, "crates")))) {
-  console.error(`the engine override was not applied: habilis-network comes from ${copies.join(" | ")}`);
-  process.exit(1);
+  fail(`the engine override was not applied: habilis-network comes from ${copies.join(" | ")}`);
 }
 
 const lockRewritten = run(["git", "status", "--porcelain", "--", "Cargo.lock"], app).out.trim() !== "";
 const record_app = { path: app, ...describe(app), lock_rewritten_by_override: lockRewritten };
 // The worktree is ours: put the lock file back, so that the next arm starts from the commit.
-if (lockRewritten) run(["git", "checkout", "--", "Cargo.lock"], app);
+if (lockRewritten) restoreLock();
 
 const dir = path.join(homedir(), "bench-results", "baseline");
 mkdirSync(path.join(dir, arm), { recursive: true });
