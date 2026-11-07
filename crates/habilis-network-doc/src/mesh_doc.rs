@@ -19,7 +19,7 @@ use habilis_network_util::consts::{
 };
 
 use crate::wire::SeedMark;
-use crate::{DocError, Limits, Stamp, pack_entry, wire};
+use crate::{DocError, Limits, Stamp, pack_entry, split, wire};
 
 use automerge::transaction;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -211,6 +211,12 @@ pub struct SeedChain {
     /// The paths of the chain that got the stamp 0 for want of a time: the cutter adds them to its
     /// count with [`MeshDoc::note_seed_built`].
     pub unstamped: u64,
+    /// The leaves that no frame of a seed can carry, so the chain leaves them out: a remote member
+    /// can make one with a deep object and a large leaf below it, in two frames that each fit.
+    /// The cutter adds them to its count with [`MeshDoc::note_seed_built`].
+    pub left_out: u64,
+    /// The path of the first leaf that the chain left out.
+    pub first_left_out: Option<Vec<String>>,
 }
 
 /// What a seed names: the stamps of its changes, and the tombstones of its root.
@@ -258,9 +264,9 @@ impl SeedPlan {
     /// The plan reads nothing from the document, so this runs on any thread.
     ///
     /// # Errors
-    /// [`DocError::TooLarge`] when one leaf does not fit a frame, [`DocError::SeedTooLong`] when
-    /// the seed needs more frames than a node accepts, and [`DocError::Encode`] when a merge does
-    /// not encode.
+    /// [`DocError::SeedTooLong`] when the seed needs more frames than a node accepts, and
+    /// [`DocError::Encode`] when a merge does not encode. A leaf that no frame can carry is left
+    /// out of the seed and counted in [`SeedChain::left_out`]: it is no error.
     pub fn build(
         &self,
         epoch: u64,
@@ -268,11 +274,9 @@ impl SeedPlan {
         fits: impl FnMut(&Value) -> bool,
     ) -> Result<SeedChain, DocError> {
         let mut within_frame = fits;
-        let cuts: Result<Vec<Value>, DocError> = pack_entry(&self.live, |merge| {
+        let (mut merges, left_out) = split::pack_carryable(&self.live, |merge| {
             count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
-        })
-        .collect();
-        let mut merges: Vec<Value> = cuts?;
+        });
         merges.retain(|merge| !matches!(merge, Value::Object(map) if map.is_empty()));
         if merges.len() > DOC_SEED_FRAMES_MAX {
             // A node refuses the root of such a seed, so the cutter does not send it. The live
@@ -342,6 +346,8 @@ impl SeedPlan {
             origins,
             tombstones: carried,
             unstamped,
+            left_out: left_out.count,
+            first_left_out: left_out.first,
         })
     }
 }
@@ -579,6 +585,9 @@ pub struct DocCensus {
     pub refused_time: u64,
     /// The paths of a seed that got the stamp 0 for want of a time, since the document began.
     pub unstamped_paths: u64,
+    /// The leaves that the seeds of this node left out because no frame can carry them, since the
+    /// document began.
+    pub seed_left_out: u64,
     /// The restores that were dropped because the map of restores was full, since the document
     /// began.
     pub dropped_restores: u64,
@@ -718,6 +727,9 @@ pub struct MeshDoc {
     refused_time: u64,
     /// The paths of a seed that got the stamp 0 (see [`Self::unstamped_paths`]).
     unstamped: AtomicU64,
+    /// The leaves that the seeds of this node left out, since the document began (see
+    /// [`Self::seed_left_out`]): one integer.
+    left_out: AtomicU64,
     /// The values that this node holds with a stamp above the live stamp that a replay of another
     /// node just set: the replay won in automerge but has the lower stamp, so this node writes its
     /// value again (see [`Self::take_restores`]). At most `DOC_RESTORES_MAX` paths.
@@ -826,6 +838,7 @@ impl MeshDoc {
             clock: AtomicU64::new(0),
             refused_time: 0,
             unstamped: AtomicU64::new(0),
+            left_out: AtomicU64::new(0),
             restores: BTreeMap::new(),
             restores_dropped: 0,
             awaiting_sync: false,
@@ -1062,6 +1075,7 @@ impl MeshDoc {
             .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len()));
         let peer_slots = json.as_ref().map(|json| self.gated_slots(json));
         let unstamped_paths: u64 = self.unstamped.load(Ordering::Relaxed);
+        let seed_left_out: u64 = self.left_out.load(Ordering::Relaxed);
         let replay_unsettled: u64 = u64::try_from(self.restores.len()).unwrap_or(u64::MAX);
         DocCensus {
             epoch: self.epoch,
@@ -1073,6 +1087,7 @@ impl MeshDoc {
             peer_slots,
             refused_time: self.refused_time,
             unstamped_paths,
+            seed_left_out,
             dropped_restores: self.restores_dropped,
             replay_unsettled,
             refused_remote: self.refused_remote,
@@ -1334,6 +1349,13 @@ impl MeshDoc {
             object = id;
         }
         Some(object)
+    }
+
+    /// How many leaves the seeds of this node left out because no frame can carry them, since the
+    /// document began. A caller reads it for a gauge, so a left-out leaf is never silent.
+    #[must_use]
+    pub fn seed_left_out(&self) -> u64 {
+        self.left_out.load(Ordering::Relaxed)
     }
 
     /// How many paths of a seed got the stamp 0 for want of a time, since the document began. A
@@ -1776,6 +1798,19 @@ impl MeshDoc {
             let zeros = chain.unstamped;
             tracing::warn!(target: LOG_TARGET, zeros, "a seed path got the stamp 0 for want of a time");
         }
+        if chain.left_out > 0 {
+            self.left_out.fetch_add(chain.left_out, Ordering::Relaxed);
+            let leaves = chain.left_out;
+            let names: Vec<&str> = chain
+                .first_left_out
+                .iter()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            let joined: String = names.join("/");
+            let path: String = joined.chars().take(200).collect();
+            tracing::warn!(target: LOG_TARGET, leaves, path = %path, "a leaf that no frame of a seed can carry was left out of the seed");
+        }
     }
 
     /// The seed of `epoch`: the live JSON of this document, cut by leaf path into merges that each
@@ -1789,9 +1824,9 @@ impl MeshDoc {
     /// and [`Self::note_seed_built`] on the calling thread.
     ///
     /// # Errors
-    /// [`DocError::TooLarge`] when one leaf does not fit a frame, [`DocError::Encode`] when a
-    /// merge does not encode, and [`DocError::CandidateHeld`] when the document waits to adopt a
-    /// candidate seed.
+    /// [`DocError::Encode`] when a merge does not encode, and [`DocError::CandidateHeld`] when the
+    /// document waits to adopt a candidate seed. A leaf that no frame can carry is left out of the
+    /// seed, not an error.
     pub fn build_seed(
         &self,
         epoch: u64,
@@ -5046,6 +5081,74 @@ mod tests {
         doc
     }
 
+    /// Eleven nested keys of 200 bytes, and a leaf below them: the path alone is 2 200 bytes.
+    fn deep_key_path() -> Vec<String> {
+        (0..11)
+            .map(|level| format!("{level:02}{}", "k".repeat(198)))
+            .collect()
+    }
+
+    /// `leaf` at the end of `path`, as a merge from the root.
+    fn merge_at(path: &[String], leaf: &Value) -> Value {
+        path.iter()
+            .rev()
+            .fold(leaf.clone(), |inner, key| json!({ (key.as_str()): inner }))
+    }
+
+    /// A remote member makes a leaf that no frame of a seed can carry, in two frames that each
+    /// pass: the first makes the deep object, the second puts a leaf of 1 KB in it with a change
+    /// whose own path is short. The cut must not fail on it, for ever, on every node.
+    #[test]
+    fn a_leaf_that_no_seed_frame_can_carry_is_left_out_and_the_cut_goes_on() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a leaf that no frame of a seed can carry was left out of the seed",
+        );
+        let (alice, mallory) = (nick("alice"), nick("mallory"));
+        let mut doc = MeshDoc::new_ungated().state_epochs();
+        let path = deep_key_path();
+        write(&mut doc, &alice, &merge_at(&path, &json!({ "kept": 1 })));
+        write(&mut doc, &alice, &json!({ "other": "value" }));
+        // The change is built by hand, into the object that frame 1 made: its own path is one key,
+        // so the check of a local write, which reads the path of a merge, cannot see the depth.
+        let mut fork = doc.doc.fork();
+        fork.set_actor(super::actor_for(&pad_seed(mallory.as_str().as_bytes())));
+        let mut object = automerge::ROOT;
+        for key in &path {
+            let (_, id) = automerge::ReadDoc::get(&fork, &object, key.as_str())
+                .expect("a read")
+                .expect("the object that frame 1 made");
+            object = id;
+        }
+        let heads = fork.get_heads();
+        let mut tx = fork.transaction();
+        tx.put(&object, "big", "x".repeat(1000)).expect("a put");
+        tx.commit();
+        let bytes = super::raw_changes(&fork, &heads).remove(0);
+        let body = change_body_timed(&bytes, None, 0, None, Some(doc.clock() + 1)).expect("a body");
+        let key = signer(&mallory);
+        let frame = Verified::fixture_unchecked(
+            Message::new_channel_event(&MeshId::from("test"), &mallory, body, Channel::State)
+                .unverified_key(key),
+            key,
+        );
+        ingest_applies(&mut doc, &frame);
+        // The size of a frame of a seed: the merge, and 1 000 bytes of envelope and margin.
+        let fits = |merge: &Value| merge.to_string().len() + 1000 <= 3840;
+
+        let chain = doc
+            .build_seed(5, b"cutter", fits)
+            .expect("the cut goes on without the leaf");
+
+        assert_eq!(
+            state_doc_of(&chain.changes, 5),
+            json!({ "other": "value", (path[0].as_str()): merge_at(&path[1..], &json!({ "kept": 1 })) }),
+            "the seed holds every leaf but the one that no frame can carry"
+        );
+        assert_eq!(doc.seed_left_out(), 1, "the leaf is counted");
+    }
+
     #[test]
     fn a_seed_chain_rebuilds_the_live_json_on_a_fresh_epoch() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -5127,13 +5230,25 @@ mod tests {
     }
 
     #[test]
-    fn a_leaf_that_does_not_fit_one_frame_is_an_error() {
+    fn a_leaf_that_does_not_fit_one_frame_is_left_out_of_the_seed() {
         let _guard = ::habilis_network_test_tracing::init();
-        let doc = state_doc_with(&json!({ "big": long(500) }));
-        let result = doc.build_seed(2, b"cutter", within(100));
-        assert!(
-            matches!(result, Err(DocError::TooLarge { .. })),
-            "a leaf over the frame cannot be cut: {result:?}"
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "a leaf that no frame of a seed can carry was left out of the seed",
+        );
+        let doc = state_doc_with(&json!({ "big": long(500), "small": 1 }));
+        let chain = doc
+            .build_seed(2, b"cutter", within(100))
+            .expect("a leaf over the frame cannot be cut: the cut goes on without it");
+        assert_eq!(
+            state_doc_of(&chain.changes, 2),
+            json!({ "small": 1 }),
+            "the seed holds the leaves that fit"
+        );
+        assert_eq!(
+            (chain.left_out, chain.first_left_out),
+            (1, Some(vec!["big".to_owned()])),
+            "the chain names the leaf it left out"
         );
     }
 

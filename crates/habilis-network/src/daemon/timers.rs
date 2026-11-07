@@ -396,6 +396,7 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &AuthorKey) {
         doc_state_json_bytes = shared.json_bytes.unwrap_or(0),
         doc_state_refused_time = shared.refused_time,
         doc_state_unstamped_paths = shared.unstamped_paths,
+        doc_state_seed_left_out = shared.seed_left_out,
         doc_state_dropped_restores = shared.dropped_restores,
         doc_state_replay_unsettled = shared.replay_unsettled,
         doc_state_ops = shared.ops_held,

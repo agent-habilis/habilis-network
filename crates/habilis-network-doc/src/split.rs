@@ -77,8 +77,31 @@ pub fn pack_entry<Fits: FnMut(&Value) -> bool>(
     mut fits: Fits,
 ) -> impl Iterator<Item = Result<Value, DocError>> + use<Fits> {
     let mut packed: Vec<Result<Value, DocError>> = Vec::new();
-    pack(entry, &mut fits, &mut packed);
+    pack(entry, &mut fits, &mut packed, &mut LeftOut::default());
     packed.into_iter()
+}
+
+/// The leaves that a cut left out because no frame can carry them: how many, and the path of the
+/// first. A path is kept for the first only, so the memory of a cut does not grow with a hostile
+/// document.
+#[derive(Debug, Default)]
+pub(crate) struct LeftOut {
+    pub(crate) count: u64,
+    pub(crate) first: Option<Vec<String>>,
+}
+
+/// [`pack_entry`] for a seed: the merges of the leaves that fit, and the leaves that no frame can
+/// carry, which are left out. A seed with a leaf less is a seed; a cut that fails on that leaf
+/// fails again on every node for ever, since the leaf stays in the document.
+pub(crate) fn pack_carryable<Fits: FnMut(&Value) -> bool>(
+    entry: &Value,
+    mut fits: Fits,
+) -> (Vec<Value>, LeftOut) {
+    let mut packed: Vec<Result<Value, DocError>> = Vec::new();
+    let mut left_out = LeftOut::default();
+    pack(entry, &mut fits, &mut packed, &mut left_out);
+    let merges: Vec<Value> = packed.into_iter().filter_map(Result::ok).collect();
+    (merges, left_out)
 }
 
 /// One leaf of an entry: the keys on the way to it, and its value.
@@ -88,6 +111,7 @@ fn pack(
     entry: &Value,
     fits: &mut dyn FnMut(&Value) -> bool,
     packed: &mut Vec<Result<Value, DocError>>,
+    left_out: &mut LeftOut,
 ) {
     let mut leaves: Vec<Leaf> = Vec::new();
     collect_leaves(entry, &mut Vec::new(), &mut leaves);
@@ -102,6 +126,10 @@ fn pack(
         if count == 0 {
             let bytes = json_len(&merge_of(&leaves[start..=start]));
             packed.push(Err(DocError::TooLarge { bytes }));
+            left_out.count = left_out.count.saturating_add(1);
+            left_out
+                .first
+                .get_or_insert_with(|| leaves[start].0.clone());
             start += 1;
             continue;
         }
