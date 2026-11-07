@@ -57,6 +57,7 @@ mod tests {
     use crate::blob::{BlobDigest, ContentId, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
     use rand::RngCore;
+    use std::collections::HashSet;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -90,7 +91,7 @@ mod tests {
         fs::write(&src, b"newest")?;
 
         let mut store = BlobStore::try_new(temp_dir("spool"))?;
-        let full = crate::util::consts::MAX_BLOB_STORE_ENTRIES;
+        let full = super::MAX_BLOB_STORE_ENTRIES;
         for index in 0..full {
             let mut bytes = [0u8; HASH_LEN];
             bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
@@ -102,7 +103,7 @@ mod tests {
                     secret: TicketSecret::from([0u8; SECRET_LEN]),
                     ticket_secret: TicketSecret::from([0u8; SECRET_LEN]),
                     password: false,
-                    owners: std::collections::HashSet::from([ContentId::new("held-by-a-ticket")]),
+                    owners: HashSet::from([ContentId::new("held-by-a-ticket")]),
                     overflowed: false,
                     seq: index as u64,
                 },

@@ -654,7 +654,9 @@ async fn ask(
 /// `seed_job::closing_digest_seen`).
 fn note_first_ask(state: &mut EventLoopState, channel: Channel) {
     if channel == Channel::State && state.doc(channel).is_awaiting_first_sync() {
-        state.first_asked_at = Some(Instant::now());
+        let now = Instant::now();
+        state.first_asked_at = Some(now);
+        state.first_request_at.get_or_insert(now);
     }
 }
 

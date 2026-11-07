@@ -647,6 +647,10 @@ pub struct EventLoopState {
     /// short time after it (see `seed_job::closing_digest_seen`): a closing digest that arrives
     /// when this node asked nobody is the answer of no request, and any member can send one.
     pub(crate) first_asked_at: Option<Instant>,
+    /// When this node sent its FIRST request for the first sync, set once. It is not renewed by a
+    /// later digest or ask: the far jump of an epoch is allowed only within a few seconds of it (see
+    /// `seed_job::far_jump_allowed`), so it does not stay open for the whole wait.
+    pub(crate) first_request_at: Option<Instant>,
     /// The `meta` channel's document — a second, independent shared-state channel.
     /// Gates foreign-card writes (unlike `state`), since a `meta` card carries a
     /// peer's cryptographic identity.
@@ -868,6 +872,7 @@ impl EventLoopState {
             state_cuts_failed: 0,
             state_sync_deadline: Instant::now() + tuning::state_sync_wait(),
             first_asked_at: None,
+            first_request_at: None,
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
             identity: init.keys.session,

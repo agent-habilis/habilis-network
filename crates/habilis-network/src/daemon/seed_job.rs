@@ -344,11 +344,15 @@ fn first_answer_open(state: &EventLoopState) -> bool {
 }
 
 /// Whether the frame that is being ingested may make a far jump of epoch: it came point-to-point,
-/// in the window of the answer of the first request of this node. A frame that came on gossip, or
+/// within the window of the FIRST request of this node (not of the last ask: the window does not
+/// renew while the node waits). A frame that came on gossip, or
 /// at any other time, never does (see `MeshDoc::ingest_far_ok`). The document adds its own
 /// condition: it holds nothing.
 pub(crate) fn far_jump_allowed(state: &EventLoopState) -> bool {
-    state.state_digest_serves.unicast.arrived_from.is_some() && first_answer_open(state)
+    let within = state
+        .first_request_at
+        .is_some_and(|at| at.elapsed() <= FIRST_ANSWER_WINDOW);
+    state.state_digest_serves.unicast.arrived_from.is_some() && within
 }
 
 /// A closing digest of a peer for `channel` came in. It ends the wait of the state document for
@@ -1271,20 +1275,26 @@ mod tests {
     fn a_far_jump_is_allowed_only_to_a_unicast_frame_in_the_window_of_the_first_answer() {
         let mut state = state_that_waits_for_the_first_sync();
         let bob = testing::endpoint_id(9);
-        state.first_asked_at = Some(Instant::now());
+        state.first_request_at = Some(Instant::now());
         assert!(
             !far_jump_allowed(&state),
             "a frame on gossip, soon after the request"
         );
         state.state_digest_serves.unicast.arrived_from = Some(bob);
         assert!(far_jump_allowed(&state), "unicast, inside the window");
-        state.first_asked_at = Instant::now().checked_sub(Duration::from_secs(6));
+        state.first_request_at = Instant::now().checked_sub(Duration::from_secs(6));
         assert!(
             !far_jump_allowed(&state),
             "unicast, outside the window of 5 s"
         );
-        state.first_asked_at = None;
+        state.first_request_at = None;
         assert!(!far_jump_allowed(&state), "unicast, with no request sent");
+        // A later ask renews the window of the answer of the wait, and not that of the far jump.
+        state.first_asked_at = Some(Instant::now());
+        assert!(
+            !far_jump_allowed(&state),
+            "a renewed ask does not open the far jump"
+        );
     }
 
     #[test]

@@ -2453,12 +2453,13 @@ impl MeshDoc {
         }
     }
 
-    /// Whether a forged epoch could make this document lose nothing: it holds no frame, or it
-    /// still awaits its first sync. The bound of a jump protects a node that holds state. A node
+    /// Whether a forged epoch could make this document lose nothing: it holds no frame and still
+    /// awaits its first sync. A node that holds a frame has state to lose, and a node that does not
+    /// await has not asked, so no answer is the answer of its first request. The bound of a jump protects a node that holds state. A node
     /// that holds none takes the root of any epoch: if two forged roots, 10 minutes apart, put the
     /// mesh above twice the bound, a new node at epoch 0 would else refuse every seed for ever.
     fn holds_nothing(&self) -> bool {
-        self.awaiting_sync || self.frames.is_empty()
+        self.awaiting_sync && self.frames.is_empty()
     }
 
     /// A frame of another epoch than the one that the document holds.
@@ -5485,11 +5486,11 @@ mod tests {
 
         assert!(
             matches!(joiner_outcome, Ingested::NewEpoch { .. }),
-            "a joiner that awaits its first sync: {joiner_outcome:?}"
+            "a joiner that awaits its first sync and holds nothing: {joiner_outcome:?}"
         );
         assert!(
-            matches!(empty_outcome, Ingested::NewEpoch { .. }),
-            "a node that holds no frame: {empty_outcome:?}"
+            matches!(empty_outcome, Ingested::Ignored),
+            "a node that does not await has asked nothing: {empty_outcome:?}"
         );
     }
 
@@ -5512,6 +5513,29 @@ mod tests {
         assert!(
             matches!(empty_outcome, Ingested::Ignored),
             "a node that holds no frame, on a plain ingest: {empty_outcome:?}"
+        );
+    }
+
+    /// A joiner that adopted the honest seed and still waits for its first sync holds state: it takes
+    /// no far root, or the first member that answers could capture it.
+    #[test]
+    fn a_node_that_holds_frames_and_still_awaits_its_sync_takes_no_far_root() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let far = far_root(3 * super::DOC_EPOCH_JUMP_MAX);
+        let mut writer = MeshDoc::new_ungated().state_epochs();
+        let held = write(&mut writer, &nick("other"), &json!({ "kept": 1 }));
+        let mut joiner = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        ingest_applies(&mut joiner, &held);
+        assert!(
+            joiner.is_awaiting_first_sync(),
+            "the premise: it still waits"
+        );
+
+        let outcome = joiner.ingest_far_ok(&far);
+
+        assert!(
+            matches!(outcome, Ingested::Ignored),
+            "a node that holds frames keeps the bound, whether it waits or not: {outcome:?}"
         );
     }
 
