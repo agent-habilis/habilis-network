@@ -675,14 +675,18 @@ async fn ask(
     true
 }
 
-/// Remember when a request with the flag `first` went out, while the state document waits for its
-/// first sync: the closing digest of its answer ends the wait (see
-/// `seed_job::closing_digest_seen`).
+/// Remember when a request went out. For the state channel, while its document waits for the first
+/// sync, the request carries the flag `first` and the closing digest of its answer ends the wait
+/// (see `seed_job::closing_digest_seen`). For the meta channel, while its document awaits a far
+/// root, the first request opens the window in which a far root is taken from a point-to-point
+/// frame (see `seed_job::far_jump_allowed`).
 fn note_first_ask(state: &mut EventLoopState, channel: Channel) {
+    let now = Instant::now();
     if channel == Channel::State && state.doc(channel).is_awaiting_first_sync() {
-        let now = Instant::now();
         state.first_asked_at = Some(now);
         state.first_request_at.get_or_insert(now);
+    } else if channel == Channel::Meta && state.doc(channel).is_awaiting_far_root() {
+        state.meta_first_request_at.get_or_insert(now);
     }
 }
 
@@ -960,6 +964,7 @@ async fn send_digests(
     }
     if set == DigestSet::All {
         note_first_ask(state, Channel::State);
+        note_first_ask(state, Channel::Meta);
     }
     if asks_for_chat {
         state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
@@ -1410,7 +1415,7 @@ mod tests {
 
     use super::{
         ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, Exchange, HeadsBody, WireWindow,
-        digest_windows, encode_key, missing_frames, state_digest,
+        digest_windows, encode_key, missing_frames, note_first_ask, state_digest,
     };
     use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
     use crate::daemon::state::EventLoopState;
@@ -1426,6 +1431,31 @@ mod tests {
     use crate::util::{consts, tuning};
     use crate::{gossip, protocol, transport};
     use tokio::sync::mpsc;
+    /// A fresh node asks for the meta channel too: the first meta ask is noted once, and the
+    /// window of the far jump of the meta root opens at it and does not renew.
+    #[test]
+    fn the_first_meta_ask_is_noted_once_while_the_meta_document_awaits_a_far_root() {
+        let mut state = fresh_state();
+        assert!(
+            state.doc(Channel::Meta).is_awaiting_far_root(),
+            "the premise: a new node awaits a far meta root"
+        );
+
+        note_first_ask(&mut state, Channel::Meta);
+        let first = state.meta_first_request_at;
+        note_first_ask(&mut state, Channel::Meta);
+
+        assert!(first.is_some(), "the first meta ask is noted");
+        assert_eq!(
+            state.meta_first_request_at, first,
+            "a later ask does not renew it"
+        );
+        assert_eq!(
+            state.first_request_at, None,
+            "the state window is not opened by a meta ask"
+        );
+    }
+
     fn members(count: usize) -> Vec<AuthorKey> {
         (0..count)
             .map(|index| test_key(&format!("member-{index:02}")))

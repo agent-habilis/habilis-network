@@ -98,6 +98,16 @@ impl EpochSwitch {
     }
 }
 
+/// Whether a document still waits for a root far above its epoch (see
+/// [`MeshDoc::awaiting_far_root`]). An enum and not a bool, so the document keeps few bools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FarRootWait {
+    /// It holds no frame yet and takes a far root as the answer of its first request.
+    Awaits,
+    /// A frame was applied, or the document never waited.
+    Done,
+}
+
 /// A switch of the document to a new epoch: every frame of the old epoch is gone.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -766,7 +776,7 @@ pub struct MeshDoc {
     awaiting_sync: bool,
     /// Whether this document waits for its first frame and takes a root far above its epoch from
     /// the answer of its first request (see [`Self::awaiting_far_root`]). It does not hold writes.
-    awaiting_far_root: bool,
+    far_root: FarRootWait,
     /// The stamps that the changes of the adopted seed name, for each change and each path that it
     /// writes. They tell who wrote the value of a leaf and when, where the change is the seed of
     /// another node. Dropped at the next epoch, and at most the paths of the seed.
@@ -878,7 +888,7 @@ impl MeshDoc {
             restores: BTreeMap::new(),
             restores_dropped: 0,
             awaiting_sync: false,
-            awaiting_far_root: false,
+            far_root: FarRootWait::Done,
             origins: HashMap::new(),
             tombstones: BTreeMap::new(),
             tombstone_paths_long: 0,
@@ -1555,14 +1565,14 @@ impl MeshDoc {
     /// The flag falls when the first frame is applied.
     #[must_use]
     pub fn awaiting_far_root(mut self) -> Self {
-        self.awaiting_far_root = true;
+        self.far_root = FarRootWait::Awaits;
         self
     }
 
     /// Whether this document still waits for a far root (see [`Self::awaiting_far_root`]).
     #[must_use]
     pub fn is_awaiting_far_root(&self) -> bool {
-        self.awaiting_far_root
+        self.far_root == FarRootWait::Awaits
     }
 
     /// Say that the first sync is over, so the local writes go on. The glue calls it after the
@@ -2480,7 +2490,7 @@ impl MeshDoc {
     /// is the answer of its first request. Without this exception a node at epoch 0 would refuse for
     /// ever every root above the bound, once two forged roots had put the mesh over twice the bound.
     fn holds_nothing(&self) -> bool {
-        (self.awaiting_sync || self.awaiting_far_root) && self.frames.is_empty()
+        (self.awaiting_sync || self.is_awaiting_far_root()) && self.frames.is_empty()
     }
 
     /// A frame of another epoch than the one that the document holds.
@@ -2803,7 +2813,7 @@ impl MeshDoc {
             return false;
         }
         self.applied.insert(hash);
-        self.awaiting_far_root = false;
+        self.far_root = FarRootWait::Done;
         if let Some(applied) = seen.as_ref() {
             self.note_deletes(applied, &frame, named.as_deref());
         }

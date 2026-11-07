@@ -348,10 +348,13 @@ fn first_answer_open(state: &EventLoopState) -> bool {
 /// renew while the node waits). A frame that came on gossip, or
 /// at any other time, never does (see `MeshDoc::ingest_far_ok`). The document adds its own
 /// condition: it holds nothing.
-pub(crate) fn far_jump_allowed(state: &EventLoopState) -> bool {
-    let within = state
-        .first_request_at
-        .is_some_and(|at| at.elapsed() <= FIRST_ANSWER_WINDOW);
+pub(crate) fn far_jump_allowed(state: &EventLoopState, channel: Channel) -> bool {
+    let first_request = if channel == Channel::Meta {
+        state.meta_first_request_at
+    } else {
+        state.first_request_at
+    };
+    let within = first_request.is_some_and(|at| at.elapsed() <= FIRST_ANSWER_WINDOW);
     state.state_digest_serves.unicast.arrived_from.is_some() && within
 }
 
@@ -1292,23 +1295,58 @@ mod tests {
         let bob = testing::endpoint_id(9);
         state.first_request_at = Some(Instant::now());
         assert!(
-            !far_jump_allowed(&state),
+            !far_jump_allowed(&state, Channel::State),
             "a frame on gossip, soon after the request"
         );
         state.state_digest_serves.unicast.arrived_from = Some(bob);
-        assert!(far_jump_allowed(&state), "unicast, inside the window");
+        assert!(
+            far_jump_allowed(&state, Channel::State),
+            "unicast, inside the window"
+        );
         state.first_request_at = Instant::now().checked_sub(Duration::from_secs(6));
         assert!(
-            !far_jump_allowed(&state),
+            !far_jump_allowed(&state, Channel::State),
             "unicast, outside the window of 5 s"
         );
         state.first_request_at = None;
-        assert!(!far_jump_allowed(&state), "unicast, with no request sent");
+        assert!(
+            !far_jump_allowed(&state, Channel::State),
+            "unicast, with no request sent"
+        );
         // A later ask renews the window of the answer of the wait, and not that of the far jump.
         state.first_asked_at = Some(Instant::now());
         assert!(
-            !far_jump_allowed(&state),
+            !far_jump_allowed(&state, Channel::State),
             "a renewed ask does not open the far jump"
+        );
+    }
+
+    /// The meta channel has its own window: a far meta root is allowed to a unicast frame within 5 s
+    /// of the first meta request, and the window of the state request does not open it.
+    #[test]
+    fn a_far_jump_of_the_meta_channel_has_its_own_window() {
+        let mut state = state_that_waits_for_the_first_sync();
+        state.state_digest_serves.unicast.arrived_from = Some(testing::endpoint_id(9));
+        state.first_request_at = Some(Instant::now());
+        assert!(
+            !far_jump_allowed(&state, Channel::Meta),
+            "the window of the state request does not open the meta far jump"
+        );
+        state.meta_first_request_at = Some(Instant::now());
+        assert!(
+            far_jump_allowed(&state, Channel::Meta),
+            "unicast, inside the window of the first meta request"
+        );
+        state.meta_first_request_at = Instant::now().checked_sub(Duration::from_secs(6));
+        assert!(
+            !far_jump_allowed(&state, Channel::Meta),
+            "unicast, outside the window of 5 s"
+        );
+        state.first_request_at = None;
+        state.meta_first_request_at = Some(Instant::now());
+        assert!(
+            !far_jump_allowed(&state, Channel::State),
+            "the window of the meta request does not open the state far jump"
         );
     }
 

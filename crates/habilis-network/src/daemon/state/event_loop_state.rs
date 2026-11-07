@@ -654,6 +654,9 @@ pub struct EventLoopState {
     /// later digest or ask: the far jump of an epoch is allowed only within a few seconds of it (see
     /// `seed_job::far_jump_allowed`), so it does not stay open for the whole wait.
     pub(crate) first_request_at: Option<Instant>,
+    /// The same for the meta channel: when this node sent its first meta request, set once, while
+    /// the meta document awaits a far root.
+    pub(crate) meta_first_request_at: Option<Instant>,
     /// The `meta` channel's document — a second, independent shared-state channel.
     /// Gates foreign-card writes (unlike `state`), since a `meta` card carries a
     /// peer's cryptographic identity.
@@ -877,6 +880,7 @@ impl EventLoopState {
             state_sync_deadline: Instant::now() + tuning::state_sync_wait(),
             first_asked_at: None,
             first_request_at: None,
+            meta_first_request_at: None,
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
             identity: init.keys.session,
@@ -948,6 +952,7 @@ impl EventLoopState {
             None => MeshDoc::new_ungated(),
         }
         .key(key)
+        .awaiting_far_root()
     }
 
     /// The number of members of the mesh as this node counts them: the peers whose arrival was

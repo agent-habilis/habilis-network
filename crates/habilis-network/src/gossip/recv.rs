@@ -1357,7 +1357,7 @@ fn dispatch_channel(
         channel, message, ..
     } = event;
     let count_before = state.doc(channel).change_count();
-    let far_ok = channel == Channel::State && seed_job::far_jump_allowed(state);
+    let far_ok = seed_job::far_jump_allowed(state, channel);
     match ingest_channel_event(event, state.doc_mut(channel), context, far_ok) {
         ChannelOutcome::Refused => state.idle.state_rejected += 1,
         ChannelOutcome::Repeat => state.idle.wire_in.note_content_dup(),
