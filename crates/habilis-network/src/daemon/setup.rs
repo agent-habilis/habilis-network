@@ -645,6 +645,12 @@ fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
         return Ok(identity::Identity::generate());
     };
     let key_path = state.with_extension("key");
+    if let Some(why) = untrusted_key_file(&key_path) {
+        anyhow::bail!(
+            "the member key file {} is not trusted: {why}; remove it to make a new member key",
+            key_path.display()
+        );
+    }
     if let Ok(bytes) = fs::read(&key_path) {
         let seed = bytes
             .get(..32)
@@ -657,6 +663,26 @@ fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
     let identity = identity::Identity::generate();
     write_key_file(&key_path, identity.seed().as_slice(), 0)?;
     Ok(identity)
+}
+
+/// Why a key file that exists is not trusted, or `None` for a missing file and for the file that this code
+/// writes: a regular file, owned by this user, that group and others cannot read. Its seed becomes the
+/// identity of this member, so a file that another user could have planted is not loaded.
+#[cfg(all(unix, feature = "host"))]
+fn untrusted_key_file(key_path: &Path) -> Option<&'static str> {
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let meta = fs::symlink_metadata(key_path).ok()?;
+    if !meta.file_type().is_file() {
+        return Some("it is not a regular file");
+    }
+    if meta.uid() != rustix::process::geteuid().as_raw() {
+        return Some("another user owns it");
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Some("group or others can access it");
+    }
+    None
 }
 
 /// Write the member key file: the 32 bytes of the seed, then the start time of the process that owns
@@ -1418,6 +1444,41 @@ mod tests {
             super::next_run(None, false).expect("no state file"),
             1,
             "no file means run 1"
+        );
+    }
+
+    /// A key file that another user could have planted or read is not loaded: its seed would become the
+    /// identity of this member. A file of mode 0600, owned by this user, is the one that this code wrote.
+    #[test]
+    fn a_key_file_that_others_can_read_or_a_link_is_not_loaded() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let dir = TempDir::new("habilis-key-trust");
+        let state = dir.path().join("session.json");
+        let key = state.with_extension("key");
+        fs::write(&key, [7u8; 40]).expect("a key file");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).expect("a loose mode");
+        let loose = super::load_or_create_identity(Some(&state));
+        assert!(
+            loose.is_err(),
+            "a key file that group and others can read was loaded"
+        );
+
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("a private mode");
+        let private = super::load_or_create_identity(Some(&state)).expect("a private file loads");
+        assert_eq!(
+            private.seed().as_slice(),
+            &[7u8; 32],
+            "the seed of a trusted file is the identity"
+        );
+
+        fs::remove_file(&key).expect("remove the file");
+        let target = dir.path().join("elsewhere.key");
+        fs::write(&target, [9u8; 40]).expect("a target file");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("a private mode");
+        symlink(&target, &key).expect("a link in place of the key file");
+        assert!(
+            super::load_or_create_identity(Some(&state)).is_err(),
+            "a link in place of the key file was followed"
         );
     }
 
