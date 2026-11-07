@@ -2219,7 +2219,7 @@ mod tests {
         let first_member = member_of(&first);
         // The child says that it runs: before its exec it still holds a copy of every descriptor of this
         // process, the lock file too, and a holder that is dropped in that gap leaves the lock held for it.
-        let mut child = process::Command::new("sh")
+        let mut child: process::Child = process::Command::new("sh")
             .args(["-c", "echo ready; sleep 30"])
             .stdout(process::Stdio::piped())
             .spawn()
