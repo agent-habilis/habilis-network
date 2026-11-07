@@ -658,7 +658,7 @@ pub(crate) async fn ingest_from(
     // layer owns every roster/presentation side effect; the gossip
     // layer only routes by kind below.
     messages::log_in(&verified);
-    let Some(observed) = roster_gate(&verified, state, context).await else {
+    let Some(observed) = roster_gate(&verified, state, app, context).await else {
         return;
     };
     let surfaceable = observed.surfaceable;
@@ -885,6 +885,7 @@ async fn dispatch_infra(
 async fn roster_gate(
     verified: &Verified,
     state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) -> Option<lifecycle::Observed> {
     let joined = matches!(
@@ -900,6 +901,12 @@ async fn roster_gate(
         );
         tracing::warn!(target: "habilis_network::lifecycle", nickname = %context.author, "our nickname is held by another member");
         context.sink.emit(NodeEvent::Error(line));
+    }
+    // A newer run of a member ends the older sessions of the member in the roster: a restart leaves
+    // no ghost until the timeout.
+    for older in state.proofs.take_replaced() {
+        let goodbye = lifecycle::Goodbye::Replaced(&verified.author);
+        lifecycle::end_session(older, goodbye, state, app, context).await;
     }
     let admitted = state.admits_session(verified, context.author);
     if admitted {
@@ -5772,6 +5779,61 @@ mod dedup_counter_tests {
         assert!(
             reader.peers.contains(&bound.author_key()),
             "the bound session stays"
+        );
+    }
+
+    /// A joined frame of a session, as the bytes that arrive on the gossip plane, with the proof of
+    /// `member` for its `run`.
+    fn joined_of(
+        session: &Identity,
+        member: &Identity,
+        nickname: &str,
+        run: u64,
+    ) -> (Plane, Bytes) {
+        let proof = member.prove(
+            &session.author_key(),
+            nickname,
+            MeshId::from("test").as_ref(),
+            run,
+        );
+        let frame = Message::new_joined_with_proof(&MeshId::from("test"), &nick(nickname), &proof)
+            .sign(session);
+        (
+            Plane::Gossip,
+            frame.serialize().expect("serialize").into_bytes(),
+        )
+    }
+
+    /// A member restarts: the `joined` frame of its new session, with a higher run, replaces the old
+    /// session in the roster. There is one peer for the member, the new one, and the old key does
+    /// not stay a ghost until its timeout.
+    #[test]
+    fn a_restarted_member_replaces_its_old_session_in_the_roster() {
+        let member = Identity::generate();
+        let (old, new) = (Identity::generate(), Identity::generate());
+        let mesh = MeshId::from("test");
+        let mut initial = fresh_state();
+        initial.peers.insert(old.author_key());
+        initial.names.insert(old.author_key(), nick("alice"));
+        let first = member.prove(&old.author_key(), "alice", mesh.as_ref(), 1);
+        let held = initial
+            .proofs
+            .accept(&old.author_key(), &nick("alice"), &mesh, first, |_| true);
+        assert!(held, "the proof of the old session is held");
+        let (_, second) = joined_of(&new, &member, "alice", 2);
+        let reader = reader_with(initial, vec![(Plane::Gossip, second)]);
+
+        assert!(
+            reader.peers.contains(&new.author_key()),
+            "the new session is a peer"
+        );
+        assert!(
+            !reader.peers.contains(&old.author_key()),
+            "the old session of the same member is not a peer any more"
+        );
+        assert!(
+            reader.proofs.proof_of(&old.author_key()).is_none(),
+            "and its proof is gone"
         );
     }
 

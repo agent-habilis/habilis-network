@@ -273,9 +273,9 @@ mod tests {
     fn crashed_members_do_not_fill_the_proof_book() {
         let mut receiver = fresh_state();
         let mesh = MeshId::from("💬test");
-        let member = protocol::identity::Identity::generate();
         let mut newest = None;
         for index in 0..QUIET_CAP + 100 {
+            let member = protocol::identity::Identity::generate();
             let session = protocol::identity::Identity::generate();
             let name = nick(&format!("peer-{index}"));
             let proof: protocol::identity::IdentityProof =
@@ -315,38 +315,85 @@ mod tests {
         assert_eq!(answered, 96, "every asker of a mesh of 96 gets its answer");
     }
 
-    /// Two live sessions of one member can share a nickname, as a restart that overlaps its old
-    /// session does. Each one holds the proof of its own session, and the proof of one is no proof
-    /// for the other: the book is keyed by the session key.
+    /// A member restarts and its `joined` frame is lost. Its first frame is an `alive`, which the gate
+    /// refuses the roster, for the nickname is bound. The session is asked for its proof all the same,
+    /// since the proof is the way in; a stranger under a free nickname is no member of the roster and
+    /// gets no request.
     #[test]
-    fn two_live_sessions_of_one_member_each_hold_their_own_proof() {
+    fn a_session_of_a_bound_nickname_that_missed_its_joined_frame_is_asked_for_its_proof() {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let bound = fresh_state();
+        let restarted = fresh_state();
+        let stranger = fresh_state();
+        let me = nick("reader");
+        receiver.peers.insert(bound.identity.author_key());
+        let proof = protocol::identity::Identity::generate().prove(
+            &bound.identity.author_key(),
+            "alice",
+            mesh.as_ref(),
+            1,
+        );
+        assert!(
+            receiver.proofs.accept(
+                &bound.identity.author_key(),
+                &nick("alice"),
+                &mesh,
+                proof,
+                |_| true
+            ),
+            "the nickname alice is bound to the member of the first session"
+        );
+        let alive_of = |sender: &EventLoopState, name: &str| -> messages::Verified {
+            Message::new_alive(&mesh, &nick(name)).sign(&sender.identity)
+        };
+
+        assert!(
+            receiver
+                .proof_request_for(&alive_of(&restarted, "alice"), &me, &mesh)
+                .is_some(),
+            "a session of the bound nickname with no proof is asked"
+        );
+        assert!(
+            receiver
+                .proof_request_for(&alive_of(&stranger, "carol"), &me, &mesh)
+                .is_none(),
+            "a stranger under a free nickname is not asked"
+        );
+    }
+
+    /// A restart makes a second session of one member under one nickname. The proof is keyed by the
+    /// session key, and a member holds one session, the newest: the proof of the run 2 session
+    /// replaces the proof of the run 1 session, and the caller hears of the one that went.
+    #[test]
+    fn the_session_of_a_newer_run_replaces_the_session_of_the_same_member() {
         let first = fresh_state();
-        let mut second = fresh_state();
-        second.member_identity = first.member_identity.clone();
+        let second = fresh_state();
         let mut receiver = fresh_state();
         let mesh = MeshId::from("💬test");
         let shared = nick("alice");
-        for sender in [&first, &second] {
+        let member = protocol::identity::Identity::generate();
+        let (old, new) = (first.identity.author_key(), second.identity.author_key());
+        for (sender, run) in [(&first, 1), (&second, 2)] {
             receiver.peers.insert(sender.identity.author_key());
-            let joined: messages::Verified = sender.own_joined(&mesh, &shared);
+            let proof = member.prove(&sender.identity.author_key(), "alice", mesh.as_ref(), run);
+            let joined =
+                Message::new_joined_with_proof(&mesh, &shared, &proof).sign(&sender.identity);
             receiver.note_joined_proof(&joined, &mesh, &nick("reader"));
         }
 
-        let held_first = receiver.proofs.proof_of(&first.identity.author_key());
-        let held_second = receiver.proofs.proof_of(&second.identity.author_key());
         assert!(
-            held_first.is_some() && held_second.is_some(),
-            "both sessions hold a proof"
+            receiver.proofs.proof_of(&old).is_none(),
+            "the old session is dropped"
+        );
+        assert!(
+            receiver.proofs.proof_of(&new).is_some(),
+            "the new session is held"
         );
         assert_eq!(
-            held_first.map(|proof| proof.identity),
-            held_second.map(|proof| proof.identity),
-            "both proofs name the one member key"
-        );
-        assert_ne!(
-            held_first.map(|proof| proof.signature),
-            held_second.map(|proof| proof.signature),
-            "each proof is signed over its own session key"
+            receiver.proofs.take_replaced(),
+            [old],
+            "the old session is reported"
         );
     }
 

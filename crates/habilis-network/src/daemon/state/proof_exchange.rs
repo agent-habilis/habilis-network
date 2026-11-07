@@ -1,3 +1,4 @@
+use std::mem;
 use std::time::Duration;
 
 use super::proof_book::ProofBook;
@@ -49,6 +50,8 @@ pub(crate) struct ProofExchange {
     asked: ProofBook<AuthorKey, Retry>,
     // the sessions told that their nickname is bound to another member: the oldest goes at the cap
     told: BoundedFifoSet<AuthorKey>,
+    // the sessions that a newer run of their member dropped, until the caller takes them
+    replaced: Vec<AuthorKey>,
     ties_refused: u64,
     bound_refused: u64,
     gate_refused: u64,
@@ -60,6 +63,7 @@ impl ProofExchange {
             book: ProofBook::with_cap(cap),
             asked: ProofBook::with_cap(cap),
             told: BoundedFifoSet::new(cap),
+            replaced: Vec::new(),
             ties_refused: 0,
             bound_refused: 0,
             gate_refused: 0,
@@ -105,6 +109,12 @@ impl ProofExchange {
             self.gate_refused += 1;
         }
         admitted
+    }
+
+    /// The sessions that a newer run of their member dropped since the last call. The caller ends
+    /// them in the roster.
+    pub(crate) fn take_replaced(&mut self) -> Vec<AuthorKey> {
+        mem::take(&mut self.replaced)
     }
 
     /// A frame was refused the roster because it claims the nickname of this node.
@@ -172,6 +182,26 @@ impl ProofExchange {
         if bound.is_some_and(|member| member != proof.identity) {
             self.bound_refused += 1;
             return false;
+        }
+        // A member holds one session, the newest: a restart makes a new session with a higher run,
+        // and the sessions of its older runs go. A proof of a run that is not higher than a run
+        // held is a late copy of an older frame, and it does not replace the newer session.
+        let others = |held: &AuthorKey, (_, other): &(Nickname, IdentityProof)| {
+            held != session && other.identity == proof.identity
+        };
+        let runs: Vec<(AuthorKey, u64)> = self
+            .book
+            .iter()
+            .filter(|(held, entry)| others(held, entry))
+            .map(|(held, (_, other))| (*held, other.run))
+            .collect();
+        if runs.iter().any(|(_, run)| *run >= proof.run) {
+            self.ties_refused += 1;
+            return false;
+        }
+        for (older, _) in runs {
+            self.book.remove(&older);
+            self.replaced.push(older);
         }
         self.book
             .insert_evicting(*session, (nickname.clone(), proof), |held, _| is_held(held));
@@ -452,23 +482,24 @@ mod tests {
         );
     }
 
-    /// A restarted member has a dead session and a live one under one nickname. The book must tell
-    /// them apart: the dead session goes first when the book is full, so the proof of a new member
-    /// still lands. A nickname alone cannot tell them apart, because the live session keeps it live.
+    /// A nickname can have a dead session of a member that left and a live session of the member
+    /// that took it after. The book must tell them apart: the dead session goes first when the book
+    /// is full, so the proof of a new member still lands. A nickname alone cannot tell them apart,
+    /// because the live session keeps it live.
     #[test]
     fn the_dead_session_of_a_restarted_member_does_not_block_a_full_book() {
         let mesh = MeshId::from("💬test");
         let alice = Nickname::from("alice");
-        let member = Identity::generate();
         let (old, new) = (
             Identity::generate().author_key(),
             Identity::generate().author_key(),
         );
         let mut book = ProofExchange::with_cap(4);
-        for (session, run) in [(old, 1), (new, 2)] {
-            let proof = member.prove(&session, alice.as_ref(), mesh.as_ref(), run);
+        // The first member left: its session is not held, so the nickname is free for the second.
+        for session in [old, new] {
+            let proof = Identity::generate().prove(&session, alice.as_ref(), mesh.as_ref(), 1);
             assert!(
-                book.accept(&session, &alice, &mesh, proof, |_| true),
+                book.accept(&session, &alice, &mesh, proof, |held| *held != old),
                 "the book has room"
             );
         }
@@ -495,5 +526,99 @@ mod tests {
             book.proof_of(&old).is_none() && book.proof_of(&new).is_some(),
             "the dead session is gone and the live session stays"
         );
+    }
+
+    /// A restart makes a new session with a higher run. The proof of the new session replaces the
+    /// proof of the old one, so a member holds one proof, the newest.
+    #[test]
+    fn a_newer_run_of_a_member_drops_its_older_session() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let member = Identity::generate();
+        let (old, new) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let first = member.prove(&old, alice.as_ref(), mesh.as_ref(), 1);
+        let second = member.prove(&new, alice.as_ref(), mesh.as_ref(), 2);
+
+        assert!(
+            book.accept(&old, &alice, &mesh, first, |_| true),
+            "run 1 is held"
+        );
+        assert!(
+            book.accept(&new, &alice, &mesh, second, |_| true),
+            "run 2 is held"
+        );
+
+        assert!(
+            book.proof_of(&old).is_none(),
+            "the older session is dropped"
+        );
+        assert!(book.proof_of(&new).is_some(), "the newer session is held");
+        assert_eq!(
+            book.take_replaced(),
+            [old],
+            "the caller hears of the dropped session"
+        );
+        assert!(book.take_replaced().is_empty(), "and hears of it once");
+    }
+
+    /// An old `joined` frame that a relay delivers late must not replace the newer session.
+    #[test]
+    fn a_proof_of_an_older_run_of_the_same_member_is_not_held() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let member = Identity::generate();
+        let (old, new) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let newer = member.prove(&new, alice.as_ref(), mesh.as_ref(), 5);
+        let older = member.prove(&old, alice.as_ref(), mesh.as_ref(), 4);
+
+        assert!(
+            book.accept(&new, &alice, &mesh, newer, |_| true),
+            "run 5 is held"
+        );
+        assert!(
+            !book.accept(&old, &alice, &mesh, older, |_| true),
+            "a late proof of run 4 is not held"
+        );
+
+        assert!(book.proof_of(&new).is_some(), "the newer session stays");
+        assert!(book.take_replaced().is_empty(), "nothing was dropped");
+    }
+
+    /// A member that restarts 1100 times, with all its old sessions still in the roster (no goodbye,
+    /// no timeout yet), holds one proof, the newest. The book never fills with its sessions, so the
+    /// proof of the newest session is never refused.
+    #[test]
+    fn a_member_that_restarts_1100_times_holds_its_newest_session() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let member = Identity::generate();
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let mut newest = None;
+        for run in 1..=1100u64 {
+            let session = Identity::generate().author_key();
+            let proof = member.prove(&session, alice.as_ref(), mesh.as_ref(), run);
+            assert!(
+                book.accept(&session, &alice, &mesh, proof, |_| true),
+                "the proof of run {run} is held"
+            );
+            let _ = book.take_replaced();
+            newest = Some(session);
+        }
+
+        let newest = newest.expect("1100 restarts");
+        assert!(
+            book.proof_of(&newest).is_some(),
+            "the newest session is held"
+        );
+        assert_eq!(book.len(), 1, "the sessions of the older runs are gone");
+        assert_eq!(book.refused(), 0, "no proof was refused for want of room");
     }
 }

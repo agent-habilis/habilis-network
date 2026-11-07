@@ -18,7 +18,9 @@ mod observed;
 mod presence_event;
 pub(crate) use logs::{log_leaving, log_ready};
 pub(crate) use observed::{Observed, observe};
-pub(crate) use presence_event::{PresenceEvent, ask_for_proof, handle_presence};
+pub(crate) use presence_event::{
+    Goodbye, PresenceEvent, ask_for_proof, end_session, handle_presence,
+};
 
 #[cfg(test)]
 mod tests {

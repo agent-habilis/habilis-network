@@ -4,7 +4,7 @@ use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
 use crate::logging::messages;
 use crate::protocol::messages::Verified;
-use crate::protocol::{Message, Nickname, PresenceSubtype};
+use crate::protocol::{AuthorKey, Message, Nickname, PresenceSubtype};
 use crate::transport;
 use iroh::EndpointId;
 
@@ -28,9 +28,15 @@ pub(crate) struct PresenceEvent<'message> {
 /// The presence that reports a departure. The roster knows the key by `departed`, and a goodbye can
 /// name another nickname. Then this node signs the `left` that reports it, as it does for an
 /// arrival, so that the proof names the peer that was removed.
-fn departure(message: &Verified, departed: &Nickname, context: &HandlerCtx<'_>) -> NodeEvent {
-    let key = message.key();
-    if message.author == *departed {
+fn departure(
+    goodbye: &Goodbye<'_>,
+    key: AuthorKey,
+    departed: &Nickname,
+    context: &HandlerCtx<'_>,
+) -> NodeEvent {
+    if let Goodbye::Signed(message) = goodbye
+        && message.author == *departed
+    {
         return NodeEvent::Presence {
             message: Box::new(message.authored()),
             peer: key,
@@ -65,6 +71,93 @@ async fn end_unbound_endpoints(state: &mut EventLoopState, endpoints: Vec<Endpoi
     }
 }
 
+/// How the end of a session is told: by the `left` frame that the session signed, or by a newer run
+/// of its member that replaced it.
+pub(crate) enum Goodbye<'source> {
+    Signed(&'source Verified),
+    /// The newer session that replaced it, named by its author.
+    Replaced(&'source Nickname),
+}
+
+impl Goodbye<'_> {
+    fn nickname(&self) -> &Nickname {
+        match self {
+            Self::Signed(message) => &message.author,
+            Self::Replaced(nickname) => nickname,
+        }
+    }
+}
+
+/// End the session `key` in the roster, for a goodbye that it signed or for a newer run of its member.
+/// The roster is keyed by author key, so this ends that key and no other: another key under the same
+/// nickname stays a peer. Any key can sign a goodbye under any nickname, and the goodbye of a key that
+/// is not in the roster removes nothing.
+pub(crate) async fn end_session(
+    key: AuthorKey,
+    goodbye: Goodbye<'_>,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) {
+    // A key says goodbye once per run. A second copy is a replay that a peer still held.
+    if state.key_said_goodbye(key) {
+        return;
+    }
+    state.drop_departed_presence(&key);
+    // The roster is keyed by author key, so a goodbye ends that key and no other: another key
+    // under the same nickname stays a peer. Any key can sign a goodbye under any nickname, and
+    // the goodbye of a key that is not in the roster removes nothing. It is kept apart from
+    // the goodbyes of peers, so a flood of them cannot evict those. A key that outlived the
+    // quiet TTL is still in the roster: it keeps its name and its dial hint.
+    let was_peer = state.peers.contains(&key)
+        || state.quiet.contains(&key)
+        || state.clock_evidence.lapsed_quiet.contains(&key);
+    if !was_peer {
+        state.note_stranger_left(key);
+        // A `PeerInfo` can bind a hint before the roster admits its key, and the hint of a
+        // key that said goodbye must not stay routable.
+        let stranger_hints = state.forget_hints_of(key);
+        let hinted = stranger_hints.iter().map(|hint| hint.id);
+        end_unbound_endpoints(state, hinted.collect()).await;
+        return;
+    }
+    state.note_left(key);
+    let was_surfaced = state.surfaced.contains(&key);
+    // The roster knows the key by the nickname it recorded, and a goodbye can name any
+    // nickname. `forget_key` drops the record, so read it first.
+    let recorded = state.names.get(&key);
+    let departed = recorded.unwrap_or(goodbye.nickname()).clone();
+    // A key that renamed left one endpoint for each nickname it used, and it can have proved an
+    // endpoint without owning a hint, when another key held its nickname. Each one is torn
+    // down, unless a nickname still binds it. `forget_key` drops the trust, so read it first.
+    let proved = state.proven_endpoints.trusted(&key);
+    let left_hints = state.forget_key(key);
+    let hinted = left_hints.iter().map(|hint| hint.id);
+    let left_endpoints: Vec<_> = hinted.chain(proved).collect();
+    end_unbound_endpoints(state, left_endpoints).await;
+    // Only announce a departure for a peer whose arrival we
+    // surfaced — keeps the join-horizon view symmetric. A `left`
+    // for a peer known only through pre-join backlog (or one we
+    // already showed going quiet) is dropped.
+    if was_surfaced {
+        context
+            .sink
+            .emit(departure(&goodbye, key, &departed, context));
+        tracing::info!(target: "habilis_network::lifecycle", nickname = %departed, "peer left");
+    }
+    state.write_peer_count();
+    // A departure is a flush edge: the frames to the key that left are gone from the buffer
+    // (`forget_key`), and the rest go now.
+    if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
+        gossip::flush_pending(state, context, "peer left").await;
+    }
+    // App cleanup last, with the roster already consistent. The app hears of every key that
+    // leaves, whoever else holds its nickname. Not gated on `surfaceable`: the key was in the
+    // roster, so a goodbye ends it whatever the clock of its sender says. The join horizon
+    // hides a line from the user, and it does not hide a fact from the app.
+    app.on_peer_left(&key, &departed, state, context).await;
+}
+
 pub(crate) async fn handle_presence(
     event: PresenceEvent<'_>,
     state: &mut EventLoopState,
@@ -82,61 +175,7 @@ pub(crate) async fn handle_presence(
         return;
     }
     if subtype == PresenceSubtype::Left {
-        // A key says goodbye once per run. A second copy is a replay that a peer still held.
-        let key = message.key();
-        if state.key_said_goodbye(key) {
-            return;
-        }
-        state.drop_departed_presence(&key);
-        // The roster is keyed by author key, so a goodbye ends that key and no other: another key
-        // under the same nickname stays a peer. Any key can sign a goodbye under any nickname, and
-        // the goodbye of a key that is not in the roster removes nothing. It is kept apart from
-        // the goodbyes of peers, so a flood of them cannot evict those. A key that outlived the
-        // quiet TTL is still in the roster: it keeps its name and its dial hint.
-        let was_peer = state.peers.contains(&key)
-            || state.quiet.contains(&key)
-            || state.clock_evidence.lapsed_quiet.contains(&key);
-        if !was_peer {
-            state.note_stranger_left(key);
-            // A `PeerInfo` can bind a hint before the roster admits its key, and the hint of a
-            // key that said goodbye must not stay routable.
-            let stranger_hints = state.forget_hints_of(key);
-            let hinted = stranger_hints.iter().map(|hint| hint.id);
-            end_unbound_endpoints(state, hinted.collect()).await;
-            return;
-        }
-        state.note_left(key);
-        let was_surfaced = state.surfaced.contains(&key);
-        // The roster knows the key by the nickname it recorded, and a goodbye can name any
-        // nickname. `forget_key` drops the record, so read it first.
-        let departed = state.names.get(&key).unwrap_or(&message.author).clone();
-        // A key that renamed left one endpoint for each nickname it used, and it can have proved an
-        // endpoint without owning a hint, when another key held its nickname. Each one is torn
-        // down, unless a nickname still binds it. `forget_key` drops the trust, so read it first.
-        let proved = state.proven_endpoints.trusted(&key);
-        let left_hints = state.forget_key(key);
-        let hinted = left_hints.iter().map(|hint| hint.id);
-        let left_endpoints: Vec<_> = hinted.chain(proved).collect();
-        end_unbound_endpoints(state, left_endpoints).await;
-        // Only announce a departure for a peer whose arrival we
-        // surfaced — keeps the join-horizon view symmetric. A `left`
-        // for a peer known only through pre-join backlog (or one we
-        // already showed going quiet) is dropped.
-        if was_surfaced {
-            context.sink.emit(departure(message, &departed, context));
-            tracing::info!(target: "habilis_network::lifecycle", nickname = %departed, "peer left");
-        }
-        state.write_peer_count();
-        // A departure is a flush edge: the frames to the key that left are gone from the buffer
-        // (`forget_key`), and the rest go now.
-        if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
-            gossip::flush_pending(state, context, "peer left").await;
-        }
-        // App cleanup last, with the roster already consistent. The app hears of every key that
-        // leaves, whoever else holds its nickname. Not gated on `surfaceable`: the key was in the
-        // roster, so a goodbye ends it whatever the clock of its sender says. The join horizon
-        // hides a line from the user, and it does not hide a fact from the app.
-        app.on_peer_left(&key, &departed, state, context).await;
+        end_session(message.key(), Goodbye::Signed(message), state, app, context).await;
     } else if subtype == PresenceSubtype::Joined && !update.stale {
         // Every `joined` re-floods our `PeerInfo`, newcomer and rejoin
         // alike. A newcomer linked to the *rendezvous*, so no `NeighborUp`
