@@ -687,6 +687,10 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
         return Ok(1);
     };
     let run_path = state.with_extension("run");
+    // The read of the counter and the write of the next one are one step: two starts of one state path
+    // would otherwise read one count and publish one run. The lock is on a file of its own, because the
+    // counter file is replaced by a rename; it is held until `run_lock` drops at the end of the call.
+    let run_lock = lock_run_counter(state)?;
     let run = match fs::read(&run_path) {
         Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_slice()) {
             Ok(last) => u64::from_le_bytes(last).saturating_add(1),
@@ -699,7 +703,21 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
         Err(_) => counter_lost(),
     };
     write_run(state, run)?;
+    drop(run_lock);
     Ok(run)
+}
+
+/// Take the exclusive lock on `<state>.run.lock`, which makes the allocation of a run one step across
+/// processes and threads. It waits for the holder, and the lock goes with the returned file.
+#[cfg(all(unix, feature = "host"))]
+fn lock_run_counter(state: &Path) -> Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false).mode(0o600);
+    let lock = options.open(state.with_extension("run.lock"))?;
+    lock.lock()?;
+    Ok(lock)
 }
 
 /// Keep `run` in `<state>.run`.
@@ -1400,6 +1418,40 @@ mod tests {
             super::next_run(None, false).expect("no state file"),
             1,
             "no file means run 1"
+        );
+    }
+
+    /// Two starts that share a state path each get their own run: the read of the counter and the write
+    /// of the next one are one step under a lock, so no two starts publish one run.
+    #[test]
+    fn starts_that_share_a_state_path_get_distinct_runs() {
+        let dir = TempDir::new("habilis-run-race");
+        let state = dir.path().join("session.json");
+        let starts = 8;
+        let rounds = 40;
+        let mut runs: Vec<u64> = Vec::new();
+        thread::scope(|scope| {
+            let handles: Vec<_> = (0..starts)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let own: Vec<u64> = (0..rounds)
+                            .map(|_| super::next_run(Some(&state), false).expect("a run number"))
+                            .collect();
+                        own
+                    })
+                })
+                .collect();
+            for handle in handles {
+                runs.extend(handle.join().expect("a start"));
+            }
+        });
+        let total = runs.len();
+        runs.sort_unstable();
+        runs.dedup();
+        assert_eq!(
+            runs.len(),
+            total,
+            "two starts of one state path published one run: peers would keep different sessions"
         );
     }
 
