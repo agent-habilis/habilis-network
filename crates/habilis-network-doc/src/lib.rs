@@ -62,6 +62,10 @@ mod limits;
 
 pub use limits::{Axis, Limits};
 
+mod time_source;
+
+pub use time_source::TimeSource;
+
 mod mesh_doc;
 
 pub use mesh_doc::{

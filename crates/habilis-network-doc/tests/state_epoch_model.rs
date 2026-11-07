@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::{env, mem};
 
-use habilis_network_doc::{DocError, Ingested, MeshDoc, Stamp, StampedPaths, wire};
+use habilis_network_doc::{DocError, Ingested, MeshDoc, Stamp, StampedPaths, TimeSource, wire};
 use habilis_network_protocol::messages::{MessageBody, Verified};
 use habilis_network_protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
 use serde_json::{Map, Value, json};
@@ -98,7 +98,13 @@ impl Sim {
         for index in 0..NODES {
             nodes.push(Node {
                 name: nick(&format!("n{index}")),
-                doc: MeshDoc::new_ungated().state_epochs(),
+                // The model checks the replay rule on the order of the Lamport times. A wall clock
+                // that stays at 0 leaves the times of a node at one above the highest that it saw,
+                // so the order of two writes that do not see each other does not depend on how
+                // fast the test runs.
+                doc: MeshDoc::new_ungated()
+                    .state_epochs()
+                    .time_source(TimeSource::new(|| 0)),
             });
         }
         Self {

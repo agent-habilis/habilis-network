@@ -182,8 +182,9 @@ pub const DOC_RESTORES_MAX: usize = 65_536;
 /// what `tests/seed_cost.rs` measured (13 to 16), and 25 at the bound of the clock.
 pub const DOC_STATE_STAMP_BYTES_BASE: usize = 9;
 
-/// The most bytes that the stamp of one path can take in a frame of a seed: a time of 16 digits (the
-/// bound `2^53` of the Lamport time), 3 digits of tag index, 4 of syntax and a new tag of 19 bytes.
+/// The most bytes that the stamp of one path can take in a frame of a seed: a time of 16 digits, 3
+/// digits of tag index, 4 of syntax and a new tag of 19 bytes. A time has 13 digits until the year
+/// 2286 (it is the wall clock in milliseconds), so this figure has room to spare.
 /// A writer that sends such stamps can make a cut fail: it is a flood, not a case that the lines
 /// cover.
 pub const DOC_STATE_STAMP_BYTES_MAX: usize = 46;
@@ -256,6 +257,15 @@ pub const DOC_EPOCH_JUMP_MAX: u64 = 131_072;
 /// epoch (a tunable). At the end it jumps to the highest epoch that it saw. A forger can force
 /// at most 1 reset per wait on a node. A node that holds nothing from others adopts at once.
 pub const DOC_EPOCH_ADOPT_WAIT_TICKS: u32 = 5;
+
+/// How far above the wall clock of a node the Lamport time of a state change may be (a wire
+/// contract). A time is the wall clock in milliseconds, or one above the highest time that a node
+/// saw. One signed frame with a huge time would otherwise pin the clock of every member for good:
+/// every later write would carry a time that every peer refuses. The hour is the lever of an
+/// attacker, who can make its own leaves win conflicts for that long, and the error that a node
+/// with a wrong clock can have: a clock that is off by more than an hour is broken, and the node
+/// shows it as refused times.
+pub const DOC_CLOCK_WINDOW: Duration = Duration::from_hours(1);
 
 /// Hard ceiling on a partial group's lifetime regardless of activity. The
 /// idle TTL alone lets a hostile stream pin its buffered bytes forever by

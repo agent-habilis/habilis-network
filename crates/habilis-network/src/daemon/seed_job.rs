@@ -26,9 +26,12 @@ use crate::util::tuning;
 
 use super::state::EventLoopState;
 
-/// The time that the stamps of the paths of a merge get in the `fits` of a seed: the largest
-/// Lamport time (`2^53 - 1`), so a frame that fits with it fits with any stamp.
-const LARGEST_TIME: u64 = (1 << 53) - 1;
+/// The time that the stamps of the paths of a merge get in the `fits` of a seed: the largest time
+/// of 13 digits, so a frame that fits with it fits with any stamp. A time is the wall clock in
+/// milliseconds, which has 13 digits until the year 2286, and the clock window keeps every time
+/// that a node takes or accepts within 2 hours of it. The same figure sizes the leaf check of a
+/// write in the document crate.
+const LARGEST_TIME: u64 = 9_999_999_999_999;
 
 /// What a node needs to build the chain of a seed and to measure its frames, copied out of the
 /// event-loop state so that the build runs on another thread.
@@ -572,7 +575,7 @@ mod tests {
     use tokio::time::interval;
 
     use crate::daemon::state::{EventLoopState, Standing};
-    use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp};
+    use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp, TimeSource};
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::Verified;
     use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
@@ -1092,6 +1095,9 @@ mod tests {
         let identity = Arc::new(Identity::generate());
         let me = testing::nick("me");
         let mut doc = MeshDoc::new_state(None);
+        // A clock that stays at 0 gives small stamps. With the wall clock a stamp has 13 digits,
+        // as many as the largest time, and the real stamps cost the same as the worst one.
+        doc.set_time_source(TimeSource::new(|| 0));
         doc.finish_sync();
         write_leaves(&mut doc, &identity, &me, 3_000);
         let plan = doc.seed_plan().expect("a plan");

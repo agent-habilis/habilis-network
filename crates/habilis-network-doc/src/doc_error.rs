@@ -56,6 +56,14 @@ pub enum DocError {
         /// What the two numbers count: `bytes` or `operations`.
         what: &'static str,
     },
+    /// The clock of the shared state is ahead of this machine: the next time of a change would be
+    /// more than `DOC_CLOCK_WINDOW` above the wall clock. A frame of a member, or a clock of
+    /// this machine that is behind, holds the clock. The write is not made: a time that did not
+    /// rise would break the order of the writes of this author. The caller tries again later.
+    ClockAhead {
+        /// How many milliseconds the next time would be above the bound.
+        ahead_ms: u64,
+    },
     /// The merge adds a value nested deeper than the state document allows.
     StateTooDeep {
         /// The keys on the way to the deepest value that the merge adds, counting its own.
@@ -101,6 +109,9 @@ impl fmt::Display for DocError {
             Self::SeedTooLong { .. } => "the seed would have more frames than a node accepts",
             Self::CandidateHeld => "the document holds a candidate seed and cuts no epoch",
             Self::ClockNotReady => "the clock of the document has not heard of another write yet",
+            Self::ClockAhead { .. } => {
+                "the clock of the shared state is ahead of the time of this machine"
+            }
             Self::StateFull { .. } | Self::StateTooDeep { .. } => unreachable!("written above"),
         })
     }
@@ -114,6 +125,7 @@ impl error::Error for DocError {
             | Self::SeedTooLong { .. }
             | Self::CandidateHeld
             | Self::ClockNotReady
+            | Self::ClockAhead { .. }
             | Self::StateFull { .. }
             | Self::StateTooDeep { .. } => None,
             Self::Body(error) => Some(error),
