@@ -1,3 +1,11 @@
+#[cfg(feature = "host")]
+const SUBSYSTEMS: &str = "habilis_network::gossip=info,\
+    habilis_network::lookup=info,\
+    habilis_network::beacon=info,\
+    habilis_network::lifecycle=info,\
+    habilis_network::directory=info,\
+    habilis_network::messages=info";
+
 /// Default tracing directives when `RUST_LOG` is unset (`RUST_LOG`
 /// wins). Quiets benign `noq_proto::connection`; release also drops the
 /// env-dependent `mainline::rpc` DHT-bootstrap ERROR; the `messages`
@@ -14,12 +22,6 @@
 #[must_use]
 pub fn log_filter(consumer_pins: &str) -> tracing_subscriber::EnvFilter {
     use tracing_subscriber::EnvFilter;
-    const SUBSYSTEMS: &str = "habilis_network::gossip=info,\
-        habilis_network::lookup=info,\
-        habilis_network::beacon=info,\
-        habilis_network::lifecycle=info,\
-        habilis_network::directory=info,\
-        habilis_network::messages=info";
     EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         let base = if cfg!(debug_assertions) {
             "info,noq_proto::connection=off"
@@ -33,4 +35,18 @@ pub fn log_filter(consumer_pins: &str) -> tracing_subscriber::EnvFilter {
         }
         EnvFilter::new(directives)
     })
+}
+
+#[cfg(all(test, feature = "host"))]
+mod tests {
+    /// A release build drops every line below `error` unless its target is pinned, so the blob
+    /// eviction warning is pinned like the other subsystems.
+    #[test]
+    fn the_blob_target_is_pinned_at_every_base_level() {
+        assert!(
+            super::SUBSYSTEMS.contains("habilis_network::blob=info"),
+            "habilis_network::blob is not pinned: {}",
+            super::SUBSYSTEMS
+        );
+    }
 }
