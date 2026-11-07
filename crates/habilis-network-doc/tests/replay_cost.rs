@@ -77,6 +77,20 @@ fn take(doc: &mut MeshDoc, frame: &Verified, what: &str) {
     );
 }
 
+/// Ingest `frames` until the document refuses one, and say how many it took. A document that is
+/// full (over the line that refuses a write that adds) refuses what comes: the cost of the frames
+/// that it took is a measurement, and the refused ones are not.
+fn take_until_refused(doc: &mut MeshDoc, frames: &[Verified]) -> usize {
+    let mut taken = 0;
+    for frame in frames {
+        if !matches!(doc.ingest(frame), Ingested::Applied { .. }) {
+            break;
+        }
+        taken += 1;
+    }
+    taken
+}
+
 /// The time and the bytes allocated that `step` took.
 fn measured<Out>(step: impl FnOnce() -> Out) -> (Out, Duration, usize) {
     let before = ALLOCATED.load(Ordering::Relaxed);
@@ -207,18 +221,11 @@ fn the_cost_of_a_replay_frame_and_of_a_burst() {
         // object, so every frame hides the leaves of the frames before it.
         let same = same_leaf_burst(true);
         let same_plain = same_leaf_burst(false);
-        let ((), same_time, same_bytes) = measured(|| {
-            for frame in &same {
-                take(&mut doc, frame, "a replay frame of the same-leaf burst");
-            }
-        });
-        let ((), same_plain_time, same_plain_bytes) = measured(|| {
-            for frame in &same_plain {
-                take(&mut base, frame, "a plain frame of the same-leaf burst");
-            }
-        });
+        let (same_taken, same_time, same_bytes) = measured(|| take_until_refused(&mut doc, &same));
+        let (same_plain_taken, same_plain_time, same_plain_bytes) =
+            measured(|| take_until_refused(&mut base, &same_plain));
         eprintln!(
-            "COST leaves={leaves} same-leaf burst of 96 replay frames: {same_time:?}/{same_bytes}B, the same as plain frames: {same_plain_time:?}/{same_plain_bytes}B"
+            "COST leaves={leaves} same-leaf burst of 96 replay frames, {same_taken} taken: {same_time:?}/{same_bytes}B, the same as plain frames, {same_plain_taken} taken: {same_plain_time:?}/{same_plain_bytes}B"
         );
     }
 }
