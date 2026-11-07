@@ -314,7 +314,7 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_
             max: budget,
             requester: &requester,
         }) {
-            if !resend_one_to(&missing, state, reply_to) {
+            if !resend_one_to(&missing, state, reply_to, Some(&message.author)) {
                 continue;
             }
             // Mark it sent so the next (overlapping) window doesn't re-send it
@@ -322,7 +322,6 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_
             // Charged even when the send failed: an addressee with no endpoint
             // yet must not be retried inside this digest; it retries next round.
             have.insert(missing.dedup_key());
-            state.idle.note_resend_for(&message.author);
             resent += 1;
             budget -= 1;
         }
@@ -342,7 +341,7 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_
 /// stream does not cross.
 #[cfg(test)]
 fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
-    resend_one_to(message, state, None)
+    resend_one_to(message, state, None, None)
 }
 
 /// What the test helper `resend_one` does, with the asker that the unicast form answers to.
@@ -350,6 +349,7 @@ fn resend_one_to(
     message: &Verified,
     state: &mut EventLoopState,
     reply_to: Option<EndpointId>,
+    requester: Option<&Nickname>,
 ) -> bool {
     let Ok(bytes) = message.serialize() else {
         return false;
@@ -367,6 +367,11 @@ fn resend_one_to(
             };
             if state.resend_outbox.offer(resend) {
                 state.idle.resent += 1;
+                // Only a resend that the outbox took is counted for the requester, so the census
+                // names the same resends as `idle_resent`.
+                if let Some(requester) = requester {
+                    state.idle.note_resend_for(requester);
+                }
             } else {
                 state.idle.resend_dropped += 1;
             }
@@ -1580,6 +1585,33 @@ mod tests {
             state.resend_outbox.dropped(),
             tuning::ANTIENTROPY_MAX_RESEND as u64 - 4,
             "the rest of the answer is dropped, and counted"
+        );
+    }
+
+    /// The census names the requesters that were answered, and the resends that it counts for them
+    /// are the ones that the outbox took: a resend that the full outbox dropped is no answer. The two
+    /// counts of one line must agree.
+    #[test]
+    fn the_requester_count_is_the_count_of_the_resends_that_the_outbox_took() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, asker) = (test_key("holder"), nick("asker"));
+        let mut state = fresh_state();
+        state.peer_for_test(asker.as_str());
+        for index in 0..100 {
+            state
+                .message_log
+                .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
+        }
+        let (outbox, _undrained) = transport::ResendOutbox::new(4);
+        state.resend_outbox = outbox;
+
+        super::handle_digest(&digest_of_an_empty_log(&asker), &mut state, &me);
+
+        assert_eq!(state.idle.resent, 4, "the outbox took 4 resends");
+        assert_eq!(
+            state.idle.resent_by.get(&asker).copied(),
+            Some(4),
+            "the requester is counted for the 4 resends that were queued, not for the ones dropped"
         );
     }
 
