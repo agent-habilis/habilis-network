@@ -1564,7 +1564,7 @@ impl MeshDoc {
     /// the frames of others.
     ///
     /// A fresh joiner holds nothing, so one frame can move it to any epoch (see
-    /// [`Self::holds_nothing`]). It holds frames of others after that, so it waits the next time.
+    /// `Self::holds_nothing`). It holds frames of others after that, so it waits the next time.
     pub fn adopt_if_alone(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
         self.settle_challenger();
         let held = self.candidate.as_ref()?;
