@@ -686,8 +686,7 @@ pub(crate) async fn handle_state_digest(
             return Answered::default();
         }
     }
-    let target = transport::unicast_answer_target(&author, state)
-        .or_else(|| arrived_from.filter(|eid| transport::can_unicast(*eid, state)));
+    let target = unicast_reply_to(&author, state);
     let plane = if target.is_some() {
         Plane::Unicast
     } else {

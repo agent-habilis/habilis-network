@@ -1707,6 +1707,52 @@ mod tests {
         });
     }
 
+    /// A state digest that came by unicast is answered to the connection it came on, also when the
+    /// signer proved another endpoint earlier: a chat answer takes the same choice.
+    #[test]
+    fn a_state_digest_is_answered_to_its_connection_not_to_an_older_proven_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            let asker = Identity::generate();
+            let older = endpoint_id(9);
+            state.linked_endpoints.insert(older);
+            state.direct.insert(older, DirectState::Direct);
+            state.note_proven_endpoint(asker.author_key(), older, UnixSecs::from(1));
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let received = read_frames(bob_endpoint, 4);
+            let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
+
+            let answered = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(
+                answered,
+                Answered {
+                    unicast: 3,
+                    broadcast: 0
+                },
+                "the frames go to the connection of the digest"
+            );
+            let (got, returned_endpoint) =
+                tokio_time::timeout(std_Duration::from_secs(5), received)
+                    .await
+                    .expect("bob reads the answer in time")
+                    .expect("reader task");
+            assert!(got.len() >= 3, "bob holds the 3 frames");
+            returned_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
     /// A digest that came by gossip is answered by a few members, as a chat digest is, when the
     /// unicast form is on. Here the k rule leaves this holder out: it sends nothing.
     #[test]
