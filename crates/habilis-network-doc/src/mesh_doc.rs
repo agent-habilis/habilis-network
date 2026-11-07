@@ -1469,8 +1469,7 @@ impl MeshDoc {
     }
 
     /// Choose between the candidate and its rival when the wait is over: the whole chain, the
-    /// lowest key if both are whole. An incomplete root that loses is forgotten, with its author for
-    /// 2 waits (see `Self::shun`).
+    /// lowest key if both are whole. The loser is forgotten.
     fn settle_challenger(&mut self) {
         let Some(challenger) = self.challenger.take() else {
             return;
@@ -1488,10 +1487,10 @@ impl MeshDoc {
         } else {
             (held, challenger)
         };
+        // The loser is forgotten, and its author is not shunned: the wholeness of a chain is judged
+        // at one instant, and an honest chain that is still arriving on a slow link would else shun
+        // its cutter for 2 waits on the nodes that do not hold all of it yet.
         self.dropped.extend(lost.keys());
-        if lost.chain().is_none() {
-            self.shun(lost.frame.key());
-        }
         self.candidate = Some(kept);
     }
 
@@ -1502,13 +1501,14 @@ impl MeshDoc {
         self.candidate_is_whole()
     }
 
-    /// The epoch of the seed that this node cuts next: one above its own epoch and above the epoch
-    /// of an incomplete candidate that it holds, so that its seed replaces that candidate and is
-    /// not refused for a lower epoch.
+    /// The epoch of the seed that this node cuts next: one above its own epoch, whatever candidate
+    /// it holds. A cut above an incomplete candidate would let a forger choose the epoch of every
+    /// honest cut: one incomplete root at the far end of the jump bound, once for each wait, would
+    /// make every honest root refused at its epoch. An incomplete candidate is replaced by the root of
+    /// any epoch (see `ingest_other_epoch`), and a root of the epoch of the candidate becomes its rival.
     #[must_use]
     pub fn cut_epoch(&self) -> u64 {
-        let held = self.candidate.as_ref().map_or(0, |held| held.epoch);
-        self.epoch.max(held).saturating_add(1)
+        self.epoch.saturating_add(1)
     }
 
     /// Whether a candidate seed waits to be adopted. A node that holds one adopts it after the wait
@@ -2534,7 +2534,11 @@ impl MeshDoc {
             {
                 return self.refuse_frame(frame);
             }
-            Some(held) if held.epoch >= epoch => return self.refuse_frame(frame),
+            // The candidate is of this epoch or above, and it is whole (or a gated one-frame root):
+            // it stays. An incomplete candidate of a higher epoch holds nothing and is replaced.
+            Some(held) if held.epoch >= epoch && (held.epoch == epoch || held.is_whole()) => {
+                return self.refuse_frame(frame);
+            }
             _ => {}
         }
         let kept = Candidate::new(epoch, frame.clone(), change, mark);
@@ -5911,12 +5915,42 @@ mod tests {
         }
     }
 
-    /// A node that holds an incomplete candidate cuts above its epoch, so its seed replaces it and
-    /// is not refused for a lower epoch, whatever the keys of the two roots.
+    /// A forger sends one incomplete root at the epoch above the held one by the whole bound of a
+    /// jump, with a fresh key, once for each wait. The honest cut, one above the epoch of the node,
+    /// must still land: an incomplete candidate of a higher epoch holds nothing, so the honest root
+    /// replaces it.
     #[test]
-    fn a_cut_above_an_incomplete_candidate_replaces_it() {
+    fn an_incomplete_far_root_does_not_stop_an_honest_cut_from_landing() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (forger, me) = (nick("forger"), nick("me"));
+        let (forger, cutter, me) = (nick("forger"), nick("cutter"), nick("me"));
+        let source = state_doc_with(&live_state());
+        let mut node = state_doc_with(&live_state());
+        let far = seed_frames_of(&source, &forger, super::DOC_EPOCH_JUMP_MAX, None).remove(0);
+        assert!(
+            matches!(node.ingest(&far), Ingested::NewEpoch { .. }),
+            "the premise: the far root is held, no bound is passed"
+        );
+        assert_eq!(node.epoch(), 0, "the epoch of the node");
+        let honest = seed_frames_of(&source, &cutter, node.epoch() + 1, None);
+        for frame in &honest {
+            node.ingest(frame);
+        }
+
+        let switch = ticks(&mut node, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+
+        assert_eq!(
+            switch.map(|switched| switched.epoch),
+            Some(1),
+            "the honest cut at one above the epoch of the node is adopted"
+        );
+    }
+
+    /// A node that holds an incomplete candidate cuts at one above its own epoch, beside it: its
+    /// whole chain wins at the end of the wait, whatever the keys.
+    #[test]
+    fn a_cut_beside_an_incomplete_candidate_is_adopted_at_the_end_of_the_wait() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (forger, me) = (nick("aaa-forger"), nick("zzz-me"));
         let mut node = state_doc_with(&live_state());
         let root_of_forger = seed_frames_of(&node, &forger, 1, None).remove(0);
         assert!(
@@ -5926,14 +5960,18 @@ mod tests {
             ),
             "the premise: an incomplete candidate of epoch 1"
         );
-        assert_eq!(node.cut_epoch(), 2, "one above the epoch of the candidate");
+        assert_eq!(node.cut_epoch(), 1, "one above the epoch of the node");
 
         let mine = seed_frames_of(&node, &me, node.cut_epoch(), None);
-        let outcome = node.ingest(&mine[0]);
+        for frame in &mine {
+            node.ingest(frame);
+        }
 
-        assert!(
-            matches!(outcome, Ingested::NewEpoch { epoch: 2 }),
-            "the seed of the node takes the place of the incomplete candidate: {outcome:?}"
+        let switch = ticks(&mut node, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        assert_eq!(
+            switch.map(|switched| switched.epoch),
+            Some(1),
+            "the whole chain of the node is adopted, not the incomplete root of the forger"
         );
     }
 
