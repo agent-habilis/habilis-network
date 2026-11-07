@@ -2603,7 +2603,7 @@ mod first_contact_tests {
     use crate::transport::proven_endpoints::ProvenEndpoints;
     use crate::transport::{PayloadPath, webrtc};
     use crate::util::{clock, tuning};
-    use crate::{lookup, protocol, transport};
+    use crate::{lifecycle, lookup, protocol, transport};
     use iroh_gossip::proto;
     use n0_future::task;
     use n0_future::time::Instant as TokioInstant;
@@ -2993,6 +2993,53 @@ mod first_contact_tests {
                 ),
                 (0, 1),
                 "the ask goes once the link is up, and nothing waits"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The sweep tick is the fallback of the deferred asks: it sends the ask of a session that has a path
+    /// by now though no event said so, and it drops the ask that waited longer than its time, so that
+    /// session is asked again at its next alive frame.
+    #[test]
+    fn the_sweep_sends_the_deferred_ask_that_has_a_path_and_drops_the_one_that_waited_too_long() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let (with_path, expired) = (Identity::generate(), Identity::generate());
+            for (session, name, endpoint) in [
+                (&with_path, "alice", endpoint_id(7)),
+                (&expired, "bob", endpoint_id(8)),
+            ] {
+                state.peers.insert(session.author_key());
+                state.names.insert(session.author_key(), nick(name));
+                state.place_endpoint(
+                    session.author_key(),
+                    &nick(name),
+                    iroh::EndpointAddr::new(endpoint),
+                );
+            }
+            let now = clock::Instant::now();
+            let long_ago = now
+                .checked_sub(std_Duration::from_secs(31))
+                .expect("a clock that runs for more than 31 s");
+            state.proofs.defer_ask(with_path.author_key(), now);
+            state.proofs.defer_ask(expired.author_key(), long_ago);
+            // the path to alice is up, and no event said so
+            state.linked_endpoints.insert(endpoint_id(7));
+
+            lifecycle::retry_deferred_asks(&mut state, &context, None).await;
+
+            assert_eq!(
+                state.proof_requests_signed.load(Ordering::Relaxed),
+                1,
+                "the ask of the session with a path went, and the one that waited too long did not"
+            );
+            assert_eq!(
+                state.proofs.deferred_len(),
+                0,
+                "nothing waits: the one asked is out, and the old one expired"
             );
             node.endpoint.close().await;
         });
