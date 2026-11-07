@@ -526,6 +526,11 @@ impl Candidate {
         whole.then_some(ordered)
     }
 
+    /// Whether the chain is complete: every frame that the mark names is held.
+    fn is_whole(&self) -> bool {
+        self.chain().is_some()
+    }
+
     /// The hashes of the tail frames that lie on the path from the root.
     fn on_path(&self) -> HashSet<ChangeHash> {
         let by_parent = self.by_parent();
@@ -681,6 +686,11 @@ pub struct MeshDoc {
     /// adopted. One frame at most, so it is bounded; a frame that does not take the place is
     /// forgotten by the receive path.
     candidate: Option<Box<Candidate>>,
+    /// A rival root of the epoch of `candidate`, held beside it: the root of another cutter, or of
+    /// a forger. At most one. A rival never takes the place of the candidate; at the end of the
+    /// wait the document adopts the one whose chain is whole, the lowest key if both are, so a root
+    /// with no chain cannot make a node drop a whole seed.
+    challenger: Option<Box<Candidate>>,
     /// The ticks since the candidate took its place.
     candidate_ticks: u32,
     /// The ticks since the epoch began.
@@ -837,6 +847,7 @@ impl MeshDoc {
             dropped: Vec::new(),
             epoch: 0,
             candidate: None,
+            challenger: None,
             candidate_ticks: 0,
             epoch_ticks: 0,
             restores_due: 0,
@@ -1448,9 +1459,39 @@ impl MeshDoc {
     /// document adopts it after the wait. An incomplete one (a root whose frames did not come, or
     /// that never will) is dropped at the end of the wait and holds nothing back.
     fn candidate_is_whole(&self) -> bool {
-        self.candidate
+        let held_whole: bool = self.candidate.as_ref().is_some_and(|held| held.is_whole());
+        let rival_whole: bool = self
+            .challenger
             .as_ref()
-            .is_some_and(|held| held.chain().is_some())
+            .is_some_and(|rival| rival.is_whole());
+        held_whole || rival_whole
+    }
+
+    /// Choose between the candidate and its rival when the wait is over: the whole chain, the
+    /// lowest key if both are whole. An incomplete root that loses is forgotten, with its author for
+    /// 2 waits (see `Self::shun`).
+    fn settle_challenger(&mut self) {
+        let Some(challenger) = self.challenger.take() else {
+            return;
+        };
+        let Some(held) = self.candidate.take() else {
+            self.candidate = Some(challenger);
+            return;
+        };
+        let held_whole = held.chain().is_some();
+        let challenger_whole = challenger.chain().is_some();
+        let takes_over: bool =
+            challenger_whole && (!held_whole || beats(&challenger.frame.key(), &held.frame.key()));
+        let (kept, lost) = if takes_over {
+            (challenger, held)
+        } else {
+            (held, challenger)
+        };
+        self.dropped.extend(lost.keys());
+        if lost.chain().is_none() {
+            self.shun(lost.frame.key());
+        }
+        self.candidate = Some(kept);
     }
 
     /// Whether a whole candidate seed waits to be adopted: a cut from this view would lose its
@@ -1525,6 +1566,7 @@ impl MeshDoc {
     /// A fresh joiner holds nothing, so one frame can move it to any epoch (see
     /// [`Self::holds_nothing`]). It holds frames of others after that, so it waits the next time.
     pub fn adopt_if_alone(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
+        self.settle_challenger();
         let held = self.candidate.as_ref()?;
         let alone = self.frames.values().all(|frame| frame.key() == *own);
         let whole = held.chain().is_some();
@@ -1589,6 +1631,7 @@ impl MeshDoc {
     /// with no frame behind it. A node that crosses the threshold with a candidate adopts it for
     /// that reason, and does not start an epoch of its own.
     fn adopt(&mut self, switcher: &AuthorKey) -> Option<EpochSwitch> {
+        self.settle_challenger();
         let candidate = self.candidate.take()?;
         let frames: Option<Vec<Verified>> = candidate.chain().map(|chain| {
             let mut owned: Vec<Verified> = Vec::with_capacity(chain.len());
@@ -1821,6 +1864,7 @@ impl MeshDoc {
         self.refused = BoundedFifoSet::new(self.limits.refused_max);
         self.pending = HashMap::new();
         self.candidate = None;
+        self.challenger = None;
         self.candidate_ticks = 0;
         self.epoch = epoch;
         self.epoch_ticks = 0;
@@ -2457,11 +2501,11 @@ impl MeshDoc {
             Some(held) if held.epoch == epoch && held.frame.dedup_key() == frame.dedup_key() => {
                 return Ingested::Duplicate;
             }
-            // Two seeds of one epoch: the root with the lowest key wins on every node.
-            Some(held)
-                if held.epoch == epoch
-                    && mark.is_some()
-                    && beats(&frame.key(), &held.frame.key()) => {}
+            // A second seed of one epoch is a rival: it is held beside the candidate, never in its
+            // place, and the wait ends with the whole chain (the lowest key if both are whole).
+            Some(held) if held.epoch == epoch && mark.is_some() => {
+                return self.take_challenger(epoch, change, frame, mark);
+            }
             // A whole candidate is not replaced by a root of a higher epoch whose chain has not come:
             // an attacker would else take the seed that every node is about to adopt. The root of a
             // seed of one frame is whole at once, so it passes.
@@ -2480,7 +2524,35 @@ impl MeshDoc {
             Some(beaten) => self.dropped.extend(beaten.keys()),
             None => self.candidate_ticks = 0,
         }
+        if let Some(rival) = self.challenger.take() {
+            self.dropped.extend(rival.keys());
+        }
         Ingested::NewEpoch { epoch }
+    }
+
+    /// The root of a second seed of the epoch of the candidate. The slot of the rival holds one
+    /// root: a new root takes it only from a rival whose chain is not whole and whose key is
+    /// higher. `Buffered` when the root is held.
+    fn take_challenger(
+        &mut self,
+        epoch: u64,
+        change: &Change,
+        frame: &Verified,
+        mark: Option<SeedMark>,
+    ) -> Ingested {
+        if let Some(held) = self.challenger.as_ref() {
+            if held.frame.dedup_key() == frame.dedup_key() {
+                return Ingested::Duplicate;
+            }
+            if held.chain().is_some() || !beats(&frame.key(), &held.frame.key()) {
+                return self.refuse_frame(frame);
+            }
+        }
+        let kept = Candidate::new(epoch, frame.clone(), change, mark);
+        if let Some(beaten) = self.challenger.replace(Box::new(kept)) {
+            self.dropped.extend(beaten.keys());
+        }
+        Ingested::Buffered
     }
 
     /// A frame of the epoch that the document holds that belongs to a rival seed: another node cut
@@ -2574,7 +2646,17 @@ impl MeshDoc {
     /// many frames as the mark of its root names, so a flood of tail frames cannot grow it.
     fn take_tail_frame(&mut self, epoch: u64, change: &Change, frame: &Verified) -> Ingested {
         let hash = change.hash();
-        let Some(held) = self.candidate.as_mut() else {
+        // A frame belongs to the chain of its author: the candidate, or the rival beside it.
+        let of_rival: bool = self
+            .challenger
+            .as_ref()
+            .is_some_and(|rival| rival.frame.key() == frame.key());
+        let slot = if of_rival {
+            self.challenger.as_mut()
+        } else {
+            self.candidate.as_mut()
+        };
+        let Some(held) = slot else {
             return self.refuse_frame(frame);
         };
         let named = held.mark.as_ref().map_or(0, |mark| mark.frames as usize);
@@ -2608,7 +2690,12 @@ impl MeshDoc {
                 self.dropped.push(gone.frame.dedup_key());
             }
         }
-        let Some(slots) = self.candidate.as_mut() else {
+        let place = if of_rival {
+            self.challenger.as_mut()
+        } else {
+            self.candidate.as_mut()
+        };
+        let Some(slots) = place else {
             return self.refuse_frame(frame);
         };
         let kept = TailFrame {
@@ -5724,6 +5811,61 @@ mod tests {
             matches!(node.seed_plan(), Err(DocError::CandidateHeld)),
             "and no plan is made"
         );
+    }
+
+    /// A root of the same epoch with a lower key must not displace a whole candidate, and it need
+    /// not be whole itself: a forger with a fresh key below the honest one, one root for each honest
+    /// seed, would else make every node drop the whole seed for an incomplete one, for ever.
+    #[test]
+    fn a_low_key_root_with_no_chain_does_not_displace_a_whole_candidate_of_its_epoch() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::allow_warn(
+            "habilis_network::gossip",
+            "the seed of the candidate epoch was not complete",
+        );
+        let (forger, honest) = (nick("aaa-forger"), nick("zzz-honest"));
+        assert!(
+            signer(&forger).as_bytes() < signer(&honest).as_bytes(),
+            "the premise: the forger has the lower key"
+        );
+        let source = state_doc_with(&live_state());
+        let mut node = MeshDoc::new_ungated().state_epochs();
+        for frame in seed_frames_of(&source, &honest, 1, None) {
+            node.ingest(&frame);
+        }
+
+        node.ingest(&seed_frames_of(&source, &forger, 1, None).remove(0));
+
+        let switch = ticks(&mut node, &nick("me"), super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        assert_eq!(
+            switch.map(|switched| switched.epoch),
+            Some(1),
+            "the whole honest seed is adopted at the end of the wait"
+        );
+    }
+
+    /// Two whole seeds of one epoch: the lowest key wins on every node, whatever the order in which
+    /// the frames came, because the node keeps the first as the candidate and the second beside it.
+    #[test]
+    fn two_whole_seeds_of_one_epoch_end_in_the_lowest_key_in_either_order() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high, me) = (nick("aaa-low"), nick("zzz-high"), nick("me"));
+        let from_low = json!({ "who": "low" });
+        let from_high = json!({ "who": "high" });
+        let low_frames = seed_frames_of(&state_doc_with(&from_low), &low, 1, None);
+        let high_frames = seed_frames_of(&state_doc_with(&from_high), &high, 1, None);
+        for (first, second) in [(&low_frames, &high_frames), (&high_frames, &low_frames)] {
+            let mut node = MeshDoc::new_ungated().state_epochs();
+            let both: Vec<&Verified> = first.iter().chain(second.iter()).collect();
+            for frame in both {
+                node.ingest(frame);
+            }
+
+            let switch = ticks(&mut node, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+
+            assert!(switch.is_some(), "a whole seed is adopted");
+            assert_eq!(node.to_json(), from_low, "the lowest key wins");
+        }
     }
 
     /// A node that holds an incomplete candidate cuts above its epoch, so its seed replaces it and
