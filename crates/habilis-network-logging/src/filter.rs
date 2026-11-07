@@ -4,7 +4,8 @@ const SUBSYSTEMS: &str = "habilis_network::gossip=info,\
     habilis_network::beacon=info,\
     habilis_network::lifecycle=info,\
     habilis_network::directory=info,\
-    habilis_network::messages=info";
+    habilis_network::messages=info,
+    habilis_network::blob=info";
 
 /// Default tracing directives when `RUST_LOG` is unset (`RUST_LOG`
 /// wins). Quiets benign `noq_proto::connection`; release also drops the
