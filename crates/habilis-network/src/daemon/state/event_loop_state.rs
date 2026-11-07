@@ -20,7 +20,7 @@ use crate::doc;
 use crate::doc::StampedPaths;
 
 use crate::transport::{ResendOutbox, UdpTransport};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -392,7 +392,13 @@ pub struct EventLoopState {
     /// The endpoint of a `PeerInfo` that bound no dial hint, because another live key holds the
     /// nickname of its signer. It waits here: the signer takes the nickname over when the other
     /// key leaves, and the sweep releases the endpoint of a signer that left the roster.
+    ///
+    /// Bounded by [`REFUSED_ENDPOINTS_CAP`]: when a new key arrives at the cap, the oldest key goes and
+    /// its endpoint state with it.
     pub(crate) refused_endpoints: HashMap<AuthorKey, EndpointAddr>,
+    /// The keys of `refused_endpoints` in the order that they were retained, oldest first. It may hold a key
+    /// that left the map; it is cut to the keys of the map when it grows past twice the cap.
+    refused_order: VecDeque<AuthorKey>,
     /// The newest stamp that we heard from each peer in a frame that proved it was alive, on the
     /// clock of that peer. A quiet peer returns only on a frame stamped after it: two stamps of
     /// one clock compare at any skew between that clock and ours.
@@ -832,6 +838,7 @@ impl EventLoopState {
             names: HashMap::new(),
             hint_owner: HashMap::new(),
             refused_endpoints: HashMap::new(),
+            refused_order: VecDeque::new(),
             peer_stamp: HashMap::new(),
             clock_evidence: ClockEvidence::default(),
             left_keys: Goodbyes::default(),
@@ -2225,6 +2232,13 @@ const MAX_DAG_PARENTS: usize = 16;
 /// the tick, so 8 is room for 4 ticks of a loop that is slow.
 const REPLAY_QUEUE_CAP: usize = 8;
 
+/// How many keys have an endpoint retained in `refused_endpoints`. The map takes the address of any signed
+/// `PeerInfo` whose key is not the holder of its nickname, and a member mints keys for free, so a flood of them
+/// would fill it until the next sweep. 256 is more than the live roster of a mesh of the size that one node
+/// serves (the beacon limit is far below it), so a real peer is not pushed out; at the cap the oldest key goes
+/// and its endpoint state with it.
+pub(crate) const REFUSED_ENDPOINTS_CAP: usize = 256;
+
 // ── Consumer surface ───────────────────────────────────────────────────────
 //
 // The application driver (`NodeApp` / `NodeDriver`) is handed `&mut
@@ -2644,6 +2658,20 @@ impl EventLoopState {
     /// the only live key of its nickname.
     pub(crate) fn retain_refused_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
         let id = endpoint.id;
+        if !self.refused_endpoints.contains_key(&key) {
+            while self.refused_endpoints.len() >= REFUSED_ENDPOINTS_CAP {
+                let Some(oldest) = self.refused_order.pop_front() else {
+                    break;
+                };
+                self.release_refused_endpoint(&oldest);
+            }
+            self.refused_order.push_back(key);
+            if self.refused_order.len() > 2 * REFUSED_ENDPOINTS_CAP {
+                let held = &self.refused_endpoints;
+                self.refused_order
+                    .retain(|queued| held.contains_key(queued) || *queued == key);
+            }
+        }
         let displaced = self.refused_endpoints.insert(key, endpoint);
         if let Some(old) = displaced
             && old.id != id

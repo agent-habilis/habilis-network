@@ -1617,6 +1617,36 @@ mod tests {
         );
     }
 
+    /// The retained endpoints are bounded: a flood of signed `PeerInfo` frames with fresh keys under a bound
+    /// nickname keeps the cap and no more, and the oldest key goes first.
+    #[test]
+    fn the_retained_endpoints_keep_their_cap_and_drop_the_oldest() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::REFUSED_ENDPOINTS_CAP;
+        let keys: Vec<AuthorKey> = (0..10 * cap)
+            .map(|index| test_key(&format!("flood-{index}")))
+            .collect();
+        for key in &keys {
+            state.retain_refused_endpoint(*key, iroh::EndpointAddr::new(endpoint_id(90)));
+        }
+
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "10 times the cap of fresh keys left more than the cap"
+        );
+        assert!(
+            !state.refused_endpoints.contains_key(&keys[0]),
+            "the oldest key is still retained"
+        );
+        assert!(
+            state
+                .refused_endpoints
+                .contains_key(keys.last().expect("a last key")),
+            "the newest key is not retained"
+        );
+    }
+
     /// A card binds nothing for a key that said goodbye, since a key never speaks again and the
     /// card is a replay, and nothing for a key that no roster holds: no name, no hint.
     #[test]
