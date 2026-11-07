@@ -157,8 +157,12 @@ impl BlobStore {
                 .get(&oldest)
                 .is_some_and(|entry| !entry.owners.is_empty())
             {
-                tracing::warn!(target: "habilis_network::blob", "held blob evicted: a ticket for it now dangles");
                 self.held_evicted += 1;
+                tracing::warn!(
+                    target: "habilis_network::blob",
+                    held_evicted_total = self.held_evicted,
+                    "held blob evicted: a ticket for it now dangles"
+                );
             }
             self.remove(&oldest);
         }
