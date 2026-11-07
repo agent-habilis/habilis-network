@@ -397,8 +397,10 @@ mod tests {
         );
     }
 
-    /// The nickname is bound to the member key that proved it first. Another member that proves the
-    /// same nickname is not held, while the session of the first is in the roster.
+    /// A receiver binds a nickname to the member key whose proof it held first. The proof of another
+    /// member for the same nickname is not held, while the session of the first is in the roster. The
+    /// binding is the view of one receiver and not a global order: each of the two members is the
+    /// other for the other one, and both hear the join error.
     #[test]
     fn a_second_member_cannot_prove_a_nickname_that_a_roster_session_binds() {
         let (first, second) = (fresh_state(), fresh_state());

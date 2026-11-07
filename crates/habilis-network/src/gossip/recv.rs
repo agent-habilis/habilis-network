@@ -898,7 +898,7 @@ async fn roster_gate(
     );
     if joined && state.note_joined_proof(verified, context.mesh, context.author) {
         let line = format!(
-            "The nickname {} is held by another member, whose key proved it first",
+            "The nickname {} is held by another member with another key. The two nodes do not accept the frames of each other",
             context.author
         );
         tracing::warn!(target: "habilis_network::lifecycle", nickname = %context.author, "our nickname is held by another member");
