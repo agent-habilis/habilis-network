@@ -361,6 +361,14 @@ impl UnicastPool {
         })
     }
 
+    /// Whether a connection to `eid` is open. It does not count as a use of it.
+    pub(crate) async fn has_warm(&self, eid: EndpointId) -> bool {
+        let conns = self.inner.conns.lock().await;
+        conns
+            .get(&eid)
+            .is_some_and(|pooled| pooled.connection.close_reason().is_none())
+    }
+
     /// The pooled connection to `eid`, if one is open. Taking it counts as
     /// using it: every caller is about to send or probe on it.
     pub(in crate::transport::pool) async fn warm(&self, eid: EndpointId) -> Option<Connection> {

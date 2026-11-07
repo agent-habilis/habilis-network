@@ -23,6 +23,8 @@ use crate::transport::{ResendOutbox, UdpTransport};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -81,6 +83,13 @@ pub(crate) struct LiveRun {
 pub(crate) struct PendingSuspend {
     pub(crate) missed: Duration,
     pub(crate) at: Instant,
+}
+
+/// The proof answer of this run and whether the log of its author holds it yet.
+#[derive(Debug, Clone)]
+pub(crate) struct OwnAnswer {
+    frame: Verified,
+    kept: bool,
 }
 
 /// The keys that said goodbye, in two bounded sets. Any key can sign a goodbye, so the goodbyes of
@@ -454,6 +463,13 @@ pub struct EventLoopState {
     /// Bounded by `QUIET_CAP`: a full book drops its oldest dead session, and refuses a new proof
     /// when every held session is live.
     pub(crate) proofs: ProofExchange,
+    /// The proof answer of this run, signed once: every asker gets this same frame, so the log of this
+    /// node keeps one entry for the run and every repeat is a duplicate at the peers. A restart is a new
+    /// run, with a new state and a new answer. One frame at most.
+    own_answer: Option<OwnAnswer>,
+    /// The proof requests that this node signed, to show that a path-less ask signs none.
+    #[cfg(test)]
+    pub(crate) proof_requests_signed: AtomicU64,
     /// The run number of this start, which the proof of this session names.
     run: u64,
     /// The lock on the member key of this start: it lives as long as this node runs, so a second start of
@@ -849,6 +865,9 @@ impl EventLoopState {
             clock_evidence: ClockEvidence::default(),
             left_keys: Goodbyes::default(),
             proofs: ProofExchange::with_cap(QUIET_CAP),
+            own_answer: None,
+            #[cfg(test)]
+            proof_requests_signed: AtomicU64::new(0),
             run: init.keys.run,
             key_lock: init.keys.key_lock,
             newest_own_run_seen: 0,
@@ -2386,8 +2405,12 @@ impl EventLoopState {
         own: &Nickname,
         mesh: &MeshId,
     ) -> Option<Verified> {
-        self.asks_for_proof(alive)
-            .then(|| Message::new_proof_request(mesh, own, alive.key()).sign(&self.identity))
+        let asks = self.asks_for_proof(alive);
+        #[cfg(test)]
+        if asks {
+            self.proof_requests_signed.fetch_add(1, Ordering::Relaxed);
+        }
+        asks.then(|| Message::new_proof_request(mesh, own, alive.key()).sign(&self.identity))
     }
 
     /// Whether a frame of a session that this node holds no proof for asks for one now: the session is in
@@ -2433,8 +2456,24 @@ impl EventLoopState {
         {
             return None;
         }
+        if let Some(held) = &self.own_answer {
+            return Some(held.frame.clone());
+        }
         let proof = self.own_proof(own, mesh, self.run)?;
-        Some(Message::new_joined_with_proof(mesh, own, &proof).sign(&self.identity))
+        let frame = Message::new_joined_with_proof(mesh, own, &proof).sign(&self.identity);
+        self.own_answer = Some(OwnAnswer {
+            frame: frame.clone(),
+            kept: false,
+        });
+        Some(frame)
+    }
+
+    /// The proof answer of this run, once, for the caller that keeps it in the log: it is the same frame
+    /// for every asker, and only the first send of it is kept.
+    pub(crate) fn take_answer_to_keep(&mut self) -> Option<Verified> {
+        let held = self.own_answer.as_mut().filter(|held| !held.kept)?;
+        held.kept = true;
+        Some(held.frame.clone())
     }
 
     /// Whether `session` is in the roster, live or quiet. A quiet peer may return, so it still

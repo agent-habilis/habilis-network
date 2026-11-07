@@ -4,7 +4,7 @@ use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
 use crate::logging::messages;
 use crate::protocol::messages::Verified;
-use crate::protocol::{AuthorKey, MeshId, Message, Nickname, PresenceSubtype};
+use crate::protocol::{AuthorKey, Message, Nickname, PresenceSubtype};
 use crate::transport;
 use iroh::EndpointId;
 
@@ -106,7 +106,11 @@ pub(crate) async fn end_session(
     if state.key_said_goodbye(key) {
         return;
     }
-    state.drop_departed_presence(&key);
+    // A session that lost its nickname said no goodbye, and no other node drops its frames: a peer that
+    // holds them would resend them to this node at every digest round while the holder keeps the name.
+    if !matches!(goodbye, Goodbye::Refused(_)) {
+        state.drop_departed_presence(&key);
+    }
     // The roster is keyed by author key, so a goodbye ends that key and no other: another key
     // under the same nickname stays a peer. Any key can sign a goodbye under any nickname, and
     // the goodbye of a key that is not in the roster removes nothing. It is kept apart from
@@ -226,27 +230,21 @@ pub(crate) async fn handle_presence(
     }
 }
 
-/// The request that goes out now for the session of `alive`, and the endpoint it goes to: none when the
-/// session is not asked now (it holds a proof, or its retry clock holds), or when there is no warm path
-/// to it. The path is checked before the request is signed, so a session with no path costs nothing.
-fn plan_proof_ask(
-    alive: &Verified,
-    state: &EventLoopState,
-    (own, mesh): (&Nickname, &MeshId),
-) -> Option<(EndpointId, Verified)> {
+/// The endpoint that the proof request for the session of `alive` would go to: none when the session is
+/// not asked now (it holds a proof, or its retry clock holds), or when no address is known for it. It
+/// signs nothing.
+fn proof_ask_target(alive: &Verified, state: &EventLoopState) -> Option<EndpointId> {
     if !state.asks_for_proof(alive) {
         return None;
     }
-    let warm_endpoint: Option<EndpointId> = state
+    let target: Option<EndpointId> = state
         .address_of(&alive.key())
         .map(|address| address.id)
         .filter(|eid| Some(*eid) != state.rendezvous_id);
-    let Some(eid) = warm_endpoint else {
-        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: no warm path");
-        return None;
-    };
-    let request = state.proof_request_for(alive, own, mesh)?;
-    Some((eid, request))
+    if target.is_none() {
+        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: no address");
+    }
+    target
 }
 
 /// Send the proof request for a session that has no proof here, to that member alone over a warm
@@ -257,7 +255,16 @@ pub(crate) async fn ask_for_proof(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    let Some((eid, request)) = plan_proof_ask(alive, state, (context.author, context.mesh)) else {
+    let Some(eid) = proof_ask_target(alive, state) else {
+        return;
+    };
+    // A path that can carry the request: a warm connection, or a neighbour that the send dials in the
+    // background. An address with neither costs a lookup, and no signature, however many frames come.
+    if !(state.linked_endpoints.contains(&eid) || state.unicast_pool.has_warm(eid).await) {
+        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: no warm path");
+        return;
+    }
+    let Some(request) = state.proof_request_for(alive, context.author, context.mesh) else {
         return;
     };
     messages::log_out(&request);
@@ -273,6 +280,7 @@ pub(crate) async fn ask_for_proof(
 
 #[cfg(test)]
 mod ask_tests {
+
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::Verified;
     use crate::protocol::{MeshId, Message};
@@ -284,11 +292,10 @@ mod ask_tests {
         Message::new_joined(&MeshId::from("test"), &nick(nickname)).sign(session)
     }
 
-    /// The ask that goes out when an admitted session shows no proof: with a warm path to it, one
-    /// request to that endpoint; with none, no request and nothing signed.
+    /// The ask has a target only when an address is known for the session; with none, nothing is
+    /// planned and nothing is signed.
     #[test]
-    fn an_admitted_session_with_no_proof_is_asked_only_when_there_is_a_warm_path() {
-        let (mesh, me) = (MeshId::from("test"), nick("carol"));
+    fn an_admitted_session_with_no_proof_has_a_target_only_when_an_address_is_known() {
         let session = Identity::generate();
         let frame = joined_of(&session, "alice");
         let mut state = fresh_state();
@@ -296,8 +303,8 @@ mod ask_tests {
         state.names.insert(session.author_key(), nick("alice"));
 
         assert!(
-            super::plan_proof_ask(&frame, &state, (&me, &mesh)).is_none(),
-            "with no warm path the session is not asked, and nothing is sent"
+            super::proof_ask_target(&frame, &state).is_none(),
+            "with no address the session has no target"
         );
 
         let endpoint = endpoint_id(7);
@@ -306,34 +313,26 @@ mod ask_tests {
             &nick("alice"),
             EndpointAddr::new(endpoint),
         );
-        let planned = super::plan_proof_ask(&frame, &state, (&me, &mesh));
         assert_eq!(
-            planned.map(|(eid, _)| eid),
+            super::proof_ask_target(&frame, &state),
             Some(endpoint),
-            "with a warm path the request goes to the endpoint of the session"
+            "with an address the request goes to the endpoint of the session"
         );
     }
 
     /// The retry clock holds: once a request went out, the same `joined` frame sent again (a resend, a
-    /// replay, a forged copy) asks for nothing inside the wait. One ask for each session and wait, as for the
-    /// alive frames before.
+    /// replay, a forged copy) asks for nothing inside the wait. One ask for each session and wait.
     #[test]
     fn the_same_joined_frame_fifty_times_makes_one_ask() {
-        let (mesh, me) = (MeshId::from("test"), nick("carol"));
         let session = Identity::generate();
         let frame = joined_of(&session, "alice");
         let mut state = fresh_state();
         state.peers.insert(session.author_key());
         state.names.insert(session.author_key(), nick("alice"));
-        state.place_endpoint(
-            session.author_key(),
-            &nick("alice"),
-            EndpointAddr::new(endpoint_id(7)),
-        );
 
         let mut asks = 0;
         for _ in 0..50 {
-            if super::plan_proof_ask(&frame, &state, (&me, &mesh)).is_some() {
+            if state.asks_for_proof(&frame) {
                 asks += 1;
                 state.note_proof_request_sent(&session.author_key(), None);
             }
@@ -345,17 +344,12 @@ mod ask_tests {
     /// A session that proved its nickname is not asked.
     #[test]
     fn a_session_with_a_proof_is_not_asked() {
-        let (mesh, me) = (MeshId::from("test"), nick("carol"));
+        let mesh = MeshId::from("test");
         let (session, member) = (Identity::generate(), Identity::generate());
         let frame = joined_of(&session, "alice");
         let mut state = fresh_state();
         state.peers.insert(session.author_key());
         state.names.insert(session.author_key(), nick("alice"));
-        state.place_endpoint(
-            session.author_key(),
-            &nick("alice"),
-            EndpointAddr::new(endpoint_id(7)),
-        );
         let proof = member.prove(&session.author_key(), "alice", mesh.as_ref(), 1);
         assert!(
             state
@@ -367,7 +361,7 @@ mod ask_tests {
         );
 
         assert!(
-            super::plan_proof_ask(&frame, &state, (&me, &mesh)).is_none(),
+            !state.asks_for_proof(&frame),
             "a proven session is not asked"
         );
     }

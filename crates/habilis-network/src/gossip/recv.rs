@@ -1119,10 +1119,17 @@ async fn answer_proof_request(
         tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: the send failed");
         return;
     }
-    // The answer is a signed \`joined\` frame that the asker holds from now on. This node keeps it too, as
-    // it keeps its other broadcasts: a peer that holds a frame of its author that the author never kept
-    // resends it to her at every digest round, forever.
-    retain_own_broadcast(state, answer);
+    keep_the_answer(state);
+}
+
+/// Keep the proof answer of this run in the log of its author, once. The answer is a signed `joined` frame
+/// that every asker holds from now on, and the same frame for every asker: a peer that holds a frame of its
+/// author that the author never kept resends it to her at every digest round, forever, and a fresh frame
+/// for each asker would spread through the mesh by anti-entropy, one for each asker.
+fn keep_the_answer(state: &mut EventLoopState) {
+    if let Some(answer) = state.take_answer_to_keep() {
+        retain_own_broadcast(state, answer);
+    }
 }
 
 /// The pong that answers `ping`, and where it goes: the endpoint that the signer of the ping proved
@@ -5809,8 +5816,10 @@ mod dedup_counter_tests {
     use crate::protocol::{Channel, MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
+    use crate::util::clock::Instant;
     use bytes::Bytes;
     use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
 
     struct Inert;
 
@@ -6380,6 +6389,97 @@ mod dedup_counter_tests {
             "the session that lost the name is a peer again once the holder is gone"
         );
         let _ = alice;
+    }
+
+    /// A `joined` frame of a session that carries no proof, as the bytes that arrive on the gossip plane.
+    fn unproved_joined_of(session: &Identity, nickname: &str) -> (Plane, Bytes) {
+        let frame = Message::new_joined(&MeshId::from("test"), &nick(nickname)).sign(session);
+        (
+            Plane::Gossip,
+            frame.serialize().expect("serialize").into_bytes(),
+        )
+    }
+
+    /// The end of an intruder is no goodbye, and no other node drops the frames of the session: this node
+    /// keeps them too. A peer that holds them would resend them at every digest round, while the holder
+    /// keeps the name, if this node dropped them.
+    #[test]
+    fn the_end_of_an_intruder_keeps_its_presence_frames_in_the_log() {
+        let (alice, intruder_session) = (Identity::generate(), Identity::generate());
+        let alice_session = Identity::generate();
+
+        let reader = reader_with(
+            fresh_state(),
+            vec![
+                unproved_joined_of(&intruder_session, "alice"),
+                joined_of(&alice_session, &alice, "alice", 1),
+            ],
+        );
+
+        assert!(
+            !reader.peers.contains(&intruder_session.author_key()),
+            "the intruder is ended"
+        );
+        assert_eq!(
+            reader.message_log.size().0,
+            2,
+            "the log holds the joined frame of the intruder and the one of the member"
+        );
+    }
+
+    /// An address with no warm path to it asks for nothing and signs nothing, however many frames of that
+    /// session come: a frame of the session costs a lookup.
+    #[test]
+    fn fifty_frames_of_a_session_with_an_address_and_no_warm_path_sign_no_request() {
+        let session = Identity::generate();
+        let mut initial = fresh_state();
+        initial.peers.insert(session.author_key());
+        initial.names.insert(session.author_key(), nick("alice"));
+        initial.place_endpoint(
+            session.author_key(),
+            &nick("alice"),
+            iroh::EndpointAddr::new(endpoint_id(7)),
+        );
+        let frames: Vec<(Plane, Bytes)> = (0..50).map(|_| alive_of(&session, "alice")).collect();
+
+        let reader = reader_with(initial, frames);
+
+        assert_eq!(
+            reader.proof_requests_signed.load(Ordering::Relaxed),
+            0,
+            "no request was signed for an address that no warm path reaches"
+        );
+    }
+
+    /// Twenty sessions ask one member for its proof: they all get the same frame, and the log of that
+    /// member keeps one entry, not twenty. A fresh frame for each asker is a frame that its author keeps
+    /// and offers in her digest, so anti-entropy would spread each one to every peer.
+    #[test]
+    fn twenty_askers_get_the_same_answer_and_the_log_keeps_one_entry() {
+        let mesh = MeshId::from("test");
+        let me = nick("alice");
+        let mut state = fresh_state();
+        let own = state.identity.author_key();
+        let mut ids = Vec::new();
+
+        for _ in 0..20 {
+            let asker = Identity::generate().author_key();
+            let answer = state
+                .proof_answer(&own, &asker, &me, &mesh, Instant::now())
+                .expect("an answer within the cap");
+            ids.push(answer.dedup_key());
+            super::keep_the_answer(&mut state);
+        }
+
+        assert!(
+            ids.iter().all(|id| *id == ids[0]),
+            "every asker got the same frame"
+        );
+        assert_eq!(
+            state.message_log.size().0,
+            1,
+            "the log of the author holds one entry for the run"
+        );
     }
 
     /// A restart of the member that holds the name is no intrusion: its new session replaces the old
