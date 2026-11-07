@@ -454,10 +454,12 @@ pub(crate) fn replay_frames(
             return Vec::new();
         }
     };
+    let merges: Vec<serde_json::Value> = merges.into_iter().collect();
+    let numbered: Vec<(usize, &serde_json::Value)> = merges.iter().enumerate().collect();
     let mut frames: Vec<(Verified, WireFrame)> = Vec::new();
-    for merge in merges {
+    for (index, merge) in numbered {
         let doc = state.doc(Channel::State);
-        let change = match doc.build_restore(&merge, &job.actor) {
+        let change = match doc.build_restore(merge, &job.actor) {
             Ok(Some(change)) => change,
             Ok(None) => continue,
             Err(error) => {
@@ -467,6 +469,18 @@ pub(crate) fn replay_frames(
         };
         let body = match doc.compose_replay_body(&change, stamps) {
             Ok(body) => body,
+            Err(error @ DocError::ClockAhead { .. }) => {
+                // No time can be taken now. The queue item is gone, so the frames that were not
+                // made go back to the document, which gives them again at a tick: a write that the
+                // seed lacks and that no other node sends is lost else.
+                tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: a frame of it does not compose");
+                for rest in &merges[index..] {
+                    state
+                        .doc_mut(Channel::State)
+                        .return_restores((rest.clone(), stamps.clone()));
+                }
+                break;
+            }
             Err(error) => {
                 tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: a frame of it does not compose");
                 break;
@@ -578,6 +592,7 @@ pub(crate) fn finish(
 mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     use serde_json::{Map, Value, json};
@@ -590,7 +605,7 @@ mod tests {
     use tokio::time::interval;
 
     use crate::daemon::state::{EventLoopState, Standing};
-    use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp, TimeSource};
+    use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp, StampedPaths, TimeSource};
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::Verified;
     use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname, SymmetricKey};
@@ -1032,6 +1047,59 @@ mod tests {
         assert!(
             !state.doc(Channel::State).is_awaiting_first_sync(),
             "a closing digest on unicast with heads that this node holds ends the wait"
+        );
+    }
+
+    /// A replay whose frame meets `ClockAhead` is not lost: the clock of the document is at the
+    /// bound (a frame of a member, or a seed from a cutter ahead of this machine), no time can be
+    /// taken, and the writes that the seed lacks would be gone for good. They go back to the
+    /// document, and the next tick sends them when the wall clock has moved.
+    const NOW_MS: u64 = 1_700_000_000_000;
+
+    #[test]
+    fn a_replay_that_meets_clock_ahead_goes_back_to_the_document_and_is_sent_later() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::allow_warn(
+            "habilis_network::gossip",
+            "the replay of the state channel stopped: a frame of it does not compose",
+        );
+        // Shared: the test moves the wall clock, and the document reads it.
+        let wall = Arc::new(AtomicU64::new(NOW_MS + 7_200_000));
+        let mut state = testing::fresh_state();
+        // The same handle, for the clock of the document.
+        let cell = Arc::clone(&wall);
+        let source = TimeSource::new(move || cell.load(Ordering::Relaxed));
+        state.doc_mut(Channel::State).set_time_source(source);
+        // Shared with the loop state, which signs with it too.
+        let identity = Arc::clone(&state.identity);
+        let me = testing::nick("me");
+        write_merge(
+            state.doc_mut(Channel::State),
+            &identity,
+            &me,
+            &json!({ "own": 1 }),
+        );
+        wall.store(NOW_MS, Ordering::Relaxed);
+        let patch = json!({ "a": 7 });
+        let stamps: StampedPaths = vec![(vec!["a".to_owned()], Stamp::new(5, "aa".to_owned()))];
+        let mesh = MeshId::from("test");
+
+        let first = replay_frames(&mut state, &patch, &stamps, &me, &mesh);
+
+        assert!(first.is_empty(), "no time can be taken: nothing is sent");
+        assert!(
+            state.doc(Channel::State).has_restores(),
+            "the replay waits in the document"
+        );
+        wall.store(NOW_MS + 7_200_000, Ordering::Relaxed);
+        let again: (Value, StampedPaths) = state
+            .doc_mut(Channel::State)
+            .take_restores()
+            .expect("the document gives the replay again");
+        let later = replay_frames(&mut state, &again.0, &again.1, &me, &mesh);
+        assert!(
+            !later.is_empty(),
+            "when the wall clock has moved, it is sent"
         );
     }
 
