@@ -915,6 +915,9 @@ async fn roster_gate(
         return Some(lifecycle::observe(verified, state, context));
     }
     if !is_membership_kind(&verified.kind) {
+        if matches!(verified.kind, MessageKind::PeerInfo) {
+            retain_refused_peer_info_address(verified, state);
+        }
         return Some(lifecycle::Observed::refused());
     }
     let alive = matches!(
@@ -1753,6 +1756,24 @@ fn peer_info_graft_below(max_peers: usize, members: usize) -> usize {
         max_peers
     } else {
         max_peers.saturating_sub(1).max(1)
+    }
+}
+
+/// The address of a `PeerInfo` of a session that the roster gate refused. The frame binds no hint and
+/// adds no roster entry (the gate treats it as stale), but the session is asked for its proof over a
+/// warm path, and with no address for it that request is skipped: the address is retained for the key,
+/// as for a second live key of a nickname, and it is no hint.
+fn retain_refused_peer_info_address(message: &Verified, state: &mut EventLoopState) {
+    let decoded: serde_json::Result<serde_json::Value> =
+        serde_json::from_str(message.body.as_str());
+    let Ok(parsed) = decoded else {
+        return;
+    };
+    let Ok((_, peer_addr)) = peer_addr_error::endpoint_addr_from_json(&parsed) else {
+        return;
+    };
+    if !state.key_said_goodbye(message.key()) {
+        state.retain_refused_endpoint(message.key(), peer_addr);
     }
 }
 
@@ -5825,6 +5846,42 @@ mod dedup_counter_tests {
         assert!(
             reader.peers.contains(&bound.author_key()),
             "the bound session stays"
+        );
+    }
+
+    /// The `PeerInfo` of a session that the roster gate refuses still gives its address: the session is
+    /// asked for its proof over a warm path, and it has none without the address. The frame binds no
+    /// hint and adds no roster entry.
+    #[test]
+    fn a_refused_session_peer_info_registers_the_address_for_the_proof_request() {
+        use crate::protocol::messages::MessageBody;
+        use crate::protocol::peer_addr_error;
+
+        let bound = Identity::generate();
+        let intruder = Identity::generate();
+        let initial = state_with_bound_nickname(&bound, "alice");
+        let json =
+            peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint_id(61)));
+        let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+        let peer_info =
+            Message::new_peer_info(&MeshId::from("test"), &nick("alice"), body).sign(&intruder);
+        let frame = (
+            Plane::Gossip,
+            peer_info.serialize().expect("serialize").into_bytes(),
+        );
+
+        let reader = reader_with(initial, vec![frame]);
+
+        assert!(
+            !reader.peers.contains(&intruder.author_key()),
+            "the refused session entered the roster"
+        );
+        assert_eq!(
+            reader
+                .address_of(&intruder.author_key())
+                .map(|address| address.id),
+            Some(endpoint_id(61)),
+            "the proof request to the session has no address to go to"
         );
     }
 
