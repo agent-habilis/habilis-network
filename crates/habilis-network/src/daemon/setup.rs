@@ -18,8 +18,6 @@ mod setup_params;
 
 use crate::transport::UdpTransport;
 
-#[cfg(all(unix, feature = "host"))]
-use anyhow::Context as _;
 use anyhow::Result;
 
 use super::setup_error::SetupError;
@@ -829,6 +827,7 @@ fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
 #[cfg(all(unix, feature = "host"))]
 // the lock is shared with every clone of the keys, and the last one to drop frees it
 fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+    use anyhow::Context as _;
     use std::fs::TryLockError;
     use std::os::unix::fs::OpenOptionsExt as _;
     let Some(state) = state else {
@@ -1210,7 +1209,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             if let Some(handle) = multihop_handle.as_ref() {
                 handle.close().await;
             }
-            return Err(error.into());
+            return Err(error);
         }
     };
     Ok(EventLoopConfig {

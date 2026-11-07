@@ -4,6 +4,7 @@
 
 #![cfg(all(unix, feature = "host"))]
 
+use std::path::Path;
 use std::{env, fs, process};
 
 use habilis_network::embed::{
@@ -50,7 +51,7 @@ impl NodeDriver for Idle {
 }
 
 /// A start of a new mesh whose member key lives under `state`.
-async fn start(name: &str, state: &std::path::Path) -> Result<EventLoopConfig, SetupError> {
+async fn start(name: &str, state: &Path) -> Result<EventLoopConfig, SetupError> {
     let kind = SetupKind::Create {
         name: MeshName::try_new(name).expect("a name"),
         config: MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh"),
@@ -93,8 +94,8 @@ fn a_second_start_of_the_state_path_of_a_running_node_fails_and_works_after_it_l
             "the lock goes with the node: a start after it left works: {:?}",
             after.as_ref().err()
         );
-        if let Ok(config) = after {
-            let _ = Node::spawn(config, Idle, None, SignalHandling::Leave)
+        if let Ok(third) = after {
+            let _ = Node::spawn(third, Idle, None, SignalHandling::Leave)
                 .leave()
                 .await;
         }

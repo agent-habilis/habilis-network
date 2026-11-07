@@ -21,6 +21,7 @@ use crate::doc::StampedPaths;
 
 use crate::transport::{ResendOutbox, UdpTransport};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -457,9 +458,9 @@ pub struct EventLoopState {
     run: u64,
     /// The lock on the member key of this start: it lives as long as this node runs, so a second start of
     /// the same state path is refused for as long as this one lives. Held, never read.
-    // shared with the clones of the keys that the setup still holds: the lock goes when the last drops
     #[expect(dead_code, reason = "held for the lock it carries, never read")]
-    key_lock: Option<Arc<std::fs::File>>,
+    // shared with the clones of the keys that the setup still holds: the lock goes when the last drops
+    key_lock: Option<Arc<File>>,
     /// The highest run above ours that a session of our own member proved: a newer run of this member is
     /// active elsewhere, and this node is superseded. One number, so the memory is bounded.
     newest_own_run_seen: u64,
