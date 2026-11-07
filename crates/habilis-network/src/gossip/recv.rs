@@ -1075,8 +1075,16 @@ async fn answer_proof_request(
     context: &HandlerCtx<'_>,
 ) {
     let asker_endpoint = state.address_of(&message.key());
+    // A request can come before the `PeerInfo` of its sender: then the connection that it arrived on is
+    // the return path, if a unicast can start on it.
+    let arrival = state
+        .state_digest_serves
+        .unicast
+        .arrived_from
+        .filter(|eid| transport::can_unicast(*eid, state));
     let warm_endpoint = asker_endpoint
         .map(|address| address.id)
+        .or(arrival)
         .filter(|eid| Some(*eid) != state.rendezvous_id);
     let Some(eid) = warm_endpoint else {
         tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no warm path");
@@ -3875,6 +3883,38 @@ mod first_contact_tests {
                 state.proven_endpoints.get(&bob_signer),
                 Some(bob_endpoint),
                 "bob's proof, bob's frame"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A proof request can come before the `PeerInfo` of its sender, so the sender has no address here. The
+    /// connection that the request arrived on is a return path of its own: the answer goes there, and so
+    /// takes its slot of the per-minute cap.
+    #[test]
+    fn a_proof_request_without_a_known_sender_address_is_answered_on_its_arrival_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let asker = Identity::generate();
+            let to = state.identity.author_key();
+            let request = Message::new_proof_request(&node.mesh, &nick("asker"), to).sign(&asker);
+            state.direct.insert(endpoint_id(80), DirectState::Direct);
+            state.state_digest_serves.unicast.arrived_from = Some(endpoint_id(80));
+
+            super::answer_proof_request(&to, &request, &mut state, &context).await;
+
+            let again = state.proof_answer(
+                &to,
+                &asker.author_key(),
+                context.author,
+                context.mesh,
+                clock::Instant::now(),
+            );
+            assert!(
+                again.is_none(),
+                "the request was dropped for want of an address, so its slot of the cap is still free"
             );
             node.endpoint.close().await;
         });
