@@ -166,16 +166,20 @@ impl IdentityProof {
     }
 }
 
-/// What the identity signs: a domain label, then the session key, the nickname, the mesh and the
-/// run, each field separated, so no two different claims share bytes.
+/// What the identity signs: a domain label, then the session key, the nickname and the mesh, each string
+/// behind its length (4 bytes, big endian), then the run. A string with a zero byte in it cannot move a
+/// field boundary, so no two different claims share bytes.
+///
+/// # Panics
+/// If a string is longer than `u32::MAX` bytes: a nickname and a mesh id are far below it.
 fn proof_bytes(session: &AuthorKey, nickname: &str, mesh: &str, run: u64) -> Vec<u8> {
-    let mut bytes = b"habilis-mesh/identity-proof/v1".to_vec();
+    let mut bytes = b"habilis-mesh/identity-proof/v2".to_vec();
     bytes.extend_from_slice(session.as_bytes());
-    bytes.push(0);
-    bytes.extend_from_slice(nickname.as_bytes());
-    bytes.push(0);
-    bytes.extend_from_slice(mesh.as_bytes());
-    bytes.push(0);
+    for text in [nickname, mesh] {
+        let length = u32::try_from(text.len()).expect("a nickname and a mesh id are short");
+        bytes.extend_from_slice(&length.to_be_bytes());
+        bytes.extend_from_slice(text.as_bytes());
+    }
     bytes.extend_from_slice(&run.to_be_bytes());
     bytes
 }
@@ -455,6 +459,65 @@ mod tests {
         assert!(
             !super::verify_proof(&other_run, &session, "alice", "mesh"),
             "another run fails"
+        );
+    }
+
+    /// The fields of a proof have lengths, so no two claims share bytes: a proof for the nickname `a\0b`
+    /// on the mesh `c` does not verify for the nickname `a` on the mesh `b\0c`.
+    #[test]
+    fn a_proof_does_not_verify_for_another_split_of_the_same_bytes() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let proof = identity.prove(&session, "a\0b", "c", 1);
+        assert!(
+            super::verify_proof(&proof, &session, "a\0b", "c"),
+            "the proof verifies for its own claim"
+        );
+        assert!(
+            !super::verify_proof(&proof, &session, "a", "b\0c"),
+            "the proof of one claim verified for another claim with the same bytes"
+        );
+    }
+
+    /// The bytes that a proof signs are pinned: a change of this literal is a change of the wire format
+    /// (the proof of a `joined` frame), and it must be a decision named in the changelog.
+    #[test]
+    fn the_bytes_of_a_proof_are_pinned() {
+        let session = AuthorKey::from([7u8; 32]);
+        let bytes = super::proof_bytes(&session, "alice", "mesh", 3);
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let expected = concat!(
+            "686162696c69732d6d6573682f6964656e746974792d70726f6f662f7632", // the label, v2
+            "0707070707070707070707070707070707070707070707070707070707070707", // the session key
+            "00000005616c696365", // the length of the nickname, then `alice`
+            "000000046d657368",   // the length of the mesh, then `mesh`
+            "0000000000000003",   // the run
+        );
+        assert_eq!(hex, expected, "the signed bytes of a proof changed");
+    }
+
+    /// A proof that was signed over the old bytes (the fields separated by a zero byte, label v1) does not
+    /// verify: wire 14.0 is not released, and no peer holds such a proof.
+    #[test]
+    fn a_proof_over_the_old_separated_bytes_does_not_verify() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let mut old = b"habilis-mesh/identity-proof/v1".to_vec();
+        old.extend_from_slice(session.as_bytes());
+        old.push(0);
+        old.extend_from_slice(b"alice");
+        old.push(0);
+        old.extend_from_slice(b"mesh");
+        old.push(0);
+        old.extend_from_slice(&3u64.to_be_bytes());
+        let proof = super::IdentityProof {
+            identity: identity.public(),
+            run: 3,
+            signature: identity.sign(&old),
+        };
+        assert!(
+            !super::verify_proof(&proof, &session, "alice", "mesh"),
+            "a proof over the old bytes verified"
         );
     }
 

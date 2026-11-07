@@ -42,7 +42,8 @@
 /// - `14.0` — the change body of the `state` channel carries a Lamport time `t` (a change with no
 ///   valid `t` is refused), and the seed and replay frames of a state epoch carry the stamps `o`
 ///   with their tag table `a`, and the tombstones `x`. A `Joined` body can carry the identity proof
-///   of the member (`<identity hex>:<run>:<sig hex>`), and a `ProofRequest` kind is addressed to one
+///   of the member (`<identity hex>:<run>:<sig hex>`; the signature covers the nickname and the mesh
+///   behind their lengths, label `v2`), and a `ProofRequest` kind is addressed to one
 ///   peer. A `13.0` peer and a `14.0` peer do not form a mesh: each side refuses every frame of
 ///   the other, with an error that names the wire version and its own. Without the bump a node
 ///   that writes no `t` would have all its state writes refused by a node that reads it, with no
