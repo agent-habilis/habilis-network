@@ -74,6 +74,7 @@ fn fresh_state_that_waits_with_book(address_book: memory::MemoryLookup) -> Event
                 // shared with the loop and its handlers, which hold clones
                 member: Some(Arc::new(Identity::generate())),
                 run: 1,
+                key_lock: None,
             },
             secrets: MeshSecrets::default(),
             per_peer_gate: None,

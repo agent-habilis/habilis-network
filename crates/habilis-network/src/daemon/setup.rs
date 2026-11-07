@@ -811,6 +811,43 @@ fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
     <[u8; 8]>::try_from(tail).ok().map(u64::from_le_bytes)
 }
 
+/// Take the exclusive lock on `<state>.key.lock` and keep it as long as the returned file lives, so two
+/// live starts of one state path cannot be one member: the second would read the same member key and take
+/// the next run, and a peer would drop the first as an older run of that member. The lock does not wait: a
+/// start that finds it held fails and names the way out. It is an OS lock on the descriptor, so it goes with
+/// the process, and a crash frees the key. The file is opened close-on-exec (the default of Rust), so a child
+/// of the daemon does not keep the lock after the daemon is gone. No state path means no key to keep.
+#[cfg(all(unix, feature = "host"))]
+fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+    use std::fs::TryLockError;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    let lock_path = state.with_extension("key.lock");
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false).mode(0o600);
+    let lock = options.open(&lock_path)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(sync::Arc::new(lock))),
+        Err(TryLockError::WouldBlock) => anyhow::bail!(
+            "another daemon holds the member key {}: two live daemons cannot be one member; use another nickname or another --state-file",
+            state.with_extension("key").display()
+        ),
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// A target with no files keeps no member key, so it takes no lock.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the version for a target with files"
+)]
+fn hold_member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+    Ok(None)
+}
+
 /// Take the exclusive lock on `<state>.run.lock`, which makes the allocation of a run one step across
 /// processes and threads. It waits for the holder, and the lock goes with the returned file.
 #[cfg(all(unix, feature = "host"))]
@@ -1018,7 +1055,10 @@ fn run_keys_for(
 fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
     // read before `member_key` makes the file: a member key that exists is from an earlier start
     let member_known = state.is_some_and(|state| state.with_extension("key").exists());
+    // taken before the key file is read, so the second start fails before it takes a run
+    let key_lock = hold_member_key(state)?;
     Ok(RunKeys {
+        key_lock,
         // shared with the loop and its handlers, which hold clones
         session: sync::Arc::new(identity::Identity::generate()),
         member: member_key(state)?,
@@ -1746,12 +1786,21 @@ mod tests {
         );
     }
 
+    /// The keys of a start whose process has ended: the lock on the member key went with it, so a
+    /// later start of the same state path is a restart and not a second live daemon.
+    fn ended(keys: RunKeys) -> RunKeys {
+        RunKeys {
+            key_lock: None,
+            ..keys
+        }
+    }
+
     /// Each start records its run in the key file, beside the counter file.
     #[test]
     fn each_start_records_its_run_in_the_key_file() {
         let dir = TempDir::new("habilis-run-recorded");
         let state = dir.path().join("session.json");
-        let first = super::run_keys(Some(&state)).expect("the first start");
+        let first = ended(super::run_keys(Some(&state)).expect("the first start"));
         let second = super::run_keys(Some(&state)).expect("the second start");
 
         let bytes = fs::read(state.with_extension("key")).expect("the key file");
@@ -1780,7 +1829,7 @@ mod tests {
             super::keys_state_path(state, Some(base), &mesh, &author, on).expect("a state path")
         };
         let default = path(None, true).expect("the flag asks for the default state path");
-        let first = super::run_keys(Some(&default)).expect("the first start");
+        let first = ended(super::run_keys(Some(&default)).expect("the first start"));
         let second = super::run_keys(Some(&default)).expect("the restart");
 
         assert!(
@@ -1847,8 +1896,8 @@ mod tests {
         );
         let dir = TempDir::new("habilis-run-deleted");
         let state = dir.path().join("session.json");
-        let first = super::run_keys(Some(&state)).expect("the first start");
-        let second = super::run_keys(Some(&state)).expect("the second start");
+        let first = ended(super::run_keys(Some(&state)).expect("the first start"));
+        let second = ended(super::run_keys(Some(&state)).expect("the second start"));
         assert_eq!(
             (first.run, second.run),
             (1, 2),
@@ -1886,16 +1935,16 @@ mod tests {
         );
         let dir = TempDir::new("habilis-owner");
         let state = dir.path().join("session.json");
-        let first = super::bind_to_owner(
+        let first = ended(super::bind_to_owner(
             super::run_keys(Some(&state)).expect("first start"),
             Some(&state),
             Some(100),
-        );
-        let restart = super::bind_to_owner(
+        ));
+        let restart = ended(super::bind_to_owner(
             super::run_keys(Some(&state)).expect("restart"),
             Some(&state),
             Some(100),
-        );
+        ));
         assert_eq!(
             member_of(&first),
             member_of(&restart),
@@ -1903,11 +1952,11 @@ mod tests {
         );
         assert_eq!(restart.run, 2, "and the run counter goes on");
 
-        let reused_pid = super::bind_to_owner(
+        let reused_pid = ended(super::bind_to_owner(
             super::run_keys(Some(&state)).expect("a start of another process"),
             Some(&state),
             Some(200),
-        );
+        ));
 
         assert_ne!(
             member_of(&first),
@@ -1934,11 +1983,11 @@ mod tests {
         );
         let dir = TempDir::new("habilis-owner-none");
         let state = dir.path().join("session.json");
-        let made = super::bind_to_owner(
+        let made = ended(super::bind_to_owner(
             super::run_keys(Some(&state)).expect("first start"),
             Some(&state),
             None,
-        );
+        ));
         let old = super::run_keys(Some(&state)).expect("a start with the pair of the first");
         let checked = super::bind_to_owner(old.clone(), Some(&state), None);
 
@@ -1957,7 +2006,7 @@ mod tests {
         let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
         fs::create_dir_all(&dir).expect("a temp dir");
         let state = dir.join("session.json");
-        let first = super::run_keys(Some(&state)).expect("first start");
+        let first = ended(super::run_keys(Some(&state)).expect("first start"));
         let second = super::run_keys(Some(&state)).expect("restart");
         assert_eq!(
             member_of(&first),
@@ -1978,6 +2027,54 @@ mod tests {
             (first.run, second.run),
             (1, 2),
             "the run number counts the starts"
+        );
+    }
+
+    /// Two live daemons cannot be one member: the second start of a state path that a live start
+    /// holds fails, and says which path and the way out. Today it reads the same member key and
+    /// takes the next run, so a peer drops the first session as an older run of the same member.
+    #[test]
+    fn a_second_start_on_a_state_path_that_a_live_start_holds_fails() {
+        let dir = env::temp_dir().join(format!("habilis-key-lock-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("held.json");
+        let first = super::run_keys(Some(&state)).expect("first start");
+        let refused = super::run_keys(Some(&state));
+        let error = refused.expect_err("a second live start of one state path is refused");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains(&state.with_extension("key").display().to_string())
+                && text.contains("another nickname")
+                && text.contains("--state-file"),
+            "the error names the key file and the way out: {text}"
+        );
+        drop(first);
+    }
+
+    /// The lock goes with the daemon: when the holder is dropped (or dies, since the lock is an OS
+    /// lock on a descriptor) the next start of the path works and keeps the member key. A child that
+    /// the daemon spawned must not keep the lock after the daemon is gone, so the lock file is
+    /// opened close-on-exec (the default of Rust): a child that outlives the holder frees the key.
+    #[test]
+    fn a_start_after_the_holder_is_gone_works_even_while_a_child_of_it_lives() {
+        let dir = env::temp_dir().join(format!("habilis-key-lock-child-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("child.json");
+        let first = super::run_keys(Some(&state)).expect("first start");
+        let first_member = member_of(&first);
+        let mut child = process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a child that outlives the holder");
+        drop(first);
+        let second = super::run_keys(Some(&state));
+        child.kill().expect("the child is stopped");
+        child.wait().expect("the child is reaped");
+        let second = second.expect("the child does not keep the lock");
+        assert_eq!(
+            (member_of(&second), second.run),
+            (first_member, 2),
+            "the restart keeps the member key and takes the next run"
         );
     }
 
@@ -2216,7 +2313,7 @@ mod tests {
                         .await
                         .expect("a loopback mesh sets up");
                     let config = config.set_owner_pid(owner).expect("a live owner");
-                    let keys = config.mesh.keys.clone();
+                    let keys = ended(config.mesh.keys.clone());
                     config
                         .endpoints
                         .router
