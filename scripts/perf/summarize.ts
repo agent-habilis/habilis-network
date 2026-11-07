@@ -210,6 +210,9 @@ function summarize(run: string): string {
     for (const [name, field] of TOTALS) {
       totals.set(name, (totals.get(name) ?? 0) + sum(numbers(text, new RegExp(`\\b${field}=(\\d+)`))));
     }
+    // An older census writes the CPU time as `cpu_user_ms` and `cpu_sys_ms`: the same total, in two fields.
+    const split = sum(numbers(text, /\bcpu_user_ms=(\d+)/)) + sum(numbers(text, /\bcpu_sys_ms=(\d+)/));
+    totals.set("cpu_ms", (totals.get("cpu_ms") ?? 0) + split);
     for (const arm of text.matchAll(/\bidle_ext_(\w+?)=(\d+)/g)) {
       ext.set(arm[1] ?? "", (ext.get(arm[1] ?? "") ?? 0) + Number(arm[2]));
     }

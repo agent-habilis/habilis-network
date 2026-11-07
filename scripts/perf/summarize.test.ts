@@ -128,3 +128,11 @@ test("a summary of a summary does not count its aggregate line as a node", () =>
   expect(run(dir).stdout.toString()).toMatch(/full=\d+\/2 /);
 });
 
+test("the CPU total reads both census forms: user plus system, and the one field", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "summarize-"));
+  writeFileSync(`${dir}/n1.err`, censusLine(30, { idle_wakeups: 1, cpu_user_ms: 6, cpu_sys_ms: 3 }) + "\n");
+  writeFileSync(`${dir}/n2.err`, censusLine(30, { idle_wakeups: 1, cpu_ms: 10 }) + "\n");
+  // 6 + 3 from the node with the two fields, and 10 from the node with one.
+  expect(run(dir).stdout.toString()).toContain("cpu_ms=19 ");
+});
+
