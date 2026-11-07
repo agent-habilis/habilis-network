@@ -906,6 +906,10 @@ async fn roster_gate(
     }
     // A newer run of a member ends the older sessions of the member in the roster: a restart leaves
     // no ghost until the timeout.
+    for intruder in state.proofs.take_evicted() {
+        let goodbye = lifecycle::Goodbye::Refused(&verified.author);
+        lifecycle::end_session(intruder, goodbye, state, app, context).await;
+    }
     for older in state.proofs.take_replaced() {
         let goodbye = lifecycle::Goodbye::Replaced(&verified.author);
         lifecycle::end_session(older, goodbye, state, app, context).await;
@@ -5789,13 +5793,14 @@ mod dedup_counter_tests {
     use crate::daemon::state::{EventLoopState, by_arrival, by_class};
     use crate::gossip::antientropy::Plane;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::SilentSink;
+    use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
     use bytes::Bytes;
+    use std::sync::Mutex;
 
     struct Inert;
 
@@ -5854,6 +5859,15 @@ mod dedup_counter_tests {
 
     /// [`reader_after_on`] for a reader that starts as `initial`.
     fn reader_with(initial: EventLoopState, arrivals: Vec<(Plane, Bytes)>) -> EventLoopState {
+        reader_with_sink(initial, arrivals, &SilentSink)
+    }
+
+    /// [`reader_with`] with the sink that receives the events of the arrivals.
+    fn reader_with_sink(
+        initial: EventLoopState,
+        arrivals: Vec<(Plane, Bytes)>,
+        sink: &dyn NodeSink,
+    ) -> EventLoopState {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let mesh = MeshId::from("test");
             let endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -5869,7 +5883,6 @@ mod dedup_counter_tests {
             let sender = MeshSender::new(gossip_sender);
             let identity = Identity::generate();
             let reader_nick = nick("reader");
-            let sink = SilentSink;
             let context = HandlerCtx {
                 sender: &sender,
                 endpoint: &endpoint,
@@ -5880,7 +5893,7 @@ mod dedup_counter_tests {
                 max_peers: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
-                sink: &sink,
+                sink,
             };
             let mut reader = initial;
             let mut app = Inert;
@@ -5890,6 +5903,22 @@ mod dedup_counter_tests {
             endpoint.close().await;
             reader
         })
+    }
+
+    /// A sink that counts the synthetic presence events: the `left` lines that the node writes for a
+    /// session that it ended itself, and not one that the session signed.
+    #[derive(Default)]
+    struct SyntheticPresence(Mutex<usize>);
+
+    impl NodeSink for SyntheticPresence {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::Presence {
+                synthetic: true, ..
+            } = event
+            {
+                *self.0.lock().expect("the count lock is not poisoned") += 1;
+            }
+        }
     }
 
     fn wire(frame: &Verified) -> u64 {
@@ -6187,6 +6216,160 @@ mod dedup_counter_tests {
         assert!(
             reader.proofs.proof_of(&newcomer.author_key()).is_none(),
             "it is unbound: no proof is held for it"
+        );
+    }
+
+    /// Two members claim one nickname before either has proved it: both sessions are admitted, because
+    /// no member key binds the name yet. When the proof of one of them arrives, the name is bound to
+    /// that member, and the admitted session of the other member leaves the roster at once: a node
+    /// that lists both lists an impostor under a bound nickname.
+    #[test]
+    fn a_proof_that_binds_a_nickname_ends_the_admitted_session_of_another_member() {
+        let (alice, intruder) = (Identity::generate(), Identity::generate());
+        let (alice_session, intruder_session) = (Identity::generate(), Identity::generate());
+
+        let reader = reader_with(
+            fresh_state(),
+            vec![
+                alive_of(&alice_session, "alice"),
+                alive_of(&intruder_session, "alice"),
+                joined_of(&alice_session, &alice, "alice", 1),
+            ],
+        );
+
+        assert!(
+            reader.peers.contains(&alice_session.author_key()),
+            "the session of the member that proved the name stays"
+        );
+        assert!(
+            !reader.peers.contains(&intruder_session.author_key()),
+            "the session of the other member, admitted before the proof, is ended"
+        );
+        assert!(
+            !reader.names.contains_key(&intruder_session.author_key()),
+            "and the roster forgets its nickname"
+        );
+        let _ = intruder;
+    }
+
+    /// The first proof that a node processes binds the name, whoever the member is: the order of the
+    /// proofs decides, at each node, and the order of the frames does not.
+    #[test]
+    fn the_member_whose_proof_comes_first_keeps_the_nickname_at_a_node() {
+        let (alice, other) = (Identity::generate(), Identity::generate());
+        let (alice_session, other_session) = (Identity::generate(), Identity::generate());
+
+        let reader = reader_with(
+            fresh_state(),
+            vec![
+                alive_of(&alice_session, "alice"),
+                alive_of(&other_session, "alice"),
+                joined_of(&other_session, &other, "alice", 1),
+                joined_of(&alice_session, &alice, "alice", 1),
+            ],
+        );
+
+        assert!(
+            reader.peers.contains(&other_session.author_key()),
+            "the member whose proof came first keeps the name"
+        );
+        assert!(
+            !reader.peers.contains(&alice_session.author_key()),
+            "the other member is not a peer, whatever frame came first"
+        );
+    }
+
+    /// A session that went quiet holds its nickname too, so a proof of another member ends it as well.
+    #[test]
+    fn a_proof_that_binds_a_nickname_ends_a_quiet_session_of_another_member() {
+        let (alice, quiet_session) = (Identity::generate(), Identity::generate());
+        let alice_session = Identity::generate();
+        let mut initial = fresh_state();
+        initial.quiet.insert(quiet_session.author_key());
+        initial
+            .names
+            .insert(quiet_session.author_key(), nick("alice"));
+
+        let reader = reader_with(initial, vec![joined_of(&alice_session, &alice, "alice", 1)]);
+
+        assert!(
+            !reader.quiet.contains(&quiet_session.author_key()),
+            "the quiet session of another member does not keep the name"
+        );
+        assert!(
+            reader.peers.contains(&alice_session.author_key()),
+            "the member that proved the name is a peer"
+        );
+    }
+
+    /// The name stays held by the member that proved it, so the end of the other session is no `left`
+    /// line for that name: the operator would read that the member went away.
+    #[test]
+    fn the_end_of_an_intruder_writes_no_left_line_for_the_name() {
+        let (alice, intruder_session) = (Identity::generate(), Identity::generate());
+        let alice_session = Identity::generate();
+        let mut initial = fresh_state();
+        initial.peers.insert(intruder_session.author_key());
+        initial.surfaced.insert(intruder_session.author_key());
+        initial
+            .names
+            .insert(intruder_session.author_key(), nick("alice"));
+        let events = SyntheticPresence::default();
+
+        let reader = reader_with_sink(
+            initial,
+            vec![joined_of(&alice_session, &alice, "alice", 1)],
+            &events,
+        );
+
+        assert!(
+            !reader.peers.contains(&intruder_session.author_key()),
+            "the intruder is ended"
+        );
+        assert_eq!(
+            *events.0.lock().expect("the count lock is not poisoned"),
+            0,
+            "no left line for a name that a member still holds"
+        );
+    }
+
+    /// A restart of the member that holds the name is no intrusion: its new session replaces the old
+    /// one, as before, and a session of another member that claims the name leaves with it.
+    #[test]
+    fn a_newer_run_of_the_member_that_holds_the_name_replaces_its_old_session_and_not_more() {
+        let (alice, intruder_session) = (Identity::generate(), Identity::generate());
+        let (old, new) = (Identity::generate(), Identity::generate());
+        let mesh = MeshId::from("test");
+        let mut initial = fresh_state();
+        initial.peers.insert(old.author_key());
+        initial.names.insert(old.author_key(), nick("alice"));
+        let first = alice.prove(&old.author_key(), "alice", mesh.as_ref(), 1);
+        assert!(
+            initial
+                .proofs
+                .accept(&old.author_key(), &nick("alice"), &mesh, first, |_| true),
+            "the proof of the old session is held"
+        );
+
+        let reader = reader_with(
+            initial,
+            vec![
+                alive_of(&intruder_session, "alice"),
+                joined_of(&new, &alice, "alice", 2),
+            ],
+        );
+
+        assert!(
+            reader.peers.contains(&new.author_key()),
+            "the new session of the member is a peer"
+        );
+        assert!(
+            !reader.peers.contains(&old.author_key()),
+            "its old session is replaced, as before"
+        );
+        assert!(
+            !reader.peers.contains(&intruder_session.author_key()),
+            "a session of another member under the bound name is not a peer"
         );
     }
 

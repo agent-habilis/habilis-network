@@ -2457,10 +2457,28 @@ impl EventLoopState {
             return proved && self.proofs.tell_once(&key);
         }
         let (peers, quiet) = (&self.peers, &self.quiet);
-        self.proofs
+        let member = proof.identity;
+        let bound = self
+            .proofs
             .accept(&key, &message.author, mesh, proof, |session| {
                 peers.contains(session) || quiet.contains(session)
             });
+        if bound {
+            // The nickname is bound to `member` here: a session of another member that was admitted
+            // while no proof bound it (or went quiet under it) does not keep the name.
+            let intruders: Vec<AuthorKey> = self
+                .keys_named(&message.author)
+                .into_iter()
+                .filter(|held| {
+                    *held != key
+                        && self
+                            .proofs
+                            .proof_of(held)
+                            .is_none_or(|proof| proof.identity != member)
+                })
+                .collect();
+            self.proofs.evict(intruders);
+        }
         false
     }
 

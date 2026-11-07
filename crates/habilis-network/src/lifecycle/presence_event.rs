@@ -77,13 +77,16 @@ pub(crate) enum Goodbye<'source> {
     Signed(&'source Verified),
     /// The newer session that replaced it, named by its author.
     Replaced(&'source Nickname),
+    /// A session of another member under a nickname that a proof bound away from it: it ends with no
+    /// `left` line, because the member that proved the name is still there.
+    Refused(&'source Nickname),
 }
 
 impl Goodbye<'_> {
     fn nickname(&self) -> &Nickname {
         match self {
             Self::Signed(message) => &message.author,
-            Self::Replaced(nickname) => nickname,
+            Self::Replaced(nickname) | Self::Refused(nickname) => nickname,
         }
     }
 }
@@ -142,7 +145,7 @@ pub(crate) async fn end_session(
     // surfaced — keeps the join-horizon view symmetric. A `left`
     // for a peer known only through pre-join backlog (or one we
     // already showed going quiet) is dropped.
-    if was_surfaced {
+    if was_surfaced && !matches!(goodbye, Goodbye::Refused(_)) {
         context
             .sink
             .emit(departure(&goodbye, key, &departed, context));

@@ -60,6 +60,9 @@ pub(crate) struct ProofExchange {
     // many as the book holds, and `roster_gate` takes them on each frame, so it holds a few at most
     // between two frames
     replaced: Vec<AuthorKey>,
+    // the sessions of another member that a proof just bound the nickname away from, until the caller
+    // takes them: the roster size at most (live and quiet), and `roster_gate` takes them on each frame
+    evicted: Vec<AuthorKey>,
     ties_refused: u64,
     bound_refused: u64,
     gate_refused: u64,
@@ -72,6 +75,7 @@ impl ProofExchange {
             asked: ProofBook::with_cap(cap),
             told: BoundedFifoSet::new(cap),
             replaced: Vec::new(),
+            evicted: Vec::new(),
             ties_refused: 0,
             bound_refused: 0,
             gate_refused: 0,
@@ -101,7 +105,9 @@ impl ProofExchange {
 
     /// Whether the frames of `session` that claim `nickname` reach the roster. They do when the
     /// session proved the nickname for the member that holds the binding, or when no held session binds it. A bound nickname with no
-    /// proof of its member is the join error of the claimant; the refusal is counted.
+    /// proof of its member is the join error of the claimant; the refusal is counted. A session that was
+    /// admitted while no proof bound the nickname does not keep it: the proof that binds the name ends it
+    /// ([`ProofExchange::evict`]).
     pub(crate) fn admits(
         &mut self,
         session: &AuthorKey,
@@ -137,6 +143,17 @@ impl ProofExchange {
     /// them in the roster.
     pub(crate) fn take_replaced(&mut self) -> Vec<AuthorKey> {
         mem::take(&mut self.replaced)
+    }
+
+    /// Mark `sessions` for the end: a proof bound their nickname to another member.
+    pub(crate) fn evict(&mut self, sessions: impl IntoIterator<Item = AuthorKey>) {
+        self.evicted.extend(sessions);
+    }
+
+    /// The sessions that a proof bound the nickname away from since the last call. The caller ends them in
+    /// the roster, with no `left` line, because the nickname stays held by the member that proved it.
+    pub(crate) fn take_evicted(&mut self) -> Vec<AuthorKey> {
+        mem::take(&mut self.evicted)
     }
 
     /// A frame was refused the roster because it claims the nickname of this node.
