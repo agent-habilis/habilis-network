@@ -121,6 +121,33 @@ pub const DOC_PENDING_AUTHOR_MAX: usize = 128;
 /// stream flush a joiner's honest backfill.
 pub const DOC_PENDING_TOTAL_MAX: usize = 512;
 
+/// The bytes that a frame that writes an entry again after a reset leaves free under a message. The
+/// frame is measured when the cut is made, and a later write carries more dependencies, so the
+/// margin keeps it inside the message. It must be at most the margin of the application that
+/// publishes the entry (128 bytes in agent-gossip): with a larger margin the engine would refuse
+/// after a reset a value that the application writes.
+pub const DOC_EPOCH_FRAME_MARGIN: usize = 128;
+
+/// How many sweep ticks a node tries to write its entry again after a reset when a send fails. At
+/// the last one it gives up, so a send that never works does not make the slot wait for ever.
+pub const DOC_EPOCH_WRITE_ATTEMPTS: u8 = 6;
+
+/// The frame bytes a gated channel keeps in one epoch before the node starts a new one (a tunable).
+/// A reset drops every frame of the epoch, then each owner writes its own entry again. The real
+/// threshold is the larger of this value and twice the frame bytes that the epoch held when it
+/// settled, so a mesh whose live entries fill the cap does not reset in a loop. The check runs once
+/// per minute, so the bound is the threshold plus one minute of writes.
+pub const DOC_EPOCH_FRAME_CAP_BYTES: usize = 1024 * 1024;
+
+/// How far above its own epoch a node adopts one (a tunable). A larger jump is refused, so a forged
+/// epoch number cannot lock the channel: the forger raises the epoch by this much per adoption.
+pub const DOC_EPOCH_JUMP_MAX: u64 = 131_072;
+
+/// How many 1-minute ticks a node that holds the frames of others waits before it adopts a higher
+/// epoch (a tunable). At the end it jumps to the highest epoch that it saw. A forger can force
+/// at most 1 reset per wait on a node. A node that holds nothing from others adopts at once.
+pub const DOC_EPOCH_ADOPT_WAIT_TICKS: u32 = 5;
+
 /// Hard ceiling on a partial group's lifetime regardless of activity. The
 /// idle TTL alone lets a hostile stream pin its buffered bytes forever by
 /// trickling one shard per window; this bounds any single group's pin to an
@@ -172,6 +199,24 @@ pub const MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 /// `host`-only with the spool itself: only a producer writes blobs to disk.
 #[cfg(feature = "host")]
 pub const MAX_BLOB_STORE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
+
+/// Entry budget of the same store. The byte budget counts size, so blobs of a
+/// few bytes would grow the map without a limit. 4096 entries leave 1 `MiB` per
+/// blob inside `MAX_BLOB_STORE_BYTES`, so a normal blob never meets this cap,
+/// and the map holds at most about 4 `MiB`. The oldest blob goes first, the same
+/// as under the byte budget.
+#[cfg(feature = "host")]
+pub const MAX_BLOB_STORE_ENTRIES: usize = 4096;
+
+/// Content groups that one blob entry records as owners. The same file offloaded for many calls
+/// shares one entry, so its owner set would grow with each group. A group past the cap is not
+/// recorded and marks the entry overflowed: the blob then stays when the recorded owners are
+/// released, for the calls that are not recorded, and the store budget (`MAX_BLOB_STORE_ENTRIES`
+/// and `MAX_BLOB_STORE_BYTES`) removes it later, oldest first. The budget can also remove a blob
+/// that still has live owners when the store is full; a fetch of it then fails cleanly. 64 owners
+/// of about 60 bytes each hold about 4 `KiB` per entry.
+#[cfg(feature = "host")]
+pub const MAX_BLOB_OWNERS: usize = 64;
 
 /// Capacity of the unicast inbound channel — frames the `UNICAST_ALPN` acceptor
 /// forwards to the event loop for `gossip::ingest`. Bounded so a peer flooding a

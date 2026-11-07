@@ -210,6 +210,7 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
     tokio::spawn(async move {
         loop {
             n0future_time::sleep(interval).await;
+            super::state::note_ppid_wake();
             let current_ppid = parent_pid();
             if parent_lost(original_ppid, current_ppid) {
                 let _ = quit_tx.send(()).await;
@@ -224,6 +225,7 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
 async fn watch_owner(owner: Owner, interval: Duration, quit_tx: mpsc::Sender<()>) {
     loop {
         n0future_time::sleep(interval).await;
+        super::state::note_ppid_wake();
         if owner.lost() {
             let _ = quit_tx.send(()).await;
             return;

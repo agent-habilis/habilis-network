@@ -27,6 +27,11 @@ pub enum DocError {
     Body(BodyError),
     /// Automerge refused the change, or the envelope did not encode.
     Encode(Box<dyn error::Error + Send + Sync + 'static>),
+    /// One value is larger than the budget of a frame and cannot be cut.
+    TooLarge {
+        /// The bytes of the value as JSON.
+        bytes: usize,
+    },
 }
 
 impl DocError {
@@ -49,6 +54,7 @@ impl fmt::Display for DocError {
             }
             Self::Body(_) => "the change body is not a valid message body",
             Self::Encode(_) => "the change could not be encoded",
+            Self::TooLarge { .. } => "one value is larger than a frame and cannot be cut",
         })
     }
 }
@@ -56,7 +62,7 @@ impl fmt::Display for DocError {
 impl error::Error for DocError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Self::NotAnObject => None,
+            Self::NotAnObject | Self::TooLarge { .. } => None,
             Self::Body(error) => Some(error),
             Self::Encode(error) => Some(&**error),
         }

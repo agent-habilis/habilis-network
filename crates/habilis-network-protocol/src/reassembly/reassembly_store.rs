@@ -237,6 +237,12 @@ impl ReassemblyStore {
             .map(|(key, _)| key.clone())
     }
 
+    /// The partial groups that the store holds, and the bytes that they are charged.
+    #[must_use]
+    pub fn size(&self) -> (usize, usize) {
+        (self.groups.len(), self.total_bytes)
+    }
+
     /// Accounting snapshot `(groups, total_bytes, max_author_bytes)` for the
     /// adversarial suite's budget tripwires.
     #[cfg(feature = "adversarial")]

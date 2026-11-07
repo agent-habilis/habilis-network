@@ -40,8 +40,12 @@ pub mod wire;
 
 mod doc_error;
 
+mod split;
+
 pub use doc_error::DocError;
+
+pub use split::split_entry;
 
 mod mesh_doc;
 
-pub use mesh_doc::{Ingested, MeshDoc, SelfWriteGate};
+pub use mesh_doc::{DocCensus, EpochSwitch, Ingested, MeshDoc, SelfWriteGate};

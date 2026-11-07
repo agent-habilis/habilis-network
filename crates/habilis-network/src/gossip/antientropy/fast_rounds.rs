@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use iroh::EndpointId;
+
 use crate::protocol::{AuthorKey, Channel, Nickname};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
@@ -24,6 +26,9 @@ pub(super) struct Waiting {
     pub(super) author: Nickname,
     pub(super) heads: Vec<String>,
     pub(super) noted: Instant,
+    /// The connection that its digest came on, when it came by unicast: a retry route for a peer
+    /// whose endpoint proof has not arrived.
+    pub(super) via: Option<EndpointId>,
 }
 
 /// This node's fast rounds: when a linked neighbor's digest shows heads we do
@@ -143,12 +148,27 @@ impl FastRounds {
             author,
             heads,
             noted: now,
+            via: None,
         };
         if let Some(known) = ahead.iter_mut().find(|known| known.key == peer.key) {
             *known = peer;
         } else if ahead.len() < FAST_ROUND_AHEAD_MAX {
             ahead.push(peer);
         }
+    }
+
+    /// Remember the connection that the digest of `key` came on, for the retry of its ask-back.
+    pub(super) fn note_arrival(&mut self, channel: Channel, key: &AuthorKey, via: EndpointId) {
+        let ahead = self.ahead.get_mut(&channel);
+        let known = ahead.and_then(|ahead| ahead.iter_mut().find(|peer| peer.key == *key));
+        if let Some(peer) = known {
+            peer.via = Some(via);
+        }
+    }
+
+    /// The peers remembered as ahead, summed over the channels.
+    pub(crate) fn ahead_count(&self) -> usize {
+        self.ahead.values().map(Vec::len).sum()
     }
 
     /// The peers remembered as ahead for `channel`.

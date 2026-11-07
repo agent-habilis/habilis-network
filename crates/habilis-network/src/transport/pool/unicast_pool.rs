@@ -28,6 +28,7 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 
+use crate::daemon::state::WireOutTally;
 use crate::protocol::messages;
 
 use n0_future::{task, time};
@@ -121,6 +122,9 @@ pub(in crate::transport::pool) struct PoolInner {
     /// The table whose ceiling the connections of this pool count against. Set once the
     /// table exists, which is after the pool.
     pub(in crate::transport::pool) admission: std_OnceLock<SignalAdmission>,
+    /// Where the frames of this pool are counted: the tally of the loop that owns it. Set once, like
+    /// the table. A pool that no loop owns counts nothing.
+    pub(in crate::transport::pool) tally: std_OnceLock<WireOutTally>,
 }
 
 /// What the dialer of a peer publishes to the callers that wait on its dial: nothing while the dial
@@ -165,6 +169,7 @@ impl UnicastPool {
                 dial_gate: std_Mutex::new(None),
                 relay_transport,
                 admission: std_OnceLock::new(),
+                tally: std_OnceLock::new(),
             }),
         }
     }
@@ -175,6 +180,11 @@ impl UnicastPool {
         let _ = self.inner.admission.set(admission);
     }
 
+    /// Count the frames of this pool into `tally`, the tally of the loop that owns it.
+    pub(crate) fn set_tally(&self, tally: WireOutTally) {
+        let _ = self.inner.tally.set(tally);
+    }
+
     /// [`send_one`], marked busy in the ledger for as long as it runs.
     async fn send_marked(
         &self,
@@ -183,7 +193,7 @@ impl UnicastPool {
         bytes: &[u8],
     ) -> Result<()> {
         let busy = self.inner.admission.get().map(|table| table.busy(eid));
-        send_one(connection, bytes, busy).await?;
+        send_one(connection, bytes, busy, self.inner.tally.get()).await?;
         // The tap holds only the frames that were written, or a redial counts a frame twice.
         #[cfg(test)]
         if let Ok(mut tap) = self.inner.tap.lock() {
@@ -225,6 +235,7 @@ impl UnicastPool {
                 dial_gate: std_Mutex::new(None),
                 relay_transport: false,
                 admission: OnceLock::new(),
+                tally: std_OnceLock::new(),
             }),
         }
     }
@@ -802,10 +813,18 @@ async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> 
 /// after it is dropped because the connection stays pooled, so the sender does not
 /// await `stopped()` (which would block the event loop on the inline
 /// unicast-only path). Only the busy mark waits for it, in a task of its own.
-async fn send_one(connection: &Connection, bytes: &[u8], busy: Option<BusyGuard>) -> Result<()> {
+async fn send_one(
+    connection: &Connection,
+    bytes: &[u8],
+    busy: Option<BusyGuard>,
+    tally: Option<&WireOutTally>,
+) -> Result<()> {
     let mut stream = connection.open_uni().await?;
     stream.write_all(bytes).await?;
     stream.finish()?;
+    if let Some(tally) = tally {
+        tally.note(bytes);
+    }
     // `finish()` returns while the frame is still in flight. The busy mark moves to a task that waits
     // until the peer has read the stream (at most `BUSY_AFTER_FINISH`), so that the ledger does not
     // evict the connection under a slow reader. The sender does not wait: it would block the event

@@ -24,6 +24,10 @@ pub(crate) struct BlobEntry {
     /// Every content group that offloaded these bytes. The spool file goes
     /// only when the last of them is evicted.
     pub(super) owners: HashSet<ContentId>,
+    /// A group claimed this blob past `MAX_BLOB_OWNERS` and was not recorded. The blob then stays
+    /// when its recorded owners are released, for the calls that are not recorded: only the
+    /// store budget removes it.
+    pub(super) overflowed: bool,
     /// Monotonic order of the last registration or claim, for oldest-first
     /// eviction under disk pressure.
     pub(super) seq: u64,

@@ -4,6 +4,7 @@ use super::ParkedLinkStates;
 use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
+use super::chat_continuations::ChatContinuations;
 use super::peer_info_flood::PeerInfoFlood;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshSecrets, PingRound,
@@ -36,6 +37,7 @@ use crate::protocol::{
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
+use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
@@ -43,7 +45,7 @@ use crate::util::tuning::{
     RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED, UNSUPPORTED_VERSION_CAP,
 };
 
-use crate::gossip::{antientropy, lan};
+use crate::gossip::{antientropy, apply_merge_patch, lan};
 use crate::protocol::{crypto, messages};
 #[cfg(test)]
 use crate::testing;
@@ -83,6 +85,13 @@ pub(crate) struct PendingSuspend {
 pub(crate) struct Goodbyes {
     peers: BoundedFifoSet<AuthorKey>,
     strangers: BoundedFifoSet<AuthorKey>,
+}
+
+impl Goodbyes {
+    /// The goodbyes held, of peers and of strangers.
+    pub(crate) fn len(&self) -> usize {
+        self.peers.len() + self.strangers.len()
+    }
 }
 
 impl Default for Goodbyes {
@@ -312,6 +321,9 @@ pub struct EventLoopState {
     pub(crate) join_fallback_at: Option<Instant>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
+    /// How many doc censuses this loop has run: one in `DOC_HEAVY_EVERY` is heavy. The count is of
+    /// this loop, so that each document of a process that runs several loops gets its heavy census.
+    pub(crate) doc_census_runs: u64,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
     /// session although nothing was sent over a connection yet.
     lane_wanted: HashMap<EndpointId, Instant>,
@@ -322,12 +334,20 @@ pub struct EventLoopState {
     /// because a digest built with no signature is a valid input of the tests: `None`
     /// is its own bucket, as the empty string was.
     digest_serves: Cooldown<AuthorKey>,
+    /// The chat continuations that an author gets inside its cooldown. Bounded: a run lives for one
+    /// cooldown window, at most `CHAT_CONTINUATION_AUTHORS_MAX` authors hold one, and a new author
+    /// is refused when the table is full (see `ChatContinuations`).
+    chat_continuations: ChatContinuations,
     /// When we last reported an author whose digest we could not read. An `Option` key
     /// for the same reason as `digest_serves`.
     digest_unreadable: Cooldown<AuthorKey>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
     pub(crate) resend_outbox: ResendOutbox,
+    /// Tests only: the next ask of a fast round fails to start, once, as a send does when the
+    /// connection cannot be opened. A default build has no such field.
+    #[cfg(test)]
+    fail_next_ask: bool,
     /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
     /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -678,8 +698,23 @@ pub struct EventLoopState {
     /// mesh, `derive_secret(mesh_key, "broadcast")` — domain-separated from
     /// the state/meta doc keys. `None` ⇒ chat stays plaintext. Wiped on drop.
     pub(crate) broadcast_key: Option<SymmetricKey>,
+    /// The switch of the meta document to a new epoch whose entry of this node is not written
+    /// again yet, and the sweeps that failed to write it. One slot, so it is bounded.
+    pub(crate) epoch_write: EpochWrite,
     /// Where the event loop's wakeups went since the last census.
     pub(crate) idle: IdleCounters,
+}
+
+/// The write of the entry of this node after the meta document moved to a new epoch. The sweep tick
+/// writes the entry and empties the slot. A second switch before that keeps the entry of the first. A
+/// failed write puts the switch back, and at `DOC_EPOCH_WRITE_ATTEMPTS` failures the switch is given
+/// up, so a send that never works cannot keep the slot for ever.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EpochWrite {
+    /// The switch whose entry waits to be written.
+    pub(crate) switch: Option<doc::EpochSwitch>,
+    /// How many sweeps failed to write it.
+    pub(crate) attempts: u8,
 }
 
 impl EventLoopState {
@@ -687,6 +722,10 @@ impl EventLoopState {
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
     /// per-channel keys are derived, rather than lingering in the caller.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the constructor names one field of each collection of the state, and is one line over the limit"
+    )]
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
         let MeshSecrets {
             password: mesh_password,
@@ -721,11 +760,15 @@ impl EventLoopState {
             redials: redial::Redials::default(),
             join_fallback_at: None,
             graft_backoff: graft_backoff::GraftBackoff::default(),
+            doc_census_runs: 0,
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
             digest_serves: Cooldown::new(tuning::ANTIENTROPY_SERVE_COOLDOWN),
+            chat_continuations: ChatContinuations::default(),
             digest_unreadable: Cooldown::new(super::UNREADABLE_DIGEST_LOG_WINDOW),
             resend_outbox,
+            #[cfg(test)]
+            fail_next_ask: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drop: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -808,6 +851,7 @@ impl EventLoopState {
             mesh_password,
             mint_mesh: None,
             broadcast_key,
+            epoch_write: EpochWrite::default(),
             idle: IdleCounters::default(),
         }
     }
@@ -819,6 +863,39 @@ impl EventLoopState {
     }
 
     /// The `meta` channel: gated by the application's per-peer map when it keeps one, free-form otherwise.
+    /// Keep `switch` until the sweep writes the entry of this node again. If a switch is waiting
+    /// already, its entry is kept: the document holds no entry of ours since the first switch except
+    /// the writes made after it, so the new entry is partial. The two merge, the newer fields win
+    /// (a deletion was applied to the waiting entry when it was made, see `follow_own_write`).
+    pub(crate) fn note_epoch_switch(&mut self, mut switch: doc::EpochSwitch) {
+        self.epoch_write.attempts = 0;
+        let waiting = self
+            .epoch_write
+            .switch
+            .take()
+            .and_then(|held| held.own_entry);
+        switch.own_entry = match (waiting, switch.own_entry.take()) {
+            (Some(mut older), Some(newer)) => {
+                apply_merge_patch(&mut older, &newer);
+                Some(older)
+            }
+            (older, newer) => newer.or(older),
+        };
+        self.epoch_write.switch = Some(switch);
+    }
+
+    /// Put `switch` back in the slot after a failed write, for the next sweep to try again, unless
+    /// it failed `DOC_EPOCH_WRITE_ATTEMPTS` times. Returns whether the switch waits.
+    pub(crate) fn retry_epoch_switch(&mut self, switch: doc::EpochSwitch) -> bool {
+        self.epoch_write.attempts = self.epoch_write.attempts.saturating_add(1);
+        if self.epoch_write.attempts >= DOC_EPOCH_WRITE_ATTEMPTS {
+            self.epoch_write.attempts = 0;
+            return false;
+        }
+        self.epoch_write.switch = Some(switch);
+        true
+    }
+
     fn meta_channel(
         per_peer_gate: Option<doc::SelfWriteGate>,
         key: Option<SymmetricKey>,
@@ -1525,6 +1602,12 @@ impl EventLoopState {
             })
     }
 
+    /// Tests only: the gap of zero links began at `since`, so a test need not wait for a heal.
+    #[cfg(test)]
+    pub(crate) fn start_zero_links_gap_at(&mut self, since: Instant) {
+        self.zero_links_since = Some(since);
+    }
+
     /// Whether a reclaim tick asks another known peer for a link: the fast reclaim window is
     /// open and this member held links and lost every one. A low priority request is refused by
     /// a peer whose view is full, and the peers that were lost are full first; waiting for the
@@ -2227,7 +2310,25 @@ impl EventLoopState {
             return false;
         }
         self.digest_serves.note(author, now);
+        self.chat_continuations
+            .begin(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN);
         true
+    }
+
+    /// Whether a digest of `author` that came by unicast, inside the cooldown that `admit_digest`
+    /// refused it for, is a continuation of its chat ask to serve now: at the pace of the asker, and
+    /// up to its count. Only an author that was served has one. Bounded (see `ChatContinuations`).
+    pub fn admit_chat_continuation(&mut self, author: AuthorKey, now: Instant) -> bool {
+        self.digest_serves.on_cooldown(&author, now)
+            && self
+                .chat_continuations
+                .admit(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN)
+    }
+
+    /// How many authors hold a run of chat continuations: the size gauge of the bound.
+    #[cfg(test)]
+    pub(crate) fn chat_continuations_len(&self) -> usize {
+        self.chat_continuations.len()
     }
 
     /// The selected path of a pair: the path watcher's last report if it has one,
@@ -2482,6 +2583,20 @@ impl EventLoopState {
     #[cfg(feature = "adversarial")]
     pub fn sever_gossip(&mut self) {
         self.standing.remove(&Standing::GossipOpen);
+    }
+
+    /// Tests only: the next ask of a fast round fails to start, once.
+    #[cfg(test)]
+    pub(crate) fn fail_the_next_ask(&mut self) {
+        self.fail_next_ask = true;
+    }
+
+    /// Tests only: whether the injected failure of an ask is due now. It is spent when it is read.
+    #[cfg(test)]
+    pub(crate) fn take_injected_ask_failure(&mut self) -> bool {
+        let due = self.fail_next_ask;
+        self.fail_next_ask = false;
+        due
     }
 
     /// Tests only: drop the next inbound frame that `what` names, once, before the app reads it.

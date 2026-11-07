@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::util::consts::MAX_BLOB_STORE_BYTES;
+use crate::util::consts::{MAX_BLOB_OWNERS, MAX_BLOB_STORE_BYTES, MAX_BLOB_STORE_ENTRIES};
 
 use crate::blob::{BlobDigest, ContentId};
 
@@ -76,6 +76,7 @@ impl BlobStore {
                 ticket_secret: secret.ticket_secret.clone(),
                 password: secret.password,
                 owners: HashSet::from([content_id]),
+                overflowed: false,
                 seq,
             },
         );
@@ -96,13 +97,21 @@ impl BlobStore {
     /// eviction, and return its ticket fields; `None` when the blob is not
     /// spooled. Lets the producer skip the ~100ms password stretch
     /// when re-offloading content it already holds.
+    ///
+    /// An entry records at most `MAX_BLOB_OWNERS` owners. A group past the cap is not recorded and
+    /// marks the entry `overflowed`, so the blob stays when the recorded owners are released. The
+    /// claim never fails for want of room.
     pub(crate) fn claim(
         &mut self,
         hash: &BlobDigest,
         content_id: &ContentId,
     ) -> Option<Registered> {
         let entry = self.map.get_mut(hash)?;
-        entry.owners.insert(content_id.clone());
+        if entry.owners.len() < MAX_BLOB_OWNERS {
+            entry.owners.insert(content_id.clone());
+        } else if !entry.owners.contains(content_id) {
+            entry.overflowed = true;
+        }
         entry.seq = self.next_seq;
         self.next_seq += 1;
         Some(Registered {
@@ -112,13 +121,15 @@ impl BlobStore {
     }
 
     /// Release `content_id`'s hold on every blob (called from the task
-    /// idle-timeout sweep), unlinking each spool file no group owns any more.
+    /// idle-timeout sweep), unlinking each spool file no group owns any more, unless the entry is
+    /// overflowed: then the store budget removes it.
     pub(crate) fn evict_content(&mut self, content_id: &ContentId) {
         let doomed: Vec<BlobDigest> = self
             .map
             .iter_mut()
             .filter_map(|(hash, entry)| {
-                (entry.owners.remove(content_id) && entry.owners.is_empty()).then_some(*hash)
+                (entry.owners.remove(content_id) && entry.owners.is_empty() && !entry.overflowed)
+                    .then_some(*hash)
             })
             .collect();
         for hash in doomed {
@@ -127,9 +138,9 @@ impl BlobStore {
     }
 
     /// Unlink the least recently registered or claimed blob first, until the
-    /// store is within `MAX_BLOB_STORE_BYTES`.
+    /// store is within `MAX_BLOB_STORE_BYTES` and `MAX_BLOB_STORE_ENTRIES`.
     fn evict_to_budget(&mut self) {
-        while self.total_bytes > MAX_BLOB_STORE_BYTES {
+        while self.total_bytes > MAX_BLOB_STORE_BYTES || self.map.len() > MAX_BLOB_STORE_ENTRIES {
             let Some(oldest) = self
                 .map
                 .iter()

@@ -12,11 +12,12 @@ use crate::transport::MeshSender;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
+use crate::doc::{DocError, EpochSwitch, split_entry};
 use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
-use crate::util::consts::MAX_MESSAGE_SIZE;
+use crate::util::consts::{DOC_EPOCH_FRAME_MARGIN, MAX_MESSAGE_SIZE};
 
 use crate::logging::messages;
 use crate::protocol::peer_addr_error;
@@ -310,6 +311,158 @@ impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
     }
 }
 
+/// The merges that write the entry of a switch to a new epoch again, as
+/// `{ <map>: { <slot>: <part> } }`, each one for a frame that `fits` accepts. The slot is the
+/// lowercase hex of the key of the owner. An item is an error for a value that cannot be cut to a
+/// frame; the other items are still there.
+pub(crate) fn entry_merges<Fits: FnMut(&serde_json::Value) -> bool>(
+    switch: &EpochSwitch,
+    slot: &str,
+    mut fits: Fits,
+) -> Vec<Result<serde_json::Value, DocError>> {
+    let Some(entry) = switch.own_entry.as_ref() else {
+        return Vec::new();
+    };
+    let map = switch.map.as_str();
+    let wrapped = |part: &serde_json::Value| serde_json::json!({ map: { slot: part } });
+    let cuts = split_entry(entry, |part| fits(&wrapped(part)));
+    cuts.map(|cut| cut.map(|part| wrapped(&part))).collect()
+}
+
+/// Apply a local write to the entry that a waiting switch kept, so the write again does not bring
+/// back what the app deleted or changed between the switch and the sweep.
+/// It patches only when a switch waits and has kept an entry: with no switch, or a switch that kept
+/// none, it does nothing.
+fn follow_own_write(state: &mut EventLoopState, merge: &serde_json::Value) {
+    let slot = state.identity.author_key().to_string();
+    let Some(switch) = state.epoch_write.switch.as_mut() else {
+        return;
+    };
+    let peers = merge.get(&switch.map);
+    let patch = peers.and_then(|peers| peers.get(slot.as_str()));
+    if let (Some(patch), Some(entry)) = (patch, switch.own_entry.as_mut()) {
+        apply_merge_patch(entry, patch);
+    }
+}
+
+/// RFC 7386: an object patch merges into `target` key by key, `null` deletes a key, and any other
+/// value replaces what is there.
+pub(crate) fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    let serde_json::Value::Object(fields) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = serde_json::json!({});
+    }
+    let Some(map) = target.as_object_mut() else {
+        return;
+    };
+    for (key, value) in fields {
+        if value.is_null() {
+            map.remove(key);
+        } else {
+            apply_merge_patch(
+                map.entry(key.clone()).or_insert(serde_json::Value::Null),
+                value,
+            );
+        }
+    }
+}
+
+/// The part of `entry` that `held` does not hold yet, or `None` when it holds all of it. A path that
+/// `held` has stays as it is, whatever its value: it is newer than the entry that a switch kept.
+fn unwritten(
+    entry: &serde_json::Value,
+    held: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let Some(held) = held else {
+        return Some(entry.clone());
+    };
+    let (serde_json::Value::Object(fields), serde_json::Value::Object(have)) = (entry, held) else {
+        return None;
+    };
+    let missing = |(key, value): (&String, &serde_json::Value)| {
+        let part = unwritten(value, have.get(key))?;
+        Some((key.clone(), part))
+    };
+    let rest: serde_json::Map<String, serde_json::Value> =
+        fields.iter().filter_map(missing).collect();
+    (!rest.is_empty()).then_some(serde_json::Value::Object(rest))
+}
+
+/// Whether the frame of `merge`, built and signed and sealed as a write of this node would be, fits
+/// a message with a margin for the dependencies that a later write adds. A merge that makes no change
+/// has no frame, so it fits.
+///
+/// It builds, composes and signs one frame for each merge that it is asked about, and the cut asks
+/// about each field once for each open merge, so the cost grows with the square of the fields of one
+/// level. It is for the write again after a reset, which runs once on a node. Do not use it on a hot
+/// path.
+fn frame_fits(
+    state: &EventLoopState,
+    mesh: &MeshId,
+    author: &Nickname,
+    merge: &serde_json::Value,
+) -> bool {
+    let seed = *state.identity.public().as_bytes();
+    let doc = state.doc(Channel::Meta);
+    let Ok(built) = doc.build_change(merge, &seed) else {
+        return false;
+    };
+    let Some(change) = built else {
+        return true;
+    };
+    let Ok((body, _plain)) = doc.compose_wire_body(&change, None) else {
+        return false;
+    };
+    let frame = Message::new_channel_event(mesh, author, body, Channel::Meta).sign(&state.identity);
+    frame
+        .serialize()
+        .is_ok_and(|wire| wire.as_bytes().len() + DOC_EPOCH_FRAME_MARGIN <= MAX_MESSAGE_SIZE)
+}
+
+/// Write the entry of this node again after the meta document moved to a new epoch: the reset dropped
+/// the old frames, and only the owner can write its own entry. It runs on the sweep tick, so the
+/// entry is back within 10 s of the switch. The write stays quiet (it is no news for the operator).
+/// A value that cannot be cut to a frame is not written, with a warning for that one value, and the
+/// other fields are written. A path that the document holds already is not written: it is a write of
+/// the app after the switch, newer than the entry that the switch kept.
+pub(crate) async fn write_entry_again(state: &mut EventLoopState, context: &MergeCtx<'_>) {
+    let Some(taken) = state.epoch_write.switch.take() else {
+        return;
+    };
+    let json = state.doc(Channel::Meta).to_json();
+    let peers = json.get(&taken.map);
+    let slot = state.identity.author_key().to_string();
+    let held = peers.and_then(|peers| peers.get(slot.as_str()));
+    let entry = taken.own_entry.as_ref();
+    let rest: Option<serde_json::Value> = entry.and_then(|entry| unwritten(entry, held));
+    let switch = EpochSwitch::new(taken.epoch, taken.map.clone(), rest);
+    let cuts: Vec<Result<serde_json::Value, DocError>> = entry_merges(&switch, &slot, |merge| {
+        frame_fits(state, context.mesh, context.author, merge)
+    });
+    for cut in cuts {
+        let merge = match cut {
+            Ok(merge) => merge,
+            Err(error) => {
+                tracing::warn!(target: "habilis_network::gossip", %error, "a value of the entry of this node is too large for a frame, and is not written again after a reset");
+                continue;
+            }
+        };
+        let params = StateMergeParams::new(context.clone(), Channel::Meta, merge).surface(false);
+        if let Err(error) = broadcast_state_merge(state, params).await {
+            if state.retry_epoch_switch(taken) {
+                tracing::warn!(target: "habilis_network::gossip", %error, "the entry of this node was not written again after a reset, and the next sweep tries again");
+            } else {
+                tracing::warn!(target: "habilis_network::gossip", %error, "the entry of this node was not written again after a reset, and the writes are given up");
+            }
+            return;
+        }
+    }
+    state.epoch_write.attempts = 0;
+}
+
 /// Parameters for [`broadcast_state_merge`]. Agent-driven writes surface to the operator, so
 /// `surface` is `true` unless [`StateMergeParams::surface`] says otherwise.
 ///
@@ -485,12 +638,18 @@ pub async fn broadcast_state_merge(
         }
         Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
         Ingested::Ignored => unreachable!("a locally-built change body always decodes"),
+        Ingested::NewEpoch { .. } => {
+            unreachable!("a locally-built change is of the epoch that the document holds")
+        }
         _ => {
             return Err(transport::SendError::internal(anyhow::anyhow!(
                 "the document did not take the change"
             )));
         }
     };
+    if channel == Channel::Meta {
+        follow_own_write(state, &merge);
+    }
 
     // A departure is mirrored before gossip takes the frame: once gossip has it, the frame is
     // no longer ours to copy, and a leaver can exit before the overlay carries it.
@@ -704,9 +863,14 @@ mod tests {
     use crate::daemon::state::Standing;
     use crate::transport::UdpTransport;
 
-    use super::{farewell_targets, mark_parked, peer_info_json};
+    use super::{
+        entry_merges, farewell_targets, frame_fits, mark_parked, peer_info_json, unwritten,
+        write_entry_again,
+    };
+    use crate::doc::EpochSwitch;
     use crate::protocol::{MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
+    use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
 
     use crate::protocol;
     use crate::protocol::messages::AppFrameParams;
@@ -862,12 +1026,593 @@ mod tests {
 
                 let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
                 assert!(
-                    matches!(delivered, Ok(Some(ref bytes)) if !bytes.is_empty()),
+                    matches!(delivered, Ok(Some(ref frame)) if !frame.bytes.is_empty()),
                     "a farewell reaches the peer by unicast, without waiting for anti-entropy"
                 );
                 router.shutdown().await.expect("shutdown");
                 node.close().await;
             },
+        );
+    }
+
+    /// The merges that write an entry again each fit the frame that `fits` measures, join into the
+    /// entry, and name the map and the owner.
+    #[test]
+    fn an_entry_is_written_again_in_merges_that_name_the_map_and_the_owner() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let entry = serde_json::json!({
+            "card": "c".repeat(700),
+            "host": "h".repeat(600),
+            "status": "idle",
+        });
+        let mut switch = EpochSwitch::new(1, "peers".to_owned(), Some(entry));
+        let fits =
+            |merge: &serde_json::Value| serde_json::to_vec(merge).expect("json").len() <= 1_000;
+        let cuts = entry_merges(&switch, "alice", fits);
+        assert!(cuts.len() >= 2, "{} merges", cuts.len());
+        for cut in cuts {
+            let merge = cut.expect("every part fits");
+            let fields = merge["peers"]["alice"]
+                .as_object()
+                .expect("the owner's fields");
+            assert!(!fields.is_empty(), "each merge holds at least one field");
+            assert!(fits(&merge), "each merge fits the frame");
+        }
+        switch = EpochSwitch::new(1, "peers".to_owned(), None);
+        assert!(
+            entry_merges(&switch, "alice", fits).is_empty(),
+            "an entry of none gives no merge"
+        );
+    }
+
+    /// After a reset the entry of this node comes back through the same write path as any merge,
+    /// so the document holds it again in the new epoch.
+    #[test]
+    fn the_entry_of_this_node_is_in_the_document_again_after_a_reset() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::endpoint::presets;
+                use iroh_gossip::{net, proto};
+
+                use crate::doc::{MeshDoc, SelfWriteGate};
+                use crate::gossip::event::SilentSink;
+                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
+                use crate::protocol::Channel;
+                use crate::transport::MeshSender;
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([8u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let write = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+
+                let mut state = fresh_state();
+                let own_key = state.identity.author_key();
+                let slot = own_key.to_string();
+                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
+                    .epoch_cap(1_000);
+                let fields = [("card", 'c'), ("host", 'h'), ("cwd", 'w')];
+                for (field, fill) in fields {
+                    let merge = serde_json::json!({"peers": {slot.as_str(): {field: fill.to_string().repeat(600)}}});
+                    let params =
+                        StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
+                    broadcast_state_merge(&mut state, params)
+                        .await
+                        .expect("the write is taken");
+                }
+                let before = state.doc(Channel::Meta).to_json();
+                let switch = state
+                    .doc_mut(Channel::Meta)
+                    .tick_epoch(&own_key)
+                    .expect("over the cap: a reset");
+                assert_eq!(
+                    state.doc(Channel::Meta).to_json(),
+                    serde_json::json!({"peers": {}}),
+                    "the reset leaves no entry in the document"
+                );
+                state.note_epoch_switch(switch);
+
+                write_entry_again(&mut state, &write).await;
+
+                assert!(state.epoch_write.switch.is_none(), "the slot is empty");
+                assert_eq!(
+                    state.doc(Channel::Meta).epoch(),
+                    1,
+                    "the reset moved the document to epoch 1"
+                );
+                assert_eq!(
+                    state.doc(Channel::Meta).to_json(),
+                    before,
+                    "the entry of this node is in the document again"
+                );
+                node.close().await;
+            },
+        );
+    }
+
+    /// An entry the size of an agent-gossip card (an array leaf of about 1.1 KB) comes back whole
+    /// after a reset, because the cut follows the measured length of the real frame.
+    #[test]
+    fn a_card_with_a_large_array_leaf_is_in_the_document_again_after_a_reset() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            card_survives_a_reset(None),
+        );
+    }
+
+    /// The same on a mesh with a password: the body is sealed and encoded again, so the frame that
+    /// the cut measures is larger than the open one.
+    #[test]
+    fn a_card_with_a_large_array_leaf_is_in_the_document_again_after_a_reset_with_a_channel_key() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            card_survives_a_reset(Some(protocol::SymmetricKey::from([7u8; 32]))),
+        );
+    }
+
+    /// `len` characters that automerge cannot squeeze, so a frame is about as long as its text.
+    fn noise(len: usize, seed: usize) -> String {
+        let digits = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15 ^ u64::try_from(seed).unwrap_or(0);
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            char::from(digits[usize::try_from(state >> 33).unwrap_or(0) % digits.len()])
+        };
+        (0..len).map(|_| next()).collect()
+    }
+
+    /// Write a card of the size of an agent-gossip card, reset the document, and write the entry
+    /// again, on a channel with `key` or with none. The whole entry must be back.
+    async fn card_survives_a_reset(key: Option<protocol::SymmetricKey>) {
+        use iroh::endpoint::presets;
+        use iroh_gossip::{net, proto};
+
+        use crate::doc::{MeshDoc, SelfWriteGate};
+        use crate::gossip::event::SilentSink;
+        use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
+        use crate::protocol::Channel;
+        use crate::transport::MeshSender;
+
+        // The array leaf has the size of the real card on both meshes (the extensions of an
+        // agent-gossip card are about 1.1 KB of JSON, and it publishes whole and sealed). The pads are
+        // noise that automerge cannot squeeze; on a mesh with a password they are smaller, so that
+        // 2 of them do not fit one sealed frame and the cut must tell the two meshes apart.
+        let params_len = 150;
+        let pad_len = if key.is_some() { 960 } else { 1_800 };
+
+        let node = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let gossip = net::Gossip::builder().spawn(node.clone());
+        let topic = gossip
+            .subscribe(proto::TopicId::from_bytes([9u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let author = nick("alice");
+        let write = MergeCtx {
+            mesh: &mesh,
+            author: &author,
+            sender: &sender,
+            sink: &SilentSink,
+        };
+        let extension = |index: usize| {
+            serde_json::json!({
+                "uri": format!("https://example.invalid/extensions/{index}"),
+                "params": format!("{index}").repeat(params_len),
+            })
+        };
+        let extensions: Vec<serde_json::Value> = (0..5).map(extension).collect();
+        let pieces = [
+            serde_json::json!({"card": {"capabilities": {"extensions": extensions}}}),
+            serde_json::json!({"card": {"name": "alice", "skills": "s".repeat(900)}}),
+            serde_json::json!({"status": "idle", "model": "m", "graph": {"node": "worker"}}),
+        ];
+
+        let mut state = fresh_state();
+        let own_key = state.identity.author_key();
+        let slot = own_key.to_string();
+        state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
+            .key(key)
+            .epoch_cap(1_000);
+        let mut writes = pieces.to_vec();
+        writes.extend((0..3).map(|index| serde_json::json!({ "pad": noise(pad_len, index) })));
+        for piece in writes {
+            let merge = serde_json::json!({"peers": {slot.as_str(): piece}});
+            let params = StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
+            broadcast_state_merge(&mut state, params)
+                .await
+                .expect("the write is taken");
+        }
+        let before = state.doc(Channel::Meta).to_json();
+        let switch = state
+            .doc_mut(Channel::Meta)
+            .tick_epoch(&own_key)
+            .expect("over the cap: a reset");
+        state.note_epoch_switch(switch);
+
+        write_entry_again(&mut state, &write).await;
+
+        assert_eq!(
+            state.doc(Channel::Meta).to_json(),
+            before,
+            "the whole entry is back, the array leaf too"
+        );
+        node.close().await;
+    }
+
+    /// A write of the app between the switch and the sweep is newer than the entry that the switch
+    /// kept, so the write again must not put the old value over it.
+    #[test]
+    fn a_write_between_the_switch_and_the_sweep_is_not_overwritten_by_the_old_entry() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::endpoint::presets;
+                use iroh_gossip::{net, proto};
+
+                use crate::doc::{MeshDoc, SelfWriteGate};
+                use crate::gossip::event::SilentSink;
+                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
+                use crate::protocol::Channel;
+                use crate::transport::MeshSender;
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([10u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let write = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                let mut state = fresh_state();
+                let own_key = state.identity.author_key();
+                let slot = own_key.to_string();
+                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
+                    .epoch_cap(1_000);
+                let first = [
+                    serde_json::json!({"card": {"name": "alice"}, "status": "idle", "model": "m"}),
+                    serde_json::json!({"pad": "a".repeat(1_800)}),
+                    serde_json::json!({"pad2": "b".repeat(1_800)}),
+                    serde_json::json!({"pad3": "c".repeat(1_800)}),
+                ];
+                for piece in first {
+                    let merge = serde_json::json!({"peers": {slot.as_str(): piece}});
+                    let params =
+                        StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
+                    broadcast_state_merge(&mut state, params)
+                        .await
+                        .expect("the write is taken");
+                }
+                let switch = state
+                    .doc_mut(Channel::Meta)
+                    .tick_epoch(&own_key)
+                    .expect("over the cap: a reset");
+                state.note_epoch_switch(switch);
+                // The agent writes a new status before the sweep.
+                let newer = serde_json::json!({"peers": {slot.as_str(): {"status": "busy"}}});
+                let params =
+                    StateMergeParams::new(write.clone(), Channel::Meta, newer).surface(false);
+                broadcast_state_merge(&mut state, params)
+                    .await
+                    .expect("the write is taken");
+
+                write_entry_again(&mut state, &write).await;
+
+                let json = state.doc(Channel::Meta).to_json();
+                let entry = &json["peers"][slot.as_str()];
+                assert_eq!(entry["status"], "busy", "the newer write stays");
+                assert_eq!(
+                    entry["model"], "m",
+                    "a field that was not written since comes back"
+                );
+                assert_eq!(entry["card"]["name"], "alice", "the card comes back");
+                node.close().await;
+            },
+        );
+    }
+
+    /// A write that fails after a reset is tried again on the next sweep. The merge that failed is
+    /// in the document already (the send failed after it), so each sweep writes what is left.
+    #[test]
+    fn a_failed_write_again_is_tried_on_the_next_sweep() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::endpoint::presets;
+                use iroh_gossip::{net, proto};
+
+                use crate::doc::{MeshDoc, SelfWriteGate};
+                use crate::gossip::MergeCtx;
+                use crate::gossip::event::SilentSink;
+                use crate::protocol::Channel;
+                use crate::transport::MeshSender;
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([11u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let write = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                let mut state = fresh_state();
+                let own_key = state.identity.author_key();
+                let slot = own_key.to_string();
+                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
+                // The overlay is up, so a write goes to gossip, and gossip is stopped below.
+                state.standing.insert(Standing::Meshed);
+                // Three fields of about 1.8 KB: each one is a merge of its own.
+                let entry = serde_json::json!({
+                    "a": "a".repeat(1_800), "b": "b".repeat(1_800), "c": "c".repeat(1_800),
+                });
+                drop(receiver);
+                gossip.shutdown().await.expect("the gossip stops");
+                ::habilis_network_test_tracing::expect_warn(
+                    "habilis_network::gossip",
+                    "the entry of this node was not written again after a reset",
+                );
+
+                state.note_epoch_switch(EpochSwitch::new(
+                    1,
+                    "peers".to_owned(),
+                    Some(entry.clone()),
+                ));
+                for sweep in 1..=3 {
+                    write_entry_again(&mut state, &write).await;
+                    assert!(
+                        state.epoch_write.switch.is_some(),
+                        "the switch waits for the next sweep after the failed write of sweep {sweep}"
+                    );
+                }
+                write_entry_again(&mut state, &write).await;
+                assert!(
+                    state.epoch_write.switch.is_none(),
+                    "nothing is left to write"
+                );
+                assert_eq!(
+                    state.doc(Channel::Meta).to_json(),
+                    serde_json::json!({ "peers": { slot.as_str(): entry } }),
+                    "each sweep wrote what was left, and the entry is whole"
+                );
+                node.close().await;
+            },
+        );
+    }
+
+    /// Two switches before the sweep writes: the entry that the first one kept is not lost to the
+    /// partial entry of the second (the document held only the writes since the first switch).
+    #[test]
+    fn a_second_switch_keeps_the_fields_of_the_queued_entry() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let first = serde_json::json!({ "card": 1, "status": "idle", "note": "kept" });
+        let partial = serde_json::json!({ "status": "busy" });
+        state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(first)));
+
+        state.note_epoch_switch(EpochSwitch::new(2, "peers".to_owned(), Some(partial)));
+
+        let kept = state.epoch_write.switch.expect("a switch waits").own_entry;
+        assert_eq!(
+            kept,
+            Some(serde_json::json!({ "card": 1, "status": "busy", "note": "kept" })),
+            "the newer write wins and the older fields stay"
+        );
+    }
+
+    /// A send that never works does not keep the switch for ever: it is given up at the last of
+    /// `DOC_EPOCH_WRITE_ATTEMPTS` failed sweeps.
+    #[test]
+    fn a_switch_whose_write_keeps_failing_is_given_up() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let switch = || EpochSwitch::new(1, "peers".to_owned(), Some(serde_json::json!({"a": 1})));
+        for attempt in 1..DOC_EPOCH_WRITE_ATTEMPTS {
+            assert!(
+                state.retry_epoch_switch(switch()),
+                "attempt {attempt} waits"
+            );
+        }
+        assert!(
+            !state.retry_epoch_switch(switch()),
+            "the switch is given up after {DOC_EPOCH_WRITE_ATTEMPTS} tries"
+        );
+    }
+
+    /// A path that the app deletes between the switch and the sweep must not come back from the
+    /// copy that the switch kept: the copy follows the local writes of that window.
+    #[test]
+    fn a_path_deleted_between_the_switch_and_the_sweep_does_not_come_back() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::endpoint::presets;
+                use iroh_gossip::{net, proto};
+
+                use crate::doc::{MeshDoc, SelfWriteGate};
+                use crate::gossip::event::SilentSink;
+                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
+                use crate::protocol::Channel;
+                use crate::transport::MeshSender;
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([12u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let write = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                let mut state = fresh_state();
+                let own_key = state.identity.author_key();
+                let slot = own_key.to_string();
+                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
+                let entry = serde_json::json!({
+                    "card": {"name": "alice"},
+                    "status": "idle",
+                    "graph": {"node": "worker", "instance": "i"},
+                });
+                state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(entry)));
+                // The agent leaves its graph before the sweep, and sets a new status.
+                for merge in [
+                    serde_json::json!({"peers": {slot.as_str(): {"graph": null}}}),
+                    serde_json::json!({"peers": {slot.as_str(): {"status": "busy"}}}),
+                ] {
+                    let params =
+                        StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
+                    broadcast_state_merge(&mut state, params)
+                        .await
+                        .expect("the write is taken");
+                }
+
+                write_entry_again(&mut state, &write).await;
+
+                let json = state.doc(Channel::Meta).to_json();
+                let written = &json["peers"][slot.as_str()];
+                assert!(
+                    written.get("graph").is_none(),
+                    "the deleted graph stays deleted"
+                );
+                assert_eq!(written["status"], "busy", "the newer status stays");
+                assert_eq!(written["card"]["name"], "alice", "the card comes back");
+                node.close().await;
+            },
+        );
+    }
+
+    /// The frame is measured as the wire takes it: sealed on a mesh with a password. A merge whose
+    /// open frame fits, and whose sealed frame does not, fits on a mesh without a key and not on one
+    /// with a key.
+    #[test]
+    fn a_merge_is_measured_sealed_on_a_mesh_with_a_password() {
+        use crate::doc::{MeshDoc, SelfWriteGate};
+
+        let _guard = ::habilis_network_test_tracing::init();
+        let gate = || SelfWriteGate::new("peers".to_owned(), "card");
+        let mesh = MeshId::from("test");
+        let author = nick("alice");
+        let merge = serde_json::json!({"peers": {"alice": {
+            "a": noise(960, 1),
+            "b": noise(960, 2),
+        }}});
+
+        let mut open = fresh_state();
+        open.meta_doc = MeshDoc::new_gated(gate());
+        assert!(
+            frame_fits(&open, &mesh, &author, &merge),
+            "the open frame of 2 fields of about 1 KB fits a message"
+        );
+
+        let mut sealed = fresh_state();
+        sealed.meta_doc =
+            MeshDoc::new_gated(gate()).key(Some(protocol::SymmetricKey::from([7u8; 32])));
+        assert!(
+            !frame_fits(&sealed, &mesh, &author, &merge),
+            "the sealed frame of the same merge is larger and does not fit"
+        );
+    }
+
+    /// What is in the document already is not written again, at any depth.
+    #[test]
+    fn only_the_paths_that_the_document_does_not_hold_are_written_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let entry = serde_json::json!({"status": "idle", "card": {"a": 1, "b": {"c": 2, "d": 3}}});
+        let held = serde_json::json!({"status": "busy", "card": {"b": {"c": 9}}});
+        assert_eq!(
+            unwritten(&entry, Some(&held)),
+            Some(serde_json::json!({"card": {"a": 1, "b": {"d": 3}}})),
+            "the held paths are left out and the rest stays"
+        );
+        assert_eq!(
+            unwritten(&entry, Some(&entry)),
+            None,
+            "an entry that is all there gives nothing to write"
+        );
+        assert_eq!(
+            unwritten(&entry, None),
+            Some(entry),
+            "no entry in the document: the whole entry"
+        );
+    }
+
+    /// A second switch before the entry is written must not lose the entry of the first: the
+    /// document holds no entry of ours since then.
+    #[test]
+    fn a_second_switch_keeps_the_entry_of_the_first() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let entry = serde_json::json!({"card": "mine"});
+        state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(entry.clone())));
+        state.note_epoch_switch(EpochSwitch::new(2, "peers".to_owned(), None));
+        let kept = state.epoch_write.switch.as_ref().expect("a switch waits");
+        assert_eq!(
+            (kept.epoch, kept.own_entry.as_ref()),
+            (2, Some(&entry)),
+            "the second switch has its own epoch and the entry of the first"
         );
     }
 

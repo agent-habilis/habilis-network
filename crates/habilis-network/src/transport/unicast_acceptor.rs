@@ -25,9 +25,17 @@ use std::fmt;
 /// that opens a stream and never stops writing.
 const MAX_UNICAST_FRAME: usize = MAX_MESSAGE_SIZE + 256;
 
+/// One frame that a peer sent on a unidirectional stream, and the endpoint of the connection that
+/// carried it. The connection is authenticated, so `from` is the peer that opened the stream.
+#[derive(Debug, Clone)]
+pub(crate) struct UnicastFrame {
+    pub(crate) from: iroh::EndpointId,
+    pub(crate) bytes: Bytes,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct UnicastAcceptor {
-    tx: mpsc::Sender<Bytes>,
+    tx: mpsc::Sender<UnicastFrame>,
     relay_transport: PayloadPath,
     /// How long an accepted connection may carry no new stream before it is
     /// closed. The dialing pool has the same timeout, so this is the backstop for a dialer
@@ -45,14 +53,14 @@ impl UnicastAcceptor {
         self
     }
 
-    pub(crate) fn new(tx: mpsc::Sender<Bytes>, relay_transport: PayloadPath) -> Self {
+    pub(crate) fn new(tx: mpsc::Sender<UnicastFrame>, relay_transport: PayloadPath) -> Self {
         Self::with_idle(tx, relay_transport, DIRECT_IDLE_BACKSTOP)
     }
 
     /// [`Self::new`] with the idle timeout spelled out, for tests that must not
     /// wait the real one.
     pub(crate) fn with_idle(
-        tx: mpsc::Sender<Bytes>,
+        tx: mpsc::Sender<UnicastFrame>,
         relay_transport: PayloadPath,
         idle: Duration,
     ) -> Self {
@@ -68,12 +76,20 @@ impl UnicastAcceptor {
 impl UnicastAcceptor {
     /// Forward one frame read outcome to the event loop. Split out of
     /// `accept` so the match arms aren't nested inside its `while let`.
-    fn handle_frame<Error: fmt::Display>(&self, result: Result<Vec<u8>, Error>) {
+    fn handle_frame<Error: fmt::Display>(
+        &self,
+        from: iroh::EndpointId,
+        result: Result<Vec<u8>, Error>,
+    ) {
         match result {
             Ok(bytes) => {
                 // Bounded, non-blocking: a flooding peer can't back-pressure
                 // the event loop, and a dropped frame heals via anti-entropy.
-                if self.tx.try_send(Bytes::from(bytes)).is_err() {
+                let frame = UnicastFrame {
+                    from,
+                    bytes: Bytes::from(bytes),
+                };
+                if self.tx.try_send(frame).is_err() {
                     tracing::debug!(target: LOG_TARGET, "unicast inbox full or closed; frame dropped");
                 } else {
                     tracing::debug!(target: LOG_TARGET, "unicast frame accepted");
@@ -108,7 +124,10 @@ impl ProtocolHandler for UnicastAcceptor {
                 Ok(Ok(mut recv)) => {
                     let admission = self.admission.as_ref();
                     let _busy = admission.map(|table| table.busy(connection.remote_id()));
-                    self.handle_frame(recv.read_to_end(MAX_UNICAST_FRAME).await);
+                    self.handle_frame(
+                        connection.remote_id(),
+                        recv.read_to_end(MAX_UNICAST_FRAME).await,
+                    );
                 }
                 Ok(Err(_closed)) => break,
                 Err(_idle) => {
@@ -130,7 +149,7 @@ mod tests {
     use iroh::protocol::Router;
 
     use super::super::UNICAST_ALPN;
-    use super::{Bytes, DIRECT_IDLE_BACKSTOP, IDLE, PayloadPath, UnicastAcceptor, mpsc};
+    use super::{DIRECT_IDLE_BACKSTOP, IDLE, PayloadPath, UnicastAcceptor, UnicastFrame, mpsc};
     use crate::lookup;
     use iroh::endpoint::presets;
     use std::time::Instant;
@@ -139,7 +158,12 @@ mod tests {
     /// connected to it.
     async fn connected(
         idle: Duration,
-    ) -> (Connection, Router, iroh::Endpoint, mpsc::Receiver<Bytes>) {
+    ) -> (
+        Connection,
+        Router,
+        iroh::Endpoint,
+        mpsc::Receiver<UnicastFrame>,
+    ) {
         let bind = || async {
             iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)

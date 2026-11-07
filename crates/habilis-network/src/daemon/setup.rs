@@ -194,9 +194,14 @@ pub(crate) fn register_rendezvous(
 /// back-pressure the loop (a dropped frame heals via anti-entropy).
 fn unicast_inbox(
     relay_transport: transport::PayloadPath,
-) -> (mpsc::Receiver<bytes::Bytes>, transport::UnicastAcceptor) {
-    let (tx, rx): (mpsc::Sender<bytes::Bytes>, mpsc::Receiver<bytes::Bytes>) =
-        mpsc::channel(consts::UNICAST_INBOX_CAP);
+) -> (
+    mpsc::Receiver<transport::UnicastFrame>,
+    transport::UnicastAcceptor,
+) {
+    let (tx, rx): (
+        mpsc::Sender<transport::UnicastFrame>,
+        mpsc::Receiver<transport::UnicastFrame>,
+    ) = mpsc::channel(consts::UNICAST_INBOX_CAP);
     (rx, transport::UnicastAcceptor::new(tx, relay_transport))
 }
 

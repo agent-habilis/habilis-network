@@ -51,7 +51,7 @@ web-time.workspace = true
 # Only the host reaches a process table, and a wasm32 build has none, so rustix is never a
 # dependency there.
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true, features = ["time"] }
 
 # Stamps the build's git short hash + dirty flag into `version::VERSION`.
 [build-dependencies]

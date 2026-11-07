@@ -154,7 +154,7 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/a
 # Neighbor ping-pong that two nodes could start (the peers a node answered are remembered), then the
 # fix of a join walk that died at the contact node (the renew arm of ForwardJoin goes on), then the
 # expiry of the answers a node remembered (a peer that shed its side and asks again is answered).
-iroh-gossip = { version = "=0.102.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "4e2c14efcbda65fa1f4713b21fb0c8e09f3fcc28", default-features = false, features = ["net"] }
+iroh-gossip = { version = "=0.102.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "810fc0fdd5541e7bd337fc6212a61cb6e18ac264", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
@@ -179,6 +179,7 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = "0.3"
 bs58 = "0.5"
+base64 = "0.22"
 # The shared `state`/`meta` documents are automerge CRDTs: concurrent edits
 # merge without a bespoke ordered-log fold. `default-features` stays on (the
 # `storage-v2` on-disk format is unused — we carry changes on the wire).

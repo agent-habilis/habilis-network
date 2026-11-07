@@ -469,6 +469,44 @@ mod tests {
             .expect("the server keeps its channel")
     }
 
+    /// A unicast write is counted in the tally of its own pool, once, under the tag of the frame,
+    /// and not in the tally of another loop.
+    #[test]
+    fn a_unicast_write_is_counted_in_the_sent_bytes() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::daemon::state::{WireOutTally, app_frame_with_tag};
+
+                let (pool, server, router, client, mut frames) =
+                    pool_with_collecting_server().await;
+                let (ours, other) = (WireOutTally::default(), WireOutTally::default());
+                pool.set_tally(ours.clone());
+                let frame = app_frame_with_tag("unicast_count_probe");
+
+                pool.dial_or_warm_send(server, bytes::Bytes::from(frame.clone()))
+                    .await
+                    .expect("the pool sends");
+
+                assert_eq!(next_frame(&mut frames).await, frame, "the frame arrives");
+                assert_eq!(
+                    ours.tag_bytes("unicast_count_probe"),
+                    frame.len() as u64,
+                    "the one frame, once"
+                );
+                assert_eq!(
+                    other.tag_bytes("unicast_count_probe"),
+                    0,
+                    "the tally of another loop does not take the bytes"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
+    }
+
     /// Two sends to one cold peer share one dial: the second caller waits for the dial in flight
     /// and writes on the connection it made, as a warm send. Each dial is a handshake and a
     /// connection, and the pool keeps only the last one.

@@ -6,7 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use crate::daemon::state::{RendezvousFlag, Standing};
+use crate::daemon::state::{Arrival, FrameShape, RendezvousFlag, Standing};
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
@@ -26,7 +26,7 @@ use crate::{lifecycle, lookup};
 // `clock::Instant` off wasm32. See `daemon::state`.
 use n0_future::time::Instant as TokioInstant;
 
-use super::antientropy;
+use super::antientropy::{self, Plane};
 use super::app::{AppClass, InboundApp, NodeApp};
 use super::merge_ctx::{announce_arrival, broadcast_peer_info};
 use crate::net;
@@ -559,13 +559,29 @@ fn report_unparsed(error: &MessageError, state: &mut EventLoopState, context: &H
 /// both surfaces exactly once. The frame is a [`Verified`] from the first check on: a directed frame
 /// sealed to us is decrypted on a plain copy before surfacing (see `gate_and_decrypt`), and the log
 /// keeps the verified ciphertext.
+///
+/// This is the wrapper for the gossip plane: the census counts the frame as arrived by gossip. A
+/// caller on another plane must call [`ingest_from`] with its plane.
 pub(crate) async fn ingest(
     frame: Bytes,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
-    let (message, _resend_nonce) = match Message::parse_wire(&frame) {
+    ingest_from(Plane::Gossip, frame, state, app, context).await;
+}
+
+/// [`ingest`] for a frame that came on `plane`: the census counts a repeat by it.
+pub(crate) async fn ingest_from(
+    plane: Plane,
+    frame: Bytes,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) {
+    let shape = FrameShape::of(&frame);
+    state.idle.wire_in.note_received(&shape);
+    let (message, resend_nonce) = match Message::parse_wire(&frame) {
         Ok(parsed) => parsed,
         Err(error) => {
             report_unparsed(&error, state, context);
@@ -620,8 +636,15 @@ pub(crate) async fn ingest(
     // `joined`/`Alive` mint fresh ids so they are never falsely suppressed
     // here. Only authenticated messages reach this gate.
     if state.mark_seen(&verified) {
+        state.idle.duplicates += 1;
+        state
+            .idle
+            .wire_in
+            .note_dup(&shape, Arrival::of(plane, resend_nonce));
         return;
     }
+    state.idle.fresh += 1;
+    state.idle.wire_in.note_fresh(&shape);
     // Identity is the signing key, not the nickname (p2panda-style): the
     // signature above authenticates the *key*; the `author` nickname is a
     // non-unique display label and is deliberately **not** pinned/claimed,
@@ -1189,6 +1212,18 @@ struct ChannelEvent<'message> {
     surfaceable: bool,
 }
 
+/// A node that holds no frame of another author adopts at once the epoch that a frame started: it
+/// has nothing to lose. The sweep writes its entry again. A node that holds the frames of others
+/// waits for [`crate::util::consts::DOC_EPOCH_ADOPT_WAIT_TICKS`] ticks of the minute timer.
+fn adopt_new_epoch(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let adopted = state
+        .doc_mut(Channel::Meta)
+        .adopt_if_alone(&context.our_pubkey);
+    if let Some(switch) = adopted {
+        state.note_epoch_switch(switch);
+    }
+}
+
 fn dispatch_channel(
     event: ChannelEvent<'_>,
     state: &mut EventLoopState,
@@ -1198,9 +1233,17 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
-    let changes = state.doc(channel).change_count();
-    ingest_channel_event(event, state.doc_mut(channel), context);
-    if state.doc(channel).change_count() > changes {
+    let count_before = state.doc(channel).change_count();
+    match ingest_channel_event(event, state.doc_mut(channel), context) {
+        ChannelOutcome::Refused => state.idle.state_rejected += 1,
+        ChannelOutcome::Repeat => state.idle.wire_in.note_content_dup(),
+        ChannelOutcome::Taken => {}
+    }
+    if channel == Channel::Meta {
+        adopt_new_epoch(state, context);
+    }
+    let changed = state.doc(channel).change_count() > count_before;
+    if changed {
         state.fast_rounds.note_change(channel, Instant::now());
     }
     for key in state.doc_mut(channel).take_dropped() {
@@ -1231,7 +1274,13 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
-fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context: &HandlerCtx<'_>) {
+///
+/// Returns what the document made of the change.
+fn ingest_channel_event(
+    event: ChannelEvent<'_>,
+    doc: &mut doc::MeshDoc,
+    context: &HandlerCtx<'_>,
+) -> ChannelOutcome {
     use crate::doc::Ingested;
 
     let ChannelEvent {
@@ -1265,9 +1314,23 @@ fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context
                 "dropping a {} change that forges another peer's agent card",
                 channel.label()
             );
+            return ChannelOutcome::Refused;
         }
-        Ingested::Duplicate | Ingested::Buffered | Ingested::Ignored | _ => {}
+        Ingested::Ignored => return ChannelOutcome::Refused,
+        Ingested::Duplicate => return ChannelOutcome::Repeat,
+        // A root of a higher epoch is kept as the candidate: `adopt_new_epoch` reads it next.
+        Ingested::Buffered | Ingested::NewEpoch { .. } | _ => {}
     }
+    ChannelOutcome::Taken
+}
+
+/// What the document made of a channel event.
+enum ChannelOutcome {
+    /// The document refused or ignored the change.
+    Refused,
+    /// The document had applied this change already.
+    Repeat,
+    Taken,
 }
 
 /// A directed leg (a directed `app_msg` or a `Task`) is surfaced **only by
@@ -3311,7 +3374,7 @@ mod first_contact_tests {
                 let delivered =
                     tokio_time::timeout(std_Duration::from_secs(5), frames.recv()).await;
                 assert_eq!(
-                    delivered.ok().flatten(),
+                    delivered.ok().flatten().map(|inbound| inbound.bytes),
                     Some(bytes.into_bytes()),
                     "bob never got the parked frame"
                 );
@@ -5438,5 +5501,329 @@ mod parked_link_state_tests {
             );
             theirs.close().await;
         });
+    }
+}
+
+/// The census counts each frame that reaches the dedup as a first sighting or a repeat.
+#[cfg(test)]
+mod dedup_counter_tests {
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+    use serde_json::json;
+
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::{EventLoopState, by_arrival, by_class};
+    use crate::gossip::antientropy::Plane;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::{Authored, MessageBody, Verified};
+    use crate::protocol::{Channel, MeshId, Message};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+    use bytes::Bytes;
+
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _context: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    fn state_frame(writer: &EventLoopState, body: MessageBody) -> Verified {
+        Message::new_channel_event(&MeshId::from("test"), &nick("writer"), body, Channel::State)
+            .sign(&writer.identity)
+    }
+
+    /// A signed frame of the writer that carries `{"key": 1}` as one change.
+    fn change_body(writer: &EventLoopState) -> MessageBody {
+        let seed = *writer.identity.public().as_bytes();
+        let doc = writer.doc(Channel::State);
+        let change = doc
+            .build_change(&json!({ "key": 1 }), &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (body, _plain) = writer
+            .doc(Channel::State)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        body
+    }
+
+    fn reader_after(frames: &[&Verified]) -> EventLoopState {
+        let arrivals: Vec<(Plane, Bytes)> = frames
+            .iter()
+            .map(|frame| {
+                (
+                    Plane::Gossip,
+                    frame.serialize().expect("serialize").into_bytes(),
+                )
+            })
+            .collect();
+        reader_after_on(arrivals)
+    }
+
+    fn reader_after_on(arrivals: Vec<(Plane, Bytes)>) -> EventLoopState {
+        reader_with(fresh_state(), arrivals)
+    }
+
+    /// [`reader_after_on`] for a reader that starts as `initial`.
+    fn reader_with(initial: EventLoopState, arrivals: Vec<(Plane, Bytes)>) -> EventLoopState {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mesh = MeshId::from("test");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey: identity.author_key(),
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let mut reader = initial;
+            let mut app = Inert;
+            for (plane, bytes) in arrivals {
+                super::ingest_from(plane, bytes, &mut reader, &mut app, &context).await;
+            }
+            endpoint.close().await;
+            reader
+        })
+    }
+
+    fn wire(frame: &Verified) -> u64 {
+        frame.serialize().expect("serialize").len() as u64
+    }
+
+    /// A node that holds nothing from others adopts at once the epoch that a received frame
+    /// starts, and keeps the switch for the sweep to write its entry again.
+    #[test]
+    fn a_node_that_holds_nothing_from_others_adopts_the_epoch_of_a_received_frame() {
+        use crate::doc::{MeshDoc, SelfWriteGate};
+
+        let gate = SelfWriteGate::new("peers".to_owned(), "card");
+        let sender_identity = Identity::generate();
+        let sender_nick = nick("sender");
+        // A document that went through 1 reset: its first write is a root of epoch 1.
+        let mut writer = MeshDoc::new_gated(gate.clone()).epoch_cap(0);
+        assert!(
+            writer.tick_epoch(&sender_identity.author_key()).is_some(),
+            "the reset"
+        );
+        let seed = *sender_identity.public().as_bytes();
+        let slot = sender_identity.author_key().to_string();
+        let merge = json!({"peers": {(slot.clone()): {"card": "from epoch 1"}}});
+        let change = writer
+            .build_change(&merge, &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (body, _plain) = writer
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        let root =
+            Message::new_channel_event(&MeshId::from("test"), &sender_nick, body, Channel::Meta)
+                .sign(&sender_identity);
+        let bytes = root.serialize().expect("serialize").into_bytes();
+
+        let mut initial = fresh_state();
+        initial.meta_doc = MeshDoc::new_gated(gate);
+        let reader = reader_with(initial, vec![(Plane::Gossip, bytes)]);
+
+        let doc = reader.doc(Channel::Meta);
+        assert_eq!(doc.epoch(), 1, "the reader adopted the epoch");
+        assert_eq!(
+            doc.to_json(),
+            json!({"peers": {(slot): {"card": "from epoch 1"}}}),
+            "the document holds the root frame of the new epoch"
+        );
+        assert!(
+            reader.epoch_write.switch.is_some(),
+            "the sweep writes the entry again"
+        );
+    }
+
+    #[test]
+    fn a_frame_delivered_3_times_counts_1_first_sighting_and_2_repeats() {
+        let writer = fresh_state();
+        let frame = state_frame(&writer, change_body(&writer));
+        let reader = reader_after(&[&frame, &frame, &frame]);
+
+        assert_eq!(
+            reader.idle.fresh, 1,
+            "the first delivery is a first sighting"
+        );
+        assert_eq!(reader.idle.duplicates, 2, "the 2 repeats are duplicates");
+    }
+
+    /// The census reads each received frame by kind: its wire bytes, and whether it was new or a
+    /// repeat. The expected numbers are 1 frame of `wire` bytes new, and 2 of the same repeated.
+    #[test]
+    fn the_received_bytes_are_counted_by_kind_and_by_what_became_of_the_frame() {
+        let writer = fresh_state();
+        let body = change_body(&writer);
+        // The body is a JSON string in the frame: its text, and 1 more byte for the backslash of
+        // each of its quotes. Counted from the text, not with the reader that is under test.
+        let quotes = body.as_str().matches('"').count();
+        let body_on_the_wire = (body.as_str().len() + quotes) as u64;
+        let frame = state_frame(&writer, body);
+        let reader = reader_after(&[&frame, &frame, &frame]);
+        let one = wire(&frame);
+
+        let received = &reader.idle.wire_in;
+        assert_eq!(received.frames, 3, "every frame that reached ingest");
+        assert_eq!(received.wire, 3 * one, "the wire bytes are 3 frames");
+        assert_eq!(
+            by_class(&received.fresh),
+            format!("state:{one}"),
+            "the first sighting is counted once"
+        );
+        assert_eq!(
+            by_class(&received.dup),
+            format!("state:{}", 2 * one),
+            "the 2 repeats are counted as repeats"
+        );
+        assert_eq!(
+            received.body,
+            3 * body_on_the_wire,
+            "the body of each of the 3 frames, without the envelope"
+        );
+    }
+
+    /// One first sighting of `frame`, then repeats that give each arrival its own count: 2 on
+    /// gossip, 1 on gossip with a resend nonce, 1 on unicast, 2 on unicast with a resend nonce. A
+    /// swap of two planes or of two names then moves bytes between cells of unequal value.
+    fn arrivals_of(frame: &Verified) -> Vec<(Plane, Bytes)> {
+        let plain = || frame.serialize().expect("serialize").into_bytes();
+        let resent = |nonce: u64| {
+            let wire = frame.serialize().expect("serialize");
+            wire.copy_with_resend_nonce(nonce).into_bytes()
+        };
+        vec![
+            (Plane::Gossip, plain()),
+            (Plane::Gossip, plain()),
+            (Plane::Gossip, plain()),
+            (Plane::Gossip, resent(1)),
+            (Plane::Unicast, plain()),
+            (Plane::Unicast, resent(2)),
+            (Plane::Unicast, resent(3)),
+        ]
+    }
+
+    /// A repeat is counted by its kind and by how it arrived: on which plane, and with a resend
+    /// nonce or without. Each of 2 kinds has one first sighting, then 2 repeats on gossip, 1 on
+    /// gossip with a nonce, 1 on unicast, and 2 on unicast with a nonce, so no 2 cells are equal.
+    #[test]
+    fn a_repeat_is_counted_by_kind_and_by_the_plane_and_the_resend_it_came_on() {
+        let writer = fresh_state();
+        let body = change_body(&writer);
+        let mesh = MeshId::from("test");
+        let state = state_frame(&writer, body.clone());
+        let meta = Message::new_channel_event(&mesh, &nick("writer"), body, Channel::Meta)
+            .sign(&writer.identity);
+        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        for frame in [&state, &meta] {
+            arrivals.extend(arrivals_of(frame));
+        }
+        let reader = reader_after_on(arrivals);
+
+        let (one_state, one_meta) = (wire(&state), wire(&meta));
+        // The resend trailer is on the wire, so a resend counts its bytes.
+        let resent = state
+            .serialize()
+            .expect("serialize")
+            .copy_with_resend_nonce(1);
+        let trailer: u64 = resent.len() as u64 - one_state;
+        let expected = [
+            format!("gossip.state:{}", 2 * one_state),
+            format!("gossip.meta:{}", 2 * one_meta),
+            format!("gossip_resend.state:{}", one_state + trailer),
+            format!("gossip_resend.meta:{}", one_meta + trailer),
+            format!("unicast.state:{one_state}"),
+            format!("unicast.meta:{one_meta}"),
+            format!("unicast_resend.state:{}", 2 * (one_state + trailer)),
+            format!("unicast_resend.meta:{}", 2 * (one_meta + trailer)),
+        ]
+        .join(",");
+        assert_eq!(
+            by_arrival(&reader.idle.wire_in.dup_by_arrival),
+            expected,
+            "each repeat is in the cell of its arrival and kind"
+        );
+    }
+
+    /// A frame can be new by id and carry a change that the document applied already: the same
+    /// signed change in another frame. The census counts its bytes as content that came back.
+    #[test]
+    fn a_new_frame_with_a_change_the_document_holds_counts_as_content_that_came_back() {
+        let writer = fresh_state();
+        let body = change_body(&writer);
+        let (first, again) = (
+            state_frame(&writer, body.clone()),
+            state_frame(&writer, body),
+        );
+        assert_ne!(first.dedup_key(), again.dedup_key(), "two frames, two ids");
+
+        let reader = reader_after(&[&first, &again]);
+
+        let received = &reader.idle.wire_in;
+        assert_eq!(
+            by_class(&received.fresh),
+            format!("state:{}", wire(&first) + wire(&again)),
+            "both frames are new by id"
+        );
+        assert_eq!(by_class(&received.dup), "-", "the dedup caught nothing");
+        assert_eq!(
+            by_class(&received.cdup),
+            format!("state:{}", wire(&again)),
+            "the second carries a change that was applied"
+        );
+    }
+
+    /// A frame whose body is no change is ignored by the document, and the census counts it.
+    #[test]
+    fn a_state_frame_that_the_document_ignores_is_counted_as_rejected() {
+        let writer = fresh_state();
+        let junk = state_frame(&writer, "not a change".into());
+        let real = state_frame(&writer, change_body(&writer));
+
+        let reader = reader_after(&[&junk, &real]);
+
+        assert_eq!(
+            reader.idle.state_rejected, 1,
+            "only the junk frame is refused"
+        );
+        assert_eq!(
+            reader.doc(Channel::State).to_json(),
+            json!({ "key": 1 }),
+            "the real change is applied"
+        );
     }
 }

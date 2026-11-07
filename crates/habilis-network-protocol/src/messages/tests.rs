@@ -997,6 +997,9 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
 // The verified.rs doctests repeat this literal, so a change to it touches both files.
 const SIGNED_WIRE: &str = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"c5281ce4ac05d99e044c97bc5acfd291c4861f17ac164c1b4b472c7bbe43386c71539a97090af6fb870886b6af51f6f8563abb5ffc0d290e5ad9e69e548c1b08","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 
+/// [`SIGNED_WIRE`] as it was in version 12.0: the old literal, kept so that a test shows the refusal.
+const SIGNED_WIRE_V12: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+
 /// The same message with no `pubkey` and no `sig` key: the canonical pre-signing form.
 const UNSIGNED_WIRE: &str = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 
@@ -1077,6 +1080,24 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Golden: the bytes of a signed message are fixed. The JSON text, the signed bytes, the content
 /// hash, and the dedup key each equal a literal captured at the base commit.
+#[test]
+fn a_message_of_version_12_is_refused_and_the_error_names_both_versions() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let refused = Message::parse(SIGNED_WIRE_V12.as_bytes());
+    let Err(error) = refused else {
+        panic!("a 13.0 build parsed a message of version 12.0");
+    };
+    assert!(
+        matches!(&error, MessageError::UnsupportedVersion(version) if version == "12.0"),
+        "the refusal is an unsupported version: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "unsupported protocol version: 12.0 (this build reads 13.0)",
+        "the error names the wire version and the version of this build"
+    );
+}
+
 #[test]
 fn a_signed_message_keeps_its_wire_form() {
     let _guard = ::habilis_network_test_tracing::init();
