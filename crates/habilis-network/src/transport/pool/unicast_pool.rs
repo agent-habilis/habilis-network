@@ -1,5 +1,6 @@
 //! The dial side of the unicast plane: the per-peer connection pool.
 
+use super::batch_slots::BatchSlots;
 use super::in_flight_dial::InFlightDial;
 use super::registration::Registration;
 use super::timeouts::{
@@ -92,6 +93,9 @@ pub(in crate::transport::pool) struct PoolInner {
     /// [`DIAL_FAILURE_COOLDOWN`] gate. An entry clears on a successful dial or
     /// a graceful `Left`; expired ones are pruned on the next `note`.
     pub(in crate::transport::pool) dial_failures: Mutex<Cooldown<EndpointId>>,
+    /// The answer batches in flight: a peer cannot draw more of them than its share, however many
+    /// author keys it signs its digests with.
+    pub(in crate::transport::pool) batch_slots: BatchSlots,
     /// Times the inline-dial path was entered. Counted on entry rather than at
     /// the dial itself, because the question a caller on the event loop needs
     /// answered is whether it *could* have waited here — a detached pool bails
@@ -162,6 +166,7 @@ impl UnicastPool {
                 probe_hold,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
+                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -228,6 +233,7 @@ impl UnicastPool {
                 probe_hold: PROBE_HOLD,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
+                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -481,6 +487,11 @@ impl UnicastPool {
         eid: EndpointId,
         frames: Vec<messages::WireFrame>,
     ) -> bool {
+        // A batch holds its frames until the last one is written, and a peer that does not read keeps
+        // them there: a peer has its share of batches in flight, and the table has its total.
+        let Some(slot) = self.inner.batch_slots.take(eid) else {
+            return false;
+        };
         let frames: Vec<Bytes> = frames
             .into_iter()
             .map(messages::WireFrame::into_bytes)
@@ -491,6 +502,7 @@ impl UnicastPool {
             }
             let pool = self.clone();
             task::spawn(async move {
+                let _slot = slot;
                 pool.send_batch(eid, &connection, &frames).await;
             });
             return true;
@@ -508,6 +520,7 @@ impl UnicastPool {
             return false;
         };
         task::spawn(async move {
+            let _slot = slot;
             let pool = &in_flight.pool;
             let connection = match pool.warm_or_dial(eid).await {
                 Ok(connection) => connection,
@@ -540,6 +553,12 @@ impl UnicastPool {
                 return;
             }
         }
+    }
+
+    /// A slot of the answer batches to `eid`, held by a test to fill them.
+    #[cfg(test)]
+    pub(crate) fn take_batch_slot(&self, eid: EndpointId) -> Option<super::batch_slots::Slot> {
+        self.inner.batch_slots.take(eid)
     }
 
     /// Put `eid` on the dial-failure cooldown, as a failed dial does.

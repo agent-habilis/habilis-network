@@ -28,6 +28,7 @@ pub use send_error::{SendError, StateRefusal};
 #[cfg(test)]
 mod tests {
     use crate::daemon::state::Standing;
+    use std::iter;
     use std::sync::Arc;
 
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
@@ -1599,6 +1600,51 @@ mod tests {
             assert_eq!(gap.broadcast, 3, "the gap is served inside the window");
             bob_endpoint.close().await;
             net.endpoint.close().await;
+        });
+    }
+
+    /// Each peer has its share of answer batches in flight, and a batch past it is refused, so the
+    /// frames of a batch that a peer does not read are not piled up without a bound. The caller of
+    /// a refusal answers on gossip. A finished batch frees its slot.
+    #[test]
+    fn a_peer_that_holds_its_share_of_batches_is_refused_the_next_one() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (endpoint, _sender) = loopback_node().await;
+            let state = state_with_pool(&endpoint, bob_endpoint.addr());
+            let bob = bob_endpoint.id();
+            let held: Vec<_> = iter::from_fn(|| state.unicast_pool.take_batch_slot(bob)).collect();
+            let frame = || {
+                vec![
+                    Message::new_digest(
+                        &MeshId::from("test"),
+                        &nick("alice"),
+                        MessageBody::from("{}"),
+                    )
+                    .sign(&state.identity)
+                    .serialize()
+                    .expect("serialize"),
+                ]
+            };
+
+            let refused = state
+                .unicast_pool
+                .send_batch_in_background(bob, frame())
+                .await;
+
+            assert!(!held.is_empty(), "the test filled the slots of the peer");
+            assert!(
+                !refused,
+                "a peer with its share of batches in flight is refused"
+            );
+            drop(held);
+            let sent = state
+                .unicast_pool
+                .send_batch_in_background(bob, frame())
+                .await;
+            assert!(sent, "a peer whose batches are done is sent the next one");
+            bob_endpoint.close().await;
+            endpoint.close().await;
         });
     }
 
