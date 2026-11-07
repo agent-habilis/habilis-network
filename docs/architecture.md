@@ -496,13 +496,26 @@ A node holds two keys.
 The session key is new at each start. It signs the frames, it is the automerge actor, and it seals the directed frames.
 The member key is stored in `<state>.key` (mode 0600) and does not change. It signs one thing: the proof of a session.
 The proof is a signature over the session key, the nickname, the mesh and the run number. The run number rises by 1 at each start (`<state>.run`).
-The `joined` frame carries the proof. A node that missed that frame asks the session once with a `ProofRequest`, addressed to the session key, and the session answers with its `joined` frame.
+The `joined` frame carries the proof.
+A node that holds a session with no proof asks the session for it with a `ProofRequest`, addressed to the session key, and the session answers with its `joined` frame.
+The ask goes when the node admits the session: on its `joined` frame that has no proof, on the `PeerInfo` that gives its address, and on its `alive` frame.
+The request needs a warm path to the session: a pooled connection, or a linked neighbour (the send dials it in the background). A node signs no request for an address that has no such path.
+An ask that finds no warm path waits. A bounded map holds the waiting asks (64 at most: a new one takes the place of the oldest, and a session whose ask was dropped is asked again at its next `alive` frame). An ask waits 30 s at most.
+The ask goes when a path comes up: when the gossip link to the endpoint of the session comes up, when a frame arrives from that endpoint on a unicast connection, or at the 10 s sweep tick, which is the fallback. A node with no waiting ask pays one comparison.
+A session is asked once for each wait (30 s, then 60 s, then 120 s, then every 10 minutes, 10 asks at most), whatever number of frames come.
+A member signs its answer once for each run, and every asker gets that same frame. The member keeps it in its own log once, so a peer that holds it does not send it back to its author at each digest round, and the answers of a join wave do not spread through the mesh as new frames.
 A calm mesh carries no proof bytes beyond the `joined` frames. A host with no files (the browser) holds no member key and sends no proof.
 
 A nickname is bound to the member key that proved it, while a session of that member is in the roster, live or quiet.
 - A session that claims a bound nickname with no proof of that member is not admitted. Its presence, ping, pong and link-state frames are dropped. Its data frames are stored and relayed and change no roster entry.
 - A second member with another member key gets the join error: its proof is not held, and the node that holds the nickname does not admit its session. The node of that second member shows an error event, once for each session.
-- A nickname that no member key proved is free. A session with no proof is admitted and binds nothing, so two live keys can still use it. When the proof of a member binds the nickname at a node, every session under it that belongs to another member, live or quiet, is ended at that node at once, with no `left` line, because the member that proved the name is still there. The first proof that a node processes binds the name, so the order of the proofs decides at each node, and the order of the frames does not. The binding is per node and not global: two nodes can bind one nickname to two members. A node with no member key (a browser) proves nothing, so any member with a key that proves its nickname ends that node at every observer. An ended session is no goodbye: its later frames go through the admission again, and are admitted when the member that holds the name is gone.
+- A nickname that no member key proved is free. A session with no proof is admitted and binds nothing, so two live keys can still use it.
+- When the proof of a member binds the nickname at a node, every session under it that belongs to another member, live or quiet, is ended at that node at once. It ends with no `left` line, because the member that proved the name is still there. The node keeps the presence frames of the ended session in its log, as the other nodes do.
+- The first proof that a node processes binds the name, so the order of the proofs decides at each node, and the order of the frames does not. The binding is per node and not global: two nodes can bind one nickname to two members.
+- A node with no member key (a browser) proves nothing, so any member with a key that proves its nickname ends that node at every observer.
+- An ended session is no goodbye: its later frames go through the admission again, and are admitted when the member that holds the name is gone.
+- A proof that is refused because another member holds the name, and whose signature is valid, does not mark its frame as seen: when the holder has left and the same frame comes again, it is read again. A proof whose signature is not valid keeps its mark, so its copies are dropped as duplicates.
+- A second session of a bound nickname is gone at an observer at most one sweep tick (10 s) after a path to it comes up, and at once when the gossip link comes up.
 
 A member holds one session, the newest. A proof with a higher run replaces the older sessions of the member, in the proof book and in the roster, as a goodbye does. A proof with a run that is not higher is a late copy and is not held.
 The proof book holds 1024 sessions at most. When it is full, the oldest session that is not in the roster goes first, and a book of sessions in the roster refuses the new proof.
