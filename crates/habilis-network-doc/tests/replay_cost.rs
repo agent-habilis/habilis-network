@@ -8,7 +8,6 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
-use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -114,6 +113,7 @@ fn writer_of(index: usize) -> String {
 
 /// The stamp tag of `writer`: the first 8 bytes of its actor, in hex.
 fn tag_of(writer: &str) -> String {
+    use std::fmt::Write as _;
     pad(writer)[..8]
         .iter()
         .fold(String::new(), |mut hex, byte| {
