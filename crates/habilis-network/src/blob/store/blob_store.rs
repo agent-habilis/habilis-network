@@ -18,6 +18,8 @@ pub(crate) struct BlobStore {
     pub(super) map: HashMap<BlobDigest, BlobEntry>,
     pub(super) total_bytes: u64,
     pub(super) next_seq: u64,
+    /// Blobs the budget removed while a ticket still held them: each such ticket dangles.
+    pub(crate) held_evicted: u64,
 }
 
 impl BlobStore {
@@ -34,6 +36,7 @@ impl BlobStore {
             map: HashMap::new(),
             total_bytes: 0,
             next_seq: 0,
+            held_evicted: 0,
         })
     }
 
@@ -149,6 +152,18 @@ impl BlobStore {
             else {
                 break;
             };
+            if self
+                .map
+                .get(&oldest)
+                .is_some_and(|entry| !entry.owners.is_empty())
+            {
+                self.held_evicted += 1;
+                tracing::warn!(
+                    target: "habilis_network::blob",
+                    held_evicted_total = self.held_evicted,
+                    "held blob evicted: a ticket for it now dangles"
+                );
+            }
             self.remove(&oldest);
         }
     }
