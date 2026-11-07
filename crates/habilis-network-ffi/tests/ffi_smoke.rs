@@ -732,6 +732,12 @@ fn a_send_to_a_key_reaches_one_of_two_members() {
 /// A nickname that a member key proved names one member. A second member under it, with another
 /// member key, is no peer: of three handles, two under one nickname and one observer, each sees
 /// one peer besides itself, and not two.
+///
+/// Only a build that has a member key can bind a nickname: the key exists on a target with files
+/// (`unix`) under the engine feature `host`, and both features of this crate (`mdns`, `dht`) turn
+/// `host` on. A build without it has no sockets, so no handle sees a peer, and a target with no
+/// files sends no proof, so a nickname binds nothing and the three handles can all join.
+#[cfg(all(unix, any(feature = "mdns", feature = "dht")))]
 #[test]
 fn a_second_member_under_a_bound_nickname_is_no_peer() {
     let shared = CString::new("alpha").expect("no interior NUL");
