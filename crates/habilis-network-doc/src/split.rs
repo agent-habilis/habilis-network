@@ -5,6 +5,7 @@ use std::mem;
 use serde_json::{Map, Value};
 
 use crate::DocError;
+use crate::left_out::LeftOut;
 
 /// Cut `entry` into merges that `fits` accepts. Applied in order, the merges give `entry` again,
 /// except for a value that cannot be cut: its item is an error, and the other items are still there.
@@ -79,15 +80,6 @@ pub fn pack_entry<Fits: FnMut(&Value) -> bool>(
     let mut packed: Vec<Result<Value, DocError>> = Vec::new();
     pack(entry, &mut fits, &mut packed, &mut LeftOut::default());
     packed.into_iter()
-}
-
-/// The leaves that a cut left out because no frame can carry them: how many, and the path of the
-/// first. A path is kept for the first only, so the memory of a cut does not grow with a hostile
-/// document.
-#[derive(Debug, Default)]
-pub(crate) struct LeftOut {
-    pub(crate) count: u64,
-    pub(crate) first: Option<Vec<String>>,
 }
 
 /// [`pack_entry`] for a seed: the merges of the leaves that fit, and the leaves that no frame can
