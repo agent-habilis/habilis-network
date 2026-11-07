@@ -2430,7 +2430,7 @@ impl EventLoopState {
         self.asks_for_session(&alive.key(), &alive.author)
     }
 
-    /// [`Self::asks_for_proof`] for a session named by its key and its nickname.
+    /// `asks_for_proof` for a session named by its key and its nickname.
     pub(crate) fn asks_for_session(&self, key: &AuthorKey, nickname: &Nickname) -> bool {
         // A session of a bound nickname with no proof is no peer yet, and it is asked as well: the
         // proof is the way in.
