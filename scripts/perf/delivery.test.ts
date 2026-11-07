@@ -9,7 +9,7 @@ const line = (kind: string, sender: string, id: string, to?: string[]) => ({
   seq: Number(id),
   ts: 0,
   payload_id: id,
-  to,
+  ...(to === undefined ? {} : { to }),
 });
 
 test("a payload carries its id, is exactly 200 bytes, and the id reads back", () => {
