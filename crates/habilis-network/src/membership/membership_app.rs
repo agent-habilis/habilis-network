@@ -766,9 +766,14 @@ impl NodeApp for MembershipApp {
     ) -> bool {
         let InboundApp {
             message,
-            surfaceable: _,
+            surfaceable,
         } = frame;
         if message.kind.app_tag().map(AppTag::as_str) != Some(MSG_TAG) {
+            return false;
+        }
+        // The engine stores and relays a frame that is not surfaceable (a refused session, or a frame from
+        // before the join), and shows it to nobody: it never reaches the consumer.
+        if !surfaceable {
             return false;
         }
         // The engine hands over a directed frame for another key too: only a frame for this
@@ -2052,6 +2057,46 @@ mod tests {
                     "the queue of the member took, or missed, the frame {text:?}"
                 );
             }
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A frame that is not surfaceable (a session that the roster gate refused, or a frame from before the
+    /// join) never reaches the consumer: the frame is stored and relayed by the engine, and shown to nobody.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_frame_that_is_not_surfaceable_is_not_queued_for_the_consumer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            let (inbound, mut queue) = mpsc::channel(4);
+            let mut app = MembershipApp::new(inbound);
+            let params = AppFrameParams::new(
+                AppTag::try_new(MSG_TAG).expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from("from a refused session"),
+            );
+            let frame = Message::new_app(&MeshId::from("test"), &Nickname::from("alice"), params)
+                .sign(&Identity::generate());
+
+            let retain = app
+                .on_app_frame(
+                    InboundApp {
+                        message: &frame.authored(),
+                        surfaceable: false,
+                    },
+                    &mut state,
+                    &context,
+                )
+                .await;
+
+            assert!(!retain, "the member app never asks to retain a frame");
+            assert!(
+                queue.try_recv().is_err(),
+                "the consumer got a message that the engine marked as not to be shown"
+            );
             node.endpoint.close().await;
         });
     }
