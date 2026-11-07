@@ -102,9 +102,8 @@ impl EpochSwitch {
 /// enum and not a bool, so the document keeps few bools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FarRootWait {
-    /// It takes a far root as the answer of its first request while it holds no frame of another
-    /// author than this key, its owner: the frames of the owner are handed back by the switch.
-    Awaits(AuthorKey),
+    /// It takes a far root as the answer of its first request.
+    Awaits,
     /// The document never takes a far root on this rule.
     Never,
 }
@@ -1560,14 +1559,14 @@ impl MeshDoc {
         self
     }
 
-    /// Let a document that holds no frame of another author than `own` take a root far above its
-    /// epoch, as the answer of its first request (see `ingest_far_ok`). It does not hold the local
-    /// writes, as [`Self::awaiting_first_sync`] does: the meta document of a node must write its
-    /// card at once, and that card is a frame of `own` that the switch hands back. The flag does not
-    /// fall at the first frame: the window of the first request, which the glue keeps, is its brake.
+    /// Let a document take a root far above its epoch, as the answer of its first request (see
+    /// `ingest_far_ok`), whatever frames it holds. It does not hold the local writes, as
+    /// [`Self::awaiting_first_sync`] does: the meta document of a node must write its card at once,
+    /// and the switch hands that card back. The flag does not fall at a frame: the window of the
+    /// first request, which the glue keeps, is its brake (see `DOC_EPOCH_JUMP_MAX`).
     #[must_use]
-    pub fn awaiting_far_root(mut self, own: AuthorKey) -> Self {
-        self.far_root = FarRootWait::Awaits(own);
+    pub fn awaiting_far_root(mut self) -> Self {
+        self.far_root = FarRootWait::Awaits;
         self
     }
 
@@ -1575,7 +1574,7 @@ impl MeshDoc {
     /// [`Self::awaiting_far_root`]).
     #[must_use]
     pub fn is_awaiting_far_root(&self) -> bool {
-        matches!(self.far_root, FarRootWait::Awaits(_))
+        self.far_root == FarRootWait::Awaits
     }
 
     /// Say that the first sync is over, so the local writes go on. The glue calls it after the
@@ -1598,7 +1597,7 @@ impl MeshDoc {
     /// the frames of others.
     ///
     /// A fresh joiner holds nothing, so one frame can move it to any epoch (see
-    /// `Self::holds_nothing`). It holds frames of others after that, so it waits the next time.
+    /// `Self::takes_far_root`). It holds frames of others after that, so it waits the next time.
     pub fn adopt_if_alone(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
         self.settle_challenger();
         let held = self.candidate.as_ref()?;
@@ -2317,10 +2316,10 @@ impl MeshDoc {
     }
 
     /// [`Self::ingest`] for a frame that the caller knows to be the answer of the first request of
-    /// this node (it came point-to-point, soon after the request): a node that holds nothing may then
-    /// take a root of any epoch. A root above the bound of a jump is taken in no other way, so a
-    /// member that floods one cannot lock out or capture a joiner; one that answers the first
-    /// request before the honest peers can still capture that one joiner until it restarts.
+    /// this node (it came point-to-point, within 5 s of the request): a document that awaits then
+    /// takes a root of any epoch, whatever frames it holds. A root above the bound of a jump is taken
+    /// in no other way, so a member that floods one cannot lock out or capture a joiner. A direct
+    /// neighbour that sends one in the 5 s can still capture that one joiner until it restarts.
     pub fn ingest_far_ok(&mut self, frame: &Verified) -> Ingested {
         self.ingest_with(frame, true)
     }
@@ -2487,17 +2486,14 @@ impl MeshDoc {
         }
     }
 
-    /// Whether a forged epoch could make this document lose nothing: it holds no frame and still
-    /// awaits its first sync (a state document) or a far root (a meta document). A node that holds a
-    /// frame has something to lose, and a node that does not await has asked nothing, so no answer
-    /// is the answer of its first request. Without this exception a node at epoch 0 would refuse for
-    /// ever every root above the bound, once two forged roots had put the mesh over twice the bound.
-    fn holds_nothing(&self) -> bool {
-        let owner_only = match self.far_root {
-            FarRootWait::Awaits(own) => self.frames.values().all(|frame| frame.key() == own),
-            FarRootWait::Never => false,
-        };
-        (self.awaiting_sync && self.frames.is_empty()) || owner_only
+    /// Whether this document may take a root above the bound of a jump when the caller says that it
+    /// is the answer of the first request: a state document that awaits its first sync, or a meta
+    /// document that awaits a far root. Frames that it holds do not count: a frame of epoch 0 comes
+    /// to a joiner by gossip from any member, so a rule that needs an empty document would let one
+    /// small frame on repeat lock out every joiner. A node that does not await has asked nothing, so
+    /// no answer is the answer of its first request.
+    fn takes_far_root(&self) -> bool {
+        self.awaiting_sync || self.is_awaiting_far_root()
     }
 
     /// A frame of another epoch than the one that the document holds.
@@ -2505,8 +2501,9 @@ impl MeshDoc {
     /// A lower epoch is dead: ignored, and its dedup key stays seen, because it can never be of use
     /// again. A higher epoch is never applied here. It becomes the candidate only if the frame is a
     /// root of that epoch (its only dependency is the genesis of the epoch), is no further than
-    /// `DOC_EPOCH_JUMP_MAX` above (a document that holds nothing has no bound, see
-    /// [`Self::holds_nothing`]), and passes the gate on a fresh document of that epoch. Every
+    /// `DOC_EPOCH_JUMP_MAX` above (a document that awaits its first sync, or a far root, has no
+    /// bound for the frame that is the answer of its first request, see `Self::takes_far_root`), and
+    /// passes the gate on a fresh document of that epoch. Every
     /// other refusal forgets the dedup key, so the re-send of the frame is not dropped as a repeat
     /// when it can be taken later.
     fn ingest_other_epoch(
@@ -2521,7 +2518,7 @@ impl MeshDoc {
         if epoch < self.epoch {
             return Ingested::Ignored;
         }
-        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX && !(far_ok && self.holds_nothing()) {
+        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX && !(far_ok && self.takes_far_root()) {
             return self.refuse_frame(frame);
         }
         let Some(genesis) = self.genesis(epoch) else {
@@ -5576,8 +5573,8 @@ mod tests {
     fn a_meta_document_that_awaits_a_far_root_takes_one_only_as_the_answer() {
         let _guard = ::habilis_network_test_tracing::init();
         let far = root_of(3 * super::DOC_EPOCH_JUMP_MAX, &nick("alice"), "far");
-        let mut plain = MeshDoc::new_gated(card_gate()).awaiting_far_root(signer(&nick("me")));
-        let mut answer = MeshDoc::new_gated(card_gate()).awaiting_far_root(signer(&nick("me")));
+        let mut plain = MeshDoc::new_gated(card_gate()).awaiting_far_root();
+        let mut answer = MeshDoc::new_gated(card_gate()).awaiting_far_root();
         let mut not_waiting = MeshDoc::new_gated(card_gate());
 
         let plain_outcome = plain.ingest(&far);
@@ -5606,7 +5603,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (me, alice) = (nick("me"), nick("alice"));
         let far = root_of(3 * super::DOC_EPOCH_JUMP_MAX, &alice, "far");
-        let mut doc = MeshDoc::new_gated(card_gate()).awaiting_far_root(signer(&me));
+        let mut doc = MeshDoc::new_gated(card_gate()).awaiting_far_root();
         author(
             &mut doc,
             &me,
@@ -5621,35 +5618,48 @@ mod tests {
         );
     }
 
-    /// A meta document that holds a frame of ANOTHER author has cards to lose: it keeps the bound,
-    /// the flag stays, and the flag does not hold the local writes. This is the residual of the
-    /// rule: a member that sends one small valid frame of the epoch of the joiner before the honest
-    /// answer shuts the door for that joiner, as the first answerer of the state channel can capture
-    /// one joiner. It does not reach the other joiners.
+    /// A meta document that holds a frame of ANOTHER author still takes the far root as the answer
+    /// of its first request: one small valid frame of epoch 0 on gossip, repeated, would else lock
+    /// out every joiner. The own card comes back after the switch, and the frame of the other
+    /// author is refetched at the new epoch. The flag does not hold the local writes.
     #[test]
-    fn a_meta_document_that_holds_a_frame_of_another_author_keeps_the_bound() {
+    fn a_meta_document_that_holds_a_frame_of_another_author_takes_the_far_root_as_the_answer() {
         let _guard = ::habilis_network_test_tracing::init();
+        let (me, bob) = (nick("me"), nick("bob"));
         let far = root_of(3 * super::DOC_EPOCH_JUMP_MAX, &nick("alice"), "far");
-        let mut doc = MeshDoc::new_gated(card_gate()).awaiting_far_root(signer(&nick("me")));
+        let mut doc = MeshDoc::new_gated(card_gate()).awaiting_far_root();
         assert!(
             !doc.is_awaiting_first_sync(),
             "the flag does not hold the writes of the card"
         );
         author(
             &mut doc,
-            &nick("bob"),
-            &json!({ "peers": { (slot("bob")): { "card": 1 } } }),
+            &me,
+            &json!({ "peers": { (slot("me")): { "card": 1 } } }),
+        );
+        author(
+            &mut doc,
+            &bob,
+            &json!({ "peers": { (slot("bob")): { "card": 2 } } }),
         );
 
         let outcome = doc.ingest_far_ok(&far);
 
         assert!(
-            matches!(outcome, Ingested::Ignored),
-            "a document that holds a frame of another author refuses a far root: {outcome:?}"
+            matches!(outcome, Ingested::NewEpoch { .. }),
+            "a document that holds a frame of another author takes the answer: {outcome:?}"
         );
-        assert!(
-            doc.is_awaiting_far_root(),
-            "the flag does not fall at a frame: the window of the first request is its brake"
+        let switch = ticks(&mut doc, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS)
+            .expect("the far root is adopted after the wait");
+        assert_eq!(
+            switch.epoch,
+            3 * super::DOC_EPOCH_JUMP_MAX,
+            "the node follows the far epoch"
+        );
+        assert_eq!(
+            switch.own_entry,
+            Some(json!({ "card": 1 })),
+            "the own card is handed back to be written again; the card of bob is not"
         );
     }
 
@@ -5675,10 +5685,13 @@ mod tests {
         );
     }
 
-    /// A joiner that adopted the honest seed and still waits for its first sync holds state: it takes
-    /// no far root, or the first member that answers could capture it.
+    /// A joiner that still waits for its first sync takes the far root as the answer of its first
+    /// request, also when it already holds a frame of another author. A frame of epoch 0 reaches a
+    /// joiner by gossip from any member, so a rule that needs an empty document would let one small
+    /// frame on repeat lock out every joiner. The window of the first request is the brake (see
+    /// `DOC_EPOCH_JUMP_MAX`): a direct neighbour can capture one joiner in 5 s, until it restarts.
     #[test]
-    fn a_node_that_holds_frames_and_still_awaits_its_sync_takes_no_far_root() {
+    fn a_node_that_holds_frames_and_still_awaits_its_sync_takes_the_far_root_as_the_answer() {
         let _guard = ::habilis_network_test_tracing::init();
         let far = far_root(3 * super::DOC_EPOCH_JUMP_MAX);
         let mut writer = MeshDoc::new_ungated().state_epochs();
@@ -5693,8 +5706,8 @@ mod tests {
         let outcome = joiner.ingest_far_ok(&far);
 
         assert!(
-            matches!(outcome, Ingested::Ignored),
-            "a node that holds frames keeps the bound, whether it waits or not: {outcome:?}"
+            matches!(outcome, Ingested::NewEpoch { .. }),
+            "a node that awaits its sync takes the answer, with frames or without: {outcome:?}"
         );
     }
 

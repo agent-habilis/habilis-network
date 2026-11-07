@@ -881,11 +881,7 @@ impl EventLoopState {
             first_asked_at: None,
             first_request_at: None,
             meta_first_request_at: None,
-            meta_doc: Self::meta_channel(
-                init.per_peer_gate,
-                meta_key,
-                init.keys.session.author_key(),
-            ),
+            meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
             identity: init.keys.session,
             member_identity: init.keys.member,
@@ -950,14 +946,13 @@ impl EventLoopState {
     fn meta_channel(
         per_peer_gate: Option<doc::SelfWriteGate>,
         key: Option<SymmetricKey>,
-        own: AuthorKey,
     ) -> MeshDoc {
         match per_peer_gate {
             Some(gate) => MeshDoc::new_gated(gate),
             None => MeshDoc::new_ungated(),
         }
         .key(key)
-        .awaiting_far_root(own)
+        .awaiting_far_root()
     }
 
     /// The number of members of the mesh as this node counts them: the peers whose arrival was
