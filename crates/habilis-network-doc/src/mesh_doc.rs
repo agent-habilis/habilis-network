@@ -1603,8 +1603,10 @@ impl MeshDoc {
     ///
     /// A fresh joiner holds nothing, so one frame can move it to any epoch (see
     /// `Self::takes_far_root`). It holds frames of others after that, so it waits the next time.
+    ///
+    /// It runs after every frame, so it does not settle a rival root: the settle belongs to the end
+    /// of the wait. `adopt` settles the rival of a whole candidate that it adopts.
     pub fn adopt_if_alone(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
-        self.settle_challenger();
         let held = self.candidate.as_ref()?;
         let alone = self.frames.values().all(|frame| frame.key() == *own);
         let whole = held.chain().is_some();
@@ -1620,9 +1622,11 @@ impl MeshDoc {
     /// not take that root in any other way, so it has nothing to wait for: the frames of the lower
     /// epoch never compete with a higher candidate, they are dead if the root is honest and are
     /// fetched again at the new epoch, and the own entry is handed back. A candidate inside the
-    /// bound, or one whose chain is not whole, is not adopted here. `None` then.
+    /// bound, or one whose chain is not whole, is not adopted here. `None` then. It runs after every
+    /// frame, so it does not settle a rival root: the settle belongs to the end of the wait (a
+    /// forger would else drop the honest root by one frame that comes next). `adopt` settles the
+    /// rival of a whole candidate that it adopts.
     pub fn adopt_far(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
-        self.settle_challenger();
         let held = self.candidate.as_ref()?;
         if held.far && held.chain().is_some() {
             self.adopt(own)
@@ -5719,6 +5723,70 @@ mod tests {
             Some(far_epoch),
             "the whole chain is adopted at once"
         );
+    }
+
+    /// An attempt to adopt must not settle a rival root: it runs after every frame, and the settle
+    /// belongs to the end of the wait. A forger sends one incomplete root before an honest cut; the
+    /// honest root takes the slot of the rival; a frame that comes next, with an attempt to adopt,
+    /// would settle two incomplete chains, keep the first root and drop the honest one, and no node
+    /// would keep the honest seed. The honest chain completes and wins at the end of the wait.
+    #[test]
+    fn an_attempt_to_adopt_does_not_settle_a_rival_root_before_the_end_of_the_wait() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (forger, honest, me) = (nick("forger"), nick("honest"), nick("me"));
+        let source = state_doc_with(&live_state());
+        let forged_root = seed_frames_of(&source, &forger, 1, None).remove(0);
+        let honest_frames = seed_frames_of(&source, &honest, 1, None);
+        assert!(
+            honest_frames.len() > 1,
+            "the premise: a chain of several frames"
+        );
+        let mut node = MeshDoc::new_ungated().state_epochs();
+        node.ingest(&forged_root);
+        node.ingest(&honest_frames[0]);
+
+        let early_far = node.adopt_far(&signer(&me));
+        let early_alone = node.adopt_if_alone(&signer(&me));
+        for frame in &honest_frames[1..] {
+            node.ingest(frame);
+        }
+        let switch = ticks(&mut node, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+
+        assert!(
+            early_far.is_none() && early_alone.is_none(),
+            "no chain is whole yet: {early_far:?} {early_alone:?}"
+        );
+        assert_eq!(
+            switch.map(|switched| switched.epoch),
+            Some(1),
+            "the honest chain is adopted at the end of the wait"
+        );
+        assert_eq!(node.to_json(), json!(live_state()), "the honest seed");
+    }
+
+    /// Two whole seeds of one epoch end in the lowest key whichever came first, also when attempts
+    /// to adopt ran between their frames.
+    #[test]
+    fn two_whole_seeds_end_in_the_lowest_key_with_attempts_to_adopt_between_the_frames() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high, me) = (nick("aaa-low"), nick("zzz-high"), nick("me"));
+        let from_low = json!({ "who": "low" });
+        let from_high = json!({ "who": "high" });
+        let low_frames = seed_frames_of(&state_doc_with(&from_low), &low, 1, None);
+        let high_frames = seed_frames_of(&state_doc_with(&from_high), &high, 1, None);
+        for (first, second) in [(&low_frames, &high_frames), (&high_frames, &low_frames)] {
+            let mut node = MeshDoc::new_ungated().state_epochs();
+            let both: Vec<&Verified> = first.iter().chain(second.iter()).collect();
+            for frame in both {
+                node.ingest(frame);
+                let _ = node.adopt_far(&signer(&me));
+            }
+
+            let switch = ticks(&mut node, &me, super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+
+            assert!(switch.is_some(), "a whole seed is adopted");
+            assert_eq!(node.to_json(), from_low, "the lowest key wins");
+        }
     }
 
     /// A big far seed does not come in 5 s on a slow link. Its root came as the answer of the first
