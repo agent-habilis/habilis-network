@@ -34,6 +34,7 @@ pub(crate) struct CollectionSizes {
     pub(crate) surfaced: usize,
     pub(crate) direct: usize,
     pub(crate) linked_endpoints: usize,
+    pub(crate) graft_backoff: usize,
 }
 
 impl CollectionSizes {
@@ -69,6 +70,7 @@ impl CollectionSizes {
         sizes.surfaced = state.surfaced.len();
         sizes.direct = state.direct.len();
         sizes.linked_endpoints = state.linked_endpoints.len();
+        sizes.graft_backoff = state.graft_backoff.len();
         sizes
     }
 }
@@ -76,7 +78,8 @@ impl CollectionSizes {
 #[cfg(test)]
 mod tests {
     use super::CollectionSizes;
-    use crate::testing::{fresh_state, test_key};
+    use crate::testing::{self, fresh_state, test_key};
+    use crate::util::clock::Instant;
 
     #[test]
     fn a_new_node_holds_nothing_in_any_collection() {
@@ -95,6 +98,9 @@ mod tests {
         state.surfaced.insert(test_key("ant"));
         let key = state.identity.author_key();
         state.forked.insert(key);
+        state
+            .graft_backoff
+            .asked(testing::endpoint_id(1), Instant::now());
 
         let sizes = CollectionSizes::read(&state);
 
@@ -104,6 +110,7 @@ mod tests {
                 peers: 2,
                 surfaced: 1,
                 forked: 1,
+                graft_backoff: 1,
                 ..CollectionSizes::default()
             },
             "only the collections that got items read above 0",

@@ -428,6 +428,7 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_surfaced = sizes.surfaced,
         col_direct = sizes.direct,
         col_linked_endpoints = sizes.linked_endpoints,
+        col_graft_backoff = sizes.graft_backoff,
         "collection census"
     );
 }
