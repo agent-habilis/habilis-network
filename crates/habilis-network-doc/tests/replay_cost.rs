@@ -8,6 +8,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -115,8 +116,10 @@ fn writer_of(index: usize) -> String {
 fn tag_of(writer: &str) -> String {
     pad(writer)[..8]
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("a write to a string");
+            hex
+        })
 }
 
 /// A replay frame of 127 leaves under `rep{index}`, written by the writer of `index`.
