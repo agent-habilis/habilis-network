@@ -499,7 +499,22 @@ pub(crate) fn replay_frames(
                 }
                 break;
             }
-            Err(error) => {
+            // Every other refusal ends the replay. Each variant is named, so the lint
+            // `non_exhaustive_omitted_patterns` flags a variant that is added later and its handling
+            // is chosen then. The last pattern is the wildcard that a `non_exhaustive` enum of
+            // another crate requires.
+            Err(
+                error @ (DocError::NotAnObject
+                | DocError::Body(_)
+                | DocError::Encode(_)
+                | DocError::TooLarge { .. }
+                | DocError::SeedTooLong { .. }
+                | DocError::CandidateHeld
+                | DocError::ClockNotReady
+                | DocError::StateFull { .. }
+                | DocError::StateTooDeep { .. }
+                | _),
+            ) => {
                 tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: a frame of it does not compose");
                 break;
             }
