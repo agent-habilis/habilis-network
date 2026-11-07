@@ -20,6 +20,13 @@ pub(crate) struct RunKeys {
     pub(crate) member: Option<Arc<Identity>>,
     /// The run number of this start, which the proof of the session names.
     pub(crate) run: u64,
+    /// The member key and the run counter were made by this start, not read from files of an
+    /// earlier one.
+    #[cfg_attr(
+        not(all(unix, feature = "host")),
+        expect(dead_code, reason = "only the binding of a host to its owner reads it")
+    )]
+    pub(crate) member_new: bool,
 }
 
 /// Everything `EventLoopState::new` needs beyond the clock, grouped for the

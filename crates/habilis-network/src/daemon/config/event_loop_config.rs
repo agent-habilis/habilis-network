@@ -8,6 +8,8 @@ use crate::daemon::setup::LiveCount;
 use crate::daemon::shutdown::{Owner, OwnerPidError};
 
 use crate::transport::{UdpTransport, UnicastFrame};
+#[cfg(feature = "host")]
+use crate::util::process;
 use std::path::PathBuf;
 
 use iroh::Endpoint;
@@ -249,6 +251,12 @@ impl EventLoopConfig {
     #[cfg(feature = "host")]
     pub fn set_owner_pid(mut self, pid: u32) -> Result<Self, OwnerPidError> {
         self.runtime.owner = Some(Owner::try_new(pid)?);
+        // The pair of files that holds the identity of this member belongs to this owner, and to no
+        // later process that gets the same pid.
+        let start = process::live_start_time(pid);
+        let keys = self.mesh.keys.clone();
+        self.mesh.keys =
+            super::super::setup::bind_to_owner(keys, self.runtime.state_file.as_deref(), start);
         Ok(self)
     }
 

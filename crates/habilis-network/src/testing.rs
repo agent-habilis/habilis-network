@@ -68,6 +68,7 @@ fn fresh_state_that_waits_with_book(address_book: memory::MemoryLookup) -> Event
             state_file: None,
             // the keys are shared with the loop and its handlers, which hold clones
             keys: RunKeys {
+                member_new: false,
                 // shared with the loop and its handlers, which hold clones
                 session: Arc::new(Identity::generate()),
                 // shared with the loop and its handlers, which hold clones
