@@ -649,6 +649,11 @@ async fn ask(
     let Ok(bytes) = ours.serialize() else {
         return false;
     };
+    // A test makes the send fail to start, as a connection that cannot be opened does.
+    #[cfg(test)]
+    if state.take_injected_ask_failure() {
+        return false;
+    }
     if !state
         .unicast_pool
         .send_batch_in_background(eid, vec![bytes])

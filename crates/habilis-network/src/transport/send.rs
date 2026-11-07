@@ -1861,6 +1861,49 @@ mod tests {
         });
     }
 
+    /// The retry of an ask-back uses the connection that the digest came on, when its signer proved no
+    /// endpoint yet: the first ask-back could not start (the send failed), and the retry must not
+    /// wait for the proof of the signer. The old form of this test used a held path for the first
+    /// failure; a held path no longer stops the ask-back on an admitted arrival, so the failure of
+    /// the send is injected.
+    #[test]
+    fn the_retry_of_an_ask_back_that_could_not_start_uses_the_connection_of_the_digest() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            // A holder with nothing to answer: the first send to bob is the retry itself, and no dial of
+            // an answer is in flight when it goes.
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 0).await;
+            let bob = bob_endpoint.id();
+            let asker = Identity::generate();
+            let ahead = serde_json::json!(["ab".repeat(32)]);
+            let digest = digest(&net.mesh, Channel::State, &ahead, &asker);
+            // The first ask-back cannot start: the send fails.
+            state.fail_the_next_ask();
+            state.state_digest_serves.unicast.arrived_from = Some(bob);
+            let _ = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+            assert_eq!(state.idle.fr_asks, 0, "the first ask-back could not start");
+
+            state.state_digest_serves.unicast.arrived_from = None;
+            state.direct.insert(bob, DirectState::Direct);
+            antientropy::resume_fast_rounds(&mut state, &net.context()).await;
+
+            assert_eq!(
+                state.idle.fr_retries, 1,
+                "the retry goes on the connection of the digest"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
     /// A digest that came by gossip is answered by a few members, as a chat digest is, when the
     /// unicast form is on. Here the k rule leaves this holder out: it sends nothing.
     #[test]

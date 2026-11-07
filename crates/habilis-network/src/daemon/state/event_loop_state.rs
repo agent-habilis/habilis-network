@@ -344,6 +344,10 @@ pub struct EventLoopState {
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
     pub(crate) resend_outbox: ResendOutbox,
+    /// Tests only: the next ask of a fast round fails to start, once, as a send does when the
+    /// connection cannot be opened. A default build has no such field.
+    #[cfg(test)]
+    fail_next_ask: bool,
     /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
     /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -763,6 +767,8 @@ impl EventLoopState {
             chat_continuations: ChatContinuations::default(),
             digest_unreadable: Cooldown::new(super::UNREADABLE_DIGEST_LOG_WINDOW),
             resend_outbox,
+            #[cfg(test)]
+            fail_next_ask: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drop: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -2577,6 +2583,20 @@ impl EventLoopState {
     #[cfg(feature = "adversarial")]
     pub fn sever_gossip(&mut self) {
         self.standing.remove(&Standing::GossipOpen);
+    }
+
+    /// Tests only: the next ask of a fast round fails to start, once.
+    #[cfg(test)]
+    pub(crate) fn fail_the_next_ask(&mut self) {
+        self.fail_next_ask = true;
+    }
+
+    /// Tests only: whether the injected failure of an ask is due now. It is spent when it is read.
+    #[cfg(test)]
+    pub(crate) fn take_injected_ask_failure(&mut self) -> bool {
+        let due = self.fail_next_ask;
+        self.fail_next_ask = false;
+        due
     }
 
     /// Tests only: drop the next inbound frame that `what` names, once, before the app reads it.
