@@ -5966,9 +5966,10 @@ mod dedup_counter_tests {
     /// about it, like the digests and the pings.
     #[test]
     fn a_proof_request_is_not_pushed_to_application_subscribers() {
+        use crate::protocol::MessageKind;
         let to = Identity::generate().author_key();
         assert!(
-            super::is_plumbing(&crate::protocol::MessageKind::ProofRequest { to }),
+            super::is_plumbing(&MessageKind::ProofRequest { to }),
             "an admitted peer's fresh proof request would reach the subscribers of the inbound push"
         );
     }

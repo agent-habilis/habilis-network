@@ -485,7 +485,7 @@ mod tests {
     fn the_bytes_of_a_proof_are_pinned() {
         let session = AuthorKey::from([7u8; 32]);
         let bytes = super::proof_bytes(&session, "alice", "mesh", 3);
-        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let hex = super::to_hex(&bytes);
         let expected = concat!(
             "686162696c69732d6d6573682f6964656e746974792d70726f6f662f7632", // the label, v2
             "0707070707070707070707070707070707070707070707070707070707070707", // the session key
