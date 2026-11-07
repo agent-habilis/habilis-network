@@ -24,6 +24,6 @@ export function phaseGate(samples: number[]): { ok: boolean; median: number; max
 }
 
 export function abGate(medianA: number, medianB: number): { ok: boolean; ratio: number } {
-  const ratio = Math.max(medianA, medianB) / Math.min(medianA, medianB);
+  const ratio = medianA === 0 && medianB === 0 ? 1 : Math.max(medianA, medianB) / Math.min(medianA, medianB);
   return { ok: ratio <= AB_RATIO_MAX, ratio };
 }
