@@ -111,6 +111,12 @@ impl ProofExchange {
         admitted
     }
 
+    /// Forget the proof of `session`, which said goodbye, and the requests for it.
+    pub(crate) fn forget(&mut self, session: &AuthorKey) {
+        self.book.remove(session);
+        self.asked.remove(session);
+    }
+
     /// The sessions that a newer run of their member dropped since the last call. The caller ends
     /// them in the roster.
     pub(crate) fn take_replaced(&mut self) -> Vec<AuthorKey> {
@@ -184,24 +190,28 @@ impl ProofExchange {
             return false;
         }
         // A member holds one session, the newest: a restart makes a new session with a higher run,
-        // and the sessions of its older runs go. A proof of a run that is not higher than a run
-        // held is a late copy of an older frame, and it does not replace the newer session.
+        // and the sessions of its older runs go. A proof of a run that is not higher than the run
+        // of a session in the roster is a late copy of an older frame, and it does not replace the
+        // newer session. A session that is not in the roster is dead: it never blocks, whatever its
+        // run, so a member that restores an old run file is still held.
         let others = |held: &AuthorKey, (_, other): &(Nickname, IdentityProof)| {
             held != session && other.identity == proof.identity
         };
-        let runs: Vec<(AuthorKey, u64)> = self
+        let runs: Vec<(AuthorKey, u64, bool)> = self
             .book
             .iter()
             .filter(|(held, entry)| others(held, entry))
-            .map(|(held, (_, other))| (*held, other.run))
+            .map(|(held, (_, other))| (*held, other.run, is_held(held)))
             .collect();
-        if runs.iter().any(|(_, run)| *run >= proof.run) {
+        if runs.iter().any(|(_, run, live)| *live && *run >= proof.run) {
             self.ties_refused += 1;
             return false;
         }
-        for (older, _) in runs {
+        for (older, _, live) in runs {
             self.book.remove(&older);
-            self.replaced.push(older);
+            if live {
+                self.replaced.push(older);
+            }
         }
         self.book
             .insert_evicting(*session, (nickname.clone(), proof), |held, _| is_held(held));
@@ -620,5 +630,56 @@ mod tests {
         );
         assert_eq!(book.len(), 1, "the sessions of the older runs are gone");
         assert_eq!(book.refused(), 0, "no proof was refused for want of room");
+    }
+
+    /// A session that is not in the roster is dead. Its proof, with whatever run, does not block the
+    /// proof of the same member: a member that restores an old run file, or moves its state to
+    /// another host, starts with a run that is lower than the dead session's, and must still be held.
+    #[test]
+    fn a_dead_session_with_a_higher_run_does_not_block_the_proof_of_its_member() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let member = Identity::generate();
+        let (dead, new) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let high = member.prove(&dead, alice.as_ref(), mesh.as_ref(), 100);
+        assert!(
+            book.accept(&dead, &alice, &mesh, high, |_| true),
+            "run 100 is held"
+        );
+        let low = member.prove(&new, alice.as_ref(), mesh.as_ref(), 1);
+
+        let held = book.accept(&new, &alice, &mesh, low, |session| *session != dead);
+
+        assert!(
+            held,
+            "the proof of run 1 is held: the session of run 100 is dead"
+        );
+        assert!(book.proof_of(&dead).is_none(), "the dead session is gone");
+        assert!(
+            book.take_replaced().is_empty(),
+            "a dead session needs no end in the roster"
+        );
+    }
+
+    /// A session that said goodbye is forgotten: its proof goes with it.
+    #[test]
+    fn a_forgotten_session_loses_its_proof() {
+        let mesh = MeshId::from("💬test");
+        let alice = Nickname::from("alice");
+        let session = Identity::generate().author_key();
+        let proof = Identity::generate().prove(&session, alice.as_ref(), mesh.as_ref(), 1);
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        assert!(
+            book.accept(&session, &alice, &mesh, proof, |_| true),
+            "the proof is held"
+        );
+
+        book.forget(&session);
+
+        assert!(book.proof_of(&session).is_none(), "the proof is gone");
     }
 }
