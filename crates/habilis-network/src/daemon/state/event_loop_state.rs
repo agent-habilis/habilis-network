@@ -2428,7 +2428,12 @@ impl EventLoopState {
         let key = message.key();
         if message.author == *own {
             let ours = self.member_identity.as_ref().map(|member| member.public());
-            let proved = |proof: &IdentityProof| ours.is_none_or(|ours| proof.identity == ours);
+            // A session of our member is a peer only when its run is not older than the run live here: a
+            // replay of an older run must not enter the roster beside it.
+            let run = self.run;
+            let proved = |proof: &IdentityProof| {
+                ours.is_none_or(|ours| proof.identity == ours && proof.run >= run)
+            };
             let ours_here = key == self.identity.author_key();
             let admitted =
                 ours_here || ours.is_none() || self.proofs.proof_of(&key).is_some_and(proved);

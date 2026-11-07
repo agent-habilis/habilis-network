@@ -6051,6 +6051,29 @@ mod dedup_counter_tests {
         );
     }
 
+    /// A session that our own member key proved under our nickname is a peer only when its run is not older
+    /// than ours: a replay of an older run must not enter the roster beside the run that is live here.
+    #[test]
+    fn an_older_run_of_our_own_member_is_no_peer_and_a_newer_run_is() {
+        let session = Identity::generate();
+        for (run, peer) in [(0, false), (2, true)] {
+            let state = fresh_state();
+            let member = state
+                .member_identity
+                .clone()
+                .expect("a test state has a member key");
+            let proof_frame = joined_of(&session, &member, "reader", run);
+
+            let reader = reader_with(state, vec![proof_frame]);
+
+            assert_eq!(
+                reader.peers.contains(&session.author_key()),
+                peer,
+                "a session of our member with run {run} against the local run 1"
+            );
+        }
+    }
+
     /// A free nickname is accepted with no proof: a member that has not proved yet, or a client
     /// that never will, is a peer, and its nickname stays unbound.
     #[test]
