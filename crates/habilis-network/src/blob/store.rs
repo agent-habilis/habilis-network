@@ -327,6 +327,7 @@ mod tests {
     #[test]
     fn a_claim_makes_the_blob_the_newest_under_disk_pressure() -> anyhow::Result<()> {
         let _guard = ::habilis_network_test_tracing::init();
+        habilis_network_test_tracing::expect_warn("habilis_network::blob", "held blob evicted");
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"x")?;
@@ -375,6 +376,7 @@ mod tests {
     fn ten_times_the_entry_cap_of_tiny_blobs_leaves_the_cap_and_drops_the_oldest()
     -> anyhow::Result<()> {
         let _guard = ::habilis_network_test_tracing::init();
+        habilis_network_test_tracing::expect_warn("habilis_network::blob", "held blob evicted");
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"x")?;
@@ -474,6 +476,7 @@ mod tests {
     fn an_overflowed_blob_without_recorded_owners_goes_with_the_entry_budget() -> anyhow::Result<()>
     {
         let _guard = ::habilis_network_test_tracing::init();
+        habilis_network_test_tracing::expect_warn("habilis_network::blob", "held blob evicted");
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"x")?;
