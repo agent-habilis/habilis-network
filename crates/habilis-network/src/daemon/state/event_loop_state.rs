@@ -2474,7 +2474,7 @@ impl EventLoopState {
                         && self
                             .proofs
                             .proof_of(held)
-                            .is_none_or(|proof| proof.identity != member)
+                            .is_none_or(|held_proof| held_proof.identity != member)
                 })
                 .collect();
             self.proofs.evict(intruders);
