@@ -172,9 +172,14 @@ pub(crate) fn unicast_peers(state: &EventLoopState) -> impl Iterator<Item = Endp
         .filter(|eid| state.rendezvous_id != Some(*eid) && !super::route::held(*eid, state))
 }
 
-/// Whether a frame can be sent to `eid` by unicast now: its payload path is not held.
+/// Whether a frame can be sent to `eid` by unicast now: its payload path is not held, or the frame
+/// being handled came by unicast from `eid`. The unicast acceptor admits a connection only on a
+/// selected path that is not the relay when the relay is lookup-only, so that arrival proves what a
+/// probe would, before the probe of the node reads it, and the reply goes back on it. The exception
+/// is for the frame at hand: `arrived_from` is set only while an unicast frame is handled, so a
+/// send outside a reply, and any other endpoint, keep the check of the path as before.
 pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
-    !super::route::held(eid, state)
+    !super::route::held(eid, state) || state.state_digest_serves.unicast.arrived_from == Some(eid)
 }
 
 pub(crate) fn unicast_answer_target(

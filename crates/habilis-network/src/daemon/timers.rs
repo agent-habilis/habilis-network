@@ -524,6 +524,7 @@ mod tests {
     #[cfg(feature = "multihop")]
     #[tokio::test(flavor = "current_thread")]
     async fn a_silent_partition_still_emits_the_census_reading() {
+        use crate::daemon::state::Standing;
         use crate::util::clock::Instant;
         use crate::util::tuning;
         use iroh::endpoint::presets;
@@ -536,9 +537,7 @@ mod tests {
             .expect("bind a local endpoint");
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let mut state = testing::fresh_state();
-        state
-            .standing
-            .insert(crate::daemon::state::Standing::Meshed);
+        state.standing.insert(Standing::Meshed);
         state.peers.insert(testing::test_key("somebody"));
         let long_ago = Instant::now()
             .checked_sub(tuning::silent_partition_after() * 2)
