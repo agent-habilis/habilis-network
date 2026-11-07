@@ -74,6 +74,10 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
         self.held.get(key)
     }
 
+    pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.held.get_mut(key)
+    }
+
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.held.iter()
     }

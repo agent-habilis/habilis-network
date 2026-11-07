@@ -2399,32 +2399,68 @@ impl EventLoopState {
     /// the way in. A stranger under a free nickname is not asked. The asks of sessions outside the
     /// roster are limited to 4 open for each nickname, so a flood of forged keys under one bound
     /// nickname replaces its own asks and no other.
+    #[cfg(test)]
     pub(crate) fn proof_request_for(
         &self,
         alive: &Verified,
         own: &Nickname,
         mesh: &MeshId,
     ) -> Option<Verified> {
-        let asks = self.asks_for_proof(alive);
+        self.asks_for_proof(alive)
+            .then(|| self.proof_request_to(&alive.key(), own, mesh))
+    }
+
+    /// The signed request for the proof of `session`.
+    pub(crate) fn proof_request_to(
+        &self,
+        session: &AuthorKey,
+        own: &Nickname,
+        mesh: &MeshId,
+    ) -> Verified {
         #[cfg(test)]
-        if asks {
-            self.proof_requests_signed.fetch_add(1, Ordering::Relaxed);
-        }
-        asks.then(|| Message::new_proof_request(mesh, own, alive.key()).sign(&self.identity))
+        self.proof_requests_signed.fetch_add(1, Ordering::Relaxed);
+        Message::new_proof_request(mesh, own, *session).sign(&self.identity)
     }
 
     /// Whether a frame of a session that this node holds no proof for asks for one now: the session is in
     /// the roster or claims a bound nickname, and its retry clock lets a request go. It does not sign
     /// anything, so a caller that has no path to send over can ask first and pay nothing.
+    #[cfg(test)]
     pub(crate) fn asks_for_proof(&self, alive: &Verified) -> bool {
-        let key = alive.key();
+        self.asks_for_session(&alive.key(), &alive.author)
+    }
+
+    /// [`Self::asks_for_proof`] for a session named by its key and its nickname.
+    pub(crate) fn asks_for_session(&self, key: &AuthorKey, nickname: &Nickname) -> bool {
         // A session of a bound nickname with no proof is no peer yet, and it is asked as well: the
         // proof is the way in.
-        let asked_for = self.peers.contains(&key)
+        let asked_for = self.peers.contains(key)
             || self
                 .proofs
-                .is_bound(&alive.author, |session| self.session_is_held(session));
-        asked_for && self.proofs.wants_proof(&key, Instant::now())
+                .is_bound(nickname, |session| self.session_is_held(session));
+        asked_for && self.proofs.wants_proof(key, Instant::now())
+    }
+
+    /// The sessions whose ask waits for a warm path and may be tried now, with their nicknames. With an
+    /// `arrived` endpoint, only those whose address is that endpoint: a frame that came from it shows
+    /// that a connection to it is up.
+    pub(crate) fn deferred_asks_to_try(
+        &mut self,
+        arrived: Option<EndpointId>,
+    ) -> Vec<(AuthorKey, Nickname)> {
+        let mut due = Vec::new();
+        for key in self.proofs.take_deferred_to_try(Instant::now()) {
+            let at_endpoint = arrived.is_none_or(|endpoint| {
+                self.address_of(&key).map(|address| address.id) == Some(endpoint)
+            });
+            match self.names.get(&key) {
+                Some(nickname) if at_endpoint => due.push((key, nickname.clone())),
+                Some(_) => {}
+                // a session that the roster forgot: its ask does not wait any more
+                None => self.proofs.undefer(&key),
+            }
+        }
+        due
     }
 
     /// The request for the proof of `session` went out: its retry clock starts. A request that

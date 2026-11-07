@@ -114,3 +114,47 @@ fn a_late_observer_holds_one_holder_of_a_shared_nickname_within_seconds() {
         );
     });
 }
+
+#[test]
+fn an_observer_that_joins_with_the_two_members_holds_one_holder_ten_seconds_later() {
+    let guard = habilis_network_test_tracing::init();
+    guard.allow_warn(
+        "habilis_network::lifecycle",
+        "our nickname is held by another member",
+    );
+    guard.allow_warn(
+        "habilis_network::gossip",
+        "no peer answered the digest of the state channel within the time limit",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+        let mesh: Mesh = Mesh::try_new(
+            fresh_seed(),
+            MeshName::try_new("together").expect("a name"),
+            config,
+        )
+        .expect("a mesh");
+        // The creator, the two members under one nickname and the observer start one after the other
+        // with no pause, as the real daemons of the churn tests do.
+        let creator = join_as(&mesh, "boss").await;
+        let first = join_as(&mesh, "alice").await;
+        let second = join_as(&mesh, "alice").await;
+        let observer = join_as(&mesh, "carol").await;
+        time::sleep(Duration::from_secs(10)).await;
+
+        let started = Instant::now();
+        while rows_named(&observer, "alice").await == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(90),
+                "the observer never saw the holder of alice"
+            );
+            time::sleep(Duration::from_secs(1)).await;
+        }
+        let rows = rows_named(&observer, "alice").await;
+        eprintln!("TOGETHER rows after ten seconds: {rows}");
+        for member in [observer, second, first, creator] {
+            let _ = member.node.leave().await;
+        }
+        assert_eq!(rows, 1, "the observer holds two members under one nickname");
+    });
+}

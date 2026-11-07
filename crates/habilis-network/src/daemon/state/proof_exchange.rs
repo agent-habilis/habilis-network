@@ -18,6 +18,14 @@ const SLOW_RETRIES: u8 = 6;
 /// session that claims a bound nickname is asked for its proof, and a flood of forged keys under
 /// that nickname must replace its own asks and nobody else's.
 const OPEN_ASKS_PER_NICKNAME: usize = 4;
+/// The asks that were skipped for lack of a warm path and wait for one: 64 at most. When the map is full a
+/// new one takes the place of the oldest, whose session falls back to the ask at its next alive frame.
+const DEFERRED_ASKS_MAX: usize = 64;
+/// How long a skipped ask waits for a warm path before the alive cycle takes over.
+const DEFERRED_ASK_TTL: Duration = Duration::from_secs(30);
+/// The least time between two tries of one deferred ask, so a flood of frames from one endpoint makes at most one
+/// signature for each session and gap.
+const DEFERRED_ASK_GAP: Duration = Duration::from_secs(1);
 
 /// The wait after the ask number `tries` (0 for the first): 30 s, 60 s, 120 s, then 10 minutes.
 fn retry_wait(tries: u8) -> Duration {
@@ -26,6 +34,13 @@ fn retry_wait(tries: u8) -> Duration {
     } else {
         SLOW_RETRY_WAIT
     }
+}
+
+/// A skipped ask: when it was first skipped, and when it was tried again last (none: not yet).
+#[derive(Debug, Clone)]
+struct DeferredAsk {
+    since: Instant,
+    tried: Option<Instant>,
 }
 
 /// How many times a session was asked, and when the next request may go.
@@ -63,6 +78,8 @@ pub(crate) struct ProofExchange {
     // the sessions of another member that a proof just bound the nickname away from, until the caller
     // takes them: the roster size at most (live and quiet), and `roster_gate` takes them on each frame
     evicted: Vec<AuthorKey>,
+    // the asks that waited for a warm path: `DEFERRED_ASKS_MAX` at most, the oldest dropped when full
+    deferred: ProofBook<AuthorKey, DeferredAsk>,
     ties_refused: u64,
     bound_refused: u64,
     gate_refused: u64,
@@ -76,6 +93,7 @@ impl ProofExchange {
             told: BoundedFifoSet::new(cap),
             replaced: Vec::new(),
             evicted: Vec::new(),
+            deferred: ProofBook::with_cap(DEFERRED_ASKS_MAX),
             ties_refused: 0,
             bound_refused: 0,
             gate_refused: 0,
@@ -137,6 +155,67 @@ impl ProofExchange {
     pub(crate) fn forget(&mut self, session: &AuthorKey) {
         self.book.remove(session);
         self.asked.remove(session);
+        self.deferred.remove(session);
+    }
+
+    /// The ask for `session` was skipped for lack of a warm path: it waits for one. A session that waits
+    /// already keeps its first time, so the wait ends after `DEFERRED_ASK_TTL` whatever comes.
+    pub(crate) fn defer_ask(&mut self, session: AuthorKey, now: Instant) {
+        if self.deferred.get(&session).is_some() {
+            return;
+        }
+        // every entry reads as dead, so a full map drops the oldest one
+        self.deferred.insert_evicting(
+            session,
+            DeferredAsk {
+                since: now,
+                tried: None,
+            },
+            |_, _| false,
+        );
+    }
+
+    /// The ask for `session` no longer waits: it went out, or the session holds a proof or is gone.
+    pub(crate) fn undefer(&mut self, session: &AuthorKey) {
+        self.deferred.remove(session);
+    }
+
+    /// Whether no ask waits. The caller asks it first, so a node with nothing deferred pays one comparison.
+    pub(crate) fn deferred_is_empty(&self) -> bool {
+        self.deferred.len() == 0
+    }
+
+    /// The sessions whose ask waits and may be tried at `now`: the oldest first. The first try of a session
+    /// is free, so the ask goes as soon as a path is up; after it, none that was tried less than
+    /// `DEFERRED_ASK_GAP` ago. Each one is marked as tried now.
+    pub(crate) fn take_deferred_to_try(&mut self, now: Instant) -> Vec<AuthorKey> {
+        let due = self.deferred.keys_where(|waiting| {
+            waiting
+                .tried
+                .is_none_or(|tried| now.saturating_duration_since(tried) >= DEFERRED_ASK_GAP)
+        });
+        for session in &due {
+            if let Some(waiting) = self.deferred.get_mut(session) {
+                waiting.tried = Some(now);
+            }
+        }
+        due
+    }
+
+    /// Drop the asks that waited `DEFERRED_ASK_TTL` and more: the alive cycle takes those sessions over.
+    pub(crate) fn expire_deferred(&mut self, now: Instant) {
+        let old = self
+            .deferred
+            .keys_where(|waiting| now.saturating_duration_since(waiting.since) >= DEFERRED_ASK_TTL);
+        for session in old {
+            self.deferred.remove(&session);
+        }
+    }
+
+    /// How many asks wait.
+    #[cfg(test)]
+    pub(crate) fn deferred_len(&self) -> usize {
+        self.deferred.len()
     }
 
     /// The sessions that a newer run of their member dropped since the last call. The caller ends
@@ -194,6 +273,8 @@ impl ProofExchange {
         claimed: Option<&Nickname>,
         is_held: impl Fn(&AuthorKey) -> bool,
     ) {
+        // the request went out: the ask no longer waits for a path
+        self.deferred.remove(session);
         let tries = self.asked.get(session).map_or(0, |retry| retry.tries);
         if let Some(nickname) = claimed {
             let same = |retry: &Retry| retry.claimed.as_ref() == Some(nickname);
@@ -286,7 +367,11 @@ impl ProofExchange {
         }
         self.book
             .insert_evicting(*session, (nickname.clone(), proof), |held, _| is_held(held));
-        self.book.get(session).is_some()
+        let held = self.book.get(session).is_some();
+        if held {
+            self.deferred.remove(session);
+        }
+        held
     }
 
     /// Whether one more answer to `asker` may go out at `now`: one per asker and window, and the per-minute cap of the node.
@@ -332,7 +417,9 @@ impl ProofExchange {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProofExchange, verify_proof};
+    use super::{
+        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, ProofExchange, verify_proof,
+    };
     use crate::protocol::identity::Identity;
     use crate::protocol::{AuthorKey, MeshId, Nickname};
     use crate::util::clock::Instant;
@@ -368,6 +455,56 @@ mod tests {
             1,
             "it was refused at the binding, before its signature was checked"
         );
+    }
+
+    /// The asks that wait for a path are 64 at most: fed 10 times the cap, the map holds the cap, and the
+    /// oldest ones are the ones that went.
+    #[test]
+    fn the_deferred_asks_stay_inside_their_cap_when_they_are_fed_10_times_the_cap() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let now = Instant::now();
+        let sessions: Vec<AuthorKey> = (0..640)
+            .map(|_| Identity::generate().author_key())
+            .collect();
+
+        for session in &sessions {
+            book.defer_ask(*session, now);
+        }
+
+        assert_eq!(book.deferred_len(), DEFERRED_ASKS_MAX, "the cap holds");
+        let waiting = book.take_deferred_to_try(now + DEFERRED_ASK_GAP);
+        assert!(
+            waiting.contains(&sessions[639]) && !waiting.contains(&sessions[0]),
+            "the newest waits and the oldest was dropped"
+        );
+    }
+
+    /// A deferred ask is tried once for each gap, and it is dropped after its time, so a flood of frames from
+    /// one endpoint makes one try for each session and gap, and a session that never gets a path falls back
+    /// to the alive cycle.
+    #[test]
+    fn a_deferred_ask_is_tried_once_for_each_gap_and_expires() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let session = Identity::generate().author_key();
+        let start = Instant::now();
+        book.defer_ask(session, start);
+
+        assert_eq!(
+            book.take_deferred_to_try(start),
+            vec![session],
+            "the first try is free: the ask goes as soon as a path is up"
+        );
+        assert!(
+            book.take_deferred_to_try(start).is_empty(),
+            "but not twice in one gap"
+        );
+        assert_eq!(
+            book.take_deferred_to_try(start + DEFERRED_ASK_GAP),
+            vec![session],
+            "after the gap it is tried again"
+        );
+        book.expire_deferred(start + DEFERRED_ASK_TTL);
+        assert!(book.deferred_is_empty(), "after its time it is dropped");
     }
 
     /// A joiner that missed the `joined` frame of a member gets the proof by one request.

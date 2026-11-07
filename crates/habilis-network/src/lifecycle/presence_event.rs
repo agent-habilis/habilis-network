@@ -230,51 +230,92 @@ pub(crate) async fn handle_presence(
     }
 }
 
-/// The endpoint that the proof request for the session of `alive` would go to: none when the session is
-/// not asked now (it holds a proof, or its retry clock holds), or when no address is known for it. It
-/// signs nothing.
-fn proof_ask_target(alive: &Verified, state: &EventLoopState) -> Option<EndpointId> {
-    if !state.asks_for_proof(alive) {
+/// The endpoint that the proof request for the session `key` (nickname `nickname`) would go to: none when the
+/// session is not asked now (it holds a proof, or its retry clock holds), or when no address is known for it.
+/// It signs nothing.
+fn proof_ask_target(
+    key: &AuthorKey,
+    nickname: &Nickname,
+    state: &EventLoopState,
+) -> Option<EndpointId> {
+    if !state.asks_for_session(key, nickname) {
         return None;
     }
     let target: Option<EndpointId> = state
-        .address_of(&alive.key())
+        .address_of(key)
         .map(|address| address.id)
         .filter(|eid| Some(*eid) != state.rendezvous_id);
     if target.is_none() {
-        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: no address");
+        tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request skipped: no address");
     }
     target
 }
 
 /// Send the proof request for a session that has no proof here, to that member alone over a warm
-/// path. The retry clock of the session starts only after a send that worked: with no warm path
-/// the next alive frame of the session asks again.
+/// path. The retry clock of the session starts only after a send that worked. With no warm path the ask
+/// is deferred: it waits for a connection to the member ([`retry_deferred_asks`]), and the next alive
+/// frame of the session asks again.
 pub(crate) async fn ask_for_proof(
     alive: &Verified,
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    let Some(eid) = proof_ask_target(alive, state) else {
+    send_proof_ask(&alive.key(), &alive.author, state, context).await;
+}
+
+/// [`ask_for_proof`] for a session named by its key and its nickname.
+async fn send_proof_ask(
+    key: &AuthorKey,
+    nickname: &Nickname,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
+    if !state.asks_for_session(key, nickname) {
+        // it holds a proof now, or its clock holds: nothing waits
+        state.proofs.undefer(key);
+        return;
+    }
+    let Some(eid) = proof_ask_target(key, nickname, state) else {
         return;
     };
     // A path that can carry the request: a warm connection, or a neighbour that the send dials in the
     // background. An address with neither costs a lookup, and no signature, however many frames come.
     if !(state.linked_endpoints.contains(&eid) || state.unicast_pool.has_warm(eid).await) {
-        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: no warm path");
+        tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request skipped: no warm path");
+        state.proofs.defer_ask(*key, Instant::now());
         return;
     }
-    let Some(request) = state.proof_request_for(alive, context.author, context.mesh) else {
-        return;
-    };
+    let request = state.proof_request_to(key, context.author, context.mesh);
     messages::log_out(&request);
     if let Ok(bytes) = request.serialize()
         && transport::send_best_effort(eid, bytes, state).await
     {
-        let claimed = (!state.peers.contains(&alive.key())).then_some(&alive.author);
-        state.note_proof_request_sent(&alive.key(), claimed);
+        let claimed = (!state.peers.contains(key)).then_some(nickname);
+        state.note_proof_request_sent(key, claimed);
     } else {
-        tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: the send failed");
+        tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request skipped: the send failed");
+    }
+}
+
+/// Ask again the sessions whose ask was skipped for lack of a warm path. A frame that arrived on a unicast
+/// connection from `arrived` shows that a connection to that endpoint is up: only the sessions at that
+/// endpoint are tried. With none (the sweep tick), every waiting session is tried, and the ones that waited
+/// too long are dropped. A node with nothing deferred pays one comparison. The retry clock of a session
+/// still limits its asks, and a deferred session is tried once for each gap, so a flood of frames from
+/// one endpoint signs no more than the clock allows.
+pub(crate) async fn retry_deferred_asks(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    arrived: Option<EndpointId>,
+) {
+    if state.proofs.deferred_is_empty() {
+        return;
+    }
+    if arrived.is_none() {
+        state.proofs.expire_deferred(Instant::now());
+    }
+    for (key, nickname) in state.deferred_asks_to_try(arrived) {
+        send_proof_ask(&key, &nickname, state, context).await;
     }
 }
 
@@ -297,13 +338,12 @@ mod ask_tests {
     #[test]
     fn an_admitted_session_with_no_proof_has_a_target_only_when_an_address_is_known() {
         let session = Identity::generate();
-        let frame = joined_of(&session, "alice");
         let mut state = fresh_state();
         state.peers.insert(session.author_key());
         state.names.insert(session.author_key(), nick("alice"));
 
         assert!(
-            super::proof_ask_target(&frame, &state).is_none(),
+            super::proof_ask_target(&session.author_key(), &nick("alice"), &state).is_none(),
             "with no address the session has no target"
         );
 
@@ -314,7 +354,7 @@ mod ask_tests {
             EndpointAddr::new(endpoint),
         );
         assert_eq!(
-            super::proof_ask_target(&frame, &state),
+            super::proof_ask_target(&session.author_key(), &nick("alice"), &state),
             Some(endpoint),
             "with an address the request goes to the endpoint of the session"
         );

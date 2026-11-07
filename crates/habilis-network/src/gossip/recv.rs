@@ -5811,6 +5811,7 @@ mod dedup_counter_tests {
     use crate::gossip::antientropy::Plane;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
+    use crate::lifecycle;
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message};
@@ -5887,6 +5888,17 @@ mod dedup_counter_tests {
         arrivals: Vec<(Plane, Bytes)>,
         sink: &dyn NodeSink,
     ) -> EventLoopState {
+        reader_full(initial, arrivals, sink, None)
+    }
+
+    /// [`reader_with_sink`], and then, with an endpoint: that endpoint becomes a linked neighbour, and a frame
+    /// from it is taken to have arrived on a unicast connection, so the asks that waited for a path are tried.
+    fn reader_full(
+        initial: EventLoopState,
+        arrivals: Vec<(Plane, Bytes)>,
+        sink: &dyn NodeSink,
+        path_up: Option<iroh::EndpointId>,
+    ) -> EventLoopState {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let mesh = MeshId::from("test");
             let endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -5918,6 +5930,10 @@ mod dedup_counter_tests {
             let mut app = Inert;
             for (plane, bytes) in arrivals {
                 super::ingest_from(plane, bytes, &mut reader, &mut app, &context).await;
+            }
+            if let Some(up) = path_up {
+                reader.linked_endpoints.insert(up);
+                lifecycle::retry_deferred_asks(&mut reader, &context, Some(up)).await;
             }
             endpoint.close().await;
             reader
@@ -6517,6 +6533,57 @@ mod dedup_counter_tests {
         assert!(
             reader.peers.contains(&member_session.author_key()),
             "and the member is a peer"
+        );
+    }
+
+    /// A session with an address and no path is asked for its proof by nothing that frames bring, but its
+    /// ask is not lost: it waits, and when a connection to its endpoint is up (a frame from it on a
+    /// unicast connection, or the sweep tick) the request goes. The late path of the simultaneous-open
+    /// tie-break of two processes is this case.
+    #[test]
+    fn an_ask_that_waited_for_a_path_goes_when_the_path_comes_up() {
+        let session = Identity::generate();
+        let endpoint = endpoint_id(7);
+        let waiting = || {
+            let mut initial = fresh_state();
+            initial.peers.insert(session.author_key());
+            initial.names.insert(session.author_key(), nick("alice"));
+            initial.place_endpoint(
+                session.author_key(),
+                &nick("alice"),
+                iroh::EndpointAddr::new(endpoint),
+            );
+            initial
+        };
+
+        let before = reader_full(
+            waiting(),
+            vec![alive_of(&session, "alice")],
+            &SilentSink,
+            None,
+        );
+        let after = reader_full(
+            waiting(),
+            vec![alive_of(&session, "alice")],
+            &SilentSink,
+            Some(endpoint),
+        );
+
+        assert_eq!(
+            (
+                before.proofs.deferred_len(),
+                before.proof_requests_signed.load(Ordering::Relaxed)
+            ),
+            (1, 0),
+            "with no path the ask waits, and nothing is signed"
+        );
+        assert_eq!(
+            (
+                after.proofs.deferred_len(),
+                after.proof_requests_signed.load(Ordering::Relaxed)
+            ),
+            (0, 1),
+            "when the path is up the ask goes once, and nothing waits"
         );
     }
 
