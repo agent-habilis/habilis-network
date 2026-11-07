@@ -15,9 +15,9 @@
 // Run it after `ulimit -n 10240`. The result goes to <out-root>/b4.json.
 
 import { appendFileSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
-import { homedir, loadavg } from "node:os";
+import { homedir } from "node:os";
 import path from "node:path";
-import { AB_RATIO_MAX, PHASE_MAX, PHASE_MEDIAN_MAX, START_NOW_MAX, START_WINDOW_MAX, abGate, phaseGate, startGate } from "./gate.ts";
+import { AB_RATIO_MAX, PHASE_MAX, PHASE_MEDIAN_MAX, START_NOW_MAX, START_WINDOW_MAX, abGate, phaseGate, waitForStart } from "./gate.ts";
 
 const flags = new Map<string, string>();
 const argv = process.argv.slice(2);
@@ -40,23 +40,17 @@ const log = (text: string) => {
   appendFileSync(`${ROOT}/b4.log`, line + "\n");
 };
 
-// The gate reads load1 every 10 s for 3 min. It waits up to 20 min for a quiet host.
-async function waitForStart(): Promise<void> {
-  const window: number[] = [];
-  for (let waited = 0; waited < 20 * 60; waited += 10) {
-    window.push(loadavg()[0] ?? 0);
-    if (window.length > 18) window.shift();
-    if (window.length === 18 && startGate(window).ok) return;
-    await Bun.sleep(10_000);
-  }
-  log(`start gate: the host did not settle in 20 min, last load1 ${window.at(-1)}`);
+async function waitForQuietHost(): Promise<void> {
+  const start = await waitForStart();
+  if (start.ok) return;
+  log(`start gate: the host did not settle in 20 min, last load1 ${start.last}`);
   process.exit(1);
 }
 
 type Run = { arm: string; pair: number; folder: string; phases: Record<string, { median: number; max: number; ok: boolean }>; void: boolean };
 
 async function runOnce(arm: "plain" | "counters", pair: number, attempt: number, nodes = NODES): Promise<Run> {
-  await waitForStart();
+  await waitForQuietHost();
   const spec = ARMS[arm];
   const label = `b4-${arm}${CURVE.length ? `-n${nodes}` : ""}-p${pair}${attempt ? `-r${attempt}` : ""}`;
   const args = [

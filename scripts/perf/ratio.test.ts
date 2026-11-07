@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { availableBytes } from "./avail.ts";
 import { chooseNodes } from "./choose-n.ts";
-import { phaseGate } from "./gate.ts";
+import { phaseGate, waitForStart } from "./gate.ts";
 import { budgetLimit, goalLimit, parseFrameRatio } from "./ratio.ts";
 
 const NODES = 16;
@@ -33,6 +33,9 @@ function measure(): Promise<number> {
   measured ??= (async () => {
     const binary = process.env.RATIO_BIN;
     if (!binary) throw new Error("RATIO_BIN names no binary: set it to a build with the wire counters");
+    // The start gate of b4.ts: the host must be quiet before the run, not only during it.
+    const start = await waitForStart();
+    if (!start.ok) throw new Error(`start gate: the host did not settle in 20 min, last load1 ${start.last}`);
     const out = mkdtempSync(path.join(tmpdir(), "ratio-"));
     const bench = Bun.spawn(
       [
