@@ -1865,6 +1865,52 @@ mod tests {
         });
     }
 
+    /// The answers that fall back to gossip count against the connection too: a member that rotates author
+    /// keys on one connection, while the unicast send cannot start, would otherwise draw a broadcast of
+    /// every frame for each key, since each key has a gossip budget of its own.
+    #[test]
+    fn answers_that_fall_back_to_gossip_count_against_the_connection_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+            use crate::util::tuning::ANTIENTROPY_SERVES_PER_WINDOW;
+
+            let silent = UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+            let bob = iroh::SecretKey::generate().public();
+            let silent_addr = iroh::EndpointAddr::from_parts(
+                bob,
+                [iroh::TransportAddr::Ip(
+                    silent.local_addr().expect("silent addr"),
+                )],
+            );
+            let (net, mut state, _frames) = holder(silent_addr, 3).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob);
+
+            let mut broadcasts = 0;
+            for round in 0..20 {
+                // Other heads each time: the same heads on one connection are answered once at a time.
+                let heads = serde_json::json!([format!("{round:064x}")]);
+                let fresh = Identity::generate();
+                let digest = digest(&net.mesh, Channel::State, &heads, &fresh);
+                let answered = antientropy::handle_state_digest(
+                    Channel::State,
+                    &digest,
+                    &mut state,
+                    &net.context(),
+                )
+                .await;
+                if answered.broadcast > 0 {
+                    broadcasts += 1;
+                }
+            }
+
+            assert!(
+                broadcasts <= ANTIENTROPY_SERVES_PER_WINDOW,
+                "20 fresh keys on one connection drew {broadcasts} broadcasts, more than the budget of {ANTIENTROPY_SERVES_PER_WINDOW}"
+            );
+            net.endpoint.close().await;
+        });
+    }
+
     /// A state digest that came by unicast is answered to the connection it came on, also when the
     /// signer proved another endpoint earlier: a chat answer takes the same choice.
     #[test]
