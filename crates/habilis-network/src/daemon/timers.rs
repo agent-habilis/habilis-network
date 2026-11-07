@@ -96,7 +96,7 @@ pub(crate) async fn tick_state_refresh(
     let roster_len = state.peers.len();
     let link_len = state.linked_endpoints.len();
 
-    // Drained on every path, including the silent-partition return below: a
+    // Drained on every path, so that a
     // counter that survived one census would fold that interval's work into
     // the next line's delta and read as a spike that never happened.
     // `wakeups` is bumped *after* each arm body, so this iteration's own bump
@@ -111,9 +111,10 @@ pub(crate) async fn tick_state_refresh(
     let cpu = reading.cpu.unwrap_or_default();
     let links = state.direct_counts();
 
+    // A silent partition warns, and the census reading below still comes: the interval of a
+    // partition is the one that a reader of the time series wants most.
     if state.silent_partition_due(roster_len, Instant::now()) {
         warn_silent_partition(state, roster_len, link_len);
-        return;
     }
 
     // Always-on census reading: the cheap counts only (no `remote_info`
@@ -516,6 +517,48 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::gossip::event::CountingSink;
+
+    /// A silent partition warns, and the census reading still comes with it: the interval of a
+    /// partition is the one that a reader of the time series wants most, and its counters are
+    /// drained in the same tick whether the line comes or not.
+    #[cfg(feature = "multihop")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_silent_partition_still_emits_the_census_reading() {
+        use crate::util::clock::Instant;
+        use crate::util::tuning;
+        use iroh::endpoint::presets;
+        use iroh_gossip::net::Gossip;
+        // The logs of this thread only: the partition warns, which the guard of the binary would fail.
+        let (captured, _scoped) = testing::LogCapture::start(tracing::Level::INFO);
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .bind()
+            .await
+            .expect("bind a local endpoint");
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let mut state = testing::fresh_state();
+        state
+            .standing
+            .insert(crate::daemon::state::Standing::Meshed);
+        state.peers.insert(testing::test_key("somebody"));
+        let long_ago = Instant::now()
+            .checked_sub(tuning::silent_partition_after() * 2)
+            .expect("the clock runs for longer than a heal");
+        state.start_zero_links_gap_at(long_ago);
+        assert!(
+            state.silent_partition_due(state.peers.len(), Instant::now()),
+            "the premise: the gap outlasted a heal"
+        );
+
+        super::tick_state_refresh(&mut state, &endpoint, &gossip).await;
+
+        let logs = captured.text();
+        endpoint.close().await;
+        assert!(logs.contains("silent partition"), "the warning: {logs}");
+        assert!(
+            logs.contains("mesh census"),
+            "the census reading comes with the warning: {logs}"
+        );
+    }
 
     /// The join phase is the first 5 minutes after the join, and the census says so.
     #[test]

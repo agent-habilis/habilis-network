@@ -1590,6 +1590,12 @@ impl EventLoopState {
             })
     }
 
+    /// Tests only: the gap of zero links began at `since`, so a test need not wait for a heal.
+    #[cfg(test)]
+    pub(crate) fn start_zero_links_gap_at(&mut self, since: Instant) {
+        self.zero_links_since = Some(since);
+    }
+
     /// Whether a reclaim tick asks another known peer for a link: the fast reclaim window is
     /// open and this member held links and lost every one. A low priority request is refused by
     /// a peer whose view is full, and the peers that were lost are full first; waiting for the
