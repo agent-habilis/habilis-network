@@ -103,6 +103,13 @@ pub enum StateRefusal {
         /// The bytes of the value and its keys.
         bytes: usize,
     },
+    /// The clock of the shared state is ahead of the time of this machine by more than the clock
+    /// window (1 hour): a frame of a member with a wrong clock, or the clock of this machine, holds
+    /// it. The engine waited up to 50 ms for the wall clock to move before it gave this up. The
+    /// write was not made and nothing was sent. A node whose clock was ahead and was set right
+    /// stays refused until the wall clock catches up with the time that it already sent, or until
+    /// it restarts.
+    ClockAhead,
 }
 
 impl StateRefusal {
@@ -120,6 +127,7 @@ impl StateRefusal {
                 limit: *limit,
             }),
             DocError::TooLarge { bytes } => Some(Self::TooLarge { bytes: *bytes }),
+            DocError::ClockAhead { .. } => Some(Self::ClockAhead),
             // Any other error of a document (it is `non_exhaustive`) is no refusal of the state.
             DocError::NotAnObject
             | DocError::Body(_)
@@ -148,6 +156,9 @@ impl fmt::Display for StateRefusal {
             Self::TooLarge { bytes } => write!(
                 f,
                 "a value of the write is too large for the shared state: {bytes} bytes with its keys; a value and its keys must fit one frame"
+            ),
+            Self::ClockAhead => f.write_str(
+                "the clock of the shared state is ahead of this machine time: retry in a few seconds",
             ),
         }
     }
@@ -217,6 +228,10 @@ mod tests {
             (
                 DocError::TooLarge { bytes: 4_000 },
                 "too large for the shared state",
+            ),
+            (
+                DocError::ClockAhead { ahead_ms: 1 },
+                "ahead of this machine time: retry in a few seconds",
             ),
         ];
         for (error, words) in cases {
