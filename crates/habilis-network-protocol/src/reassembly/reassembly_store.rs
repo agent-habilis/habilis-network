@@ -5,7 +5,7 @@ use super::{RepairTicket, ShardIngest};
 use std::collections::{BTreeMap, HashMap};
 
 use crate::messages::{Authored, Verified};
-use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
+use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, ShardGroup};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
     LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
@@ -47,9 +47,6 @@ pub(super) struct PartialGroup {
     /// Kind pinned at the first shard; a later shard of a different kind is a
     /// crafted stream and is dropped.
     kind: MessageKind,
-    /// The author's nickname (from the first shard) — where a repair request
-    /// for this group is addressed.
-    author: Nickname,
     slots: BTreeMap<u32, String>,
     header: Option<Verified>,
     bytes: usize,
@@ -147,7 +144,6 @@ impl ReassemblyStore {
                 .or_insert_with(|| PartialGroup {
                     total: shard.total,
                     kind: shard_msg.kind.clone(),
-                    author: shard_msg.author.clone(),
                     slots: BTreeMap::new(),
                     header: None,
                     bytes: 0,
@@ -277,7 +273,7 @@ impl ReassemblyStore {
     /// re-sends a directed shard point-to-point to its addressee.
     pub fn repair_tickets(&mut self, now: Instant) -> impl Iterator<Item = RepairTicket> {
         let mut tickets = Vec::new();
-        for ((_, group_id), group) in &mut self.groups {
+        for ((author, group_id), group) in &mut self.groups {
             if group.total <= LOGGED_SHARD_GROUP_MAX_TOTAL || group.is_complete() {
                 continue;
             }
@@ -294,7 +290,7 @@ impl ReassemblyStore {
                 .take(REASSEMBLY_REPAIR_MAX_IDXS)
                 .collect();
             tickets.push(RepairTicket {
-                author: group.author.clone(),
+                author: *author,
                 group: group_id.clone(),
                 missing,
             });

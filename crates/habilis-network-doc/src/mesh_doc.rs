@@ -7,7 +7,7 @@ use automerge::{
 use serde_json::{Map, Value};
 
 use habilis_network_protocol::messages::Verified;
-use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
+use habilis_network_protocol::{AuthorKey, DedupKey, Message, SymmetricKey};
 use habilis_network_util::consts::{
     DOC_EPOCH_ADOPT_WAIT_TICKS, DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_JUMP_MAX,
     DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX,
@@ -100,9 +100,17 @@ pub struct EpochSwitch {
     pub own_entry: Option<Value>,
 }
 
-/// Declares that a channel holds a **per-peer map** at the document root — one
-/// entry per nickname — in which a single field belongs to the peer that entry
-/// names, and may be written by no one else.
+/// Declares that a channel holds a **per-peer map** at the document root, keyed by the lowercase
+/// hex of an author key. One field of each entry belongs to the key that names the slot, and no
+/// other author may write it.
+///
+/// # What the gate guards
+///
+/// The gate guards the configured field of each slot and nothing else. A write to the field of a
+/// slot that another key names is refused, and so is a write to the field of a slot that is not a
+/// key in hex. Any author can write any other field of any slot, so those fields are open to
+/// forgery. An application that needs a field to belong to its author keeps it inside the
+/// gated field.
 ///
 /// The engine needs two things from this and nothing more: the map's key, so it
 /// can plant a shared genesis change and every replica agrees on that map's
@@ -130,14 +138,16 @@ pub struct EpochSwitch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SelfWriteGate {
-    /// Root key of the per-peer map, keyed by nickname.
+    /// Root key of the per-peer map, keyed by the lowercase hex of the author key. A nickname is a
+    /// label, so two keys can use one, and a slot named by it would be shared.
     pub map: String,
-    /// The field inside `<map>/<nick>/` that only `<nick>` may write.
+    /// The field inside `<map>/<key>/` that only the key `<key>` may write.
     pub field: String,
 }
 
 impl SelfWriteGate {
-    /// The gate for the per-peer map `map`, where only `<nick>` writes `<map>/<nick>/<field>`.
+    /// The gate for the per-peer map `map`, where only the key `<key>` (lowercase hex) writes
+    /// `<map>/<key>/<field>`.
     /// The map is a `String` and the field a `&str`, so a call with the two swapped does not compile.
     #[must_use]
     pub fn new(map: String, field: &str) -> Self {
@@ -355,7 +365,7 @@ impl MeshDoc {
     fn forges_foreign_entry(
         &self,
         change: &Change,
-        author: &Nickname,
+        author: &AuthorKey,
         hydrated: Option<&Value>,
     ) -> bool {
         let Some(gate) = self.gate.as_ref() else {
@@ -370,9 +380,8 @@ impl MeshDoc {
             None => peer_entries(&self.doc, gate),
         };
         let after = peer_entries(&fork, gate);
-        let author_name = author.as_str();
-        let mut nicks = before.keys().chain(after.keys());
-        nicks.any(|nick| nick.as_str() != author_name && before.get(nick) != after.get(nick))
+        let mut slots = before.keys().chain(after.keys());
+        slots.any(|slot| !author.matches_hex(slot) && before.get(slot) != after.get(slot))
     }
 
     /// Set this channel's encryption key (the daemon's per-channel
@@ -501,10 +510,10 @@ impl MeshDoc {
     /// A fresh joiner holds nothing, so one frame can move it up to `DOC_EPOCH_JUMP_MAX` epochs. The
     /// mesh then follows it within one wait, because that jump is inside the bound of the mesh, and
     /// the joiner holds frames of others after that, so it waits the next time.
-    pub fn adopt_if_alone(&mut self, me: &Nickname, own: &AuthorKey) -> Option<EpochSwitch> {
+    pub fn adopt_if_alone(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
         self.candidate.as_ref()?;
         let alone = self.frames.values().all(|frame| frame.key() == *own);
-        if alone { self.adopt(me) } else { None }
+        if alone { self.adopt(own) } else { None }
     }
 
     /// One tick of 1 minute. Adopts the candidate epoch when it has waited for
@@ -521,12 +530,12 @@ impl MeshDoc {
     /// tick after the wait: a node adopts at the end of the wait and writes its entry on the next
     /// sweep, so the entries are back in that margin, whatever the phase of the two timers. Only a
     /// gated channel has epochs: the free-form `state` channel keeps every frame.
-    pub fn tick_epoch(&mut self, me: &Nickname) -> Option<EpochSwitch> {
+    pub fn tick_epoch(&mut self, own: &AuthorKey) -> Option<EpochSwitch> {
         self.epoch_ticks = self.epoch_ticks.saturating_add(1);
         if self.candidate.is_some() {
             self.candidate_ticks = self.candidate_ticks.saturating_add(1);
             if self.candidate_ticks >= DOC_EPOCH_ADOPT_WAIT_TICKS {
-                return self.adopt(me);
+                return self.adopt(own);
             }
         }
         if self.epoch_ticks == DOC_EPOCH_ADOPT_WAIT_TICKS + 2 {
@@ -540,9 +549,9 @@ impl MeshDoc {
         };
         if self.gate.is_some() && self.frame_bytes >= threshold {
             if self.candidate.is_some() {
-                return self.adopt(me);
+                return self.adopt(own);
             }
-            return Some(self.switch_to(self.epoch.saturating_add(1), me));
+            return Some(self.switch_to(self.epoch.saturating_add(1), own));
         }
         None
     }
@@ -551,9 +560,9 @@ impl MeshDoc {
     /// epoch, and a peer sent it once, so a switch that dropped it would leave its dedup key seen
     /// with no frame behind it. A node that crosses the threshold with a candidate adopts it for
     /// that reason, and does not start an epoch of its own.
-    fn adopt(&mut self, me: &Nickname) -> Option<EpochSwitch> {
+    fn adopt(&mut self, switcher: &AuthorKey) -> Option<EpochSwitch> {
         let candidate = self.candidate.take()?;
-        let switch = self.switch_to(candidate.epoch, me);
+        let switch = self.switch_to(candidate.epoch, switcher);
         if !matches!(self.ingest(&candidate.frame), Ingested::Applied { .. }) {
             // Automerge can still refuse the change in `apply`, which only a crafted frame reaches.
             self.dropped.push(candidate.frame.dedup_key());
@@ -564,14 +573,14 @@ impl MeshDoc {
         Some(switch)
     }
 
-    /// Drop every frame and start `epoch`, and hand back the entry of `me`, which only `me` can
-    /// write again.
-    fn switch_to(&mut self, epoch: u64, me: &Nickname) -> EpochSwitch {
+    /// Drop every frame and start `epoch`, and hand back the entry of `own`, which only `own` can
+    /// write again. The entry is the slot that the lowercase hex of the key names.
+    fn switch_to(&mut self, epoch: u64, own: &AuthorKey) -> EpochSwitch {
         let gate_map = self.gate.as_ref().map(|gate| gate.map.clone());
         let map: String = gate_map.unwrap_or_default();
         let json = self.to_json();
         let peers = json.get(&map);
-        let own_entry: Option<Value> = peers.and_then(|peers| peers.get(me.as_str())).cloned();
+        let own_entry: Option<Value> = peers.and_then(|peers| peers.get(own.to_string())).cloned();
         self.restart(epoch);
         EpochSwitch {
             epoch,
@@ -731,7 +740,7 @@ impl MeshDoc {
         // rejection path this pays for a hydration it does not use, which is
         // the rare adversarial case rather than the steady-state one.
         let before = self.to_json();
-        if self.forges_foreign_entry(&change, &frame.author, Some(&before)) {
+        if self.forges_foreign_entry(&change, &frame.key(), Some(&before)) {
             return Ingested::Rejected;
         }
         if !self.apply(change, hash, frame.clone()) {
@@ -773,7 +782,7 @@ impl MeshDoc {
             return refuse(self);
         }
         let fresh = Self::new_gated(gate).at_epoch(epoch);
-        if fresh.forges_foreign_entry(change, &frame.author, None) {
+        if fresh.forges_foreign_entry(change, &frame.key(), None) {
             return Ingested::Rejected;
         }
         match self.candidate.as_ref() {
@@ -973,7 +982,7 @@ impl MeshDoc {
         let Some(entry) = self.pending.remove(&hash) else {
             return;
         };
-        if self.forges_foreign_entry(&entry.change, &entry.frame.author, None) {
+        if self.forges_foreign_entry(&entry.change, &entry.frame.key(), None) {
             return; // dropped, same as a directly-rejected change
         }
         self.apply(entry.change, hash, entry.frame);
@@ -991,7 +1000,7 @@ fn decode_hash(encoded: &str) -> Option<ChangeHash> {
     <[u8; 32]>::try_from(bytes.as_slice()).ok().map(ChangeHash)
 }
 
-/// Each peer's gated field, keyed by nick (absent → no entry). Derived from the
+/// Each peer's gated field, keyed by the slot of its key (absent → no entry). Derived from the
 /// hydrated JSON so it captures the field whatever its shape.
 fn peer_entries(doc: &Automerge, gate: &SelfWriteGate) -> Map<String, Value> {
     gated_entries(&doc_json(doc), gate)
@@ -1385,16 +1394,16 @@ mod tests {
         let first = author(
             &mut doc,
             &alice,
-            &json!({ "peers": { "alice": { "card": 1 } } }),
+            &json!({ "peers": { (slot("alice")): { "card": 1 } } }),
         );
         let second = author(
             &mut doc,
             &bob,
-            &json!({ "peers": { "bob": { "card": 2 } } }),
+            &json!({ "peers": { (slot("bob")): { "card": 2 } } }),
         );
         assert_eq!(
             hand_counted_wire_len(&first),
-            639,
+            720,
             "the hand count of the first frame matches the frame as it serializes"
         );
         let wire_bytes = hand_counted_wire_len(&first) + hand_counted_wire_len(&second);
@@ -1418,12 +1427,14 @@ mod tests {
         assert_eq!(heavy.frame_bytes, wire_bytes, "the same sum");
         assert_eq!(
             heavy.json_bytes,
-            Some(47),
-            "the 47 bytes of the two-entry document, counted by hand"
+            Some(167),
+            "the 167 bytes of the two-entry document, counted by hand: two slots of 64 hex digits"
         );
-        let mut nicks = heavy.peer_nicks.expect("the heavy census lists the owners");
-        nicks.sort();
-        assert_eq!(nicks, ["alice", "bob"], "the owners of the peer map");
+        let mut owners = heavy.peer_nicks.expect("the heavy census lists the owners");
+        owners.sort();
+        let mut slots = [slot("alice"), slot("bob")];
+        slots.sort();
+        assert_eq!(owners, slots, "the owners of the peer map");
         assert!(
             heavy.save_bytes.expect("a save was asked for") > 0,
             "the save has bytes"
@@ -1460,20 +1471,28 @@ mod tests {
     #[test]
     fn concurrent_peer_reports_converge_via_shared_genesis() {
         let _guard = ::habilis_network_test_tracing::init();
-        // Two peers each vivify their own `/peers/<nick>` entry concurrently. The
+        // Two peers each vivify their own `/peers/<key>` entry concurrently. The
         // shared `/peers` genesis makes these distinct keys in one map, so both
         // survive — the case that erased a card before the genesis existed.
         let (alice, bob) = (nick("alice"), nick("bob"));
         let mut left = MeshDoc::new_gated(card_gate());
         let mut right = MeshDoc::new_gated(card_gate());
 
-        let alice_frame = author(&mut left, &alice, &json!({"peers": {"alice": {"m": 1}}}));
-        let bob_frame = author(&mut right, &bob, &json!({"peers": {"bob": {"m": 2}}}));
+        let alice_frame = author(
+            &mut left,
+            &alice,
+            &json!({"peers": {(slot("alice")): {"m": 1}}}),
+        );
+        let bob_frame = author(
+            &mut right,
+            &bob,
+            &json!({"peers": {(slot("bob")): {"m": 2}}}),
+        );
 
         left.ingest(&bob_frame);
         right.ingest(&alice_frame);
 
-        let want = json!({"peers": {"alice": {"m": 1}, "bob": {"m": 2}}});
+        let want = json!({"peers": {(slot("alice")): {"m": 1}, (slot("bob")): {"m": 2}}});
         assert_eq!(
             left.to_json(),
             want,
@@ -1494,21 +1513,21 @@ mod tests {
         author(
             &mut doc,
             &alice,
-            &json!({"peers": {"alice": {"model": "opus", "host": "box"}}}),
+            &json!({"peers": {(slot("alice")): {"model": "opus", "host": "box"}}}),
         );
         author(
             &mut doc,
             &alice,
-            &json!({"peers": {"alice": {"model": "sonnet"}}}),
+            &json!({"peers": {(slot("alice")): {"model": "sonnet"}}}),
         );
         author(
             &mut doc,
             &alice,
-            &json!({"peers": {"alice": {"host": null}}}),
+            &json!({"peers": {(slot("alice")): {"host": null}}}),
         );
         assert_eq!(
             doc.to_json(),
-            json!({"peers": {"alice": {"model": "sonnet"}}}),
+            json!({"peers": {(slot("alice")): {"model": "sonnet"}}}),
             "a null deletes its key and keeps the siblings"
         );
     }
@@ -2069,12 +2088,12 @@ mod tests {
     }
 
     fn entry(who: &str, card: &str) -> Value {
-        json!({ "peers": { who: { "card": card, "status": "idle" } } })
+        json!({ "peers": { (slot(who)): { "card": card, "status": "idle" } } })
     }
 
     /// A write of `who` that adds one field of about 2 KB: one frame, below the size of a message.
     fn filler(who: &str, field: &str) -> Value {
-        json!({ "peers": { who: { field: long(1_800) } } })
+        json!({ "peers": { (slot(who)): { field: long(1_800) } } })
     }
 
     /// `len` characters that automerge cannot squeeze, so a frame is about as long as its entry.
@@ -2109,7 +2128,7 @@ mod tests {
             write(&mut doc, &ghost, &filler("ghost", field));
         }
         write(&mut doc, &me, &entry("me", "mine"));
-        let switch = doc.tick_epoch(&me).expect("over the cap: a reset");
+        let switch = doc.tick_epoch(&signer(&me)).expect("over the cap: a reset");
         assert_eq!(switch.epoch, 1, "the reset starts the next epoch");
         assert_eq!(doc.epoch(), 1, "the document holds the new epoch");
         assert_eq!(
@@ -2138,7 +2157,7 @@ mod tests {
         let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(1_000_000);
         write(&mut doc, &me, &entry("me", "mine"));
         assert_eq!(
-            doc.tick_epoch(&me),
+            doc.tick_epoch(&signer(&me)),
             None,
             "a document under the cap does not reset"
         );
@@ -2152,12 +2171,12 @@ mod tests {
         let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(4_000);
         write(&mut doc, &me, &entry("me", "mine"));
         for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS + 2 {
-            assert!(doc.tick_epoch(&me).is_none(), "under the cap");
+            assert!(doc.tick_epoch(&signer(&me)).is_none(), "under the cap");
         }
         for field in ["a", "b"] {
             write(&mut doc, &ann, &filler("ann", field));
         }
-        let switch = doc.tick_epoch(&me).expect("over the cap");
+        let switch = doc.tick_epoch(&signer(&me)).expect("over the cap");
         assert_eq!(switch.epoch, 1, "the first reset starts epoch 1");
         // The live entries come back, and they alone are over the cap.
         for who in [&me, &ann, &bob, &cat] {
@@ -2166,7 +2185,10 @@ mod tests {
         let live = doc.census(false).frame_bytes;
         assert!(live > 4_000, "the live entries fill the cap: {live}");
         for tick in 0..30 {
-            assert!(doc.tick_epoch(&me).is_none(), "no reset at tick {tick}");
+            assert!(
+                doc.tick_epoch(&signer(&me)).is_none(),
+                "no reset at tick {tick}"
+            );
         }
         assert_eq!(
             doc.epoch(),
@@ -2184,11 +2206,12 @@ mod tests {
         write(&mut doc, &me, &entry("me", "mine"));
         let (mut resets, mut peak) = (0, 0);
         for round in 0..200 {
-            let merge = json!({ "peers": { "me": { "status": format!("{round}{}", long(300)) } } });
+            let merge =
+                json!({ "peers": { (slot("me")): { "status": format!("{round}{}", long(300)) } } });
             write(&mut doc, &me, &merge);
-            if let Some(switch) = doc.tick_epoch(&me) {
+            if let Some(switch) = doc.tick_epoch(&signer(&me)) {
                 resets += 1;
-                let again = json!({ "peers": { "me": switch.own_entry } });
+                let again = json!({ "peers": { (slot("me")): switch.own_entry } });
                 write(&mut doc, &me, &again);
             }
             peak = peak.max(doc.census(false).frame_bytes);
@@ -2213,7 +2236,7 @@ mod tests {
         );
         assert_eq!(doc.epoch(), 0, "the frame alone does not switch");
         let switch = doc
-            .adopt_if_alone(&joiner, &signer(&joiner))
+            .adopt_if_alone(&signer(&joiner))
             .expect("a node that holds nothing from others adopts");
         assert_eq!(switch.epoch, 1, "the node adopts the epoch of the root");
         assert_eq!(
@@ -2224,7 +2247,7 @@ mod tests {
         assert_eq!(doc.epoch(), 1, "the document holds the new epoch");
         assert_eq!(
             doc.to_json(),
-            json!({ "peers": { "live": { "card": "live card", "status": "idle" } } }),
+            json!({ "peers": { (slot("live")): { "card": "live card", "status": "idle" } } }),
             "the root applies in the new epoch and nothing of the old one stays"
         );
     }
@@ -2244,11 +2267,14 @@ mod tests {
             "the root of epoch 1 is the candidate"
         );
         assert!(
-            doc.adopt_if_alone(&quiet, &signer(&quiet)).is_none(),
+            doc.adopt_if_alone(&signer(&quiet)).is_none(),
             "a node that holds frames of others does not adopt at once"
         );
         for tick in 1..5 {
-            assert!(doc.tick_epoch(&quiet).is_none(), "tick {tick} waits");
+            assert!(
+                doc.tick_epoch(&signer(&quiet)).is_none(),
+                "tick {tick} waits"
+            );
         }
         assert!(
             matches!(
@@ -2257,7 +2283,7 @@ mod tests {
             ),
             "the root of epoch 2 takes the place of the root of epoch 1"
         );
-        let switch = doc.tick_epoch(&quiet).expect("the wait is over");
+        let switch = doc.tick_epoch(&signer(&quiet)).expect("the wait is over");
         assert_eq!(switch.epoch, 2, "it jumps to the highest epoch that it saw");
         assert_eq!(
             switch.own_entry,
@@ -2266,7 +2292,7 @@ mod tests {
         );
         assert_eq!(
             doc.to_json(),
-            json!({ "peers": { "live": { "card": "two", "status": "idle" } } }),
+            json!({ "peers": { (slot("live")): { "card": "two", "status": "idle" } } }),
             "the document holds the entry of the highest epoch only"
         );
     }
@@ -2320,14 +2346,14 @@ mod tests {
         }
         for _ in 0..20 {
             assert!(
-                doc.tick_epoch(&me).is_none(),
+                doc.tick_epoch(&signer(&me)).is_none(),
                 "a refused frame never starts a reset"
             );
         }
         assert_eq!(doc.epoch(), 0, "no refused frame changes the epoch");
         assert_eq!(
             doc.to_json(),
-            json!({ "peers": { "alice": { "card": "alice card", "status": "idle" } } }),
+            json!({ "peers": { (slot("alice")): { "card": "alice card", "status": "idle" } } }),
             "no refused frame changes the document"
         );
     }
@@ -2346,7 +2372,7 @@ mod tests {
         assert!(dropped_keys(&mut doc).is_empty(), "a dead frame stays seen");
         assert_eq!(
             doc.to_json(),
-            json!({ "peers": { "me": { "card": "mine", "status": "idle" } } }),
+            json!({ "peers": { (slot("me")): { "card": "mine", "status": "idle" } } }),
             "a frame of a dead epoch does not change the document"
         );
     }
@@ -2396,7 +2422,7 @@ mod tests {
     }
 
     fn holds_entry(doc: &MeshDoc, who: &str) -> bool {
-        doc.to_json()["peers"].get(who).is_some()
+        doc.to_json()["peers"].get(slot(who)).is_some()
     }
 
     #[test]
@@ -2409,7 +2435,7 @@ mod tests {
             matches!(doc.ingest(&from_alice), Ingested::NewEpoch { epoch: 1 }),
             "the root of epoch 1 is the candidate of a node that is still at epoch 0"
         );
-        doc.tick_epoch(&bob)
+        doc.tick_epoch(&signer(&bob))
             .expect("over the cap: a reset to epoch 1");
         let forgotten = dropped_keys(&mut doc).contains(&from_alice.dedup_key());
         assert!(
@@ -2428,7 +2454,9 @@ mod tests {
             matches!(doc.ingest(&from_alice), Ingested::NewEpoch { epoch: 3 }),
             "the root of epoch 3 is the candidate"
         );
-        let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
+        let switch = doc
+            .tick_epoch(&signer(&bob))
+            .expect("over the cap: a switch");
         assert_eq!(
             switch.epoch, 3,
             "the switch goes to the epoch of the candidate"
@@ -2459,7 +2487,9 @@ mod tests {
             epoch: 1,
             frame: forged.clone(),
         });
-        let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
+        let switch = doc
+            .tick_epoch(&signer(&bob))
+            .expect("over the cap: a switch");
         assert_eq!(switch.epoch, 1, "the node still goes to the epoch");
         assert!(
             !holds_entry(&doc, "alice"),
@@ -2483,7 +2513,7 @@ mod tests {
         let mut sent: Vec<Verified> = Vec::new();
         for first in 0..names.len() {
             docs[first]
-                .tick_epoch(&names[first])
+                .tick_epoch(&signer(&names[first]))
                 .expect("over the cap: a reset");
             let card = entry(names[first].as_str(), "mine");
             sent.push(write(&mut docs[first], &names[first], &card));
@@ -2670,12 +2700,12 @@ mod tests {
         let bob_card = author(
             &mut attacker,
             &bob,
-            &json!({"peers": {"bob": {"card": {"metadata": {"pubkey": "bb"}}}}}),
+            &json!({"peers": {(slot("bob")): {"card": {"metadata": {"pubkey": "bb"}}}}}),
         );
         let forged = author(
             &mut attacker,
             &alice,
-            &json!({"peers": {"bob": {"card": {"metadata": {"pubkey": "ff"}}}}}),
+            &json!({"peers": {(slot("bob")): {"card": {"metadata": {"pubkey": "ff"}}}}}),
         );
 
         // A gated victim accepts Bob's real card, then refuses Alice's forge.
@@ -2690,7 +2720,7 @@ mod tests {
         );
         assert_eq!(
             victim.to_json(),
-            json!({"peers": {"bob": {"card": {"metadata": {"pubkey": "bb"}}}}}),
+            json!({"peers": {(slot("bob")): {"card": {"metadata": {"pubkey": "bb"}}}}}),
             "the victim keeps its card after a forged write"
         );
 
@@ -2698,7 +2728,7 @@ mod tests {
         let mut alice_doc = MeshDoc::new_gated(card_gate());
         let own_bytes: Vec<u8> = alice_doc
             .build_change(
-                &json!({"peers": {"alice": {"card": {"name": "alice"}}}}),
+                &json!({"peers": {(slot("alice")): {"card": {"name": "alice"}}}}),
                 &pad_seed(alice.as_str().as_bytes()),
             )
             .expect("builds")
@@ -2712,10 +2742,118 @@ mod tests {
         );
     }
 
+    /// The slot of the author whose actor seed is `seed`: the lowercase hex of its key.
+    fn slot(seed: &str) -> String {
+        AuthorKey::from_bytes(pad_seed(seed.as_bytes())).to_string()
+    }
+
+    /// A nickname is a label, so two keys can use one. Each key owns the slot that its own key
+    /// names, and neither key writes the slot of the other.
+    #[test]
+    fn two_keys_under_one_nickname_each_own_a_slot_and_neither_writes_the_other() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let twin = nick("twin");
+        let (first, second) = (slot("twin-first"), slot("twin-second"));
+
+        let mut source = MeshDoc::new_gated(card_gate()).synced_but_ungated();
+        let first_card = author_as(
+            &mut source,
+            &twin,
+            b"twin-first",
+            &json!({"peers": {(first.clone()): {"card": {"name": "first"}}}}),
+        );
+        let second_card = author_as(
+            &mut source,
+            &twin,
+            b"twin-second",
+            &json!({"peers": {(second.clone()): {"card": {"name": "second"}}}}),
+        );
+        let overwrite = author_as(
+            &mut source,
+            &twin,
+            b"twin-second",
+            &json!({"peers": {(first.clone()): {"card": {"name": "forged"}}}}),
+        );
+
+        let mut victim = MeshDoc::new_gated(card_gate());
+        assert!(
+            matches!(victim.ingest(&first_card), Ingested::Applied { .. }),
+            "the first key could not write the slot of its own key"
+        );
+        assert!(
+            matches!(victim.ingest(&second_card), Ingested::Applied { .. }),
+            "the second key could not write the slot of its own key"
+        );
+        assert!(
+            matches!(victim.ingest(&overwrite), Ingested::Rejected),
+            "the second key wrote the slot of the first key"
+        );
+        assert_eq!(
+            victim.to_json(),
+            json!({"peers": {
+                (first): {"card": {"name": "first"}},
+                (second): {"card": {"name": "second"}},
+            }}),
+            "each slot keeps the card of its own key"
+        );
+    }
+
+    /// A slot named by a nickname is the slot that two keys share. No key owns it, so the gate
+    /// refuses a write to it.
+    #[test]
+    fn a_slot_named_by_the_nickname_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let twin = nick("twin");
+        let mut source = MeshDoc::new_gated(card_gate()).synced_but_ungated();
+        let by_name = author_as(
+            &mut source,
+            &twin,
+            b"twin-first",
+            &json!({"peers": {"twin": {"card": {"name": "first"}}}}),
+        );
+
+        let mut victim = MeshDoc::new_gated(card_gate());
+        assert!(
+            matches!(victim.ingest(&by_name), Ingested::Rejected),
+            "a write to the slot of a nickname was accepted"
+        );
+    }
+
+    /// The gate guards the configured field and no other. Any author can write another field of
+    /// any slot, including a slot that a nickname names. This test pins that limit.
+    #[test]
+    fn a_field_that_is_not_gated_is_open_to_any_author() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let writer = nick("writer");
+        let mut doc = MeshDoc::new_gated(card_gate());
+
+        let _ = author_as(
+            &mut doc,
+            &writer,
+            b"writer",
+            &json!({"peers": {(slot("victim")): {"status": "busy"}}}),
+        );
+        let _ = author_as(
+            &mut doc,
+            &writer,
+            b"writer",
+            &json!({"peers": {"victim": {"status": "busy"}}}),
+        );
+
+        assert_eq!(
+            doc.to_json(),
+            json!({"peers": {
+                (slot("victim")): {"status": "busy"},
+                "victim": {"status": "busy"},
+            }}),
+            "a field other than the gated one was refused"
+        );
+    }
+
     #[test]
     fn self_entry_delete_passes_gate_foreign_delete_is_rejected() {
         let _guard = ::habilis_network_test_tracing::init();
-        // The leave-time retraction: a peer nulls its own `/peers/<nick>`
+        // The leave-time retraction: a peer nulls its own `/peers/<key>`
         // entry. The gate must let the owner do it and refuse anyone else —
         // which is why departed peers can only ever be pruned by themselves.
         let (alice, bob) = (nick("alice"), nick("bob"));
@@ -2726,9 +2864,13 @@ mod tests {
         let alice_card = author(
             &mut source,
             &alice,
-            &json!({"peers": {"alice": {"card": {"name": "alice"}, "model": "m1"}}}),
+            &json!({"peers": {(slot("alice")): {"card": {"name": "alice"}, "model": "m1"}}}),
         );
-        let self_delete = author(&mut source, &alice, &json!({"peers": {"alice": null}}));
+        let self_delete = author(
+            &mut source,
+            &alice,
+            &json!({"peers": {(slot("alice")): null}}),
+        );
 
         let mut victim = MeshDoc::new_gated(card_gate());
         assert!(
@@ -2740,7 +2882,9 @@ mod tests {
             "a foreign delete is rejected"
         );
         assert_eq!(
-            victim.to_json().pointer("/peers/alice"),
+            victim
+                .to_json()
+                .pointer(&format!("/peers/{}", slot("alice"))),
             None,
             "the whole entry — card and agent facts — is gone"
         );
@@ -2751,12 +2895,12 @@ mod tests {
         let card_frame = author(
             &mut foreign_source,
             &alice,
-            &json!({"peers": {"alice": {"card": {"name": "alice"}}}}),
+            &json!({"peers": {(slot("alice")): {"card": {"name": "alice"}}}}),
         );
         let foreign_delete = author(
             &mut foreign_source,
             &bob,
-            &json!({"peers": {"alice": null}}),
+            &json!({"peers": {(slot("alice")): null}}),
         );
         let mut gated = MeshDoc::new_gated(card_gate());
         assert!(
@@ -2768,7 +2912,9 @@ mod tests {
             "the gated sink rejects a foreign delete"
         );
         assert_eq!(
-            gated.to_json().pointer("/peers/alice/card/name"),
+            gated
+                .to_json()
+                .pointer(&format!("/peers/{}/card/name", slot("alice"))),
             Some(&json!("alice")),
             "the gated sink keeps the card after the rejected delete"
         );
@@ -2787,19 +2933,21 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let alice = nick("alice");
 
+        // A restart mints a new key, so the new session owns a new slot. The retraction of the old
+        // slot must not touch it, and the backfill of the old history must not erase it.
         // Old session: card, then the leave-time retraction.
         let mut old_session = MeshDoc::new_gated(card_gate());
         let old_card = author_as(
             &mut old_session,
             &alice,
             b"alice-session-key-old",
-            &json!({"peers": {"alice": {"card": {"name": "alice", "session": "old"}}}}),
+            &json!({"peers": {(slot("alice-session-key-old")): {"card": {"name": "alice", "session": "old"}}}}),
         );
         let retraction = author_as(
             &mut old_session,
             &alice,
             b"alice-session-key-old",
-            &json!({"peers": {"alice": null}}),
+            &json!({"peers": {(slot("alice-session-key-old")): null}}),
         );
 
         // A staying peer applied both.
@@ -2813,7 +2961,8 @@ mod tests {
             "the retraction is accepted"
         );
         assert_eq!(
-            host.to_json().pointer("/peers/alice"),
+            host.to_json()
+                .pointer(&format!("/peers/{}", slot("alice-session-key-old"))),
             None,
             "the republished card survives the prior self delete"
         );
@@ -2824,7 +2973,7 @@ mod tests {
             &mut new_session,
             &alice,
             b"alice-session-key-new",
-            &json!({"peers": {"alice": {"card": {"name": "alice", "session": "new"}}}}),
+            &json!({"peers": {(slot("alice-session-key-new")): {"card": {"name": "alice", "session": "new"}}}}),
         );
 
         // Both directions converge on the new card.
@@ -2834,7 +2983,10 @@ mod tests {
             "expected applied, got {outcome:?}"
         );
         assert_eq!(
-            host.to_json().pointer("/peers/alice/card/session"),
+            host.to_json().pointer(&format!(
+                "/peers/{}/card/session",
+                slot("alice-session-key-new")
+            )),
             Some(&json!("new")),
             "the fresh publish must survive the earlier delete: {}",
             host.to_json()
@@ -2848,7 +3000,10 @@ mod tests {
             "a new session accepts the retraction"
         );
         assert_eq!(
-            new_session.to_json().pointer("/peers/alice/card/session"),
+            new_session.to_json().pointer(&format!(
+                "/peers/{}/card/session",
+                slot("alice-session-key-new")
+            )),
             Some(&json!("new")),
             "backfilling the old history must not erase the new card: {}",
             new_session.to_json()

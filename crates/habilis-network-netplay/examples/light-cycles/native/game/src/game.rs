@@ -84,8 +84,6 @@ pub struct Game {
     /// Render ticks since the match was decided, or `None` while playing.
     decided_since: Option<u32>,
     desynced: bool,
-    /// The last reason the lobby refused to start, if it still stands.
-    blocked: Option<String>,
 }
 
 impl Game {
@@ -106,7 +104,6 @@ impl Game {
             ticks: 0,
             decided_since: None,
             desynced: false,
-            blocked: None,
         }
     }
 
@@ -158,7 +155,6 @@ impl Game {
             present,
             waiting: self.session.is_none(),
             desynced: self.desynced,
-            blocked: self.blocked.clone(),
             syncing,
         }
     }
@@ -196,10 +192,6 @@ impl Game {
         // than reclaiming its old entry. Without this the roster only
         // grows and the next match is proposed with a ghost in it.
         lobby.expire(now, TickSpan::new(u64::from(PRESENCE_EVERY_TICKS) * 12));
-        // Asked of every peer, not just whichever one proposes: the other
-        // would otherwise show "players ready" for a match that can never
-        // start.
-        self.blocked = lobby.blocker().map(|reason| reason.to_string());
         for (pubkey, nick) in lobby.present() {
             self.nicks.insert(pubkey, nick);
         }
@@ -286,16 +278,8 @@ impl Game {
         let Some(lobby) = self.lobby.as_mut() else {
             return;
         };
-        // Kept, not discarded. `NotEnoughPlayers` is transient and
-        // `ready_for_a_new_match` already ruled it out; the one this can
-        // really return is `DuplicateNickname`, which is *permanent* —
-        // the check is a pure function of a roster that never shrinks, so
-        // retrying it every tick forever changes nothing. Swallowing it
-        // left the screen reading "GET READY" for a match that could
-        // never start, which is the worst possible direction to be wrong
-        // in.
-        // The reason, if there is one, was already recorded by
-        // `pump_lobby`'s `blocker()` call — this only has to stop.
+        // `NotEnoughPlayers` is the only refusal, and `ready_for_a_new_match` already ruled it
+        // out, so a refusal here only means the roster shrank since: stop and try next tick.
         let Ok(start) = lobby.propose() else {
             return;
         };

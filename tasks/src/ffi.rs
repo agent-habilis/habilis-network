@@ -130,7 +130,7 @@ fn declared(header: &str) -> BTreeSet<String> {
             continue;
         }
         let len = header[start..]
-            .find(|ch: char| !(ch.is_ascii_lowercase() || ch == '_'))
+            .find(|ch: char| !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'))
             .unwrap_or(header.len() - start);
         if header[start + len..].starts_with('(') {
             names.insert(header[start..start + len].to_owned());
@@ -153,8 +153,36 @@ fn exported(nm: &str) -> BTreeSet<String> {
             symbol.starts_with("habilis_network_")
                 && symbol
                     .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         })
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{declared, exported};
+
+    /// A name with a digit, such as `habilis_network_msg_recv_v2`, is a function of the header.
+    /// A scrape that stops at the digit never sees it, and the gate passes for a symbol that the
+    /// archive might not export.
+    #[test]
+    fn a_function_name_with_a_digit_is_declared() {
+        let names = declared("long habilis_network_msg_recv_v2(habilis_network_mesh *handle);");
+
+        assert!(
+            names.contains("habilis_network_msg_recv_v2"),
+            "the scrape missed a name with a digit: {names:?}"
+        );
+    }
+
+    #[test]
+    fn an_archive_symbol_with_a_digit_is_exported() {
+        let names = exported("0000000000001234 T _habilis_network_msg_recv_v2\n");
+
+        assert!(
+            names.contains("habilis_network_msg_recv_v2"),
+            "the filter dropped a symbol with a digit: {names:?}"
+        );
+    }
 }

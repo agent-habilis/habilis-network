@@ -9,7 +9,8 @@ exchange changes and automerge merges them without conflicts.
 - Every change travels inside a signed message and is authorized before
   it touches the live document.
 - `SelfWriteGate` applies each change to a throwaway fork first and
-  rejects it if it would alter another peer's field.
+  rejects it if it would alter the gated field of another peer's slot.
+  The other fields of a slot are not gated.
 - Changes that arrive before their causal dependencies wait in a pending
   buffer and drain through the same gate.
 

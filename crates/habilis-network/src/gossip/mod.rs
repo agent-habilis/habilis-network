@@ -48,5 +48,5 @@ pub(crate) use path_summary::PathSummary;
 
 pub(crate) use recv::{
     drain_dead_receiver, drain_queued, flush_pending, handle_gossip_event, ingest_from,
-    requeue_failed, retain_own_broadcast,
+    requeue_failed,
 };

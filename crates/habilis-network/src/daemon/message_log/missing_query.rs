@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::protocol::{DedupKey, Nickname};
+use crate::protocol::{AuthorKey, DedupKey};
 
 use super::WindowRange;
 
@@ -13,5 +13,5 @@ pub(crate) struct MissingQuery<'query> {
     pub range: WindowRange,
     pub have: &'query HashSet<DedupKey>,
     pub max: usize,
-    pub requester: &'query Nickname,
+    pub requester: &'query AuthorKey,
 }

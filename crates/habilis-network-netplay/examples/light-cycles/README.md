@@ -84,8 +84,7 @@ Room codes are case-sensitive — `topic_seed` hashes the string byte for byte,
 so `Volt-Paddle` and `volt-paddle` are different rooms.
 
 If a match will not start, the status line says why (`WAITING`,
-`2 PLAYERS READY`, `SYNCING`, or the reason it is blocked — two players
-sharing a nickname, say). For anything below that, `--log-file game.log` with
+`2 PLAYERS READY`, or `SYNCING`). For anything below that, `--log-file game.log` with
 `RUST_LOG=habilis_network=debug` writes the engine's own log to a file; it cannot go to
 the terminal, which the game's alternate screen owns.
 

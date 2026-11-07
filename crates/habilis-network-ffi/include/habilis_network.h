@@ -71,11 +71,27 @@ typedef struct {
 } habilis_network_opts;
 
 /*
- * Metadata for one received message. The text lands NUL-terminated in the
- * caller's buffer; `len` is its length in bytes, excluding the NUL.
+ * Metadata for one received message, with the key of its author. The text lands
+ * NUL-terminated in the caller's buffer; `len` is its length in bytes, excluding
+ * the NUL. Two members can use one nickname, so a nickname names no author; the
+ * key does, and habilis_network_msg_send_to_key() sends to it.
+ *
+ * The struct has no size field: the caller allocates it with this header. It has
+ * 144 bytes and alignment 8 on a 64-bit target (140 bytes with a 4-byte size_t):
+ *
+ *   offset   0  char nick[64]   the author's nickname, truncated to 63 bytes
+ *   offset  64  char key[65]    64 lowercase hex digits and the NUL
+ *   offset 129  3 bytes of padding
+ *   offset 132  int directed
+ *   offset 136  size_t len
+ *
+ * This layout replaced one of 80 bytes that had no key (nick at 0, directed at 64,
+ * len at 72). Every caller built with the old header must be rebuilt: an old
+ * caller allocates 80 bytes, and habilis_network_msg_recv() writes 144.
  */
 typedef struct {
-  char nick[64];  /* the author's nickname, truncated to 63 bytes if longer */
+  char nick[64];
+  char key[65];
   int directed;   /* 1 = addressed to us specifically, 0 = broadcast */
   size_t len;
 } habilis_network_msg;
@@ -96,6 +112,15 @@ const char *habilis_network_mesh_nickname(const habilis_network_mesh *handle);
  * Bulk bytes belong on a stream.
  */
 int habilis_network_msg_send(habilis_network_mesh *handle, const char *to, const char *text);
+
+/*
+ * Send one message to the member that holds an author key. `key` is 64 lowercase
+ * hex digits: the `key` of a received habilis_network_msg, or of a roster row.
+ * Two members can use one nickname, and habilis_network_msg_send() refuses such a
+ * nickname; a key names one member. 0 on success, -1 on failure: a text that is
+ * not a key, or a message that does not fit one frame, is refused.
+ */
+int habilis_network_msg_send_to_key(habilis_network_mesh *handle, const char *key, const char *text);
 
 /*
  * Take the next inbound message, waiting up to `timeout_ms`. Returns 1 with the
@@ -125,12 +150,11 @@ long habilis_network_mesh_state_json(habilis_network_mesh *handle, char *buffer,
 long habilis_network_mesh_peers_json(habilis_network_mesh *handle, char *buffer, size_t cap);
 
 /*
- * How many peers other than you are in the mesh right now; 0 means you are
+ * How many members are in the mesh right now, you included; 1 means you are
  * alone. -1 on failure.
  *
- * Deliberately NOT the roster JSON's own "count" field, which includes you and
- * so never reads 0. This is the question a sender waiting for company has, and
- * the answer it can loop on.
+ * The same number as the roster JSON's "count" field. A sender waiting for
+ * company loops until it reads 2 or more.
  */
 long habilis_network_mesh_peer_count(habilis_network_mesh *handle);
 

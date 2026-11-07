@@ -10,7 +10,7 @@ import { ABI } from './abi.ts'
  */
 function declared(header: string): Set<string> {
   return new Set(
-    [...header.matchAll(/(?<![\w])habilis_network_[a-z_]*(?=\()/g)].map((match) => match[0]),
+    [...header.matchAll(/(?<![\w])habilis_network_[a-z0-9_]*(?=\()/g)].map((match) => match[0]),
   )
 }
 
@@ -29,6 +29,12 @@ describe('the signature table and the header', () => {
     const header = await Bun.file(new URL(HEADER, import.meta.url)).text()
 
     expect(declared(header).size).toBeGreaterThan(10)
+  })
+
+  test('the scrape reads a name with a digit', () => {
+    expect(declared('long habilis_network_msg_recv2(habilis_network_mesh *h);')).toEqual(
+      new Set(['habilis_network_msg_recv2']),
+    )
   })
 
   test('the scrape ignores a mention that is not a call', () => {

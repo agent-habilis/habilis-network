@@ -177,7 +177,7 @@ impl Message {
     /// A `Pong` response addressed to the original pinger (`to`), naming the `Ping` (`probe`) that
     /// it answers.
     #[must_use]
-    pub fn new_pong(mesh: &MeshId, author: &Nickname, to: Nickname, probe: &MessageId) -> Self {
+    pub fn new_pong(mesh: &MeshId, author: &Nickname, to: AuthorKey, probe: &MessageId) -> Self {
         let probe = probe.clone();
         Self::new(mesh, author, MessageKind::Pong { to, probe }, empty_body())
     }
@@ -272,8 +272,21 @@ impl Message {
         if data.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge);
         }
-        let wire: WireIn = serde_json::from_slice(data)
-            .map_err(MessageError::with_step("failed to parse message JSON"))?;
+        let wire: WireIn = match serde_json::from_slice(data) {
+            Ok(wire) => wire,
+            Err(error) => {
+                // A frame of another version can fail on a field that the version changed. The
+                // cause to name is the version, not the field.
+                if let Some(version) = envelope_version(data)
+                    && version != VERSION
+                {
+                    return Err(MessageError::UnsupportedVersion(version));
+                }
+                return Err(MessageError::with_step("failed to parse message JSON")(
+                    error,
+                ));
+            }
+        };
         if wire.version != VERSION {
             return Err(MessageError::UnsupportedVersion(wire.version));
         }
@@ -543,4 +556,11 @@ impl Message {
             ext: serde_json::json!({}),
         }
     }
+}
+
+/// The `v` of a JSON envelope, for a frame that does not parse as a whole.
+fn envelope_version(data: &[u8]) -> Option<String> {
+    let envelope: serde_json::Value = serde_json::from_slice(data).ok()?;
+    let version = envelope.get("v")?;
+    version.as_str().map(str::to_owned)
 }

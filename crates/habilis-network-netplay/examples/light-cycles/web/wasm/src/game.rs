@@ -85,8 +85,6 @@ pub struct Game {
     /// Render ticks since the match was decided, or `None` while playing.
     decided_since: Option<u32>,
     desynced: bool,
-    /// The last reason the lobby refused to start, if it still stands.
-    blocked: Option<String>,
     /// Who was in the lobby when [`Game::drain_events`] last ran.
     known: BTreeMap<AuthorKey, Nickname>,
     pending_events: Vec<GameEvent>,
@@ -108,7 +106,6 @@ impl Game {
             ticks: 0,
             decided_since: None,
             desynced: false,
-            blocked: None,
             known: BTreeMap::new(),
             pending_events: Vec::new(),
         }
@@ -166,7 +163,6 @@ impl Game {
             present,
             waiting: self.session.is_none(),
             desynced: self.desynced,
-            blocked: self.blocked.clone(),
             syncing,
         }
     }
@@ -204,10 +200,6 @@ impl Game {
         // than reclaiming its old entry. Without this the roster only
         // grows and the next match is proposed with a ghost in it.
         lobby.expire(now, TickSpan::new(u64::from(PRESENCE_EVERY_TICKS) * 12));
-        // Asked of every peer, not just whichever one proposes: the other
-        // would otherwise show "players ready" for a match that can never
-        // start.
-        self.blocked = lobby.blocker().map(|reason| reason.to_string());
         let present: BTreeMap<AuthorKey, Nickname> = lobby.present().collect();
         for (pubkey, nick) in &present {
             if !self.known.contains_key(pubkey) {
