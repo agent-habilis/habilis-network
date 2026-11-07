@@ -23,7 +23,7 @@ use habilis_network::protocol::{
     AppFrameParams, AppTag, Channel, LookupOpts, MessageBody, Nickname,
 };
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh, tuning,
 };
 use tokio::sync::oneshot;
 
@@ -164,6 +164,8 @@ fn nick(name: &str) -> Nickname {
 
 // the app writes what it reads here, and the test reads it after the run
 async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>) {
+    // These tests write state at once: the wait for the first sync ends at the start.
+    tuning::init(tuning::Tuning::DEFAULTS.state_sync_wait(Duration::ZERO));
     // the app writes what it reads here, and the test reads it after the run
     let read = Arc::new(Mutex::new(Vec::new()));
     let mesh =
@@ -442,7 +444,7 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
             eprintln!("attempt {attempt} had no answer on the connection");
             assert!(
                 attempt < STATE_ATTEMPTS,
-                "no answer went on the connection in {STATE_ATTEMPTS} attempts: the unicast path never started"
+                "no answer went on the connection in {STATE_ATTEMPTS} attempts: no answer went on the connection, or no digest came on the connection"
             );
             attempt += 1;
         }

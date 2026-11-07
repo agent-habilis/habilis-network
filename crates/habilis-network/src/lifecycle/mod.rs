@@ -17,8 +17,10 @@ pub(crate) mod membership_update;
 mod observed;
 mod presence_event;
 pub(crate) use logs::{log_leaving, log_ready};
-pub(crate) use observed::observe;
-pub(crate) use presence_event::{PresenceEvent, handle_presence};
+pub(crate) use observed::{Observed, observe};
+pub(crate) use presence_event::{
+    Goodbye, PresenceEvent, ask_for_proof, end_session, handle_presence,
+};
 
 #[cfg(test)]
 mod tests {
@@ -115,6 +117,60 @@ mod departed_tests {
             .expect("subscribe to a peerless topic");
         let (gossip_sender, _receiver) = topic.split();
         (endpoint, MeshSender::new(gossip_sender))
+    }
+
+    /// A key that is not in the roster can keep a retained endpoint (its `PeerInfo` came before its
+    /// admission). Its goodbye must release that endpoint, or a directed send could still route to it.
+    #[test]
+    fn the_goodbye_of_a_stranger_releases_its_retained_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let stranger = Identity::generate();
+            let left = Message::new_left(&mesh, &nick("stranger")).sign(&stranger);
+            let mut state = fresh_state();
+            let mut app = Inert;
+            state.retain_refused_endpoint(
+                stranger.author_key(),
+                iroh::EndpointAddr::new(endpoint_id(70)),
+            );
+            let update = membership_update::compute_for(&left, &state);
+
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.refused_endpoints.contains_key(&stranger.author_key()),
+                "a directed send could still route to the endpoint of a key that said goodbye"
+            );
+            endpoint.close().await;
+        });
     }
 
     #[test]

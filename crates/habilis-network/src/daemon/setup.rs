@@ -1,8 +1,19 @@
 use crate::{beacon, transport};
 use iroh_gossip::{api, net, proto};
+#[cfg(not(all(unix, feature = "host")))]
+use std::fs::File;
+#[cfg(all(unix, feature = "host"))]
+use std::fs::{File, OpenOptions};
+#[cfg(all(unix, feature = "host"))]
+use std::io;
+use std::path::{Path, PathBuf};
 use std::{mem, sync};
+#[cfg(all(unix, feature = "host"))]
+use std::{time::Duration, time::Instant};
 #[cfg(feature = "host")]
 use tokio::task;
+#[cfg(all(unix, feature = "host"))]
+use tokio::time;
 mod injected_endpoint;
 mod setup_kind;
 mod setup_params;
@@ -32,6 +43,7 @@ use crate::lifecycle;
 use super::config::{
     EndpointOwner, Endpoints, MeshSpec, RendezvousConfig, RuntimeConfig, TransportSet,
 };
+use super::state::RunKeys;
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
 use crate::gossip::split;
@@ -545,6 +557,8 @@ struct Assembled {
     /// The invite-only creator's mesh (with its in-memory issuer key + root),
     /// retained so `invite` can mint. `Some` only on an invite-only creator.
     mint_mesh: Option<Mesh>,
+    /// True for the node that created the mesh: it has no peer to sync its state with.
+    is_creator: bool,
     /// The multi-hop transport handle when the mesh policy has `multihop`, threaded
     /// into `EventLoopState` so the link-state tick can feed its routing table.
     /// Present with the `multihop` feature; the native underlay builder that fills
@@ -632,6 +646,549 @@ fn validated_mesh_config(kind: &SetupKind) -> Result<&MeshConfig> {
     Ok(mesh_config)
 }
 
+/// The identity of this member, kept across restarts. Its seed lives in `<state>.key`, mode 0600.
+/// A key file of the wrong length is replaced, with a warning. No state file means a new key.
+#[cfg(all(unix, feature = "host"))]
+fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
+    use std::io::Read as _;
+    let Some(state) = state else {
+        return Ok(identity::Identity::generate());
+    };
+    let key_path = state.with_extension("key");
+    let mut reading = OpenOptions::new();
+    reading.read(true);
+    match open_trusted_key_file(&key_path, &mut reading) {
+        Ok(mut file) => {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let seed: Option<[u8; 32]> = bytes
+                .get(..32)
+                .and_then(|seed| <[u8; 32]>::try_from(seed).ok());
+            if let Some(seed) = seed {
+                return Ok(identity::Identity::from_seed(&seed));
+            }
+            tracing::warn!(target: "habilis_network::lifecycle", "identity key file has the wrong length; a new key replaces it");
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => anyhow::bail!(
+            "the member key file {} is not trusted: {error}; remove it to make a new member key",
+            key_path.display()
+        ),
+    }
+    let identity = identity::Identity::generate();
+    write_key_file(&key_path, identity.seed().as_slice(), 0)?;
+    Ok(identity)
+}
+
+/// Open the key file with `options`, without following a link, and check the OPEN file: a regular file, owned by
+/// this user, that group and others cannot access (the mode that `write_key_file` makes). Its seed becomes the
+/// identity of this member, so a file that another user planted is not used. The checks are on the descriptor, not
+/// on the path, so a link or a file that is put at the path between a check and the open cannot slip through. A
+/// missing file is `NotFound`; a file that fails a check is `PermissionDenied`.
+#[cfg(all(unix, feature = "host"))]
+fn open_trusted_key_file(key_path: &Path, options: &mut OpenOptions) -> io::Result<File> {
+    use rustix::fs::OFlags;
+    use rustix::io::Errno;
+    use rustix::process::geteuid;
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    let flags = i32::try_from(OFlags::NOFOLLOW.bits()).unwrap_or(0);
+    let file: File = options
+        .custom_flags(flags)
+        .open(key_path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(Errno::LOOP.raw_os_error()) {
+                Error::new(ErrorKind::PermissionDenied, "it is a link")
+            } else {
+                error
+            }
+        })?;
+    let meta = file.metadata()?;
+    let refused: Option<&str> = if !meta.file_type().is_file() {
+        Some("it is not a regular file")
+    } else if meta.uid() != geteuid().as_raw() {
+        Some("another user owns it")
+    } else if meta.permissions().mode() & 0o077 != 0 {
+        Some("group or others can access it")
+    } else {
+        None
+    };
+    match refused {
+        Some(why) => Err(Error::new(ErrorKind::PermissionDenied, why)),
+        None => Ok(file),
+    }
+}
+
+/// Write the member key file: the 32 bytes of the seed, then the start time of the process that owns
+/// the daemon (0 until the owner is known), as 8 bytes. The file is private to the user.
+#[cfg(all(unix, feature = "host"))]
+fn write_key_file(key_path: &Path, seed: &[u8], owner_start: u64) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // The last run that the file names stays: the owner of the file changes, the count does not.
+    let last_run = last_recorded_run_in(key_path);
+    // No truncate at the open: a file that fails the checks is not touched, and one that passes is cut after.
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false).mode(0o600);
+    let mut file = open_trusted_key_file(key_path, &mut options)?;
+    file.set_len(0)?;
+    file.write_all(seed)?;
+    file.write_all(&owner_start.to_le_bytes())?;
+    if let Some(last_run) = last_run {
+        file.write_all(&last_run.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+/// The run number of this start, kept in `<state>.run`. It counts up by 1 at each start and never
+/// reads the clock, so a clock that went back cannot make a newer run look older. The one exception
+/// is a lost file: then the count restarts from the clock (see `counter_lost`). A missing file is a
+/// lost file when a member key exists, since peers hold runs above 1 for that member. No state file
+/// means run 1.
+#[cfg(all(unix, feature = "host"))]
+fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
+    use std::fs;
+    use std::io::ErrorKind;
+    let Some(state) = state else {
+        return Ok(1);
+    };
+    let run_path = state.with_extension("run");
+    // The read of the counter and the write of the next one are one step: two starts of one state path
+    // would otherwise read one count and publish one run. The lock is on a file of its own, because the
+    // counter file is replaced by a rename; it is held until `run_lock` drops at the end of the call.
+    let run_lock = lock_run_counter(state)?;
+    let run = match fs::read(&run_path) {
+        Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_slice()) {
+            Ok(last) => u64::from_le_bytes(last).saturating_add(1),
+            Err(_) => counter_lost(state),
+        },
+        // No counter, but a member key from an earlier start: the counter was deleted. Peers hold
+        // runs above 1 for this member, so the count restarts from the clock, as for a bad file.
+        Err(error) if error.kind() == ErrorKind::NotFound && member_known => counter_lost(state),
+        Err(error) if error.kind() == ErrorKind::NotFound => 1,
+        Err(_) => counter_lost(state),
+    };
+    write_run(state, run)?;
+    record_last_run(state, run);
+    drop(run_lock);
+    Ok(run)
+}
+
+/// Keep `run` in the member key file too, at bytes 40 to 48 (after the seed and the owner start), as the second
+/// record of the counter. A start that loses the counter file a second time, after the clock went back, reads it
+/// there. A key file that is too short to hold it is left as it is.
+#[cfg(all(unix, feature = "host"))]
+fn record_last_run(state: &Path, run: u64) {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::FileExt as _;
+    let mut writing = OpenOptions::new();
+    writing.write(true);
+    let opened = open_trusted_key_file(&state.with_extension("key"), &mut writing);
+    let file = match opened {
+        Ok(file) => file,
+        // No key file, no second record: a state path with no member key keeps the one counter file.
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(target: "habilis_network::lifecycle", %error, "the last run could not be recorded in the key file");
+            return;
+        }
+    };
+    if let Err(error) = file.write_all_at(&run.to_le_bytes(), 40) {
+        tracing::warn!(target: "habilis_network::lifecycle", %error, "the last run could not be recorded in the key file");
+    }
+}
+
+/// The last run that the member key file of `state` names, if it names one.
+#[cfg(all(unix, feature = "host"))]
+fn last_recorded_run(state: &Path) -> Option<u64> {
+    last_recorded_run_in(&state.with_extension("key"))
+}
+
+/// The last run that the key file at `key_path` names, if it names one.
+#[cfg(all(unix, feature = "host"))]
+fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
+    use std::io::Read as _;
+    let mut reading = OpenOptions::new();
+    reading.read(true);
+    let mut file = open_trusted_key_file(key_path, &mut reading).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let tail = bytes.get(40..48)?;
+    <[u8; 8]>::try_from(tail).ok().map(u64::from_le_bytes)
+}
+
+/// Take the exclusive lock on `<state>.key.lock` and keep it as long as the returned file lives, so two
+/// live starts of one state path cannot be one member: the second would read the same member key and take
+/// the next run, and a peer would drop the first as an older run of that member. Each try is non-blocking, and
+/// a held lock is tried again for `KEY_LOCK_RETRY`, in steps of `KEY_LOCK_STEP`, because a restart that comes
+/// right after a leave meets the old daemon while it still stops; the wait is a timer of the runtime, so the
+/// old daemon, which may run on the same thread, still gets to stop. After that the start fails and names the
+/// way out. It is an OS lock on the descriptor, so it goes with the process, and a crash frees the key. The
+/// file is opened close-on-exec (the default of Rust), so a child of the daemon does not keep the lock after
+/// the daemon is gone. No state path means no key to keep. A file system that has no file locks cannot start
+/// a daemon with a member key: the error names the lock file.
+#[cfg(all(unix, feature = "host"))]
+// the lock is shared with every clone of the keys, and the last one to drop frees it
+async fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    let lock = open_key_lock(state)?;
+    let give_up = Instant::now() + KEY_LOCK_RETRY;
+    while !try_key_lock(&lock, state)? {
+        if Instant::now() >= give_up {
+            return Err(key_held_error(state));
+        }
+        time::sleep(KEY_LOCK_STEP).await;
+    }
+    // shared with every clone of the keys: the lock goes when the last one drops
+    Ok(Some(sync::Arc::new(lock)))
+}
+
+/// [`hold_member_key`] with one try and no wait, for a caller that is not async.
+#[cfg(all(unix, feature = "host"))]
+// the lock is shared with every clone of the keys, and the last one to drop frees it
+fn hold_member_key_once(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    let lock = open_key_lock(state)?;
+    if try_key_lock(&lock, state)? {
+        // shared with every clone of the keys: the lock goes when the last one drops
+        Ok(Some(sync::Arc::new(lock)))
+    } else {
+        Err(key_held_error(state))
+    }
+}
+
+/// Open the lock file of the member key of `state`, mode 0600.
+#[cfg(all(unix, feature = "host"))]
+fn open_key_lock(state: &Path) -> Result<File> {
+    use anyhow::Context as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let lock_path = state.with_extension("key.lock");
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false).mode(0o600);
+    options
+        .open(&lock_path)
+        .with_context(|| format!("the lock file {} cannot be opened", lock_path.display()))
+}
+
+/// One try at the lock: true when it is taken, false when another holder has it.
+#[cfg(all(unix, feature = "host"))]
+fn try_key_lock(lock: &File, state: &Path) -> Result<bool> {
+    use std::fs::TryLockError;
+    match lock.try_lock() {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(error)) => Err(anyhow::Error::from(error).context(format!(
+            "the lock file {} cannot be locked: the file system may not support file locks, and a daemon with a member key cannot start there",
+            state.with_extension("key.lock").display()
+        ))),
+    }
+}
+
+/// The error of a start that finds the member key held.
+#[cfg(all(unix, feature = "host"))]
+fn key_held_error(state: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "another daemon still runs on this state file and holds the member key {}: wait for it to exit and retry, or use another nickname or --state-file",
+        state.with_extension("key").display()
+    )
+}
+
+/// How long a start tries again for the lock of the member key, while the daemon that holds it stops.
+#[cfg(all(unix, feature = "host"))]
+const KEY_LOCK_RETRY: Duration = Duration::from_secs(2);
+/// The wait between two tries for the lock of the member key.
+#[cfg(all(unix, feature = "host"))]
+const KEY_LOCK_STEP: Duration = Duration::from_millis(50);
+
+/// A target with no files keeps no member key, so it takes no lock.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unused_async,
+    reason = "the same signature as the version for a target with files"
+)]
+// the same type as the version for a target with files
+async fn hold_member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+    Ok(None)
+}
+
+/// [`hold_member_key`] with one try, for a caller that is not async: no lock on a target with no files.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the version for a target with files"
+)]
+// the same type as the version for a target with files
+fn hold_member_key_once(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+    Ok(None)
+}
+
+/// Take the exclusive lock on `<state>.run.lock`, which makes the allocation of a run one step across
+/// processes and threads. It waits for the holder, and the lock goes with the returned file.
+#[cfg(all(unix, feature = "host"))]
+fn lock_run_counter(state: &Path) -> Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false).mode(0o600);
+    let lock = options.open(state.with_extension("run.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+/// Keep `run` in `<state>.run`.
+#[cfg(all(unix, feature = "host"))]
+fn write_run(state: &Path, run: u64) -> Result<()> {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let run_path = state.with_extension("run");
+    // A crash after the write and before the rename leaves the old counter, never a cut short one.
+    let tmp_path = state.with_extension("run.tmp");
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true).mode(0o600);
+    let mut file = options.open(&tmp_path)?;
+    file.write_all(&run.to_le_bytes())?;
+    file.sync_all()?;
+    fs::rename(&tmp_path, &run_path)?;
+    // Without this, a power loss can undo the rename, and the next start repeats a run that peers saw.
+    if let Some(folder) = run_path
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+    {
+        File::open(folder)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// The counter file is unreadable, so the count restarts from the unix seconds: the counter grows by
+/// 1 per start and the seconds grow faster, so the number is above any count that peers kept. A clock that went
+/// back since an earlier loss could still give a lower number, so the run is never below the last run that the
+/// key file names, plus one.
+#[cfg(all(unix, feature = "host"))]
+fn counter_lost(state: &Path) -> u64 {
+    use crate::protocol::UnixSecs;
+    let clock = u64::try_from(UnixSecs::now().as_secs()).unwrap_or(1).max(1);
+    let run = last_recorded_run(state).map_or(clock, |last| clock.max(last.saturating_add(1)));
+    tracing::warn!(target: "habilis_network::lifecycle", new_run = run, "run counter file is unreadable, so its old run is unknown; the count restarts from the clock");
+    run
+}
+
+/// A target with no files has no state to count in, so each start is run 1.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the file-backed version, so the caller is one call"
+)]
+fn next_run(_state: Option<&Path>, _member_known: bool) -> Result<u64> {
+    Ok(1)
+}
+
+/// The member key of this node, kept in the state file. A target with no files (wasm, or a build
+/// without `host`) has none: a key made at each start would prove nothing across restarts.
+#[cfg(all(unix, feature = "host"))]
+// the key is shared with the loop and its handlers, which hold clones
+fn member_key(state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identity>>> {
+    // shared with the loop and its handlers, which hold clones
+    Ok(Some(sync::Arc::new(load_or_create_identity(state)?)))
+}
+
+/// A target with no files has no member key.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the version for a target with files"
+)]
+// the key is shared with the loop and its handlers, which hold clones
+fn member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identity>>> {
+    Ok(None)
+}
+
+/// Bind the member key and the run counter to the process that owns the daemon. The pair is kept in
+/// files so that a restart of the same agent keeps its identity, and the files are named for the pid
+/// of the agent. After a crash a later agent can get the same pid, and it must not take the identity
+/// of the one that crashed. The key file holds the start time of the owner, which differs for two
+/// processes of one pid: they start in different seconds, unless the pid wrapped within one second of
+/// the first. A pair made by this very start is stamped. A pair of another owner, with no stamp, or
+/// with no start time to check against, is not reused: a new member, at run 1.
+#[cfg(all(unix, feature = "host"))]
+pub(crate) fn bind_to_owner(
+    keys: RunKeys,
+    state: Option<&Path>,
+    owner_start: Option<u64>,
+) -> RunKeys {
+    use std::fs;
+    let (Some(state), Some(member)) = (state, keys.member.as_ref()) else {
+        return keys;
+    };
+    let key_path = state.with_extension("key");
+    let bytes = fs::read(&key_path).unwrap_or_default();
+    let tail = bytes
+        .get(32..40)
+        .and_then(|tail| <[u8; 8]>::try_from(tail).ok());
+    let held = tail.map(u64::from_le_bytes);
+    match (owner_start, held) {
+        (Some(start), Some(held)) if held == start => keys,
+        (Some(start), _) if keys.member_new => {
+            if let Err(error) = write_key_file(&key_path, member.seed().as_slice(), start) {
+                tracing::warn!(target: "habilis_network::lifecycle", %error, "the owner of the member key could not be kept");
+            }
+            keys
+        }
+        (None, _) if keys.member_new => keys,
+        _ => replace_member(keys, state, owner_start.unwrap_or(0)),
+    }
+}
+
+/// A new member key and run 1, kept in the files, for a pair that another owner left behind.
+#[cfg(all(unix, feature = "host"))]
+fn replace_member(keys: RunKeys, state: &Path, owner_start: u64) -> RunKeys {
+    let member = identity::Identity::generate();
+    let key_path = state.with_extension("key");
+    let seed = member.seed();
+    let key_written = write_key_file(&key_path, seed.as_slice(), owner_start);
+    let written = key_written.and_then(|()| write_run(state, 1));
+    if let Err(error) = written {
+        tracing::warn!(target: "habilis_network::lifecycle", %error, "the new member key could not be kept");
+    }
+    tracing::warn!(target: "habilis_network::lifecycle", "the member key and the run counter are from another owner, so a new member key replaces them and the run starts at 1");
+    RunKeys {
+        // shared with the loop and its handlers, which hold clones
+        member: Some(sync::Arc::new(member)),
+        run: 1,
+        member_new: true,
+        ..keys
+    }
+}
+
+/// The state path that the member key and the run counter live under: the state file when there is one, and
+/// otherwise, for a caller that asks for it (`keys_in_default_state`), the default state path of the mesh
+/// under the runtime base. `None` keeps ephemeral keys.
+#[cfg_attr(
+    not(feature = "host"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as the host version, which can fail to make the folder"
+    )
+)]
+fn keys_state_path(
+    state_file: Option<&Path>,
+    runtime_base: Option<&Path>,
+    mesh: &MeshId,
+    author: &Nickname,
+    in_default_state: bool,
+) -> Result<Option<PathBuf>> {
+    let explicit = state_file.map(Path::to_path_buf);
+    #[cfg(feature = "host")]
+    {
+        use crate::util;
+        if explicit.is_some() {
+            return Ok(explicit);
+        }
+        let Some(base) = runtime_base.filter(|_| in_default_state) else {
+            return Ok(None);
+        };
+        // The key file goes in the folder of the mesh, which the control socket would make later.
+        util::ensure_mesh_runtime_dir(base, mesh.as_str())?;
+        Ok(Some(default_state_path(base, mesh, author)))
+    }
+    #[cfg(not(feature = "host"))]
+    {
+        let _ = (runtime_base, mesh, author, in_default_state);
+        Ok(explicit)
+    }
+}
+
+/// The default state path of a mesh: `<runtime base>/<mesh folder>/<nickname>.state.json`, where the CLI keeps
+/// the readiness file of a daemon that was given no `--state-file`.
+#[cfg(feature = "host")]
+pub(crate) fn default_state_path(base: &Path, mesh: &MeshId, author: &Nickname) -> PathBuf {
+    use crate::util;
+    util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.state.json"))
+}
+
+/// The keys of this run, under the state path that [`keys_state_path`] gives. `mesh` is the mesh id and the
+/// nickname of this member.
+fn run_keys_for(
+    state_file: Option<&Path>,
+    runtime_base: Option<&Path>,
+    keys_in_default_state: bool,
+    (mesh, author): (&MeshId, &Nickname),
+    // shared with every clone of the keys; `None` where the lock was not taken before the setup
+    key_lock: Option<sync::Arc<File>>,
+) -> Result<RunKeys> {
+    let keys_path = keys_state_path(
+        state_file,
+        runtime_base,
+        mesh,
+        author,
+        keys_in_default_state,
+    )?;
+    match key_lock {
+        Some(held) => run_keys_holding(keys_path.as_deref(), Some(held)),
+        // a new mesh has a random id, so its default state path cannot be held by another start
+        None => run_keys(keys_path.as_deref()),
+    }
+}
+
+/// The state path of the keys of a start, as far as it is known before the endpoint is bound: the explicit
+/// state file, or the default path of a mesh that the id names (a join or a topic). A new mesh has no id yet,
+/// and a random one, so its default state path is nobody else's.
+fn early_keys_state_path(
+    kind: &SetupKind,
+    state_file: Option<&Path>,
+    runtime_base: Option<&Path>,
+    keys_in_default_state: bool,
+    author: &Nickname,
+) -> Result<Option<PathBuf>> {
+    match kind {
+        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => {
+            let id = MeshId::try_new(&mesh.to_string())
+                .expect("Mesh::to_string always produces a valid MeshId");
+            keys_state_path(state_file, runtime_base, &id, author, keys_in_default_state)
+        }
+        SetupKind::Create { .. } => Ok(state_file.map(Path::to_path_buf)),
+    }
+}
+
+/// The keys of this run. The member key comes from the state file. The session key is the one that
+/// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
+/// would start the same actor again at sequence 1.
+fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
+    run_keys_holding(state, hold_member_key_once(state)?)
+}
+
+/// [`run_keys`] for a start that holds the lock of the member key of `state` already: the setup takes it
+/// before it binds an endpoint, so a refused start leaves nothing behind.
+// the lock is shared with every clone of the keys, and the last one to drop frees it
+fn run_keys_holding(state: Option<&Path>, key_lock: Option<sync::Arc<File>>) -> Result<RunKeys> {
+    // read before `member_key` makes the file: a member key that exists is from an earlier start
+    let member_known = state.is_some_and(|state| state.with_extension("key").exists());
+    Ok(RunKeys {
+        key_lock,
+        // shared with the loop and its handlers, which hold clones
+        session: sync::Arc::new(identity::Identity::generate()),
+        member: member_key(state)?,
+        run: next_run(state, member_known)?,
+        member_new: !member_known,
+    })
+}
+
+/// The caller owns an endpoint that it injected; the engine owns the one that it binds.
+fn owner_of(injected: Option<&InjectedEndpoint>) -> EndpointOwner {
+    if injected.is_none() {
+        EndpointOwner::Engine
+    } else {
+        EndpointOwner::Caller
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the setup is one assembly of the mesh, in the order that its parts need"
+)]
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -639,6 +1196,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         max_direct,
         runtime_base,
         state_file,
+        keys_in_default_state,
         sink,
         cohost: cohost_override,
         live_count,
@@ -647,11 +1205,17 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         transports,
         per_peer_gate,
     } = params;
-    let endpoint_owner = if injected.is_none() {
-        EndpointOwner::Engine
-    } else {
-        EndpointOwner::Caller
-    };
+    // The member key is taken first, before an endpoint is bound or a topic joined: a start that another
+    // daemon holds the key of fails with nothing left behind.
+    let early_state = early_keys_state_path(
+        &kind,
+        state_file.as_deref(),
+        runtime_base.as_deref(),
+        keys_in_default_state,
+        &author,
+    )?;
+    let key_lock = hold_member_key(early_state.as_deref()).await?;
+    let endpoint_owner = owner_of(injected.as_ref());
     let (max_peers, max_direct) = resolve_caps(max_peers, max_direct);
     // The localhost binding is owned + bound by the caller; the engine only needs
     // the resolved port for the `ready` event. `Some(0)` (ephemeral) is resolved
@@ -668,7 +1232,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // rung 0 (empty ladder ⇒ `None`).
     let ladder: Vec<_> = relay_ladder(&lookups.relay_lookup).collect();
     let (rung_tx, rung_rx) = watch::channel(ladder.first().cloned());
-
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
 
     let build = SetupBuild {
@@ -701,6 +1264,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         mesh_password,
         mesh_key,
         mint_mesh,
+        is_creator,
         #[cfg(feature = "multihop")]
             multihop: multihop_handle,
         #[cfg(feature = "multihop")]
@@ -712,19 +1276,26 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         webrtc_ice,
         topic_string,
     } = assemble(kind, &build, injected).await?;
-
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
 
+    let keys = run_keys_for(
+        state_file.as_deref(),
+        runtime_base.as_deref(),
+        keys_in_default_state,
+        (&mesh_id, &author),
+        key_lock,
+    )?;
     Ok(EventLoopConfig {
         mesh: MeshSpec {
             mesh: mesh_id,
             name: mesh_name,
             topic_string,
             mint_mesh,
+            is_creator,
             author,
-            // The mesh spec and the loop state both hold the signing identity, so it is shared.
-            identity: sync::Arc::new(identity::Identity::generate()),
+            // The mesh spec and the loop state both hold the keys, so they are shared.
+            keys,
             mesh_password,
             mesh_key,
         },
@@ -982,6 +1553,7 @@ async fn setup_create(
         mesh_password,
         mesh_key,
         mint_mesh,
+        is_creator: true,
         #[cfg(feature = "multihop")]
         multihop,
         #[cfg(feature = "multihop")]
@@ -1091,6 +1663,7 @@ async fn setup_join(
         // A joiner holds no issuer key, so it can never mint — even after
         // redeeming an invite-only mesh.
         mint_mesh: None,
+        is_creator: false,
         #[cfg(feature = "multihop")]
         multihop,
         #[cfg(feature = "multihop")]
@@ -1106,6 +1679,597 @@ async fn setup_join(
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    use crate::daemon::state::RunKeys;
+    use crate::protocol::AuthorKey;
+    use std::path::{Path, PathBuf};
+    use std::{env, fs, process, thread};
+
+    fn member_key(keys: &RunKeys) -> Option<AuthorKey> {
+        let member = keys.member.as_ref();
+        member.map(|member| member.author_key())
+    }
+
+    fn member_of(keys: &RunKeys) -> AuthorKey {
+        let member = keys.member.as_ref().expect("a member key");
+        member.author_key()
+    }
+
+    /// A temp dir that goes away when the test ends, also when an assert fails.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = env::temp_dir().join(format!("{name}-{}", process::id()));
+            drop(fs::remove_dir_all(&dir));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            drop(fs::remove_dir_all(&self.0));
+        }
+    }
+
+    /// A restarted member keeps its identity: the same state file gives the same key, and a
+    /// missing file gives a new one.
+    #[test]
+    fn a_restart_keeps_its_identity() {
+        let dir = env::temp_dir().join(format!("habilis-identity-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
+        let first = super::load_or_create_identity(Some(&state)).expect("first start");
+        let second = super::load_or_create_identity(Some(&state)).expect("restart");
+        assert_eq!(
+            first.author_key(),
+            second.author_key(),
+            "the restart keeps the key"
+        );
+        let fresh = super::load_or_create_identity(None).expect("no state file");
+        assert_ne!(
+            fresh.author_key(),
+            first.author_key(),
+            "no file means a new key"
+        );
+    }
+
+    /// The run number rises at each start, and a clock that went back cannot lower it: the counter
+    /// never reads the clock.
+    #[test]
+    fn the_run_number_rises_at_each_start() {
+        let dir = TempDir::new("habilis-run-number");
+        let state = dir.path().join("session.json");
+        let runs: Vec<u64> = (0..3)
+            .map(|_| super::next_run(Some(&state), false).expect("a run number"))
+            .collect();
+        assert_eq!(runs, [1, 2, 3], "each start counts one more");
+        let ahead: u64 = 4_000_000_000_000;
+        fs::write(state.with_extension("run"), ahead.to_le_bytes()).expect("a counter ahead");
+        assert_eq!(
+            super::next_run(Some(&state), false).expect("a run number"),
+            ahead + 1,
+            "a counter ahead of any clock still rises"
+        );
+        assert_eq!(
+            super::next_run(None, false).expect("no state file"),
+            1,
+            "no file means run 1"
+        );
+    }
+
+    /// A key file that another user could have planted or read is not loaded: its seed would become the
+    /// identity of this member. A file of mode 0600, owned by this user, is the one that this code wrote.
+    #[test]
+    fn a_key_file_that_others_can_read_or_a_link_is_not_loaded() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let dir = TempDir::new("habilis-key-trust");
+        let state = dir.path().join("session.json");
+        let key = state.with_extension("key");
+        fs::write(&key, [7u8; 40]).expect("a key file");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).expect("a loose mode");
+        let loose = super::load_or_create_identity(Some(&state));
+        assert!(
+            loose.is_err(),
+            "a key file that group and others can read was loaded"
+        );
+
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("a private mode");
+        let private = super::load_or_create_identity(Some(&state)).expect("a private file loads");
+        assert_eq!(
+            private.seed().as_slice(),
+            &[7u8; 32],
+            "the seed of a trusted file is the identity"
+        );
+
+        fs::remove_file(&key).expect("remove the file");
+        let target = dir.path().join("elsewhere.key");
+        fs::write(&target, [9u8; 40]).expect("a target file");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("a private mode");
+        symlink(&target, &key).expect("a link in place of the key file");
+        assert!(
+            super::load_or_create_identity(Some(&state)).is_err(),
+            "a link in place of the key file was followed"
+        );
+    }
+
+    /// The checks of the key file are on the open file, and the open does not follow a link: a link that is
+    /// put at the path after a path check cannot make the write go to its target, and a file that others can
+    /// read is not written over.
+    #[test]
+    fn the_key_file_is_opened_without_following_a_link_and_checked_on_the_open_file() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "the last run could not be recorded",
+        );
+        let dir = TempDir::new("habilis-key-toctou");
+        let key = dir.path().join("session.key");
+        let target = dir.path().join("elsewhere");
+        fs::write(&target, b"untouched").expect("a target file");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("a private mode");
+        symlink(&target, &key).expect("a link in place of the key file");
+
+        let written = super::write_key_file(&key, &[1u8; 32], 5);
+        super::record_last_run(&key.with_extension("json"), 9);
+
+        assert!(
+            written.is_err(),
+            "the write followed a link at the key path"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target"),
+            b"untouched",
+            "a write went through the link to its target"
+        );
+
+        fs::remove_file(&key).expect("remove the link");
+        fs::write(&key, b"old").expect("a wide file");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).expect("a loose mode");
+        let over_wide = super::write_key_file(&key, &[2u8; 32], 5);
+        assert!(
+            over_wide.is_err(),
+            "a key file that others can read was written over"
+        );
+        assert_eq!(
+            fs::read(&key).expect("the file"),
+            b"old",
+            "the file changed"
+        );
+    }
+
+    /// Two starts that share a state path each get their own run: the read of the counter and the write
+    /// of the next one are one step under a lock, so no two starts publish one run.
+    #[test]
+    fn starts_that_share_a_state_path_get_distinct_runs() {
+        let dir = TempDir::new("habilis-run-race");
+        let state = dir.path().join("session.json");
+        let starts = 8;
+        let rounds = 40;
+        let mut runs: Vec<u64> = Vec::new();
+        thread::scope(|scope| {
+            let handles: Vec<_> = (0..starts)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let own: Vec<u64> = (0..rounds)
+                            .map(|_| super::next_run(Some(&state), false).expect("a run number"))
+                            .collect();
+                        own
+                    })
+                })
+                .collect();
+            for handle in handles {
+                runs.extend(handle.join().expect("a start"));
+            }
+        });
+        let total = runs.len();
+        runs.sort_unstable();
+        runs.dedup();
+        assert_eq!(
+            runs.len(),
+            total,
+            "two starts of one state path published one run: peers would keep different sessions"
+        );
+    }
+
+    /// The member key file keeps the last run too. When the counter file is lost a second time, after the
+    /// clock went back, the clock alone would give a run below the one that peers hold: the key file is
+    /// the second record, and the new run is above the last run that it names.
+    #[test]
+    fn a_lost_counter_does_not_go_below_the_last_run_that_the_key_file_names() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "run counter file is unreadable",
+        );
+        let dir = TempDir::new("habilis-run-twice-lost");
+        let state = dir.path().join("session.json");
+        let key = state.with_extension("key");
+        let ahead_of_the_clock: u64 = 4_000_000_000_000;
+        let mut bytes = vec![7u8; 32];
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&ahead_of_the_clock.to_le_bytes());
+        fs::write(&key, bytes).expect("a key file that names a last run");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("a private mode");
+
+        let run = super::next_run(Some(&state), true).expect("a run number");
+
+        assert!(
+            run > ahead_of_the_clock,
+            "the run after a lost counter is {run}, not above the last run of the key file"
+        );
+    }
+
+    /// The keys of a start whose process has ended: the lock on the member key went with it, so a
+    /// later start of the same state path is a restart and not a second live daemon.
+    fn ended(keys: RunKeys) -> RunKeys {
+        RunKeys {
+            key_lock: None,
+            ..keys
+        }
+    }
+
+    /// Each start records its run in the key file, beside the counter file.
+    #[test]
+    fn each_start_records_its_run_in_the_key_file() {
+        let dir = TempDir::new("habilis-run-recorded");
+        let state = dir.path().join("session.json");
+        let first = ended(super::run_keys(Some(&state)).expect("the first start"));
+        let second = super::run_keys(Some(&state)).expect("the second start");
+
+        let bytes = fs::read(state.with_extension("key")).expect("the key file");
+        let named = bytes
+            .get(40..48)
+            .and_then(|tail| <[u8; 8]>::try_from(tail).ok())
+            .map(u64::from_le_bytes);
+
+        assert_eq!(first.run, 1, "the first start is run 1");
+        assert_eq!(second.run, 2, "the second start is run 2");
+        assert_eq!(named, Some(second.run), "the key file names the last run");
+    }
+
+    /// A daemon that the CLI started with no state file keeps its member key and counts its run on, in the
+    /// default state path of its mesh, when the setup asks for it. Without the flag the keys stay ephemeral,
+    /// and an explicit state file wins over the default.
+    #[test]
+    fn a_restart_with_no_state_file_keeps_its_member_key_in_the_default_state_path() {
+        use crate::protocol::{MeshId, Nickname};
+        let dir = TempDir::new("habilis-default-state");
+        let base = dir.path();
+        let (mesh, author) = (MeshId::from("test"), Nickname::from("alice"));
+        let explicit = dir.path().join("explicit.json");
+
+        let path = |state: Option<&Path>, on: bool| {
+            super::keys_state_path(state, Some(base), &mesh, &author, on).expect("a state path")
+        };
+        let default = path(None, true).expect("the flag asks for the default state path");
+        let first = ended(super::run_keys(Some(&default)).expect("the first start"));
+        let second = super::run_keys(Some(&default)).expect("the restart");
+
+        assert!(
+            default.starts_with(base),
+            "the default path is under the runtime base"
+        );
+        assert_eq!(
+            member_of(&first),
+            member_of(&second),
+            "the restart made a new member key"
+        );
+        assert_eq!(second.run, first.run + 1, "the run counts on");
+        assert!(path(None, false).is_none(), "no flag keeps ephemeral keys");
+        assert_eq!(
+            path(Some(&explicit), true).as_deref(),
+            Some(explicit.as_path()),
+            "an explicit state file wins"
+        );
+    }
+
+    /// A counter file that a crash cut short must not restart the count at 1: a peer that kept a
+    /// higher run would refuse the live session. The next run then starts above any count of starts.
+    #[test]
+    fn a_cut_short_counter_file_does_not_restart_the_count() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "run counter file is unreadable",
+        );
+        let dir = TempDir::new("habilis-run-cut");
+        let state = dir.path().join("session.json");
+        fs::write(state.with_extension("run"), b"").expect("a cut short file");
+        let run = super::next_run(Some(&state), false).expect("a run number");
+        assert!(
+            run > 1_000_000_000,
+            "the run after a cut short file is {run}"
+        );
+        let mode: u32 = fs::metadata(state.with_extension("run"))
+            .expect("the file")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the counter file is private, like the key file"
+        );
+        assert!(
+            !state.with_extension("run.tmp").exists(),
+            "no temp file stays"
+        );
+    }
+
+    /// A member whose run file is deleted keeps its member key. Peers hold the proof of its old
+    /// session with a high run, and they refuse a proof of run 1 as a late copy, so the member would
+    /// be admitted with no proof and its nickname would be free for a forger. The count restarts from
+    /// the clock then, which is above any count of starts.
+    #[test]
+    fn a_member_whose_run_file_is_deleted_restarts_from_the_clock() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "run counter file is unreadable",
+        );
+        let dir = TempDir::new("habilis-run-deleted");
+        let state = dir.path().join("session.json");
+        let first = ended(super::run_keys(Some(&state)).expect("the first start"));
+        let second = ended(super::run_keys(Some(&state)).expect("the second start"));
+        assert_eq!(
+            (first.run, second.run),
+            (1, 2),
+            "the first starts count 1, 2"
+        );
+        fs::remove_file(state.with_extension("run")).expect("the run file is deleted");
+
+        let third = super::run_keys(Some(&state)).expect("the start after the deletion");
+
+        assert!(
+            third.run > 1_000_000_000,
+            "the run after a deleted file is {}, below the runs that peers hold",
+            third.run
+        );
+    }
+
+    /// A first start has no run file and no member key: the count starts at 1, with no warning.
+    #[test]
+    fn a_first_start_with_no_files_counts_from_1() {
+        let dir = TempDir::new("habilis-run-first");
+        let state = dir.path().join("session.json");
+        let first = super::run_keys(Some(&state)).expect("the first start");
+        assert_eq!(first.run, 1, "a new member starts at run 1");
+    }
+
+    /// The pair of files (the member key and the run counter) is bound to the start time of the process
+    /// that owns the daemon. A restart of the same owner keeps it. Another process that got the same
+    /// pid has another start time, and starts as a new member, at run 1.
+    #[test]
+    fn a_pair_of_files_from_another_owner_is_not_reused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "from another owner",
+        );
+        let dir = TempDir::new("habilis-owner");
+        let state = dir.path().join("session.json");
+        let first = ended(super::bind_to_owner(
+            super::run_keys(Some(&state)).expect("first start"),
+            Some(&state),
+            Some(100),
+        ));
+        let restart = ended(super::bind_to_owner(
+            super::run_keys(Some(&state)).expect("restart"),
+            Some(&state),
+            Some(100),
+        ));
+        assert_eq!(
+            member_of(&first),
+            member_of(&restart),
+            "the same owner keeps the member key"
+        );
+        assert_eq!(restart.run, 2, "and the run counter goes on");
+
+        let reused_pid = ended(super::bind_to_owner(
+            super::run_keys(Some(&state)).expect("a start of another process"),
+            Some(&state),
+            Some(200),
+        ));
+
+        assert_ne!(
+            member_of(&first),
+            member_of(&reused_pid),
+            "another owner start time is a new member"
+        );
+        assert_eq!(reused_pid.run, 1, "and its run counter starts again");
+        let next = super::run_keys(Some(&state)).expect("the start after");
+        assert_eq!(
+            member_of(&reused_pid),
+            member_of(&next),
+            "the new member key is kept, for the restarts of the new owner"
+        );
+    }
+
+    /// An owner whose start time cannot be read gets no reuse of an old pair: the safe side. A pair
+    /// that this start made is kept.
+    #[test]
+    fn with_no_start_time_an_old_pair_is_not_reused_and_a_new_one_is_kept() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "from another owner",
+        );
+        let dir = TempDir::new("habilis-owner-none");
+        let state = dir.path().join("session.json");
+        let made = ended(super::bind_to_owner(
+            super::run_keys(Some(&state)).expect("first start"),
+            Some(&state),
+            None,
+        ));
+        let old = super::run_keys(Some(&state)).expect("a start with the pair of the first");
+        let checked = super::bind_to_owner(old.clone(), Some(&state), None);
+
+        assert_eq!(made.run, 1, "a pair made by this start is kept");
+        assert_ne!(
+            member_of(&old),
+            member_of(&checked),
+            "an old pair is not reused with no start time to check"
+        );
+    }
+
+    /// The member key survives a restart and the session key does not: the session key is the
+    /// automerge actor, and a restart that kept it would start the same actor again.
+    #[test]
+    fn a_restart_keeps_the_member_key_and_changes_the_session_key() {
+        let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
+        let first = ended(super::run_keys(Some(&state)).expect("first start"));
+        let second = super::run_keys(Some(&state)).expect("restart");
+        assert_eq!(
+            member_of(&first),
+            member_of(&second),
+            "the restart keeps the member key"
+        );
+        assert_ne!(
+            first.session.author_key(),
+            second.session.author_key(),
+            "the restart makes a new session key"
+        );
+        assert_ne!(
+            first.session.author_key(),
+            member_of(&first),
+            "the session key is not the member key"
+        );
+        assert_eq!(
+            (first.run, second.run),
+            (1, 2),
+            "the run number counts the starts"
+        );
+    }
+
+    /// Two live daemons cannot be one member: the second start of a state path that a live start
+    /// holds fails, and says which path and the way out. Today it reads the same member key and
+    /// takes the next run, so a peer drops the first session as an older run of the same member.
+    #[test]
+    fn a_second_start_on_a_state_path_that_a_live_start_holds_fails() {
+        let dir = env::temp_dir().join(format!("habilis-key-lock-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("held.json");
+        let first = super::run_keys(Some(&state)).expect("first start");
+        let refused = super::run_keys(Some(&state));
+        let error = refused.expect_err("a second live start of one state path is refused");
+        let text = format!("{error:#}");
+        let key_file = state.with_extension("key").display().to_string();
+        assert!(
+            text.contains(&key_file)
+                && text.contains("another nickname")
+                && text.contains("--state-file"),
+            "the error names the key file and the way out: {text}"
+        );
+        drop(first);
+    }
+
+    /// A restart that comes right after a leave meets the old daemon while it still stops: the start
+    /// tries again for a short time instead of failing at once. The runtime has ONE thread, the one that
+    /// the old daemon stops on: a wait that blocks the thread would keep it from stopping, and the start
+    /// would wait the whole time and fail. The holder here ends after 300 ms, on that thread.
+    #[test]
+    fn a_start_that_meets_a_holder_that_is_stopping_waits_for_it_on_one_thread() {
+        use std::time::Instant;
+        let guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::run(guard, async {
+            let dir = env::temp_dir().join(format!("habilis-key-lock-wait-{}", process::id()));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            let state = dir.join("wait.json");
+            let holder = super::run_keys(Some(&state)).expect("first start");
+            let stopping = tokio::spawn(async move {
+                time::sleep(Duration::from_millis(300)).await;
+                drop(holder);
+            });
+            let started = Instant::now();
+            let second = super::hold_member_key(Some(&state)).await;
+            let waited = started.elapsed();
+            stopping.await.expect("the holder task ends");
+            assert!(
+                second.is_ok(),
+                "a start that meets a holder that is stopping works: {:?}",
+                second.err()
+            );
+            assert!(
+                waited >= Duration::from_millis(250) && waited < Duration::from_secs(2),
+                "the start waited for the holder, and not for the whole retry: {waited:?}"
+            );
+        });
+    }
+
+    /// The lock goes with the daemon: when the holder is dropped (or dies, since the lock is an OS
+    /// lock on a descriptor) the next start of the path works and keeps the member key. A child that
+    /// the daemon spawned must not keep the lock after the daemon is gone, so the lock file is
+    /// opened close-on-exec (the default of Rust): a child that outlives the holder frees the key.
+    #[test]
+    fn a_start_after_the_holder_is_gone_works_even_while_a_child_of_it_lives() {
+        let dir = env::temp_dir().join(format!("habilis-key-lock-child-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("child.json");
+        let first = super::run_keys(Some(&state)).expect("first start");
+        let first_member = member_of(&first);
+        let mut child = process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a child that outlives the holder");
+        drop(first);
+        let second = super::run_keys(Some(&state));
+        child.kill().expect("the child is stopped");
+        child.wait().expect("the child is reaped");
+        let second = second.expect("the child does not keep the lock");
+        assert_eq!(
+            (member_of(&second), second.run),
+            (first_member, 2),
+            "the restart keeps the member key and takes the next run"
+        );
+    }
+
+    /// The failure this prevents: after a restart the session starts a new document at sequence 1.
+    /// Under the old actor, a replica that holds the first run refuses that change as a duplicate
+    /// sequence number, and every write of the restarted member is lost.
+    #[test]
+    fn a_restarted_session_writes_under_a_new_actor() {
+        use crate::daemon::state::RunKeys;
+        use crate::doc::{Ingested, MeshDoc};
+        use crate::protocol::{Channel, MeshId, Message};
+        use crate::testing;
+        let dir = env::temp_dir().join(format!("habilis-restart-actor-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("session.json");
+        let mesh = MeshId::from("💬test");
+        let author = testing::nick("alice");
+        let write = |keys: &RunKeys, value: u8| {
+            let doc = MeshDoc::new_ungated();
+            let seed = *keys.session.public().as_bytes();
+            let change = doc
+                .build_change(&serde_json::json!({ "k": value }), &seed)
+                .expect("a JSON object merges")
+                .expect("a non-empty merge yields a change");
+            let (wire, _plain) = doc.compose_wire_body(&change, None).expect("wire body");
+            Message::new_channel_event(&mesh, &author, wire, Channel::State).sign(&keys.session)
+        };
+        let before = write(&super::run_keys(Some(&state)).expect("first start"), 1);
+        let after = write(&super::run_keys(Some(&state)).expect("restart"), 2);
+        let mut replica = MeshDoc::new_ungated();
+        assert!(
+            matches!(replica.ingest(&before), Ingested::Applied { .. }),
+            "the replica takes the first run"
+        );
+        let outcome = replica.ingest(&after);
+        assert!(
+            matches!(outcome, Ingested::Applied { .. }),
+            "the replica takes the restarted run, got {outcome:?}: the actor is new"
+        );
+    }
+
     use crate::daemon::node::SignalHandling;
     use crate::transport::PayloadPath;
     use crate::{embed, lookup, membership, transport};
@@ -1253,6 +2417,86 @@ mod tests {
                     handle.close().await;
                 }
             }
+        });
+    }
+
+    /// A child process that lives until the guard drops: a live pid for an owner.
+    struct Sleeper(process::Child);
+
+    impl Sleeper {
+        fn spawn() -> Self {
+            let child = process::Command::new("sleep")
+                .arg("120")
+                .spawn()
+                .expect("a sleep process");
+            // The start times of two processes differ by a tick at least.
+            thread::sleep(Duration::from_millis(50));
+            Self(child)
+        }
+    }
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            drop(self.0.kill());
+            drop(self.0.wait());
+        }
+    }
+
+    /// The owner of the daemon, set through `set_owner_pid`, binds the pair of files: the same owner
+    /// restarts with its member key and the run goes on, and another process with another start time
+    /// that names the same state file starts as a new member at run 1.
+    #[test]
+    fn set_owner_pid_binds_the_member_key_to_its_owner() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::lifecycle",
+                "from another owner",
+            );
+            let dir = TempDir::new("habilis-owner-wiring");
+            let state = dir.path().join("session.json");
+            let (first_owner, second_owner) = (Sleeper::spawn(), Sleeper::spawn());
+            let start = |owner: u32| {
+                let state = state.clone();
+                async move {
+                    let options = membership::JoinOptions::default();
+                    let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+                    let params = super::SetupParams::new(author, embed::SilentSink)
+                        .max_peers(8)
+                        .state_file(state);
+                    let config = super::setup_mesh(kind, params)
+                        .await
+                        .expect("a loopback mesh sets up");
+                    let config = config.set_owner_pid(owner).expect("a live owner");
+                    let keys = ended(config.mesh.keys.clone());
+                    config
+                        .endpoints
+                        .router
+                        .shutdown()
+                        .await
+                        .expect("the router stops");
+                    if let Some(handle) = config.transports.multihop.as_ref() {
+                        handle.close().await;
+                    }
+                    keys
+                }
+            };
+
+            let first = start(first_owner.0.id()).await;
+            let restart = start(first_owner.0.id()).await;
+            let reused_pid = start(second_owner.0.id()).await;
+
+            assert_eq!(
+                member_key(&first),
+                member_key(&restart),
+                "the same owner keeps the member key"
+            );
+            assert_eq!((first.run, restart.run), (1, 2), "and the run goes on");
+            assert_ne!(
+                member_key(&first),
+                member_key(&reused_pid),
+                "another owner that names the same state file is a new member"
+            );
+            assert_eq!(reused_pid.run, 1, "at run 1");
         });
     }
 

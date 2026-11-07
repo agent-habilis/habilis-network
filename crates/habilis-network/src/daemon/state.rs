@@ -8,6 +8,8 @@ mod key_of_error;
 mod latch;
 mod mesh_secrets;
 mod ping_round;
+mod proof_book;
+mod proof_exchange;
 mod socket_bytes;
 mod state_init;
 mod wire_out_tally;
@@ -49,7 +51,7 @@ pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
 pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
-pub(crate) use state_init::StateInit;
+pub(crate) use state_init::{RunKeys, StateInit};
 #[cfg(test)]
 pub(crate) use wire_out_tally::app_frame_with_tag;
 pub(crate) use wire_out_tally::{Arrival, FrameShape, WireOut, WireOutTally, by_arrival, by_class};
@@ -106,6 +108,520 @@ mod tests {
     use crate::testing::{
         author_of, endpoint_id, fresh_state, fresh_state_with_book, nick, test_key,
     };
+
+    /// The proof of a session is signed by the member key, over the session key, the nickname and
+    /// the mesh. The session key signs frames, so a proof signed by it would prove nothing.
+    #[test]
+    fn the_proof_of_a_session_is_signed_by_the_member_key() {
+        use crate::protocol::identity;
+        let state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let proof = state
+            .own_proof(&nick("alice"), &mesh, 7)
+            .expect("a member key");
+        assert_eq!(
+            proof.identity,
+            state
+                .member_identity
+                .as_ref()
+                .expect("a member key")
+                .public(),
+            "the member key signs the proof"
+        );
+        assert!(
+            identity::verify_proof(&proof, &state.identity.author_key(), "alice", mesh.as_ref()),
+            "the proof binds the session key, the nickname and the mesh"
+        );
+    }
+
+    /// A receiver holds the proof in a `joined` frame when it verifies for the author, and holds
+    /// nothing for a proof of another nickname or for an empty body.
+    #[test]
+    fn a_joined_frame_proof_is_held_when_it_verifies() {
+        let sender = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let key = sender.identity.author_key();
+        let own: Message = Message::new_joined_with_proof(
+            &mesh,
+            &nick("alice"),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
+        );
+        receiver.note_joined_proof(&own.sign(&sender.identity), &mesh, &nick("reader"));
+        assert!(
+            receiver.proofs.proof_of(&key).is_some(),
+            "the proof is held"
+        );
+
+        let mut other = fresh_state();
+        let forged = Message::new_joined_with_proof(
+            &mesh,
+            &nick("bob"),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
+        );
+        other.note_joined_proof(&forged.sign(&sender.identity), &mesh, &nick("reader"));
+        assert!(
+            other.proofs.proof_of(&key).is_none(),
+            "a proof of another nickname is not held"
+        );
+        let thief = fresh_state();
+        let stolen = Message::new_joined_with_proof(
+            &mesh,
+            &nick("alice"),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
+        )
+        .sign(&thief.identity);
+        other.note_joined_proof(&stolen, &mesh, &nick("reader"));
+        assert!(
+            other
+                .proofs
+                .proof_of(&thief.identity.author_key())
+                .is_none(),
+            "a proof body of another session, replayed under a new key, is not held"
+        );
+        let empty = Message::new_joined(&mesh, &nick("alice")).sign(&sender.identity);
+        other.note_joined_proof(&empty, &mesh, &nick("reader"));
+        assert!(
+            other.proofs.proof_of(&key).is_none(),
+            "an empty body holds no proof"
+        );
+    }
+
+    /// A proof request for this node gets one answer with a proof that verifies. A request for
+    /// another node gets none, and the answers stop at the per-minute cap.
+    #[test]
+    fn a_proof_request_is_answered_once_in_the_cap() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let asker = AuthorKey::from([200u8; 32]);
+        let now = Instant::now();
+        assert!(
+            state
+                .proof_answer(&AuthorKey::from([7u8; 32]), &asker, &me, &mesh, now)
+                .is_none(),
+            "a request for another node gets no answer"
+        );
+        let answer: messages::Verified = state
+            .proof_answer(&state.identity.author_key(), &asker, &me, &mesh, now)
+            .expect("a request for this node gets an answer");
+        let proof = answer.joined_proof().expect("the answer holds a proof");
+        assert!(
+            protocol::identity::verify_proof(
+                &proof,
+                &state.identity.author_key(),
+                "alice",
+                mesh.as_ref()
+            ),
+            "the proof in the answer verifies"
+        );
+        let askers: Vec<AuthorKey> = (1..=100u8)
+            .map(|index| AuthorKey::from([index; 32]))
+            .collect();
+        let mut answered = 0;
+        for other in &askers {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, now)
+                .is_some()
+            {
+                answered += 1;
+            }
+        }
+        assert_eq!(answered + 1, 30, "the answers stop at the per-minute cap");
+    }
+
+    /// An alive frame from a roster member whose session has no proof asks once. An alive frame
+    /// from a stranger asks never, and a held proof asks never.
+    #[test]
+    fn an_alive_frame_without_a_proof_asks_once() {
+        let mut state = fresh_state();
+        let peer = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let alive: messages::Verified =
+            Message::new_alive(&mesh, &nick("bob")).sign(&peer.identity);
+        assert!(
+            state.proof_request_for(&alive, &me, &mesh).is_none(),
+            "a stranger gets no request"
+        );
+        state.peers.insert(alive.key());
+        let request = state
+            .proof_request_for(&alive, &me, &mesh)
+            .expect("a roster member without a proof is asked");
+        assert_eq!(
+            request.kind,
+            protocol::MessageKind::ProofRequest {
+                to: peer.identity.author_key()
+            },
+            "the request names the member"
+        );
+        state.note_proof_request_sent(&alive.key(), None);
+        assert!(
+            state.proof_request_for(&alive, &me, &mesh).is_none(),
+            "after a send the session waits for its back-off"
+        );
+    }
+
+    /// A member that crashed never says goodbye, so its session must not stay live for ever: when
+    /// the book is full, the sessions of members that left the roster make room for new ones.
+    #[test]
+    fn crashed_members_do_not_fill_the_proof_book() {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let mut newest = None;
+        for index in 0..QUIET_CAP + 100 {
+            let member = protocol::identity::Identity::generate();
+            let session = protocol::identity::Identity::generate();
+            let name = nick(&format!("peer-{index}"));
+            let proof: protocol::identity::IdentityProof =
+                member.prove(&session.author_key(), name.as_ref(), mesh.as_ref(), 1);
+            let joined = Message::new_joined_with_proof(&mesh, &name, &proof).sign(&session);
+            receiver.note_joined_proof(&joined, &mesh, &nick("reader"));
+            newest = Some(session.author_key());
+        }
+        let newest: AuthorKey = newest.expect("the loop ran");
+        assert!(
+            receiver.proofs.proof_of(&newest).is_some(),
+            "the newest session verifies after more crashes than the cap"
+        );
+    }
+
+    /// A node that joins a mesh of 96 is asked by every peer in the same minute. Each asker gets
+    /// its answer: the node-wide cap grows with the roster.
+    #[test]
+    fn every_asker_of_a_mesh_of_96_is_answered() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        for index in 0..96 {
+            state.peers.insert(test_key(&format!("peer-{index}")));
+        }
+        let now = Instant::now();
+        let mut answered = 0;
+        for index in 0..96u8 {
+            let asker = AuthorKey::from([index; 32]);
+            if state
+                .proof_answer(&state.identity.author_key(), &asker, &me, &mesh, now)
+                .is_some()
+            {
+                answered += 1;
+            }
+        }
+        assert_eq!(answered, 96, "every asker of a mesh of 96 gets its answer");
+    }
+
+    /// A member restarts and its `joined` frame is lost. Its first frame is an `alive`, which the gate
+    /// refuses the roster, for the nickname is bound. The session is asked for its proof all the same,
+    /// since the proof is the way in; a stranger under a free nickname is no member of the roster and
+    /// gets no request.
+    #[test]
+    fn a_session_of_a_bound_nickname_that_missed_its_joined_frame_is_asked_for_its_proof() {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let bound = fresh_state();
+        let restarted = fresh_state();
+        let stranger = fresh_state();
+        let me = nick("reader");
+        receiver.peers.insert(bound.identity.author_key());
+        let proof = protocol::identity::Identity::generate().prove(
+            &bound.identity.author_key(),
+            "alice",
+            mesh.as_ref(),
+            1,
+        );
+        assert!(
+            receiver.proofs.accept(
+                &bound.identity.author_key(),
+                &nick("alice"),
+                &mesh,
+                proof,
+                |_| true
+            ),
+            "the nickname alice is bound to the member of the first session"
+        );
+        let alive_of = |sender: &EventLoopState, name: &str| -> messages::Verified {
+            Message::new_alive(&mesh, &nick(name)).sign(&sender.identity)
+        };
+
+        assert!(
+            receiver
+                .proof_request_for(&alive_of(&restarted, "alice"), &me, &mesh)
+                .is_some(),
+            "a session of the bound nickname with no proof is asked"
+        );
+        assert!(
+            receiver
+                .proof_request_for(&alive_of(&stranger, "carol"), &me, &mesh)
+                .is_none(),
+            "a stranger under a free nickname is not asked"
+        );
+    }
+
+    /// A restart makes a second session of one member under one nickname. The proof is keyed by the
+    /// session key, and a member holds one session, the newest: the proof of the run 2 session
+    /// replaces the proof of the run 1 session, and the caller hears of the one that went.
+    #[test]
+    fn the_session_of_a_newer_run_replaces_the_session_of_the_same_member() {
+        let first = fresh_state();
+        let second = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let shared = nick("alice");
+        let member = protocol::identity::Identity::generate();
+        let (old, new) = (first.identity.author_key(), second.identity.author_key());
+        for (sender, run) in [(&first, 1), (&second, 2)] {
+            receiver.peers.insert(sender.identity.author_key());
+            let proof = member.prove(&sender.identity.author_key(), "alice", mesh.as_ref(), run);
+            let joined =
+                Message::new_joined_with_proof(&mesh, &shared, &proof).sign(&sender.identity);
+            receiver.note_joined_proof(&joined, &mesh, &nick("reader"));
+        }
+
+        assert!(
+            receiver.proofs.proof_of(&old).is_none(),
+            "the old session is dropped"
+        );
+        assert!(
+            receiver.proofs.proof_of(&new).is_some(),
+            "the new session is held"
+        );
+        assert_eq!(
+            receiver.proofs.take_replaced(),
+            [old],
+            "the old session is reported"
+        );
+    }
+
+    /// A receiver binds a nickname to the member key whose proof it held first. The proof of another
+    /// member for the same nickname is not held, while the session of the first is in the roster. The
+    /// binding is the view of one receiver and not a global order: each of the two members is the
+    /// other for the other one, and both hear the join error.
+    #[test]
+    fn a_second_member_cannot_prove_a_nickname_that_a_roster_session_binds() {
+        let (first, second) = (fresh_state(), fresh_state());
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let shared = nick("alice");
+        receiver.peers.insert(first.identity.author_key());
+        receiver.peers.insert(second.identity.author_key());
+        let joined_first: messages::Verified = first.own_joined(&mesh, &shared);
+        let joined_second: messages::Verified = second.own_joined(&mesh, &shared);
+
+        receiver.note_joined_proof(&joined_first, &mesh, &nick("reader"));
+        receiver.note_joined_proof(&joined_second, &mesh, &nick("reader"));
+
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&first.identity.author_key())
+                .is_some(),
+            "the first member binds the nickname"
+        );
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&second.identity.author_key())
+                .is_none(),
+            "the second member's proof for the same nickname is not held"
+        );
+        assert_eq!(receiver.proofs.bound_refused(), 1, "the refusal is counted");
+    }
+
+    /// The nickname of this node is bound to its member key. The first proof of another member for
+    /// it is the join error of this node, told once for each session.
+    #[test]
+    fn a_proof_of_another_member_for_our_nickname_is_the_join_error_once() {
+        let mut ours = fresh_state();
+        let other = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let mine = nick("alice");
+        let joined: messages::Verified = other.own_joined(&mesh, &mine);
+
+        assert!(
+            ours.note_joined_proof(&joined, &mesh, &mine),
+            "the first proof of another member for our nickname is told"
+        );
+        assert!(
+            !ours.note_joined_proof(&joined, &mesh, &mine),
+            "the same session is told once"
+        );
+        assert!(
+            ours.proofs.proof_of(&other.identity.author_key()).is_none(),
+            "the proof is not held: our nickname is not up for binding"
+        );
+        let ours_joined: messages::Verified = ours.own_joined(&mesh, &mine);
+        assert!(
+            !ours.note_joined_proof(&ours_joined, &mesh, &mine),
+            "a proof of our own member key is no error"
+        );
+    }
+
+    /// A nickname is a label that two live sessions can share. A request names one session, and only
+    /// that session answers it: the other one holds the same nickname and stays silent.
+    #[test]
+    fn a_request_names_one_session_when_two_live_sessions_share_a_nickname() {
+        let (first, mut second) = (fresh_state(), fresh_state());
+        let mut joiner = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let (shared, joiner_name) = (nick("alice"), nick("bob"));
+        joiner.peers.insert(first.identity.author_key());
+        joiner.peers.insert(second.identity.author_key());
+        let alive: messages::Verified = Message::new_alive(&mesh, &shared).sign(&first.identity);
+
+        let request = joiner
+            .proof_request_for(&alive, &joiner_name, &mesh)
+            .expect("the joiner asks the first session");
+        let protocol::MessageKind::ProofRequest { to } = &request.kind else {
+            panic!("the joiner sent a proof request");
+        };
+        let now = Instant::now();
+        let asker = request.key();
+
+        assert!(
+            second
+                .proof_answer(to, &asker, &shared, &mesh, now)
+                .is_none(),
+            "the second session shares the nickname and is not the one that was asked"
+        );
+    }
+
+    /// Two nodes, end to end at state level: a joiner that missed the `joined` frame of a member
+    /// sees its alive frame, asks once, gets the answer, and holds a proof that verifies. The
+    /// restart half (a new session replaces the old one) waits for the gate.
+    #[test]
+    fn a_joiner_that_missed_the_joined_frame_ends_up_with_the_proof() {
+        let mut member = fresh_state();
+        let mut joiner = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let (member_name, joiner_name) = (nick("alice"), nick("bob"));
+        joiner.peers.insert(member.identity.author_key());
+        let alive: messages::Verified =
+            Message::new_alive(&mesh, &member_name).sign(&member.identity);
+
+        let request = joiner
+            .proof_request_for(&alive, &joiner_name, &mesh)
+            .expect("the joiner asks for the proof");
+        joiner.note_proof_request_sent(&alive.key(), None);
+        let protocol::MessageKind::ProofRequest { to } = &request.kind else {
+            panic!("the joiner sent a proof request");
+        };
+        let answer: messages::Verified = member
+            .proof_answer(to, &request.key(), &member_name, &mesh, Instant::now())
+            .expect("the member answers the request for itself");
+        joiner.note_joined_proof(&answer, &mesh, &nick("reader"));
+
+        let held = joiner.proofs.proof_of(&member.identity.author_key());
+        assert!(
+            held.is_some(),
+            "the joiner holds the proof of the member session"
+        );
+        assert!(
+            joiner
+                .proof_request_for(&alive, &joiner_name, &mesh)
+                .is_none(),
+            "the next alive frame of the session asks for nothing"
+        );
+    }
+
+    /// A joiner starts with a small roster, so its answer cap starts at 30. The askers it refused
+    /// ask again 30 s later, when the roster has grown, and every one of the 96 is answered.
+    #[test]
+    fn askers_refused_in_the_first_seconds_are_answered_after_the_roster_grows() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let askers: Vec<AuthorKey> = (0..96u8)
+            .map(|index| AuthorKey::from([index; 32]))
+            .collect();
+        let start = Instant::now();
+        let mut answered = Vec::new();
+        for other in &askers {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, start)
+                .is_some()
+            {
+                answered.push(*other);
+            }
+        }
+        assert_eq!(
+            answered.len(),
+            30,
+            "a small roster answers 30 in the first minute"
+        );
+        for index in 0..96 {
+            state.peers.insert(test_key(&format!("peer-{index}")));
+        }
+        let retry_at = start + Duration::from_secs(30);
+        let mut refused: Vec<AuthorKey> = Vec::new();
+        for other in &askers {
+            if !answered.contains(other) {
+                refused.push(*other);
+            }
+        }
+        for other in &refused {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, retry_at)
+                .is_some()
+            {
+                answered.push(*other);
+            }
+        }
+        assert_eq!(
+            answered.len(),
+            96,
+            "the retries of the refused askers are answered"
+        );
+    }
+
+    /// The `joined` frame a node announces carries the proof of its session, and a receiver holds
+    /// it: the first join needs no request.
+    #[test]
+    fn the_joined_frame_of_a_node_carries_its_proof() {
+        let sender = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let joined: messages::Verified = sender.own_joined(&mesh, &nick("alice"));
+        receiver.note_joined_proof(&joined, &mesh, &nick("reader"));
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&sender.identity.author_key())
+                .is_some(),
+            "the receiver holds the proof from the first frame"
+        );
+    }
+
+    /// A node with no member key (a target with no files, such as wasm) sends an empty `joined`
+    /// body: a proof made with a key of this start would prove nothing across restarts. It answers
+    /// no proof request either.
+    #[test]
+    fn a_node_with_no_member_key_sends_an_empty_joined_body() {
+        let mut state = fresh_state();
+        state.member_identity = None;
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let joined: messages::Verified = state.own_joined(&mesh, &me);
+        assert!(joined.joined_proof().is_none(), "the joined body is empty");
+        let asker = AuthorKey::from([9u8; 32]);
+        assert!(
+            state
+                .proof_answer(
+                    &state.identity.author_key(),
+                    &asker,
+                    &me,
+                    &mesh,
+                    Instant::now()
+                )
+                .is_none(),
+            "a node with no member key answers no request"
+        );
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
@@ -1098,6 +1614,36 @@ mod tests {
             state.address_of(&first).map(|address| address.id),
             Some(first_endpoint),
             "the first key lost its endpoint"
+        );
+    }
+
+    /// The retained endpoints are bounded: a flood of signed `PeerInfo` frames with fresh keys under a bound
+    /// nickname keeps the cap and no more, and the oldest key goes first.
+    #[test]
+    fn the_retained_endpoints_keep_their_cap_and_drop_the_oldest() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::REFUSED_ENDPOINTS_CAP;
+        let keys: Vec<AuthorKey> = (0..10 * cap)
+            .map(|index| test_key(&format!("flood-{index}")))
+            .collect();
+        for key in &keys {
+            state.retain_refused_endpoint(*key, iroh::EndpointAddr::new(endpoint_id(90)));
+        }
+
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "10 times the cap of fresh keys left more than the cap"
+        );
+        assert!(
+            !state.refused_endpoints.contains_key(&keys[0]),
+            "the oldest key is still retained"
+        );
+        assert!(
+            state
+                .refused_endpoints
+                .contains_key(keys.last().expect("a last key")),
+            "the newest key is not retained"
         );
     }
 

@@ -74,6 +74,30 @@ pub fn antientropy_interval() -> Duration {
     current().antientropy_interval.max(Duration::from_secs(1))
 }
 
+/// How long a state document with epochs holds its local writes at the start, waiting for the
+/// first sync, before it writes anyway (`MeshDoc::finish_sync`). A node that restarts has a Lamport
+/// clock of 0, so a write before it heard of another write could get a time below its own earlier
+/// writes and lose to them. A lone node, or a mesh whose peers are all down, would wait for ever
+/// without this limit, so it counts from the start of the node and not from the first peer.
+pub const STATE_SYNC_WAIT: Duration = Duration::from_secs(30);
+
+/// The live value, after any override of [`STATE_SYNC_WAIT`].
+///
+/// # Examples
+///
+/// The wait is 30 seconds unless a test or a tool changes it.
+///
+/// ```
+/// use habilis_network_util::tuning::state_sync_wait;
+/// use std::time::Duration;
+///
+/// assert!(state_sync_wait() <= Duration::from_secs(30));
+/// ```
+#[must_use]
+pub fn state_sync_wait() -> Duration {
+    current().state_sync_wait
+}
+
 /// How often a node re-broadcasts its relay **link-state** vector (its own
 /// measured links) so every peer keeps a fresh routing graph. Steady-state cost
 /// is one small message per interval; churn triggers a fresh vector out-of-band
@@ -351,6 +375,8 @@ pub struct Tuning {
     pub heal_interval: Duration,
     /// How often a node sends its digest to look for missing messages.
     pub antientropy_interval: Duration,
+    /// How long the state channel holds the writes of a node that has not synced yet.
+    pub state_sync_wait: Duration,
     /// How long an unmeshed joiner waits before it co-hosts the rendezvous anyway.
     pub cohost_grace: Duration,
     /// How long a ping round collects pongs before it reports.
@@ -392,6 +418,14 @@ impl Tuning {
     #[must_use]
     pub fn antientropy_interval(mut self, antientropy_interval: Duration) -> Self {
         self.antientropy_interval = antientropy_interval;
+        self
+    }
+
+    /// Set how long the state channel holds the writes of a node that has not synced yet. Zero
+    /// ends the wait at the start, for a test that writes at once.
+    #[must_use]
+    pub fn state_sync_wait(mut self, state_sync_wait: Duration) -> Self {
+        self.state_sync_wait = state_sync_wait;
         self
     }
 
@@ -473,6 +507,7 @@ impl Tuning {
         sweep_interval: SWEEP_INTERVAL,
         heal_interval: HEAL_INTERVAL,
         antientropy_interval: ANTIENTROPY_INTERVAL,
+        state_sync_wait: STATE_SYNC_WAIT,
         cohost_grace: BEACON_COHOST_GRACE,
         ping_window: PING_WINDOW,
         ppid_watch_interval: PPID_WATCH_INTERVAL,

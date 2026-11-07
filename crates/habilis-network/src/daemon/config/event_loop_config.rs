@@ -8,6 +8,8 @@ use crate::daemon::setup::LiveCount;
 use crate::daemon::shutdown::{Owner, OwnerPidError};
 
 use crate::transport::{UdpTransport, UnicastFrame};
+#[cfg(feature = "host")]
+use crate::util::process;
 use std::path::PathBuf;
 
 use iroh::Endpoint;
@@ -21,7 +23,8 @@ use crate::protocol::{MeshId, Nickname};
 
 use crate::beacon;
 
-use crate::protocol::{crypto, identity};
+use crate::daemon::state::RunKeys;
+use crate::protocol::crypto;
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 use iroh::address_lookup::memory;
@@ -76,10 +79,13 @@ pub(crate) struct MeshSpec {
     /// only on the creator of an invite-only mesh; `None` everywhere else (a
     /// joiner holds no issuer key, so it could never mint).
     pub(crate) mint_mesh: Option<Mesh>,
+    /// True on the node that created the mesh (invite-only or not): it has no peer to sync its
+    /// state with, so its state document does not wait for a first sync.
+    pub(crate) is_creator: bool,
     pub(crate) author: Nickname,
-    /// This member's signing identity (Ed25519), minted in `setup_mesh`.
-    /// In-process / ephemeral for now (see [`crate::protocol::identity`]).
-    pub(crate) identity: sync::Arc<identity::Identity>,
+    /// The two keys of this run (Ed25519), made in `setup_mesh`: a session key that is new each
+    /// run, and a member key that a restart keeps (see [`crate::protocol::identity`]).
+    pub(crate) keys: RunKeys,
     /// The raw mesh password, retained for the process lifetime when the
     /// mesh is password-protected (`None` otherwise). Needed at blob-offload
     /// time to key blob tickets with the same password — the Argon2id stretch
@@ -245,6 +251,12 @@ impl EventLoopConfig {
     #[cfg(feature = "host")]
     pub fn set_owner_pid(mut self, pid: u32) -> Result<Self, OwnerPidError> {
         self.runtime.owner = Some(Owner::try_new(pid)?);
+        // The pair of files that holds the identity of this member belongs to this owner, and to no
+        // later process that gets the same pid.
+        let start = process::live_start_time(pid);
+        let keys = self.mesh.keys.clone();
+        self.mesh.keys =
+            super::super::setup::bind_to_owner(keys, self.runtime.state_file.as_deref(), start);
         Ok(self)
     }
 

@@ -63,6 +63,7 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
         | MessageKind::Ping
         | MessageKind::Pong { .. } => timestamp > now - heartbeat::QUIET_TTL,
         MessageKind::PeerInfo
+        | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::Digest
@@ -87,6 +88,7 @@ pub(crate) fn is_live_kind(kind: &MessageKind) -> bool {
             subtype: PresenceSubtype::Left,
         }
         | MessageKind::PeerInfo
+        | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::Digest
@@ -211,6 +213,7 @@ fn compute_proving(
         | MessageKind::Pong { .. }
         | MessageKind::StateDigest
         | MessageKind::MetaDigest
+        | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
         | _ => !known,
     };
