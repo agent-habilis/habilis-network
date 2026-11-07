@@ -31,10 +31,6 @@ pub(crate) struct RunKeys {
     /// The lock on `<state>.key.lock`, held for as long as this start lives, so that no second live
     /// start reads the same member key. The lock is an OS lock on the descriptor: it goes when the
     /// process ends, so a crash frees the key. `None` where there is no member key to keep.
-    #[expect(
-        dead_code,
-        reason = "the field is held, never read: the lock lives as long as the keys do"
-    )]
     // shared with every clone of the keys: the lock goes when the last one drops
     pub(crate) key_lock: Option<Arc<File>>,
 }
