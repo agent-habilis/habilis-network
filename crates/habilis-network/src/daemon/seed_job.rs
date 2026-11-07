@@ -287,20 +287,20 @@ pub(crate) fn tick(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     if !state.doc(Channel::State).cut_due(rank) {
         return;
     }
-    start_cut(state, me, mesh, epoch);
+    start_cut(state, me, mesh);
 }
 
 /// A browser never cuts: the build is one synchronous call of seconds, and the loop of a browser
 /// has no other thread. The nodes of the host cut after their own slots, so a browser ranked ahead
 /// of them costs the mesh a delay of one slot (2 ticks).
 #[cfg(target_family = "wasm")]
-fn start_cut(_state: &mut EventLoopState, _me: &Nickname, _mesh: &MeshId, _epoch: u64) {}
+fn start_cut(_state: &mut EventLoopState, _me: &Nickname, _mesh: &MeshId) {}
 
 /// Read the document into a plan and start the build on another thread.
 #[cfg(not(target_family = "wasm"))]
-fn start_cut(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u64) {
+fn start_cut(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId) {
     let planned = state.doc(Channel::State).seed_plan();
-    // A candidate that the node holds is adopted, not cut over.
+    // A whole candidate that the node holds is adopted, not cut over.
     if matches!(planned, Err(DocError::CandidateHeld)) {
         return;
     }
@@ -311,7 +311,7 @@ fn start_cut(state: &mut EventLoopState, me: &Nickname, mesh: &MeshId, epoch: u6
             return;
         }
     };
-    let job = job_for(state, me, mesh, epoch.saturating_add(1));
+    let job = job_for(state, me, mesh, state.doc(Channel::State).cut_epoch());
     state.seed_job = Some(spawn_build(plan, job));
 }
 
@@ -555,7 +555,7 @@ pub(crate) fn finish(
     };
     // A seed came in while the build ran (or the epoch moved on): the rival rule can drop ours.
     let doc = state.doc(Channel::State);
-    if doc.has_candidate() || doc.epoch() >= outcome.epoch {
+    if doc.has_whole_candidate() || doc.epoch() >= outcome.epoch {
         tracing::info!(target: "habilis_network::gossip", epoch = outcome.epoch, "the seed of the state channel is dropped: another seed came in during the build");
         return Vec::new();
     }

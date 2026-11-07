@@ -1183,7 +1183,8 @@ impl MeshDoc {
     /// sees alive. The size of the document must have crossed the cut ceiling (see [`Limits`]) and
     /// grown by the growth of a cut since its seed, and the node must have waited the slot of its
     /// rank: rank 0 at once, rank `r` for `2 x r` ticks, and a node of rank 16 or more for 32
-    /// ticks and a spread that its tag chooses. A node that holds a candidate does not cut, and a
+    /// ticks and a spread that its tag chooses. A node that holds a whole candidate does not cut (an
+    /// incomplete one is no reason: a root with no chain would else hold every cut), and a
     /// node that a failed cut holds does not cut until the hold ends. The ticks are those of
     /// [`Self::tick_epoch`]. The rank is soft: a wrong view of the nodes delays or doubles a cut and
     /// never blocks it, because the higher ranks cut after the spread.
@@ -1191,7 +1192,7 @@ impl MeshDoc {
     pub fn cut_due(&self, rank: usize) -> bool {
         if !self.state_epochs
             || self.gate.is_some()
-            || self.candidate.is_some()
+            || self.candidate_is_whole()
             || self.cut_wait > 0
         {
             return false;
@@ -1441,6 +1442,31 @@ impl MeshDoc {
                 ahead_ms: held.saturating_add(1).max(now).saturating_sub(limit),
             }),
         }
+    }
+
+    /// Whether the candidate that the document holds is whole: its chain is complete, so the
+    /// document adopts it after the wait. An incomplete one (a root whose frames did not come, or
+    /// that never will) is dropped at the end of the wait and holds nothing back.
+    fn candidate_is_whole(&self) -> bool {
+        self.candidate
+            .as_ref()
+            .is_some_and(|held| held.chain().is_some())
+    }
+
+    /// Whether a whole candidate seed waits to be adopted: a cut from this view would lose its
+    /// values, so the node does not cut (see [`Self::cut_due`]).
+    #[must_use]
+    pub fn has_whole_candidate(&self) -> bool {
+        self.candidate_is_whole()
+    }
+
+    /// The epoch of the seed that this node cuts next: one above its own epoch and above the epoch
+    /// of an incomplete candidate that it holds, so that its seed replaces that candidate and is
+    /// not refused for a lower epoch.
+    #[must_use]
+    pub fn cut_epoch(&self) -> u64 {
+        let held = self.candidate.as_ref().map_or(0, |held| held.epoch);
+        self.epoch.max(held).saturating_add(1)
     }
 
     /// Whether a candidate seed waits to be adopted. A node that holds one adopts it after the wait
@@ -1815,7 +1841,7 @@ impl MeshDoc {
     /// # Errors
     /// [`DocError::CandidateHeld`] when the document waits to adopt a candidate seed.
     pub fn seed_plan(&self) -> Result<SeedPlan, DocError> {
-        if self.candidate.is_some() {
+        if self.candidate_is_whole() {
             return Err(DocError::CandidateHeld);
         }
         let live = self.without_dead_values();
@@ -2434,6 +2460,16 @@ impl MeshDoc {
                 if held.epoch == epoch
                     && mark.is_some()
                     && beats(&frame.key(), &held.frame.key()) => {}
+            // A whole candidate is not replaced by a root of a higher epoch whose chain has not come:
+            // an attacker would else take the seed that every node is about to adopt. The root of a
+            // seed of one frame is whole at once, so it passes.
+            Some(held)
+                if held.epoch < epoch
+                    && held.chain().is_some()
+                    && mark.as_ref().is_some_and(|named| named.frames > 1) =>
+            {
+                return self.refuse_frame(frame);
+            }
             Some(held) if held.epoch >= epoch => return self.refuse_frame(frame),
             _ => {}
         }
@@ -5638,6 +5674,93 @@ mod tests {
             doc.to_json(),
             live,
             "the document holds the live json of the seed"
+        );
+    }
+
+    /// A root with no chain, sent once for each wait, held the cut of every node for ever. Only a
+    /// candidate that is whole (it will be adopted) holds back the cut of a node: a cut from the old
+    /// view would lose the values of the seed.
+    #[test]
+    fn an_incomplete_candidate_does_not_hold_back_a_cut_but_a_whole_one_does() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (forger, cutter) = (nick("forger"), nick("cutter"));
+        let source = state_doc_with(&live_state());
+        let frames = seed_frames_of(&source, &cutter, 1, None);
+        let mut node = MeshDoc::new_ungated().state_epochs();
+        node.crossed_ticks = Some(100);
+        let first = node.ingest(&seed_frames_of(&source, &forger, 1, None).remove(0));
+        assert!(
+            matches!(first, Ingested::NewEpoch { .. }),
+            "the premise: an incomplete candidate is held: {first:?}"
+        );
+
+        assert!(
+            node.cut_due(0),
+            "an incomplete candidate holds nothing back"
+        );
+        assert!(node.seed_plan().is_ok(), "and the plan is made");
+        for frame in &frames {
+            node.ingest(frame);
+        }
+        assert!(
+            node.has_candidate() && !node.cut_due(0),
+            "a whole candidate holds the cut back"
+        );
+        assert!(
+            matches!(node.seed_plan(), Err(DocError::CandidateHeld)),
+            "and no plan is made"
+        );
+    }
+
+    /// A node that holds an incomplete candidate cuts above its epoch, so its seed replaces it and
+    /// is not refused for a lower epoch, whatever the keys of the two roots.
+    #[test]
+    fn a_cut_above_an_incomplete_candidate_replaces_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (forger, me) = (nick("forger"), nick("me"));
+        let mut node = state_doc_with(&live_state());
+        let root_of_forger = seed_frames_of(&node, &forger, 1, None).remove(0);
+        assert!(
+            matches!(
+                node.ingest(&root_of_forger),
+                Ingested::NewEpoch { epoch: 1 }
+            ),
+            "the premise: an incomplete candidate of epoch 1"
+        );
+        assert_eq!(node.cut_epoch(), 2, "one above the epoch of the candidate");
+
+        let mine = seed_frames_of(&node, &me, node.cut_epoch(), None);
+        let outcome = node.ingest(&mine[0]);
+
+        assert!(
+            matches!(outcome, Ingested::NewEpoch { epoch: 2 }),
+            "the seed of the node takes the place of the incomplete candidate: {outcome:?}"
+        );
+    }
+
+    /// A whole candidate is not taken away by a root with no chain: an attacker with a higher epoch
+    /// would else replace the seed that every node is about to adopt.
+    #[test]
+    fn a_root_with_no_chain_does_not_replace_a_whole_candidate() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (forger, cutter) = (nick("forger"), nick("cutter"));
+        let source = state_doc_with(&live_state());
+        let mut node = MeshDoc::new_ungated().state_epochs();
+        for frame in seed_frames_of(&source, &cutter, 1, None) {
+            node.ingest(&frame);
+        }
+
+        let higher = node.ingest(&seed_frames_of(&source, &forger, 2, None).remove(0));
+
+        assert!(
+            matches!(higher, Ingested::Ignored),
+            "a higher epoch: {higher:?}"
+        );
+        let switch = ticks(&mut node, &nick("me"), super::DOC_EPOCH_ADOPT_WAIT_TICKS);
+        assert_eq!(
+            switch.map(|switched| switched.epoch),
+            Some(1),
+            "the whole seed is adopted"
         );
     }
 
