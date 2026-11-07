@@ -43,7 +43,9 @@ pub use merge_ctx::{
     Farewell, MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge,
     send_app, start_ping_round, unicast_farewell,
 };
-pub(crate) use merge_ctx::{broadcast_peer_info, send_second_probe, write_entry_again};
+pub(crate) use merge_ctx::{
+    apply_merge_patch, broadcast_peer_info, send_second_probe, write_entry_again,
+};
 pub(crate) use path_summary::PathSummary;
 
 pub(crate) use recv::{
