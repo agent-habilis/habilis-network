@@ -163,13 +163,19 @@ function summarize(run: string): string {
     (line) => Object.fromEntries([...line.matchAll(/(\w+)=(\d+)/g)].map((m) => [m[1], m[2]])),
   );
   const census = rows.filter((row) => "roster_len" in row);
-  const roster = census.map((row) => Number(row.roster_len));
+  // The runner writes no per-node row to summary.txt, so the roster of a node is read from its own log: the
+  // roster_len of its last mesh census.
+  const lastRosterOf = (file: string): number[] => {
+    const last = [...clean(readFileSync(`${run}/${file}`, "utf8")).matchAll(/mesh census roster_len=(\d+)/g)].at(-1);
+    return last?.[1] === undefined ? [] : [Number(last[1])];
+  };
+  const nodeLogs = readdirSync(run).filter((f) => /^n.*\.err$/.test(f));
+  const roster = census.length ? census.map((row) => Number(row.roster_len)) : nodeLogs.flatMap(lastRosterOf);
   const mem = census
     .filter((row) => "peak_resident_memory_mb" in row)
     .map((row) => Number(row.peak_resident_memory_mb));
-  const logs = readdirSync(run).filter((f) => /^n.*\.err$/.test(f)).length;
   // Only a per-node row counts: the aggregate summary of an earlier pass has no `roster_len`.
-  const n = census.length || logs;
+  const n = census.length || nodeLogs.length;
 
   const stalls: number[] = [];
   const drops = new Map<string, number>();

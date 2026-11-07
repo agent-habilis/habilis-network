@@ -10,14 +10,14 @@
 // A pair of two builds with the wire counters, to compare their ratio: --plain-loaded 300 gives arm a a loaded phase too.
 //
 // Every run waits for the start gate, then runs bench.ts with the same warm-up (the settle phase). A run whose
-// phase breaks the phase gate is void and runs again, twice at most. After a pair, the A/B gate compares the
-// load of the two idle1 phases; a pair that fails it runs once more. See README.md, "Load gates".
+// phase breaks the phase gate is void and runs again, twice at most. After a pair, the fairness gate compares the
+// host load of the 3 min before each arm started; a pair that fails it runs once more. See README.md, "Load gates".
 // Run it after `ulimit -n 10240`. The result goes to <out-root>/b4.json.
 
 import { appendFileSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { AB_RATIO_MAX, PHASE_MAX, PHASE_MEDIAN_MAX, START_NOW_MAX, START_WINDOW_MAX, abGate, phaseGate, waitForStart } from "./gate.ts";
+import { PHASE_MAX, PHASE_MEDIAN_MAX, START_NOW_MAX, START_RATIO_MAX, START_WINDOW_MAX, fairGate, phaseGate, waitForStartWindow } from "./gate.ts";
 
 const flags = new Map<string, string>();
 const argv = process.argv.slice(2);
@@ -40,17 +40,24 @@ const log = (text: string) => {
   appendFileSync(`${ROOT}/b4.log`, line + "\n");
 };
 
-async function waitForQuietHost(): Promise<void> {
-  const start = await waitForStart();
-  if (start.ok) return;
+async function waitForQuietHost(): Promise<number[]> {
+  const start = await waitForStartWindow();
+  if (start.ok) return start.window;
   log(`start gate: the host did not settle in 20 min, last load1 ${start.last}`);
   process.exit(1);
 }
 
-type Run = { arm: string; pair: number; folder: string; phases: Record<string, { median: number; max: number; ok: boolean }>; void: boolean };
+type Run = {
+  arm: string;
+  pair: number;
+  folder: string;
+  phases: Record<string, { median: number; max: number; ok: boolean }>;
+  start: number[]; // the load1 of the 3 min before the run started
+  void: boolean;
+};
 
 async function runOnce(arm: "plain" | "counters", pair: number, attempt: number, nodes = NODES): Promise<Run> {
-  await waitForQuietHost();
+  const start = await waitForQuietHost();
   const spec = ARMS[arm];
   const label = `b4-${arm}${CURVE.length ? `-n${nodes}` : ""}-p${pair}${attempt ? `-r${attempt}` : ""}`;
   const args = [
@@ -85,8 +92,8 @@ async function runOnce(arm: "plain" | "counters", pair: number, attempt: number,
   }
   const bad = Object.entries(phases).filter(([, gate]) => !gate.ok).map(([name]) => name);
   log(`run ${label} done: ${Object.entries(phases).map(([n, g]) => `${n} median ${g.median.toFixed(2)} max ${g.max.toFixed(2)}`).join("; ")}${bad.length ? `; VOID (${bad.join(",")})` : ""}`);
-  if (bad.length > 0) return { arm, pair, folder: markVoid(folder), phases, void: true };
-  return { arm, pair, folder, phases, void: false };
+  if (bad.length > 0) return { arm, pair, folder: markVoid(folder), phases, start, void: true };
+  return { arm, pair, folder, phases, start, void: false };
 }
 
 // A void run stays on disk under a name that says so.
@@ -111,8 +118,10 @@ const gates = {
   start_window_max: START_WINDOW_MAX,
   phase_median_max: PHASE_MEDIAN_MAX,
   phase_max: PHASE_MAX,
-  ab_ratio_max: AB_RATIO_MAX,
-  reason: "widened by the leader on 2026-11-02 after the first start gate (1.5) failed on an idle host",
+  start_ratio_max: START_RATIO_MAX,
+  reason:
+    "the start gate was widened by the leader on 2026-11-02 after the first start gate (1.5) failed on an idle host; " +
+    "the pair gate was changed on 2026-11-07 from the idle1 load of the arms to the host load before each arm started",
 };
 const kept: Run[] = [];
 if (CURVE.length) {
@@ -127,22 +136,22 @@ if (CURVE.length) {
   log("all pairs done");
   process.exit(0);
 }
-const pairs: { pair: number; ab: ReturnType<typeof abGate>; runs: string[] }[] = [];
+const pairs: { pair: number; fair: ReturnType<typeof fairGate>; runs: string[] }[] = [];
 for (let pair = 1; pair <= PAIRS; pair++) {
   const order: ("plain" | "counters")[] = pair % 2 === 1 ? ["plain", "counters"] : ["counters", "plain"];
   for (let round = 0; round < 2; round++) {
     const done: Run[] = [];
     for (const arm of order) done.push(await runValid(arm, pair));
-    const ab = abGate(done[0]!.phases.idle1!.median, done[1]!.phases.idle1!.median);
-    log(`pair ${pair} A/B idle1 load1 ratio ${ab.ratio.toFixed(2)} ${ab.ok ? "ok" : "FAILED"}`);
-    if (!ab.ok && round === 1) {
+    const fair = fairGate(done[0]!.start, done[1]!.start);
+    log(`pair ${pair} fairness gate, start load1 ratio of the two arms ${fair.ratio.toFixed(2)} ${fair.ok ? "ok" : "FAILED"}`);
+    if (!fair.ok && round === 1) {
       for (const run of done) run.folder = markVoid(run.folder);
-      log(`pair ${pair}: the A/B gate failed on both attempts, the two pairs are void; stop`);
+      log(`pair ${pair}: the fairness gate failed on both attempts, the two pairs are void; stop`);
       process.exit(1);
     }
-    if (ab.ok) {
+    if (fair.ok) {
       kept.push(...done);
-      pairs.push({ pair, ab, runs: done.map((run) => run.folder) });
+      pairs.push({ pair, fair, runs: done.map((run) => run.folder) });
       break;
     }
     for (const run of done) run.folder = markVoid(run.folder);
