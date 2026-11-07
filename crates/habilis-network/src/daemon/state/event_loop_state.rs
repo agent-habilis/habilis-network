@@ -2749,6 +2749,16 @@ impl EventLoopState {
         self.standing.remove(&Standing::GossipOpen);
     }
 
+    /// Test only: adversarial feature. Put the document of `channel` in `epoch` at once, as an
+    /// adoption does after its wait, and queue the write of the own entry. The Op that calls it
+    /// exists only in an app build with the feature on: no frame and no CLI reaches it.
+    #[cfg(feature = "adversarial")]
+    pub fn force_epoch(&mut self, channel: protocol::Channel, epoch: u64) {
+        let own = self.identity.author_key();
+        let switch = self.doc_mut(channel).restart_at_epoch(epoch, &own);
+        self.note_epoch_switch(switch);
+    }
+
     /// Tests only: drop the next inbound frame that `what` names, once, before the app reads it.
     /// The frame is named, not counted, so that no other frame can take the drop.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

@@ -1831,6 +1831,30 @@ impl MeshDoc {
         lacking.then_some(Value::Object(merge))
     }
 
+    /// Test only: adversarial feature. Switch to `epoch` at once, as an adoption does after its
+    /// wait, and hand back the entry of `own` (see `switch_to`). It puts an honest node in a far
+    /// epoch without 10 minutes of ticks.
+    #[cfg(feature = "adversarial")]
+    pub fn restart_at_epoch(&mut self, epoch: u64, own: &AuthorKey) -> EpochSwitch {
+        self.switch_to(epoch, own)
+    }
+
+    /// Test only: adversarial feature. The body of a root of `epoch` that a forger builds: a change
+    /// of `merge` on the genesis of that epoch of a document with `gate`. `None` when `merge`
+    /// changes nothing.
+    #[cfg(feature = "adversarial")]
+    #[must_use]
+    pub fn forged_root_body(
+        gate: SelfWriteGate,
+        epoch: u64,
+        merge: &Value,
+        actor_seed: &[u8],
+    ) -> Option<habilis_network_protocol::MessageBody> {
+        let doc = Self::new_gated(gate).at_epoch(epoch);
+        let change = doc.build_change(merge, actor_seed).ok()??;
+        wire::change_body_timed(&change, None, epoch, None, None).ok()
+    }
+
     /// Drop every frame and start `epoch`, and hand back the entry of `own`, which only `own` can
     /// write again. The entry is the slot that the lowercase hex of the key names.
     fn switch_to(&mut self, epoch: u64, own: &AuthorKey) -> EpochSwitch {
