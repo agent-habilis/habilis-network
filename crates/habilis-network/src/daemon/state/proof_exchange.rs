@@ -14,6 +14,10 @@ const RETRIES: u8 = 3;
 /// After the fast retries a session is asked once per 10 minutes, 6 times at most.
 const SLOW_RETRY_WAIT: Duration = Duration::from_secs(600);
 const SLOW_RETRIES: u8 = 6;
+/// The asks of sessions that are not in the roster and claim one bound nickname: 4 open at most. A
+/// session that claims a bound nickname is asked for its proof, and a flood of forged keys under
+/// that nickname must replace its own asks and nobody else's.
+const OPEN_ASKS_PER_NICKNAME: usize = 4;
 
 /// The wait after the ask number `tries` (0 for the first): 30 s, 60 s, 120 s, then 10 minutes.
 fn retry_wait(tries: u8) -> Duration {
@@ -25,10 +29,12 @@ fn retry_wait(tries: u8) -> Duration {
 }
 
 /// How many times a session was asked, and when the next request may go.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Retry {
     tries: u8,
     next_at: Instant,
+    // the bound nickname that a session outside the roster claimed, when it was asked
+    claimed: Option<Nickname>,
 }
 
 /// The proofs this node holds, and the sessions it already asked for one. A proof comes in the
@@ -50,7 +56,9 @@ pub(crate) struct ProofExchange {
     asked: ProofBook<AuthorKey, Retry>,
     // the sessions told that their nickname is bound to another member: the oldest goes at the cap
     told: BoundedFifoSet<AuthorKey>,
-    // the sessions that a newer run of their member dropped, until the caller takes them
+    // the sessions that a newer run of their member dropped, until the caller takes them: at most as
+    // many as the book holds, and `roster_gate` takes them on each frame, so it holds a few at most
+    // between two frames
     replaced: Vec<AuthorKey>,
     ties_refused: u64,
     bound_refused: u64,
@@ -135,8 +143,8 @@ impl ProofExchange {
     }
 
     /// An alive frame came from `session`. True means: send the session a proof request now. A
-    /// request that got no answer is sent again, 3 times at most, with a doubling back-off. The
-    /// caller tells [`Self::note_asked`] when the request went out.
+    /// request that got no answer is sent again, with a doubling back-off (3 fast retries, then 6
+    /// slow ones). The caller tells [`Self::note_asked`] when the request went out.
     pub(crate) fn wants_proof(&self, session: &AuthorKey, now: Instant) -> bool {
         if self.book.get(session).is_some() {
             return false;
@@ -146,12 +154,34 @@ impl ProofExchange {
             .is_none_or(|retry| retry.tries <= RETRIES + SLOW_RETRIES && now >= retry.next_at)
     }
 
-    /// The request for `session` went out at `now`: the retry clock of the session starts.
-    pub(crate) fn note_asked(&mut self, session: &AuthorKey, now: Instant) {
+    /// The request for `session` went out at `now`: the retry clock of the session starts. `claimed`
+    /// is the bound nickname of a session that is not in the roster. At most 4 asks stay open for
+    /// each such nickname, and the oldest of that nickname goes for a new one.
+    pub(crate) fn note_asked(
+        &mut self,
+        session: &AuthorKey,
+        now: Instant,
+        claimed: Option<&Nickname>,
+    ) {
         let tries = self.asked.get(session).map_or(0, |retry| retry.tries);
+        if let Some(nickname) = claimed {
+            let same = |retry: &Retry| retry.claimed.as_ref() == Some(nickname);
+            let open: Vec<AuthorKey> = self
+                .asked
+                .keys_where(same)
+                .into_iter()
+                .filter(|asked| asked != session)
+                .collect();
+            let excess = (open.len() + 1).saturating_sub(OPEN_ASKS_PER_NICKNAME);
+            let oldest_ones = &open[..excess.min(open.len())];
+            for oldest in oldest_ones {
+                self.asked.remove(oldest);
+            }
+        }
         let retry = Retry {
             tries: tries.saturating_add(1),
             next_at: now + retry_wait(tries),
+            claimed: claimed.cloned(),
         };
         self.asked.insert_evicting(*session, retry, |_, _| false);
     }
@@ -283,7 +313,7 @@ mod tests {
             joiner.wants_proof(&session, now),
             "an alive frame of a session with no proof asks for it"
         );
-        joiner.note_asked(&session, now);
+        joiner.note_asked(&session, now, None);
         assert!(
             !joiner.wants_proof(&session, Instant::now()),
             "the session is asked once, not at each alive frame"
@@ -314,14 +344,15 @@ mod tests {
             joiner.wants_proof(&session, now),
             "no send, so the session still needs one"
         );
-        joiner.note_asked(&session, now);
+        joiner.note_asked(&session, now, None);
         assert!(
             !joiner.wants_proof(&session, now),
             "after a send the retry clock runs"
         );
     }
 
-    /// A request that got no answer is sent again, 3 times at most, after 30 s, 60 s and 120 s.
+    /// A request that got no answer is sent again 3 times, after 30 s, 60 s and 120 s, and then at a
+    /// slow pace (see the next test).
     #[test]
     fn an_unanswered_request_is_retried_three_times_with_a_back_off() {
         let session = Identity::generate().author_key();
@@ -332,13 +363,13 @@ mod tests {
             joiner.wants_proof(&session, at(0)),
             "the first request goes at once"
         );
-        joiner.note_asked(&session, at(0));
+        joiner.note_asked(&session, at(0), None);
         assert!(
             !joiner.wants_proof(&session, at(29)),
             "no retry before 30 s"
         );
         assert!(joiner.wants_proof(&session, at(30)), "retry 1 after 30 s");
-        joiner.note_asked(&session, at(30));
+        joiner.note_asked(&session, at(30), None);
         assert!(
             !joiner.wants_proof(&session, at(89)),
             "no retry before 60 s more"
@@ -347,7 +378,7 @@ mod tests {
             joiner.wants_proof(&session, at(90)),
             "retry 2 after 60 s more"
         );
-        joiner.note_asked(&session, at(90));
+        joiner.note_asked(&session, at(90), None);
         assert!(
             !joiner.wants_proof(&session, at(209)),
             "no retry before 120 s more"
@@ -356,7 +387,7 @@ mod tests {
             joiner.wants_proof(&session, at(210)),
             "retry 3 after 120 s more"
         );
-        joiner.note_asked(&session, at(210));
+        joiner.note_asked(&session, at(210), None);
         assert!(
             !joiner.wants_proof(&session, at(809)),
             "no fourth fast retry: the next ask waits 10 minutes"
@@ -376,7 +407,7 @@ mod tests {
                 joiner.wants_proof(&session, at(secs)),
                 "a fast ask at {secs} s"
             );
-            joiner.note_asked(&session, at(secs));
+            joiner.note_asked(&session, at(secs), None);
         }
         assert!(
             !joiner.wants_proof(&session, at(809)),
@@ -386,7 +417,7 @@ mod tests {
         for round in 1..=6 {
             last += 600;
             assert!(joiner.wants_proof(&session, at(last)), "slow retry {round}");
-            joiner.note_asked(&session, at(last));
+            joiner.note_asked(&session, at(last), None);
         }
         assert!(
             !joiner.wants_proof(&session, at(last + 100_000)),
@@ -681,5 +712,31 @@ mod tests {
         book.forget(&session);
 
         assert!(book.proof_of(&session).is_none(), "the proof is gone");
+    }
+
+    /// Keys that are not members can claim a bound nickname by the thousand, and each one with an
+    /// address is asked for a proof. The asks of such sessions are limited for each nickname, so the
+    /// flood replaces its own asks and pushes no other ask, and no retry clock, out of the book.
+    #[test]
+    fn a_flood_of_forged_keys_under_one_nickname_keeps_the_asks_of_the_members() {
+        let member = Identity::generate().author_key();
+        let claimed = Nickname::from("alice");
+        let mut joiner = ProofExchange::with_cap(QUIET_CAP);
+        let now = Instant::now();
+        joiner.note_asked(&member, now, None);
+        assert!(
+            !joiner.wants_proof(&member, now),
+            "the member waits for its answer"
+        );
+
+        for _ in 0..2_000 {
+            let forged = Identity::generate().author_key();
+            joiner.note_asked(&forged, now, Some(&claimed));
+        }
+
+        assert!(
+            !joiner.wants_proof(&member, now),
+            "the ask of the member is still there, and its retry clock was not reset"
+        );
     }
 }

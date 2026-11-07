@@ -78,6 +78,13 @@ impl<K: Eq + Hash + Clone, V> ProofBook<K, V> {
         self.held.iter()
     }
 
+    /// The keys whose value `matches`, the oldest first.
+    pub(crate) fn keys_where(&self, matches: impl Fn(&V) -> bool) -> Vec<K> {
+        let held = &self.held;
+        let wanted = |key: &&K| held.get(*key).is_some_and(&matches);
+        self.order.iter().filter(wanted).cloned().collect()
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.held.len()
     }

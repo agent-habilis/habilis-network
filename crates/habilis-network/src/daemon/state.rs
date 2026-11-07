@@ -260,7 +260,7 @@ mod tests {
             },
             "the request names the member"
         );
-        state.note_proof_request_sent(&alive.key());
+        state.note_proof_request_sent(&alive.key(), None);
         assert!(
             state.proof_request_for(&alive, &me, &mesh).is_none(),
             "after a send the session waits for its back-off"
@@ -504,7 +504,7 @@ mod tests {
         let request = joiner
             .proof_request_for(&alive, &joiner_name, &mesh)
             .expect("the joiner asks for the proof");
-        joiner.note_proof_request_sent(&alive.key());
+        joiner.note_proof_request_sent(&alive.key(), None);
         let protocol::MessageKind::ProofRequest { to } = &request.kind else {
             panic!("the joiner sent a proof request");
         };

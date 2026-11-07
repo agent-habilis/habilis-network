@@ -232,7 +232,8 @@ pub(crate) async fn ask_for_proof(
     if let Ok(bytes) = request.serialize()
         && transport::send_best_effort(eid, bytes, state).await
     {
-        state.note_proof_request_sent(&alive.key());
+        let claimed = (!state.peers.contains(&alive.key())).then_some(&alive.author);
+        state.note_proof_request_sent(&alive.key(), claimed);
     } else {
         tracing::debug!(target: "habilis_network::lifecycle", member = %alive.author, "proof request skipped: the send failed");
     }

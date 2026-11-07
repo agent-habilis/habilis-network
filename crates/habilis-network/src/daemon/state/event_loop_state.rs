@@ -2308,8 +2308,10 @@ impl EventLoopState {
     }
 
     /// The request to send for an `alive` frame whose session this node holds no proof for. It asks
-    /// once per session, and only for a member of the roster, so a flood of new keys buys no
-    /// request.
+    /// for a member of the roster and for a session that claims a bound nickname, since the proof is
+    /// the way in. A stranger under a free nickname is not asked. The asks of sessions outside the
+    /// roster are limited to 4 open for each nickname, so a flood of forged keys under one bound
+    /// nickname replaces its own asks and no other.
     pub(crate) fn proof_request_for(
         &self,
         alive: &Verified,
@@ -2331,8 +2333,12 @@ impl EventLoopState {
 
     /// The request for the proof of `session` went out: its retry clock starts. A request that
     /// did not go out, for lack of a warm path, is not noted, so the next alive frame asks again.
-    pub(crate) fn note_proof_request_sent(&mut self, session: &AuthorKey) {
-        self.proofs.note_asked(session, Instant::now());
+    pub(crate) fn note_proof_request_sent(
+        &mut self,
+        session: &AuthorKey,
+        claimed: Option<&Nickname>,
+    ) {
+        self.proofs.note_asked(session, Instant::now(), claimed);
     }
 
     /// The answer to a proof request: a signed `joined` frame with the proof of this session, if
