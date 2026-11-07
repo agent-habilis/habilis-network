@@ -15,8 +15,8 @@ use habilis_network_util::consts::{
     DOC_EPOCH_FRAME_CAP_BYTES, DOC_EPOCH_FRAME_MARGIN, DOC_EPOCH_JUMP_MAX, DOC_PENDING_AUTHOR_MAX,
     DOC_PENDING_TOTAL_MAX, DOC_REPLAY_ENTRIES_MAX, DOC_RESTORES_MAX, DOC_SEED_FRAMES_MAX,
     DOC_SEED_TOMBSTONE_FRAME_BYTES, DOC_SEED_TOMBSTONES_MAX, DOC_STATE_DEPTH_MAX,
-    DOC_STATE_ENVELOPE_BYTES, DOC_STATE_EPOCH_FRAME_CAP_BYTES, DOC_TOMBSTONE_PATH_BYTES_MAX,
-    MAX_MESSAGE_SIZE,
+    DOC_STATE_ENVELOPE_BYTES, DOC_STATE_EPOCH_FRAME_CAP_BYTES, DOC_STATE_STAMP_BYTES_MAX,
+    DOC_TOMBSTONE_PATH_BYTES_MAX, MAX_MESSAGE_SIZE,
 };
 
 use crate::wire::SeedMark;
@@ -2149,7 +2149,7 @@ impl MeshDoc {
     /// of the envelope and the envelope itself. If one did not, the write would pass the frame of
     /// the write (which has no stamp) and every later cut would fail on it. Only a leaf of
     /// `SEED_LEAF_CHECK_MIN` bytes or more is built and measured: a smaller one always fits.
-    fn check_seed_frames(merge: &Value) -> Result<(), DocError> {
+    fn check_seed_frames(&self, merge: &Value) -> Result<(), DocError> {
         let mut leaves: Vec<(Vec<String>, Value)> = Vec::new();
         collect_leaves(merge, &mut Vec::new(), &mut leaves);
         for (path, value) in &leaves {
@@ -2158,10 +2158,12 @@ impl MeshDoc {
             }
             let path_bytes: usize = path.iter().map(String::len).sum();
             let json_bytes: usize = serde_json::to_vec(value).map_or(0, |bytes| bytes.len());
-            if path_bytes + json_bytes < SEED_LEAF_CHECK_MIN {
+            // A stamp for each key of the path and one more: a leaf that is small but deep is still measured.
+            let stamp_bytes: usize = (path.len() + 1) * DOC_STATE_STAMP_BYTES_MAX;
+            if path_bytes + json_bytes + stamp_bytes < SEED_LEAF_CHECK_MIN {
                 continue;
             }
-            let body = seed_frame_body_len(path, value);
+            let body = seed_frame_body_len(path, value, self.key.as_ref());
             if body + DOC_EPOCH_FRAME_MARGIN + DOC_STATE_ENVELOPE_BYTES > MAX_MESSAGE_SIZE {
                 return Err(DocError::TooLarge {
                     bytes: path_bytes + json_bytes,
@@ -2196,7 +2198,7 @@ impl MeshDoc {
         }
         let adds = adds_value(merge) && !restoring;
         if adds {
-            Self::check_seed_frames(merge)?;
+            self.check_seed_frames(merge)?;
             let depth = merge_depth(merge);
             if depth > DOC_STATE_DEPTH_MAX {
                 return Err(DocError::StateTooDeep {
@@ -3546,13 +3548,16 @@ const SEED_LEAF_CHECK_MIN: usize = 1_500;
 /// The bytes of the body of the frame of a seed that holds only the leaf `value` at `path`, with the
 /// largest stamp. The change is built on an empty document, so it holds the keys above the leaf as
 /// well, which is more than a later frame of the seed needs: the figure is an upper bound.
-fn seed_frame_body_len(path: &[String], value: &Value) -> usize {
+fn seed_frame_body_len(path: &[String], value: &Value, seal: Option<&SymmetricKey>) -> usize {
     let mut merge = value.clone();
     let innermost_first = path.iter().rev();
     for key in innermost_first {
         merge = Value::Object(Map::from_iter([(key.clone(), merge)]));
     }
     let mut doc = Automerge::new();
+    // The actor of a seed is the signing key of its cutter, 32 bytes, and an actor is in every
+    // change: the random actor of a new document is half as long.
+    doc.set_actor(actor_for(&[0xff; 32]));
     let mut tx = doc.transaction();
     if write_map(&mut tx, &ROOT, &merge).is_err() {
         return usize::MAX;
@@ -3565,9 +3570,18 @@ fn seed_frame_body_len(path: &[String], value: &Value) -> usize {
     // The largest time of 13 digits: a time is the wall clock in milliseconds, so it has 13 digits
     // until the year 2286.
     let time: u64 = 9_999_999_999_999;
-    let worst = [Stamp::new(time, "ffffffffffffffff".to_owned())];
+    // The frame of a seed carries a stamp for each path that its change writes: the leaf and each
+    // object on the way to it, so one for each key of the path, and one more for the root of the
+    // change.
+    let worst = vec![Stamp::new(time, "ffffffffffffffff".to_owned()); path.len() + 1];
     let bytes = change.raw_bytes();
-    let body = wire::change_body_tombstoned(bytes, None, 1, None, Some(time), &worst, &[]);
+    let plain = wire::change_body_tombstoned(bytes, None, 1, None, Some(time), &worst, &[]);
+    // A sealed mesh sends the body sealed, which is longer: the frame is measured as it goes.
+    let body = match (plain, seal) {
+        (Ok(plain), Some(seal)) => wire::encrypt_body(&plain, seal),
+        (plain, None) => plain,
+        (Err(error), Some(_)) => Err(error),
+    };
     body.map_or(usize::MAX, |body| body.as_str().len())
 }
 
@@ -5385,10 +5399,10 @@ mod tests {
         );
     }
 
-    /// Eleven nested keys of 200 bytes, and a leaf below them: the path alone is 2 200 bytes.
+    /// Eleven nested keys of 170 bytes, and a leaf below them: the path alone is 1 870 bytes.
     fn deep_key_path() -> Vec<String> {
         (0..11)
-            .map(|level| format!("{level:02}{}", "k".repeat(198)))
+            .map(|level| format!("{level:02}{}", "k".repeat(168)))
             .collect()
     }
 
@@ -5427,7 +5441,7 @@ mod tests {
         }
         let heads = fork.get_heads();
         let mut tx = fork.transaction();
-        tx.put(&object, "big", "x".repeat(1000)).expect("a put");
+        tx.put(&object, "big", "x".repeat(1300)).expect("a put");
         tx.commit();
         let bytes = super::raw_changes(&fork, &heads).remove(0);
         let body = change_body_timed(&bytes, None, 0, None, Some(doc.clock() + 1)).expect("a body");
@@ -8150,8 +8164,8 @@ mod tests {
         let timeless = MeshDoc::new_ungated();
         let change = change_of(&timeless, &merge, &pad_seed(b"me"));
         let time: u64 = 9_999_999_999_999;
-        let worst = Stamp::new(time, "ffffffffffffffff".to_owned());
-        let body = change_body_tombstoned(&change, None, 1, None, Some(time), &[worst], &[]);
+        let worst = vec![Stamp::new(time, "ffffffffffffffff".to_owned()); path.len() + 1];
+        let body = change_body_tombstoned(&change, None, 1, None, Some(time), &worst, &[]);
         body.map_or(usize::MAX, |body| body.as_str().len())
     }
 

@@ -593,7 +593,7 @@ mod tests {
     use crate::doc::{DocError, Ingested, Limits, MeshDoc, Stamp, TimeSource};
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::Verified;
-    use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname};
+    use crate::protocol::{AuthorKey, Channel, MeshId, Message, Nickname, SymmetricKey};
     use crate::testing;
     use crate::util::bounded_fifo_set::BoundedFifoSet;
     use crate::util::tuning::PENDING_OUTBOUND_CAP;
@@ -704,6 +704,47 @@ mod tests {
             mesh: MeshId::from("test"),
             author: testing::nick("me"),
         }
+    }
+
+    /// A leaf at depth 12 that the check of a write accepts must be carried by the cut: the frame of
+    /// a seed carries a stamp for each object on the path, and the mesh is sealed. A leaf that the
+    /// write check passes and the cut drops is lost with no error to the writer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_deep_leaf_that_the_write_check_accepts_is_carried_by_the_cut_in_a_sealed_mesh() {
+        // Shared with the job that builds on another thread.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let key = SymmetricKey::from_bytes([7; 32]);
+        let mut doc = MeshDoc::new_state(Some(key.clone()));
+        doc.finish_sync();
+        let path: Vec<String> = (0..12).map(|level| format!("k{level}")).collect();
+        let merge_of = |length: usize| {
+            let leaf = json!("x".repeat(length));
+            path.iter()
+                .rev()
+                .fold(leaf, |inner, name| json!({ (name.as_str()): inner }))
+        };
+        let accepted: usize = (1..2_000)
+            .rev()
+            .step_by(10)
+            .find(|length| {
+                doc.build_change(&merge_of(*length), identity.public().as_bytes())
+                    .is_ok()
+            })
+            .expect("a short leaf passes the check");
+        write_merge(&mut doc, &identity, &me, &merge_of(accepted));
+        let plan = doc.seed_plan().expect("a plan");
+        let mut job = job_of(&identity, 1);
+        // Shared with the job that builds on another thread.
+        job.seal = Some(Arc::new(key));
+
+        let outcome = spawn_build(plan, job).await.expect("the build ends");
+
+        let chain = outcome.chain.expect("the cut works");
+        assert_eq!(
+            chain.left_out, 0,
+            "the leaf of {accepted} bytes passed the write check and the cut left it out"
+        );
     }
 
     /// The timers of the loop go on while the seed is built: a ticker of 10 ms counts the ticks that
