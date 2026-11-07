@@ -18,6 +18,7 @@ use habilis_network::membership::{self, Inspect, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net::test_relay;
+use habilis_network::util::tuning;
 use std::{env, fs};
 use tokio::{sync, time};
 /// One more than `MAX_DIRECT_PEERS + 1`, so that a node cannot hold a session
@@ -37,6 +38,11 @@ fn logs() -> String {
 }
 
 async fn open(nick: &str, options: membership::JoinOptions) -> Membership {
+    // These tests are about the roster and the rendezvous, not about the first sync of the state channel,
+    // which none of them uses: its wait ends at the start. Without this, a member that no peer answered
+    // in 30 s of a loaded runner (18 members on one process) warned once, by design, and the guard of the
+    // test failed the run on a warning that the test does not check. Every assertion stays as it was.
+    tuning::init(tuning::Tuning::DEFAULTS.state_sync_wait(Duration::ZERO));
     let (sink, _events) = membership::json_sink();
     let options = options.nick(Some(nick.to_owned()));
     membership::join(&options, sink)
