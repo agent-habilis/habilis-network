@@ -912,6 +912,13 @@ async fn roster_gate(
     }
     let admitted = state.admits_session(verified, context.author);
     if admitted {
+        if let Some(run) = state.newer_run_of_our_member(verified, context.author) {
+            let line = format!(
+                "Another, newer run of this member is active (run {run}): this node is superseded: stop it"
+            );
+            tracing::warn!(target: "habilis_network::lifecycle", run, "a newer run of our member is active");
+            context.sink.emit(NodeEvent::Error(line));
+        }
         return Some(lifecycle::observe(verified, state, context));
     }
     // A goodbye is signed by the key that leaves, whatever nickname the frame names: the gate refuses the
@@ -3159,6 +3166,57 @@ mod first_contact_tests {
                 naming.len(),
                 1,
                 "the version of the frame is named once: {seen:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A newer run of our own member is admitted, and the newest run wins at the other nodes: this node is
+    /// superseded and says so, once for each run number.
+    #[test]
+    fn a_newer_run_of_our_own_member_is_reported_once_for_each_run() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::lifecycle",
+                "a newer run of our member is active",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let member = state
+                .member_identity
+                .clone()
+                .expect("a test state has a member key");
+            let mut app = Inert;
+
+            // Our run is 1. The runs 5, 5 (another session) and 6 of our member arrive, then the run 0.
+            for run in [5u64, 5, 6, 0] {
+                let session = Identity::generate();
+                let key = session.author_key();
+                let proof = member.prove(&key, node.author.as_ref(), node.mesh.as_ref(), run);
+                let joined =
+                    Message::new_joined_with_proof(&node.mesh, &node.author, &proof).sign(&session);
+                let bytes = joined.serialize().expect("serialize").into_bytes();
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+
+            let seen = lines
+                .0
+                .lock()
+                .expect("the lines lock is not poisoned")
+                .clone();
+            let superseded: Vec<&String> = seen
+                .iter()
+                .filter(|line| line.contains("newer run of this member"))
+                .collect();
+            assert_eq!(
+                superseded.len(),
+                2,
+                "one line for the run 5 and one for the run 6, none for the second run 5 or the older run: {seen:?}"
             );
             node.endpoint.close().await;
         });
@@ -6095,24 +6153,21 @@ mod dedup_counter_tests {
     /// A session that our own member key proved under our nickname is a peer only when its run is not older
     /// than ours: a replay of an older run must not enter the roster beside the run that is live here.
     #[test]
-    fn an_older_run_of_our_own_member_is_no_peer_and_a_newer_run_is() {
+    fn an_older_run_of_our_own_member_is_no_peer() {
         let session = Identity::generate();
-        for (run, peer) in [(0, false), (2, true)] {
-            let state = fresh_state();
-            let member = state
-                .member_identity
-                .clone()
-                .expect("a test state has a member key");
-            let proof_frame = joined_of(&session, &member, "reader", run);
+        let state = fresh_state();
+        let member = state
+            .member_identity
+            .clone()
+            .expect("a test state has a member key");
+        let proof_frame = joined_of(&session, &member, "reader", 0);
 
-            let reader = reader_with(state, vec![proof_frame]);
+        let reader = reader_with(state, vec![proof_frame]);
 
-            assert_eq!(
-                reader.peers.contains(&session.author_key()),
-                peer,
-                "a session of our member with run {run} against the local run 1"
-            );
-        }
+        assert!(
+            !reader.peers.contains(&session.author_key()),
+            "a session of our member with run 0 against the local run 1 entered the roster"
+        );
     }
 
     /// A free nickname is accepted with no proof: a member that has not proved yet, or a client

@@ -440,6 +440,9 @@ pub struct EventLoopState {
     pub(crate) proofs: ProofExchange,
     /// The run number of this start, which the proof of this session names.
     run: u64,
+    /// The highest run above ours that a session of our own member proved: a newer run of this member is
+    /// active elsewhere, and this node is superseded. One number, so the memory is bounded.
+    newest_own_run_seen: u64,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
@@ -822,6 +825,7 @@ impl EventLoopState {
             left_keys: Goodbyes::default(),
             proofs: ProofExchange::with_cap(QUIET_CAP),
             run: init.keys.run,
+            newest_own_run_seen: 0,
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
@@ -2419,6 +2423,34 @@ impl EventLoopState {
                 peers.contains(session) || quiet.contains(session)
             });
         false
+    }
+
+    /// The run of a session of our own member that is newer than ours, when this frame is the first to show
+    /// it: a newer run of this member is active elsewhere, so this node is superseded. It is admitted as
+    /// before, and the caller says so once for each run number.
+    pub(crate) fn newer_run_of_our_member(
+        &mut self,
+        message: &Verified,
+        own: &Nickname,
+    ) -> Option<u64> {
+        let ours = self
+            .member_identity
+            .as_ref()
+            .map(|member| member.public())?;
+        let key = message.key();
+        if message.author != *own || key == self.identity.author_key() {
+            return None;
+        }
+        let run = self
+            .proofs
+            .proof_of(&key)
+            .filter(|proof| proof.identity == ours)
+            .map(|proof| proof.run)?;
+        let newer = run > self.run && run > self.newest_own_run_seen;
+        newer.then(|| {
+            self.newest_own_run_seen = run;
+            run
+        })
     }
 
     /// Whether the frames of this session reach the roster. A session that claims a nickname that
