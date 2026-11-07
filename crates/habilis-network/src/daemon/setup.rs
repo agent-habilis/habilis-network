@@ -1,7 +1,9 @@
 use crate::{beacon, transport};
 use iroh_gossip::{api, net, proto};
 #[cfg(all(unix, feature = "host"))]
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+#[cfg(all(unix, feature = "host"))]
+use std::io;
 use std::path::{Path, PathBuf};
 use std::{mem, sync};
 #[cfg(feature = "host")]
@@ -642,64 +644,88 @@ fn validated_mesh_config(kind: &SetupKind) -> Result<&MeshConfig> {
 /// A key file of the wrong length is replaced, with a warning. No state file means a new key.
 #[cfg(all(unix, feature = "host"))]
 fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
-    use std::fs;
+    use std::io::Read as _;
     let Some(state) = state else {
         return Ok(identity::Identity::generate());
     };
     let key_path = state.with_extension("key");
-    if let Some(why) = untrusted_key_file(&key_path) {
-        anyhow::bail!(
-            "the member key file {} is not trusted: {why}; remove it to make a new member key",
-            key_path.display()
-        );
-    }
-    if let Ok(bytes) = fs::read(&key_path) {
-        let seed = bytes
-            .get(..32)
-            .and_then(|seed| <[u8; 32]>::try_from(seed).ok());
-        if let Some(seed) = seed {
-            return Ok(identity::Identity::from_seed(&seed));
+    let mut reading = OpenOptions::new();
+    reading.read(true);
+    match open_trusted_key_file(&key_path, &mut reading) {
+        Ok(mut file) => {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let seed: Option<[u8; 32]> = bytes
+                .get(..32)
+                .and_then(|seed| <[u8; 32]>::try_from(seed).ok());
+            if let Some(seed) = seed {
+                return Ok(identity::Identity::from_seed(&seed));
+            }
+            tracing::warn!(target: "habilis_network::lifecycle", "identity key file has the wrong length; a new key replaces it");
         }
-        tracing::warn!(target: "habilis_network::lifecycle", "identity key file has the wrong length; a new key replaces it");
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => anyhow::bail!(
+            "the member key file {} is not trusted: {error}; remove it to make a new member key",
+            key_path.display()
+        ),
     }
     let identity = identity::Identity::generate();
     write_key_file(&key_path, identity.seed().as_slice(), 0)?;
     Ok(identity)
 }
 
-/// Why a key file that exists is not trusted, or `None` for a missing file and for the file that this code
-/// writes: a regular file, owned by this user, that group and others cannot read. Its seed becomes the
-/// identity of this member, so a file that another user could have planted is not loaded.
+/// Open the key file with `options`, without following a link, and check the OPEN file: a regular file, owned by
+/// this user, that group and others cannot access (the mode that `write_key_file` makes). Its seed becomes the
+/// identity of this member, so a file that another user planted is not used. The checks are on the descriptor, not
+/// on the path, so a link or a file that is put at the path between a check and the open cannot slip through. A
+/// missing file is `NotFound`; a file that fails a check is `PermissionDenied`.
 #[cfg(all(unix, feature = "host"))]
-fn untrusted_key_file(key_path: &Path) -> Option<&'static str> {
+fn open_trusted_key_file(key_path: &Path, options: &mut OpenOptions) -> io::Result<File> {
+    use rustix::fs::OFlags;
+    use rustix::io::Errno;
     use rustix::process::geteuid;
-    use std::fs;
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    let meta = fs::symlink_metadata(key_path).ok()?;
-    if !meta.file_type().is_file() {
-        return Some("it is not a regular file");
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    let flags = i32::try_from(OFlags::NOFOLLOW.bits()).unwrap_or(0);
+    let file: File = options
+        .custom_flags(flags)
+        .open(key_path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(Errno::LOOP.raw_os_error()) {
+                Error::new(ErrorKind::PermissionDenied, "it is a link")
+            } else {
+                error
+            }
+        })?;
+    let meta = file.metadata()?;
+    let refused: Option<&str> = if !meta.file_type().is_file() {
+        Some("it is not a regular file")
+    } else if meta.uid() != geteuid().as_raw() {
+        Some("another user owns it")
+    } else if meta.permissions().mode() & 0o077 != 0 {
+        Some("group or others can access it")
+    } else {
+        None
+    };
+    match refused {
+        Some(why) => Err(Error::new(ErrorKind::PermissionDenied, why)),
+        None => Ok(file),
     }
-    if meta.uid() != geteuid().as_raw() {
-        return Some("another user owns it");
-    }
-    if meta.permissions().mode() & 0o077 != 0 {
-        return Some("group or others can access it");
-    }
-    None
 }
 
 /// Write the member key file: the 32 bytes of the seed, then the start time of the process that owns
 /// the daemon (0 until the owner is known), as 8 bytes. The file is private to the user.
 #[cfg(all(unix, feature = "host"))]
 fn write_key_file(key_path: &Path, seed: &[u8], owner_start: u64) -> Result<()> {
-    use std::fs;
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     // The last run that the file names stays: the owner of the file changes, the count does not.
     let last_run = last_recorded_run_in(key_path);
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true).mode(0o600);
-    let mut file = options.open(key_path)?;
+    // No truncate at the open: a file that fails the checks is not touched, and one that passes is cut after.
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false).mode(0o600);
+    let mut file = open_trusted_key_file(key_path, &mut options)?;
+    file.set_len(0)?;
     file.write_all(seed)?;
     file.write_all(&owner_start.to_le_bytes())?;
     if let Some(last_run) = last_run {
@@ -747,12 +773,11 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
 /// there. A key file that is too short to hold it is left as it is.
 #[cfg(all(unix, feature = "host"))]
 fn record_last_run(state: &Path, run: u64) {
-    use std::fs::OpenOptions;
     use std::io::ErrorKind;
     use std::os::unix::fs::FileExt as _;
-    let opened = OpenOptions::new()
-        .write(true)
-        .open(state.with_extension("key"));
+    let mut writing = OpenOptions::new();
+    writing.write(true);
+    let opened = open_trusted_key_file(&state.with_extension("key"), &mut writing);
     let file = match opened {
         Ok(file) => file,
         // No key file, no second record: a state path with no member key keeps the one counter file.
@@ -776,8 +801,12 @@ fn last_recorded_run(state: &Path) -> Option<u64> {
 /// The last run that the key file at `key_path` names, if it names one.
 #[cfg(all(unix, feature = "host"))]
 fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
-    use std::fs;
-    let bytes = fs::read(key_path).ok()?;
+    use std::io::Read as _;
+    let mut reading = OpenOptions::new();
+    reading.read(true);
+    let mut file = open_trusted_key_file(key_path, &mut reading).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
     let tail = bytes.get(40..48)?;
     <[u8; 8]>::try_from(tail).ok().map(u64::from_le_bytes)
 }
@@ -786,7 +815,6 @@ fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
 /// processes and threads. It waits for the holder, and the lock goes with the returned file.
 #[cfg(all(unix, feature = "host"))]
 fn lock_run_counter(state: &Path) -> Result<File> {
-    use std::fs::OpenOptions;
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false).mode(0o600);
@@ -1606,6 +1634,52 @@ mod tests {
         assert!(
             super::load_or_create_identity(Some(&state)).is_err(),
             "a link in place of the key file was followed"
+        );
+    }
+
+    /// The checks of the key file are on the open file, and the open does not follow a link: a link that is
+    /// put at the path after a path check cannot make the write go to its target, and a file that others can
+    /// read is not written over.
+    #[test]
+    fn the_key_file_is_opened_without_following_a_link_and_checked_on_the_open_file() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "the last run could not be recorded",
+        );
+        let dir = TempDir::new("habilis-key-toctou");
+        let key = dir.path().join("session.key");
+        let target = dir.path().join("elsewhere");
+        fs::write(&target, b"untouched").expect("a target file");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("a private mode");
+        symlink(&target, &key).expect("a link in place of the key file");
+
+        let written = super::write_key_file(&key, &[1u8; 32], 5);
+        super::record_last_run(&key.with_extension("json"), 9);
+
+        assert!(
+            written.is_err(),
+            "the write followed a link at the key path"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target"),
+            b"untouched",
+            "a write went through the link to its target"
+        );
+
+        fs::remove_file(&key).expect("remove the link");
+        fs::write(&key, b"old").expect("a wide file");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).expect("a loose mode");
+        let over_wide = super::write_key_file(&key, &[2u8; 32], 5);
+        assert!(
+            over_wide.is_err(),
+            "a key file that others can read was written over"
+        );
+        assert_eq!(
+            fs::read(&key).expect("the file"),
+            b"old",
+            "the file changed"
         );
     }
 
