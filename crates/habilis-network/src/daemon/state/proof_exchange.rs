@@ -100,7 +100,7 @@ impl ProofExchange {
     }
 
     /// Whether the frames of `session` that claim `nickname` reach the roster. They do when the
-    /// session proved the nickname, or when no held session binds it. A bound nickname with no
+    /// session proved the nickname for the member that holds the binding, or when no held session binds it. A bound nickname with no
     /// proof of its member is the join error of the claimant; the refusal is counted.
     pub(crate) fn admits(
         &mut self,
@@ -108,11 +108,19 @@ impl ProofExchange {
         nickname: &Nickname,
         is_held: impl Fn(&AuthorKey) -> bool,
     ) -> bool {
-        let proved = self
+        // A cached proof counts only while it agrees with the binding now: a proof that was cached while
+        // its session was not in the roster must not pass once another member holds the nickname.
+        let proof_of = self
             .book
             .get(session)
-            .is_some_and(|(named, _)| named == nickname);
-        let admitted = proved || self.bound_to(nickname, is_held).is_none();
+            .filter(|(named, _)| named == nickname)
+            .map(|(_, proof)| proof.identity);
+        let bound = self.bound_to(nickname, is_held);
+        let admitted = match (proof_of, bound) {
+            (Some(member), Some(held)) => member == held,
+            (Some(_) | None, None) => true,
+            (None, Some(_)) => false,
+        };
         if !admitted {
             self.gate_refused += 1;
         }
@@ -340,6 +348,39 @@ mod tests {
         assert!(
             verify_proof(held, &session, nickname.as_ref(), mesh.as_ref()),
             "the held proof verifies"
+        );
+    }
+
+    /// A proof that was cached while its session was not in the roster does not outlive the nickname: once
+    /// another member holds the binding, the cached proof of the first member admits nothing under it.
+    #[test]
+    fn a_cached_proof_does_not_admit_a_session_to_a_nickname_that_another_member_binds() {
+        let mesh = MeshId::from("💬test");
+        let nickname = Nickname::from("alice");
+        let (first, second) = (Identity::generate(), Identity::generate());
+        let (first_session, second_session) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let first_proof = first.prove(&first_session, nickname.as_ref(), &mesh.as_ref(), 1);
+        assert!(
+            book.accept(&first_session, &nickname, &mesh, first_proof, |_| false),
+            "the proof of the first member is held while no session of it is in the roster"
+        );
+        let second_proof = second.prove(&second_session, nickname.as_ref(), &mesh.as_ref(), 1);
+        assert!(
+            book.accept(&second_session, &nickname, &mesh, second_proof, |key| {
+                *key == second_session
+            }),
+            "the second member binds the nickname: no held session binds it yet"
+        );
+
+        let admitted = book.admits(&first_session, &nickname, |key| *key == second_session);
+
+        assert!(
+            !admitted,
+            "a fresh frame of the first member passed the binding of the second member"
         );
     }
 
