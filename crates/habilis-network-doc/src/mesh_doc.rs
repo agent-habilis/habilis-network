@@ -2539,7 +2539,18 @@ impl MeshDoc {
         if epoch < self.epoch {
             return Ingested::Ignored;
         }
-        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX && !(far_ok && self.takes_far_root()) {
+        // A later frame of the chain of a far candidate that the node holds extends it and opens no
+        // door: a big seed does not come in the 5 s of the window. It is not a root (it has no
+        // mark), and it is of the epoch of the candidate; a root is refused outside the window.
+        let tail_of_far = mark.is_none()
+            && self
+                .candidate
+                .as_ref()
+                .is_some_and(|held| held.far && held.epoch == epoch);
+        if epoch - self.epoch > DOC_EPOCH_JUMP_MAX
+            && !(far_ok && self.takes_far_root())
+            && !tail_of_far
+        {
             return self.refuse_frame(frame);
         }
         let Some(genesis) = self.genesis(epoch) else {
@@ -5683,6 +5694,42 @@ mod tests {
             whole.map(|switch| switch.epoch),
             Some(far_epoch),
             "the whole chain is adopted at once"
+        );
+    }
+
+    /// A big far seed does not come in 5 s on a slow link. Its root came as the answer of the first
+    /// request, and the later frames of the same chain are taken after the window: they extend a
+    /// candidate that the node holds, and open no door. A root of another far epoch, or a root of
+    /// the same one, is still refused after the window.
+    #[test]
+    fn the_tail_of_a_far_chain_is_taken_after_the_window_and_a_far_root_is_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, cutter, forger) = (nick("me"), nick("cutter"), nick("forger"));
+        let source = state_doc_with(&live_state());
+        let far_epoch = 3 * super::DOC_EPOCH_JUMP_MAX;
+        let frames = seed_frames_of(&source, &cutter, far_epoch, None);
+        assert!(frames.len() > 1, "the premise: a chain of several frames");
+        let mut joiner = MeshDoc::new_ungated().state_epochs().awaiting_first_sync();
+        assert!(
+            matches!(joiner.ingest_far_ok(&frames[0]), Ingested::NewEpoch { .. }),
+            "the premise: the root came as the answer"
+        );
+
+        for frame in &frames[1..] {
+            joiner.ingest(frame);
+        }
+        let other_far = seed_frames_of(&source, &forger, far_epoch + 1, None).remove(0);
+        let rival = joiner.ingest(&other_far);
+
+        let whole = joiner.adopt_far(&signer(&me));
+        assert_eq!(
+            whole.map(|switch| switch.epoch),
+            Some(far_epoch),
+            "the tail that came after the window completed the chain"
+        );
+        assert!(
+            matches!(rival, Ingested::Ignored),
+            "a far root after the window is refused: {rival:?}"
         );
     }
 
