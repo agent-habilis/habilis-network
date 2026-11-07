@@ -127,7 +127,12 @@ pub(crate) async fn end_session(
         end_unbound_endpoints(state, hinted.collect()).await;
         return;
     }
-    state.note_left(key);
+    // A session that lost its nickname to another member did not say goodbye: it is only taken out of the
+    // roster, so its later frames go through the admission again (refused while the other member holds the
+    // name, admitted when that member is gone). A goodbye marks every later frame of the key stale for good.
+    if !matches!(goodbye, Goodbye::Refused(_)) {
+        state.note_left(key);
+    }
     let was_surfaced = state.surfaced.contains(&key);
     // The roster knows the key by the nickname it recorded, and a goodbye can name any
     // nickname. `forget_key` drops the record, so read it first.

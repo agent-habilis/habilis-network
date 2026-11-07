@@ -2456,8 +2456,22 @@ impl EventLoopState {
             let proved = verify_proof(&proof, &key, message.author.as_ref(), mesh.as_ref());
             return proved && self.proofs.tell_once(&key);
         }
-        let (peers, quiet) = (&self.peers, &self.quiet);
         let member = proof.identity;
+        // Read before the proof is held: holding it drops the older sessions of the same member from the
+        // book (a newer run replaces them, and they end with a `left` line), and they must not read as
+        // sessions of another member.
+        let intruders: Vec<AuthorKey> = self
+            .keys_named(&message.author)
+            .into_iter()
+            .filter(|held| {
+                *held != key
+                    && self
+                        .proofs
+                        .proof_of(held)
+                        .is_none_or(|held_proof| held_proof.identity != member)
+            })
+            .collect();
+        let (peers, quiet) = (&self.peers, &self.quiet);
         let bound = self
             .proofs
             .accept(&key, &message.author, mesh, proof, |session| {
@@ -2466,17 +2480,6 @@ impl EventLoopState {
         if bound {
             // The nickname is bound to `member` here: a session of another member that was admitted
             // while no proof bound it (or went quiet under it) does not keep the name.
-            let intruders: Vec<AuthorKey> = self
-                .keys_named(&message.author)
-                .into_iter()
-                .filter(|held| {
-                    *held != key
-                        && self
-                            .proofs
-                            .proof_of(held)
-                            .is_none_or(|held_proof| held_proof.identity != member)
-                })
-                .collect();
             self.proofs.evict(intruders);
         }
         false

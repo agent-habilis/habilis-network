@@ -6333,6 +6333,45 @@ mod dedup_counter_tests {
         );
     }
 
+    /// A `left` frame of a session, as the bytes that arrive on the gossip plane.
+    fn left_of(session: &Identity, nickname: &str) -> (Plane, Bytes) {
+        let frame = Message::new_left(&MeshId::from("test"), &nick(nickname)).sign(session);
+        (
+            Plane::Gossip,
+            frame.serialize().expect("serialize").into_bytes(),
+        )
+    }
+
+    /// The end of an intruder is no goodbye that it signed: the member that lost the name at a node can
+    /// come back there. While the other member holds the name its frames are refused, and when that
+    /// member leaves they are admitted again, with no restart of the first. Two honest members that
+    /// share a nickname would otherwise split the mesh for the whole session.
+    #[test]
+    fn a_member_that_lost_the_nickname_is_admitted_again_when_the_holder_leaves() {
+        let (alice, holder) = (Identity::generate(), Identity::generate());
+        let (alice_session, holder_session) = (Identity::generate(), Identity::generate());
+
+        let reader = reader_with(
+            fresh_state(),
+            vec![
+                alive_of(&alice_session, "alice"),
+                joined_of(&holder_session, &holder, "alice", 1),
+                left_of(&holder_session, "alice"),
+                alive_of(&alice_session, "alice"),
+            ],
+        );
+
+        assert!(
+            !reader.peers.contains(&holder_session.author_key()),
+            "the holder left"
+        );
+        assert!(
+            reader.peers.contains(&alice_session.author_key()),
+            "the session that lost the name is a peer again once the holder is gone"
+        );
+        let _ = alice;
+    }
+
     /// A restart of the member that holds the name is no intrusion: its new session replaces the old
     /// one, as before, and a session of another member that claims the name leaves with it.
     #[test]
@@ -6342,6 +6381,7 @@ mod dedup_counter_tests {
         let mesh = MeshId::from("test");
         let mut initial = fresh_state();
         initial.peers.insert(old.author_key());
+        initial.surfaced.insert(old.author_key());
         initial.names.insert(old.author_key(), nick("alice"));
         let first = alice.prove(&old.author_key(), "alice", mesh.as_ref(), 1);
         assert!(
@@ -6350,13 +6390,15 @@ mod dedup_counter_tests {
                 .accept(&old.author_key(), &nick("alice"), &mesh, first, |_| true),
             "the proof of the old session is held"
         );
+        let events = SyntheticPresence::default();
 
-        let reader = reader_with(
+        let reader = reader_with_sink(
             initial,
             vec![
                 alive_of(&intruder_session, "alice"),
                 joined_of(&new, &alice, "alice", 2),
             ],
+            &events,
         );
 
         assert!(
@@ -6370,6 +6412,11 @@ mod dedup_counter_tests {
         assert!(
             !reader.peers.contains(&intruder_session.author_key()),
             "a session of another member under the bound name is not a peer"
+        );
+        assert_eq!(
+            *events.0.lock().expect("the count lock is not poisoned"),
+            1,
+            "the old session ended as replaced, which writes its left line (the eviction writes none)"
         );
     }
 
