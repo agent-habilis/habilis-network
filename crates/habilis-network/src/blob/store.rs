@@ -79,6 +79,57 @@ mod tests {
         }
     }
 
+    /// The budget may evict a blob that a ticket still holds, so the eviction must say so: the
+    /// ticket dangles from then on.
+    #[test]
+    fn a_held_blob_evicted_by_the_budget_is_logged() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
+        habilis_network_test_tracing::expect_warn("habilis_network::blob", "held blob evicted");
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"newest")?;
+
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let full = crate::util::consts::MAX_BLOB_STORE_ENTRIES;
+        for index in 0..full {
+            let mut bytes = [0u8; HASH_LEN];
+            bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            store.map.insert(
+                BlobDigest::from(bytes),
+                super::BlobEntry {
+                    path: store.spool_dir.join(index.to_string()),
+                    size: 0,
+                    secret: TicketSecret::from([0u8; SECRET_LEN]),
+                    ticket_secret: TicketSecret::from([0u8; SECRET_LEN]),
+                    password: false,
+                    owners: std::collections::HashSet::from([ContentId::new("held-by-a-ticket")]),
+                    overflowed: false,
+                    seq: index as u64,
+                },
+            );
+        }
+        store.next_seq = full as u64;
+
+        store.snapshot(
+            &src,
+            ContentMeta {
+                sha256: BlobDigest::from([0xffu8; HASH_LEN]),
+                size: 6,
+                content_id: ContentId::new("newest"),
+            },
+            &plain_secret([3u8; SECRET_LEN]),
+        )?;
+
+        let mut oldest = [0u8; HASH_LEN];
+        oldest[..8].copy_from_slice(&0u64.to_be_bytes());
+        assert!(
+            store.get(&BlobDigest::from(oldest)).is_none(),
+            "the budget evicts the oldest blob"
+        );
+        fs::remove_dir_all(&src_dir).ok();
+        Ok(())
+    }
+
     #[test]
     fn snapshot_then_get_streams_from_spool() -> anyhow::Result<()> {
         let _guard = ::habilis_network_test_tracing::init();
