@@ -379,7 +379,7 @@ Peers then see an immediate neighbor-down event instead of an idle timeout.
 `EventLoopState` is layered, and only specific events write each layer:
 
 - **Transport layer** — live gossip links and remembered endpoints. Only neighbor-up and neighbor-down events write the link set. Cooldowns make sure that a flapping peer cannot start a mesh-wide connection storm.
-- **Membership layer** — the roster, keyed by author key, with the nickname of each key, last-seen times and self-advertised endpoints. A nickname is a label, so two live keys can use one.
+- **Membership layer** — the roster, keyed by author key, with the nickname of each key, last-seen times and self-advertised endpoints. A member key binds the nickname that it proved (section 7.7). A nickname that no member key proved is a label, so two live keys can use it.
 - **Heartbeat layer** — the quiet set for peers past the keepalive window.
 - **Presentation layer** — the surfaced subset of the roster, behind the join-horizon gate.
 
@@ -490,6 +490,23 @@ The reassembly store budgets by bytes, never by shard counts, so a forged total 
 Only new shards refresh the staleness clock, so resends cannot keep a dead group alive.
 Large groups skip the message log and repair through a directed shard-repair request served from a sender-side cache.
 
+### 7.7 Member key and nickname
+
+A node holds two keys.
+The session key is new at each start. It signs the frames, it is the automerge actor, and it seals the directed frames.
+The member key is stored in `<state>.key` (mode 0600) and does not change. It signs one thing: the proof of a session.
+The proof is a signature over the session key, the nickname, the mesh and the run number. The run number rises by 1 at each start (`<state>.run`).
+The `joined` frame carries the proof. A node that missed that frame asks the session once with a `ProofRequest`, addressed to the session key, and the session answers with its `joined` frame.
+A calm mesh carries no proof bytes beyond the `joined` frames. A host with no files (the browser) holds no member key and sends no proof.
+
+A nickname is bound to the member key that proved it, while a session of that member is in the roster, live or quiet.
+- A session that claims a bound nickname with no proof of that member is not admitted. Its presence, ping, pong and link-state frames are dropped. Its data frames are stored and relayed and change no roster entry.
+- A second member with another member key gets the join error: its proof is not held, and the node that holds the nickname does not admit its session. The node of that second member shows an error event, once for each session.
+- A nickname that no member key proved is free. A session with no proof is admitted and binds nothing, so two live keys can still use it.
+
+A member holds one session, the newest. A proof with a higher run replaces the older sessions of the member, in the proof book and in the roster, as a goodbye does. A proof with a run that is not higher is a late copy and is not held.
+The proof book holds 1024 sessions at most. When it is full, the oldest session that is not in the roster goes first, and a book of sessions in the roster refuses the new proof.
+
 ## 8. Shared state: the CRDT channels
 
 Each mesh carries two automerge documents, the channels `state` and `meta`.
@@ -501,7 +518,7 @@ Authenticity is the job of the engine.
 The `state` channel is free-form.
 The `meta` channel carries a **self-write gate**: a per-peer map where one field belongs to the peer the entry names.
 The slot key of that map is the lowercase hex of the author key, not the nickname.
-A nickname is a label that two live keys can share, so a slot named by nickname would belong to both.
+A nickname that no member key proved can be shared by two live keys, so a slot named by nickname would belong to both.
 A key can write the gated field only in the slot that names it.
 The other fields of a slot are not gated, so any author can write them.
 The gate matters because a `meta` card carries the cryptographic identity of a peer.
@@ -709,7 +726,7 @@ The socket module compiles out on wasm32, and a browser binds nothing.
 `habilis-network-ffi` exposes opaque handles and blocking calls, declared in `include/habilis_network.h`.
 A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages and reads the shared state as JSON.
 A send names a nickname (`habilis_network_msg_send`) or an author key (`habilis_network_msg_send_to_key`).
-Two live members can use one nickname, so a nickname names no member, and a key does.
+A nickname that a member key proved names one member. A nickname that no member key proved can be used by two live members, so it names no member, and a key does.
 A receive with `habilis_network_msg_recv` gives the key of the author in `habilis_network_msg.key`.
 The struct has 144 bytes on a 64-bit target and no size field, so a caller built with an older header must be rebuilt.
 A stream node (`habilis_network_streams_*`, `habilis_network_stream_*`) creates and opens byte streams (§9.4).
