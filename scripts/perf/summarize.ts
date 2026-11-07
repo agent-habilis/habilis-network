@@ -332,8 +332,11 @@ interface Phase {
 
 // The ratio of the metadata to the data, by phase. It needs `result.json` (the phase windows)
 // and `oracle.jsonl` (the data that the runner sent); a run folder without them gets no ratio.
-// A census line counts in the phase that holds its time stamp, an oracle line in the phase that
-// holds its `ts`. A census interval that crosses a phase edge lands whole in one phase.
+// A census line counts in the phase that holds its time stamp. An oracle line that names its recipients (`to`)
+// counts, for each recipient, in the phase of the first census of that recipient at or after the `ts` of the
+// line: the census interval that holds the payload, so the wire bytes and the data bytes of a payload that
+// lands after the last loaded census both count in the phase of that census. An oracle line with no `to`
+// counts in the phase that holds its `ts`. A census interval that crosses a phase edge lands whole in one phase.
 //
 // - <phase>_meta_bps_per_daemon: for a phase with no data, the received frame bytes per second per daemon.
 // - delivered_data_bytes / frame_meta_per_data / udp_meta_per_data: for a phase with data, the sum of
@@ -348,14 +351,17 @@ function phaseReport(run: string): string {
   const wire = new Map<string, number>();
   const udp = new Map<string, number>();
   const delivered = new Map<string, number>();
+  const censusStamps = new Map<string, number[]>(); // the node name, then its census times in ms, in order
   let sawWire = false;
   const add = (into: Map<string, number>, name: string, value: number) =>
     into.set(name, (into.get(name) ?? 0) + value);
   for (const file of nodes) {
+    const owner = `bench${file.match(/^n(\d+)\.err$/)?.[1]?.padStart(2, "0") ?? ""}`;
     for (const line of lines(clean(readFileSync(`${run}/${file}`, "utf8")))) {
       const stamp = line.match(/^(\d{4}-\d\d-\d\dT[0-9:.]+Z)/);
       if (!stamp || !line.includes(" census")) continue;
       sawWire ||= /\bidle_wire_in=/.test(line);
+      censusStamps.set(owner, [...(censusStamps.get(owner) ?? []), Date.parse(stamp[1] ?? "")]);
       const phase = phases.find((p) => inPhase(p, Date.parse(stamp[1] ?? "")));
       if (!phase) continue;
       add(wire, phase.name, sum(numbers(line, /\bidle_wire_in=(\d+)/)));
@@ -365,9 +371,18 @@ function phaseReport(run: string): string {
   // A build with no wire counters (a baseline) has no frame layer to compare: no ratio, and no failure.
   if (!sawWire) return "";
   for (const line of lines(readFileSync(`${run}/oracle.jsonl`, "utf8"))) {
-    const sent: { bytes: number; receivers: number; ts: number } = JSON.parse(line);
-    const phase = phases.find((p) => inPhase(p, sent.ts));
-    if (phase) add(delivered, phase.name, sent.bytes * sent.receivers);
+    const sent: { bytes: number; receivers: number; ts: number; to?: string[] } = JSON.parse(line);
+    if (sent.to === undefined) {
+      const phase = phases.find((p) => inPhase(p, sent.ts));
+      if (phase) add(delivered, phase.name, sent.bytes * sent.receivers);
+      continue;
+    }
+    for (const recipient of sent.to) {
+      const stamps = censusStamps.get(recipient) ?? [];
+      const holding = stamps.find((stamp) => stamp >= sent.ts) ?? sent.ts; // no census after it: the phase of its ts
+      const phase = phases.find((p) => inPhase(p, holding));
+      if (phase) add(delivered, phase.name, sent.bytes);
+    }
   }
   const fields: string[] = [];
   for (const phase of phases) {

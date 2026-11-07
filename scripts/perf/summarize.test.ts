@@ -147,3 +147,35 @@ test("a run whose census has no wire counters gets no ratio and no failure", () 
   expect(result.stdout.toString()).not.toContain("frame_meta_per_data");
 });
 
+test("a payload that lands after the last loaded census counts in the phase of the census that holds it", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "summarize-"));
+  const node = (loaded: number, idle2: number) =>
+    [
+      censusLine(30, { idle_wire_in: 1000 }),
+      censusLine(90, { idle_wire_in: loaded }),
+      censusLine(130, { idle_wire_in: idle2 }),
+      censusLine(150, { idle_wire_in: 300 }),
+    ].join("\n") + "\n";
+  writeFileSync(`${dir}/n1.err`, node(50, 400));
+  writeFileSync(`${dir}/n2.err`, node(50, 500)); // its census at 130 holds the 200 data bytes sent at 118
+  writeFileSync(
+    `${dir}/result.json`,
+    JSON.stringify({
+      phases: [
+        { name: "idle1", start_ms: T0, end_ms: T0 + 60_000 },
+        { name: "loaded", start_ms: T0 + 60_000, end_ms: T0 + 120_000 },
+        { name: "idle2", start_ms: T0 + 120_000, end_ms: T0 + 180_000 },
+      ],
+    }),
+  );
+  // Sent in the loaded phase, 2 s before it ends, to bench02. Its next census is in idle2.
+  writeFileSync(
+    `${dir}/oracle.jsonl`,
+    JSON.stringify({ sender: "bench01", kind: "msg", receivers: 1, bytes: 200, seq: 0, ts: T0 + 118_000, to: ["bench02"] }) + "\n",
+  );
+  const result = run(dir);
+  expect(result.exitCode).toBe(0); // the old window put 200 bytes in loaded, against 100 wire bytes: the frame layer failed
+  expect(result.stdout.toString()).toContain("delivered_data_bytes=200");
+  expect(result.stdout.toString()).toContain("loaded_meta_bps_per_daemon=");
+});
+
