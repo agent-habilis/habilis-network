@@ -764,6 +764,9 @@ pub struct MeshDoc {
     restores_dropped: u64,
     /// Whether local writes wait for the end of the first sync (see [`Self::awaiting_first_sync`]).
     awaiting_sync: bool,
+    /// Whether this document waits for its first frame and takes a root far above its epoch from
+    /// the answer of its first request (see [`Self::awaiting_far_root`]). It does not hold writes.
+    awaiting_far_root: bool,
     /// The stamps that the changes of the adopted seed name, for each change and each path that it
     /// writes. They tell who wrote the value of a leaf and when, where the change is the seed of
     /// another node. Dropped at the next epoch, and at most the paths of the seed.
@@ -875,6 +878,7 @@ impl MeshDoc {
             restores: BTreeMap::new(),
             restores_dropped: 0,
             awaiting_sync: false,
+            awaiting_far_root: false,
             origins: HashMap::new(),
             tombstones: BTreeMap::new(),
             tombstone_paths_long: 0,
@@ -1543,6 +1547,22 @@ impl MeshDoc {
     pub fn awaiting_first_sync(mut self) -> Self {
         self.awaiting_sync = true;
         self
+    }
+
+    /// Let a document that holds no frame take a root far above its epoch, as the answer of its
+    /// first request (see `ingest_far_ok`). It does not hold the local writes, as
+    /// [`Self::awaiting_first_sync`] does: the meta document of a node must write its card at once.
+    /// The flag falls when the first frame is applied.
+    #[must_use]
+    pub fn awaiting_far_root(mut self) -> Self {
+        self.awaiting_far_root = true;
+        self
+    }
+
+    /// Whether this document still waits for a far root (see [`Self::awaiting_far_root`]).
+    #[must_use]
+    pub fn is_awaiting_far_root(&self) -> bool {
+        self.awaiting_far_root
     }
 
     /// Say that the first sync is over, so the local writes go on. The glue calls it after the
@@ -2455,12 +2475,12 @@ impl MeshDoc {
     }
 
     /// Whether a forged epoch could make this document lose nothing: it holds no frame and still
-    /// awaits its first sync. A node that holds a frame has state to lose, and a node that does not
-    /// await has not asked, so no answer is the answer of its first request. The bound of a jump protects a node that holds state. A node
-    /// that holds none takes the root of any epoch: if two forged roots, 10 minutes apart, put the
-    /// mesh above twice the bound, a new node at epoch 0 would else refuse every seed for ever.
+    /// awaits its first sync (a state document) or a far root (a meta document). A node that holds a
+    /// frame has something to lose, and a node that does not await has asked nothing, so no answer
+    /// is the answer of its first request. Without this exception a node at epoch 0 would refuse for
+    /// ever every root above the bound, once two forged roots had put the mesh over twice the bound.
     fn holds_nothing(&self) -> bool {
-        self.awaiting_sync && self.frames.is_empty()
+        (self.awaiting_sync || self.awaiting_far_root) && self.frames.is_empty()
     }
 
     /// A frame of another epoch than the one that the document holds.
@@ -2783,6 +2803,7 @@ impl MeshDoc {
             return false;
         }
         self.applied.insert(hash);
+        self.awaiting_far_root = false;
         if let Some(applied) = seen.as_ref() {
             self.note_deletes(applied, &frame, named.as_deref());
         }
@@ -5528,6 +5549,65 @@ mod tests {
         assert!(
             matches!(empty_outcome, Ingested::Ignored),
             "a node that does not await has asked nothing: {empty_outcome:?}"
+        );
+    }
+
+    /// The meta twin of the far root: two roots of a forger, 10 minutes apart, put the mesh above 2 x
+    /// `DOC_EPOCH_JUMP_MAX`, and a new node at epoch 0 would get no meta for ever: no roster, no
+    /// cards. A meta document that awaits a far root and holds no frame takes the root that comes as
+    /// the answer of its first request, and keeps the bound against a plain ingest.
+    #[test]
+    fn a_meta_document_that_awaits_a_far_root_takes_one_only_as_the_answer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let far = root_of(3 * super::DOC_EPOCH_JUMP_MAX, &nick("alice"), "far");
+        let mut plain = MeshDoc::new_gated(card_gate()).awaiting_far_root();
+        let mut answer = MeshDoc::new_gated(card_gate()).awaiting_far_root();
+        let mut not_waiting = MeshDoc::new_gated(card_gate());
+
+        let plain_outcome = plain.ingest(&far);
+        let answer_outcome = answer.ingest_far_ok(&far);
+        let not_waiting_outcome = not_waiting.ingest_far_ok(&far);
+
+        assert!(
+            matches!(plain_outcome, Ingested::Ignored),
+            "a plain ingest keeps the bound: {plain_outcome:?}"
+        );
+        assert!(
+            matches!(answer_outcome, Ingested::NewEpoch { .. }),
+            "the answer of the first request is taken: {answer_outcome:?}"
+        );
+        assert!(
+            matches!(not_waiting_outcome, Ingested::Ignored),
+            "a document that does not wait has asked nothing: {not_waiting_outcome:?}"
+        );
+    }
+
+    /// A meta document that holds a frame has cards to lose: it keeps the bound, whether it still
+    /// carries the flag or not, and the flag does not hold the local writes.
+    #[test]
+    fn a_meta_document_that_holds_a_frame_keeps_the_bound_and_writes_at_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let far = root_of(3 * super::DOC_EPOCH_JUMP_MAX, &nick("alice"), "far");
+        let mut doc = MeshDoc::new_gated(card_gate()).awaiting_far_root();
+        assert!(
+            !doc.is_awaiting_first_sync(),
+            "the flag does not hold the writes of the card"
+        );
+        author(
+            &mut doc,
+            &nick("bob"),
+            &json!({ "peers": { (slot("bob")): { "card": 1 } } }),
+        );
+
+        let outcome = doc.ingest_far_ok(&far);
+
+        assert!(
+            matches!(outcome, Ingested::Ignored),
+            "a document that holds a frame refuses a far root: {outcome:?}"
+        );
+        assert!(
+            !doc.is_awaiting_far_root(),
+            "the flag fell when the first frame was applied"
         );
     }
 
