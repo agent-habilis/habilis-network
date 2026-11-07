@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { availableBytes } from "./avail.ts";
 import { chooseNodes } from "./choose-n.ts";
+import { phaseGate } from "./gate.ts";
 import { budgetLimit, goalLimit, parseFrameRatio } from "./ratio.ts";
 
 const NODES = 16;
@@ -43,6 +44,14 @@ function measure(): Promise<number> {
     const [text, err] = await Promise.all([new Response(bench.stdout).text(), new Response(bench.stderr).text()]);
     const folder = text.match(/run folder: (\S+)/)?.[1];
     if (!folder) throw new Error(`bench.ts gave no run folder (exit ${await bench.exited}): ${err.slice(-300)}`);
+    // The load gates of b4.ts: a ratio from a loaded host is no measurement.
+    const host = readFileSync(`${folder}/host.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const result = JSON.parse(readFileSync(`${folder}/result.json`, "utf8"));
+    for (const phase of result.phases as { name: string; start_ms: number; end_ms: number }[]) {
+      const load1s = host.filter((s) => s.ts >= phase.start_ms && s.ts <= phase.end_ms).map((s) => s.load1 as number);
+      const gate = phaseGate(load1s);
+      if (!gate.ok) throw new Error(`phase ${phase.name}: load1 median ${gate.median}, max ${gate.max}: the host was too loaded, run again`);
+    }
     const summary = Bun.spawnSync([process.execPath, path.join(import.meta.dir, "summarize.ts"), folder]);
     return parseFrameRatio(summary.stdout.toString());
   })();

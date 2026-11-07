@@ -327,6 +327,27 @@ fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
 /// The state digest answer test, one run. A digest that came on the connection is answered on the
 /// connection, and the repair works. Returns whether an answer really went on the connection: under
 /// load a dial can be in flight, and then the answer falls back to gossip by design.
+/// An answer whose send could not start (a dial in flight) goes on gossip by design: it was aimed at
+/// the connection of the digest, so it is no failure, and it proves nothing about the connection. An
+/// answer that went by unicast and on gossip as well is a failure.
+fn aimed_at_the_connection(line: &str) -> bool {
+    line.contains("unicast=0") && line.contains("the send could not start")
+}
+
+#[test]
+fn an_answer_on_gossip_after_a_unicast_one_is_not_aimed_at_the_connection() {
+    let after_unicast = "state anti-entropy: resent frames a peer lacked unicast=3 broadcast=3";
+    let could_not_start = "state anti-entropy: resent frames a peer lacked unicast=0 broadcast=3 the send could not start";
+    assert!(
+        !aimed_at_the_connection(after_unicast),
+        "a broadcast after a successful unicast is a failure: {after_unicast}"
+    );
+    assert!(
+        aimed_at_the_connection(could_not_start),
+        "an answer whose send could not start goes on gossip by design: {could_not_start}"
+    );
+}
+
 async fn state_digest_answer_run() -> bool {
     {
         let _one_at_a_time = serial().lock().await;
@@ -393,14 +414,9 @@ async fn state_digest_answer_run() -> bool {
         for line in &answers {
             eprintln!("state digest answer: {line}");
         }
-        // An answer whose send could not start (a dial in flight) goes on gossip by design. It was aimed
-        // at the connection of the digest, so it is no failure. It proves nothing about the connection.
-        let aimed = |line: &String| {
-            !line.contains("unicast=0") || line.contains("the send could not start")
-        };
         let none_on_gossip = answers
             .iter()
-            .all(|line| line.contains("broadcast=0") || aimed(line));
+            .all(|line| line.contains("broadcast=0") || aimed_at_the_connection(line));
         assert!(
             none_on_gossip,
             "the answer goes to the connection of the digest, never on gossip\n{}",

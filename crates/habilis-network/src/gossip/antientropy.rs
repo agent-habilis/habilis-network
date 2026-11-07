@@ -320,7 +320,7 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_
             max: budget,
             requester: &requester,
         }) {
-            if !resend_one_to(&missing, state, reply_to) {
+            if !resend_one_to(&missing, state, reply_to, Some(&message.author)) {
                 continue;
             }
             // Mark it sent so the next (overlapping) window doesn't re-send it
@@ -328,7 +328,6 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_
             // Charged even when the send failed: an addressee with no endpoint
             // yet must not be retried inside this digest; it retries next round.
             have.insert(missing.dedup_key());
-            state.idle.note_resend_for(&message.author);
             resent += 1;
             budget -= 1;
         }
@@ -348,7 +347,7 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_
 /// stream does not cross.
 #[cfg(test)]
 fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
-    resend_one_to(message, state, None)
+    resend_one_to(message, state, None, None)
 }
 
 /// What the test helper `resend_one` does, with the asker that the unicast form answers to.
@@ -356,6 +355,7 @@ fn resend_one_to(
     message: &Verified,
     state: &mut EventLoopState,
     reply_to: Option<EndpointId>,
+    requester: Option<&Nickname>,
 ) -> bool {
     let Ok(bytes) = message.serialize() else {
         return false;
@@ -373,6 +373,11 @@ fn resend_one_to(
             };
             if state.resend_outbox.offer(resend) {
                 state.idle.resent += 1;
+                // Only a resend that the outbox took is counted for the requester, so the census
+                // names the same resends as `idle_resent`.
+                if let Some(requester) = requester {
+                    state.idle.note_resend_for(requester);
+                }
             } else {
                 state.idle.resend_dropped += 1;
             }
@@ -552,7 +557,8 @@ async fn ask_back(
         state.doc(channel).change_count(),
         now,
     ) {
-        ask(channel, &key, &digest.author, state, context).await;
+        let via = state.state_digest_serves.unicast.arrived_from;
+        ask(channel, (&key, &digest.author), via, state, context).await;
     } else {
         tracing::debug!(me = %context.author, peer = %digest.author, ?channel, "a peer is ahead, but a fast round waits");
     }
@@ -600,24 +606,27 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &Han
         let Some((key, author)) = target else {
             continue;
         };
-        if ask(channel, &key, &author, state, context).await {
+        if ask(channel, (&key, &author), None, state, context).await {
             state.idle.fr_retries += 1;
             tracing::debug!(me = %context.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
         }
     }
 }
 
-/// Send our digest for `channel` to `author` point-to-point, if it is a linked
-/// neighbor with a usable path. The caller decides whether the round allows
-/// it. Returns whether it went out.
+/// Send our digest for `channel` to `author` point-to-point: on `via`, the connection that its
+/// digest came on, where a unicast can start, else to its proven endpoint. The caller decides
+/// whether the round allows it. Returns whether it went out.
 async fn ask(
     channel: Channel,
-    key: &AuthorKey,
-    author: &Nickname,
+    (key, author): (&AuthorKey, &Nickname),
+    via: Option<EndpointId>,
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) -> bool {
-    let Some(eid) = transport::unicast_answer_target(key, state) else {
+    let target = via
+        .filter(|eid| transport::can_unicast(*eid, state))
+        .or_else(|| transport::unicast_answer_target(key, state));
+    let Some(eid) = target else {
         return false;
     };
     let origin = DigestOrigin {
@@ -717,8 +726,7 @@ pub(crate) async fn handle_state_digest(
             return Answered::default();
         }
     }
-    let target = transport::unicast_answer_target(&author, state)
-        .or_else(|| arrived_from.filter(|eid| transport::can_unicast(*eid, state)));
+    let target = unicast_reply_to(&author, state);
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
@@ -939,7 +947,7 @@ async fn send_digests(
     if asks_for_chat {
         state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
             peer,
-            log_len: state.message_log.len(),
+            accepted: state.message_log.accepted(),
             at: Instant::now(),
             retries: 0,
         });
@@ -948,14 +956,15 @@ async fn send_digests(
 }
 
 /// Ask the peer of the last chat digest again while its answers are full, because a gap longer than one
-/// answer would wait one tick per answer. It stops when an answer is not full (the log did not grow by
-/// the resend cap) and after `CHAT_RETRIES_MAX` repeats, so it cannot become a loop.
+/// answer would wait one tick per answer. It stops when an answer is not full (the log took fewer
+/// messages than the resend cap) and after `CHAT_RETRIES_MAX` repeats, so it cannot become a loop.
 pub(crate) async fn retry_chat_ask(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let Some(ask) = state.state_digest_serves.unicast.chat_ask else {
         return;
     };
     let now = Instant::now();
-    let full = state.message_log.len().saturating_sub(ask.log_len) >= antientropy_max_resend();
+    let took = state.message_log.accepted().saturating_sub(ask.accepted);
+    let full = usize::try_from(took).unwrap_or(usize::MAX) >= antientropy_max_resend();
     if !full {
         if now.duration_since(ask.at) >= FAST_ROUND_ACTIVE {
             state.state_digest_serves.unicast.chat_ask = None;
@@ -1666,6 +1675,33 @@ mod tests {
             state.resend_outbox.dropped(),
             tuning::ANTIENTROPY_MAX_RESEND as u64 - 4,
             "the rest of the answer is dropped, and counted"
+        );
+    }
+
+    /// The census names the requesters that were answered, and the resends that it counts for them
+    /// are the ones that the outbox took: a resend that the full outbox dropped is no answer. The two
+    /// counts of one line must agree.
+    #[test]
+    fn the_requester_count_is_the_count_of_the_resends_that_the_outbox_took() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, asker) = (test_key("holder"), nick("asker"));
+        let mut state = fresh_state();
+        state.peer_for_test(asker.as_str());
+        for index in 0..100 {
+            state
+                .message_log
+                .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
+        }
+        let (outbox, _undrained) = transport::ResendOutbox::new(4);
+        state.resend_outbox = outbox;
+
+        super::handle_digest(&digest_of_an_empty_log(&asker), &mut state, &me);
+
+        assert_eq!(state.idle.resent, 4, "the outbox took 4 resends");
+        assert_eq!(
+            state.idle.resent_by.get(&asker).copied(),
+            Some(4),
+            "the requester is counted for the 4 resends that were queued, not for the ones dropped"
         );
     }
 

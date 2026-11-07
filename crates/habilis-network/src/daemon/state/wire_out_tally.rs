@@ -156,10 +156,19 @@ impl<'frame> FrameShape<'frame> {
         } else {
             None
         };
+        let body_start = value_after(frame, b"\"body\":\"", type_at).map(|(_, start)| start);
         let tail_from = frame.len().saturating_sub(TAIL_SCAN).max(type_at);
         let tail = frame.get(tail_from..).unwrap_or_default();
-        let signed_at = find(tail, b"\",\"pubkey\":\"").map(|at| tail_from + at);
-        let body_start = value_after(frame, b"\"body\":\"", type_at).map(|(_, start)| start);
+        // The end of the body is the first unescaped `","pubkey":"` after it: a quote in the body is
+        // escaped, so the body cannot hold it. It is near the end of a frame, so the tail is searched
+        // first; a large `ext` pushes it out of the tail, and then the frame is searched from the body.
+        let in_tail = find(tail, b"\",\"pubkey\":\"").map(|at| tail_from + at);
+        let beyond_tail = || {
+            let from = body_start?;
+            let rest = frame.get(from..)?;
+            find(rest, b"\",\"pubkey\":\"").map(|at| from + at)
+        };
+        let signed_at = in_tail.or_else(beyond_tail);
         let body = match (body_start, signed_at) {
             (Some(start), Some(end)) if end >= start => end - start,
             _ => 0,
@@ -443,6 +452,25 @@ mod tests {
     use crate::testing;
 
     const APP: &[u8] = br#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","seq":3,"ext":{}}"#;
+
+    /// A frame can carry an `ext` of any size, and the `pubkey` that ends the body then lies more than
+    /// 2048 bytes from the end. The body still counts: it is not the envelope.
+    #[test]
+    fn a_body_counts_when_a_large_ext_puts_its_end_beyond_the_tail_window() {
+        let ext = "x".repeat(3000);
+        let frame = format!(
+            r#"{{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","seq":3,"ext":{{"big":"{ext}"}}}}"#
+        );
+
+        let shape = FrameShape::of(frame.as_bytes());
+
+        assert_eq!(
+            shape.body,
+            "hello, golden".len(),
+            "the body is 13 bytes of the frame"
+        );
+        assert_eq!(shape.wire, frame.len(), "the wire size is the whole frame");
+    }
 
     #[test]
     fn an_app_frame_has_its_tag_its_body_and_its_wire_size() {

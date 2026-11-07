@@ -46,6 +46,10 @@ const num = (name: string, fallback: number) => Number(flags.get(name) ?? fallba
 const chosen = chooseNodes(availableBytes());
 const NODES = flags.has("nodes") ? num("nodes", 0) : chosen.nodes;
 if (!flags.has("nodes")) console.log(chosen.why);
+if (!Number.isSafeInteger(NODES) || NODES < 1) {
+  console.error(`--nodes must be a positive integer, got ${flags.get("nodes")}`);
+  process.exit(2);
+}
 const SEED = num("seed", 1);
 const STAGGER = num("stagger", 0.5);
 const SETTLE = num("settle", 480);
@@ -57,6 +61,7 @@ const LOOKUP = flags.get("lookup") ?? "";
 const MAX_PEERS = flags.get("max-peers") ?? "";
 const maxPeers = MAX_PEERS ? ["--max-peers", MAX_PEERS] : [];
 const PERIOD = num("period", 30);
+const DRAIN_MAX = 120;
 const PAYLOAD = "x".repeat(200);
 
 const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
@@ -75,8 +80,6 @@ function rng(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const random = rng(SEED);
-
 const sleep = (seconds: number) => Bun.sleep(seconds * 1000);
 
 async function cli(args: string[]): Promise<{ code: number; out: string; err: string }> {
@@ -114,12 +117,20 @@ saveResult();
 const nick = (i: number) => `bench${String(i).padStart(2, "0")}`;
 // Not in the sessions folder of the runtime: the Stop hook of the agent counts the daemons there.
 mkdirSync(`${OUT}/state`, { recursive: true });
+// An idle-only run sends no workload: the summary still reads the (empty) oracle.
+writeFileSync(`${OUT}/oracle.jsonl`, "");
 const stateFile = (i: number) => `${OUT}/state/${nick(i)}.json`;
 let gossip = "";
 let seq = 0;
 
 function oracle(sender: string, kind: string, receivers: number, bytes: number): void {
   appendFileSync(`${OUT}/oracle.jsonl`, JSON.stringify({ sender, kind, receivers, bytes, seq: seq++, ts: Date.now() }) + "\n");
+}
+
+// A workload send that fails is no delivery: stop before the oracle counts it.
+async function send(args: string[]): Promise<void> {
+  const sent = await cli(args);
+  if (sent.code !== 0) await abort(`a workload send failed (exit ${sent.code}): ${args.slice(0, 2).join(" ")} ${sent.err.trim().slice(-200)}`);
 }
 
 async function abort(reason: string): Promise<never> {
@@ -164,12 +175,15 @@ async function cleanup(): Promise<void> {
 }
 
 // The mesh prefix of the runtime folder is the head of the gossip id.
-function collectLogs(): void {
+function collectLogs(): number[] {
   const dir = `${RUNTIME}/${gossip.slice(0, 16)}`;
+  const missing: number[] = [];
   for (let i = 1; i <= NODES; i++) {
     const log = `${dir}/${nick(i)}.tracing.log`;
     if (existsSync(log)) copyFileSync(log, `${OUT}/n${i}.err`);
+    else missing.push(i);
   }
+  return missing;
 }
 
 function openFiles(): number {
@@ -185,12 +199,13 @@ function fileLimit(): number {
 }
 const processFileLimit = Bun.spawnSync(["sh", "-c", "ulimit -n"]).stdout.toString().trim();
 
-// RSS of the daemons of this run: the processes that name the state folder of the run.
+// RSS of the daemons of this run: the processes that name the state folder of the run and carry
+// `--owner-pid`, which only a daemon launch has (a CLI client names the folder and has no such flag).
 // `ps` prints cputime as [[H:]M:]S.cc, in seconds of CPU the process used since it started.
 const cpuSeconds = (text: string) => text.split(":").reduce((total, part) => total * 60 + Number(part), 0);
 function daemonRss(): { daemons: number; rss_kb_sum: number; rss_kb_max: number; cpu_s_sum: number } {
   const rows = Bun.spawnSync(["ps", "-axo", "rss=,cputime=,command="]).stdout.toString().split("\n");
-  const mine = rows.filter((row) => row.includes(`${OUT}/state/`)).map((row) => row.trim().split(/\s+/));
+  const mine = rows.filter((row) => row.includes(`${OUT}/state/`) && row.includes(" --owner-pid ")).map((row) => row.trim().split(/\s+/));
   const sizes = mine.map((cols) => Number(cols[0]));
   return {
     daemons: sizes.length,
@@ -251,6 +266,9 @@ await allAlive("after join");
 const open = new Map<string, string>(); // task id -> initiator nickname, for tasks this runner plays the worker of
 // Each step of a task runs once. A repeat of an event must not start the step again, or a task loops.
 const done = new Set<string>();
+// Tasks the load submitted and tasks the workers completed: the loaded phase ends when they match.
+let submitted = 0;
+let completed = 0;
 const once = (step: string, task: string) => !done.has(`${step}:${task}`) && !!done.add(`${step}:${task}`);
 async function listen(i: number): Promise<void> {
   const me = nick(i);
@@ -274,21 +292,22 @@ async function listen(i: number): Promise<void> {
       if (event.kind === "message" && event.state === "submitted" && once("work", task)) {
         // The worker: working, then the artifact. The initiator approves, and then the worker completes.
         open.set(task, event.author);
-        await cli(["a2a", "status", "--gossip", gossip, "--nickname", me, "--task-id", task, "--state", "working"]);
+        await send(["a2a", "status", "--gossip", gossip, "--nickname", me, "--task-id", task, "--state", "working"]);
         oracle(me, "task_status", 1, 0);
-        await cli(["a2a", "artifact", "--gossip", gossip, "--nickname", me, "--task-id", task, "--text", PAYLOAD]);
+        await send(["a2a", "artifact", "--gossip", gossip, "--nickname", me, "--task-id", task, "--text", PAYLOAD]);
         oracle(me, "task_artifact", 1, PAYLOAD.length);
       } else if (event.kind === "artifact-update" && once("approve", task)) {
         // The initiator: approve the result.
-        await cli([
+        await send([
           "a2a", "call", "--gossip", gossip, "--nickname", me, "--to", event.author,
           "--method", "SendMessage", "--task-id", task, "--text", "approved",
         ]);
         oracle(me, "task_status", 1, "approved".length);
       } else if (event.kind === "message" && event.state === "working" && open.has(task) && once("complete", task)) {
         open.delete(task);
-        await cli(["a2a", "status", "--gossip", gossip, "--nickname", me, "--task-id", task, "--state", "completed"]);
+        await send(["a2a", "status", "--gossip", gossip, "--nickname", me, "--task-id", task, "--state", "completed"]);
         oracle(me, "task_status", 1, 0);
+        completed++;
       }
     }
   }
@@ -297,17 +316,20 @@ async function listen(i: number): Promise<void> {
 // The workload of one daemon: every PERIOD s, one broadcast, one msg, one task.
 async function load(i: number, until: number): Promise<void> {
   const me = nick(i);
+  // One stream per daemon, so command timings that differ between arms cannot reorder the draws.
+  const random = rng(SEED * 1000 + i);
   await sleep(random() * PERIOD);
   while (Date.now() < until && !stopping) {
     const started = Date.now();
     const others = Array.from({ length: NODES }, (_, k) => nick(k + 1)).filter((n) => n !== me);
     const to = others[Math.floor(random() * others.length)] ?? me;
-    await cli(["a2a", "broadcast", "--gossip", gossip, "--nickname", me, "--text", PAYLOAD]);
+    await send(["a2a", "broadcast", "--gossip", gossip, "--nickname", me, "--text", PAYLOAD]);
     oracle(me, "broadcast", NODES - 1, PAYLOAD.length);
-    await cli(["a2a", "msg", "--gossip", gossip, "--nickname", me, "--to", to, "--text", PAYLOAD]);
+    await send(["a2a", "msg", "--gossip", gossip, "--nickname", me, "--to", to, "--text", PAYLOAD]);
     oracle(me, "msg", 1, PAYLOAD.length);
-    await cli(["a2a", "call", "--gossip", gossip, "--nickname", me, "--to", to, "--method", "SendMessage", "--label", "bench", "--text", PAYLOAD]);
+    await send(["a2a", "call", "--gossip", gossip, "--nickname", me, "--to", to, "--method", "SendMessage", "--label", "bench", "--text", PAYLOAD]);
     oracle(me, "task_brief", 1, PAYLOAD.length);
+    submitted++;
     await sleep(Math.max(0, PERIOD - (Date.now() - started) / 1000));
   }
 }
@@ -341,10 +363,15 @@ await phase("idle1", IDLE);
 await phase("loaded", LOADED, async () => {
   const until = Date.now() + LOADED * 1000;
   await Promise.all(Array.from({ length: NODES }, (_, k) => load(k + 1, until)));
+  // A task exchange still open would send workload into idle2.
+  const drainBy = Date.now() + DRAIN_MAX * 1000;
+  while (completed < submitted && Date.now() < drainBy) await sleep(1);
+  if (completed < submitted) await abort(`${submitted - completed} task exchange(s) still open ${DRAIN_MAX} s after the load stopped`);
 });
 await phase("idle2", IDLE);
 
-collectLogs();
+const missingLogs = collectLogs();
+if (missingLogs.length > 0) await abort(`no tracing log for node(s) ${missingLogs.join(",")}`);
 await cleanup();
 writeFileSync(`${OUT}/done`, "done\n");
 console.log(`run folder: ${OUT}`);

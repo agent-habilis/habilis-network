@@ -46,7 +46,7 @@ use crate::util::tuning::{
     RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED, UNSUPPORTED_VERSION_CAP,
 };
 
-use crate::gossip::{antientropy, lan};
+use crate::gossip::{antientropy, apply_merge_patch, lan};
 use crate::protocol::{crypto, messages};
 #[cfg(test)]
 use crate::testing;
@@ -325,6 +325,9 @@ pub struct EventLoopState {
     pub(crate) join_fallback_at: Option<Instant>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
+    /// How many doc censuses this loop has run: one in `DOC_HEAVY_EVERY` is heavy. The count is of
+    /// this loop, so that each document of a process that runs several loops gets its heavy census.
+    pub(crate) doc_census_runs: u64,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
     /// session although nothing was sent over a connection yet.
     lane_wanted: HashMap<EndpointId, Instant>,
@@ -789,6 +792,7 @@ impl EventLoopState {
             redials: redial::Redials::default(),
             join_fallback_at: None,
             graft_backoff: graft_backoff::GraftBackoff::default(),
+            doc_census_runs: 0,
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
             digest_serves: Cooldown::new(tuning::ANTIENTROPY_SERVE_COOLDOWN),
@@ -903,8 +907,9 @@ impl EventLoopState {
 
     /// The `meta` channel: gated by the application's per-peer map when it keeps one, free-form otherwise.
     /// Keep `switch` until the sweep writes the entry of this node again. If a switch is waiting
-    /// already, its entry stays when the new switch has none: the document holds no entry of ours
-    /// since the first switch.
+    /// already, its entry is kept: the document holds no entry of ours since the first switch except
+    /// the writes made after it, so the new entry is partial. The two merge, the newer fields win
+    /// (a deletion was applied to the waiting entry when it was made, see `follow_own_write`).
     pub(crate) fn note_epoch_switch(&mut self, mut switch: doc::EpochSwitch) {
         self.epoch_write.attempts = 0;
         let waiting = self
@@ -912,9 +917,13 @@ impl EventLoopState {
             .switch
             .take()
             .and_then(|held| held.own_entry);
-        if switch.own_entry.is_none() {
-            switch.own_entry = waiting;
-        }
+        switch.own_entry = match (waiting, switch.own_entry.take()) {
+            (Some(mut older), Some(newer)) => {
+                apply_merge_patch(&mut older, &newer);
+                Some(older)
+            }
+            (older, newer) => newer.or(older),
+        };
         self.epoch_write.switch = Some(switch);
     }
 
@@ -922,7 +931,7 @@ impl EventLoopState {
     /// it failed `DOC_EPOCH_WRITE_ATTEMPTS` times. Returns whether the switch waits.
     pub(crate) fn retry_epoch_switch(&mut self, switch: doc::EpochSwitch) -> bool {
         self.epoch_write.attempts = self.epoch_write.attempts.saturating_add(1);
-        if self.epoch_write.attempts > DOC_EPOCH_WRITE_ATTEMPTS {
+        if self.epoch_write.attempts >= DOC_EPOCH_WRITE_ATTEMPTS {
             self.epoch_write.attempts = 0;
             return false;
         }

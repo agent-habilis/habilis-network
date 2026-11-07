@@ -1146,13 +1146,14 @@ impl MeshDoc {
         }
     }
 
-    /// The slots with an entry in the gated map of `json`. Empty for a document with no gate.
+    /// The slots of the gated map of `json`, every one: a slot that holds no gated field still
+    /// takes memory. Empty for a document with no gate, or a map that is not an object.
     fn gated_slots(&self, json: &Value) -> Vec<String> {
         let Some(gate) = self.gate.as_ref() else {
             return Vec::new();
         };
-        let entries = gated_entries(json, gate);
-        entries.keys().cloned().collect()
+        let peers = json.get(&gate.map).and_then(Value::as_object);
+        peers.map_or_else(Vec::new, |peers| peers.keys().cloned().collect())
     }
 
     /// The operations of the changes that this document holds in this epoch.
@@ -4191,6 +4192,35 @@ mod tests {
             heavy.save_bytes.expect("a save was asked for") > 0,
             "the save has bytes"
         );
+    }
+
+    /// A slot that holds no gated field still takes memory (a member can write another field of the
+    /// slot of a peer), so the census counts every slot of the map, not only the slots with a card.
+    #[test]
+    fn the_census_counts_a_slot_that_holds_no_gated_field() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut doc = MeshDoc::new_gated(card_gate());
+        let (alice, bob) = (nick("alice"), nick("bob"));
+        author(
+            &mut doc,
+            &alice,
+            &json!({ "peers": { (slot("alice")): { "card": 1 } } }),
+        );
+        author(
+            &mut doc,
+            &bob,
+            &json!({ "peers": { (slot("bob")): { "status": "idle" } } }),
+        );
+
+        let mut owners = doc
+            .census(true)
+            .peer_slots
+            .expect("the heavy census lists the slots");
+
+        owners.sort();
+        let mut slots = [slot("alice"), slot("bob")];
+        slots.sort();
+        assert_eq!(owners, slots, "both slots, the one with no card too");
     }
 
     #[test]

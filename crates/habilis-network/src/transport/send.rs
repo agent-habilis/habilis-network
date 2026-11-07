@@ -1865,6 +1865,80 @@ mod tests {
         });
     }
 
+    /// A state digest that came by unicast is answered to the connection it came on, also when the
+    /// signer proved another endpoint earlier: a chat answer takes the same choice.
+    #[test]
+    fn a_state_digest_is_answered_to_its_connection_not_to_an_older_proven_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            let asker = Identity::generate();
+            let older = endpoint_id(9);
+            state.linked_endpoints.insert(older);
+            state.direct.insert(older, DirectState::Direct);
+            state.note_proven_endpoint(asker.author_key(), older, UnixSecs::from(1));
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let received = read_frames(bob_endpoint, 4);
+            let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
+
+            let answered = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(
+                answered,
+                Answered {
+                    unicast: 3,
+                    broadcast: 0
+                },
+                "the frames go to the connection of the digest"
+            );
+            let (got, returned_endpoint) =
+                tokio_time::timeout(std_Duration::from_secs(5), received)
+                    .await
+                    .expect("bob reads the answer in time")
+                    .expect("reader task");
+            assert!(got.len() >= 3, "bob holds the 3 frames");
+            returned_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// A unicast digest that is ahead of us is asked back on its connection, though its signer has
+    /// proved no endpoint yet: the ask-back does not wait for the next exchange.
+    #[test]
+    fn a_unicast_digest_that_is_ahead_is_asked_back_on_its_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let asker = Identity::generate();
+            let ahead = serde_json::json!(["ab".repeat(32)]);
+            let digest = digest(&net.mesh, Channel::State, &ahead, &asker);
+
+            let _ = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(state.idle.fr_asks, 1, "one ask-back, on the connection");
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
     /// A digest that came by gossip is answered by a few members, as a chat digest is, when the
     /// unicast form is on. Here the k rule leaves this holder out: it sends nothing.
     #[test]
@@ -2005,7 +2079,7 @@ mod tests {
                 .expect("the clock is older than 60 s");
             let full_answer = ChatAsk {
                 peer: bob_endpoint.id(),
-                log_len: 0,
+                accepted: 0,
                 at: long_ago,
                 retries: 0,
             };
@@ -2042,6 +2116,54 @@ mod tests {
                     .map(|ask| ask.retries),
                 Some(1),
                 "a full answer is asked again"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// The progress of a chat answer is the count of the messages that the log took, not its length:
+    /// a full log keeps its length while an answer replaces its entries.
+    #[test]
+    fn the_chat_retry_sees_an_answer_that_a_full_log_took_without_growing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::daemon::message_log::MessageLog;
+            use crate::gossip::antientropy::{ChatAsk, retry_chat_ask};
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
+            state.standing.insert(Standing::Meshed);
+            state.message_log = MessageLog::new(2);
+            state.message_log.push(directed_msg());
+            state.message_log.push(directed_msg());
+            let long_ago = clock::Instant::now()
+                .checked_sub(std_Duration::from_secs(60))
+                .expect("the clock is older than 60 s");
+            state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
+                peer: bob_endpoint.id(),
+                accepted: state.message_log.accepted(),
+                at: long_ago,
+                retries: 0,
+            });
+            for _ in 0..tuning::antientropy_max_resend() {
+                state.message_log.push(directed_msg());
+            }
+            assert_eq!(
+                state.message_log.len(),
+                2,
+                "the log is full and did not grow"
+            );
+
+            retry_chat_ask(&mut state, &net.context()).await;
+
+            assert_eq!(
+                state
+                    .state_digest_serves
+                    .unicast
+                    .chat_ask
+                    .map(|ask| ask.retries),
+                Some(1),
+                "a full answer into a full log is asked again"
             );
             bob_endpoint.close().await;
             net.endpoint.close().await;

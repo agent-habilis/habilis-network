@@ -120,3 +120,11 @@ test("the cputime of the daemon processes gives the CPU per daemon in each phase
   expect(out).toContain("idle1_cpu_pct_per_daemon=50.0");
   expect(out).toContain("idle2_cpu_pct_per_daemon=10.0");
 });
+
+test("a summary of a summary does not count its aggregate line as a node", () => {
+  const dir = fixture([1200, 800]);
+  writeFileSync(`${dir}/summary.txt`, run(dir).stdout.toString());
+  // The aggregate line of the first pass is no node: the 2 node logs give the count.
+  expect(run(dir).stdout.toString()).toMatch(/full=\d+\/2 /);
+});
+

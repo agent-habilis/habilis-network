@@ -104,6 +104,13 @@ impl GraftBackoff {
         refused
     }
 
+    /// How many peers the backoff holds a record of. A record stays until the link to its peer comes
+    /// up or the peer has a new address, so this is the gauge of a collection that lives as long as
+    /// the node.
+    pub(crate) fn len(&self) -> usize {
+        self.by_peer.len()
+    }
+
     /// Whether `peer` is left alone at `now`.
     pub(crate) fn is_blocked(&self, peer: &EndpointId, now: Instant) -> bool {
         self.by_peer

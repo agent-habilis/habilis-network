@@ -168,7 +168,8 @@ function summarize(run: string): string {
     .filter((row) => "peak_resident_memory_mb" in row)
     .map((row) => Number(row.peak_resident_memory_mb));
   const logs = readdirSync(run).filter((f) => /^n.*\.err$/.test(f)).length;
-  const n = rows.length || logs;
+  // Only a per-node row counts: the aggregate summary of an earlier pass has no `roster_len`.
+  const n = census.length || logs;
 
   const stalls: number[] = [];
   const drops = new Map<string, number>();

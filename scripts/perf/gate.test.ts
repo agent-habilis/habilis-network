@@ -22,3 +22,8 @@ test("the A/B gate needs two phase medians within 35 percent", () => {
   expect(abGate(2.0, 2.8).ok).toBe(false); // 1.40
   expect(abGate(2.8, 2.0).ok).toBe(false); // the order does not matter
 });
+
+test("the A/B gate reads two zero medians as a ratio of 1", () => {
+  expect(abGate(0, 0)).toEqual({ ok: true, ratio: 1 });
+  expect(abGate(0, 1).ok).toBe(false); // one zero is no match
+});
