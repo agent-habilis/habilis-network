@@ -9,9 +9,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::{mem, sync};
 #[cfg(all(unix, feature = "host"))]
-use std::{thread, time::Duration, time::Instant};
+use std::{time::Duration, time::Instant};
 #[cfg(feature = "host")]
 use tokio::task;
+#[cfg(all(unix, feature = "host"))]
+use tokio::time;
 mod injected_endpoint;
 mod setup_kind;
 mod setup_params;
@@ -819,47 +821,80 @@ fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
 /// live starts of one state path cannot be one member: the second would read the same member key and take
 /// the next run, and a peer would drop the first as an older run of that member. Each try is non-blocking, and
 /// a held lock is tried again for `KEY_LOCK_RETRY`, in steps of `KEY_LOCK_STEP`, because a restart that comes
-/// right after a leave meets the old daemon while it still stops; after that the start fails and names the way
-/// out. It is an OS lock on the descriptor, so it goes with the process, and a crash frees the key. The file
-/// is opened close-on-exec (the default of Rust), so a child of the daemon does not keep the lock after the
-/// daemon is gone. No state path means no key to keep. A file system that has no file locks cannot start a
-/// daemon with a member key: the error names the lock file.
+/// right after a leave meets the old daemon while it still stops; the wait is a timer of the runtime, so the
+/// old daemon, which may run on the same thread, still gets to stop. After that the start fails and names the
+/// way out. It is an OS lock on the descriptor, so it goes with the process, and a crash frees the key. The
+/// file is opened close-on-exec (the default of Rust), so a child of the daemon does not keep the lock after
+/// the daemon is gone. No state path means no key to keep. A file system that has no file locks cannot start
+/// a daemon with a member key: the error names the lock file.
 #[cfg(all(unix, feature = "host"))]
 // the lock is shared with every clone of the keys, and the last one to drop frees it
-fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
-    use anyhow::Context as _;
-    use std::fs::TryLockError;
-    use std::os::unix::fs::OpenOptionsExt as _;
+async fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
     let Some(state) = state else {
         return Ok(None);
     };
+    let lock = open_key_lock(state)?;
+    let give_up = Instant::now() + KEY_LOCK_RETRY;
+    while !try_key_lock(&lock, state)? {
+        if Instant::now() >= give_up {
+            return Err(key_held_error(state));
+        }
+        time::sleep(KEY_LOCK_STEP).await;
+    }
+    // shared with every clone of the keys: the lock goes when the last one drops
+    Ok(Some(sync::Arc::new(lock)))
+}
+
+/// [`hold_member_key`] with one try and no wait, for a caller that is not async.
+#[cfg(all(unix, feature = "host"))]
+// the lock is shared with every clone of the keys, and the last one to drop frees it
+fn hold_member_key_once(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    let lock = open_key_lock(state)?;
+    if try_key_lock(&lock, state)? {
+        // shared with every clone of the keys: the lock goes when the last one drops
+        Ok(Some(sync::Arc::new(lock)))
+    } else {
+        Err(key_held_error(state))
+    }
+}
+
+/// Open the lock file of the member key of `state`, mode 0600.
+#[cfg(all(unix, feature = "host"))]
+fn open_key_lock(state: &Path) -> Result<File> {
+    use anyhow::Context as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
     let lock_path = state.with_extension("key.lock");
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false).mode(0o600);
-    let lock = options
+    options
         .open(&lock_path)
-        .with_context(|| format!("the lock file {} cannot be opened", lock_path.display()))?;
-    let give_up = Instant::now() + KEY_LOCK_RETRY;
-    loop {
-        match lock.try_lock() {
-            // shared with every clone of the keys: the lock goes when the last one drops
-            Ok(()) => return Ok(Some(sync::Arc::new(lock))),
-            Err(TryLockError::WouldBlock) if Instant::now() < give_up => {
-                // a start is a one-time step and the wait is bounded, so the thread may sleep here
-                thread::sleep(KEY_LOCK_STEP);
-            }
-            Err(TryLockError::WouldBlock) => anyhow::bail!(
-                "another daemon still runs on this state file and holds the member key {}: wait for it to exit and retry, or use another nickname or --state-file",
-                state.with_extension("key").display()
-            ),
-            Err(TryLockError::Error(error)) => {
-                return Err(anyhow::Error::from(error).context(format!(
-                    "the lock file {} cannot be locked: the file system may not support file locks, and a daemon with a member key cannot start there",
-                    lock_path.display()
-                )));
-            }
-        }
+        .with_context(|| format!("the lock file {} cannot be opened", lock_path.display()))
+}
+
+/// One try at the lock: true when it is taken, false when another holder has it.
+#[cfg(all(unix, feature = "host"))]
+fn try_key_lock(lock: &File, state: &Path) -> Result<bool> {
+    use std::fs::TryLockError;
+    match lock.try_lock() {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(error)) => Err(anyhow::Error::from(error).context(format!(
+            "the lock file {} cannot be locked: the file system may not support file locks, and a daemon with a member key cannot start there",
+            state.with_extension("key.lock").display()
+        ))),
     }
+}
+
+/// The error of a start that finds the member key held.
+#[cfg(all(unix, feature = "host"))]
+fn key_held_error(state: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "another daemon still runs on this state file and holds the member key {}: wait for it to exit and retry, or use another nickname or --state-file",
+        state.with_extension("key").display()
+    )
 }
 
 /// How long a start tries again for the lock of the member key, while the daemon that holds it stops.
@@ -872,11 +907,22 @@ const KEY_LOCK_STEP: Duration = Duration::from_millis(50);
 /// A target with no files keeps no member key, so it takes no lock.
 #[cfg(not(all(unix, feature = "host")))]
 #[expect(
+    clippy::unused_async,
+    reason = "the same signature as the version for a target with files"
+)]
+// the same type as the version for a target with files
+async fn hold_member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+    Ok(None)
+}
+
+/// [`hold_member_key`] with one try, for a caller that is not async: no lock on a target with no files.
+#[cfg(not(all(unix, feature = "host")))]
+#[expect(
     clippy::unnecessary_wraps,
     reason = "the same signature as the version for a target with files"
 )]
 // the same type as the version for a target with files
-fn hold_member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+fn hold_member_key_once(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
     Ok(None)
 }
 
@@ -1070,6 +1116,8 @@ fn run_keys_for(
     runtime_base: Option<&Path>,
     keys_in_default_state: bool,
     (mesh, author): (&MeshId, &Nickname),
+    // shared with every clone of the keys; `None` where the lock was not taken before the setup
+    key_lock: Option<sync::Arc<File>>,
 ) -> Result<RunKeys> {
     let keys_path = keys_state_path(
         state_file,
@@ -1078,17 +1126,46 @@ fn run_keys_for(
         author,
         keys_in_default_state,
     )?;
-    run_keys(keys_path.as_deref())
+    match key_lock {
+        Some(held) => run_keys_holding(keys_path.as_deref(), Some(held)),
+        // a new mesh has a random id, so its default state path cannot be held by another start
+        None => run_keys(keys_path.as_deref()),
+    }
+}
+
+/// The state path of the keys of a start, as far as it is known before the endpoint is bound: the explicit
+/// state file, or the default path of a mesh that the id names (a join or a topic). A new mesh has no id yet,
+/// and a random one, so its default state path is nobody else's.
+fn early_keys_state_path(
+    kind: &SetupKind,
+    state_file: Option<&Path>,
+    runtime_base: Option<&Path>,
+    keys_in_default_state: bool,
+    author: &Nickname,
+) -> Result<Option<PathBuf>> {
+    match kind {
+        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => {
+            let id = MeshId::try_new(&mesh.to_string())
+                .expect("Mesh::to_string always produces a valid MeshId");
+            keys_state_path(state_file, runtime_base, &id, author, keys_in_default_state)
+        }
+        SetupKind::Create { .. } => Ok(state_file.map(Path::to_path_buf)),
+    }
 }
 
 /// The keys of this run. The member key comes from the state file. The session key is the one that
 /// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
 /// would start the same actor again at sequence 1.
 fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
+    run_keys_holding(state, hold_member_key_once(state)?)
+}
+
+/// [`run_keys`] for a start that holds the lock of the member key of `state` already: the setup takes it
+/// before it binds an endpoint, so a refused start leaves nothing behind.
+// the lock is shared with every clone of the keys, and the last one to drop frees it
+fn run_keys_holding(state: Option<&Path>, key_lock: Option<sync::Arc<File>>) -> Result<RunKeys> {
     // read before `member_key` makes the file: a member key that exists is from an earlier start
     let member_known = state.is_some_and(|state| state.with_extension("key").exists());
-    // taken before the key file is read, so the second start fails before it takes a run
-    let key_lock = hold_member_key(state)?;
     Ok(RunKeys {
         key_lock,
         // shared with the loop and its handlers, which hold clones
@@ -1128,6 +1205,16 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         transports,
         per_peer_gate,
     } = params;
+    // The member key is taken first, before an endpoint is bound or a topic joined: a start that another
+    // daemon holds the key of fails with nothing left behind.
+    let early_state = early_keys_state_path(
+        &kind,
+        state_file.as_deref(),
+        runtime_base.as_deref(),
+        keys_in_default_state,
+        &author,
+    )?;
+    let key_lock = hold_member_key(early_state.as_deref()).await?;
     let endpoint_owner = owner_of(injected.as_ref());
     let (max_peers, max_direct) = resolve_caps(max_peers, max_direct);
     // The localhost binding is owned + bound by the caller; the engine only needs
@@ -1192,26 +1279,13 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
 
-    let keys = match run_keys_for(
+    let keys = run_keys_for(
         state_file.as_deref(),
         runtime_base.as_deref(),
         keys_in_default_state,
         (&mesh_id, &author),
-    ) {
-        Ok(keys) => keys,
-        Err(error) => {
-            // The endpoint is bound already: close it, so a refused start (the state path is held by a
-            // running node) does not drop it ungracefully.
-            if let Err(close) = router.shutdown().await {
-                tracing::debug!(target: "habilis_network::lifecycle", %close, "the router of a refused start did not stop cleanly");
-            }
-            #[cfg(feature = "multihop")]
-            if let Some(handle) = multihop_handle.as_ref() {
-                handle.close().await;
-            }
-            return Err(error);
-        }
-    };
+        key_lock,
+    )?;
     Ok(EventLoopConfig {
         mesh: MeshSpec {
             mesh: mesh_id,
@@ -2099,31 +2173,36 @@ mod tests {
     }
 
     /// A restart that comes right after a leave meets the old daemon while it still stops: the start
-    /// tries again for a short time instead of failing at once. The holder here ends after 300 ms.
+    /// tries again for a short time instead of failing at once. The runtime has ONE thread, the one that
+    /// the old daemon stops on: a wait that blocks the thread would keep it from stopping, and the start
+    /// would wait the whole time and fail. The holder here ends after 300 ms, on that thread.
     #[test]
-    fn a_start_that_meets_a_holder_that_is_stopping_waits_for_it() {
+    fn a_start_that_meets_a_holder_that_is_stopping_waits_for_it_on_one_thread() {
         use std::time::Instant;
-        let dir = env::temp_dir().join(format!("habilis-key-lock-wait-{}", process::id()));
-        fs::create_dir_all(&dir).expect("a temp dir");
-        let state = dir.join("wait.json");
-        let holder = super::run_keys(Some(&state)).expect("first start");
-        let stopping = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(300));
-            drop(holder);
+        let guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::run(guard, async {
+            let dir = env::temp_dir().join(format!("habilis-key-lock-wait-{}", process::id()));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            let state = dir.join("wait.json");
+            let holder = super::run_keys(Some(&state)).expect("first start");
+            let stopping = tokio::spawn(async move {
+                time::sleep(Duration::from_millis(300)).await;
+                drop(holder);
+            });
+            let started = Instant::now();
+            let second = super::hold_member_key(Some(&state)).await;
+            let waited = started.elapsed();
+            stopping.await.expect("the holder task ends");
+            assert!(
+                second.is_ok(),
+                "a start that meets a holder that is stopping works: {:?}",
+                second.err()
+            );
+            assert!(
+                waited >= Duration::from_millis(250) && waited < Duration::from_secs(2),
+                "the start waited for the holder, and not for the whole retry: {waited:?}"
+            );
         });
-        let started = Instant::now();
-        let second = super::run_keys(Some(&state));
-        let waited = started.elapsed();
-        stopping.join().expect("the holder thread ends");
-        assert!(
-            second.is_ok(),
-            "a start that meets a holder that is stopping works: {:?}",
-            second.err()
-        );
-        assert!(
-            waited >= Duration::from_millis(250) && waited < Duration::from_secs(2),
-            "the start waited for the holder, and not for the whole retry: {waited:?}"
-        );
     }
 
     /// The lock goes with the daemon: when the holder is dropped (or dies, since the lock is an OS

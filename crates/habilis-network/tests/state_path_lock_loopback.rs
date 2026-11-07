@@ -12,6 +12,8 @@ use habilis_network::embed::{
 };
 use habilis_network::protocol::messages::Authored;
 use habilis_network::protocol::{MeshConfig, MeshName, Nickname};
+use tokio::sync::oneshot;
+
 use habilis_network::runtime::{
     EventLoopConfig, Node, SetupError, SetupKind, SetupParams, SignalHandling, setup_mesh,
 };
@@ -36,16 +38,18 @@ impl NodeApp for Idle {
 
 #[habilis_network::async_trait]
 impl NodeDriver for Idle {
-    type Session = ();
+    // A request is answered by the event loop itself, so an answer proves that the loop is running.
+    type Session = oneshot::Sender<()>;
     type Http = ();
     type Ipc = ();
 
     async fn handle_session(
         &mut self,
-        _request: Self::Session,
+        request: Self::Session,
         _state: &mut EventLoopState,
         _context: &HandlerCtx<'_>,
     ) -> bool {
+        let _ = request.send(());
         true
     }
 }
@@ -77,6 +81,13 @@ fn a_second_start_of_the_state_path_of_a_running_node_fails_and_works_after_it_l
 
         let config = start("lock-first", &state).await.expect("the first start");
         let node = Node::spawn(config, Idle, None, SignalHandling::Leave);
+        // Wait until the loop of the first node answers: the second start then meets a node that runs,
+        // and not a setup that is still on its way, so the result does not depend on timing.
+        let (running, answered) = oneshot::channel();
+        node.send(running)
+            .await
+            .expect("the request reaches the loop");
+        answered.await.expect("the loop of the first node runs");
 
         let second = start("lock-second", &state).await;
         let refused = second.err().map(|error| error.to_string());
