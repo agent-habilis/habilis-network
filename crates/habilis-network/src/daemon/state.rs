@@ -1,3 +1,4 @@
+mod chat_continuations;
 mod collection_sizes;
 mod event_loop_state;
 
@@ -2743,6 +2744,106 @@ mod tests {
                 now + super::UNREADABLE_DIGEST_LOG_WINDOW + Duration::from_secs(1)
             ),
             "the author is reported again after the window"
+        );
+    }
+
+    /// A chat gap longer than one answer is closed by the repeats of the asker, by unicast, at its
+    /// pace and up to its count: the cooldown of the holder lets those through and nothing else.
+    #[test]
+    fn a_unicast_continuation_is_served_inside_the_cooldown_at_the_pace_of_the_asker() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let t0 = Instant::now();
+        let pace = tuning::FAST_ROUND_MIN_INTERVAL;
+        let aa = author_of("aa");
+        assert!(state.admit_digest(aa, t0), "the first is served as always");
+
+        assert!(
+            !state.admit_chat_continuation(author_of("never-served"), t0 + pace),
+            "an author that was not served has no continuation: its digest is a first one"
+        );
+        assert!(
+            state.admit_chat_continuation(aa, t0 + pace),
+            "the first repeat, inside the cooldown, by unicast"
+        );
+        assert!(
+            !state.admit_chat_continuation(aa, t0 + pace + pace / 2),
+            "a repeat sooner than the pace of the asker is a flood"
+        );
+        let mut served = 1;
+        let mut at = t0 + pace;
+        while served < tuning::CHAT_RETRIES_MAX + 1 {
+            at += pace;
+            if !state.admit_chat_continuation(aa, at) {
+                break;
+            }
+            served += 1;
+        }
+        assert_eq!(
+            served,
+            tuning::CHAT_RETRIES_MAX,
+            "the repeats stop at the count of the asker"
+        );
+        assert!(
+            !state.admit_chat_continuation(aa, at + pace),
+            "one repeat more than the count is refused"
+        );
+
+        let later = t0 + tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_millis(1);
+        assert!(state.admit_digest(aa, later), "the cadence resumes");
+        assert!(
+            state.admit_chat_continuation(aa, later + pace),
+            "and a new run of repeats is allowed in the new window"
+        );
+    }
+
+    /// The table of the continuations has a cap: ten times the cap of authors, all served in one
+    /// window, leave exactly the cap of runs, the first authors keep theirs, and the rest meet the
+    /// cooldown as before. A window later the table is empty.
+    #[test]
+    fn the_continuations_stay_inside_their_cap_when_ten_times_the_cap_of_authors_ask() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let t0 = Instant::now();
+        let pace = tuning::FAST_ROUND_MIN_INTERVAL;
+        let cap = tuning::CHAT_CONTINUATION_AUTHORS_MAX;
+        let mut admitted = 0;
+        for index in 0..10 * cap {
+            let author = author_of(&format!("author-{index}"));
+            assert!(state.admit_digest(author, t0), "the first digest of each");
+            if state.admit_chat_continuation(author, t0 + pace) {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, cap, "only the cap of authors got a continuation");
+        assert_eq!(
+            state.chat_continuations_len(),
+            cap,
+            "the table holds the cap"
+        );
+        assert!(
+            state.admit_chat_continuation(author_of("author-0"), t0 + pace * 2),
+            "an author that holds a run goes on"
+        );
+        assert!(
+            !state
+                .admit_chat_continuation(author_of(&format!("author-{}", 10 * cap - 1)), t0 + pace),
+            "an author that came when the table was full is refused"
+        );
+
+        let later = t0 + tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_millis(1);
+        assert!(
+            state.admit_digest(author_of("fresh"), later),
+            "a new window opens for a new author"
+        );
+        assert!(
+            state.admit_chat_continuation(author_of("fresh"), later + pace),
+            "and it gets a continuation: the table has room again"
+        );
+        assert_eq!(
+            state.chat_continuations_len(),
+            1,
+            "a window later the runs of the others are gone"
         );
     }
 

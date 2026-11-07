@@ -1134,6 +1134,13 @@ pub const FAST_ROUND_RETRY: Duration = Duration::from_millis(400);
 /// not wait one tick per cap, and it stops after this many.
 pub const CHAT_RETRIES_MAX: u32 = 16;
 
+/// How many authors a holder serves chat continuations to at once, inside the cooldown window of their
+/// digest (see `ChatContinuations`). 64 is four times the members of the largest mesh that was
+/// measured (16): a mesh where every member is catching up at once has room, and the table is a few
+/// bytes for each author for one window of 5 s. When it is full, the continuation of a new author is
+/// refused and meets the cooldown as before.
+pub const CHAT_CONTINUATION_AUTHORS_MAX: usize = 64;
+
 /// How many peers a node remembers as ahead of it, per channel.
 pub const FAST_ROUND_AHEAD_MAX: usize = 16;
 

@@ -4,6 +4,7 @@ use super::ParkedLinkStates;
 use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
+use super::chat_continuations::ChatContinuations;
 use super::peer_info_flood::PeerInfoFlood;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshSecrets, PingRound,
@@ -333,6 +334,10 @@ pub struct EventLoopState {
     /// because a digest built with no signature is a valid input of the tests: `None`
     /// is its own bucket, as the empty string was.
     digest_serves: Cooldown<AuthorKey>,
+    /// The chat continuations that an author gets inside its cooldown. Bounded: a run lives for one
+    /// cooldown window, at most `CHAT_CONTINUATION_AUTHORS_MAX` authors hold one, and a new author
+    /// is refused when the table is full (see `ChatContinuations`).
+    chat_continuations: ChatContinuations,
     /// When we last reported an author whose digest we could not read. An `Option` key
     /// for the same reason as `digest_serves`.
     digest_unreadable: Cooldown<AuthorKey>,
@@ -755,6 +760,7 @@ impl EventLoopState {
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
             digest_serves: Cooldown::new(tuning::ANTIENTROPY_SERVE_COOLDOWN),
+            chat_continuations: ChatContinuations::default(),
             digest_unreadable: Cooldown::new(super::UNREADABLE_DIGEST_LOG_WINDOW),
             resend_outbox,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -2298,7 +2304,25 @@ impl EventLoopState {
             return false;
         }
         self.digest_serves.note(author, now);
+        self.chat_continuations
+            .begin(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN);
         true
+    }
+
+    /// Whether a digest of `author` that came by unicast, inside the cooldown that `admit_digest`
+    /// refused it for, is a continuation of its chat ask to serve now: at the pace of the asker, and
+    /// up to its count. Only an author that was served has one. Bounded (see `ChatContinuations`).
+    pub fn admit_chat_continuation(&mut self, author: AuthorKey, now: Instant) -> bool {
+        self.digest_serves.on_cooldown(&author, now)
+            && self
+                .chat_continuations
+                .admit(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN)
+    }
+
+    /// How many authors hold a run of chat continuations: the size gauge of the bound.
+    #[cfg(test)]
+    pub(crate) fn chat_continuations_len(&self) -> usize {
+        self.chat_continuations.len()
     }
 
     /// The selected path of a pair: the path watcher's last report if it has one,

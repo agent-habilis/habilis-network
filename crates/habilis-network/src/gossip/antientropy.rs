@@ -277,7 +277,11 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_
     // `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts, so ungated this turns one
     // small frame into that much flooding from every member that hears it —
     // the cost scaling with the mesh rather than with the sender.
-    if !state.admit_digest(message.key(), Instant::now()) {
+    // A repeat of a chat ask by unicast, at the pace of the asker, is a continuation of the answer:
+    // it is served inside the cooldown, up to the count of the asker (see `ChatContinuations`).
+    let now = Instant::now();
+    let continued = asked_alone && state.admit_chat_continuation(message.key(), now);
+    if !continued && !state.admit_digest(message.key(), now) {
         tracing::debug!(
             target: "habilis_network::gossip",
             author = %message.author,
@@ -1705,6 +1709,54 @@ mod tests {
             let (_parsed, nonce) = Message::parse_wire(frame.as_bytes()).expect("a frame parses");
             assert_eq!(nonce, None, "the frame goes as it was signed");
         }
+    }
+
+    /// An asker whose chat gap is longer than one answer repeats its digest by unicast (see
+    /// `retry_chat_ask`): the holder answers the repeats inside the cooldown of the author, at the
+    /// pace of the asker. A repeat that comes sooner than that pace, and a repeat on gossip, still
+    /// meet the cooldown.
+    #[test]
+    fn a_unicast_chat_digest_that_repeats_inside_the_cooldown_is_answered_at_the_pace_of_the_asker()
+    {
+        use std::thread;
+        use std::time::Duration;
+        let _guard = ::habilis_network_test_tracing::init();
+        let asker_identity = Identity::generate();
+        let asker_endpoint = endpoint_id(7);
+        let (mut state, mut resends) = holder_for_unicast(3, &asker_identity, asker_endpoint);
+        let digest = || {
+            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                .sign(&asker_identity)
+        };
+        state.state_digest_serves.unicast.arrived_from = Some(asker_endpoint);
+        super::handle_digest(&digest(), &mut state, &test_key("holder"));
+        assert_eq!(
+            drained(&mut resends).len(),
+            3,
+            "the first digest is answered"
+        );
+
+        super::handle_digest(&digest(), &mut state, &test_key("holder"));
+        assert!(
+            drained(&mut resends).is_empty(),
+            "a repeat at once is a flood, inside the pace of the asker"
+        );
+
+        thread::sleep(super::FAST_ROUND_MIN_INTERVAL + Duration::from_millis(50));
+        super::handle_digest(&digest(), &mut state, &test_key("holder"));
+        assert_eq!(
+            drained(&mut resends).len(),
+            3,
+            "the repeat at the pace of the asker is a continuation, and is answered"
+        );
+
+        state.state_digest_serves.unicast.arrived_from = None;
+        thread::sleep(super::FAST_ROUND_MIN_INTERVAL + Duration::from_millis(50));
+        super::handle_digest(&digest(), &mut state, &test_key("holder"));
+        assert!(
+            drained(&mut resends).is_empty(),
+            "a repeat that comes on gossip meets the cooldown as before"
+        );
     }
 
     /// The rule that a few members answer one digest (`answers_digest`) is for a digest that all of
