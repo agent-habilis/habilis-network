@@ -1990,7 +1990,11 @@ mod tests {
             for _ in 0..tuning::antientropy_max_resend() {
                 state.message_log.push(directed_msg());
             }
-            assert_eq!(state.message_log.len(), 2, "the log is full and did not grow");
+            assert_eq!(
+                state.message_log.len(),
+                2,
+                "the log is full and did not grow"
+            );
 
             retry_chat_ask(&mut state, &net.context()).await;
 
