@@ -1921,7 +1921,7 @@ mod tests {
                 .expect("the clock is older than 60 s");
             let full_answer = ChatAsk {
                 peer: bob_endpoint.id(),
-                log_len: 0,
+                accepted: 0,
                 at: long_ago,
                 retries: 0,
             };
@@ -1958,6 +1958,50 @@ mod tests {
                     .map(|ask| ask.retries),
                 Some(1),
                 "a full answer is asked again"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// The progress of a chat answer is the count of the messages that the log took, not its length:
+    /// a full log keeps its length while an answer replaces its entries.
+    #[test]
+    fn the_chat_retry_sees_an_answer_that_a_full_log_took_without_growing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::daemon::message_log::MessageLog;
+            use crate::gossip::antientropy::{ChatAsk, retry_chat_ask};
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
+            state.standing.insert(Standing::Meshed);
+            state.message_log = MessageLog::new(2);
+            state.message_log.push(directed_msg());
+            state.message_log.push(directed_msg());
+            let long_ago = clock::Instant::now()
+                .checked_sub(std_Duration::from_secs(60))
+                .expect("the clock is older than 60 s");
+            state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
+                peer: bob_endpoint.id(),
+                accepted: state.message_log.accepted(),
+                at: long_ago,
+                retries: 0,
+            });
+            for _ in 0..tuning::antientropy_max_resend() {
+                state.message_log.push(directed_msg());
+            }
+            assert_eq!(state.message_log.len(), 2, "the log is full and did not grow");
+
+            retry_chat_ask(&mut state, &net.context()).await;
+
+            assert_eq!(
+                state
+                    .state_digest_serves
+                    .unicast
+                    .chat_ask
+                    .map(|ask| ask.retries),
+                Some(1),
+                "a full answer into a full log is asked again"
             );
             bob_endpoint.close().await;
             net.endpoint.close().await;

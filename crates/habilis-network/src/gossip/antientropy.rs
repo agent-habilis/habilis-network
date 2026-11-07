@@ -869,7 +869,7 @@ async fn send_digests(
     if asks_for_chat {
         state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
             peer,
-            log_len: state.message_log.len(),
+            accepted: state.message_log.accepted(),
             at: Instant::now(),
             retries: 0,
         });
@@ -878,14 +878,15 @@ async fn send_digests(
 }
 
 /// Ask the peer of the last chat digest again while its answers are full, because a gap longer than one
-/// answer would wait one tick per answer. It stops when an answer is not full (the log did not grow by
-/// the resend cap) and after `CHAT_RETRIES_MAX` repeats, so it cannot become a loop.
+/// answer would wait one tick per answer. It stops when an answer is not full (the log took fewer
+/// messages than the resend cap) and after `CHAT_RETRIES_MAX` repeats, so it cannot become a loop.
 pub(crate) async fn retry_chat_ask(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let Some(ask) = state.state_digest_serves.unicast.chat_ask else {
         return;
     };
     let now = Instant::now();
-    let full = state.message_log.len().saturating_sub(ask.log_len) >= antientropy_max_resend();
+    let took = state.message_log.accepted().saturating_sub(ask.accepted);
+    let full = usize::try_from(took).unwrap_or(usize::MAX) >= antientropy_max_resend();
     if !full {
         if now.duration_since(ask.at) >= FAST_ROUND_ACTIVE {
             state.state_digest_serves.unicast.chat_ask = None;

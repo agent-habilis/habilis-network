@@ -6,8 +6,8 @@ use crate::util::clock::Instant;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ChatAsk {
     pub(crate) peer: EndpointId,
-    /// The size of the chat log when the digest went out.
-    pub(crate) log_len: usize,
+    /// The count of the messages that the chat log had taken when the digest went out.
+    pub(crate) accepted: u64,
     pub(crate) at: Instant,
     /// How many times the digest was repeated after a full answer.
     pub(crate) retries: u32,

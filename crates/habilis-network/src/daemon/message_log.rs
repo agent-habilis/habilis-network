@@ -58,6 +58,10 @@ pub struct MessageLog {
     /// walk. The log holds whole signed frames, so this is what it keeps, not the text of the
     /// bodies: a presence frame has no body.
     frame_bytes: usize,
+    /// How many messages the log has taken since it was made: it grows when the log is full and
+    /// each take evicts one, so it tells progress where the length does not. A `u64` counter, no
+    /// collection.
+    accepted: u64,
 }
 
 /// The bytes of a frame on the wire, 0 for a frame that does not serialize.
@@ -73,7 +77,14 @@ impl MessageLog {
             per_author: HashMap::new(),
             keys: HashSet::new(),
             frame_bytes: 0,
+            accepted: 0,
         }
+    }
+
+    /// The count of the messages that the log took since it was made.
+    #[must_use]
+    pub(crate) fn accepted(&self) -> u64 {
+        self.accepted
     }
 
     /// Add a message to the log, keeping arrival order. If that overflows
@@ -92,6 +103,7 @@ impl MessageLog {
         if !self.keys.insert(message.dedup_key()) {
             return None;
         }
+        self.accepted = self.accepted.saturating_add(1);
         *self.per_author.entry(message.key()).or_default() += 1;
         self.frame_bytes += wire_len(&message);
         self.messages.push_back(message);
