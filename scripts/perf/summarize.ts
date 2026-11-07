@@ -348,18 +348,22 @@ function phaseReport(run: string): string {
   const wire = new Map<string, number>();
   const udp = new Map<string, number>();
   const delivered = new Map<string, number>();
+  let sawWire = false;
   const add = (into: Map<string, number>, name: string, value: number) =>
     into.set(name, (into.get(name) ?? 0) + value);
   for (const file of nodes) {
     for (const line of lines(clean(readFileSync(`${run}/${file}`, "utf8")))) {
       const stamp = line.match(/^(\d{4}-\d\d-\d\dT[0-9:.]+Z)/);
       if (!stamp || !line.includes(" census")) continue;
+      sawWire ||= /\bidle_wire_in=/.test(line);
       const phase = phases.find((p) => inPhase(p, Date.parse(stamp[1] ?? "")));
       if (!phase) continue;
       add(wire, phase.name, sum(numbers(line, /\bidle_wire_in=(\d+)/)));
       add(udp, phase.name, sum(["ip", "relay", "custom"].flatMap((via) => numbers(line, new RegExp(`\\bidle_net_recv_${via}=(\\d+)`)))));
     }
   }
+  // A build with no wire counters (a baseline) has no frame layer to compare: no ratio, and no failure.
+  if (!sawWire) return "";
   for (const line of lines(readFileSync(`${run}/oracle.jsonl`, "utf8"))) {
     const sent: { bytes: number; receivers: number; ts: number } = JSON.parse(line);
     const phase = phases.find((p) => inPhase(p, sent.ts));

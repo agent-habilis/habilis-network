@@ -136,3 +136,14 @@ test("the CPU total reads both census forms: user plus system, and the one field
   expect(run(dir).stdout.toString()).toContain("cpu_ms=19 ");
 });
 
+test("a run whose census has no wire counters gets no ratio and no failure", () => {
+  const dir = fixture([1200, 800]);
+  for (const node of ["n1.err", "n2.err"]) {
+    const text = readFileSync(`${dir}/${node}`, "utf8");
+    writeFileSync(`${dir}/${node}`, text.replaceAll(/ idle_wire_in=\d+/g, "").replaceAll(/ idle_net_recv_ip=\d+/g, ""));
+  }
+  const result = run(dir);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).not.toContain("frame_meta_per_data");
+});
+
