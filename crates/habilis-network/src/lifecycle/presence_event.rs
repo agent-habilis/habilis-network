@@ -297,9 +297,9 @@ async fn send_proof_ask(
     }
 }
 
-/// Ask again the sessions whose ask was skipped for lack of a warm path. A frame that arrived on a unicast
-/// connection from `arrived` shows that a connection to that endpoint is up: only the sessions at that
-/// endpoint are tried. With none (the sweep tick), every waiting session is tried, and the ones that waited
+/// Ask again the sessions whose ask was skipped for lack of a warm path. A gossip link that came up to
+/// `arrived`, or a frame that arrived on a unicast connection from it, shows that a path to that endpoint
+/// is there: only the sessions at that endpoint are tried. With none (the sweep tick), every waiting session is tried, and the ones that waited
 /// too long are dropped. A node with nothing deferred pays one comparison. The retry clock of a session
 /// still limits its asks, and a deferred session is tried once for each gap, so a flood of frames from
 /// one endpoint signs no more than the clock allows.

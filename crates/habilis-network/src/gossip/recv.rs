@@ -157,6 +157,11 @@ pub(crate) async fn handle_gossip_event(
                 // formed — leaving permanent ghosts that suppressed
                 // both; see the 2026-06-12 roster-collapse review.)
                 state.link(node_id);
+                // A linked neighbour is a path for a proof request (the send dials it in the background):
+                // the asks that waited for one to this endpoint go now, and not at the next sweep tick.
+                // The late link of the simultaneous-open tie-break comes up a few milliseconds after the
+                // ask was skipped.
+                lifecycle::retry_deferred_asks(state, context, Some(node_id)).await;
                 // A new neighbor: the underlay may owe it a session, and may take
                 // its signal.
                 #[cfg(feature = "multihop")]
@@ -2951,6 +2956,43 @@ mod first_contact_tests {
             assert!(
                 state.pending_outbound.is_empty(),
                 "the parked frame waits for a PeerInfo that may not come"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A proof ask that waited for a path goes when the gossip link to its endpoint comes up: the link
+    /// is a path (the send dials the neighbour in the background), and it is the first sign of one, long
+    /// before the next sweep tick. The late links of the simultaneous-open tie-break come up a few
+    /// milliseconds after the ask was skipped.
+    #[test]
+    fn an_ask_that_waited_for_a_path_goes_when_the_gossip_link_to_its_endpoint_comes_up() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let session = Identity::generate();
+            let endpoint = endpoint_id(7);
+            state.peers.insert(session.author_key());
+            state.names.insert(session.author_key(), nick("alice"));
+            state.place_endpoint(
+                session.author_key(),
+                &nick("alice"),
+                iroh::EndpointAddr::new(endpoint),
+            );
+            state
+                .proofs
+                .defer_ask(session.author_key(), clock::Instant::now());
+
+            feed(Event::NeighborUp(endpoint), &mut state, &context).await;
+
+            assert_eq!(
+                (
+                    state.proofs.deferred_len(),
+                    state.proof_requests_signed.load(Ordering::Relaxed)
+                ),
+                (0, 1),
+                "the ask goes once the link is up, and nothing waits"
             );
             node.endpoint.close().await;
         });
