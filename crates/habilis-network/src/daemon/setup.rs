@@ -611,6 +611,12 @@ fn resolve_caps(max_peers: usize, max_direct: usize) -> (usize, usize) {
 /// The join target fails to resolve, the password fails to verify, or the
 /// endpoint cannot bind.
 ///
+/// # Cancellation
+/// The setup has many await points, and dropping its future at any of them drops what it built so far (the endpoint
+/// and the router) without a graceful close. Let it end, and then shut the node down, for a clean stop. A drop while
+/// the start waits for the run lock leaves no lock and no run counter behind: the worker that waits stops at its
+/// next step.
+///
 /// # Examples
 ///
 /// It sets up a mesh from its kind and its parameters, and it returns the config for the event loop. The doc test compiles it but does not run it.
