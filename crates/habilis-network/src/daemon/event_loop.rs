@@ -1148,7 +1148,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.state_digest_serves.unicast.arrived_from = None;
         // A frame on a unicast connection shows that a connection to its endpoint is up: the proof
         // requests that waited for one go now.
-        lifecycle::retry_deferred_asks(&mut self.state, &context, Some(frame.from)).await;
+        let sign = Some(lifecycle::PathSign::Unicast(frame.from));
+        lifecycle::retry_deferred_asks(&mut self.state, &context, sign).await;
     }
 
     fn prune(&mut self) {

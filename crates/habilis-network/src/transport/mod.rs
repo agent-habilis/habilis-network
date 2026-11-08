@@ -67,8 +67,8 @@ pub use send::{
     Delivered, Lane, PendingSend, SendError, StateRefusal, deliver, deliver_in_background,
 };
 pub(crate) use send::{
-    can_unicast, lane_for, note_held, resolve, send_best_effort, unicast_answer_target,
-    unicast_peers,
+    can_unicast, lane_for, note_held, resolve, send_best_effort, send_dialing_back,
+    unicast_answer_target, unicast_peers,
 };
 pub(crate) use unicast_acceptor::{UnicastAcceptor, UnicastFrame};
 pub use webrtc::MAX_DIRECT_PEERS;

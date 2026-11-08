@@ -161,7 +161,12 @@ pub(crate) async fn handle_gossip_event(
                 // the asks that waited for one to this endpoint go now, and not at the next sweep tick.
                 // The late link of the simultaneous-open tie-break comes up a few milliseconds after the
                 // ask was skipped.
-                lifecycle::retry_deferred_asks(state, context, Some(node_id)).await;
+                lifecycle::retry_deferred_asks(
+                    state,
+                    context,
+                    Some(lifecycle::PathSign::LinkUp(node_id)),
+                )
+                .await;
                 // A new neighbor: the underlay may owe it a session, and may take
                 // its signal.
                 #[cfg(feature = "multihop")]
@@ -6079,7 +6084,7 @@ mod dedup_counter_tests {
         initial: EventLoopState,
         arrivals: Vec<(Plane, Bytes)>,
         sink: &dyn NodeSink,
-        path_up: Option<iroh::EndpointId>,
+        path_up: Option<lifecycle::PathSign>,
     ) -> EventLoopState {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let mesh = MeshId::from("test");
@@ -6113,9 +6118,11 @@ mod dedup_counter_tests {
             for (plane, bytes) in arrivals {
                 super::ingest_from(plane, bytes, &mut reader, &mut app, &context).await;
             }
-            if let Some(up) = path_up {
-                reader.linked_endpoints.insert(up);
-                lifecycle::retry_deferred_asks(&mut reader, &context, Some(up)).await;
+            if let Some(sign) = path_up {
+                if let lifecycle::PathSign::LinkUp(up) = sign {
+                    reader.linked_endpoints.insert(up);
+                }
+                lifecycle::retry_deferred_asks(&mut reader, &context, Some(sign)).await;
             }
             endpoint.close().await;
             reader
@@ -6966,7 +6973,7 @@ mod dedup_counter_tests {
             waiting(),
             vec![alive_of(&session, "alice")],
             &SilentSink,
-            Some(endpoint),
+            Some(lifecycle::PathSign::LinkUp(endpoint)),
         );
 
         assert_eq!(
@@ -6984,6 +6991,52 @@ mod dedup_counter_tests {
             ),
             (0, 1),
             "when the path is up the ask goes once, and nothing waits"
+        );
+    }
+
+    /// A frame that comes on a unicast connection from the endpoint of a session that waits shows that the
+    /// endpoint can reach us, and the endpoint id of that connection is authenticated by the transport. The
+    /// session may have no gossip link and no connection of ours to it (it dialed us), so the ask goes by a
+    /// dial back in the background, as the send to a linked neighbour does. The limits of the retry stay: one
+    /// try for each gap, and only the session whose address is that endpoint.
+    #[test]
+    fn an_ask_that_waited_goes_by_a_dial_back_when_a_unicast_frame_comes_from_its_endpoint() {
+        let session = Identity::generate();
+        let (endpoint, other) = (endpoint_id(7), endpoint_id(9));
+        let waiting = || {
+            let mut initial = fresh_state();
+            initial.peers.insert(session.author_key());
+            initial.names.insert(session.author_key(), nick("alice"));
+            initial.place_endpoint(
+                session.author_key(),
+                &nick("alice"),
+                iroh::EndpointAddr::new(endpoint),
+            );
+            initial
+        };
+
+        let from_it = reader_full(
+            waiting(),
+            vec![alive_of(&session, "alice")],
+            &SilentSink,
+            Some(lifecycle::PathSign::Unicast(endpoint)),
+        );
+        let from_another = reader_full(
+            waiting(),
+            vec![alive_of(&session, "alice")],
+            &SilentSink,
+            Some(lifecycle::PathSign::Unicast(other)),
+        );
+
+        assert_eq!(
+            from_it.proof_requests_signed.load(Ordering::Relaxed),
+            1,
+            "a unicast frame from the endpoint of the waiting session did not send its ask"
+        );
+        assert_eq!(
+            from_another.proof_requests_signed.load(Ordering::Relaxed),
+            0,
+            "a unicast frame from another endpoint sent the ask of this session"
         );
     }
 
@@ -7019,7 +7072,7 @@ mod dedup_counter_tests {
             state_with_bound_nickname(&bound, "alice"),
             frames(),
             &SilentSink,
-            Some(endpoint),
+            Some(lifecycle::PathSign::LinkUp(endpoint)),
         );
 
         assert_eq!(

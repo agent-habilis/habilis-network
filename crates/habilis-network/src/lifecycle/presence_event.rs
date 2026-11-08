@@ -263,15 +263,20 @@ pub(crate) async fn ask_for_proof(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    send_proof_ask(&alive.key(), &alive.author, state, context).await;
+    send_proof_ask(&alive.key(), &alive.author, state, context, None).await;
 }
 
 /// [`ask_for_proof`] for a session named by its key and its nickname.
+///
+/// `inbound` is the endpoint that just sent an authenticated unicast frame, if that is what set this ask off:
+/// the session at that endpoint can be reached by a dial back, though it has no gossip link and no connection
+/// of ours.
 async fn send_proof_ask(
     key: &AuthorKey,
     nickname: &Nickname,
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
+    inbound: Option<EndpointId>,
 ) {
     if !state.asks_for_session(key, nickname) {
         // it holds a proof now, or its clock holds: nothing waits
@@ -281,9 +286,12 @@ async fn send_proof_ask(
     let Some(eid) = proof_ask_target(key, nickname, state) else {
         return;
     };
-    // A path that can carry the request: a warm connection, or a neighbour that the send dials in the
-    // background. An address with neither costs a lookup, and no signature, however many frames come.
-    if !(state.linked_endpoints.contains(&eid) || state.unicast_pool.has_warm(eid).await) {
+    // A path that can carry the request: a warm connection, a neighbour that the send dials in the
+    // background, or an endpoint that just sent a unicast frame (the same dial). An address with none of
+    // them costs a lookup, and no signature, however many frames come.
+    let dials_back = inbound == Some(eid);
+    let linked = state.linked_endpoints.contains(&eid);
+    if !(linked || dials_back || state.unicast_pool.has_warm(eid).await) {
         tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request skipped: no warm path");
         state.proofs.defer_ask(*key, nickname, Instant::now());
         return;
@@ -292,13 +300,33 @@ async fn send_proof_ask(
     state.note_ask_dial_address(eid);
     let request = state.proof_request_to(key, context.author, context.mesh);
     messages::log_out(&request);
-    if let Ok(bytes) = request.serialize()
-        && transport::send_best_effort(eid, bytes, state).await
-    {
+    let sent = match request.serialize() {
+        Ok(bytes) if dials_back => transport::send_dialing_back(eid, bytes, state).await,
+        Ok(bytes) => transport::send_best_effort(eid, bytes, state).await,
+        Err(_) => false,
+    };
+    if sent {
         let claimed = (!state.peers.contains(key)).then_some(nickname);
         state.note_proof_request_sent(key, claimed);
     } else {
         tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request skipped: the send failed");
+    }
+}
+
+/// What shows that a path to an endpoint is there, for the asks that wait for one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathSign {
+    /// The gossip link to the endpoint came up.
+    LinkUp(EndpointId),
+    /// A frame came from the endpoint on a unicast connection.
+    Unicast(EndpointId),
+}
+
+impl PathSign {
+    fn endpoint(self) -> EndpointId {
+        match self {
+            Self::LinkUp(endpoint) | Self::Unicast(endpoint) => endpoint,
+        }
     }
 }
 
@@ -311,16 +339,20 @@ async fn send_proof_ask(
 pub(crate) async fn retry_deferred_asks(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
-    arrived: Option<EndpointId>,
+    sign: Option<PathSign>,
 ) {
     if state.proofs.deferred_is_empty() {
         return;
     }
-    if arrived.is_none() {
+    if sign.is_none() {
         state.proofs.expire_deferred(Instant::now());
     }
-    for (key, nickname) in state.deferred_asks_to_try(arrived) {
-        send_proof_ask(&key, &nickname, state, context).await;
+    let inbound = match sign {
+        Some(PathSign::Unicast(endpoint)) => Some(endpoint),
+        Some(PathSign::LinkUp(_)) | None => None,
+    };
+    for (key, nickname) in state.deferred_asks_to_try(sign.map(PathSign::endpoint)) {
+        send_proof_ask(&key, &nickname, state, context, inbound).await;
     }
 }
 
