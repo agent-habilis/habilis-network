@@ -2612,13 +2612,16 @@ impl EventLoopState {
     /// of other members under it end.
     pub(crate) fn evict_for_waiting_claimant(&mut self, message: &Verified) {
         let key = message.key();
-        if !self.proofs.take_waiting_to_evict(&key) {
+        if !self.proofs.is_waiting_to_evict(&key) {
             return;
         }
+        // The wait stays until a frame under the nickname that the proof names comes: a frame of the same
+        // session under another nickname is admitted, and it must not use the wait up.
         let Some(held) = self.proofs.proof_for(&key, &message.author) else {
             return;
         };
         let member = held.identity;
+        self.proofs.take_waiting_to_evict(&key);
         let named: Vec<AuthorKey> = self.keys_named(&message.author);
         let others = named.into_iter().filter(|other| {
             let proof = self.proofs.proof_of(other);

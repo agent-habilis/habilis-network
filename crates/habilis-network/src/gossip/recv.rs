@@ -6627,6 +6627,39 @@ mod dedup_counter_tests {
         )
     }
 
+    /// The end that waits for a claimant stays until a frame of that claimant under the PROVED nickname comes. A
+    /// frame of the same session under another nickname (`bob`) is admitted, and it must not use up the wait:
+    /// the later frame under `alice` would then leave the other session in the roster, with no end.
+    #[test]
+    fn a_frame_under_another_nickname_does_not_use_up_the_wait_of_a_claimant() {
+        let member = Identity::generate();
+        let (member_session, other_session) = (Identity::generate(), Identity::generate());
+        let waiting = reader_with(
+            fresh_state(),
+            vec![
+                alive_of(&other_session, "alice"),
+                old_joined_of(&member_session, &member, "alice", 3 * 86_400),
+            ],
+        );
+        assert!(
+            waiting.peers.contains(&other_session.author_key()),
+            "the old frame ended nothing: the end waits for its sender"
+        );
+
+        let as_bob = reader_with(waiting, vec![alive_of(&member_session, "bob")]);
+        assert!(
+            as_bob.peers.contains(&other_session.author_key()),
+            "a frame under another nickname ended the other session"
+        );
+
+        let as_alice = reader_with(as_bob, vec![alive_of(&member_session, "alice")]);
+
+        assert!(
+            !as_alice.peers.contains(&other_session.author_key()),
+            "the wait was used up by the frame under another nickname: the other session stays in the roster"
+        );
+    }
+
     /// A member that restored a lower run counter has a live session at run 3. An unseen historical `joined`
     /// frame of the same member at run 9 (stamped 3 days ago) must not replace it: the live session would end,
     /// with the frames that wait for it, for a session that is not there. A FRESH `joined` of a real restart at a
