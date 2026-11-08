@@ -989,12 +989,14 @@ async fn roster_gate(
     None
 }
 
-/// A copy of a `joined` frame gives back the proof that the book lost for its session, and nothing else. A
-/// member signs its answer to a proof request once for each run, so an asker that dropped the proof of that
-/// session (the session left the roster and came back) gets the same frame again, and the frame is a
-/// duplicate there. Only a session that is live gets its proof back: a copy for any other session (a quiet one
-/// too) keeps nothing, so a flood of old copies cannot fill the book or move a binding. The copy is no arrival
-/// and no heartbeat.
+/// A copy of a `joined` frame gives back the proof that its session lost, and nothing else. A member signs its
+/// answer to a proof request once for each run, so an asker that dropped the proof of that session (the session left
+/// the roster and came back, or its pending proof was dropped at a cap) gets the same frame again, and the frame is a
+/// duplicate there. A session that is live gets its proof back as an active proof. Any other session (a quiet one, or
+/// one that the nickname gate refused and so is not in the roster) gets it back as a PENDING proof: valid and
+/// inactive, it binds nothing and replaces nothing, so a flood of old copies cannot move a binding, and it is
+/// activated when the session proves presence. A session that said goodbye gets nothing. The copy is no arrival and
+/// no heartbeat.
 async fn restore_lost_proof(
     verified: &Verified,
     state: &mut EventLoopState,
@@ -1008,18 +1010,17 @@ async fn restore_lost_proof(
         }
     );
     let key = verified.key();
-    // A session that is live only. A quiet session counts as held in the roster: with its proof back it would
-    // bind the nickname, and the live session of another member under it would be refused and ended. It gets
-    // its proof back when it returns: then it is live, and the answer to the ask is this same frame.
+    if !joined || verified.joined_proof().is_none() || state.key_said_goodbye(key) {
+        return;
+    }
+    if state.proofs.proof_of(&key).is_some() || state.proofs.has_pending(&key) {
+        return;
+    }
     let live = state.peers.contains(&key);
-    if !joined || !live || verified.joined_proof().is_none() {
-        return;
+    state.note_joined_proof(verified, context.mesh, context.author, live);
+    if live {
+        end_displaced_sessions(verified, state, app, context).await;
     }
-    if state.proofs.proof_of(&key).is_some() {
-        return;
-    }
-    state.note_joined_proof(verified, context.mesh, context.author, true);
-    end_displaced_sessions(verified, state, app, context).await;
 }
 
 /// End the sessions that a proof displaced: the sessions of other members under a nickname that the proof bound
@@ -6909,6 +6910,41 @@ mod dedup_counter_tests {
             "the newer run of our member was refused although its answer proved it"
         );
         assert_eq!(told, 1, "this node was not told once that it is superseded");
+    }
+
+    /// The one cached answer of a session is a duplicate when it comes again. If the pending proof of that session was
+    /// dropped (the cap of its class, a forget) while the session is refused and so not in the roster, the duplicate
+    /// gives the proof back as a pending proof, and nothing more: it binds nothing and replaces nothing. Else the
+    /// session stays refused for good: it has no proof, and its only answer is dropped as a duplicate.
+    #[test]
+    fn a_duplicate_answer_gives_back_the_pending_proof_of_a_session_that_is_not_in_the_roster() {
+        let member = Identity::generate();
+        let (live, newer) = (Identity::generate(), Identity::generate());
+        let (live_key, newer_key) = (live.author_key(), newer.author_key());
+        let answer = old_joined_run_of(&newer, &member, 9, 3 * 86_400);
+        let first = reader_with(fresh_state(), vec![joined_of(&live, &member, "alice", 3)]);
+        let mut kept = reader_with(first, vec![answer.clone()]);
+        assert!(
+            kept.proofs.has_pending(&newer_key),
+            "the old answer is kept pending"
+        );
+        kept.proofs.forget(&newer_key);
+
+        let restored = reader_with(kept, vec![answer]);
+
+        assert!(
+            restored.proofs.has_pending(&newer_key),
+            "the duplicate answer did not give back the pending proof of a session that is not in the roster"
+        );
+        assert!(
+            restored.proofs.proof_of(&newer_key).is_none() && restored.peers.contains(&live_key),
+            "the restored proof bound the nickname or replaced the live run 3"
+        );
+        let shown = reader_with(restored, vec![alive_of(&newer, "alice")]);
+        assert!(
+            shown.peers.contains(&newer_key),
+            "the session of the restored proof was refused"
+        );
     }
 
     /// A quiet peer whose clock stepped back returns after a run of rising frames (the roster rule of `observe`).
