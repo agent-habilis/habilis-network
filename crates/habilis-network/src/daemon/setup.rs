@@ -864,17 +864,34 @@ fn hold_member_key_once(state: Option<&Path>) -> Result<Option<sync::Arc<File>>>
     }
 }
 
-/// Refuse a state folder that others can write and that has no sticky bit. The member key, the run counter
-/// and the lock live in that folder, and a user who can write it can unlink or rename them while they are
-/// held: a second start then reads the same member key at a higher run, and peers replace the first session.
-/// The sticky bit (as on `/tmp`) stops other users from unlinking or renaming files that they do not own, so
-/// that folder is accepted. A folder that only the group can write is accepted too: on many systems the group
-/// of a user holds that user alone, and the check is for the others. A folder that cannot be read is left
-/// to the open of the lock file, which names it.
+/// What is wrong with a state folder of this `mode`, owned by user `owner`, for the user `effective_user` who
+/// starts the node. The member key, the run counter and the lock live in that folder. A user who can write it
+/// can unlink or rename them while they are held: a second start then reads the same member key at a higher
+/// run, and peers replace the first session. That user is the owner of the folder when it is not the user who
+/// starts the node (root excepted), and anyone with the other-write bit (unless the sticky bit, as on `/tmp`,
+/// stops other users from unlinking or renaming files that they do not own). A folder that
+/// only the group can write is accepted: on many systems the group of a user holds that user alone, and the
+/// check is for the others.
+#[cfg(all(unix, feature = "host"))]
+fn state_folder_problem(mode: u32, owner: u32, effective_user: u32) -> Option<&'static str> {
+    // The owner of a folder can unlink or rename any file in it, sticky bit or not. Root owns `/tmp` and can
+    // do that to any file anyway.
+    if owner != effective_user && owner != 0 {
+        return Some("is owned by another user");
+    }
+    if mode & 0o002 != 0 && mode & 0o1000 == 0 {
+        return Some("can be written by other users and has no sticky bit");
+    }
+    None
+}
+
+/// Refuse a state folder that [`state_folder_problem`] names. A folder that cannot be read is left to the open
+/// of the lock file, which names it.
 #[cfg(all(unix, feature = "host"))]
 fn refuse_shared_state_folder(state: &Path) -> Result<()> {
+    use rustix::process::geteuid;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     let parent: Option<&Path> = state.parent();
     let named: Option<&Path> = parent.filter(|folder| !folder.as_os_str().is_empty());
     let folder: &Path = named.unwrap_or_else(|| Path::new("."));
@@ -882,9 +899,9 @@ fn refuse_shared_state_folder(state: &Path) -> Result<()> {
         return Ok(());
     };
     let mode = meta.permissions().mode();
-    if mode & 0o002 != 0 && mode & 0o1000 == 0 {
+    if let Some(problem) = state_folder_problem(mode, meta.uid(), geteuid().as_raw()) {
         anyhow::bail!(
-            "the state folder {folder} can be written by other users and has no sticky bit, so another user could remove the member key or its lock: run `chmod o-w {folder}` or use a --state-file in a private folder",
+            "the state folder {folder} {problem}, so another user could remove the member key or its lock: use a --state-file in a private folder of this user (`chmod o-w {folder}` closes the other-write case)",
             folder = folder.display()
         );
     }
@@ -1798,6 +1815,47 @@ mod tests {
         assert!(
             super::hold_member_key_once(Some(&private)).is_ok(),
             "a private folder (mode 0700) was refused"
+        );
+    }
+
+    /// A state folder that another user owns is refused, whatever its mode: its owner can unlink or rename the
+    /// key file, the run file and the lock. The owner may be the user who starts the node, or root (the owner of
+    /// `/tmp`, whose sticky bit protects the files of the others). The check is a pure function of the mode, the
+    /// owner and the user, so it is tested with owners that a test cannot make with chown.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_state_folder_that_another_user_owns_is_refused_whatever_its_mode() {
+        let (me, other, root) = (501, 4242, 0);
+
+        assert_eq!(
+            super::state_folder_problem(0o755, other, me),
+            Some("is owned by another user"),
+            "a folder of another user at mode 0755 was accepted"
+        );
+        assert_eq!(
+            super::state_folder_problem(0o700, other, me),
+            Some("is owned by another user"),
+            "a folder of another user at mode 0700 was accepted"
+        );
+        assert_eq!(
+            super::state_folder_problem(0o1777, other, me),
+            Some("is owned by another user"),
+            "a sticky folder of another user was accepted: its owner can remove our files"
+        );
+        assert_eq!(
+            super::state_folder_problem(0o755, me, me),
+            None,
+            "a folder of this user was refused"
+        );
+        assert_eq!(
+            super::state_folder_problem(0o1777, root, me),
+            None,
+            "the sticky folder of root (as /tmp) was refused"
+        );
+        assert_eq!(
+            super::state_folder_problem(0o777, me, me),
+            Some("can be written by other users and has no sticky bit"),
+            "a folder that others can write was accepted"
         );
     }
 

@@ -499,7 +499,7 @@ The session key is new at each start. It signs the frames, it is the automerge a
 The member key is stored in `<state>.key` (mode 0600) and does not change. It signs one thing: the proof of a session.
 The proof is a signature over the session key, the nickname, the mesh and the run number. The run number rises by 1 at each start (`<state>.run`).
 A lock file `<state>.key.lock` is an OS lock that the node holds for its whole life. A second start on the same state path fails and names the file. A start that finds a holder that is stopping waits up to 2 s for it. A node that leaves removes its key and run files with its state file.
-The state folder must be private to the user. If other users can write it and it has no sticky bit (as `/tmp` has), the start fails and names the folder, because another user could remove the key file, the run file or the lock while they are held. A folder that only the group can write is accepted.
+The state folder must be private to the user. If another user owns it (root excepted), or if other users can write it and it has no sticky bit (as `/tmp` has), the start fails and names the folder, because another user could remove the key file, the run file or the lock while they are held. A folder that only the group can write is accepted. The folders above the state folder are not checked.
 The `joined` frame carries the proof.
 A node that holds a session with no proof asks the session for it with a `ProofRequest`, addressed to the session key, and the session answers with its `joined` frame.
 The ask goes when the node admits the session: on its `joined` frame that has no proof, on the `PeerInfo` that gives its address, and on its `alive` frame.
