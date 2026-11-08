@@ -1090,19 +1090,7 @@ async fn answer_proof_request(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    let asker_endpoint = state.address_of(&message.key());
-    // A request can come before the `PeerInfo` of its sender: then the connection that it arrived on is
-    // the return path, if a unicast can start on it.
-    let arrival = state
-        .state_digest_serves
-        .unicast
-        .arrived_from
-        .filter(|eid| transport::can_unicast(*eid, state));
-    let warm_endpoint = asker_endpoint
-        .map(|address| address.id)
-        .or(arrival)
-        .filter(|eid| Some(*eid) != state.rendezvous_id);
-    let Some(eid) = warm_endpoint else {
+    let Some(eid) = return_path(state, &message.key()) else {
         tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no warm path");
         return;
     };
@@ -1125,6 +1113,26 @@ async fn answer_proof_request(
         return;
     }
     keep_the_answer(state);
+}
+
+/// The endpoint that the answer to a proof request from `asker` goes to.
+fn return_path(state: &EventLoopState, asker: &AuthorKey) -> Option<iroh::EndpointId> {
+    // The address in the roster may be the old one of an asker that moved: it counts only when a unicast can
+    // start on it, as for the arrival.
+    let known = state
+        .address_of(asker)
+        .map(|address| address.id)
+        .filter(|eid| transport::can_unicast(*eid, state));
+    // A request can come before the `PeerInfo` of its sender: then the connection that it arrived on is
+    // the return path, if a unicast can start on it.
+    let arrival = state
+        .state_digest_serves
+        .unicast
+        .arrived_from
+        .filter(|eid| transport::can_unicast(*eid, state));
+    known
+        .or(arrival)
+        .filter(|eid| Some(*eid) != state.rendezvous_id)
 }
 
 /// Keep the proof answer of this run in the log of its author, once. The answer is a signed `joined` frame
@@ -4086,6 +4094,35 @@ mod first_contact_tests {
             );
             node.endpoint.close().await;
         });
+    }
+
+    /// The answer to a proof request goes where a send can go. An asker that moved to another endpoint can
+    /// leave its old address in the roster: that address has no usable path, and the connection that the
+    /// request came on has. The answer must not be sent to the old address, where it is lost after it took a
+    /// slot of the cap. An address that does have a usable path stays the first choice.
+    #[test]
+    fn a_proof_answer_goes_to_the_arrival_when_the_cached_address_has_no_usable_path() {
+        let mut state = fresh_state();
+        let asker = Identity::generate().author_key();
+        let (old, new) = (endpoint_id(81), endpoint_id(82));
+        state.peers.insert(asker);
+        state.names.insert(asker, nick("asker"));
+        state.place_endpoint(asker, &nick("asker"), iroh::EndpointAddr::new(old));
+        state.direct.insert(new, DirectState::Direct);
+        state.state_digest_serves.unicast.arrived_from = Some(new);
+
+        assert_eq!(
+            super::return_path(&state, &asker),
+            Some(new),
+            "the answer was aimed at the old address, which has no usable path"
+        );
+
+        state.direct.insert(old, DirectState::Direct);
+        assert_eq!(
+            super::return_path(&state, &asker),
+            Some(old),
+            "an address with a usable path is no longer the first choice"
+        );
     }
 
     /// Two live keys use one nickname, and the second binds no dial hint. When the first leaves,
