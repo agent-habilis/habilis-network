@@ -647,6 +647,7 @@ pub(crate) async fn ingest_from(
             .idle
             .wire_in
             .note_dup(&shape, Arrival::of(plane, resend_nonce));
+        restore_lost_proof(&verified, state, app, context).await;
         return;
     }
     state.idle.fresh += 1;
@@ -962,6 +963,35 @@ async fn roster_gate(
         lifecycle::ask_for_proof(verified, state, context).await;
     }
     None
+}
+
+/// A copy of a `joined` frame gives back the proof that the book lost for its session, and nothing else. A
+/// member signs its answer to a proof request once for each run, so an asker that dropped the proof of that
+/// session (the session left the roster and came back) gets the same frame again, and the frame is a
+/// duplicate there. Only a session that is in the roster gets its proof back: a copy for any other session
+/// keeps nothing, so a flood of old copies cannot fill the book. The copy is no arrival and no heartbeat.
+async fn restore_lost_proof(
+    verified: &Verified,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) {
+    let joined = matches!(
+        verified.kind,
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Joined
+        }
+    );
+    let key = verified.key();
+    let in_roster = state.peers.contains(&key) || state.quiet.contains(&key);
+    if !joined || !in_roster || verified.joined_proof().is_none() {
+        return;
+    }
+    if state.proofs.proof_of(&key).is_some() {
+        return;
+    }
+    state.note_joined_proof(verified, context.mesh, context.author, true);
+    end_displaced_sessions(verified, state, app, context).await;
 }
 
 /// End the sessions that a proof displaced: the sessions of other members under a nickname that the proof bound
@@ -6479,6 +6509,45 @@ mod dedup_counter_tests {
         assert!(
             !alive.peers.contains(&other_session.author_key()),
             "the session of the other member stays when the member that proved the name is alive"
+        );
+    }
+
+    /// A member signs its answer to a proof request once for each run, so every asker gets the same frame. An
+    /// asker that dropped the proof of that session (the session left the roster and came back) gets the frame
+    /// again, and the frame is a duplicate there: dropped before anything reads its proof. The proof must come
+    /// back for a session that is in the roster, with none of the other effects of the frame (it is no arrival
+    /// and no heartbeat). A copy for a session that is not in the roster keeps no proof.
+    #[test]
+    fn a_duplicate_joined_frame_gives_back_the_proof_that_the_book_lost() {
+        let (member, session) = (Identity::generate(), Identity::generate());
+        let key = session.author_key();
+        let frame = joined_of(&session, &member, "alice", 1);
+
+        let mut first = reader_with(fresh_state(), vec![frame.clone()]);
+        assert!(first.proofs.proof_of(&key).is_some(), "the proof is held");
+        first.proofs.forget(&key);
+        assert!(first.proofs.proof_of(&key).is_none(), "the proof was lost");
+
+        let again = reader_with(first, vec![frame]);
+
+        assert!(
+            again.proofs.proof_of(&key).is_some(),
+            "the copy of the joined frame did not give the proof back to a session that is in the roster"
+        );
+        assert_eq!(
+            again.idle.duplicates, 1,
+            "the copy is still counted as a duplicate"
+        );
+
+        let stranger = Identity::generate();
+        let known = joined_of(&stranger, &member, "alice", 1);
+        let mut other = reader_with(fresh_state(), vec![known.clone()]);
+        other.peers.remove(&stranger.author_key());
+        other.proofs.forget(&stranger.author_key());
+        let after = reader_with(other, vec![known]);
+        assert!(
+            after.proofs.proof_of(&stranger.author_key()).is_none(),
+            "a copy for a session that is not in the roster kept a proof"
         );
     }
 
