@@ -2539,11 +2539,18 @@ impl EventLoopState {
     /// Hold the proof in the body of a `joined` frame, if it verifies for the author of the frame.
     /// A frame with an empty or bad body holds none. True means: this is the first proof that shows
     /// our own nickname bound to another member, which is the join error of this node.
+    ///
+    /// `claimant_enters` says that the sender of the frame is in the roster, or is about to be put there by this
+    /// frame. When the proof binds the nickname, the sessions of other members under it end only then. When
+    /// it is false (an old copy of the frame, that proves no presence) the proof is kept and the end waits
+    /// until the sender enters the roster ([`Self::evict_for_waiting_claimant`]): a replay of an old
+    /// signed frame must not end a live session for a member that is not there.
     pub(crate) fn note_joined_proof(
         &mut self,
         message: &Verified,
         mesh: &MeshId,
         own: &Nickname,
+        claimant_enters: bool,
     ) -> bool {
         let Some(proof) = message.joined_proof() else {
             return false;
@@ -2587,12 +2594,35 @@ impl EventLoopState {
             // copies are dropped as duplicates and cost a lookup. One key leaves a bounded set.
             self.seen.remove(&message.dedup_key());
         }
-        if bound {
+        if bound && claimant_enters {
             // The nickname is bound to `member` here: a session of another member that was admitted
             // while no proof bound it (or went quiet under it) does not keep the name.
             self.proofs.evict(intruders);
+        } else if bound {
+            self.proofs.wait_to_evict(key);
         }
         false
+    }
+
+    /// The end of the sessions of other members, for a proof that was held while its sender was not in the
+    /// roster: the sender of `message` enters it now, so the nickname is bound to its member and the sessions
+    /// of other members under it end.
+    pub(crate) fn evict_for_waiting_claimant(&mut self, message: &Verified) {
+        let key = message.key();
+        if !self.proofs.take_waiting_to_evict(&key) {
+            return;
+        }
+        let Some(held) = self.proofs.proof_for(&key, &message.author) else {
+            return;
+        };
+        let member = held.identity;
+        let named: Vec<AuthorKey> = self.keys_named(&message.author);
+        let others = named.into_iter().filter(|other| {
+            let proof = self.proofs.proof_of(other);
+            *other != key && proof.is_none_or(|proof| proof.identity != member)
+        });
+        let intruders: Vec<AuthorKey> = others.collect();
+        self.proofs.evict(intruders);
     }
 
     /// The run of a session of our own member that is newer than ours, when this frame is the first to show

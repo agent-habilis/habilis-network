@@ -21,6 +21,10 @@ const OPEN_ASKS_PER_NICKNAME: usize = 4;
 /// The asks that were skipped for lack of a warm path and wait for one: 64 at most. When the map is full a
 /// new one takes the place of the oldest, whose session falls back to the ask at its next alive frame.
 const DEFERRED_ASKS_MAX: usize = 64;
+/// The sessions whose proof is held while they are not in the roster, and whose eviction of another member's
+/// session waits until they enter it: 64 at most. At the cap the oldest drops, and the sessions that it would
+/// have ended stay until the sweep of their own silence.
+const EVICTIONS_WAITING_MAX: usize = 64;
 /// How long a skipped ask waits for a warm path before the alive cycle takes over.
 const DEFERRED_ASK_TTL: Duration = Duration::from_secs(30);
 /// The least time between two tries of one deferred ask, so a flood of frames from one endpoint makes at most one
@@ -83,6 +87,9 @@ pub(crate) struct ProofExchange {
     evicted: Vec<AuthorKey>,
     // the asks that waited for a warm path: `DEFERRED_ASKS_MAX` at most, the oldest dropped when full
     deferred: ProofBook<AuthorKey, DeferredAsk>,
+    // the sessions that hold a proof and are not in the roster yet: `EVICTIONS_WAITING_MAX` at most, the
+    // oldest dropped when full
+    waiting_to_evict: BoundedFifoSet<AuthorKey>,
     ties_refused: u64,
     bound_refused: u64,
     gate_refused: u64,
@@ -97,6 +104,7 @@ impl ProofExchange {
             replaced: Vec::new(),
             evicted: Vec::new(),
             deferred: ProofBook::with_cap(DEFERRED_ASKS_MAX),
+            waiting_to_evict: BoundedFifoSet::new(EVICTIONS_WAITING_MAX),
             ties_refused: 0,
             bound_refused: 0,
             gate_refused: 0,
@@ -156,6 +164,7 @@ impl ProofExchange {
 
     /// Forget the proof of `session`, which said goodbye, and the requests for it.
     pub(crate) fn forget(&mut self, session: &AuthorKey) {
+        self.waiting_to_evict.remove(session);
         self.book.remove(session);
         self.asked.remove(session);
         self.deferred.remove(session);
@@ -239,6 +248,22 @@ impl ProofExchange {
     /// Mark `sessions` for the end: a proof bound their nickname to another member.
     pub(crate) fn evict(&mut self, sessions: impl IntoIterator<Item = AuthorKey>) {
         self.evicted.extend(sessions);
+    }
+
+    /// The proof of `session` is held, and `session` is not in the roster: the sessions of other members under
+    /// its nickname end when it enters the roster, and not before.
+    pub(crate) fn wait_to_evict(&mut self, session: AuthorKey) {
+        self.waiting_to_evict.insert(session);
+    }
+
+    /// Whether the eviction for `session` waits, and no longer waits after this call.
+    pub(crate) fn take_waiting_to_evict(&mut self, session: &AuthorKey) -> bool {
+        self.waiting_to_evict.remove(session)
+    }
+
+    /// Whether the eviction for `session` waits for it to enter the roster.
+    pub(crate) fn is_waiting_to_evict(&self, session: &AuthorKey) -> bool {
+        self.waiting_to_evict.contains(session)
     }
 
     /// The sessions that a proof bound the nickname away from since the last call. The caller ends them in
@@ -443,7 +468,8 @@ impl ProofExchange {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, ProofExchange, verify_proof,
+        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EVICTIONS_WAITING_MAX,
+        ProofExchange, verify_proof,
     };
     use crate::protocol::identity::Identity;
     use crate::protocol::{AuthorKey, MeshId, Nickname};
@@ -509,6 +535,35 @@ mod tests {
         assert!(
             waiting.contains(&sessions[639]) && !waiting.contains(&sessions[0]),
             "the newest waits and the oldest was dropped"
+        );
+    }
+
+    /// The sessions whose eviction waits for them to enter the roster are bounded: fed 10 times the cap, the set
+    /// holds the cap and the newest, and the oldest dropped. A session that is taken no longer waits.
+    #[test]
+    fn the_evictions_that_wait_stay_inside_their_cap_when_they_are_fed_10_times_the_cap() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let sessions: Vec<AuthorKey> = (0..10 * EVICTIONS_WAITING_MAX)
+            .map(|_| Identity::generate().author_key())
+            .collect();
+
+        for session in &sessions {
+            book.wait_to_evict(*session);
+        }
+
+        let waiting: usize = sessions
+            .iter()
+            .filter(|session| book.is_waiting_to_evict(session))
+            .count();
+        assert_eq!(waiting, EVICTIONS_WAITING_MAX, "the cap holds");
+        let (oldest, newest) = (&sessions[0], &sessions[sessions.len() - 1]);
+        assert!(
+            !book.is_waiting_to_evict(oldest) && book.is_waiting_to_evict(newest),
+            "the oldest was dropped and the newest waits"
+        );
+        assert!(
+            book.take_waiting_to_evict(newest) && !book.is_waiting_to_evict(newest),
+            "a session that is taken no longer waits"
         );
     }
 

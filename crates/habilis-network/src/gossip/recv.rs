@@ -16,7 +16,7 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::seed_job;
 use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
-use crate::lifecycle::membership_update::MembershipUpdate;
+use crate::lifecycle::membership_update::{self, MembershipUpdate};
 use crate::protocol::messages::{
     Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log,
 };
@@ -901,7 +901,10 @@ async fn roster_gate(
             subtype: PresenceSubtype::Joined
         }
     );
-    if joined && state.note_joined_proof(verified, context.mesh, context.author) {
+    // Read before the proof is held: whether this frame leaves its sender in the roster. A proof that binds a
+    // nickname ends the sessions of other members under it only for a sender that is there.
+    let claimant_enters = joined && membership_update::leaves_sender_in_roster(verified, state);
+    if joined && state.note_joined_proof(verified, context.mesh, context.author, claimant_enters) {
         let line = format!(
             "The nickname {} is held by another member with another key. The two nodes do not accept the frames of each other",
             context.author
@@ -909,16 +912,7 @@ async fn roster_gate(
         tracing::warn!(target: "habilis_network::lifecycle", nickname = %context.author, "our nickname is held by another member");
         context.sink.emit(NodeEvent::Error(line));
     }
-    // A newer run of a member ends the older sessions of the member in the roster: a restart leaves
-    // no ghost until the timeout.
-    for intruder in state.proofs.take_evicted() {
-        let goodbye = lifecycle::Goodbye::Refused(&verified.author);
-        lifecycle::end_session(intruder, goodbye, state, app, context).await;
-    }
-    for older in state.proofs.take_replaced() {
-        let goodbye = lifecycle::Goodbye::Replaced(&verified.author);
-        lifecycle::end_session(older, goodbye, state, app, context).await;
-    }
+    end_displaced_sessions(verified, state, app, context).await;
     let admitted = state.admits_session(verified, context.author);
     if admitted {
         if let Some(run) = state.newer_run_of_our_member(verified, context.author) {
@@ -927,6 +921,14 @@ async fn roster_gate(
             );
             tracing::warn!(target: "habilis_network::lifecycle", run, "a newer run of our member is active");
             context.sink.emit(NodeEvent::Error(line));
+        }
+        // A proof that was held while its sender was out of the roster ends the sessions of other members under
+        // the nickname when the sender enters it, and before its arrival is shown.
+        if state.proofs.is_waiting_to_evict(&verified.key())
+            && membership_update::leaves_sender_in_roster(verified, state)
+        {
+            state.evict_for_waiting_claimant(verified);
+            end_displaced_sessions(verified, state, app, context).await;
         }
         return Some(lifecycle::observe(verified, state, context));
     }
@@ -960,6 +962,25 @@ async fn roster_gate(
         lifecycle::ask_for_proof(verified, state, context).await;
     }
     None
+}
+
+/// End the sessions that a proof displaced: the sessions of other members under a nickname that the proof bound
+/// (with no `left` line for a session that was never shown), and the older sessions of a member whose newer run
+/// came: a restart leaves no ghost until the timeout.
+async fn end_displaced_sessions(
+    verified: &Verified,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) {
+    for intruder in state.proofs.take_evicted() {
+        let goodbye = lifecycle::Goodbye::Refused(&verified.author);
+        lifecycle::end_session(intruder, goodbye, state, app, context).await;
+    }
+    for older in state.proofs.take_replaced() {
+        let goodbye = lifecycle::Goodbye::Replaced(&verified.author);
+        lifecycle::end_session(older, goodbye, state, app, context).await;
+    }
 }
 
 /// Whether a frame of this kind changes the roster or the routes of a peer. The gate refuses these
@@ -6394,6 +6415,70 @@ mod dedup_counter_tests {
         assert!(
             !reader.peers.contains(&session.author_key()),
             "a session of our member with run 0 against the local run 1 entered the roster"
+        );
+    }
+
+    /// A `joined` frame with the proof of `member`, stamped `age_secs` seconds ago: a stored copy that a relay
+    /// or an anti-entropy answer hands out long after its author spoke.
+    fn old_joined_of(
+        session: &Identity,
+        member: &Identity,
+        nickname: &str,
+        age_secs: i64,
+    ) -> (Plane, Bytes) {
+        use crate::protocol::UnixSecs;
+        let proof = member.prove(
+            &session.author_key(),
+            nickname,
+            MeshId::from("test").as_ref(),
+            1,
+        );
+        let mut message =
+            Message::new_joined_with_proof(&MeshId::from("test"), &nick(nickname), &proof);
+        message.timestamp = UnixSecs::from(UnixSecs::now().as_secs() - age_secs);
+        let frame = message.sign(session);
+        (
+            Plane::Gossip,
+            frame.serialize().expect("serialize").into_bytes(),
+        )
+    }
+
+    /// An old signed `joined` frame of a member proves nothing about the member now: its sender does not enter
+    /// the roster (the frame is too old to prove presence). It must not end the live session of another
+    /// member under that nickname either: the live session would be gone, with the buffered frames for it, and
+    /// nobody would hold the name. The proof is kept, and when its session shows it is alive, the name is bound
+    /// to its member and the session of the other member ends.
+    #[test]
+    fn an_old_joined_frame_of_a_member_ends_no_session_while_its_sender_is_not_in_the_roster() {
+        let member = Identity::generate();
+        let (member_session, other_session) = (Identity::generate(), Identity::generate());
+
+        let replayed = reader_with(
+            fresh_state(),
+            vec![
+                alive_of(&other_session, "alice"),
+                old_joined_of(&member_session, &member, "alice", 3 * 86_400),
+            ],
+        );
+
+        assert!(
+            replayed.peers.contains(&other_session.author_key()),
+            "a replay of an old joined frame ended the live session of another member"
+        );
+        assert!(
+            !replayed.peers.contains(&member_session.author_key()),
+            "the sender of an old frame entered the roster"
+        );
+
+        let alive = reader_with(replayed, vec![alive_of(&member_session, "alice")]);
+
+        assert!(
+            alive.peers.contains(&member_session.author_key()),
+            "the member whose proof is kept is a peer once it shows that it is alive"
+        );
+        assert!(
+            !alive.peers.contains(&other_session.author_key()),
+            "the session of the other member stays when the member that proved the name is alive"
         );
     }
 
