@@ -936,6 +936,43 @@ fn refuse_shared_state_folder(state: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What is wrong with a lock file that was opened: a lock file must be a regular file that the user who starts
+/// the node owns. In a sticky folder (`/tmp` style) another user can create the name first. The file is theirs
+/// then: they can unlink or replace it while we hold the lock, so a second start locks another file, or they can
+/// hold the lock themselves. Root is not accepted: nobody else should own a lock file of this user.
+#[cfg(all(unix, feature = "host"))]
+fn lock_file_problem(is_regular: bool, owner: u32, effective_user: u32) -> Option<&'static str> {
+    if !is_regular {
+        return Some("is not a regular file");
+    }
+    if owner != effective_user {
+        return Some("is owned by another user");
+    }
+    None
+}
+
+/// Refuse a lock file that [`lock_file_problem`] names. The check is on the opened file (`fstat` on the
+/// descriptor), so a file that is put at the path between a check and the open cannot slip in.
+#[cfg(all(unix, feature = "host"))]
+fn refuse_foreign_lock_file(lock: &File, path: &Path) -> Result<()> {
+    use anyhow::Context as _;
+    use rustix::process::geteuid;
+    use std::fs::Metadata;
+    use std::os::unix::fs::MetadataExt as _;
+    let meta: Metadata = lock
+        .metadata()
+        .with_context(|| format!("the lock file {} cannot be read", path.display()))?;
+    let is_regular: bool = meta.file_type().is_file();
+    let problem: Option<&str> = lock_file_problem(is_regular, meta.uid(), geteuid().as_raw());
+    if let Some(problem) = problem {
+        anyhow::bail!(
+            "the lock file {path} {problem}, so it cannot keep two starts apart: remove it if no daemon runs, or use a --state-file in a private folder of this user",
+            path = path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Open the lock file of the member key of `state`, mode 0600.
 #[cfg(all(unix, feature = "host"))]
 fn open_key_lock(state: &Path) -> Result<File> {
@@ -945,10 +982,12 @@ fn open_key_lock(state: &Path) -> Result<File> {
     let lock_path = state.with_extension("key.lock");
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false).mode(0o600);
-    options
+    let lock: File = options
         .custom_flags(no_link_flags())
         .open(&lock_path)
-        .with_context(|| format!("the lock file {} cannot be opened", lock_path.display()))
+        .with_context(|| format!("the lock file {} cannot be opened", lock_path.display()))?;
+    refuse_foreign_lock_file(&lock, &lock_path)?;
+    Ok(lock)
 }
 
 /// One try at the lock: true when it is taken, false when another holder has it.
@@ -1004,16 +1043,56 @@ fn hold_member_key_once(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>
 }
 
 /// Take the exclusive lock on `<state>.run.lock`, which makes the allocation of a run one step across
-/// processes and threads. It waits for the holder, and the lock goes with the returned file.
+/// processes and threads. The lock is held for one read and one write of the counter, so a holder lets go at
+/// once. A holder that does not (in a sticky folder, a user who made the file first and locked it) must not block
+/// a worker of the runtime for ever. The lock is tried again, in steps of `KEY_LOCK_STEP`, for as long as the
+/// counter moves: when other starts take the lock in turn, each one writes the counter file, and a start that
+/// waits in a queue of them is not stuck. The wait ends, and the start fails and names the file, when the counter
+/// has not moved for `KEY_LOCK_RETRY`. The wait is a sleep of this thread, because the caller is not async: it
+/// holds a worker for `KEY_LOCK_RETRY` when a holder does not let go. The lock goes with the returned file.
 #[cfg(all(unix, feature = "host"))]
 fn lock_run_counter(state: &Path) -> Result<File> {
+    use std::fs::{self, TryLockError};
     use std::os::unix::fs::OpenOptionsExt as _;
+    use std::thread;
+    let lock_path = state.with_extension("run.lock");
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false).mode(0o600);
     options.custom_flags(no_link_flags());
-    let lock = options.open(state.with_extension("run.lock"))?;
-    lock.lock()?;
-    Ok(lock)
+    let lock = options.open(&lock_path)?;
+    refuse_foreign_lock_file(&lock, &lock_path)?;
+    // When the counter file was written last: a holder that lets go writes it, so a change is a start that made
+    // progress, and the wait for it starts again.
+    let run_path = state.with_extension("run");
+    let moved = || {
+        let meta: Option<fs::Metadata> = fs::metadata(&run_path).ok();
+        meta.and_then(|meta| meta.modified().ok())
+    };
+    let mut last_move = moved();
+    let mut give_up = Instant::now() + KEY_LOCK_RETRY;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                let latest = moved();
+                if latest != last_move {
+                    last_move = latest;
+                    give_up = now + KEY_LOCK_RETRY;
+                }
+                if now < give_up {
+                    thread::sleep(KEY_LOCK_STEP);
+                    continue;
+                }
+                anyhow::bail!(
+                    "the run lock {path} is held by another start, and the run counter has not moved for {wait} s: wait for it, or remove the file if no daemon runs",
+                    path = lock_path.display(),
+                    wait = KEY_LOCK_RETRY.as_secs()
+                );
+            }
+            Err(TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
 }
 
 /// Keep `run` in `<state>.run`.
@@ -1915,6 +1994,67 @@ mod tests {
                 "a folder of mode {mode:o} was refused"
             );
         }
+    }
+
+    /// A lock file that another user owns, or that is not a regular file, is refused: see `lock_file_problem`.
+    /// The check is a pure function of what `fstat` says on the opened file, so it is tested with owners that a
+    /// test cannot make with chown.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_lock_file_that_another_user_owns_or_that_is_no_regular_file_is_refused() {
+        let (me, other, root) = (501, 4242, 0);
+
+        assert_eq!(
+            super::lock_file_problem(true, other, me),
+            Some("is owned by another user"),
+            "a lock file of another user was accepted"
+        );
+        assert_eq!(
+            super::lock_file_problem(true, root, me),
+            Some("is owned by another user"),
+            "a lock file of root was accepted"
+        );
+        assert_eq!(
+            super::lock_file_problem(false, me, me),
+            Some("is not a regular file"),
+            "a lock file that is no regular file was accepted"
+        );
+        assert_eq!(
+            super::lock_file_problem(true, me, me),
+            None,
+            "a lock file of this user was refused"
+        );
+    }
+
+    /// The run lock does not wait for ever. Another holder that keeps `<state>.run.lock` (in a sticky folder, a
+    /// user who made the file first and locked it) must not block the start: the lock is tried again for a short
+    /// time, as the key lock is, and then the start fails and names the file.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_run_lock_that_another_holder_keeps_does_not_block_the_start_for_ever() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = TempDir::new("habilis-run-lock-held");
+        let state = dir.path().join("session.json");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        let holder: fs::File = options
+            .open(state.with_extension("run.lock"))
+            .expect("the file of the holder");
+        holder.lock().expect("the holder takes the lock");
+        let (done, outcome) = mpsc::channel();
+        thread::spawn(move || {
+            let refused = super::next_run(Some(&state), false).is_err();
+            // the test has stopped waiting when this fails, and then nothing needs the answer
+            done.send(refused).expect("the test waits for the answer");
+        });
+        let refused = outcome.recv_timeout(Duration::from_secs(5));
+        assert_eq!(
+            refused,
+            Ok(true),
+            "the start did not end in an error within 5 s while another holder kept the run lock: {refused:?}"
+        );
+        drop(holder);
     }
 
     /// A state folder that another user owns is refused, whatever its mode: its owner can unlink or rename the
