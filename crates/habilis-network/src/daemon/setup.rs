@@ -1045,6 +1045,16 @@ pub(crate) fn bind_to_owner(
     }
 }
 
+/// A target with no files has no pair of files to bind to an owner.
+#[cfg(all(not(all(unix, feature = "host")), feature = "host"))]
+pub(crate) fn bind_to_owner(
+    keys: RunKeys,
+    _state: Option<&Path>,
+    _owner_start: Option<u64>,
+) -> RunKeys {
+    keys
+}
+
 /// A new member key and run 1, kept in the files, for a pair that another owner left behind.
 #[cfg(all(unix, feature = "host"))]
 fn replace_member(keys: RunKeys, state: &Path, owner_start: u64) -> RunKeys {
@@ -1682,16 +1692,22 @@ async fn setup_join(
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    #[cfg(all(unix, feature = "host"))]
     use crate::daemon::state::RunKeys;
+    #[cfg(all(unix, feature = "host"))]
     use crate::protocol::AuthorKey;
     use std::path::{Path, PathBuf};
-    use std::{env, fs, process, thread};
+    #[cfg(all(unix, feature = "host"))]
+    use std::thread;
+    use std::{env, fs, process};
 
+    #[cfg(all(unix, feature = "host"))]
     fn member_key(keys: &RunKeys) -> Option<AuthorKey> {
         let member = keys.member.as_ref();
         member.map(|member| member.author_key())
     }
 
+    #[cfg(all(unix, feature = "host"))]
     fn member_of(keys: &RunKeys) -> AuthorKey {
         let member = keys.member.as_ref().expect("a member key");
         member.author_key()
@@ -1719,8 +1735,39 @@ mod tests {
         }
     }
 
+    /// A target with no files keeps no member key, no run count and no lock: each start is run 1, whatever
+    /// the state path, and the start takes no lock. This is the coverage of the fallback that the tests of the
+    /// key files, which need a file system, give up on such a target.
+    #[cfg(not(all(unix, feature = "host")))]
+    #[test]
+    fn a_target_with_no_files_has_no_member_key_and_starts_at_run_1() {
+        let dir = TempDir::new("habilis-no-files");
+        let state = dir.path().join("session.json");
+        assert_eq!(
+            super::next_run(Some(&state), false).expect("run"),
+            1,
+            "the first start is run 1"
+        );
+        assert_eq!(
+            super::next_run(Some(&state), false).expect("run"),
+            1,
+            "with no counter file the second start is run 1 as well"
+        );
+        assert!(
+            super::member_key(Some(&state)).expect("keys").is_none(),
+            "a target with no files keeps no member key"
+        );
+        assert!(
+            super::hold_member_key_once(Some(&state))
+                .expect("no lock")
+                .is_none(),
+            "a target with no files takes no lock"
+        );
+    }
+
     /// A restarted member keeps its identity: the same state file gives the same key, and a
     /// missing file gives a new one.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_restart_keeps_its_identity() {
         let dir = env::temp_dir().join(format!("habilis-identity-{}", process::id()));
@@ -1743,6 +1790,7 @@ mod tests {
 
     /// The run number rises at each start, and a clock that went back cannot lower it: the counter
     /// never reads the clock.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn the_run_number_rises_at_each_start() {
         let dir = TempDir::new("habilis-run-number");
@@ -1767,6 +1815,7 @@ mod tests {
 
     /// A key file that another user could have planted or read is not loaded: its seed would become the
     /// identity of this member. A file of mode 0600, owned by this user, is the one that this code wrote.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_key_file_that_others_can_read_or_a_link_is_not_loaded() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -1802,6 +1851,7 @@ mod tests {
 
     /// The last run that the key file names is read from the bytes 40 to 48, and a file that is shorter names
     /// none. The seed in the first 32 bytes is not needed to read it.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn the_last_run_is_read_from_the_bytes_40_to_48_of_the_key_file() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1831,6 +1881,7 @@ mod tests {
     /// A key path that is a FIFO with no writer must be refused, not waited for: a read-only open of such a
     /// FIFO blocks until a writer comes, and the start would hang a worker of the runtime before the check of
     /// the file type could run. The load runs on its own thread so that a hang fails the test and not the run.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_key_path_that_is_a_fifo_with_no_writer_is_refused_and_does_not_block() {
         use std::sync::mpsc;
@@ -1859,6 +1910,7 @@ mod tests {
     /// The checks of the key file are on the open file, and the open does not follow a link: a link that is
     /// put at the path after a path check cannot make the write go to its target, and a file that others can
     /// read is not written over.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn the_key_file_is_opened_without_following_a_link_and_checked_on_the_open_file() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -1904,6 +1956,7 @@ mod tests {
 
     /// Two starts that share a state path each get their own run: the read of the counter and the write
     /// of the next one are one step under a lock, so no two starts publish one run.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn starts_that_share_a_state_path_get_distinct_runs() {
         let dir = TempDir::new("habilis-run-race");
@@ -1939,6 +1992,7 @@ mod tests {
     /// The member key file keeps the last run too. When the counter file is lost a second time, after the
     /// clock went back, the clock alone would give a run below the one that peers hold: the key file is
     /// the second record, and the new run is above the last run that it names.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_lost_counter_does_not_go_below_the_last_run_that_the_key_file_names() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1967,6 +2021,7 @@ mod tests {
 
     /// The keys of a start whose process has ended: the lock on the member key went with it, so a
     /// later start of the same state path is a restart and not a second live daemon.
+    #[cfg(all(unix, feature = "host"))]
     fn ended(keys: RunKeys) -> RunKeys {
         RunKeys {
             key_lock: None,
@@ -1975,6 +2030,7 @@ mod tests {
     }
 
     /// Each start records its run in the key file, beside the counter file.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn each_start_records_its_run_in_the_key_file() {
         let dir = TempDir::new("habilis-run-recorded");
@@ -1996,6 +2052,7 @@ mod tests {
     /// A daemon that the CLI started with no state file keeps its member key and counts its run on, in the
     /// default state path of its mesh, when the setup asks for it. Without the flag the keys stay ephemeral,
     /// and an explicit state file wins over the default.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_restart_with_no_state_file_keeps_its_member_key_in_the_default_state_path() {
         use crate::protocol::{MeshId, Nickname};
@@ -2031,6 +2088,7 @@ mod tests {
 
     /// A counter file that a crash cut short must not restart the count at 1: a peer that kept a
     /// higher run would refuse the live session. The next run then starts above any count of starts.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_cut_short_counter_file_does_not_restart_the_count() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2066,6 +2124,7 @@ mod tests {
     /// session with a high run, and they refuse a proof of run 1 as a late copy, so the member would
     /// be admitted with no proof and its nickname would be free for a forger. The count restarts from
     /// the clock then, which is above any count of starts.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_member_whose_run_file_is_deleted_restarts_from_the_clock() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -2105,6 +2164,8 @@ mod tests {
     /// The pair of files (the member key and the run counter) is bound to the start time of the process
     /// that owns the daemon. A restart of the same owner keeps it. Another process that got the same
     /// pid has another start time, and starts as a new member, at run 1.
+    #[cfg(all(unix, feature = "host"))]
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_pair_of_files_from_another_owner_is_not_reused() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -2153,6 +2214,8 @@ mod tests {
 
     /// An owner whose start time cannot be read gets no reuse of an old pair: the safe side. A pair
     /// that this start made is kept.
+    #[cfg(all(unix, feature = "host"))]
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn with_no_start_time_an_old_pair_is_not_reused_and_a_new_one_is_kept() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -2180,6 +2243,7 @@ mod tests {
 
     /// The member key survives a restart and the session key does not: the session key is the
     /// automerge actor, and a restart that kept it would start the same actor again.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_restart_keeps_the_member_key_and_changes_the_session_key() {
         let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
@@ -2212,6 +2276,7 @@ mod tests {
     /// Two live daemons cannot be one member: the second start of a state path that a live start
     /// holds fails, and says which path and the way out. Today it reads the same member key and
     /// takes the next run, so a peer drops the first session as an older run of the same member.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_second_start_on_a_state_path_that_a_live_start_holds_fails() {
         let dir = env::temp_dir().join(format!("habilis-key-lock-{}", process::id()));
@@ -2235,6 +2300,7 @@ mod tests {
     /// tries again for a short time instead of failing at once. The runtime has ONE thread, the one that
     /// the old daemon stops on: a wait that blocks the thread would keep it from stopping, and the start
     /// would wait the whole time and fail. The holder here ends after 300 ms, on that thread.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_start_that_meets_a_holder_that_is_stopping_waits_for_it_on_one_thread() {
         use std::time::Instant;
@@ -2268,6 +2334,7 @@ mod tests {
     /// lock on a descriptor) the next start of the path works and keeps the member key. A child that
     /// the daemon spawned must not keep the lock after the daemon is gone, so the lock file is
     /// opened close-on-exec (the default of Rust): a child that outlives the holder frees the key.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_start_after_the_holder_is_gone_works_even_while_a_child_of_it_lives() {
         use std::io::{BufRead, BufReader};
@@ -2488,8 +2555,10 @@ mod tests {
     }
 
     /// A child process that lives until the guard drops: a live pid for an owner.
+    #[cfg(all(unix, feature = "host"))]
     struct Sleeper(process::Child);
 
+    #[cfg(all(unix, feature = "host"))]
     impl Sleeper {
         fn spawn() -> Self {
             let child = process::Command::new("sleep")
@@ -2502,6 +2571,7 @@ mod tests {
         }
     }
 
+    #[cfg(all(unix, feature = "host"))]
     impl Drop for Sleeper {
         fn drop(&mut self) {
             drop(self.0.kill());
@@ -2512,6 +2582,8 @@ mod tests {
     /// The owner of the daemon, set through `set_owner_pid`, binds the pair of files: the same owner
     /// restarts with its member key and the run goes on, and another process with another start time
     /// that names the same state file starts as a new member at run 1.
+    #[cfg(all(unix, feature = "host"))]
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn set_owner_pid_binds_the_member_key_to_its_owner() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
