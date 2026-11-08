@@ -30,9 +30,14 @@ const PENDING_PROOFS_MAX: usize = 64;
 /// holds a frame. The budget is checked before the request is signed.
 const ASKS_PER_ENDPOINT: usize = 8;
 /// The proof requests that this node sends, for each `ASK_BUDGET_WINDOW`, in all: the asks after the first of an
-/// endpoint need room in it. The first ask of each endpoint is guaranteed (it counts in it, and it needs none), so
-/// a window holds at most this number plus one for each endpoint that has a path to this node.
+/// endpoint need room in it. The first ask of each endpoint is guaranteed (it counts in it, and it needs none),
+/// up to `FIRST_ASKS_IN_ALL` of them, so a window holds at most that many first asks plus the asks after them.
 const ASKS_IN_ALL: usize = 64;
+/// The guaranteed first asks that this node sends, for each `ASK_BUDGET_WINDOW`, in all. Without it, the map of
+/// counts (it drops its oldest endpoint) lets an endpoint whose count was dropped be first again, and the asks
+/// follow the rate of an attacker that has many endpoints with a path. A window holds at most this number of
+/// first asks, and `ASKS_IN_ALL` asks after them.
+const FIRST_ASKS_IN_ALL: usize = 256;
 /// The window of the budget of the proof requests.
 const ASK_BUDGET_WINDOW: Duration = Duration::from_secs(10);
 /// The endpoints that have a count in the budget: 256 at most, the oldest dropped when full (its count starts
@@ -106,8 +111,9 @@ pub(crate) struct ProofExchange {
     // the proof requests sent to each endpoint in the window: when it started, and how many;
     // `ASK_BUDGET_ENDPOINTS_MAX` endpoints at most, the oldest dropped when full
     ask_budget: ProofBook<EndpointId, (Instant, usize)>,
-    // the proof requests sent in all in the window: when it started, and how many
-    ask_budget_all: Option<(Instant, usize)>,
+    // the proof requests sent in all in the window: when it started, how many, and how many of them were the
+    // guaranteed first ask of an endpoint
+    ask_budget_all: Option<(Instant, usize, usize)>,
     ties_refused: u64,
     bound_refused: u64,
     gate_refused: u64,
@@ -277,9 +283,9 @@ impl ProofExchange {
     /// asks, and goes when the window has moved.
     pub(crate) fn may_ask(&mut self, endpoint: EndpointId, now: Instant) -> bool {
         let in_window = |start: Instant| now.saturating_duration_since(start) < ASK_BUDGET_WINDOW;
-        let (all_start, all_count) = match self.ask_budget_all {
-            Some((start, count)) if in_window(start) => (start, count),
-            _ => (now, 0),
+        let (all_start, all_count, all_first) = match self.ask_budget_all {
+            Some((start, count, first)) if in_window(start) => (start, count, first),
+            _ => (now, 0, 0),
         };
         let (start, count) = match self.ask_budget.get(&endpoint) {
             Some((start, count)) if in_window(*start) => (*start, *count),
@@ -289,13 +295,18 @@ impl ProofExchange {
         // in it). The budget in all would otherwise be the vector of a starvation: one peer with a few endpoints
         // that have a path to us uses all of it, and every honest endpoint is deferred. Only the asks after the
         // first need both budgets.
+        // The first asks have a budget in all of their own.
         let first = count == 0;
-        let over_all = all_count >= ASKS_IN_ALL && !first;
+        let over_all = if first {
+            all_first >= FIRST_ASKS_IN_ALL
+        } else {
+            all_count >= ASKS_IN_ALL
+        };
         if over_all || count >= ASKS_PER_ENDPOINT {
-            self.ask_budget_all = Some((all_start, all_count));
+            self.ask_budget_all = Some((all_start, all_count, all_first));
             return false;
         }
-        self.ask_budget_all = Some((all_start, all_count + 1));
+        self.ask_budget_all = Some((all_start, all_count + 1, all_first + usize::from(first)));
         // every count reads as dead, so a full map drops the oldest endpoint
         self.ask_budget
             .insert_evicting(endpoint, (start, count + 1), |_, _| false);
@@ -593,8 +604,8 @@ impl ProofExchange {
 mod tests {
     use super::{
         ASK_BUDGET_ENDPOINTS_MAX, ASK_BUDGET_WINDOW, ASKS_IN_ALL, ASKS_PER_ENDPOINT,
-        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EndpointId, PENDING_PROOFS_MAX,
-        ProofExchange, verify_proof,
+        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EndpointId, FIRST_ASKS_IN_ALL,
+        PENDING_PROOFS_MAX, ProofExchange, verify_proof,
     };
     use crate::protocol::identity::Identity;
     use crate::protocol::{AuthorKey, MeshId, Nickname};
@@ -784,6 +795,24 @@ mod tests {
         );
     }
 
+    /// The guaranteed first asks are bounded in all too: 600 endpoints with a path, each asking once in one window,
+    /// get 256 signed asks and no more. Else the map of the counts (256 endpoints, the oldest dropped) lets an endpoint
+    /// whose count was dropped be first again, and the asks follow the rate of the attacker.
+    #[test]
+    fn the_first_asks_of_600_endpoints_in_one_window_are_bounded_in_all() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+
+        let allowed: usize = (0..600u32)
+            .filter(|index| book.may_ask(endpoint_of(*index), start))
+            .count();
+
+        assert!(
+            allowed <= 256,
+            "the first asks of 600 endpoints were not bounded in all: {allowed} allowed"
+        );
+    }
+
     /// The first ask of each endpoint in a window is guaranteed: it needs no room in the budget in all (it counts in
     /// it). Fed 10 times its cap of endpoints, each asking once, all are allowed, and the map of the endpoints
     /// holds its cap at most. An endpoint that asks again, when the budget in all is full, is refused.
@@ -799,16 +828,15 @@ mod tests {
             .count();
 
         assert_eq!(
-            allowed,
-            usize::try_from(endpoints).expect("a small number"),
-            "the first ask of each endpoint is guaranteed, whatever the budget in all"
+            allowed, FIRST_ASKS_IN_ALL,
+            "the first ask of each endpoint is guaranteed, whatever the budget in all, up to the budget of the first asks"
         );
         assert!(
             book.ask_budget_endpoints() <= ASK_BUDGET_ENDPOINTS_MAX,
             "the map of the endpoints holds more than its cap"
         );
         assert!(
-            !book.may_ask(endpoint_of(endpoints - 1), start),
+            !book.may_ask(endpoint_of(0), start),
             "a second ask of an endpoint was allowed while the budget in all was full"
         );
     }
