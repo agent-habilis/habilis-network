@@ -1414,8 +1414,8 @@ impl EventLoopState {
     /// oldest of them all otherwise), and
     /// the state of the dropped orphan goes with it (`drop_endpoint_state`): no eviction leaves state that no sweep
     /// finds again, whether the orphan lost its link after it came in (it waits for the next sweep), or the endpoints
-    /// that are linked outnumber the cap (`--max-peers` has no upper limit). The pooled connection falls back to the
-    /// idle sweep of the pool.
+    /// that are linked outnumber the cap (`--max-peers` has no upper limit), unless a nickname or a retained key binds
+    /// the endpoint again by then. The pooled connection falls back to the idle sweep of the pool.
     fn insert_orphan(&mut self, endpoint: EndpointId) {
         if self.orphaned_endpoints.len() >= ORPHANED_ENDPOINTS_MAX
             && !self.orphaned_endpoints.contains(&endpoint)
@@ -1429,7 +1429,12 @@ impl EventLoopState {
                 unlinked.or_else(|| self.orphaned_endpoints.oldest().copied());
             if let Some(dropped) = victim {
                 self.orphaned_endpoints.remove(&dropped);
-                self.drop_endpoint_state(dropped);
+                // The same check as every caller of `forget_endpoint_state` and the drain of the teardown make: an
+                // endpoint that a nickname or a retained key binds again keeps ALL its state (address, proof,
+                // backoff, rival flag, direct path, watches, kinds, pool address): it is not an orphan any more.
+                if !self.endpoint_is_bound(dropped) {
+                    self.drop_endpoint_state(dropped);
+                }
             }
         }
         self.orphaned_endpoints.insert(endpoint);

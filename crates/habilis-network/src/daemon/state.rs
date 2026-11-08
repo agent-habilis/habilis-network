@@ -1804,6 +1804,48 @@ mod tests {
         );
     }
 
+    /// An orphan that another key bound again before the full set dropped it keeps its state: the endpoint is bound, as
+    /// the callers of `forget_endpoint_state` and the drain of the teardown check, and the nickname that binds it needs
+    /// its address, direct path and proof for a dial. The set forgets the endpoint; the state stays.
+    #[test]
+    fn an_orphan_that_another_key_bound_again_keeps_its_state_when_a_full_set_drops_it() {
+        use super::direct_state::DirectState;
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoint_at = |index: u32| {
+            let mut bytes = [13u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        let mut state = fresh_state();
+
+        // the only orphan that is not linked, and so the one that a flood drops: a hint binds it again
+        let rebound = endpoint_at(0);
+        state.linked_endpoints.insert(rebound);
+        state.release_unbound_endpoint(rebound);
+        state.direct.insert(rebound, DirectState::Direct);
+        state.linked_endpoints.remove(&rebound);
+        state
+            .peer_endpoints
+            .insert(nick("carol"), iroh::EndpointAddr::new(rebound));
+        for index in 1..u32::try_from(cap).expect("a small number") {
+            let linked = endpoint_at(index);
+            state.linked_endpoints.insert(linked);
+            state.release_unbound_endpoint(linked);
+        }
+        let newcomer = endpoint_at(u32::try_from(cap).expect("a small number"));
+        state.linked_endpoints.insert(newcomer);
+        state.release_unbound_endpoint(newcomer);
+
+        assert!(
+            !state.orphaned_endpoints.contains(&rebound),
+            "the orphan that another key bound again was not the one dropped"
+        );
+        assert!(
+            state.direct.contains_key(&rebound),
+            "the set deleted the state of an endpoint that another key bound again"
+        );
+    }
+
     /// A full orphan set drops an orphan that is not linked, never a linked one: the state of a linked orphan (its
     /// address, its direct path, its proof) is cleaned only when its link ends, and the set is walked for that. The
     /// linked endpoints are far fewer than the cap, so there is always an unlinked orphan to drop.
