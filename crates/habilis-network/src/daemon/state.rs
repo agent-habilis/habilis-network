@@ -1743,6 +1743,44 @@ mod tests {
         );
     }
 
+    /// A full orphan set drops an orphan that is not linked, never a linked one: the state of a linked orphan (its
+    /// address, its direct path, its proof) is cleaned only when its link ends, and the set is walked for that. The
+    /// linked endpoints are far fewer than the cap, so there is always an unlinked orphan to drop.
+    #[test]
+    fn a_full_orphan_set_keeps_its_linked_orphan() {
+        let mut state = fresh_state();
+        let linked = {
+            let mut bytes = [7u8; 32];
+            bytes[..4].copy_from_slice(&0u32.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        state.linked_endpoints.insert(linked);
+        state.release_unbound_endpoint(linked);
+        assert!(
+            state.orphaned_endpoints.contains(&linked),
+            "the linked endpoint is an orphan"
+        );
+
+        // more unlinked endpoints than the queue and the orphan set hold together: the first ones fill the queue, the
+        // rest go to the orphan set, which overflows
+        let flood = super::event_loop_state::ORPHANED_ENDPOINTS_MAX + 512;
+        for index in 1..=u32::try_from(flood).expect("a small number") {
+            let mut bytes = [7u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            state.release_unbound_endpoint(iroh::SecretKey::from_bytes(&bytes).public());
+        }
+
+        assert!(
+            state.orphaned_endpoints.contains(&linked),
+            "the full orphan set dropped its linked orphan: its state is cleaned by no link loss any more"
+        );
+        assert_eq!(
+            state.orphaned_endpoints.len(),
+            super::event_loop_state::ORPHANED_ENDPOINTS_MAX,
+            "the orphan set holds its cap"
+        );
+    }
+
     /// The retained endpoints are bounded: a flood of signed `PeerInfo` frames with fresh keys under a bound
     /// nickname keeps the cap and no more, and the oldest key goes first.
     #[test]

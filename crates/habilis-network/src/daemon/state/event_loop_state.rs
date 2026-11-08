@@ -257,8 +257,8 @@ pub struct EventLoopState {
     /// Endpoints whose dial hint the sweep pruned while they still had a link. The state of such
     /// an endpoint stays for the regraft that follows the link loss. A later sweep drops it once
     /// the link is gone and no nickname binds the endpoint. It also holds the endpoints that found the queue of the
-    /// teardown full. `ORPHANED_ENDPOINTS_MAX` at most, the oldest dropped when full: that endpoint falls back to
-    /// the idle sweep of the pool.
+    /// teardown full. `ORPHANED_ENDPOINTS_MAX` at most. A full set drops an orphan that is not linked (its state is
+    /// forgotten already, and its pool state falls back to the idle sweep), never a linked one: see `insert_orphan`.
     pub(crate) orphaned_endpoints: BoundedFifoSet<EndpointId>,
     /// When `linked_endpoints` last became empty, `None` while it holds a link. The census warns
     /// of a silent partition only when this gap outlasts a heal: see
@@ -1397,6 +1397,26 @@ impl EventLoopState {
         released
     }
 
+    /// Put `endpoint` in the orphan set. A full set drops an orphan that is NOT linked: the state of a linked orphan
+    /// (its address, direct path and proof) is cleaned only when its link ends, and the sweep walks this set for that.
+    /// The linked endpoints are few (the link cap), far below `ORPHANED_ENDPOINTS_MAX`, so there is always an unlinked
+    /// orphan to drop; its state is forgotten already, and its pool state falls back to the idle sweep.
+    fn insert_orphan(&mut self, endpoint: EndpointId) {
+        if self.orphaned_endpoints.len() >= ORPHANED_ENDPOINTS_MAX
+            && !self.orphaned_endpoints.contains(&endpoint)
+        {
+            let unlinked: Option<EndpointId> = self
+                .orphaned_endpoints
+                .iter()
+                .find(|orphan| !self.linked_endpoints.contains(*orphan))
+                .copied();
+            if let Some(victim) = unlinked {
+                self.orphaned_endpoints.remove(&victim);
+            }
+        }
+        self.orphaned_endpoints.insert(endpoint);
+    }
+
     /// Drop the state of an endpoint that no nickname binds any more. A linked endpoint keeps its
     /// proof, direct path and backoff for the regraft after the link loss. The path watch goes:
     /// nothing names this endpoint, and a stale entry nudges it on each tick. A later sweep drops
@@ -1405,7 +1425,7 @@ impl EventLoopState {
         if self.linked_endpoints.contains(&endpoint) {
             self.path_kinds.remove(&endpoint);
             self.path_watchers.remove(&endpoint);
-            self.orphaned_endpoints.insert(endpoint);
+            self.insert_orphan(endpoint);
         } else {
             self.forget_endpoint_state(endpoint);
         }
@@ -1431,7 +1451,7 @@ impl EventLoopState {
         if self.teardown_pending.len() >= TEARDOWN_PENDING_MAX
             && !self.teardown_pending.contains(&endpoint)
         {
-            self.orphaned_endpoints.insert(endpoint);
+            self.insert_orphan(endpoint);
         } else {
             self.teardown_pending.insert(endpoint);
         }
