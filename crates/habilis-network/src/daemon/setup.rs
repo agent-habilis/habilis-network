@@ -755,7 +755,6 @@ fn write_key_file(key_path: &Path, seed: &[u8], owner_start: u64) -> Result<()> 
 /// means run 1.
 #[cfg(all(unix, feature = "host"))]
 fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
-    use std::fs;
     use std::io::ErrorKind;
     let Some(state) = state else {
         return Ok(1);
@@ -765,7 +764,7 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
     // would otherwise read one count and publish one run. The lock is on a file of its own, because the
     // counter file is replaced by a rename; it is held until `run_lock` drops at the end of the call.
     let run_lock = lock_run_counter(state)?;
-    let run = match fs::read(&run_path) {
+    let run = match read_run_file(&run_path) {
         Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_slice()) {
             Ok(last) => u64::from_le_bytes(last).saturating_add(1),
             Err(_) => counter_lost(state),
@@ -780,6 +779,27 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
     record_last_run(state, run);
     drop(run_lock);
     Ok(run)
+}
+
+/// The bytes of the run counter file, read like the key file: no link is followed, a file that is not a regular
+/// file is refused, and at most 16 bytes are read (the counter is 8 bytes, and a file of another length is not a
+/// counter).
+#[cfg(all(unix, feature = "host"))]
+fn read_run_file(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut options = OpenOptions::new();
+    options.read(true).custom_flags(no_link_flags());
+    let file = options.open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "it is not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(16).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Keep `run` in the member key file too, at bytes 40 to 48 (after the seed and the owner start), as the second
@@ -2261,6 +2281,65 @@ mod tests {
             path(Some(&explicit), true).as_deref(),
             Some(explicit.as_path()),
             "an explicit state file wins"
+        );
+    }
+
+    /// The run counter file is read like the key file: no link is followed, a file that is not a regular file is
+    /// refused, and no more than 16 bytes are read. In a folder that other users can write but cannot unlink
+    /// from (the sticky bit, as on `/tmp`), another user can create our `.run` name first: as a link to a device
+    /// that never ends, the read grew memory for ever, and as a FIFO with no writer the open waited for ever while
+    /// the run lock was held.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn the_run_file_is_read_like_the_key_file() {
+        use std::os::unix::fs::symlink;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = TempDir::new("habilis-run-read");
+
+        let target = dir.path().join("elsewhere");
+        fs::write(&target, 99u64.to_le_bytes()).expect("a target with a counter");
+        let link = dir.path().join("link.run");
+        symlink(&target, &link).expect("a link at the run path");
+        assert!(
+            super::read_run_file(&link).is_err(),
+            "the run file was read through a link"
+        );
+
+        let long = dir.path().join("long.run");
+        fs::write(&long, vec![7u8; 1 << 20]).expect("a long file");
+        let bytes = super::read_run_file(&long).unwrap_or_default();
+        assert!(
+            bytes.len() <= 16,
+            "{} bytes of a long run file were read",
+            bytes.len()
+        );
+
+        let whole = dir.path().join("whole.run");
+        fs::write(&whole, 5u64.to_le_bytes()).expect("a counter file");
+        assert_eq!(
+            super::read_run_file(&whole).expect("a regular counter file"),
+            5u64.to_le_bytes(),
+            "a regular counter file of 8 bytes is read whole"
+        );
+
+        let fifo = dir.path().join("fifo.run");
+        let made: process::ExitStatus = process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "a FIFO at the run path");
+        let (done, outcome) = mpsc::channel();
+        thread::spawn(move || {
+            let refused = super::read_run_file(&fifo).is_err();
+            // the test has stopped waiting when this fails, and then nothing needs the answer
+            done.send(refused).expect("the test waits for the answer");
+        });
+        let refused = outcome.recv_timeout(Duration::from_secs(2));
+        assert_eq!(
+            refused,
+            Ok(true),
+            "the read of a FIFO run file did not end in an error within 2 s: {refused:?}"
         );
     }
 
