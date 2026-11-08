@@ -62,7 +62,7 @@ fn departure(
 }
 
 /// End the pooled connection, the dial cooldown and the multihop origin of each endpoint that no
-/// nickname binds. A graceful goodbye, unlike a silence timeout, drops the dial hint, and with it
+/// nickname binds and that no gossip link keeps. A graceful goodbye, unlike a silence timeout, drops the dial hint, and with it
 /// the warm unicast connection, so a rejoin re-dials cold. The advertised links go too, or routes
 /// keep running through a peer that said goodbye until its vector ages out.
 async fn end_unbound_endpoints(state: &mut EventLoopState, endpoints: Vec<EndpointId>) {
@@ -71,6 +71,12 @@ async fn end_unbound_endpoints(state: &mut EventLoopState, endpoints: Vec<Endpoi
         .filter(|endpoint_id| !state.endpoint_is_bound(*endpoint_id))
         .collect();
     for endpoint_id in unbound {
+        // A neighbor whose gossip link is still up keeps its pooled connection and its origin: routes run through it.
+        // It takes the orphan path, and its teardown follows when the link has ended.
+        if state.linked_endpoints.contains(&endpoint_id) {
+            state.release_unbound_endpoint(endpoint_id);
+            continue;
+        }
         state.unicast_pool.forget(endpoint_id).await;
         #[cfg(feature = "multihop")]
         if let Some(handle) = state.multihop.as_ref() {

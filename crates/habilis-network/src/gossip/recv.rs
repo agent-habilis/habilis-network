@@ -7537,6 +7537,36 @@ mod dedup_counter_tests {
         });
     }
 
+    /// The goodbye of a session whose retained endpoint is still LINKED does not close the pooled connection or the
+    /// multihop origin of that endpoint: routes run through that neighbor while the link lives. The endpoint takes the
+    /// orphan path, and its teardown follows when the link has ended.
+    #[test]
+    fn the_goodbye_of_a_session_does_not_tear_down_a_linked_endpoint_before_its_link_ends() {
+        let session = Identity::generate();
+        let linked = endpoint_id(68);
+        let mut initial = fresh_state();
+        initial.peers.insert(session.author_key());
+        initial.names.insert(session.author_key(), nick("carol"));
+        initial.retain_refused_endpoint(session.author_key(), iroh::EndpointAddr::new(linked));
+        initial.linked_endpoints.insert(linked);
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            initial.unicast_pool.note_dial_failure(linked).await;
+        });
+
+        let reader = reader_with(initial, vec![left_of(&session, "carol")]);
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            assert!(
+                reader.unicast_pool.is_cooling(linked).await,
+                "the goodbye closed the pool state of an endpoint that is still linked"
+            );
+        });
+        assert!(
+            reader.orphaned_endpoints.contains(&linked),
+            "the linked endpoint did not take the orphan path: nothing closes it when the link ends"
+        );
+    }
+
     /// The end of an intruder is no goodbye that it signed: the member that lost the name at a node can
     /// come back there. While the other member holds the name its frames are refused, and when that
     /// member leaves they are admitted again, with no restart of the first. Two honest members that
