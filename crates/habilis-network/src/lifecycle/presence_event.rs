@@ -311,6 +311,12 @@ async fn send_proof_ask(
         return;
     }
     let Some(eid) = proof_ask_target(key, nickname, state) else {
+        // A session with no address yet (a restart sends its alive frame before its endpoint, and a meta
+        // card gives the endpoint with no ask of its own) waits for it like an ask that waits for a path: the
+        // sweep tick sends it once the address and a path are there, and not at the next alive frame.
+        if state.address_of(key).is_none() {
+            state.proofs.defer_ask(*key, nickname, Instant::now());
+        }
         return;
     };
     // A path that can carry the request: a warm connection, a neighbour that the send dials in the

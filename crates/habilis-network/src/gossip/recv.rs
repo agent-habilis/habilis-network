@@ -3120,6 +3120,46 @@ mod first_contact_tests {
         });
     }
 
+    /// A restart sends its alive frame before its address (a meta card gives the endpoint, with no ask of its
+    /// own). The ask is not lost for want of an address: it waits as an ask that waits for a path does, and the
+    /// sweep tick sends it once the address and a path are there, and not at the next alive frame, 30 s later.
+    #[test]
+    fn an_ask_for_a_session_with_no_address_yet_waits_for_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let session = Identity::generate();
+            let key = session.author_key();
+            state.peers.insert(key);
+            state.names.insert(key, nick("alice"));
+            let alive: Verified = Message::new_alive(&node.mesh, &nick("alice")).sign(&session);
+
+            lifecycle::ask_for_proof(&alive, &mut state, &context).await;
+
+            assert_eq!(
+                (
+                    state.proofs.deferred_len(),
+                    state.proof_requests_signed.load(Ordering::Relaxed)
+                ),
+                (1, 0),
+                "the ask for a session with no address was dropped, and nothing waits for the address"
+            );
+
+            let endpoint = endpoint_id(86);
+            state.place_endpoint(key, &nick("alice"), iroh::EndpointAddr::new(endpoint));
+            state.linked_endpoints.insert(endpoint);
+            lifecycle::retry_deferred_asks(&mut state, &context, None).await;
+
+            assert_eq!(
+                state.proof_requests_signed.load(Ordering::Relaxed),
+                1,
+                "the sweep did not send the ask once the address and the path were there"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// The sweep tick is the fallback of the deferred asks: it sends the ask of a session that has a path
     /// by now though no event said so, and it drops the ask that waited longer than its time, so that
     /// session is asked again at its next alive frame.
