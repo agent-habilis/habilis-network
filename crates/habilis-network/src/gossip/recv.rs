@@ -7528,6 +7528,17 @@ mod dedup_counter_tests {
             0,
             "a unicast frame from another endpoint sent the ask of this session"
         );
+        // `proof_requests_signed` counts at the signature, before the send: it is true even if the send was refused.
+        // The retry clock of the session starts only for a request that went out, so it shows that it was sent.
+        let (key, name) = (session.author_key(), nick("alice"));
+        assert!(
+            !from_it.asks_for_session(&key, &name),
+            "the request was signed but the send was refused: the retry clock of the session did not start"
+        );
+        assert!(
+            from_another.asks_for_session(&key, &name),
+            "a session that no request was sent to has its retry clock started"
+        );
     }
 
     /// A session that the roster gate refuses (it claims a nickname that another member holds) is not in the
