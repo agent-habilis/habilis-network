@@ -1013,6 +1013,10 @@ fn key_held_error(state: &Path) -> anyhow::Error {
     )
 }
 
+/// The longest that a start waits for the run lock in all, whatever the counter does: a holder that keeps
+/// writing the counter file must not hold a worker of the runtime for ever.
+#[cfg(all(unix, feature = "host"))]
+const RUN_LOCK_CAP: Duration = Duration::from_secs(30);
 /// How long a start tries again for the lock of the member key, while the daemon that holds it stops.
 #[cfg(all(unix, feature = "host"))]
 const KEY_LOCK_RETRY: Duration = Duration::from_secs(2);
@@ -1048,10 +1052,19 @@ fn hold_member_key_once(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>
 /// a worker of the runtime for ever. The lock is tried again, in steps of `KEY_LOCK_STEP`, for as long as the
 /// counter moves: when other starts take the lock in turn, each one writes the counter file, and a start that
 /// waits in a queue of them is not stuck. The wait ends, and the start fails and names the file, when the counter
-/// has not moved for `KEY_LOCK_RETRY`. The wait is a sleep of this thread, because the caller is not async: it
+/// has not moved for `KEY_LOCK_RETRY`, and in any case after `RUN_LOCK_CAP`. The movement is read from the
+/// modification time of the counter file with no link followed; a file system with a coarse clock (FAT keeps 2 s)
+/// shows a movement late, which the cap bounds. The wait is a sleep of this thread, because the caller is not async: it
 /// holds a worker for `KEY_LOCK_RETRY` when a holder does not let go. The lock goes with the returned file.
 #[cfg(all(unix, feature = "host"))]
 fn lock_run_counter(state: &Path) -> Result<File> {
+    lock_run_counter_within(state, KEY_LOCK_RETRY, RUN_LOCK_CAP)
+}
+
+/// [`lock_run_counter`] with its two bounds as parameters: `stall` is how long the counter may stand still while
+/// the lock is held by another start, and `cap` is the longest wait in all.
+#[cfg(all(unix, feature = "host"))]
+fn lock_run_counter_within(state: &Path, stall: Duration, cap: Duration) -> Result<File> {
     use std::fs::{self, TryLockError};
     use std::os::unix::fs::OpenOptionsExt as _;
     use std::thread;
@@ -1064,12 +1077,15 @@ fn lock_run_counter(state: &Path) -> Result<File> {
     // When the counter file was written last: a holder that lets go writes it, so a change is a start that made
     // progress, and the wait for it starts again.
     let run_path = state.with_extension("run");
+    // `symlink_metadata`: no link is followed. A link at the counter path moves only when it is replaced, and
+    // another user cannot make progress by touching the file that the link points to.
     let moved = || {
-        let meta: Option<fs::Metadata> = fs::metadata(&run_path).ok();
+        let meta: Option<fs::Metadata> = fs::symlink_metadata(&run_path).ok();
         meta.and_then(|meta| meta.modified().ok())
     };
     let mut last_move = moved();
-    let mut give_up = Instant::now() + KEY_LOCK_RETRY;
+    let started = Instant::now();
+    let mut give_up = started + stall;
     loop {
         match lock.try_lock() {
             Ok(()) => return Ok(lock),
@@ -1078,16 +1094,19 @@ fn lock_run_counter(state: &Path) -> Result<File> {
                 let latest = moved();
                 if latest != last_move {
                     last_move = latest;
-                    give_up = now + KEY_LOCK_RETRY;
+                    give_up = now + stall;
                 }
-                if now < give_up {
+                // The stall bound restarts at each write of the counter; the cap does not: a holder that keeps
+                // writing must not hold a worker of the runtime for ever.
+                if now < give_up && now.saturating_duration_since(started) < cap {
                     thread::sleep(KEY_LOCK_STEP);
                     continue;
                 }
                 anyhow::bail!(
-                    "the run lock {path} is held by another start, and the run counter has not moved for {wait} s: wait for it, or remove the file if no daemon runs",
+                    "the run lock {path} is held by another start, and the run counter has not moved for {wait} s, or the wait passed {limit} s: wait for it, or remove the file if no daemon runs",
                     path = lock_path.display(),
-                    wait = KEY_LOCK_RETRY.as_secs()
+                    wait = stall.as_secs(),
+                    limit = cap.as_secs()
                 );
             }
             Err(TryLockError::Error(error)) => return Err(error.into()),
@@ -2023,6 +2042,116 @@ mod tests {
             super::lock_file_problem(true, me, me),
             None,
             "a lock file of this user was refused"
+        );
+    }
+
+    /// A holder of the run lock that writes the counter file all the time does not extend the wait for ever: the
+    /// stall bound restarts at each write, so the wait has an absolute cap as well. Here the stall is 1 s and the
+    /// cap 3 s, and the holder writes every 200 ms for 12 s: the wait must end with an error at the cap.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_holder_that_keeps_writing_the_run_counter_does_not_extend_the_wait_for_ever() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let dir = TempDir::new("habilis-run-lock-toucher");
+        let state = dir.path().join("session.json");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        let holder: fs::File = options
+            .open(state.with_extension("run.lock"))
+            .expect("the file of the holder");
+        holder.lock().expect("the holder takes the lock");
+        // the toucher thread and the test share the flag that stops the toucher
+        let stop = Arc::new(AtomicBool::new(false));
+        let toucher = {
+            let (stop, run_path) = (Arc::clone(&stop), state.with_extension("run"));
+            thread::spawn(move || {
+                let mut count = 0u8;
+                while !stop.load(Ordering::Relaxed) && count < 60 {
+                    fs::write(&run_path, u64::from(count).to_le_bytes()).expect("a write");
+                    count += 1;
+                    thread::sleep(Duration::from_millis(200));
+                }
+            })
+        };
+        let (done, outcome) = mpsc::channel();
+        let waiting = state;
+        thread::spawn(move || {
+            let refused = super::lock_run_counter_within(
+                &waiting,
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+            )
+            .is_err();
+            // the test has stopped waiting when this fails, and then nothing needs the answer
+            done.send(refused).expect("the test waits for the answer");
+        });
+        let refused = outcome.recv_timeout(Duration::from_secs(8));
+        stop.store(true, Ordering::Relaxed);
+        toucher.join().expect("the toucher ends");
+        drop(holder);
+        assert_eq!(
+            refused,
+            Ok(true),
+            "a holder that wrote the counter every 200 ms kept the wait going past its cap of 3 s: {refused:?}"
+        );
+    }
+
+    /// The progress of the counter is read without following a link: another user can create `.run` as a link to a
+    /// file that it touches each second, in a root-owned sticky folder. The link itself does not move, so the stall
+    /// bound ends the wait.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn the_progress_of_the_run_counter_is_not_read_through_a_link() {
+        use std::os::unix::fs::symlink;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let dir = TempDir::new("habilis-run-lock-link");
+        let state = dir.path().join("session.json");
+        let target = dir.path().join("touched");
+        fs::write(&target, 1u64.to_le_bytes()).expect("a target");
+        symlink(&target, state.with_extension("run")).expect("a link at the run path");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        let holder: fs::File = options
+            .open(state.with_extension("run.lock"))
+            .expect("the file of the holder");
+        holder.lock().expect("the holder takes the lock");
+        // the toucher thread and the test share the flag that stops the toucher
+        let stop = Arc::new(AtomicBool::new(false));
+        let toucher = {
+            let (stop, target) = (Arc::clone(&stop), target);
+            thread::spawn(move || {
+                let mut count = 0u8;
+                while !stop.load(Ordering::Relaxed) && count < 60 {
+                    fs::write(&target, u64::from(count).to_le_bytes()).expect("a write");
+                    count += 1;
+                    thread::sleep(Duration::from_millis(200));
+                }
+            })
+        };
+        let (done, outcome) = mpsc::channel();
+        let waiting = state;
+        thread::spawn(move || {
+            let refused = super::lock_run_counter_within(
+                &waiting,
+                Duration::from_secs(1),
+                Duration::from_secs(30),
+            )
+            .is_err();
+            // the test has stopped waiting when this fails, and then nothing needs the answer
+            done.send(refused).expect("the test waits for the answer");
+        });
+        let refused = outcome.recv_timeout(Duration::from_secs(6));
+        stop.store(true, Ordering::Relaxed);
+        toucher.join().expect("the toucher ends");
+        drop(holder);
+        assert_eq!(
+            refused,
+            Ok(true),
+            "the touches of the target of a link kept the wait going: {refused:?}"
         );
     }
 
