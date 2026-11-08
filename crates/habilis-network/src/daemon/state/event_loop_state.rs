@@ -2824,13 +2824,13 @@ impl EventLoopState {
         }
     }
 
-    /// Give up the retained endpoint of `key`. Its state goes with it, unless a nickname binds the
-    /// endpoint or another retained endpoint names it.
-    pub(crate) fn release_refused_endpoint(&mut self, key: &AuthorKey) {
-        let Some(address) = self.refused_endpoints.remove(key) else {
-            return;
-        };
+    /// Give up the retained endpoint of `key`, and return it. Its state goes with it, unless a nickname binds
+    /// the endpoint or another retained endpoint names it. The caller that tears an endpoint down also
+    /// closes the connection of the pool, and passes the returned endpoint on.
+    pub(crate) fn release_refused_endpoint(&mut self, key: &AuthorKey) -> Option<EndpointId> {
+        let address = self.refused_endpoints.remove(key)?;
         self.release_if_unowned(address.id);
+        Some(address.id)
     }
 
     /// Drop the state of `endpoint` unless a dial hint or a retained endpoint names it.

@@ -6536,6 +6536,36 @@ mod dedup_counter_tests {
         )
     }
 
+    /// The goodbye of a key that is not in the roster ends the endpoint that was retained for it, with the state
+    /// of the pool: its pooled connection and its dial-failure cooldown go too, and the shared-endpoint check
+    /// stays (an endpoint that another key still names is kept).
+    #[test]
+    fn the_goodbye_of_a_stranger_tears_down_the_pool_state_of_its_retained_endpoint() {
+        let stranger = Identity::generate();
+        let (retained, shared) = (endpoint_id(63), endpoint_id(64));
+        let mut initial = fresh_state();
+        initial.retain_refused_endpoint(stranger.author_key(), iroh::EndpointAddr::new(retained));
+        let other = Identity::generate().author_key();
+        initial.retain_refused_endpoint(other, iroh::EndpointAddr::new(shared));
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            initial.unicast_pool.note_dial_failure(retained).await;
+            initial.unicast_pool.note_dial_failure(shared).await;
+        });
+
+        let reader = reader_with(initial, vec![left_of(&stranger, "carol")]);
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            assert!(
+                !reader.unicast_pool.is_cooling(retained).await,
+                "the retained endpoint of a stranger that left kept its pool state"
+            );
+            assert!(
+                reader.unicast_pool.is_cooling(shared).await,
+                "the endpoint of another retained key lost its pool state"
+            );
+        });
+    }
+
     /// The end of an intruder is no goodbye that it signed: the member that lost the name at a node can
     /// come back there. While the other member holds the name its frames are refused, and when that
     /// member leaves they are admitted again, with no restart of the first. Two honest members that

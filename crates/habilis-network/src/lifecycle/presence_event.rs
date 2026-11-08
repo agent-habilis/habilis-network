@@ -125,10 +125,11 @@ pub(crate) async fn end_session(
         // key that said goodbye must not stay routable.
         let stranger_hints = state.forget_hints_of(key);
         // The same `PeerInfo` can have left an endpoint that the roster never admitted, retained
-        // for the key: it goes too, with the state of an endpoint that nothing else binds.
-        state.release_refused_endpoint(&key);
+        // for the key: it goes too, with the state of an endpoint that nothing else binds, and with its
+        // pooled connection and cooldown (`end_unbound_endpoints` keeps the shared-endpoint check).
+        let retained = state.release_refused_endpoint(&key);
         let hinted = stranger_hints.iter().map(|hint| hint.id);
-        end_unbound_endpoints(state, hinted.collect()).await;
+        end_unbound_endpoints(state, hinted.chain(retained).collect()).await;
         return;
     }
     // A session that lost its nickname to another member did not say goodbye: it is only taken out of the
