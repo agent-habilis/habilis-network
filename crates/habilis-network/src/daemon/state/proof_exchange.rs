@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::mem;
 use std::time::Duration;
 
@@ -41,6 +42,13 @@ const ASKS_IN_ALL: usize = 64;
 /// follow the rate of an attacker that has many endpoints with a path. A window holds at most this number of
 /// first asks, and `ASKS_IN_ALL` asks after them.
 const FIRST_ASKS_IN_ALL: usize = 256;
+/// The first asks for sessions that claim a bound nickname (a restart of the member that holds the name, or an
+/// intruder), for each window, outside the shared `FIRST_ASKS_IN_ALL`: an attacker that keeps many endpoints with a
+/// path asking cannot starve the restart of a member that holds a name. The asks of the reserve count in the work in
+/// all. At most `ASKS_PER_BOUND_NICKNAME` for each nickname: an attacker that claims 16 bound nicknames with 4 fresh
+/// sessions each uses the whole reserve, and the restart of another bound nickname waits one window.
+const FIRST_ASKS_BOUND: usize = 64;
+const ASKS_PER_BOUND_NICKNAME: usize = 4;
 /// The window of the budget of the proof requests.
 const ASK_BUDGET_WINDOW: Duration = Duration::from_secs(10);
 /// The endpoints that have a count in the budget: 256 at most. A count outside its window is dropped first, the
@@ -118,6 +126,9 @@ pub(crate) struct ProofExchange {
     // the proof requests sent to each endpoint in the window: when it started, and how many;
     // `ASK_BUDGET_ENDPOINTS_MAX` endpoints at most, the oldest dropped when full
     ask_budget: ProofBook<EndpointId, (Instant, usize)>,
+    // the reserve of the claims of bound nicknames in its window: when it started, how many asks it gave, and how
+    // many for each nickname (`FIRST_ASKS_BOUND` entries at most, the asks of a window)
+    ask_budget_bound: Option<(Instant, usize, HashMap<Nickname, usize>)>,
     // the proof requests sent in all in the window: when it started, how many, and how many of them were the
     // guaranteed first ask of an endpoint
     ask_budget_all: Option<(Instant, usize, usize)>,
@@ -139,6 +150,7 @@ impl ProofExchange {
             pending_other: ProofBook::with_cap(PENDING_PROOFS_CLASS_MAX),
             ask_budget: ProofBook::with_cap(ASK_BUDGET_ENDPOINTS_MAX),
             ask_budget_all: None,
+            ask_budget_bound: None,
             ties_refused: 0,
             bound_refused: 0,
             gate_refused: 0,
@@ -289,7 +301,23 @@ impl ProofExchange {
     /// Whether one more proof request may go to `endpoint` at `now`, and the request is counted when it may.
     /// The caller asks BEFORE it signs the request. An ask that may not go waits in the map of the deferred
     /// asks, and goes when the window has moved.
+    #[cfg(test)]
     pub(crate) fn may_ask(&mut self, endpoint: EndpointId, now: Instant) -> bool {
+        self.may_ask_for(endpoint, None, now)
+    }
+
+    /// `may_ask` for a session that CLAIMS A BOUND NICKNAME (`claim`: a restart of the member that holds the
+    /// name, or an intruder). The first ask of such a session has a reserve of its own, outside the shared budget of
+    /// the first asks, and it is not refused because the map of counts is full of live counts (the oldest count goes):
+    /// an attacker that keeps many endpoints asking cannot starve the restart of a member that holds a name. The
+    /// reserve is `FIRST_ASKS_BOUND` for each window and `ASKS_PER_BOUND_NICKNAME` for each nickname, and the asks
+    /// that it allows count in the work in all.
+    pub(crate) fn may_ask_for(
+        &mut self,
+        endpoint: EndpointId,
+        claim: Option<&Nickname>,
+        now: Instant,
+    ) -> bool {
         let in_window = |start: Instant| now.saturating_duration_since(start) < ASK_BUDGET_WINDOW;
         let (all_start, all_count, all_first) = match self.ask_budget_all {
             Some((start, count, first)) if in_window(start) => (start, count, first),
@@ -299,6 +327,16 @@ impl ProofExchange {
             Some((start, count)) if in_window(*start) => (*start, *count),
             _ => (now, 0),
         };
+        if count == 0
+            && let Some(nickname) = claim
+            && self.take_bound_reserve(nickname, now)
+        {
+            self.ask_budget_all = Some((all_start, all_count + 1, all_first));
+            // every count reads as dead, so a full map drops its oldest count
+            self.ask_budget
+                .insert_evicting(endpoint, (start, 1), |_, _| false);
+            return true;
+        }
         // A count that is inside its window is never dropped to make room: an endpoint that used its asks would
         // get a second budget. A full map of live counts defers an endpoint that it does not track.
         let tracked = self.ask_budget.get(&endpoint).is_some();
@@ -332,6 +370,27 @@ impl ProofExchange {
                 in_window(*counted_at)
             });
         true
+    }
+
+    /// Take one ask out of the reserve of the claims of bound nicknames, if there is room for `nickname`. The reserve
+    /// has its own window; its map of nicknames holds at most `FIRST_ASKS_BOUND` entries, as many as the asks that it
+    /// allows in a window.
+    fn take_bound_reserve(&mut self, nickname: &Nickname, now: Instant) -> bool {
+        let (start, total, mut by_nickname) = match self.ask_budget_bound.take() {
+            Some((start, total, by_nickname))
+                if now.saturating_duration_since(start) < ASK_BUDGET_WINDOW =>
+            {
+                (start, total, by_nickname)
+            }
+            _ => (now, 0, HashMap::new()),
+        };
+        let used = by_nickname.get(nickname).copied().unwrap_or(0);
+        let allowed = total < FIRST_ASKS_BOUND && used < ASKS_PER_BOUND_NICKNAME;
+        if allowed {
+            by_nickname.insert(nickname.clone(), used + 1);
+        }
+        self.ask_budget_bound = Some((start, total + usize::from(allowed), by_nickname));
+        allowed
     }
 
     /// How many endpoints have a count in the budget of the proof requests.
@@ -1054,6 +1113,73 @@ mod tests {
         assert!(
             !book.may_ask(endpoint_of(1), at(12)),
             "A, whose count is still inside its window, got a second budget after the map dropped its count"
+        );
+    }
+
+    /// An ask for a session that CLAIMS A BOUND NICKNAME (a restart of the member, or an intruder) has a reserve of its
+    /// own, outside the shared budget of the first asks, so an attacker that keeps many endpoints asking cannot starve
+    /// the restart of a member that holds a name: the shared 256 are used up, the map of counts is full of live
+    /// counts, and the ask of the claim still goes.
+    #[test]
+    fn a_claim_of_a_bound_nickname_is_asked_when_the_shared_first_asks_are_used_up() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let alice = Nickname::try_new("alice").expect("a nickname");
+        let used: usize = (0..300u32)
+            .filter(|index| book.may_ask_for(endpoint_of(*index), None, start))
+            .count();
+        assert_eq!(used, FIRST_ASKS_IN_ALL, "the shared first asks are used up");
+
+        assert!(
+            book.may_ask_for(endpoint_of(1000), Some(&alice), start),
+            "the ask for a claim of a bound nickname was refused although the shared first asks were used up"
+        );
+        assert!(
+            !book.may_ask_for(endpoint_of(1001), None, start),
+            "an ask for a free nickname got into the reserve of the claims"
+        );
+    }
+
+    /// The reserve is 64 asks for each window and 4 for each nickname: an attacker that claims 16 bound nicknames with
+    /// 4 fresh sessions each uses the whole reserve, and the restart of ANOTHER bound nickname waits for the next
+    /// window (no nickname is lost). One nickname cannot eat the reserve alone.
+    #[test]
+    fn the_reserve_of_the_claims_has_64_asks_for_each_window_and_4_for_each_nickname() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let name = |index: u32| Nickname::try_new(&format!("claim{index}")).expect("a nickname");
+        // the shared first asks are used up by endpoints that claim nothing
+        for index in 0..300u32 {
+            let _ = book.may_ask_for(endpoint_of(index), None, start);
+        }
+
+        // one nickname: 4 asks from the reserve, no more
+        let eaten: usize = (0..10u32)
+            .filter(|index| book.may_ask_for(endpoint_of(1000 + index), Some(&name(0)), start))
+            .count();
+        assert_eq!(eaten, 4, "one nickname got other than 4 asks in a window");
+
+        // 15 other nicknames with 4 each: 16 x 4 = 64, the whole reserve
+        let mut index = 2000u32;
+        for nickname in 1..16u32 {
+            for _ in 0..4 {
+                assert!(
+                    book.may_ask_for(endpoint_of(index), Some(&name(nickname)), start),
+                    "claim {nickname} was refused inside the reserve"
+                );
+                index += 1;
+            }
+        }
+
+        // the restart of another bound nickname waits for the next window, and then it is asked
+        let restart = name(99);
+        assert!(
+            !book.may_ask_for(endpoint_of(5000), Some(&restart), start),
+            "the reserve gave more than 64 asks in a window"
+        );
+        assert!(
+            book.may_ask_for(endpoint_of(5000), Some(&restart), start + ASK_BUDGET_WINDOW),
+            "the restart was not asked in the next window"
         );
     }
 

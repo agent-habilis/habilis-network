@@ -2555,6 +2555,16 @@ impl EventLoopState {
         Some(held.frame.clone())
     }
 
+    /// Whether `session`, which is not a live peer, claims a nickname that a member of the roster holds by its proof:
+    /// a restart of that member, or an intruder. Such an ask has a reserve in the budget of the proof requests.
+    pub(crate) fn claims_bound_nickname(&self, session: &AuthorKey, nickname: &Nickname) -> bool {
+        let (peers, quiet) = (&self.peers, &self.quiet);
+        !peers.contains(session)
+            && self.proofs.is_bound(nickname, |held| {
+                peers.contains(held) || quiet.contains(held)
+            })
+    }
+
     /// Whether `session` is in the roster, live or quiet. A quiet peer may return, so it still
     /// holds its nickname; a session that left or timed out holds nothing.
     pub(crate) fn session_is_held(&self, session: &AuthorKey) -> bool {

@@ -344,7 +344,10 @@ async fn send_proof_ask(
     // The budget comes before the signature: a peer that makes fresh session keys must not set off a signature
     // and a task that holds a frame for each of them. An ask over the budget waits in the same map as the asks
     // that wait for a path, and goes when the window has moved.
-    if !state.proofs.may_ask(eid, Instant::now()) {
+    let claim = state
+        .claims_bound_nickname(key, nickname)
+        .then_some(nickname);
+    if !state.proofs.may_ask_for(eid, claim, Instant::now()) {
         tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request deferred: the budget of the endpoint or of the node is used");
         state.proofs.defer_ask(*key, nickname, Instant::now());
         return;

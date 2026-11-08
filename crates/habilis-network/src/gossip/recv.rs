@@ -6947,6 +6947,33 @@ mod dedup_counter_tests {
         );
     }
 
+    /// A session that is not a live peer claims a bound nickname when a member of the roster holds that nickname by its
+    /// proof: that is what gives its first proof request a place in the reserve of the claims. A live peer, and a
+    /// session under a free nickname, do not claim one.
+    #[test]
+    fn a_session_claims_a_bound_nickname_only_when_a_member_of_the_roster_holds_it() {
+        let member = Identity::generate();
+        let (live, newer, stranger) = (
+            Identity::generate(),
+            Identity::generate(),
+            Identity::generate(),
+        );
+        let state = reader_with(fresh_state(), vec![joined_of(&live, &member, "alice", 3)]);
+
+        assert!(
+            state.claims_bound_nickname(&newer.author_key(), &nick("alice")),
+            "a session that is no peer and claims the nickname of a member of the roster is a claim"
+        );
+        assert!(
+            !state.claims_bound_nickname(&live.author_key(), &nick("alice")),
+            "a live peer is no claim"
+        );
+        assert!(
+            !state.claims_bound_nickname(&stranger.author_key(), &nick("bob")),
+            "a free nickname is no claim"
+        );
+    }
+
     /// A quiet peer whose clock stepped back returns after a run of rising frames (the roster rule of `observe`).
     /// The check before `observe` is pure and reads the last frame of the run as stale, so a pending proof of that peer
     /// was not activated when the peer entered the roster. The proof is activated right after `observe`: the peer
