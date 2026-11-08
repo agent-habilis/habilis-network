@@ -1876,9 +1876,6 @@ async fn handle_peer_info(
     // path to its node.
     let changed = !state.unicast_pool.remembers_address(&peer_addr);
     state.place_endpoint(hinter, &message.author, peer_addr.clone());
-    // The address of a session that is in the roster with no proof is the warm path that its proof
-    // request was waiting for: ask now, and not at its next alive frame, 30 s or more away.
-    lifecycle::ask_for_proof(message, state, context).await;
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.
@@ -1951,6 +1948,10 @@ async fn handle_peer_info(
             });
         }
     }
+    // The address of a session that is in the roster with no proof is the warm path that its proof
+    // request was waiting for: ask now, and not at its next alive frame, 30 s or more away. The ask comes
+    // after the address is registered, because the dial that it can start uses the address of the pool.
+    lifecycle::ask_for_proof(message, state, context).await;
     // A buffered directed frame addressed to this author may just have become
     // deliverable — its endpoint binding and dial address are now registered.
     // Only while meshed: the pre-mesh backlog waits for the meshed edge.
@@ -6255,6 +6256,38 @@ mod dedup_counter_tests {
                 .map(|address| address.id),
             Some(endpoint_id(61)),
             "the proof request to the session has no address to go to"
+        );
+    }
+
+    /// The `PeerInfo` of a session of the roster that has no proof gives its address, and the proof request
+    /// that it sets off goes to a linked peer by a dial in the background. That dial uses the address that
+    /// the pool remembers, so the address must be registered before the request goes: a dial that starts
+    /// with no address, or with the old one, can fail, and the request that was queued has started the retry
+    /// clock of the session for nothing.
+    #[test]
+    fn the_address_of_a_peer_info_is_registered_in_the_pool_before_the_proof_request_goes() {
+        use crate::protocol::messages::MessageBody;
+        use crate::protocol::peer_addr_error;
+
+        let session = Identity::generate();
+        let address = iroh::EndpointAddr::new(endpoint_id(62));
+        let mut initial = fresh_state();
+        initial.linked_endpoints.insert(endpoint_id(62));
+        let json = peer_addr_error::endpoint_addr_to_json(&address);
+        let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+        let peer_info =
+            Message::new_peer_info(&MeshId::from("test"), &nick("carol"), body).sign(&session);
+        let info = (
+            Plane::Gossip,
+            peer_info.serialize().expect("serialize").into_bytes(),
+        );
+
+        let reader = reader_with(initial, vec![alive_of(&session, "carol"), info]);
+
+        assert_eq!(
+            reader.ask_dial_addrs,
+            vec![Some(address)],
+            "the proof request went before the pool remembered the address of its endpoint"
         );
     }
 

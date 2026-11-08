@@ -285,6 +285,8 @@ async fn send_proof_ask(
         state.proofs.defer_ask(*key, Instant::now());
         return;
     }
+    #[cfg(test)]
+    state.note_ask_dial_address(eid);
     let request = state.proof_request_to(key, context.author, context.mesh);
     messages::log_out(&request);
     if let Ok(bytes) = request.serialize()

@@ -470,6 +470,10 @@ pub struct EventLoopState {
     /// The proof requests that this node signed, to show that a path-less ask signs none.
     #[cfg(test)]
     pub(crate) proof_requests_signed: AtomicU64,
+    /// For each proof request that was sent: the dial address that the pool remembered for its endpoint at
+    /// that moment, to show that the address was registered before the request went.
+    #[cfg(test)]
+    pub(crate) ask_dial_addrs: Vec<Option<EndpointAddr>>,
     /// The run number of this start, which the proof of this session names.
     run: u64,
     /// The lock on the member key of this start: it lives as long as this node runs, so a second start of
@@ -868,6 +872,8 @@ impl EventLoopState {
             own_answer: None,
             #[cfg(test)]
             proof_requests_signed: AtomicU64::new(0),
+            #[cfg(test)]
+            ask_dial_addrs: Vec::new(),
             run: init.keys.run,
             key_lock: init.keys.key_lock,
             newest_own_run_seen: 0,
@@ -2466,6 +2472,13 @@ impl EventLoopState {
             self.proofs.mark_deferred_tried(key, now);
         }
         due
+    }
+
+    /// Record the dial address that the pool remembers for `endpoint`, as a proof request goes to it.
+    #[cfg(test)]
+    pub(crate) fn note_ask_dial_address(&mut self, endpoint: EndpointId) {
+        let remembered = self.unicast_pool.remembered_address(endpoint);
+        self.ask_dial_addrs.push(remembered);
     }
 
     /// The request for the proof of `session` went out: its retry clock starts. A request that

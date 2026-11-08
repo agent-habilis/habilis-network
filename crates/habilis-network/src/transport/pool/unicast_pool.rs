@@ -307,6 +307,13 @@ impl UnicastPool {
             .is_ok_and(|addrs| addrs.get(&address.id) == Some(address))
     }
 
+    /// The dial address remembered for `eid`, if any.
+    #[cfg(test)]
+    pub(crate) fn remembered_address(&self, eid: EndpointId) -> Option<EndpointAddr> {
+        let addrs = self.inner.addrs.lock().ok()?;
+        addrs.get(&eid).cloned()
+    }
+
     /// Drop the remembered dial address of `eid`. The pooled connection stays open: the caller
     /// uses this when only the address has no owner left.
     pub(crate) fn forget_addr(&self, eid: EndpointId) {
