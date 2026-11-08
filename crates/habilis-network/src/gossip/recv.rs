@@ -1009,7 +1009,10 @@ async fn end_displaced_sessions(
     context: &HandlerCtx<'_>,
 ) {
     for intruder in state.proofs.take_evicted() {
-        let goodbye = lifecycle::Goodbye::Refused(&verified.author);
+        let goodbye = lifecycle::Goodbye::Refused {
+            nickname: &verified.author,
+            by: verified.key(),
+        };
         lifecycle::end_session(intruder, goodbye, state, app, context).await;
     }
     for older in state.proofs.take_replaced() {
@@ -6001,7 +6004,7 @@ mod dedup_counter_tests {
     use crate::lifecycle;
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
-    use crate::protocol::{AuthorKey, Channel, MeshId, Message};
+    use crate::protocol::{AuthorKey, Channel, MeshId, Message, MessageKind, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
     use crate::util::clock::Instant;
@@ -6661,19 +6664,27 @@ mod dedup_counter_tests {
         );
     }
 
-    /// The presence events that reach the sink, in order: the key of the session, and whether the event is a
-    /// line that the node made itself (a `left` for a session that ended with no goodbye) and not a frame.
+    /// The presence events that reach the sink, in order: the key of the session, and what the event says
+    /// (`joined`, `left` or another kind of presence).
     #[derive(Default)]
-    struct PresenceOrder(Mutex<Vec<(AuthorKey, bool)>>);
+    struct PresenceOrder(Mutex<Vec<(AuthorKey, &'static str)>>);
 
     impl NodeSink for PresenceOrder {
         fn emit(&self, event: NodeEvent) {
-            if let NodeEvent::Presence {
-                peer, synthetic, ..
-            } = event
-            {
+            if let NodeEvent::Presence { peer, message, .. } = event {
+                let label = if let MessageKind::Presence { subtype } = message.kind {
+                    if subtype == PresenceSubtype::Joined {
+                        "joined"
+                    } else if subtype == PresenceSubtype::Left {
+                        "left"
+                    } else {
+                        "alive"
+                    }
+                } else {
+                    "other"
+                };
                 let mut seen = self.0.lock().expect("the order lock is not poisoned");
-                seen.push((peer, synthetic));
+                seen.push((peer, label));
             }
         }
     }
@@ -6708,10 +6719,47 @@ mod dedup_counter_tests {
         assert_eq!(
             *seen,
             vec![
-                (intruder_session.author_key(), true),
-                (alice_session.author_key(), false)
+                (intruder_session.author_key(), "left"),
+                (alice_session.author_key(), "joined")
             ],
             "the intruder that was shown must get a `left` line, and before the arrival of the member"
+        );
+    }
+
+    /// Both sessions were shown before the proof (neither had proved the name): the stream read `joined` twice.
+    /// The proof of the member ends the intruder, with a `left`, and the member is there: a reader that keys by
+    /// nickname must not read the name as gone, so the `joined` of the member is shown again after the `left`.
+    #[test]
+    fn the_end_of_a_surfaced_intruder_shows_the_member_again_when_the_member_was_shown_too() {
+        let (alice, intruder_session) = (Identity::generate(), Identity::generate());
+        let alice_session = Identity::generate();
+        let mut initial = fresh_state();
+        for session in [&alice_session, &intruder_session] {
+            initial.peers.insert(session.author_key());
+            initial.surfaced.insert(session.author_key());
+            initial.names.insert(session.author_key(), nick("alice"));
+        }
+        let events = PresenceOrder::default();
+
+        let reader = reader_with_sink(
+            initial,
+            vec![joined_of(&alice_session, &alice, "alice", 1)],
+            &events,
+        );
+
+        assert!(
+            reader.peers.contains(&alice_session.author_key())
+                && !reader.peers.contains(&intruder_session.author_key()),
+            "the member stays and the intruder is ended"
+        );
+        let seen = events.0.lock().expect("the order lock is not poisoned");
+        assert_eq!(
+            *seen,
+            vec![
+                (intruder_session.author_key(), "left"),
+                (alice_session.author_key(), "joined")
+            ],
+            "a `left` for the intruder with no `joined` of the member after it reads as a name that is gone"
         );
     }
 
