@@ -408,7 +408,7 @@ impl ProofExchange {
         self.accept_live(session, nickname, mesh, proof, true, is_held)
     }
 
-    /// [`Self::accept`] for a frame whose sender may not be live. `claimant_live` says that the sender is in the
+    /// `accept` (a test helper that passes a live sender) for a frame whose sender may not be live. `claimant_live` says that the sender is in the
     /// roster (live) after the frame. A proof of a sender that is not live does not replace a live session of its
     /// member: a historical `joined` frame with a higher run (the member restored a lower counter) would end the
     /// live session, with the frames that wait for it, for a member that is not there. Such a proof is not held.
