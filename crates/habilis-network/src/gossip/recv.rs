@@ -1169,7 +1169,12 @@ async fn answer_proof_request(
         return;
     };
     messages::log_out(&answer);
+    // The connection that the request came on is authenticated by the transport: when the answer goes to that
+    // endpoint, a dial back in the background is allowed, as for the ask (an asker that only dialed us has no
+    // gossip link and no connection of ours). One answer for each asker and window, and the cap, stay.
+    let came_on_it = state.state_digest_serves.unicast.arrived_from == Some(eid);
     let sent = match answer.serialize() {
+        Ok(bytes) if came_on_it => transport::send_dialing_back(eid, bytes, state).await,
         Ok(bytes) => transport::send_best_effort(eid, bytes, state).await,
         Err(_) => false,
     };
@@ -4193,6 +4198,33 @@ mod first_contact_tests {
             Some(old),
             "an address with a usable path is no longer the first choice"
         );
+    }
+
+    /// A proof request that arrives on a unicast connection from an endpoint that is cold and not linked (the
+    /// asker only dialed us) is answered by a dial back in the background, as the ask is sent: `send_best_effort`
+    /// drops the answer for such an endpoint, after the answer took its slot of the cap, and the asker stays
+    /// unproved. The answer is kept in the log of its author only when it was sent, so that is the proof here.
+    #[test]
+    fn a_proof_request_from_a_cold_unlinked_arrival_is_answered_by_a_dial_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let asker = Identity::generate();
+            let to = state.identity.author_key();
+            let request = Message::new_proof_request(&node.mesh, &nick("asker"), to).sign(&asker);
+            state.direct.insert(endpoint_id(82), DirectState::Direct);
+            state.state_digest_serves.unicast.arrived_from = Some(endpoint_id(82));
+
+            super::answer_proof_request(&to, &request, &mut state, &context).await;
+
+            let unkept = state.take_answer_to_keep();
+            assert!(
+                unkept.is_none(),
+                "the answer was made but not sent: the send to the cold unlinked arrival was dropped"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// Two live keys use one nickname, and the second binds no dial hint. When the first leaves,
