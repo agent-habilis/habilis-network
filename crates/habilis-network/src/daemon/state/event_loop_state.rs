@@ -1397,10 +1397,25 @@ impl EventLoopState {
         released
     }
 
-    /// Put `endpoint` in the orphan set. A full set drops an orphan that is NOT linked: the state of a linked orphan
-    /// (its address, direct path and proof) is cleaned only when its link ends, and the sweep walks this set for that.
-    /// The linked endpoints are few (the link cap), far below `ORPHANED_ENDPOINTS_MAX`, so there is always an unlinked
-    /// orphan to drop; its state is forgotten already, and its pool state falls back to the idle sweep.
+    /// The state of `endpoint` that sync code can drop: its address, backoff, proof, rival flag, direct path, path
+    /// watch and kind, and its address in the pool. It queues no teardown of the pool.
+    fn drop_endpoint_state(&mut self, endpoint: EndpointId) {
+        self.address_book.remove_endpoint_info(endpoint);
+        self.graft_backoff.reset(endpoint);
+        self.proven_endpoints.forget_endpoint(endpoint);
+        self.forget_rival_holder(endpoint);
+        self.direct.remove(&endpoint);
+        self.path_watchers.remove(&endpoint);
+        self.path_kinds.remove(&endpoint);
+        self.unicast_pool.forget_addr(endpoint);
+    }
+
+    /// Put `endpoint` in the orphan set. A full set drops one orphan, an orphan that is NOT linked if there is one (the
+    /// oldest of them all otherwise), and
+    /// the state of the dropped orphan goes with it (`drop_endpoint_state`): no eviction leaves state that no sweep
+    /// finds again, whether the orphan lost its link after it came in (it waits for the next sweep), or the endpoints
+    /// that are linked outnumber the cap (`--max-peers` has no upper limit). The pooled connection falls back to the
+    /// idle sweep of the pool.
     fn insert_orphan(&mut self, endpoint: EndpointId) {
         if self.orphaned_endpoints.len() >= ORPHANED_ENDPOINTS_MAX
             && !self.orphaned_endpoints.contains(&endpoint)
@@ -1410,8 +1425,11 @@ impl EventLoopState {
                 .iter()
                 .find(|orphan| !self.linked_endpoints.contains(*orphan))
                 .copied();
-            if let Some(victim) = unlinked {
-                self.orphaned_endpoints.remove(&victim);
+            let victim: Option<EndpointId> =
+                unlinked.or_else(|| self.orphaned_endpoints.oldest().copied());
+            if let Some(dropped) = victim {
+                self.orphaned_endpoints.remove(&dropped);
+                self.drop_endpoint_state(dropped);
             }
         }
         self.orphaned_endpoints.insert(endpoint);
@@ -1434,14 +1452,7 @@ impl EventLoopState {
     /// Drop every state that is keyed by `endpoint`: the backoff, the proof, the rival flag, the
     /// direct state, the path state and the address of the endpoint, in the pool and in the book.
     pub(crate) fn forget_endpoint_state(&mut self, endpoint: EndpointId) {
-        self.address_book.remove_endpoint_info(endpoint);
-        self.graft_backoff.reset(endpoint);
-        self.proven_endpoints.forget_endpoint(endpoint);
-        self.forget_rival_holder(endpoint);
-        self.direct.remove(&endpoint);
-        self.path_watchers.remove(&endpoint);
-        self.path_kinds.remove(&endpoint);
-        self.unicast_pool.forget_addr(endpoint);
+        self.drop_endpoint_state(endpoint);
         // Sync code released it (the heartbeat prune, the capacity drop of the retained endpoints) and cannot call
         // the async pool: the loop closes its pooled connection and its cooldown later (`take_teardown_pending`).
         // Only here, when nothing links the endpoint any more: a linked one keeps its pool and its multihop origin

@@ -1743,6 +1743,67 @@ mod tests {
         );
     }
 
+    /// The orphan set drops an orphan when it is full, and the state of that orphan goes with it: its address, direct
+    /// path, proof and backoff are cleaned at the eviction, so no eviction leaves state that nothing finds again. That
+    /// holds for an orphan whose link has ended since it came in (it waits for the next sweep, and the flood evicts it
+    /// first), and for a linked one when more endpoints are linked than the set holds (`--max-peers` is not capped).
+    #[test]
+    fn the_orphan_that_a_full_set_drops_loses_its_state_with_it() {
+        use super::direct_state::DirectState;
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoint_at = |index: u32| {
+            let mut bytes = [11u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        let mut state = fresh_state();
+
+        // `cap - 1` linked orphans, and one orphan whose link ended: the only one that is not linked
+        let lost_link = endpoint_at(0);
+        state.linked_endpoints.insert(lost_link);
+        state.release_unbound_endpoint(lost_link);
+        state.direct.insert(lost_link, DirectState::Direct);
+        state.linked_endpoints.remove(&lost_link);
+        for index in 1..u32::try_from(cap).expect("a small number") {
+            let linked = endpoint_at(index);
+            state.linked_endpoints.insert(linked);
+            state.release_unbound_endpoint(linked);
+        }
+        assert_eq!(state.orphaned_endpoints.len(), cap, "the set is full");
+        // one more linked orphan: the set drops the only orphan that is not linked, the one that lost its link
+        let newcomer = endpoint_at(u32::try_from(cap).expect("a small number"));
+        state.linked_endpoints.insert(newcomer);
+        state.release_unbound_endpoint(newcomer);
+
+        assert!(
+            !state.orphaned_endpoints.contains(&lost_link),
+            "the orphan that lost its link was not the one dropped"
+        );
+        assert!(
+            !state.direct.contains_key(&lost_link),
+            "the orphan that a full set dropped kept its direct state: no sweep finds it any more"
+        );
+
+        // every orphan is linked now: the next newcomer makes the set drop a LINKED one, and that one loses its state
+        let linked_with_state: EndpointId = *state
+            .orphaned_endpoints
+            .oldest()
+            .expect("the set holds endpoints");
+        state.direct.insert(linked_with_state, DirectState::Direct);
+        let last = endpoint_at(u32::try_from(cap).expect("a small number") + 1);
+        state.linked_endpoints.insert(last);
+        state.release_unbound_endpoint(last);
+        let with_state: Vec<EndpointId> = state.direct.keys().copied().collect();
+        let dropped: Vec<EndpointId> = with_state
+            .into_iter()
+            .filter(|endpoint| !state.orphaned_endpoints.contains(endpoint))
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "an orphan that the set dropped kept its direct state: {dropped:?}"
+        );
+    }
+
     /// A full orphan set drops an orphan that is not linked, never a linked one: the state of a linked orphan (its
     /// address, its direct path, its proof) is cleaned only when its link ends, and the set is walked for that. The
     /// linked endpoints are far fewer than the cap, so there is always an unlinked orphan to drop.
