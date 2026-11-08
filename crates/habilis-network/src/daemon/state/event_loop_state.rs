@@ -2600,7 +2600,7 @@ impl EventLoopState {
         }
         let run = self
             .proofs
-            .proof_of(&key)
+            .proof_for(&key, own)
             .filter(|proof| proof.identity == ours)
             .map(|proof| proof.run)?;
         let newer = run > self.run && run > self.newest_own_run_seen;
@@ -2625,7 +2625,7 @@ impl EventLoopState {
             };
             let ours_here = key == self.identity.author_key();
             let admitted =
-                ours_here || ours.is_none() || self.proofs.proof_of(&key).is_some_and(proved);
+                ours_here || ours.is_none() || self.proofs.proof_for(&key, own).is_some_and(proved);
             if !admitted {
                 self.proofs.note_gate_refused();
             }

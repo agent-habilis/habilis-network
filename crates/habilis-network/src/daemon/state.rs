@@ -462,6 +462,62 @@ mod tests {
         );
     }
 
+    /// The proof of a session names the nickname that it proved. A session of our own member that proved `bob`
+    /// has no proof for our nickname `alice`: its frames under `alice` are not admitted on the proof for `bob`.
+    #[test]
+    fn a_proof_for_another_nickname_does_not_admit_a_session_under_our_nickname() {
+        let mut ours = fresh_state();
+        let mut session = fresh_state();
+        session.member_identity = ours.member_identity.clone();
+        let mesh = MeshId::from("💬test");
+        let (mine, other_name) = (nick("alice"), nick("bob"));
+        let for_bob: messages::Verified = session.own_joined(&mesh, &other_name);
+        assert!(
+            !ours.note_joined_proof(&for_bob, &mesh, &mine),
+            "a proof of our own member for another nickname is no error"
+        );
+        assert!(
+            ours.proofs
+                .proof_of(&session.identity.author_key())
+                .is_some(),
+            "the proof for bob is held"
+        );
+        let as_alice: messages::Verified = Message::new_alive(&mesh, &mine).sign(&session.identity);
+
+        assert!(
+            !ours.admits_session(&as_alice, &mine),
+            "the session that proved bob was admitted under our nickname on the proof for bob"
+        );
+    }
+
+    /// The same for the report of a newer run of our own member: a proof for another nickname with a higher
+    /// run does not show that a newer run of this member is active under our nickname.
+    #[test]
+    fn a_proof_for_another_nickname_is_no_newer_run_under_our_nickname() {
+        let mut ours = fresh_state();
+        let session = protocol::identity::Identity::generate();
+        let member = ours
+            .member_identity
+            .clone()
+            .expect("a test state has a member key");
+        let mesh = MeshId::from("💬test");
+        let (mine, other_name) = (nick("alice"), nick("bob"));
+        let proof = member.prove(&session.author_key(), "bob", mesh.as_ref(), 6);
+        let for_bob: messages::Verified =
+            Message::new_joined_with_proof(&mesh, &other_name, &proof).sign(&session);
+        assert!(
+            !ours.note_joined_proof(&for_bob, &mesh, &mine),
+            "a proof of our own member for another nickname is no error"
+        );
+        let as_alice: messages::Verified = Message::new_alive(&mesh, &mine).sign(&session);
+
+        assert_eq!(
+            ours.newer_run_of_our_member(&as_alice, &mine),
+            None,
+            "a proof for bob with a higher run was taken as a newer run of our member under our nickname"
+        );
+    }
+
     /// A nickname is a label that two live sessions can share. A request names one session, and only
     /// that session answers it: the other one holds the same nickname and stays silent.
     #[test]

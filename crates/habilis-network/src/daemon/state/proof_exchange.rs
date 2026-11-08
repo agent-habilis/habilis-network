@@ -414,6 +414,19 @@ impl ProofExchange {
     pub(crate) fn proof_of(&self, session: &AuthorKey) -> Option<&IdentityProof> {
         self.book.get(session).map(|(_, proof)| proof)
     }
+
+    /// The proof of `session` for `nickname`: none when the session proved another nickname. A proof signs
+    /// its nickname, so it says nothing about a frame that claims a different one.
+    pub(crate) fn proof_for(
+        &self,
+        session: &AuthorKey,
+        nickname: &Nickname,
+    ) -> Option<&IdentityProof> {
+        self.book
+            .get(session)
+            .filter(|(named, _)| named == nickname)
+            .map(|(_, proof)| proof)
+    }
 }
 
 #[cfg(test)]
