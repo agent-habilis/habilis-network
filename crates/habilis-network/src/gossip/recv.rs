@@ -2991,7 +2991,7 @@ mod first_contact_tests {
             );
             state
                 .proofs
-                .defer_ask(session.author_key(), clock::Instant::now());
+                .defer_ask(session.author_key(), &nick("alice"), clock::Instant::now());
 
             feed(Event::NeighborUp(endpoint), &mut state, &context).await;
 
@@ -3033,8 +3033,12 @@ mod first_contact_tests {
             let long_ago = now
                 .checked_sub(std_Duration::from_secs(31))
                 .expect("a clock that runs for more than 31 s");
-            state.proofs.defer_ask(with_path.author_key(), now);
-            state.proofs.defer_ask(expired.author_key(), long_ago);
+            state
+                .proofs
+                .defer_ask(with_path.author_key(), &nick("alice"), now);
+            state
+                .proofs
+                .defer_ask(expired.author_key(), &nick("bob"), long_ago);
             // the path to alice is up, and no event said so
             state.linked_endpoints.insert(endpoint_id(7));
 
@@ -6773,6 +6777,56 @@ mod dedup_counter_tests {
             ),
             (0, 1),
             "when the path is up the ask goes once, and nothing waits"
+        );
+    }
+
+    /// A session that the roster gate refuses (it claims a nickname that another member holds) is not in the
+    /// roster, so the roster has no name for it. Its ask waits for a path as any ask does, and it keeps the
+    /// nickname that the session claimed: when the path comes up the request goes, and does not die for want
+    /// of a roster entry. The restart of a member whose alive frame came before its address is this case.
+    #[test]
+    fn an_ask_for_a_refused_session_that_waited_goes_when_the_path_comes_up() {
+        use crate::protocol::messages::MessageBody;
+        use crate::protocol::peer_addr_error;
+
+        let bound = Identity::generate();
+        let session = Identity::generate();
+        let endpoint = endpoint_id(65);
+        let json = peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+        let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+        let peer_info =
+            Message::new_peer_info(&MeshId::from("test"), &nick("alice"), body).sign(&session);
+        let info = (
+            Plane::Gossip,
+            peer_info.serialize().expect("serialize").into_bytes(),
+        );
+        let frames = || vec![info.clone(), alive_of(&session, "alice")];
+
+        let before = reader_full(
+            state_with_bound_nickname(&bound, "alice"),
+            frames(),
+            &SilentSink,
+            None,
+        );
+        let after = reader_full(
+            state_with_bound_nickname(&bound, "alice"),
+            frames(),
+            &SilentSink,
+            Some(endpoint),
+        );
+
+        assert_eq!(
+            (
+                before.proofs.deferred_len(),
+                before.proof_requests_signed.load(Ordering::Relaxed)
+            ),
+            (1, 0),
+            "with no path the ask of the refused session waits, and nothing is signed"
+        );
+        assert_eq!(
+            after.proof_requests_signed.load(Ordering::Relaxed),
+            1,
+            "when the path is up the ask of the refused session goes once"
         );
     }
 

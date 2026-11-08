@@ -283,7 +283,7 @@ async fn send_proof_ask(
     // background. An address with neither costs a lookup, and no signature, however many frames come.
     if !(state.linked_endpoints.contains(&eid) || state.unicast_pool.has_warm(eid).await) {
         tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request skipped: no warm path");
-        state.proofs.defer_ask(*key, Instant::now());
+        state.proofs.defer_ask(*key, nickname, Instant::now());
         return;
     }
     #[cfg(test)]
@@ -352,7 +352,9 @@ mod ask_tests {
                 &nick(name),
                 EndpointAddr::new(endpoint),
             );
-            state.proofs.defer_ask(session.author_key(), Instant::now());
+            state
+                .proofs
+                .defer_ask(session.author_key(), &nick(name), Instant::now());
         }
 
         let from_x: Vec<AuthorKey> = state

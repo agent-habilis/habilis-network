@@ -39,6 +39,9 @@ fn retry_wait(tries: u8) -> Duration {
 /// A skipped ask: when it was first skipped, and when it was tried again last (none: not yet).
 #[derive(Debug, Clone)]
 struct DeferredAsk {
+    /// The nickname that the session claims. A session that the roster refused is not in the roster, so
+    /// the roster has no name for it; the retry reads the name here.
+    nickname: Nickname,
     since: Instant,
     tried: Option<Instant>,
 }
@@ -160,7 +163,7 @@ impl ProofExchange {
 
     /// The ask for `session` was skipped for lack of a warm path: it waits for one. A session that waits
     /// already keeps its first time, so the wait ends after `DEFERRED_ASK_TTL` whatever comes.
-    pub(crate) fn defer_ask(&mut self, session: AuthorKey, now: Instant) {
+    pub(crate) fn defer_ask(&mut self, session: AuthorKey, nickname: &Nickname, now: Instant) {
         if self.deferred.get(&session).is_some() {
             return;
         }
@@ -168,6 +171,7 @@ impl ProofExchange {
         self.deferred.insert_evicting(
             session,
             DeferredAsk {
+                nickname: nickname.clone(),
                 since: now,
                 tried: None,
             },
@@ -188,12 +192,19 @@ impl ProofExchange {
     /// The sessions whose ask waits and may be tried at `now`: the oldest first. The first try of a session
     /// is free, so the ask goes as soon as a path is up; after it, none that was tried less than
     /// `DEFERRED_ASK_GAP` ago. It marks nothing: the caller marks the ones that it tries.
-    pub(crate) fn deferred_due(&self, now: Instant) -> Vec<AuthorKey> {
-        self.deferred.keys_where(|waiting| {
+    pub(crate) fn deferred_due(&self, now: Instant) -> Vec<(AuthorKey, Nickname)> {
+        let due = self.deferred.keys_where(|waiting| {
             waiting
                 .tried
                 .is_none_or(|tried| now.saturating_duration_since(tried) >= DEFERRED_ASK_GAP)
-        })
+        });
+        let mut named = Vec::with_capacity(due.len());
+        for session in due {
+            if let Some(waiting) = self.deferred.get(&session) {
+                named.push((session, waiting.nickname.clone()));
+            }
+        }
+        named
     }
 
     /// The deferred ask of `session` is tried now.
@@ -482,11 +493,19 @@ mod tests {
             .collect();
 
         for session in &sessions {
-            book.defer_ask(*session, now);
+            book.defer_ask(
+                *session,
+                &Nickname::try_new("alice").expect("a nickname"),
+                now,
+            );
         }
 
         assert_eq!(book.deferred_len(), DEFERRED_ASKS_MAX, "the cap holds");
-        let waiting = book.deferred_due(now + DEFERRED_ASK_GAP);
+        let waiting: Vec<AuthorKey> = book
+            .deferred_due(now + DEFERRED_ASK_GAP)
+            .into_iter()
+            .map(|(session, _)| session)
+            .collect();
         assert!(
             waiting.contains(&sessions[639]) && !waiting.contains(&sessions[0]),
             "the newest waits and the oldest was dropped"
@@ -501,11 +520,12 @@ mod tests {
         let mut book = ProofExchange::with_cap(QUIET_CAP);
         let session = Identity::generate().author_key();
         let start = Instant::now();
-        book.defer_ask(session, start);
+        let alice = Nickname::try_new("alice").expect("a nickname");
+        book.defer_ask(session, &alice, start);
 
         assert_eq!(
             book.deferred_due(start),
-            vec![session],
+            vec![(session, alice.clone())],
             "the first try is free: the ask goes as soon as a path is up"
         );
         book.mark_deferred_tried(&session, start);
@@ -515,7 +535,7 @@ mod tests {
         );
         assert_eq!(
             book.deferred_due(start + DEFERRED_ASK_GAP),
-            vec![session],
+            vec![(session, alice)],
             "after the gap it is tried again"
         );
         book.expire_deferred(start + DEFERRED_ASK_TTL);

@@ -2457,15 +2457,15 @@ impl EventLoopState {
     ) -> Vec<(AuthorKey, Nickname)> {
         let now = Instant::now();
         let mut due = Vec::new();
-        for key in self.proofs.deferred_due(now) {
+        for (key, nickname) in self.proofs.deferred_due(now) {
             let at_endpoint = arrived.is_none_or(|endpoint| {
                 self.address_of(&key).map(|address| address.id) == Some(endpoint)
             });
-            match self.names.get(&key) {
-                Some(nickname) if at_endpoint => due.push((key, nickname.clone())),
-                Some(_) => {}
-                // a session that the roster forgot: its ask does not wait any more
-                None => self.proofs.undefer(&key),
+            // A session that the roster refused is not in `names`: its ask keeps the nickname that it
+            // claimed. A session that no roster entry or binding names any more is dropped by the ask
+            // itself (`asks_for_session`).
+            if at_endpoint {
+                due.push((key, nickname));
             }
         }
         for (key, _) in &due {
