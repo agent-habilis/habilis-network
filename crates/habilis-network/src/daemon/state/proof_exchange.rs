@@ -310,8 +310,9 @@ impl ProofExchange {
     }
 
     /// `may_ask` for a session that CLAIMS A BOUND NICKNAME (`claim`: a restart of the member that holds the
-    /// name, or an intruder). The first ask of such a session has a reserve of its own, outside the shared budget of
-    /// the first asks, and it is not refused because the map of counts is full of live counts (the oldest count goes):
+    /// name, or an intruder). The asks of such a session have a reserve of their own, outside the shared budgets, while
+    /// its endpoint is under its cap of 8, and they are not refused because the map of counts is full of live counts
+    /// (the ask goes out untracked, and no live count is dropped):
     /// an attacker that keeps many endpoints asking cannot starve the restart of a member that holds a name. The
     /// reserve is `FIRST_ASKS_BOUND` for each window and `ASKS_PER_BOUND_NICKNAME` for each nickname, and the asks
     /// that it allows count in the work in all.
@@ -330,16 +331,6 @@ impl ProofExchange {
             Some((start, count)) if in_window(*start) => (*start, *count),
             _ => (now, 0),
         };
-        if count == 0
-            && let Some(nickname) = claim
-            && self.take_bound_reserve(nickname, now)
-        {
-            self.ask_budget_all = Some((all_start, all_count + 1, all_first));
-            // every count reads as dead, so a full map drops its oldest count
-            self.ask_budget
-                .insert_evicting(endpoint, (start, 1), |_, _| false);
-            return true;
-        }
         // A count that is inside its window is never dropped to make room: an endpoint that used its asks would
         // get a second budget. A full map of live counts defers an endpoint that it does not track.
         let tracked = self.ask_budget.get(&endpoint).is_some();
@@ -348,6 +339,23 @@ impl ProofExchange {
                 .ask_budget
                 .iter()
                 .any(|(_, (counted_at, _))| !in_window(*counted_at));
+        // The reserve is for the SESSION that claims a bound nickname: any ask of it, while its endpoint is under its
+        // own cap (an embedder keeps one endpoint across starts, so a restart can come on an endpoint with a count).
+        // A full map of live counts leaves the ask untracked: it counts in the reserve and in the work in all.
+        if count < ASKS_PER_ENDPOINT
+            && let Some(nickname) = claim
+            && self.take_bound_reserve(nickname, now)
+        {
+            self.ask_budget_all = Some((all_start, all_count + 1, all_first));
+            if tracked || has_room {
+                self.ask_budget.insert_evicting(
+                    endpoint,
+                    (start, count + 1),
+                    |_, (counted_at, _)| in_window(*counted_at),
+                );
+            }
+            return true;
+        }
         if !tracked && !has_room {
             return false;
         }
@@ -1231,6 +1239,60 @@ mod tests {
         assert!(
             !book.may_ask_for(endpoint_of(1001), None, start),
             "an ask for a free nickname got into the reserve of the claims"
+        );
+    }
+
+    /// The reserve is for a SESSION that claims a bound nickname, not for the first ask of an endpoint: a restart that
+    /// comes on an endpoint that has a count in the window (an embedder keeps one endpoint across starts) is asked from
+    /// the reserve although the budget in all is used up.
+    #[test]
+    fn a_claim_from_an_endpoint_that_has_a_count_is_asked_from_the_reserve() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let alice = Nickname::try_new("alice").expect("a nickname");
+        assert!(
+            book.may_ask_for(endpoint_of(0), None, start),
+            "the first ask of the endpoint"
+        );
+        for index in 1..300u32 {
+            let _ = book.may_ask_for(endpoint_of(index), None, start);
+        }
+
+        assert!(
+            book.may_ask_for(endpoint_of(0), Some(&alice), start),
+            "a claim from an endpoint that has a count was deferred although the reserve was unused"
+        );
+    }
+
+    /// The reserve does not drop a count that is inside its window: with the map full of live counts the ask of a claim
+    /// goes out untracked, and an endpoint that used its 8 asks cannot get 8 more by a claim after the map dropped it.
+    #[test]
+    fn the_reserve_keeps_the_live_counts_of_the_endpoints() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let (alice, bob) = (
+            Nickname::try_new("alice").expect("a nickname"),
+            Nickname::try_new("bob").expect("a nickname"),
+        );
+        // A uses its 8 asks first, so it is the oldest count; 255 other endpoints fill the map with live counts
+        let used: usize = (0..ASKS_PER_ENDPOINT)
+            .filter(|_| book.may_ask_for(endpoint_of(0), None, start))
+            .count();
+        assert_eq!(used, ASKS_PER_ENDPOINT, "A uses its asks");
+        for index in 1..256u32 {
+            assert!(
+                book.may_ask_for(endpoint_of(index), None, start),
+                "a first ask"
+            );
+        }
+
+        assert!(
+            book.may_ask_for(endpoint_of(1000), Some(&alice), start),
+            "a claim from a new endpoint was refused although the reserve was unused"
+        );
+        assert!(
+            !book.may_ask_for(endpoint_of(0), Some(&bob), start),
+            "A got more asks by a claim after the reserve dropped its live count"
         );
     }
 
