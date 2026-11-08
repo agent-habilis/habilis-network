@@ -18,7 +18,7 @@ use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::{self, MembershipUpdate};
 use crate::protocol::messages::{
-    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log,
+    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log, sole_addressee,
 };
 use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
@@ -486,6 +486,15 @@ pub(crate) fn requeue_failed(
     message: Verified,
     bytes: WireFrame,
 ) {
+    // A send can fail after its recipient ended: a goodbye or a newer run of its member marks the key as
+    // departed, and drops the frames that waited for it. The frame of a late failure is not parked again for a
+    // session that never comes back. A frame for a key that is not known yet stays (it waits for the peer).
+    let departed =
+        sole_addressee(&message.kind).is_some_and(|recipient| state.key_said_goodbye(*recipient));
+    if departed {
+        tracing::debug!(target: "habilis_network::gossip", "a failed send to a session that ended is not buffered again");
+        return;
+    }
     if !requeue(state, context, message, bytes) {
         tracing::warn!(target: "habilis_network::gossip", "buffered outbound message undeliverable and the buffer is full; dropped");
     }
@@ -2830,6 +2839,37 @@ mod first_contact_tests {
                 node.endpoint.close().await;
             },
         );
+    }
+
+    /// A send that was in flight when a newer run replaced its recipient fails later, and the frame comes back to
+    /// the loop. The buffered frames for the replaced session were dropped at its end, so the frame must not be
+    /// parked again: it would wait for a session that never comes back, and be retried at each flush.
+    #[test]
+    fn a_late_failed_send_to_a_replaced_session_is_not_parked_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let replaced = test_key("replaced");
+            // a session that a newer run replaced is marked as departed, as a goodbye marks it
+            state.note_left(replaced);
+            let frame = Message::new_pong(
+                &node.mesh,
+                &node.author,
+                replaced,
+                &protocol::MessageId::random(),
+            )
+            .sign(&Identity::generate());
+            let bytes = frame.serialize().expect("serialize");
+
+            super::requeue_failed(&mut state, &context, frame, bytes);
+
+            assert!(
+                state.pending_outbound.take().is_empty(),
+                "a late failure parked the frame of a replaced session again"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// A directed frame names a key, so a nickname that two live peers use does not make it
