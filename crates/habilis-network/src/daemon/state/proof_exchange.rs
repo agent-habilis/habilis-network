@@ -29,6 +29,9 @@ const DEFERRED_ASKS_MAX: usize = 64;
 /// the attacker cannot sign them), and all the others (free nicknames: anyone can sign a proof of its own and put it
 /// in an old frame). Each class holds 32 at most, the oldest dropped when it is full.
 const PENDING_PROOFS_CLASS_MAX: usize = 32;
+/// The most pending proofs that one member has in the class of the holders: a member signs as many valid proofs as it
+/// likes for its own nickname, and one member must not push out the restart proof of another.
+const PENDING_PER_MEMBER: usize = 4;
 /// The proof requests that one endpoint gets, for each `ASK_BUDGET_WINDOW`. A peer that makes fresh session keys
 /// (they are free) sets off one ask for each key to its own endpoint: each ask is a signature and a task that
 /// holds a frame. The budget is checked before the request is signed.
@@ -424,19 +427,43 @@ impl ProofExchange {
                 .insert_evicting(session, (nickname.clone(), proof), |_, _| false);
             return;
         }
-        // The class of the holder keeps the HIGHEST runs: only the member signs its runs, so a replay of a logged
-        // run is always below the real newest one. A full class drops its lowest run, and refuses a run that is
-        // not above it.
-        if self.pending_held.len() >= PENDING_PROOFS_CLASS_MAX {
-            let lowest = self
+        // The class of the holder is kept for the RESTARTS of the members that hold a name, and a member signs as many
+        // valid proofs as it likes for its own name. So each member has a cap in it, `PENDING_PER_MEMBER`, and keeps
+        // its HIGHEST runs (only the member signs its runs, so a replay is always below its real newest one): a
+        // member over its cap replaces its own lowest run, or is refused if the run is not above it. A full class
+        // drops the lowest run of the member that has the most entries, so no member pushes out another.
+        let member = proof.identity;
+        let own: Vec<(AuthorKey, u64)> = self
+            .pending_held
+            .iter()
+            .filter(|(_, (_, kept))| kept.identity == member)
+            .map(|(held, (_, kept))| (*held, kept.run))
+            .collect();
+        let own_lowest: Option<(AuthorKey, u64)> = own.iter().min_by_key(|(_, run)| *run).copied();
+        if let Some((lowest, run)) = own_lowest
+            && own.len() >= PENDING_PER_MEMBER
+        {
+            if proof.run <= run {
+                return;
+            }
+            self.pending_held.remove(&lowest);
+        } else if self.pending_held.len() >= PENDING_PROOFS_CLASS_MAX {
+            let mut by_member: HashMap<PublicKey, usize> = HashMap::new();
+            for (_, (_, kept)) in self.pending_held.iter() {
+                *by_member.entry(kept.identity).or_default() += 1;
+            }
+            let fullest: Option<PublicKey> = by_member
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(fullest, _)| fullest);
+            let victim: Option<AuthorKey> = self
                 .pending_held
                 .iter()
+                .filter(|(_, (_, kept))| Some(kept.identity) == fullest)
                 .min_by_key(|(_, (_, kept))| kept.run)
-                .map(|(held, (_, kept))| (*held, kept.run));
-            match lowest {
-                Some((_, run)) if proof.run <= run => return,
-                Some((held, _)) => self.pending_held.remove(&held),
-                None => {}
+                .map(|(held, _)| *held);
+            if let Some(victim) = victim {
+                self.pending_held.remove(&victim);
             }
         }
         self.pending_held.insert(session, (nickname.clone(), proof));
@@ -748,7 +775,7 @@ mod tests {
     use super::{
         ASK_BUDGET_ENDPOINTS_MAX, ASK_BUDGET_WINDOW, ASKS_IN_ALL, ASKS_PER_ENDPOINT,
         DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EndpointId, FIRST_ASKS_IN_ALL,
-        PENDING_PROOFS_CLASS_MAX, ProofExchange, verify_proof,
+        PENDING_PER_MEMBER, PENDING_PROOFS_CLASS_MAX, ProofExchange, verify_proof,
     };
     use crate::protocol::identity::Identity;
     use crate::protocol::{AuthorKey, MeshId, Nickname};
@@ -826,66 +853,86 @@ mod tests {
     }
 
     /// The pending proofs (valid, inactive: the proofs of senders that are not live) are bounded, each class by its own
-    /// cap: fed 10 times the cap, a class holds the cap, the oldest is dropped and the newest is kept, and the other
-    /// class keeps its entries. They are not in the book, so nothing that reads the book sees them. A taken one is
-    /// gone.
+    /// cap: fed 10 times the cap, a class holds the cap, and the other class keeps its entries. In the class of the
+    /// holders no member has more than `PENDING_PER_MEMBER`, and each keeps its newest. They are not in the book, so
+    /// nothing that reads the book sees them. A taken one is gone.
     #[test]
     fn the_pending_proofs_stay_inside_their_cap_when_they_are_fed_10_times_the_cap() {
         let mut book = ProofExchange::with_cap(QUIET_CAP);
         let mesh = MeshId::from("test");
         let member = Identity::generate();
         let alice = Nickname::try_new("alice").expect("a nickname");
-        // the run of the first proof that `feed` signs: the runs rise by one, as the runs of a member do
-        let feed = |target: &mut ProofExchange, first_run: u64| -> Vec<AuthorKey> {
-            let sessions: Vec<AuthorKey> = (0..10 * PENDING_PROOFS_CLASS_MAX)
-                .map(|_| Identity::generate().author_key())
-                .collect();
-            for (run, session) in (first_run..).zip(&sessions) {
-                let proof = member.prove(session, "alice", mesh.as_ref(), run);
-                assert!(
-                    !target.accept_live(session, &alice, &mesh, proof, false, |_| true),
-                    "the proof of a sender that is not live was held active"
-                );
-            }
-            sessions
-        };
 
-        // no session of the member holds the name: the proofs go in the other class
-        let others = feed(&mut book, 1);
+        // no session of the member holds the name: the proofs go in the other class, oldest first
+        let others: Vec<AuthorKey> = (0..10 * PENDING_PROOFS_CLASS_MAX)
+            .map(|_| Identity::generate().author_key())
+            .collect();
+        for (run, session) in (1u64..).zip(&others) {
+            let proof = member.prove(session, "alice", mesh.as_ref(), run);
+            assert!(
+                !book.accept_live(session, &alice, &mesh, proof, false, |_| true),
+                "the proof of a sender that is not live was held active"
+            );
+        }
         assert_eq!(
             book.pending_len(),
             PENDING_PROOFS_CLASS_MAX,
             "the cap holds"
         );
-        // the member holds the name now: its proofs go in the class of the holder
-        let live = Identity::generate().author_key();
-        let held = member.prove(&live, "alice", mesh.as_ref(), 2);
-        assert!(
-            book.accept_live(&live, &alice, &mesh, held, true, |_| true),
-            "the live session of the member did not hold its proof"
-        );
-        // above the run of the holder: a past run of the member would go to the other class
-        let holders = feed(&mut book, 3);
+
+        // 10 members hold a name each (run 2); each is fed 10 times the cap of proofs above its run
+        let mut fed: Vec<Vec<AuthorKey>> = Vec::new();
+        for index in 0..10 {
+            let (holder, name) = (Identity::generate(), format!("holder{index}"));
+            let nickname = Nickname::try_new(&name).expect("a nickname");
+            let live = Identity::generate().author_key();
+            let held = holder.prove(&live, &name, mesh.as_ref(), 2);
+            assert!(
+                book.accept_live(&live, &nickname, &mesh, held, true, |_| true),
+                "the live session of {name} did not hold its proof"
+            );
+            let sessions: Vec<AuthorKey> = (0..10 * PENDING_PROOFS_CLASS_MAX)
+                .map(|_| Identity::generate().author_key())
+                .collect();
+            for (run, session) in (3u64..).zip(&sessions) {
+                let proof = holder.prove(session, &name, mesh.as_ref(), run);
+                assert!(
+                    !book.accept_live(session, &nickname, &mesh, proof, false, |_| true),
+                    "the proof of a sender that is not live was held active"
+                );
+            }
+            fed.push(sessions);
+        }
 
         assert_eq!(
             book.pending_len(),
             2 * PENDING_PROOFS_CLASS_MAX,
             "each class holds its own cap, and the other class kept its entries"
         );
-        for sessions in [&others, &holders] {
-            let (oldest, newest) = (&sessions[0], &sessions[sessions.len() - 1]);
+        let (oldest, newest) = (&others[0], &others[others.len() - 1]);
+        assert!(
+            !book.has_pending(oldest) && book.has_pending(newest),
+            "the oldest of the other class was dropped and the newest is kept"
+        );
+        for sessions in &fed {
+            let kept: usize = sessions
+                .iter()
+                .filter(|session| book.has_pending(session))
+                .count();
             assert!(
-                !book.has_pending(oldest) && book.has_pending(newest),
-                "the oldest was dropped and the newest is kept"
+                kept <= PENDING_PER_MEMBER && book.has_pending(&sessions[sessions.len() - 1]),
+                "a member holds {kept} pending proofs, and its newest is kept"
             );
         }
-        let newest = &holders[holders.len() - 1];
+        let holder_newest = &fed[0][fed[0].len() - 1];
         assert!(
-            book.proof_of(newest).is_none(),
+            book.proof_of(holder_newest).is_none(),
             "a pending proof is not in the book"
         );
+        let first_holder = Nickname::try_new("holder0").expect("a nickname");
         assert!(
-            book.take_pending(newest, &alice).is_some() && !book.has_pending(newest),
+            book.take_pending(holder_newest, &first_holder).is_some()
+                && !book.has_pending(holder_newest),
             "a taken pending proof is gone"
         );
     }
@@ -1004,8 +1051,55 @@ mod tests {
         );
     }
 
-    /// Inside the class of the holder, the HIGHEST runs are kept: the member alone signs its runs, so a replay of a
-    /// logged run is always below the real newest one, and a full class drops its lowest run, not its oldest entry.
+    /// A member that holds a nickname signs valid pending proofs for its own nickname with fresh session keys and
+    /// runs above its book run, and so can fill the class of the holders. One member must not push out the pending
+    /// proof of ANOTHER member: the class has a cap for each member.
+    #[test]
+    fn one_member_cannot_fill_the_class_of_the_holders_and_push_out_the_restart_of_another() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let mesh = MeshId::from("test");
+        let (victim, insider) = (Identity::generate(), Identity::generate());
+        let (alice, mallory) = (
+            Nickname::try_new("alice").expect("a nickname"),
+            Nickname::try_new("mallory").expect("a nickname"),
+        );
+        for (member, nickname, name, run) in [
+            (&victim, &alice, "alice", 3u64),
+            (&insider, &mallory, "mallory", 5),
+        ] {
+            let live = Identity::generate().author_key();
+            let held = member.prove(&live, name, mesh.as_ref(), run);
+            assert!(
+                book.accept_live(&live, nickname, &mesh, held, true, |_| true),
+                "the live session of {name} did not hold its proof"
+            );
+        }
+        let restart = Identity::generate().author_key();
+        let answer = victim.prove(&restart, "alice", mesh.as_ref(), 9);
+        assert!(
+            !book.accept_live(&restart, &alice, &mesh, answer, false, |_| true),
+            "the proof of a sender that is not live was held active"
+        );
+
+        for run in 6..66u64 {
+            let own = Identity::generate().author_key();
+            let proof = insider.prove(&own, "mallory", mesh.as_ref(), run);
+            book.accept_live(&own, &mallory, &mesh, proof, false, |_| true);
+        }
+
+        assert!(
+            book.has_pending(&restart),
+            "60 pending proofs of another member pushed out the restart of the victim"
+        );
+        assert!(
+            book.admits(&restart, &alice, |_| true),
+            "the session of the restart is not admitted"
+        );
+    }
+
+    /// Inside the class of the holder, the HIGHEST runs of a member are kept: the member alone signs its runs, so a
+    /// replay of a logged run is always below the real newest one, and a member over its cap drops its lowest run, not
+    /// its oldest entry.
     #[test]
     fn a_full_class_of_the_holder_keeps_the_highest_runs() {
         let mut book = ProofExchange::with_cap(QUIET_CAP);
@@ -1038,8 +1132,8 @@ mod tests {
         );
         assert_eq!(
             book.pending_len(),
-            PENDING_PROOFS_CLASS_MAX,
-            "the class of the holder holds its cap"
+            PENDING_PER_MEMBER,
+            "one member holds its cap in the class of the holders, and keeps its highest runs"
         );
     }
 
