@@ -11,9 +11,9 @@ use iroh::{EndpointId, PublicKey};
 /// The first retry waits 30 s, and each next one waits twice as long: 30 s, 60 s, 120 s.
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(30);
 const RETRIES: u8 = 3;
-/// After the fast retries a session is asked once per 10 minutes, 6 times at most.
+/// After the fast retries a session is asked once per 10 minutes, for as long as its entry lives: while the session
+/// stays visible and has no proof. The entry goes with the session, and the rate is bounded by the budgets.
 const SLOW_RETRY_WAIT: Duration = Duration::from_secs(600);
-const SLOW_RETRIES: u8 = 6;
 /// The asks of sessions that are not in the roster and claim one bound nickname: 4 open at most. A
 /// session that claims a bound nickname is asked for its proof, and a flood of forged keys under
 /// that nickname must replace its own asks and nobody else's.
@@ -424,15 +424,15 @@ impl ProofExchange {
     }
 
     /// An alive frame came from `session`. True means: send the session a proof request now. A
-    /// request that got no answer is sent again, with a doubling back-off (3 fast retries, then 6
-    /// slow ones). The caller tells [`Self::note_asked`] when the request went out.
+    /// request that got no answer is sent again, with a doubling back-off (3 fast retries, then one every 10
+    /// minutes for as long as the entry lives). The caller tells [`Self::note_asked`] when the request went out.
     pub(crate) fn wants_proof(&self, session: &AuthorKey, now: Instant) -> bool {
         if self.book.get(session).is_some() {
             return false;
         }
         self.asked
             .get(session)
-            .is_none_or(|retry| retry.tries <= RETRIES + SLOW_RETRIES && now >= retry.next_at)
+            .is_none_or(|retry| now >= retry.next_at)
     }
 
     /// The request for `session` went out at `now`: the retry clock of the session starts. `claimed`
@@ -441,8 +441,8 @@ impl ProofExchange {
     /// a session is in the roster. The book holds 1024 records: when it is full, the record of the
     /// oldest session that is not in the roster goes, so the retry clock of a session that is in it
     /// is not reset. Only when all 1024 are in the roster does the oldest record go, and that
-    /// session can be asked again, up to 9 more times: the limit of a mesh of more than 1024
-    /// sessions that send no proof.
+    /// session can be asked again at once: the limit of a mesh of more than 1024 sessions that send
+    /// no proof.
     pub(crate) fn note_asked(
         &mut self,
         session: &AuthorKey,
@@ -1182,10 +1182,11 @@ mod tests {
         );
     }
 
-    /// After the 3 fast retries a session is asked once per 10 minutes, 6 more times at most, so a
-    /// long time with no warm path does not lose the proof for good.
+    /// After the 3 fast retries a session is asked once per 10 minutes for as long as its entry lives (while the
+    /// session stays visible and has no proof), so a long time with no warm path does not lose the proof for good.
+    /// The ask is never sooner than 10 minutes after the one before.
     #[test]
-    fn a_slow_retry_follows_the_fast_ones_and_stops_after_six() {
+    fn a_slow_retry_follows_the_fast_ones_every_10_minutes_while_the_session_is_visible() {
         let session = Identity::generate().author_key();
         let mut joiner = ProofExchange::with_cap(QUIET_CAP);
         let start = Instant::now();
@@ -1202,15 +1203,18 @@ mod tests {
             "no slow retry before 10 minutes"
         );
         let mut last = 210;
-        for round in 1..=6 {
+        for round in 1..=30 {
             last += 600;
-            assert!(joiner.wants_proof(&session, at(last)), "slow retry {round}");
+            assert!(
+                !joiner.wants_proof(&session, at(last - 1)),
+                "slow retry {round} came before 10 minutes"
+            );
+            assert!(
+                joiner.wants_proof(&session, at(last)),
+                "slow retry {round} did not come: the asks stopped"
+            );
             joiner.note_asked(&session, at(last), None, |_| true);
         }
-        assert!(
-            !joiner.wants_proof(&session, at(last + 100_000)),
-            "no seventh slow retry"
-        );
     }
 
     /// The same proof comes again with each resent or re-announced `joined` frame. A copy of the
