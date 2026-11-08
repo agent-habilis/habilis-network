@@ -1298,7 +1298,7 @@ pub(crate) fn default_state_path(base: &Path, mesh: &MeshId, author: &Nickname) 
 
 /// The keys of this run, under the state path that [`keys_state_path`] gives. `mesh` is the mesh id and the
 /// nickname of this member.
-fn run_keys_for(
+async fn run_keys_for(
     state_file: Option<&Path>,
     runtime_base: Option<&Path>,
     keys_in_default_state: bool,
@@ -1313,10 +1313,36 @@ fn run_keys_for(
         author,
         keys_in_default_state,
     )?;
-    match key_lock {
+    run_keys_off_the_runtime(keys_path, key_lock).await
+}
+
+/// [`run_keys`] or [`run_keys_holding`], on a blocking worker: the wait for the run lock sleeps its thread, for
+/// 30 s at the most, and it must not stop the timers of a runtime that runs on one thread. A browser has no such
+/// worker (`spawn_blocking` needs `rt-multi-thread`), and a target with no files has no lock to wait for.
+#[cfg_attr(
+    not(feature = "host"),
+    expect(
+        clippy::unused_async,
+        reason = "a target with no blocking worker runs the keys inline, and keeps the signature"
+    )
+)]
+async fn run_keys_off_the_runtime(
+    keys_path: Option<PathBuf>,
+    // the lock is shared with every clone of the keys, and the last one to drop frees it
+    key_lock: Option<sync::Arc<File>>,
+) -> Result<RunKeys> {
+    let run = move || match key_lock {
         Some(held) => run_keys_holding(keys_path.as_deref(), Some(held)),
         // a new mesh has a random id, so its default state path cannot be held by another start
         None => run_keys(keys_path.as_deref()),
+    };
+    #[cfg(feature = "host")]
+    {
+        task::spawn_blocking(run).await?
+    }
+    #[cfg(not(feature = "host"))]
+    {
+        run()
     }
 }
 
@@ -1472,7 +1498,8 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         keys_in_default_state,
         (&mesh_id, &author),
         key_lock,
-    )?;
+    )
+    .await?;
     Ok(EventLoopConfig {
         mesh: MeshSpec {
             mesh: mesh_id,
@@ -2539,6 +2566,58 @@ mod tests {
         assert_eq!(first.run, 1, "the first start is run 1");
         assert_eq!(second.run, 2, "the second start is run 2");
         assert_eq!(named, Some(second.run), "the key file names the last run");
+    }
+
+    /// The wait for the run lock holds no thread of the runtime: while another start keeps the lock for 700 ms, a
+    /// ticker on the same current-thread runtime keeps running. A blocking sleep on the runtime thread (up to 30 s)
+    /// would stop every timer of a daemon that starts in the same process.
+    #[cfg(all(unix, feature = "host"))]
+    #[tokio::test]
+    async fn the_wait_for_the_run_lock_does_not_stop_the_runtime() {
+        use std::fs;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        use tokio::task;
+        let dir = TempDir::new("habilis-run-lock-runtime");
+        let state = dir.path().join("session.json");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        let holder: fs::File = options
+            .open(state.with_extension("run.lock"))
+            .expect("the file of the holder");
+        holder.lock().expect("the holder takes the lock");
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(700));
+            drop(holder);
+        });
+        // the test and the ticker task share the count
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticker = {
+            let ticks = Arc::clone(&ticks);
+            tokio::spawn(async move {
+                loop {
+                    time::sleep(Duration::from_millis(20)).await;
+                    ticks.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        // let the ticker start
+        task::yield_now().await;
+
+        let keys = super::run_keys_off_the_runtime(Some(state), None).await;
+
+        ticker.abort();
+        releaser.join().expect("the holder ends");
+        assert!(
+            keys.is_ok(),
+            "the start did not get the lock after the holder let go"
+        );
+        let seen = ticks.load(Ordering::Relaxed);
+        assert!(
+            seen >= 10,
+            "the wait for the run lock stopped the runtime: the ticker ran {seen} times in 700 ms"
+        );
     }
 
     /// A daemon that the CLI started with no state file keeps its member key and counts its run on, in the
