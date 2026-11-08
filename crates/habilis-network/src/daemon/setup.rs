@@ -692,7 +692,9 @@ fn open_trusted_key_file(key_path: &Path, options: &mut OpenOptions) -> io::Resu
     use rustix::process::geteuid;
     use std::io::{Error, ErrorKind};
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
-    let flags = i32::try_from(OFlags::NOFOLLOW.bits()).unwrap_or(0);
+    // `NONBLOCK`: a read-only open of a FIFO with no writer waits for one, and the file type is checked only
+    // after the open. A regular file ignores the flag.
+    let flags = i32::try_from((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits()).unwrap_or(0);
     let file: File = options
         .custom_flags(flags)
         .open(key_path)
@@ -1794,6 +1796,34 @@ mod tests {
         assert!(
             super::load_or_create_identity(Some(&state)).is_err(),
             "a link in place of the key file was followed"
+        );
+    }
+
+    /// A key path that is a FIFO with no writer must be refused, not waited for: a read-only open of such a
+    /// FIFO blocks until a writer comes, and the start would hang a worker of the runtime before the check of
+    /// the file type could run. The load runs on its own thread so that a hang fails the test and not the run.
+    #[test]
+    fn a_key_path_that_is_a_fifo_with_no_writer_is_refused_and_does_not_block() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = TempDir::new("habilis-key-fifo");
+        let state = dir.path().join("session.json");
+        let made: process::ExitStatus = process::Command::new("mkfifo")
+            .arg(state.with_extension("key"))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "a FIFO at the key path");
+        let (done, outcome) = mpsc::channel();
+        thread::spawn(move || {
+            let refused = super::load_or_create_identity(Some(&state)).is_err();
+            // the test has stopped waiting when this fails, and then nothing needs the answer
+            done.send(refused).expect("the test waits for the answer");
+        });
+        let refused = outcome.recv_timeout(Duration::from_secs(2));
+        assert_eq!(
+            refused,
+            Ok(true),
+            "the load of a FIFO key path did not end in an error within 2 s: {refused:?}"
         );
     }
 
