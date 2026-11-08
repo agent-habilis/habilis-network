@@ -80,7 +80,9 @@ fn take(doc: &mut MeshDoc, frame: &Verified, what: &str) {
 /// Ingest `frames` until the document refuses one, and say how many it took. A document that is
 /// full (over the line that refuses a write that adds) refuses what comes: the cost of the frames
 /// that it took is a measurement, and the refused ones are not. A document that takes no frame
-/// gives no measurement, so that case stops the run.
+/// gives no measurement, so that case stops the run. The time that a caller measures around this
+/// function includes the ONE refused ingest at the end (the function stops at it), so a caller
+/// names that in its output: see `refusal_note`.
 fn take_until_refused(doc: &mut MeshDoc, frames: &[Verified]) -> usize {
     let mut taken = 0;
     for frame in frames {
@@ -243,9 +245,23 @@ fn the_cost_of_a_replay_frame_and_of_a_burst() {
         let (same_taken, same_time, same_bytes) = measured(|| take_until_refused(&mut doc, &same));
         let (same_plain_taken, same_plain_time, same_plain_bytes) =
             measured(|| take_until_refused(&mut base, &same_plain));
+        let note = refusal_note(same_taken, same.len());
+        let plain_note = refusal_note(same_plain_taken, same_plain.len());
         eprintln!(
-            "COST leaves={leaves} same-leaf burst of 96 replay frames, {same_taken} taken: {same_time:?}/{same_bytes}B, the same as plain frames, {same_plain_taken} taken: {same_plain_time:?}/{same_plain_bytes}B"
+            "COST leaves={leaves} same-leaf burst of 96 replay frames, {same_taken} of {} taken ({note}): {same_time:?}/{same_bytes}B, the same as plain frames, {same_plain_taken} of {} taken ({plain_note}): {same_plain_time:?}/{same_plain_bytes}B",
+            same.len(),
+            same_plain.len()
         );
+    }
+}
+
+/// What the time of `take_until_refused` includes: with `taken` frames of `total`, a refusal ended the run
+/// when `taken` is less than `total`, and its one refused ingest is inside the time that was measured.
+fn refusal_note(taken: usize, total: usize) -> &'static str {
+    if taken < total {
+        "the time includes the one refused frame that ended the run"
+    } else {
+        "no frame was refused"
     }
 }
 
