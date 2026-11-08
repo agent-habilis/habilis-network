@@ -7,6 +7,7 @@ use std::fs::{File, OpenOptions};
 #[cfg(all(unix, feature = "host"))]
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{mem, sync};
 #[cfg(all(unix, feature = "host"))]
 use std::{time::Duration, time::Instant};
@@ -754,7 +755,7 @@ fn write_key_file(key_path: &Path, seed: &[u8], owner_start: u64) -> Result<()> 
 /// lost file when a member key exists, since peers hold runs above 1 for that member. No state file
 /// means run 1.
 #[cfg(all(unix, feature = "host"))]
-fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
+fn next_run(state: Option<&Path>, member_known: bool, cancel: &AtomicBool) -> Result<u64> {
     use std::io::ErrorKind;
     let Some(state) = state else {
         return Ok(1);
@@ -763,7 +764,7 @@ fn next_run(state: Option<&Path>, member_known: bool) -> Result<u64> {
     // The read of the counter and the write of the next one are one step: two starts of one state path
     // would otherwise read one count and publish one run. The lock is on a file of its own, because the
     // counter file is replaced by a rename; it is held until `run_lock` drops at the end of the call.
-    let run_lock = lock_run_counter(state)?;
+    let run_lock = lock_run_counter(state, cancel)?;
     let run = match read_run_file(&run_path) {
         Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_slice()) {
             Ok(last) => u64::from_le_bytes(last).saturating_add(1),
@@ -1057,14 +1058,19 @@ fn hold_member_key_once(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>
 /// shows a movement late, which the cap bounds. The wait is a sleep of this thread, because the caller is not async: it
 /// holds a worker for `KEY_LOCK_RETRY` when a holder does not let go. The lock goes with the returned file.
 #[cfg(all(unix, feature = "host"))]
-fn lock_run_counter(state: &Path) -> Result<File> {
-    lock_run_counter_within(state, KEY_LOCK_RETRY, RUN_LOCK_CAP)
+fn lock_run_counter(state: &Path, cancel: &AtomicBool) -> Result<File> {
+    lock_run_counter_within(state, KEY_LOCK_RETRY, RUN_LOCK_CAP, cancel)
 }
 
 /// [`lock_run_counter`] with its two bounds as parameters: `stall` is how long the counter may stand still while
 /// the lock is held by another start, and `cap` is the longest wait in all.
 #[cfg(all(unix, feature = "host"))]
-fn lock_run_counter_within(state: &Path, stall: Duration, cap: Duration) -> Result<File> {
+fn lock_run_counter_within(
+    state: &Path,
+    stall: Duration,
+    cap: Duration,
+    cancel: &AtomicBool,
+) -> Result<File> {
     use std::fs::{self, TryLockError};
     use std::os::unix::fs::OpenOptionsExt as _;
     use std::thread;
@@ -1090,6 +1096,12 @@ fn lock_run_counter_within(state: &Path, stall: Duration, cap: Duration) -> Resu
         match lock.try_lock() {
             Ok(()) => return Ok(lock),
             Err(TryLockError::WouldBlock) => {
+                if cancel.load(Ordering::Relaxed) {
+                    anyhow::bail!(
+                        "the start was cancelled while it waited for the run lock {}",
+                        lock_path.display()
+                    );
+                }
                 let now = Instant::now();
                 let latest = moved();
                 if latest != last_move {
@@ -1159,7 +1171,7 @@ fn counter_lost(state: &Path) -> u64 {
     clippy::unnecessary_wraps,
     reason = "the same signature as the file-backed version, so the caller is one call"
 )]
-fn next_run(_state: Option<&Path>, _member_known: bool) -> Result<u64> {
+fn next_run(_state: Option<&Path>, _member_known: bool, _cancel: &AtomicBool) -> Result<u64> {
     Ok(1)
 }
 
@@ -1316,6 +1328,22 @@ async fn run_keys_for(
     run_keys_off_the_runtime(keys_path, key_lock).await
 }
 
+/// The flag of a start that nobody cancels, for the tests of the run counter.
+#[cfg(test)]
+static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Sets its flag when it drops: the cancel signal of a worker that cannot be stopped from outside.
+struct CancelOnDrop(
+    // shared with the worker, which reads it at each step of its wait
+    sync::Arc<AtomicBool>,
+);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// [`run_keys`] or [`run_keys_holding`], on a blocking worker: the wait for the run lock sleeps its thread, for
 /// 30 s at the most, and it must not stop the timers of a runtime that runs on one thread. A browser has no such
 /// worker (`spawn_blocking` needs `rt-multi-thread`), and a target with no files has no lock to wait for.
@@ -1331,10 +1359,16 @@ async fn run_keys_off_the_runtime(
     // the lock is shared with every clone of the keys, and the last one to drop frees it
     key_lock: Option<sync::Arc<File>>,
 ) -> Result<RunKeys> {
+    // The worker cannot be stopped from outside: when this future is dropped (the setup was cancelled) the guard
+    // sets the flag, and the wait for the run lock ends at its next step and takes nothing.
+    // shared by the worker, which reads it, and the guard, which sets it
+    let cancel = sync::Arc::new(AtomicBool::new(false));
+    // the second handle, for the guard
+    let _cancel_on_drop = CancelOnDrop(sync::Arc::clone(&cancel));
     let run = move || match key_lock {
-        Some(held) => run_keys_holding(keys_path.as_deref(), Some(held)),
+        Some(held) => run_keys_holding(keys_path.as_deref(), Some(held), &cancel),
         // a new mesh has a random id, so its default state path cannot be held by another start
-        None => run_keys(keys_path.as_deref()),
+        None => run_keys(keys_path.as_deref(), &cancel),
     };
     #[cfg(feature = "host")]
     {
@@ -1369,14 +1403,18 @@ fn early_keys_state_path(
 /// The keys of this run. The member key comes from the state file. The session key is the one that
 /// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
 /// would start the same actor again at sequence 1.
-fn run_keys(state: Option<&Path>) -> Result<RunKeys> {
-    run_keys_holding(state, hold_member_key_once(state)?)
+fn run_keys(state: Option<&Path>, cancel: &AtomicBool) -> Result<RunKeys> {
+    run_keys_holding(state, hold_member_key_once(state)?, cancel)
 }
 
 /// [`run_keys`] for a start that holds the lock of the member key of `state` already: the setup takes it
 /// before it binds an endpoint, so a refused start leaves nothing behind.
-// the lock is shared with every clone of the keys, and the last one to drop frees it
-fn run_keys_holding(state: Option<&Path>, key_lock: Option<sync::Arc<File>>) -> Result<RunKeys> {
+fn run_keys_holding(
+    state: Option<&Path>,
+    // the lock is shared with every clone of the keys, and the last one to drop frees it
+    key_lock: Option<sync::Arc<File>>,
+    cancel: &AtomicBool,
+) -> Result<RunKeys> {
     // read before `member_key` makes the file: a member key that exists is from an earlier start
     let member_known = state.is_some_and(|state| state.with_extension("key").exists());
     Ok(RunKeys {
@@ -1384,7 +1422,7 @@ fn run_keys_holding(state: Option<&Path>, key_lock: Option<sync::Arc<File>>) -> 
         // shared with the loop and its handlers, which hold clones
         session: sync::Arc::new(identity::Identity::generate()),
         member: member_key(state)?,
-        run: next_run(state, member_known)?,
+        run: next_run(state, member_known, cancel)?,
         member_new: !member_known,
     })
 }
@@ -2001,7 +2039,7 @@ mod tests {
         let (run_state, run_target) = planted("run-lock");
         symlink(&run_target, run_state.with_extension("run.lock")).expect("a link at the run lock");
         assert!(
-            super::next_run(Some(&run_state), false).is_err(),
+            super::next_run(Some(&run_state), false, &super::NEVER_CANCELLED).is_err(),
             "the run lock was opened through a link"
         );
 
@@ -2009,7 +2047,7 @@ mod tests {
         symlink(&tmp_target, tmp_state.with_extension("run.tmp"))
             .expect("a link at the temporary file");
         assert!(
-            super::next_run(Some(&tmp_state), false).is_err(),
+            super::next_run(Some(&tmp_state), false, &super::NEVER_CANCELLED).is_err(),
             "the temporary run file was opened through a link"
         );
         assert_eq!(
@@ -2109,6 +2147,7 @@ mod tests {
                 &waiting,
                 Duration::from_secs(1),
                 Duration::from_secs(3),
+                &super::NEVER_CANCELLED,
             )
             .is_err();
             // the test has stopped waiting when this fails, and then nothing needs the answer
@@ -2166,6 +2205,7 @@ mod tests {
                 &waiting,
                 Duration::from_secs(1),
                 Duration::from_secs(30),
+                &super::NEVER_CANCELLED,
             )
             .is_err();
             // the test has stopped waiting when this fails, and then nothing needs the answer
@@ -2200,7 +2240,7 @@ mod tests {
         holder.lock().expect("the holder takes the lock");
         let (done, outcome) = mpsc::channel();
         thread::spawn(move || {
-            let refused = super::next_run(Some(&state), false).is_err();
+            let refused = super::next_run(Some(&state), false, &super::NEVER_CANCELLED).is_err();
             // the test has stopped waiting when this fails, and then nothing needs the answer
             done.send(refused).expect("the test waits for the answer");
         });
@@ -2263,12 +2303,12 @@ mod tests {
         let dir = TempDir::new("habilis-no-files");
         let state = dir.path().join("session.json");
         assert_eq!(
-            super::next_run(Some(&state), false).expect("run"),
+            super::next_run(Some(&state), false, &super::NEVER_CANCELLED).expect("run"),
             1,
             "the first start is run 1"
         );
         assert_eq!(
-            super::next_run(Some(&state), false).expect("run"),
+            super::next_run(Some(&state), false, &super::NEVER_CANCELLED).expect("run"),
             1,
             "with no counter file the second start is run 1 as well"
         );
@@ -2315,18 +2355,20 @@ mod tests {
         let dir = TempDir::new("habilis-run-number");
         let state = dir.path().join("session.json");
         let runs: Vec<u64> = (0..3)
-            .map(|_| super::next_run(Some(&state), false).expect("a run number"))
+            .map(|_| {
+                super::next_run(Some(&state), false, &super::NEVER_CANCELLED).expect("a run number")
+            })
             .collect();
         assert_eq!(runs, [1, 2, 3], "each start counts one more");
         let ahead: u64 = 4_000_000_000_000;
         fs::write(state.with_extension("run"), ahead.to_le_bytes()).expect("a counter ahead");
         assert_eq!(
-            super::next_run(Some(&state), false).expect("a run number"),
+            super::next_run(Some(&state), false, &super::NEVER_CANCELLED).expect("a run number"),
             ahead + 1,
             "a counter ahead of any clock still rises"
         );
         assert_eq!(
-            super::next_run(None, false).expect("no state file"),
+            super::next_run(None, false, &super::NEVER_CANCELLED).expect("no state file"),
             1,
             "no file means run 1"
         );
@@ -2488,7 +2530,10 @@ mod tests {
                 .map(|_| {
                     scope.spawn(|| {
                         let own: Vec<u64> = (0..rounds)
-                            .map(|_| super::next_run(Some(&state), false).expect("a run number"))
+                            .map(|_| {
+                                super::next_run(Some(&state), false, &super::NEVER_CANCELLED)
+                                    .expect("a run number")
+                            })
                             .collect();
                         own
                     })
@@ -2530,7 +2575,8 @@ mod tests {
         fs::write(&key, bytes).expect("a key file that names a last run");
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("a private mode");
 
-        let run = super::next_run(Some(&state), true).expect("a run number");
+        let run =
+            super::next_run(Some(&state), true, &super::NEVER_CANCELLED).expect("a run number");
 
         assert!(
             run > ahead_of_the_clock,
@@ -2554,8 +2600,10 @@ mod tests {
     fn each_start_records_its_run_in_the_key_file() {
         let dir = TempDir::new("habilis-run-recorded");
         let state = dir.path().join("session.json");
-        let first = ended(super::run_keys(Some(&state)).expect("the first start"));
-        let second = super::run_keys(Some(&state)).expect("the second start");
+        let first =
+            ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"));
+        let second =
+            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the second start");
 
         let bytes = fs::read(state.with_extension("key")).expect("the key file");
         let named = bytes
@@ -2620,6 +2668,36 @@ mod tests {
         );
     }
 
+    /// A setup that is cancelled while it waits for the run lock leaves nothing behind: the worker that waits stops
+    /// at its next step. Else it keeps the member key lock that it holds, and when the holder lets go it takes the run
+    /// lock and writes the run counter of a start that does not exist.
+    #[cfg(all(unix, feature = "host"))]
+    #[tokio::test]
+    async fn a_cancelled_wait_for_the_run_lock_writes_no_run_counter() {
+        use std::fs;
+        use std::time::Duration;
+        let dir = TempDir::new("habilis-run-lock-cancel");
+        let state = dir.path().join("session.json");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        let holder: fs::File = options
+            .open(state.with_extension("run.lock"))
+            .expect("the file of the holder");
+        holder.lock().expect("the holder takes the lock");
+        let start = tokio::spawn(super::run_keys_off_the_runtime(Some(state.clone()), None));
+        time::sleep(Duration::from_millis(150)).await;
+
+        start.abort();
+        time::sleep(Duration::from_millis(150)).await;
+        drop(holder);
+        time::sleep(Duration::from_millis(500)).await;
+
+        assert!(
+            !state.with_extension("run").exists(),
+            "the cancelled start took the run lock when the holder let go, and wrote a run counter"
+        );
+    }
+
     /// A daemon that the CLI started with no state file keeps its member key and counts its run on, in the
     /// default state path of its mesh, when the setup asks for it. Without the flag the keys stay ephemeral,
     /// and an explicit state file wins over the default.
@@ -2636,8 +2714,10 @@ mod tests {
             super::keys_state_path(state, Some(base), &mesh, &author, on).expect("a state path")
         };
         let default = path(None, true).expect("the flag asks for the default state path");
-        let first = ended(super::run_keys(Some(&default)).expect("the first start"));
-        let second = super::run_keys(Some(&default)).expect("the restart");
+        let first = ended(
+            super::run_keys(Some(&default), &super::NEVER_CANCELLED).expect("the first start"),
+        );
+        let second = super::run_keys(Some(&default), &super::NEVER_CANCELLED).expect("the restart");
 
         assert!(
             default.starts_with(base),
@@ -2730,7 +2810,8 @@ mod tests {
         let dir = TempDir::new("habilis-run-cut");
         let state = dir.path().join("session.json");
         fs::write(state.with_extension("run"), b"").expect("a cut short file");
-        let run = super::next_run(Some(&state), false).expect("a run number");
+        let run =
+            super::next_run(Some(&state), false, &super::NEVER_CANCELLED).expect("a run number");
         assert!(
             run > 1_000_000_000,
             "the run after a cut short file is {run}"
@@ -2764,8 +2845,11 @@ mod tests {
         );
         let dir = TempDir::new("habilis-run-deleted");
         let state = dir.path().join("session.json");
-        let first = ended(super::run_keys(Some(&state)).expect("the first start"));
-        let second = ended(super::run_keys(Some(&state)).expect("the second start"));
+        let first =
+            ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"));
+        let second = ended(
+            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the second start"),
+        );
         assert_eq!(
             (first.run, second.run),
             (1, 2),
@@ -2773,7 +2857,8 @@ mod tests {
         );
         fs::remove_file(state.with_extension("run")).expect("the run file is deleted");
 
-        let third = super::run_keys(Some(&state)).expect("the start after the deletion");
+        let third = super::run_keys(Some(&state), &super::NEVER_CANCELLED)
+            .expect("the start after the deletion");
 
         assert!(
             third.run > 1_000_000_000,
@@ -2787,7 +2872,8 @@ mod tests {
     fn a_first_start_with_no_files_counts_from_1() {
         let dir = TempDir::new("habilis-run-first");
         let state = dir.path().join("session.json");
-        let first = super::run_keys(Some(&state)).expect("the first start");
+        let first =
+            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start");
         assert_eq!(first.run, 1, "a new member starts at run 1");
     }
 
@@ -2806,12 +2892,12 @@ mod tests {
         let dir = TempDir::new("habilis-owner");
         let state = dir.path().join("session.json");
         let first = ended(super::bind_to_owner(
-            super::run_keys(Some(&state)).expect("first start"),
+            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
             Some(&state),
             Some(100),
         ));
         let restart = ended(super::bind_to_owner(
-            super::run_keys(Some(&state)).expect("restart"),
+            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart"),
             Some(&state),
             Some(100),
         ));
@@ -2823,7 +2909,8 @@ mod tests {
         assert_eq!(restart.run, 2, "and the run counter goes on");
 
         let reused_pid = ended(super::bind_to_owner(
-            super::run_keys(Some(&state)).expect("a start of another process"),
+            super::run_keys(Some(&state), &super::NEVER_CANCELLED)
+                .expect("a start of another process"),
             Some(&state),
             Some(200),
         ));
@@ -2834,7 +2921,7 @@ mod tests {
             "another owner start time is a new member"
         );
         assert_eq!(reused_pid.run, 1, "and its run counter starts again");
-        let next = super::run_keys(Some(&state)).expect("the start after");
+        let next = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the start after");
         assert_eq!(
             member_of(&reused_pid),
             member_of(&next),
@@ -2856,11 +2943,12 @@ mod tests {
         let dir = TempDir::new("habilis-owner-none");
         let state = dir.path().join("session.json");
         let made = ended(super::bind_to_owner(
-            super::run_keys(Some(&state)).expect("first start"),
+            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
             Some(&state),
             None,
         ));
-        let old = super::run_keys(Some(&state)).expect("a start with the pair of the first");
+        let old = super::run_keys(Some(&state), &super::NEVER_CANCELLED)
+            .expect("a start with the pair of the first");
         let checked = super::bind_to_owner(old.clone(), Some(&state), None);
 
         assert_eq!(made.run, 1, "a pair made by this start is kept");
@@ -2879,8 +2967,9 @@ mod tests {
         let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
         fs::create_dir_all(&dir).expect("a temp dir");
         let state = dir.join("session.json");
-        let first = ended(super::run_keys(Some(&state)).expect("first start"));
-        let second = super::run_keys(Some(&state)).expect("restart");
+        let first =
+            ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"));
+        let second = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart");
         assert_eq!(
             member_of(&first),
             member_of(&second),
@@ -2912,8 +3001,8 @@ mod tests {
         let dir = env::temp_dir().join(format!("habilis-key-lock-{}", process::id()));
         fs::create_dir_all(&dir).expect("a temp dir");
         let state = dir.join("held.json");
-        let first = super::run_keys(Some(&state)).expect("first start");
-        let refused = super::run_keys(Some(&state));
+        let first = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
+        let refused = super::run_keys(Some(&state), &super::NEVER_CANCELLED);
         let error = refused.expect_err("a second live start of one state path is refused");
         let text = format!("{error:#}");
         let key_file = state.with_extension("key").display().to_string();
@@ -2939,7 +3028,8 @@ mod tests {
             let dir = env::temp_dir().join(format!("habilis-key-lock-wait-{}", process::id()));
             fs::create_dir_all(&dir).expect("a temp dir");
             let state = dir.join("wait.json");
-            let holder = super::run_keys(Some(&state)).expect("first start");
+            let holder =
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
             let stopping = tokio::spawn(async move {
                 time::sleep(Duration::from_millis(300)).await;
                 drop(holder);
@@ -2971,7 +3061,7 @@ mod tests {
         let dir = env::temp_dir().join(format!("habilis-key-lock-child-{}", process::id()));
         fs::create_dir_all(&dir).expect("a temp dir");
         let state = dir.join("child.json");
-        let first = super::run_keys(Some(&state)).expect("first start");
+        let first = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
         let first_member = member_of(&first);
         // The child says that it runs: before its exec it still holds a copy of every descriptor of this
         // process, the lock file too, and a holder that is dropped in that gap leaves the lock held for it.
@@ -2985,7 +3075,7 @@ mod tests {
         BufRead::read_line(&mut BufReader::new(pipe), &mut ready)
             .expect("the child says that it runs");
         drop(first);
-        let second = super::run_keys(Some(&state));
+        let second = super::run_keys(Some(&state), &super::NEVER_CANCELLED);
         child.kill().expect("the child is stopped");
         child.wait().expect("the child is reaped");
         let second = second.expect("the child does not keep the lock");
@@ -3020,8 +3110,14 @@ mod tests {
             let (wire, _plain) = doc.compose_wire_body(&change, None).expect("wire body");
             Message::new_channel_event(&mesh, &author, wire, Channel::State).sign(&keys.session)
         };
-        let before = write(&super::run_keys(Some(&state)).expect("first start"), 1);
-        let after = write(&super::run_keys(Some(&state)).expect("restart"), 2);
+        let before = write(
+            &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
+            1,
+        );
+        let after = write(
+            &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart"),
+            2,
+        );
         let mut replica = MeshDoc::new_ungated();
         assert!(
             matches!(replica.ingest(&before), Ingested::Applied { .. }),
