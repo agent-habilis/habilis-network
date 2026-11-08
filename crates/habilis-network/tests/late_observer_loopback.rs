@@ -142,19 +142,14 @@ fn an_observer_that_joins_with_the_two_members_holds_one_holder_ten_seconds_late
         let observer = join_as(&mesh, "carol").await;
         time::sleep(Duration::from_secs(10)).await;
 
-        let started = Instant::now();
-        while rows_named(&observer, "alice").await == 0 {
-            assert!(
-                started.elapsed() < Duration::from_secs(90),
-                "the observer never saw the holder of alice"
-            );
-            time::sleep(Duration::from_secs(1)).await;
-        }
         let rows = rows_named(&observer, "alice").await;
         eprintln!("TOGETHER rows after ten seconds: {rows}");
         for member in [observer, second, first, creator] {
             let _ = member.node.leave().await;
         }
-        assert_eq!(rows, 1, "the observer holds two members under one nickname");
+        assert_eq!(
+            rows, 1,
+            "the observer holds {rows} rows under one nickname ten seconds after it joined, and it must hold one"
+        );
     });
 }

@@ -186,6 +186,9 @@ fn proof_bytes(session: &AuthorKey, nickname: &str, mesh: &str, run: u64) -> Vec
 
 impl Identity {
     /// Prove that `session` speaks as `nickname` on `mesh`, in run `run`.
+    ///
+    /// # Panics
+    /// If `nickname` or `mesh` is longer than `u32::MAX` bytes: a nickname and a mesh id are far below it.
     #[must_use]
     pub fn prove(
         &self,
@@ -203,6 +206,9 @@ impl Identity {
 }
 
 /// Whether `proof` is the identity's proof of `session` as `nickname` on `mesh`, for its run.
+///
+/// # Panics
+/// If `nickname` or `mesh` is longer than `u32::MAX` bytes: a nickname and a mesh id are far below it.
 #[must_use]
 pub fn verify_proof(
     proof: &IdentityProof,
