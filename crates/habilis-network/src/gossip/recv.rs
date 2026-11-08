@@ -6089,7 +6089,30 @@ mod dedup_counter_tests {
         sink: &dyn NodeSink,
         path_up: Option<lifecycle::PathSign>,
     ) -> EventLoopState {
+        reader_run(initial, arrivals, sink, path_up, &[])
+    }
+
+    /// [`reader_with_sink`] for a test whose subject is a WARN: each `(target, text)` is expected from the run.
+    fn reader_expecting(
+        initial: EventLoopState,
+        arrivals: Vec<(Plane, Bytes)>,
+        sink: &dyn NodeSink,
+        expected: &[(&str, &str)],
+    ) -> EventLoopState {
+        reader_run(initial, arrivals, sink, None, expected)
+    }
+
+    fn reader_run(
+        initial: EventLoopState,
+        arrivals: Vec<(Plane, Bytes)>,
+        sink: &dyn NodeSink,
+        path_up: Option<lifecycle::PathSign>,
+        expected: &[(&str, &str)],
+    ) -> EventLoopState {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            for (target, text) in expected {
+                ::habilis_network_test_tracing::expect_warn(target, text);
+            }
             let mesh = MeshId::from("test");
             let endpoint = iroh::Endpoint::builder(presets::Minimal)
                 .bind()
@@ -6436,6 +6459,65 @@ mod dedup_counter_tests {
             reader.peers.contains(&old_run.identity.author_key()),
             "a session that our member key proved is a peer"
         );
+    }
+
+    /// A sink that counts the lines that say that our nickname is held by another member.
+    #[derive(Default)]
+    struct HeldLines(Mutex<usize>);
+
+    impl NodeSink for HeldLines {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::Error(text) = event
+                && text.contains("is held by another member")
+            {
+                *self.0.lock().expect("the count lock is not poisoned") += 1;
+            }
+        }
+    }
+
+    /// The claimant of a nickname must learn that another member holds it, once, whatever the order of the
+    /// frames of that member: its alive frame (refused under our nickname), its `joined` frame with the proof,
+    /// the same `joined` frame again (a duplicate), and an old copy of a `joined` frame with the same proof
+    /// (stamped 3 days ago, a different frame). Every order of the four gives exactly one line.
+    #[test]
+    fn the_claimant_of_a_nickname_is_told_once_whatever_the_order_of_the_frames_of_the_other_member()
+     {
+        let (member, session) = (Identity::generate(), Identity::generate());
+        let alive = alive_of(&session, "reader");
+        let joined = joined_of(&session, &member, "reader", 1);
+        let old = old_joined_of(&session, &member, "reader", 3 * 86_400);
+        let frames = [alive, joined.clone(), joined, old];
+        let mut orders = 0_usize;
+        for first in 0..4 {
+            for second in (0..4).filter(|index| *index != first) {
+                for third in (0..4).filter(|index| *index != first && *index != second) {
+                    let fourth = 6 - first - second - third;
+                    let arrivals: Vec<(Plane, Bytes)> = [first, second, third, fourth]
+                        .iter()
+                        .map(|index| frames[*index].clone())
+                        .collect();
+                    let lines = HeldLines::default();
+
+                    reader_expecting(
+                        fresh_state(),
+                        arrivals,
+                        &lines,
+                        &[(
+                            "habilis_network::lifecycle",
+                            "our nickname is held by another member",
+                        )],
+                    );
+
+                    let told = *lines.0.lock().expect("the count lock is not poisoned");
+                    assert_eq!(
+                        told, 1,
+                        "the order {first}, {second}, {third}, {fourth} gave {told} lines that our nickname is held"
+                    );
+                    orders += 1;
+                }
+            }
+        }
+        assert_eq!(orders, 24, "every order of the four frames was tried");
     }
 
     /// A session that our own member key proved under our nickname is a peer only when its run is not older
