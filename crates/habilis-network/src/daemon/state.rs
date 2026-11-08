@@ -1674,7 +1674,8 @@ mod tests {
     }
 
     /// The endpoints that sync code released wait for the teardown of the pool in a bounded list: fed 10 times its
-    /// cap of endpoints, it holds the cap, and the oldest are dropped (their pool state goes with the idle sweep).
+    /// cap of endpoints, it holds the cap (the first ones), and the others wait in the orphan set, where the sweep
+    /// queues them again after the drain: none is dropped.
     #[test]
     fn the_endpoints_that_wait_for_the_teardown_stay_inside_their_cap_at_10_times_the_cap() {
         let mut state = fresh_state();
@@ -1694,8 +1695,13 @@ mod tests {
         let waiting = state.take_teardown_pending();
         assert_eq!(waiting.len(), cap, "the list holds its cap");
         assert!(
-            waiting.contains(&endpoints[endpoints.len() - 1]) && !waiting.contains(&endpoints[0]),
-            "the newest is kept and the oldest was dropped"
+            waiting.contains(&endpoints[0]) && !waiting.contains(&endpoints[endpoints.len() - 1]),
+            "the first endpoints are queued and the last one waits"
+        );
+        assert_eq!(
+            state.orphaned_endpoints.len(),
+            endpoints.len() - cap,
+            "the endpoints that found the list full wait in the orphan set"
         );
         assert!(
             state.take_teardown_pending().is_empty(),

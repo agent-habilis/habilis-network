@@ -407,8 +407,8 @@ pub struct EventLoopState {
     /// its endpoint state with it.
     pub(crate) refused_endpoints: HashMap<AuthorKey, EndpointAddr>,
     /// The endpoints that sync code released, waiting for the teardown of the pool (its pooled connection and its
-    /// dial cooldown), which the loop does where it can be async: `TEARDOWN_PENDING_MAX` at most, the oldest is
-    /// dropped when full (its pool state then goes with the idle sweep, as before).
+    /// dial cooldown), which the loop does where it can be async: `TEARDOWN_PENDING_MAX` at most. An endpoint that
+    /// finds it full waits in `orphaned_endpoints` and is queued again by the next sweep.
     teardown_pending: BoundedFifoSet<EndpointId>,
     /// The keys of `refused_endpoints` in the order that they were retained, oldest first. It may hold a key
     /// that left the map; it is cut to the keys of the map when it grows past twice the cap.
@@ -1424,8 +1424,16 @@ impl EventLoopState {
         // Sync code released it (the heartbeat prune, the capacity drop of the retained endpoints) and cannot call
         // the async pool: the loop closes its pooled connection and its cooldown later (`take_teardown_pending`).
         // Only here, when nothing links the endpoint any more: a linked one keeps its pool and its multihop origin
-        // until its link ends (`drop_orphaned_endpoint_state`).
-        self.teardown_pending.insert(endpoint);
+        // until its link ends (`drop_orphaned_endpoint_state`). A full queue does not drop the endpoint: it waits in
+        // the orphan set, and the sweep that follows the drain queues it again. The set holds at most the endpoints
+        // that the maps of the hints and of the retained endpoints could release, which are capped.
+        if self.teardown_pending.len() >= TEARDOWN_PENDING_MAX
+            && !self.teardown_pending.contains(&endpoint)
+        {
+            self.orphaned_endpoints.insert(endpoint);
+        } else {
+            self.teardown_pending.insert(endpoint);
+        }
     }
 
     /// Drop everything the roster keeps about `key`, which left: its place in the roster, its

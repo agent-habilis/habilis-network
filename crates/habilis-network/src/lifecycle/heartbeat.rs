@@ -478,6 +478,42 @@ mod tests {
         });
     }
 
+    /// More endpoints are released at once than the queue of the teardown holds (256): the others are not lost. They
+    /// wait in the orphan set, and the sweep that follows the drain queues them again, so every released endpoint
+    /// gets its teardown.
+    #[test]
+    fn a_release_of_more_endpoints_than_the_queue_holds_loses_none_of_them() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let released: Vec<iroh::EndpointId> = (0..300u32)
+                .map(|index| {
+                    let mut bytes = [9u8; 32];
+                    bytes[..4].copy_from_slice(&index.to_le_bytes());
+                    iroh::SecretKey::from_bytes(&bytes).public()
+                })
+                .collect();
+            for endpoint in &released {
+                state.unicast_pool.note_dial_failure(*endpoint).await;
+                state.release_unbound_endpoint(*endpoint);
+            }
+
+            lifecycle::end_pending_endpoints(&mut state).await;
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+
+            let mut still_cooling = 0usize;
+            for endpoint in &released {
+                still_cooling += usize::from(state.unicast_pool.is_cooling(*endpoint).await);
+            }
+            assert_eq!(
+                still_cooling, 0,
+                "{still_cooling} of 300 released endpoints never got their teardown: the queue dropped them"
+            );
+        });
+    }
+
     /// The key that held the hint of a nickname crashes: no `Left`, only silence. The sweep moves
     /// it to quiet, so the nickname has one live key left, and the endpoint that this key had
     /// retained becomes the hint at once. Else a send to the survivor finds a stale hint and
