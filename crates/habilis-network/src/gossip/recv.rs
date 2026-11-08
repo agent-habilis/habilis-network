@@ -7409,6 +7409,79 @@ mod dedup_counter_tests {
         );
     }
 
+    /// A peer that makes fresh session keys (they are free) sets off one ask for each key to its own endpoint. The
+    /// proof requests have a budget before they are signed: 8 for each endpoint in a window. The asks over the
+    /// budget wait in the map of the deferred asks (the same map), and another endpoint is not starved.
+    #[test]
+    fn twenty_fresh_sessions_at_one_endpoint_sign_the_budget_of_that_endpoint_and_no_more() {
+        let (flooder, calm) = (endpoint_id(70), endpoint_id(71));
+        let mut initial = fresh_state();
+        initial.linked_endpoints.insert(flooder);
+        initial.linked_endpoints.insert(calm);
+        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        for (count, endpoint, prefix) in [(20, flooder, "flood"), (3, calm, "calm")] {
+            for index in 0..count {
+                let session = Identity::generate();
+                let name = format!("{prefix}-{index}");
+                initial.peers.insert(session.author_key());
+                initial.names.insert(session.author_key(), nick(&name));
+                initial.place_endpoint(
+                    session.author_key(),
+                    &nick(&name),
+                    iroh::EndpointAddr::new(endpoint),
+                );
+                arrivals.push(alive_of(&session, &name));
+            }
+        }
+
+        let reader = reader_with(initial, arrivals);
+
+        assert_eq!(
+            reader.proof_requests_signed.load(Ordering::Relaxed),
+            8 + 3,
+            "20 fresh sessions at one endpoint signed more than its budget of 8, or another endpoint was starved"
+        );
+        assert_eq!(
+            reader.proofs.deferred_len(),
+            12,
+            "the asks over the budget wait in the map of the deferred asks"
+        );
+    }
+
+    /// The budget in all: 80 endpoints with one fresh session each sign 64 requests in a window, and the other 16
+    /// asks wait in the map of the deferred asks.
+    #[test]
+    fn eighty_endpoints_with_one_fresh_session_each_sign_the_budget_in_all_and_no_more() {
+        let mut initial = fresh_state();
+        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        for index in 0..80u8 {
+            let (session, endpoint) = (Identity::generate(), endpoint_id(100 + index));
+            let name = format!("spread-{index}");
+            initial.linked_endpoints.insert(endpoint);
+            initial.peers.insert(session.author_key());
+            initial.names.insert(session.author_key(), nick(&name));
+            initial.place_endpoint(
+                session.author_key(),
+                &nick(&name),
+                iroh::EndpointAddr::new(endpoint),
+            );
+            arrivals.push(alive_of(&session, &name));
+        }
+
+        let reader = reader_with(initial, arrivals);
+
+        assert_eq!(
+            reader.proof_requests_signed.load(Ordering::Relaxed),
+            64,
+            "80 endpoints signed more than the budget of the node in one window"
+        );
+        assert_eq!(
+            reader.proofs.deferred_len(),
+            16,
+            "the asks over the budget wait in the map of the deferred asks"
+        );
+    }
+
     /// A `joined` frame whose proof is refused for a held nickname, as the verified frame and its bytes.
     fn proof_frame_of(
         session: &Identity,

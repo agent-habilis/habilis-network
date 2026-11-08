@@ -6,7 +6,7 @@ use crate::protocol::identity::{IdentityProof, verify_proof};
 use crate::protocol::{AuthorKey, MeshId, Nickname};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::clock::Instant;
-use iroh::PublicKey;
+use iroh::{EndpointId, PublicKey};
 
 /// The first retry waits 30 s, and each next one waits twice as long: 30 s, 60 s, 120 s.
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(30);
@@ -25,6 +25,17 @@ const DEFERRED_ASKS_MAX: usize = 64;
 /// session waits until they enter it: 64 at most. At the cap the oldest drops, and the sessions that it would
 /// have ended stay until the sweep of their own silence.
 const EVICTIONS_WAITING_MAX: usize = 64;
+/// The proof requests that one endpoint gets, for each `ASK_BUDGET_WINDOW`. A peer that makes fresh session keys
+/// (they are free) sets off one ask for each key to its own endpoint: each ask is a signature and a task that
+/// holds a frame. The budget is checked before the request is signed.
+const ASKS_PER_ENDPOINT: usize = 8;
+/// The proof requests that this node sends, for each `ASK_BUDGET_WINDOW`, in all.
+const ASKS_IN_ALL: usize = 64;
+/// The window of the budget of the proof requests.
+const ASK_BUDGET_WINDOW: Duration = Duration::from_secs(10);
+/// The endpoints that have a count in the budget: 256 at most, the oldest dropped when full (its count starts
+/// again, and the global budget still bounds the node).
+const ASK_BUDGET_ENDPOINTS_MAX: usize = 256;
 /// How long a skipped ask waits for a warm path before the alive cycle takes over.
 const DEFERRED_ASK_TTL: Duration = Duration::from_secs(30);
 /// The least time between two tries of one deferred ask, so a flood of frames from one endpoint makes at most one
@@ -90,6 +101,11 @@ pub(crate) struct ProofExchange {
     // the sessions that hold a proof and are not in the roster yet: `EVICTIONS_WAITING_MAX` at most, the
     // oldest dropped when full
     waiting_to_evict: BoundedFifoSet<AuthorKey>,
+    // the proof requests sent to each endpoint in the window: when it started, and how many;
+    // `ASK_BUDGET_ENDPOINTS_MAX` endpoints at most, the oldest dropped when full
+    ask_budget: ProofBook<EndpointId, (Instant, usize)>,
+    // the proof requests sent in all in the window: when it started, and how many
+    ask_budget_all: Option<(Instant, usize)>,
     ties_refused: u64,
     bound_refused: u64,
     gate_refused: u64,
@@ -105,6 +121,8 @@ impl ProofExchange {
             evicted: Vec::new(),
             deferred: ProofBook::with_cap(DEFERRED_ASKS_MAX),
             waiting_to_evict: BoundedFifoSet::new(EVICTIONS_WAITING_MAX),
+            ask_budget: ProofBook::with_cap(ASK_BUDGET_ENDPOINTS_MAX),
+            ask_budget_all: None,
             ties_refused: 0,
             bound_refused: 0,
             gate_refused: 0,
@@ -248,6 +266,36 @@ impl ProofExchange {
     /// Mark `sessions` for the end: a proof bound their nickname to another member.
     pub(crate) fn evict(&mut self, sessions: impl IntoIterator<Item = AuthorKey>) {
         self.evicted.extend(sessions);
+    }
+
+    /// Whether one more proof request may go to `endpoint` at `now`, and the request is counted when it may.
+    /// The caller asks BEFORE it signs the request. An ask that may not go waits in the map of the deferred
+    /// asks, and goes when the window has moved.
+    pub(crate) fn may_ask(&mut self, endpoint: EndpointId, now: Instant) -> bool {
+        let in_window = |start: Instant| now.saturating_duration_since(start) < ASK_BUDGET_WINDOW;
+        let (all_start, all_count) = match self.ask_budget_all {
+            Some((start, count)) if in_window(start) => (start, count),
+            _ => (now, 0),
+        };
+        let (start, count) = match self.ask_budget.get(&endpoint) {
+            Some((start, count)) if in_window(*start) => (*start, *count),
+            _ => (now, 0),
+        };
+        if all_count >= ASKS_IN_ALL || count >= ASKS_PER_ENDPOINT {
+            self.ask_budget_all = Some((all_start, all_count));
+            return false;
+        }
+        self.ask_budget_all = Some((all_start, all_count + 1));
+        // every count reads as dead, so a full map drops the oldest endpoint
+        self.ask_budget
+            .insert_evicting(endpoint, (start, count + 1), |_, _| false);
+        true
+    }
+
+    /// How many endpoints have a count in the budget of the proof requests.
+    #[cfg(test)]
+    pub(crate) fn ask_budget_endpoints(&self) -> usize {
+        self.ask_budget.len()
     }
 
     /// The proof of `session` is held, and `session` is not in the roster: the sessions of other members under
@@ -492,14 +540,23 @@ impl ProofExchange {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EVICTIONS_WAITING_MAX,
+        ASK_BUDGET_ENDPOINTS_MAX, ASK_BUDGET_WINDOW, ASKS_IN_ALL, ASKS_PER_ENDPOINT,
+        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EVICTIONS_WAITING_MAX, EndpointId,
         ProofExchange, verify_proof,
     };
     use crate::protocol::identity::Identity;
     use crate::protocol::{AuthorKey, MeshId, Nickname};
     use crate::util::clock::Instant;
     use crate::util::tuning::QUIET_CAP;
+    use iroh::SecretKey;
     use std::time::Duration;
+
+    /// The endpoint id of `index`: as many distinct ids as a test needs.
+    fn endpoint_of(index: u32) -> EndpointId {
+        let mut bytes = [1u8; 32];
+        bytes[..4].copy_from_slice(&index.to_le_bytes());
+        SecretKey::from_bytes(&bytes).public()
+    }
 
     /// A proof of a nickname that another member holds is refused at the binding, before its signature is
     /// read: a replayed copy of a refused frame costs a lookup. A proof whose signature is not valid
@@ -588,6 +645,51 @@ mod tests {
         assert!(
             book.take_waiting_to_evict(newest) && !book.is_waiting_to_evict(newest),
             "a session that is taken no longer waits"
+        );
+    }
+
+    /// The proof requests are budgeted before they are signed: 8 for each endpoint and 64 in all, for each window
+    /// of 10 s. An endpoint that uses its budget does not starve another one, and a window that has moved starts
+    /// the counts again.
+    #[test]
+    fn the_proof_requests_have_a_budget_for_each_endpoint_and_in_all() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let (first, second) = (endpoint_of(1), endpoint_of(2));
+
+        let allowed_first = (0..20).filter(|_| book.may_ask(first, start)).count();
+        let allowed_second = (0..3).filter(|_| book.may_ask(second, start)).count();
+
+        assert_eq!(
+            allowed_first, ASKS_PER_ENDPOINT,
+            "the budget of one endpoint"
+        );
+        assert_eq!(
+            allowed_second, 3,
+            "another endpoint is not starved by the first"
+        );
+        assert!(
+            book.may_ask(first, start + ASK_BUDGET_WINDOW),
+            "a window that has moved starts the count again"
+        );
+    }
+
+    /// The budget in all holds at 64 for the window, whatever the number of endpoints, and its map of endpoints is
+    /// bounded: fed 10 times its cap of endpoints, it holds the cap at most.
+    #[test]
+    fn the_budget_of_the_proof_requests_stays_inside_its_bounds_at_10_times_the_cap() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let endpoints = 10 * ASK_BUDGET_ENDPOINTS_MAX;
+
+        let allowed: usize = (0..endpoints)
+            .filter(|index| book.may_ask(endpoint_of(u32::try_from(*index).unwrap_or(0)), start))
+            .count();
+
+        assert_eq!(allowed, ASKS_IN_ALL, "the budget in all for one window");
+        assert!(
+            book.ask_budget_endpoints() <= ASK_BUDGET_ENDPOINTS_MAX,
+            "the map of the endpoints holds more than its cap"
         );
     }
 
