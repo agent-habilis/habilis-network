@@ -864,11 +864,39 @@ fn hold_member_key_once(state: Option<&Path>) -> Result<Option<sync::Arc<File>>>
     }
 }
 
+/// Refuse a state folder that others can write and that has no sticky bit. The member key, the run counter
+/// and the lock live in that folder, and a user who can write it can unlink or rename them while they are
+/// held: a second start then reads the same member key at a higher run, and peers replace the first session.
+/// The sticky bit (as on `/tmp`) stops other users from unlinking or renaming files that they do not own, so
+/// that folder is accepted. A folder that only the group can write is accepted too: on many systems the group
+/// of a user holds that user alone, and the check is for the others. A folder that cannot be read is left
+/// to the open of the lock file, which names it.
+#[cfg(all(unix, feature = "host"))]
+fn refuse_shared_state_folder(state: &Path) -> Result<()> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    let parent: Option<&Path> = state.parent();
+    let named: Option<&Path> = parent.filter(|folder| !folder.as_os_str().is_empty());
+    let folder: &Path = named.unwrap_or_else(|| Path::new("."));
+    let Ok(meta) = fs::metadata(folder) else {
+        return Ok(());
+    };
+    let mode = meta.permissions().mode();
+    if mode & 0o002 != 0 && mode & 0o1000 == 0 {
+        anyhow::bail!(
+            "the state folder {folder} can be written by other users and has no sticky bit, so another user could remove the member key or its lock: run `chmod o-w {folder}` or use a --state-file in a private folder",
+            folder = folder.display()
+        );
+    }
+    Ok(())
+}
+
 /// Open the lock file of the member key of `state`, mode 0600.
 #[cfg(all(unix, feature = "host"))]
 fn open_key_lock(state: &Path) -> Result<File> {
     use anyhow::Context as _;
     use std::os::unix::fs::OpenOptionsExt as _;
+    refuse_shared_state_folder(state)?;
     let lock_path = state.with_extension("key.lock");
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false).mode(0o600);
@@ -1733,6 +1761,44 @@ mod tests {
         fn drop(&mut self) {
             drop(fs::remove_dir_all(&self.0));
         }
+    }
+
+    /// The member key, the run counter and the lock live in the folder of the state file. A user that can write
+    /// that folder can unlink or rename them while they are held, and a second start then reads the same
+    /// member key at a higher run and replaces the first session. A folder that others can write is refused
+    /// unless it has the sticky bit (like `/tmp`), which stops other users from unlinking or renaming files
+    /// that they do not own. A private folder is the normal case.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_state_folder_that_others_can_write_without_the_sticky_bit_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new("habilis-shared-folder");
+        let state = dir.path().join("session.json");
+        let folder = |mode: u32| {
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).expect("a mode");
+        };
+
+        folder(0o777);
+        let open = super::hold_member_key_once(Some(&state));
+        let refusal: Option<String> = open.err().map(|error| format!("{error:#}"));
+        let text: String = refusal.unwrap_or_default();
+        let named: String = dir.path().display().to_string();
+        assert!(
+            text.contains("can be written by other users") && text.contains(&named),
+            "a folder with mode 0777 was not refused with its name: {text:?}"
+        );
+
+        folder(0o1777);
+        assert!(
+            super::hold_member_key_once(Some(&state)).is_ok(),
+            "a folder with the sticky bit (mode 1777) was refused"
+        );
+        let private = dir.path().join("private.json");
+        folder(0o700);
+        assert!(
+            super::hold_member_key_once(Some(&private)).is_ok(),
+            "a private folder (mode 0700) was refused"
+        );
     }
 
     /// A target with no files keeps no member key, no run count and no lock: each start is run 1, whatever
