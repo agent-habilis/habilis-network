@@ -3509,6 +3509,75 @@ mod first_contact_tests {
         });
     }
 
+    /// The claimant of OUR nickname (another member with its own key) is asked for its proof, as the claimant of a
+    /// bound nickname is. Else the nickname-held event depends on one frame, the `joined` that the claimant sends at its
+    /// start: a node that is not yet a neighbor of the claimant misses it, and nothing sends it again. Here the start
+    /// `joined` never arrives, the `alive` frames of the claimant do, and the answer to the ask raises the event once.
+    #[test]
+    fn the_claimant_of_our_nickname_is_asked_for_its_proof_and_its_answer_raises_the_held_event() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::lifecycle",
+                "our nickname is held by another member",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let (claimant, other_member) = (Identity::generate(), Identity::generate());
+            let key = claimant.author_key();
+            let endpoint = endpoint_id(87);
+            // the refused `PeerInfo` of the claimant gave its address, which the node retains for it
+            state.retain_refused_endpoint(key, iroh::EndpointAddr::new(endpoint));
+            state.linked_endpoints.insert(endpoint);
+
+            // the start `joined` of the claimant never came: its `alive` frames do
+            let alive: Verified = Message::new_alive(&node.mesh, &node.author).sign(&claimant);
+            ingest(
+                alive.serialize().expect("serialize").into_bytes(),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert_eq!(
+                state.proof_requests_signed.load(Ordering::Relaxed),
+                1,
+                "the claimant of our nickname was not asked for its proof: the held event waits for one frame"
+            );
+            let (name, mesh_text): (&str, &str) = (node.author.as_ref(), node.mesh.as_ref());
+            let proof = other_member.prove(&key, name, mesh_text, 1);
+            let answer: Verified =
+                Message::new_joined_with_proof(&node.mesh, &node.author, &proof).sign(&claimant);
+            ingest(
+                answer.serialize().expect("serialize").into_bytes(),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            let seen: Vec<String> = lines
+                .0
+                .lock()
+                .expect("the lines lock is not poisoned")
+                .clone();
+            let held: usize = seen
+                .iter()
+                .filter(|line| line.contains("is held by another member"))
+                .count();
+            assert_eq!(
+                held, 1,
+                "the answer of the claimant did not raise the held event once"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// The version of a frame that does not parse is chosen by its sender, and the frame is not
     /// verified. A version of 500 characters with control bytes gives a short line of printable
     /// characters, and the set of named versions holds the cut text.
@@ -6961,15 +7030,15 @@ mod dedup_counter_tests {
         let state = reader_with(fresh_state(), vec![joined_of(&live, &member, "alice", 3)]);
 
         assert!(
-            state.claims_bound_nickname(&newer.author_key(), &nick("alice")),
+            state.claims_bound_nickname(&newer.author_key(), &nick("alice"), &nick("reader")),
             "a session that is no peer and claims the nickname of a member of the roster is a claim"
         );
         assert!(
-            !state.claims_bound_nickname(&live.author_key(), &nick("alice")),
+            !state.claims_bound_nickname(&live.author_key(), &nick("alice"), &nick("reader")),
             "a live peer is no claim"
         );
         assert!(
-            !state.claims_bound_nickname(&stranger.author_key(), &nick("bob")),
+            !state.claims_bound_nickname(&stranger.author_key(), &nick("bob"), &nick("reader")),
             "a free nickname is no claim"
         );
     }
@@ -7825,11 +7894,11 @@ mod dedup_counter_tests {
         // The retry clock of the session starts only for a request that went out, so it shows that it was sent.
         let (key, name) = (session.author_key(), nick("alice"));
         assert!(
-            !from_it.asks_for_session(&key, &name),
+            !from_it.asks_for_session(&key, &name, &nick("reader")),
             "the request was signed but the send was refused: the retry clock of the session did not start"
         );
         assert!(
-            from_another.asks_for_session(&key, &name),
+            from_another.asks_for_session(&key, &name, &nick("reader")),
             "a session that no request was sent to has its retry clock started"
         );
     }
@@ -8033,7 +8102,7 @@ mod dedup_counter_tests {
         let reader = reader_with(initial, arrivals);
 
         assert!(
-            !reader.asks_for_session(&honest.author_key(), &nick("honest")),
+            !reader.asks_for_session(&honest.author_key(), &nick("honest"), &nick("reader")),
             "the honest session was not asked: the attacker used the budget in all and the ask was deferred"
         );
     }

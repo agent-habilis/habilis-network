@@ -284,9 +284,10 @@ pub(crate) async fn handle_presence(
 fn proof_ask_target(
     key: &AuthorKey,
     nickname: &Nickname,
+    own: &Nickname,
     state: &EventLoopState,
 ) -> Option<EndpointId> {
-    if !state.asks_for_session(key, nickname) {
+    if !state.asks_for_session(key, nickname, own) {
         return None;
     }
     let target: Option<EndpointId> = state
@@ -323,12 +324,12 @@ async fn send_proof_ask(
     context: &HandlerCtx<'_>,
     inbound: Option<EndpointId>,
 ) {
-    if !state.asks_for_session(key, nickname) {
+    if !state.asks_for_session(key, nickname, context.author) {
         // it holds a proof now, or its clock holds: nothing waits
         state.proofs.undefer(key);
         return;
     }
-    let Some(eid) = proof_ask_target(key, nickname, state) else {
+    let Some(eid) = proof_ask_target(key, nickname, context.author, state) else {
         // A session with no address yet (a restart sends its alive frame before its endpoint, and a meta
         // card gives the endpoint with no ask of its own) waits for it like an ask that waits for a path: the
         // sweep tick sends it once the address and a path are there, and not at the next alive frame.
@@ -351,7 +352,7 @@ async fn send_proof_ask(
     // and a task that holds a frame for each of them. An ask over the budget waits in the same map as the asks
     // that wait for a path, and goes when the window has moved.
     let claim = state
-        .claims_bound_nickname(key, nickname)
+        .claims_bound_nickname(key, nickname, context.author)
         .then_some(nickname);
     if !state.proofs.may_ask_for(eid, claim, Instant::now()) {
         tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request deferred: the budget of the endpoint or of the node is used");
@@ -486,7 +487,13 @@ mod ask_tests {
         state.names.insert(session.author_key(), nick("alice"));
 
         assert!(
-            super::proof_ask_target(&session.author_key(), &nick("alice"), &state).is_none(),
+            super::proof_ask_target(
+                &session.author_key(),
+                &nick("alice"),
+                &nick("reader"),
+                &state
+            )
+            .is_none(),
             "with no address the session has no target"
         );
 
@@ -497,7 +504,12 @@ mod ask_tests {
             EndpointAddr::new(endpoint),
         );
         assert_eq!(
-            super::proof_ask_target(&session.author_key(), &nick("alice"), &state),
+            super::proof_ask_target(
+                &session.author_key(),
+                &nick("alice"),
+                &nick("reader"),
+                &state
+            ),
             Some(endpoint),
             "with an address the request goes to the endpoint of the session"
         );
@@ -515,7 +527,7 @@ mod ask_tests {
 
         let mut asks = 0;
         for _ in 0..50 {
-            if state.asks_for_proof(&frame) {
+            if state.asks_for_proof(&frame, &nick("reader")) {
                 asks += 1;
                 state.note_proof_request_sent(&session.author_key(), None);
             }
@@ -544,7 +556,7 @@ mod ask_tests {
         );
 
         assert!(
-            !state.asks_for_proof(&frame),
+            !state.asks_for_proof(&frame, &nick("reader")),
             "a proven session is not asked"
         );
     }

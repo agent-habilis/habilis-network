@@ -2450,7 +2450,7 @@ impl EventLoopState {
         own: &Nickname,
         mesh: &MeshId,
     ) -> Option<Verified> {
-        self.asks_for_proof(alive)
+        self.asks_for_proof(alive, own)
             .then(|| self.proof_request_to(&alive.key(), own, mesh))
     }
 
@@ -2470,15 +2470,23 @@ impl EventLoopState {
     /// the roster or claims a bound nickname, and its retry clock lets a request go. It does not sign
     /// anything, so a caller that has no path to send over can ask first and pay nothing.
     #[cfg(test)]
-    pub(crate) fn asks_for_proof(&self, alive: &Verified) -> bool {
-        self.asks_for_session(&alive.key(), &alive.author)
+    pub(crate) fn asks_for_proof(&self, alive: &Verified, own: &Nickname) -> bool {
+        self.asks_for_session(&alive.key(), &alive.author, own)
     }
 
     /// `asks_for_proof` for a session named by its key and its nickname.
-    pub(crate) fn asks_for_session(&self, key: &AuthorKey, nickname: &Nickname) -> bool {
+    pub(crate) fn asks_for_session(
+        &self,
+        key: &AuthorKey,
+        nickname: &Nickname,
+        own: &Nickname,
+    ) -> bool {
         // A session of a bound nickname with no proof is no peer yet, and it is asked as well: the
-        // proof is the way in.
+        // proof is the way in. So is a session that claims OUR nickname (`own`): its proof is the only way to tell
+        // this node that another member holds the nickname, and the start `joined` of the claimant, which a node that
+        // was not yet its neighbor misses, is sent once.
         let asked_for = self.peers.contains(key)
+            || nickname == own
             || self
                 .proofs
                 .is_bound(nickname, |session| self.session_is_held(session));
@@ -2568,14 +2576,21 @@ impl EventLoopState {
         Some(held.frame.clone())
     }
 
-    /// Whether `session`, which is not a live peer, claims a nickname that a member of the roster holds by its proof:
-    /// a restart of that member, or an intruder. Such an ask has a reserve in the budget of the proof requests.
-    pub(crate) fn claims_bound_nickname(&self, session: &AuthorKey, nickname: &Nickname) -> bool {
+    /// Whether `session`, which is not a live peer, claims a nickname that a member of the roster holds by its proof
+    /// (a restart of that member, or an intruder), or OUR nickname `own`, which is bound to this node. Such an ask has a
+    /// reserve in the budget of the proof requests: at most 4 for each nickname in a window.
+    pub(crate) fn claims_bound_nickname(
+        &self,
+        session: &AuthorKey,
+        nickname: &Nickname,
+        own: &Nickname,
+    ) -> bool {
         let (peers, quiet) = (&self.peers, &self.quiet);
         !peers.contains(session)
-            && self.proofs.is_bound(nickname, |held| {
-                peers.contains(held) || quiet.contains(held)
-            })
+            && (nickname == own
+                || self.proofs.is_bound(nickname, |held| {
+                    peers.contains(held) || quiet.contains(held)
+                }))
     }
 
     /// Whether `session` is in the roster, live or quiet. A quiet peer may return, so it still
