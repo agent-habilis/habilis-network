@@ -894,10 +894,10 @@ fn hold_member_key_once(state: Option<&Path>) -> Result<Option<sync::Arc<File>>>
 /// starts the node. The member key, the run counter and the lock live in that folder. A user who can write it
 /// can unlink or rename them while they are held: a second start then reads the same member key at a higher
 /// run, and peers replace the first session. That user is the owner of the folder when it is not the user who
-/// starts the node (root excepted), and anyone with the other-write bit (unless the sticky bit, as on `/tmp`,
-/// stops other users from unlinking or renaming files that they do not own). A folder that
-/// only the group can write is accepted: on many systems the group of a user holds that user alone, and the
-/// check is for the others.
+/// starts the node (root excepted), and anyone who can write it through its group or as an other (unless the
+/// sticky bit, as on `/tmp`, stops other users from unlinking or renaming files that they do not own). A folder
+/// that only the group can write is refused too: a trusted group cannot be known (the members of a group come
+/// from several sources, and the primary group of a user is not in the list), and there is no setting for it.
 #[cfg(all(unix, feature = "host"))]
 fn state_folder_problem(mode: u32, owner: u32, effective_user: u32) -> Option<&'static str> {
     // The owner of a folder can unlink or rename any file in it, sticky bit or not. Root owns `/tmp` and can
@@ -905,8 +905,10 @@ fn state_folder_problem(mode: u32, owner: u32, effective_user: u32) -> Option<&'
     if owner != effective_user && owner != 0 {
         return Some("is owned by another user");
     }
-    if mode & 0o002 != 0 && mode & 0o1000 == 0 {
-        return Some("can be written by other users and has no sticky bit");
+    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+        return Some(
+            "can be written by other users (its group or the others) and has no sticky bit",
+        );
     }
     None
 }
@@ -927,7 +929,7 @@ fn refuse_shared_state_folder(state: &Path) -> Result<()> {
     let mode = meta.permissions().mode();
     if let Some(problem) = state_folder_problem(mode, meta.uid(), geteuid().as_raw()) {
         anyhow::bail!(
-            "the state folder {folder} {problem}, so another user could remove the member key or its lock: use a --state-file in a private folder of this user (`chmod o-w {folder}` closes the other-write case)",
+            "the state folder {folder} {problem}, so another user could remove the member key or its lock: use a --state-file in a private folder of this user (`chmod go-w {folder}` closes the group-write and the other-write case)",
             folder = folder.display()
         );
     }
@@ -1892,6 +1894,29 @@ mod tests {
         );
     }
 
+    /// A state folder that the group can write is refused like one that others can write, unless it has the
+    /// sticky bit. Another member of that group can unlink or rename the key file, the run file and the lock. A
+    /// trusted group cannot be known (the members of a group come from several sources, and the primary group of
+    /// a user is not in the list), and there is no setting for it: one rule. A folder at mode 0775 needs `chmod g-w`.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_state_folder_that_the_group_can_write_without_the_sticky_bit_is_refused() {
+        let me = 501;
+        for mode in [0o770, 0o775, 0o720, 0o2775] {
+            assert!(
+                super::state_folder_problem(mode, me, me).is_some(),
+                "a folder of mode {mode:o} that the group can write was accepted"
+            );
+        }
+        for mode in [0o700, 0o755, 0o750, 0o1775, 0o1777] {
+            assert_eq!(
+                super::state_folder_problem(mode, me, me),
+                None,
+                "a folder of mode {mode:o} was refused"
+            );
+        }
+    }
+
     /// A state folder that another user owns is refused, whatever its mode: its owner can unlink or rename the
     /// key file, the run file and the lock. The owner may be the user who starts the node, or root (the owner of
     /// `/tmp`, whose sticky bit protects the files of the others). The check is a pure function of the mode, the
@@ -1928,7 +1953,7 @@ mod tests {
         );
         assert_eq!(
             super::state_folder_problem(0o777, me, me),
-            Some("can be written by other users and has no sticky bit"),
+            Some("can be written by other users (its group or the others) and has no sticky bit"),
             "a folder that others can write was accepted"
         );
     }
