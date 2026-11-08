@@ -89,19 +89,16 @@ pub(crate) enum Goodbye<'source> {
     Replaced(&'source Nickname),
     /// A session of another member under a nickname that a proof bound away from it. It said no goodbye, so its
     /// frames are not marked as stale, and a session that was shown ends with a `left` line (before the arrival
-    /// of the member that proved the name). One that was never shown ends with none. `by` is the session of the
-    /// member that proved the name: if it was shown already, its `joined` is shown again after the `left`.
-    Refused {
-        nickname: &'source Nickname,
-        by: AuthorKey,
-    },
+    /// of the member that proved the name). One that was never shown ends with none. The caller shows the member
+    /// again, once, when it was shown already ([`show_again`]).
+    Refused(&'source Nickname),
 }
 
 impl Goodbye<'_> {
     fn nickname(&self) -> &Nickname {
         match self {
             Self::Signed(message) => &message.author,
-            Self::Replaced(nickname) | Self::Refused { nickname, .. } => nickname,
+            Self::Replaced(nickname) | Self::Refused(nickname) => nickname,
         }
     }
 }
@@ -109,21 +106,21 @@ impl Goodbye<'_> {
 /// End the session `key` in the roster, for a goodbye that it signed or for a newer run of its member.
 /// The roster is keyed by author key, so this ends that key and no other: another key under the same
 /// nickname stays a peer. Any key can sign a goodbye under any nickname, and the goodbye of a key that
-/// is not in the roster removes nothing.
+/// is not in the roster removes nothing. True when it showed a `left` line for the session.
 pub(crate) async fn end_session(
     key: AuthorKey,
     goodbye: Goodbye<'_>,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
-) {
+) -> bool {
     // A key says goodbye once per run. A second copy is a replay that a peer still held.
     if state.key_said_goodbye(key) {
-        return;
+        return false;
     }
     // A session that lost its nickname said no goodbye, and no other node drops its frames: a peer that
     // holds them would resend them to this node at every digest round while the holder keeps the name.
-    if !matches!(goodbye, Goodbye::Refused { .. }) {
+    if !matches!(goodbye, Goodbye::Refused(_)) {
         state.drop_departed_presence(&key);
     }
     // The roster is keyed by author key, so a goodbye ends that key and no other: another key
@@ -145,12 +142,12 @@ pub(crate) async fn end_session(
         let retained = state.release_refused_endpoint(&key);
         let hinted = stranger_hints.iter().map(|hint| hint.id);
         end_unbound_endpoints(state, hinted.chain(retained).collect()).await;
-        return;
+        return false;
     }
     // A session that lost its nickname to another member did not say goodbye: it is only taken out of the
     // roster, so its later frames go through the admission again (refused while the other member holds the
     // name, admitted when that member is gone). A goodbye marks every later frame of the key stale for good.
-    if !matches!(goodbye, Goodbye::Refused { .. }) {
+    if !matches!(goodbye, Goodbye::Refused(_)) {
         state.note_left(key);
     }
     let was_surfaced = state.surfaced.contains(&key);
@@ -176,14 +173,6 @@ pub(crate) async fn end_session(
             .sink
             .emit(departure(&goodbye, key, &departed, context));
         tracing::info!(target: "habilis_network::lifecycle", nickname = %departed, "peer left");
-        // The member that proved the name can have been shown before: then no `joined` of it follows, and a
-        // reader that keys by nickname would take the name for gone. Its `joined` is shown again, after the
-        // `left`. If it was not shown yet, its own arrival comes next and shows it.
-        if let Goodbye::Refused { by, nickname } = goodbye
-            && state.surfaced.contains(&by)
-        {
-            context.sink.emit(rearrival(by, nickname, context));
-        }
     }
     state.write_peer_count();
     // A departure is a flush edge: the frames to the key that left are gone from the buffer
@@ -196,6 +185,22 @@ pub(crate) async fn end_session(
     // roster, so a goodbye ends it whatever the clock of its sender says. The join horizon
     // hides a line from the user, and it does not hide a fact from the app.
     app.on_peer_left(&key, &departed, state, context).await;
+    was_surfaced
+}
+
+/// Show the `joined` of the session `key` again, if it was shown. It is called once after the sessions that its
+/// proof ended got their `left` lines: the member that proved the name can have been shown before, and then no
+/// `joined` of it follows, so a reader that keys by nickname would take the name for gone. If it was not shown
+/// yet, its own arrival comes next and shows it.
+pub(crate) fn show_again(
+    key: AuthorKey,
+    nickname: &Nickname,
+    state: &EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
+    if state.surfaced.contains(&key) {
+        context.sink.emit(rearrival(key, nickname, context));
+    }
 }
 
 pub(crate) async fn handle_presence(

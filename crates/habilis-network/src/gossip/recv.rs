@@ -1008,12 +1008,14 @@ async fn end_displaced_sessions(
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
+    let mut shown_left = false;
     for intruder in state.proofs.take_evicted() {
-        let goodbye = lifecycle::Goodbye::Refused {
-            nickname: &verified.author,
-            by: verified.key(),
-        };
-        lifecycle::end_session(intruder, goodbye, state, app, context).await;
+        let goodbye = lifecycle::Goodbye::Refused(&verified.author);
+        shown_left |= lifecycle::end_session(intruder, goodbye, state, app, context).await;
+    }
+    // One proof can end several shown intruders: the member is shown again once, after their `left` lines.
+    if shown_left {
+        lifecycle::show_again(verified.key(), &verified.author, state, context);
     }
     for older in state.proofs.take_replaced() {
         let goodbye = lifecycle::Goodbye::Replaced(&verified.author);
@@ -6842,6 +6844,61 @@ mod dedup_counter_tests {
                 (alice_session.author_key(), "joined")
             ],
             "a `left` for the intruder with no `joined` of the member after it reads as a name that is gone"
+        );
+    }
+
+    /// One proof can end several shown intruders. Each gets its `left`, and the `joined` of the member is shown
+    /// again ONCE, after them: N identical `joined` lines for one proof would only be noise.
+    #[test]
+    fn the_member_is_shown_again_once_for_a_proof_that_ends_two_shown_intruders() {
+        let alice = Identity::generate();
+        let alice_session = Identity::generate();
+        let intruders = [Identity::generate(), Identity::generate()];
+        let mut initial = fresh_state();
+        for session in [&alice_session, &intruders[0], &intruders[1]] {
+            initial.peers.insert(session.author_key());
+            initial.surfaced.insert(session.author_key());
+            initial.names.insert(session.author_key(), nick("alice"));
+        }
+        let events = PresenceOrder::default();
+
+        let reader = reader_with_sink(
+            initial,
+            vec![joined_of(&alice_session, &alice, "alice", 1)],
+            &events,
+        );
+
+        let intruder_keys: Vec<AuthorKey> = intruders.iter().map(Identity::author_key).collect();
+        let all_ended = intruder_keys.iter().all(|key| !reader.peers.contains(key));
+        assert!(
+            reader.peers.contains(&alice_session.author_key()) && all_ended,
+            "the member stays and both intruders are ended"
+        );
+        let seen = events.0.lock().expect("the order lock is not poisoned");
+        let lefts: Vec<AuthorKey> = seen
+            .iter()
+            .filter(|(_, label)| *label == "left")
+            .map(|(key, _)| *key)
+            .collect();
+        let joined: Vec<AuthorKey> = seen
+            .iter()
+            .filter(|(_, label)| *label == "joined")
+            .map(|(key, _)| *key)
+            .collect();
+        assert_eq!(
+            lefts.len(),
+            2,
+            "each shown intruder gets its `left`: {seen:?}"
+        );
+        assert_eq!(
+            joined,
+            vec![alice_session.author_key()],
+            "the member is shown again once for one proof: {seen:?}"
+        );
+        assert_eq!(
+            seen.last().map(|(_, label)| *label),
+            Some("joined"),
+            "the `joined` of the member comes after the two `left` lines: {seen:?}"
         );
     }
 
