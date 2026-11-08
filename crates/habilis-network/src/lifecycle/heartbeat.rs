@@ -448,6 +448,36 @@ mod tests {
         });
     }
 
+    /// An endpoint that is still LINKED keeps its pooled connection and its multihop origin when the sweep releases
+    /// it: routes run through that neighbor. The teardown waits until the link has ended and nothing binds the
+    /// endpoint.
+    #[test]
+    fn the_teardown_of_a_released_endpoint_waits_until_its_link_ends() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let linked = testing::endpoint_id(56);
+            let left = test_key("twin#left");
+            state.retain_refused_endpoint(left, iroh::EndpointAddr::new(linked));
+            state.linked_endpoints.insert(linked);
+            state.unicast_pool.note_dial_failure(linked).await;
+
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+            assert!(
+                state.unicast_pool.is_cooling(linked).await,
+                "the teardown closed the pool state of an endpoint that is still linked"
+            );
+
+            state.linked_endpoints.remove(&linked);
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+            assert!(
+                !state.unicast_pool.is_cooling(linked).await,
+                "the pool state of an endpoint whose link ended stayed"
+            );
+        });
+    }
+
     /// The key that held the hint of a nickname crashes: no `Left`, only silence. The sweep moves
     /// it to quiet, so the nickname has one live key left, and the endpoint that this key had
     /// retained becomes the hint at once. Else a send to the survivor finds a stale hint and

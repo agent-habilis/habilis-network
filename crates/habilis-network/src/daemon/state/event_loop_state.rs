@@ -1401,9 +1401,6 @@ impl EventLoopState {
     /// nothing names this endpoint, and a stale entry nudges it on each tick. A later sweep drops
     /// the rest.
     pub(crate) fn release_unbound_endpoint(&mut self, endpoint: EndpointId) {
-        // Sync code released it (the heartbeat prune, the capacity drop of the retained endpoints) and cannot call
-        // the async pool: the loop closes its pooled connection and its cooldown later (`take_teardown_pending`).
-        self.teardown_pending.insert(endpoint);
         if self.linked_endpoints.contains(&endpoint) {
             self.path_kinds.remove(&endpoint);
             self.path_watchers.remove(&endpoint);
@@ -1424,6 +1421,11 @@ impl EventLoopState {
         self.path_watchers.remove(&endpoint);
         self.path_kinds.remove(&endpoint);
         self.unicast_pool.forget_addr(endpoint);
+        // Sync code released it (the heartbeat prune, the capacity drop of the retained endpoints) and cannot call
+        // the async pool: the loop closes its pooled connection and its cooldown later (`take_teardown_pending`).
+        // Only here, when nothing links the endpoint any more: a linked one keeps its pool and its multihop origin
+        // until its link ends (`drop_orphaned_endpoint_state`).
+        self.teardown_pending.insert(endpoint);
     }
 
     /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
