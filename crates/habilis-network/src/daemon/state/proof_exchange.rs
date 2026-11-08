@@ -267,7 +267,8 @@ impl ProofExchange {
     }
 
     /// The sessions that a proof bound the nickname away from since the last call. The caller ends them in
-    /// the roster, with no `left` line, because the nickname stays held by the member that proved it.
+    /// the roster. They said no goodbye: a session that was shown ends with a `left` line, and one that was never
+    /// shown ends with none.
     pub(crate) fn take_evicted(&mut self) -> Vec<AuthorKey> {
         mem::take(&mut self.evicted)
     }

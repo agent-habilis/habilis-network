@@ -5996,7 +5996,7 @@ mod dedup_counter_tests {
     use crate::lifecycle;
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
-    use crate::protocol::{Channel, MeshId, Message};
+    use crate::protocol::{AuthorKey, Channel, MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
     use crate::util::clock::Instant;
@@ -6654,15 +6654,68 @@ mod dedup_counter_tests {
         );
     }
 
-    /// The name stays held by the member that proved it, so the end of the other session is no `left`
-    /// line for that name: the operator would read that the member went away.
+    /// The presence events that reach the sink, in order: the key of the session, and whether the event is a
+    /// line that the node made itself (a `left` for a session that ended with no goodbye) and not a frame.
+    #[derive(Default)]
+    struct PresenceOrder(Mutex<Vec<(AuthorKey, bool)>>);
+
+    impl NodeSink for PresenceOrder {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::Presence {
+                peer, synthetic, ..
+            } = event
+            {
+                let mut seen = self.0.lock().expect("the order lock is not poisoned");
+                seen.push((peer, synthetic));
+            }
+        }
+    }
+
+    /// An intruder that was shown ends with a `left`, and the `left` comes before the arrival of the member that
+    /// proved the name. The operator read `joined` for the intruder: every `joined` that was shown gets its
+    /// `left`, as for the older run that a newer run replaces. With the `left` after the arrival, a reader
+    /// that keys by nickname would take the name for gone while its member is there.
     #[test]
-    fn the_end_of_an_intruder_writes_no_left_line_for_the_name() {
+    fn the_end_of_a_surfaced_intruder_writes_a_left_line_before_the_arrival_of_the_member() {
         let (alice, intruder_session) = (Identity::generate(), Identity::generate());
         let alice_session = Identity::generate();
         let mut initial = fresh_state();
         initial.peers.insert(intruder_session.author_key());
         initial.surfaced.insert(intruder_session.author_key());
+        initial
+            .names
+            .insert(intruder_session.author_key(), nick("alice"));
+        let events = PresenceOrder::default();
+
+        let reader = reader_with_sink(
+            initial,
+            vec![joined_of(&alice_session, &alice, "alice", 1)],
+            &events,
+        );
+
+        assert!(
+            !reader.peers.contains(&intruder_session.author_key()),
+            "the intruder is ended"
+        );
+        let seen = events.0.lock().expect("the order lock is not poisoned");
+        assert_eq!(
+            *seen,
+            vec![
+                (intruder_session.author_key(), true),
+                (alice_session.author_key(), false)
+            ],
+            "the intruder that was shown must get a `left` line, and before the arrival of the member"
+        );
+    }
+
+    /// An intruder that was never shown (the join horizon, or a frame that came as backlog) gets no `left`: the
+    /// operator never read a `joined` for it, and the rule that a `left` is for a session that was shown stays.
+    #[test]
+    fn the_end_of_an_intruder_that_was_never_shown_writes_no_left_line() {
+        let (alice, intruder_session) = (Identity::generate(), Identity::generate());
+        let alice_session = Identity::generate();
+        let mut initial = fresh_state();
+        initial.peers.insert(intruder_session.author_key());
         initial
             .names
             .insert(intruder_session.author_key(), nick("alice"));
@@ -6681,7 +6734,7 @@ mod dedup_counter_tests {
         assert_eq!(
             *events.0.lock().expect("the count lock is not poisoned"),
             0,
-            "no left line for a name that a member still holds"
+            "no left line for a session that was never shown"
         );
     }
 

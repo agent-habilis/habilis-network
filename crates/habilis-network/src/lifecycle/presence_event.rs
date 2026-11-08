@@ -77,8 +77,9 @@ pub(crate) enum Goodbye<'source> {
     Signed(&'source Verified),
     /// The newer session that replaced it, named by its author.
     Replaced(&'source Nickname),
-    /// A session of another member under a nickname that a proof bound away from it: it ends with no
-    /// `left` line, because the member that proved the name is still there.
+    /// A session of another member under a nickname that a proof bound away from it. It said no goodbye, so its
+    /// frames are not marked as stale, and a session that was shown ends with a `left` line (before the arrival
+    /// of the member that proved the name). One that was never shown ends with none.
     Refused(&'source Nickname),
 }
 
@@ -154,8 +155,9 @@ pub(crate) async fn end_session(
     // Only announce a departure for a peer whose arrival we
     // surfaced — keeps the join-horizon view symmetric. A `left`
     // for a peer known only through pre-join backlog (or one we
-    // already showed going quiet) is dropped.
-    if was_surfaced && !matches!(goodbye, Goodbye::Refused(_)) {
+    // already showed going quiet) is dropped. A session that a proof of another member ended is shown
+    // leaving like any other: every `joined` that was shown gets its `left`.
+    if was_surfaced {
         context
             .sink
             .emit(departure(&goodbye, key, &departed, context));
