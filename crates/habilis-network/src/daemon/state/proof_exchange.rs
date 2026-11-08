@@ -43,8 +43,9 @@ const ASKS_IN_ALL: usize = 64;
 const FIRST_ASKS_IN_ALL: usize = 256;
 /// The window of the budget of the proof requests.
 const ASK_BUDGET_WINDOW: Duration = Duration::from_secs(10);
-/// The endpoints that have a count in the budget: 256 at most, the oldest dropped when full (its count starts
-/// again, and the global budget still bounds the node).
+/// The endpoints that have a count in the budget: 256 at most. A count outside its window is dropped first, the
+/// oldest one; a count inside its window is never dropped, and an endpoint that the full map does not track waits
+/// in the deferred map until a window has moved.
 const ASK_BUDGET_ENDPOINTS_MAX: usize = 256;
 /// How long a skipped ask waits for a warm path before the alive cycle takes over.
 const DEFERRED_ASK_TTL: Duration = Duration::from_secs(30);
@@ -298,6 +299,17 @@ impl ProofExchange {
             Some((start, count)) if in_window(*start) => (*start, *count),
             _ => (now, 0),
         };
+        // A count that is inside its window is never dropped to make room: an endpoint that used its asks would
+        // get a second budget. A full map of live counts defers an endpoint that it does not track.
+        let tracked = self.ask_budget.get(&endpoint).is_some();
+        let has_room = self.ask_budget.len() < ASK_BUDGET_ENDPOINTS_MAX
+            || self
+                .ask_budget
+                .iter()
+                .any(|(_, (counted_at, _))| !in_window(*counted_at));
+        if !tracked && !has_room {
+            return false;
+        }
         // The first ask of an endpoint in the window is guaranteed: it needs no room in the budget in all (it counts
         // in it). The budget in all would otherwise be the vector of a starvation: one peer with a few endpoints
         // that have a path to us uses all of it, and every honest endpoint is deferred. Only the asks after the
@@ -314,9 +326,11 @@ impl ProofExchange {
             return false;
         }
         self.ask_budget_all = Some((all_start, all_count + 1, all_first + usize::from(first)));
-        // every count reads as dead, so a full map drops the oldest endpoint
+        // a full map drops its oldest count that is outside its window (there is one: `has_room`)
         self.ask_budget
-            .insert_evicting(endpoint, (start, count + 1), |_, _| false);
+            .insert_evicting(endpoint, (start, count + 1), |_, (counted_at, _)| {
+                in_window(*counted_at)
+            });
         true
     }
 
@@ -903,6 +917,37 @@ mod tests {
         assert!(
             book.admits(&restart, &alice, |_| true),
             "the session of the restart is not admitted"
+        );
+    }
+
+    /// A count that is still inside its window is not dropped to make room: an endpoint that used its 8 asks is
+    /// still at 8 when 256 other endpoints came after it. A full map of live counts defers an untracked endpoint.
+    #[test]
+    fn an_endpoint_that_used_its_asks_does_not_get_a_second_budget_when_the_map_of_counts_is_full()
+    {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        // X opens the window of the budget in all, and A uses its 8 asks 5 s later
+        assert!(book.may_ask(endpoint_of(0), at(0)), "the first ask of X");
+        let used: usize = (0..ASKS_PER_ENDPOINT)
+            .filter(|_| book.may_ask(endpoint_of(1), at(5)))
+            .count();
+        assert_eq!(used, ASKS_PER_ENDPOINT, "A uses its asks");
+        // 254 more endpoints fill the map of 256 counts, 9 s into the window
+        for index in 2..256u32 {
+            assert!(book.may_ask(endpoint_of(index), at(9)), "a first ask");
+        }
+        // the window in all has moved: two new endpoints need room in the map
+        assert!(
+            book.may_ask(endpoint_of(1000), at(11)),
+            "a new endpoint after X expired"
+        );
+        let _ = book.may_ask(endpoint_of(1001), at(11));
+
+        assert!(
+            !book.may_ask(endpoint_of(1), at(12)),
+            "A, whose count is still inside its window, got a second budget after the map dropped its count"
         );
     }
 
