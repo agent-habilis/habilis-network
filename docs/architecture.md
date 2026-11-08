@@ -143,12 +143,13 @@ A build with `--no-default-features` leaves the portable engine that runs in a b
 
 ## 4. Identity and cryptography
 
-### 4.1 Three keys
+### 4.1 Four keys
 
 | Key | Where it lives | What it authenticates |
 |---|---|---|
 | iroh `EndpointId` (Ed25519) | Minted per endpoint at build time | The connection (QUIC-TLS). |
-| Author `Identity` (Ed25519) | `habilis-network-protocol/src/identity.rs` | Every message the member authors. In-process and ephemeral: a restart mints a new key. |
+| Session `Identity` (Ed25519) | `habilis-network-protocol/src/identity.rs` | Every message that one run of the member authors. New at each start. |
+| Member `Identity` (Ed25519) | `<state>.key` (mode 0600), see section 7.7 | One thing only: the proof that a session belongs to the member. It survives a restart. A host with no files (the browser) has none. |
 | Rendezvous key | Derived from the mesh seed | The bootstrap anchor. Every member can derive it. |
 
 ### 4.2 Derivations
@@ -412,6 +413,7 @@ A silent domain change makes verification fail invisibly, and the exact gate tur
 | `PeerInfo` | A signed card with the self-advertised endpoint. |
 | `Digest` | Anti-entropy digest of the message log window. |
 | `Ping`, `Pong { to, probe }` | Reachability rounds. A pong names the ping it answers. |
+| `ProofRequest { to }` | Unicast. A node asks one session, named by its author key, for the proof of its member. The session answers with its `joined` frame. |
 | `State`, `StateDigest` | The free-form CRDT channel and its repair digest. |
 | `Meta`, `MetaDigest` | The gated CRDT channel and its repair digest. |
 | `LinkState` | The multihop link vector. Ephemeral, never logged. |
@@ -496,6 +498,7 @@ A node holds two keys.
 The session key is new at each start. It signs the frames, it is the automerge actor, and it seals the directed frames.
 The member key is stored in `<state>.key` (mode 0600) and does not change. It signs one thing: the proof of a session.
 The proof is a signature over the session key, the nickname, the mesh and the run number. The run number rises by 1 at each start (`<state>.run`).
+A lock file `<state>.key.lock` is an OS lock that the node holds for its whole life. A second start on the same state path fails and names the file. A start that finds a holder that is stopping waits up to 2 s for it. A node that leaves removes its key and run files with its state file.
 The `joined` frame carries the proof.
 A node that holds a session with no proof asks the session for it with a `ProofRequest`, addressed to the session key, and the session answers with its `joined` frame.
 The ask goes when the node admits the session: on its `joined` frame that has no proof, on the `PeerInfo` that gives its address, and on its `alive` frame.
@@ -538,6 +541,42 @@ The gate matters because a `meta` card carries the cryptographic identity of a p
 Ingest applies each foreign change to a throwaway fork first.
 If the change touches the field of any other peer, the gate rejects it.
 Changes that arrive before their causal dependencies wait in a pending buffer and drain through the same gate.
+
+### 8.1 The bound of the state channel
+
+The `state` channel must run for a year, so it has a bound. The engine measures the document and cuts it into a new epoch when it grows.
+
+**Time.**
+Each state change carries a time `t`. It is the wall clock in milliseconds. A node writes `max(clock + 1, now)`.
+A node refuses a change whose `t` is more than 1 hour above its own clock. A frame of a seed gets 2 hours, because it copies the times of its cutter.
+A write that finds the clock ahead waits up to 50 ms. Then it gets the refusal `ClockAhead`.
+The stamp of a leaf is the time and the actor of the change that holds its value.
+
+**Size lines.**
+- At about 3 MiB or about 20000 operations the members cut a new epoch.
+- At about 3.4 MiB or about 22700 operations a write that adds a value is refused. A delete is not.
+- At the memory line (4 MiB, 26667 paths) every write is refused, a delete too, until the next cut.
+- A write nests 12 levels at most. A leaf that no frame of a seed can carry is refused when it is written.
+- A remote frame over the remote line is refused once and remembered. The set of refused frames holds 4096 at most. The value comes back with the seed of a holder.
+
+**The cut.**
+- Each live member has a rank from 0 up. The roster and the epoch fix the ranks. Rank 0 cuts at once. Rank 1 cuts after 2 ticks. A failed cut backs off before the next one.
+- The seed is a chain of frames with no history. It carries the live values with their stamps, and at most 1024 tombstones.
+- The build runs on a blocking thread, so the event loop keeps its timers.
+- A node adopts a seed only when the whole chain is held, after a wait of 5 ticks. A chain that is not whole is dropped and its keys are forgotten.
+- When two whole seeds of one epoch meet, the lowest key wins. A leaf that no seed frame can carry is left out of the seed. The cut counts it and warns with its path.
+- A browser never cuts.
+
+**The replay rule.**
+A write that the seed lacks is written again after the switch. The author writes it at once. A holder that is not the author waits 1 to 3 ticks. A restore never overwrites a newer write or a newer delete.
+
+**The first sync.**
+A joiner holds its state writes until a peer answers its first request (section 7.5). The wait ends at 30 s at the latest, and the node warns. The creator of a mesh never waits.
+A node that awaits its first sync takes a seed root that is more than 131072 epochs ahead only as the point-to-point answer of that request, within 5 s of it. The window opens once and a later ask does not renew it. A node that does not await refuses such a root.
+
+**Limits of the design.**
+- A member that sends whole seeds with a low key can win every cut. Nothing closes this while a member key is free to make. The effect is bounded: the state grows to the add line, and then a write that adds a value is refused until the member stops.
+- A clock that is wrong by more than 1 hour is not supported.
 
 ## 9. Transports
 
@@ -777,8 +816,8 @@ What the engine is not:
 - It is not a general-purpose networking library, and it is not published to crates.io.
 - It is not a bulk-transfer system.
   Gossip re-broadcasts and logs every frame, so large payloads go over the `blob` channel or not at all.
-- The author identity is not yet durable.
-  A restart mints a new message key.
+- The identity of a session is not durable.
+  A restart mints a new session key. Only the member key, which signs the proof, survives a restart.
 
 ## 12. References
 
