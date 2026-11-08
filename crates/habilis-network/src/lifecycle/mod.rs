@@ -19,8 +19,8 @@ mod presence_event;
 pub(crate) use logs::{log_leaving, log_ready};
 pub(crate) use observed::{Observed, observe};
 pub(crate) use presence_event::{
-    Goodbye, PathSign, PresenceEvent, ask_for_proof, end_session, handle_presence,
-    retry_deferred_asks, show_again,
+    Goodbye, PathSign, PresenceEvent, ask_for_proof, end_pending_endpoints, end_session,
+    handle_presence, retry_deferred_asks, show_again,
 };
 
 #[cfg(test)]

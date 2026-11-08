@@ -1673,6 +1673,36 @@ mod tests {
         );
     }
 
+    /// The endpoints that sync code released wait for the teardown of the pool in a bounded list: fed 10 times its
+    /// cap of endpoints, it holds the cap, and the oldest are dropped (their pool state goes with the idle sweep).
+    #[test]
+    fn the_endpoints_that_wait_for_the_teardown_stay_inside_their_cap_at_10_times_the_cap() {
+        let mut state = fresh_state();
+        let cap = 256;
+        let endpoints: Vec<EndpointId> = (0..10 * cap)
+            .map(|index| {
+                let mut bytes = [3u8; 32];
+                bytes[..4].copy_from_slice(&u32::try_from(index).unwrap_or(0).to_le_bytes());
+                iroh::SecretKey::from_bytes(&bytes).public()
+            })
+            .collect();
+
+        for endpoint in &endpoints {
+            state.release_unbound_endpoint(*endpoint);
+        }
+
+        let waiting = state.take_teardown_pending();
+        assert_eq!(waiting.len(), cap, "the list holds its cap");
+        assert!(
+            waiting.contains(&endpoints[endpoints.len() - 1]) && !waiting.contains(&endpoints[0]),
+            "the newest is kept and the oldest was dropped"
+        );
+        assert!(
+            state.take_teardown_pending().is_empty(),
+            "the list is empty after it was taken"
+        );
+    }
+
     /// The retained endpoints are bounded: a flood of signed `PeerInfo` frames with fresh keys under a bound
     /// nickname keeps the cap and no more, and the oldest key goes first.
     #[test]

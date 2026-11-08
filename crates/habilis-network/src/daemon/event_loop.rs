@@ -1739,11 +1739,15 @@ async fn run_loop<Driver: NodeDriver>(
             },
             _ = lp.intervals.prune.tick() => {
                 lp.prune();
+                lifecycle::end_pending_endpoints(&mut lp.state).await;
                 lp.send_replays().await;
             },
             outcome = seed_job::seed_job_done(&mut lp.state.seed_job) => { lp.seed_built(outcome).await; },
             _ = lp.intervals.alive.tick() => { lp.alive().await; },
-            _ = lp.intervals.sweep.tick() => { lp.sweep().await; },
+            _ = lp.intervals.sweep.tick() => {
+                lp.sweep().await;
+                lifecycle::end_pending_endpoints(&mut lp.state).await;
+            },
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
             Ok(()) = lp.rung_rx.changed() => { lp.rung_change(); },
             found_rival = beacon::probe_verdict(&mut lp.rival_probe) => { lp.probe_verdict(found_rival).await; },

@@ -389,7 +389,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::protocol::messages::sole_addressee;
-    use crate::{protocol, testing};
+    use crate::{lifecycle, protocol, testing};
     /// A `PeerInfo` of a key that another key shadows binds no hint, but its address goes into
     /// the unicast book. When the key is no peer, quiet or lapsed any more, the sweep releases the
     /// address too, or the book grows with each such endpoint.
@@ -416,6 +416,36 @@ mod tests {
             state.refused_endpoints.is_empty(),
             "the retained endpoint of a key that left the roster stayed"
         );
+    }
+
+    /// The sweep releases the endpoint of a refused key that left the roster, in sync code, and it cannot call the
+    /// async pool. The endpoint goes to a list that the loop drains: its pooled connection and its dial cooldown
+    /// go then, and an endpoint that another key still binds keeps its pool state.
+    #[test]
+    fn the_sweep_hands_the_released_endpoints_to_the_teardown_of_the_pool() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let (gone, shared) = (testing::endpoint_id(54), testing::endpoint_id(55));
+            let (left, staying) = (test_key("twin#left"), test_key("twin#staying"));
+            state.peers.insert(staying);
+            state.names.insert(staying, nick("twin"));
+            state.retain_refused_endpoint(left, iroh::EndpointAddr::new(gone));
+            state.retain_refused_endpoint(staying, iroh::EndpointAddr::new(shared));
+            state.unicast_pool.note_dial_failure(gone).await;
+            state.unicast_pool.note_dial_failure(shared).await;
+
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+
+            assert!(
+                !state.unicast_pool.is_cooling(gone).await,
+                "the endpoint that the sweep released kept its dial cooldown in the pool"
+            );
+            assert!(
+                state.unicast_pool.is_cooling(shared).await,
+                "an endpoint that a key of the roster still retains lost its pool state"
+            );
+        });
     }
 
     /// The key that held the hint of a nickname crashes: no `Left`, only silence. The sweep moves

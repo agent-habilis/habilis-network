@@ -81,6 +81,15 @@ async fn end_unbound_endpoints(state: &mut EventLoopState, endpoints: Vec<Endpoi
     }
 }
 
+/// Close the pool state of the endpoints that sync code released (the heartbeat prune, the capacity drop of the
+/// retained endpoints): `end_unbound_endpoints` does it, and keeps the shared-binding check.
+pub(crate) async fn end_pending_endpoints(state: &mut EventLoopState) {
+    let released: Vec<EndpointId> = state.take_teardown_pending();
+    if !released.is_empty() {
+        end_unbound_endpoints(state, released).await;
+    }
+}
+
 /// How the end of a session is told: by the `left` frame that the session signed, or by a newer run
 /// of its member that replaced it.
 pub(crate) enum Goodbye<'source> {
@@ -142,6 +151,7 @@ pub(crate) async fn end_session(
         let retained = state.release_refused_endpoint(&key);
         let hinted = stranger_hints.iter().map(|hint| hint.id);
         end_unbound_endpoints(state, hinted.chain(retained).collect()).await;
+        end_pending_endpoints(state).await;
         return false;
     }
     // A session that lost its nickname to another member did not say goodbye: it is only taken out of the
@@ -185,6 +195,8 @@ pub(crate) async fn end_session(
     // roster, so a goodbye ends it whatever the clock of its sender says. The join horizon
     // hides a line from the user, and it does not hide a fact from the app.
     app.on_peer_left(&key, &departed, state, context).await;
+    // The endpoints that sync code released during this end (a capacity drop of the retained endpoints) go too.
+    end_pending_endpoints(state).await;
     was_surfaced
 }
 

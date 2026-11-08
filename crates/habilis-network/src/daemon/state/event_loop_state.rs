@@ -406,6 +406,10 @@ pub struct EventLoopState {
     /// Bounded by [`REFUSED_ENDPOINTS_CAP`]: when a new key arrives at the cap, the oldest key goes and
     /// its endpoint state with it.
     pub(crate) refused_endpoints: HashMap<AuthorKey, EndpointAddr>,
+    /// The endpoints that sync code released, waiting for the teardown of the pool (its pooled connection and its
+    /// dial cooldown), which the loop does where it can be async: `TEARDOWN_PENDING_MAX` at most, the oldest is
+    /// dropped when full (its pool state then goes with the idle sweep, as before).
+    teardown_pending: BoundedFifoSet<EndpointId>,
     /// The keys of `refused_endpoints` in the order that they were retained, oldest first. It may hold a key
     /// that left the map; it is cut to the keys of the map when it grows past twice the cap.
     refused_order: VecDeque<AuthorKey>,
@@ -865,6 +869,7 @@ impl EventLoopState {
             hint_owner: HashMap::new(),
             refused_endpoints: HashMap::new(),
             refused_order: VecDeque::new(),
+            teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             peer_stamp: HashMap::new(),
             clock_evidence: ClockEvidence::default(),
             left_keys: Goodbyes::default(),
@@ -1383,11 +1388,22 @@ impl EventLoopState {
         hinted.chain(retained).any(|address| address.id == endpoint)
     }
 
+    /// The endpoints that were released since the last call, for the teardown of the pool: the loop passes them on
+    /// to `end_unbound_endpoints`, which keeps the shared-binding check.
+    pub(crate) fn take_teardown_pending(&mut self) -> Vec<EndpointId> {
+        let released: Vec<EndpointId> = self.teardown_pending.iter().copied().collect();
+        self.teardown_pending = BoundedFifoSet::new(TEARDOWN_PENDING_MAX);
+        released
+    }
+
     /// Drop the state of an endpoint that no nickname binds any more. A linked endpoint keeps its
     /// proof, direct path and backoff for the regraft after the link loss. The path watch goes:
     /// nothing names this endpoint, and a stale entry nudges it on each tick. A later sweep drops
     /// the rest.
     pub(crate) fn release_unbound_endpoint(&mut self, endpoint: EndpointId) {
+        // Sync code released it (the heartbeat prune, the capacity drop of the retained endpoints) and cannot call
+        // the async pool: the loop closes its pooled connection and its cooldown later (`take_teardown_pending`).
+        self.teardown_pending.insert(endpoint);
         if self.linked_endpoints.contains(&endpoint) {
             self.path_kinds.remove(&endpoint);
             self.path_watchers.remove(&endpoint);
@@ -2275,6 +2291,8 @@ const REPLAY_QUEUE_CAP: usize = 8;
 /// serves (the beacon limit is far below it), so a real peer is not pushed out; at the cap the oldest key goes
 /// and its endpoint state with it.
 pub(crate) const REFUSED_ENDPOINTS_CAP: usize = 256;
+/// The released endpoints that wait for the teardown of the pool: 256 at most.
+const TEARDOWN_PENDING_MAX: usize = 256;
 
 // ── Consumer surface ───────────────────────────────────────────────────────
 //
