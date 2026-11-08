@@ -256,9 +256,10 @@ pub struct EventLoopState {
     pub(crate) linked_endpoints: HashSet<EndpointId>,
     /// Endpoints whose dial hint the sweep pruned while they still had a link. The state of such
     /// an endpoint stays for the regraft that follows the link loss. A later sweep drops it once
-    /// the link is gone and no nickname binds the endpoint. Bounded by `linked_endpoints`: an entry
-    /// leaves at the first sweep that sees no link.
-    pub(crate) orphaned_endpoints: HashSet<EndpointId>,
+    /// the link is gone and no nickname binds the endpoint. It also holds the endpoints that found the queue of the
+    /// teardown full. `ORPHANED_ENDPOINTS_MAX` at most, the oldest dropped when full: that endpoint falls back to
+    /// the idle sweep of the pool.
+    pub(crate) orphaned_endpoints: BoundedFifoSet<EndpointId>,
     /// When `linked_endpoints` last became empty, `None` while it holds a link. The census warns
     /// of a silent partition only when this gap outlasts a heal: see
     /// [`Self::silent_partition_due`].
@@ -820,7 +821,7 @@ impl EventLoopState {
         let [state_key, meta_key, broadcast_key] = Self::channel_keys(mesh_key.as_ref());
         Self {
             linked_endpoints: HashSet::new(),
-            orphaned_endpoints: HashSet::new(),
+            orphaned_endpoints: BoundedFifoSet::new(ORPHANED_ENDPOINTS_MAX),
             zero_links_since: None,
             direct: HashMap::new(),
             relay_transport: transport::PayloadPath::DirectOnly,
@@ -2303,6 +2304,10 @@ const REPLAY_QUEUE_CAP: usize = 8;
 pub(crate) const REFUSED_ENDPOINTS_CAP: usize = 256;
 /// The released endpoints that wait for the teardown of the pool: 256 at most.
 const TEARDOWN_PENDING_MAX: usize = 256;
+/// The orphan endpoints: 1024 at most, 4 times the queue of the teardown, which each sweep (10 s) takes up to 256 of
+/// out of the set, so a full set drains in 4 sweeps. It is far above the link cap (the linked endpoints that lose
+/// their hint). At the cap the oldest is dropped, and its pool state goes with the idle sweep.
+pub(crate) const ORPHANED_ENDPOINTS_MAX: usize = 1024;
 
 // ── Consumer surface ───────────────────────────────────────────────────────
 //

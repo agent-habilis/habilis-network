@@ -1675,7 +1675,8 @@ mod tests {
 
     /// The endpoints that sync code released wait for the teardown of the pool in a bounded list: fed 10 times its
     /// cap of endpoints, it holds the cap (the first ones), and the others wait in the orphan set, where the sweep
-    /// queues them again after the drain: none is dropped.
+    /// queues them again after the drain. The orphan set has its own cap: the oldest of the waiting ones fall back to
+    /// the idle sweep of the pool.
     #[test]
     fn the_endpoints_that_wait_for_the_teardown_stay_inside_their_cap_at_10_times_the_cap() {
         let mut state = fresh_state();
@@ -1700,12 +1701,45 @@ mod tests {
         );
         assert_eq!(
             state.orphaned_endpoints.len(),
-            endpoints.len() - cap,
-            "the endpoints that found the list full wait in the orphan set"
+            super::event_loop_state::ORPHANED_ENDPOINTS_MAX,
+            "the endpoints that found the list full wait in the orphan set, up to its cap"
         );
         assert!(
             state.take_teardown_pending().is_empty(),
             "the list is empty after it was taken"
+        );
+    }
+
+    /// The orphan set is bounded: fed 10 times its cap of linked endpoints that no nickname binds, it holds the cap, and
+    /// the oldest fall back to the idle sweep of the pool.
+    #[test]
+    fn the_orphan_set_stays_inside_its_cap_at_10_times_the_cap() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoints: Vec<EndpointId> = (0..10 * cap)
+            .map(|index| {
+                let mut bytes = [5u8; 32];
+                bytes[..4].copy_from_slice(&u32::try_from(index).unwrap_or(0).to_le_bytes());
+                iroh::SecretKey::from_bytes(&bytes).public()
+            })
+            .collect();
+
+        for endpoint in &endpoints {
+            state.linked_endpoints.insert(*endpoint);
+            state.release_unbound_endpoint(*endpoint);
+        }
+
+        assert_eq!(
+            state.orphaned_endpoints.len(),
+            cap,
+            "the orphan set holds more than its cap"
+        );
+        assert!(
+            state
+                .orphaned_endpoints
+                .contains(&endpoints[endpoints.len() - 1])
+                && !state.orphaned_endpoints.contains(&endpoints[0]),
+            "the newest is kept and the oldest was dropped"
         );
     }
 
