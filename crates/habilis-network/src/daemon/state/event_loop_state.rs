@@ -2579,11 +2579,14 @@ impl EventLoopState {
         let refused_before = self.proofs.bound_refused();
         let to_verify = proof;
         let (peers, quiet) = (&self.peers, &self.quiet);
-        let bound = self
-            .proofs
-            .accept(&key, &message.author, mesh, proof, |session| {
-                peers.contains(session) || quiet.contains(session)
-            });
+        let bound = self.proofs.accept_live(
+            &key,
+            &message.author,
+            mesh,
+            proof,
+            claimant_enters,
+            |session| peers.contains(session) || quiet.contains(session),
+        );
         if self.proofs.bound_refused() > refused_before
             && verify_proof(&to_verify, &key, message.author.as_ref(), mesh.as_ref())
         {

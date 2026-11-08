@@ -348,12 +348,29 @@ impl ProofExchange {
     /// not lower the run of a proof already held, and if no held session binds the nickname to
     /// another member. `is_held` says whether a held session is in the roster: at the cap the
     /// oldest session that is not goes first, and a book of sessions in the roster refuses.
+    #[cfg(test)]
     pub(crate) fn accept(
         &mut self,
         session: &AuthorKey,
         nickname: &Nickname,
         mesh: &MeshId,
         proof: IdentityProof,
+        is_held: impl Fn(&AuthorKey) -> bool,
+    ) -> bool {
+        self.accept_live(session, nickname, mesh, proof, true, is_held)
+    }
+
+    /// [`Self::accept`] for a frame whose sender may not be live. `claimant_live` says that the sender is in the
+    /// roster (live) after the frame. A proof of a sender that is not live does not replace a live session of its
+    /// member: a historical `joined` frame with a higher run (the member restored a lower counter) would end the
+    /// live session, with the frames that wait for it, for a member that is not there. Such a proof is not held.
+    pub(crate) fn accept_live(
+        &mut self,
+        session: &AuthorKey,
+        nickname: &Nickname,
+        mesh: &MeshId,
+        proof: IdentityProof,
+        claimant_live: bool,
         is_held: impl Fn(&AuthorKey) -> bool,
     ) -> bool {
         // The run is compared first: a copy of the held proof, which comes with each resent or
@@ -395,6 +412,12 @@ impl ProofExchange {
             .collect();
         if runs.iter().any(|(_, run, live)| *live && *run >= proof.run) {
             self.ties_refused += 1;
+            return false;
+        }
+        // The proof is of a higher run than a live session of its member. Only a sender that is live replaces
+        // it: a sender that is not (an old copy of a frame, a quiet session) leaves the live session as it is,
+        // and the proof comes again with the next frame of that sender, when it is live.
+        if !claimant_live && runs.iter().any(|(_, _, live)| *live) {
             return false;
         }
         for (older, _, live) in runs {

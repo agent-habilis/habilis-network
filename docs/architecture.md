@@ -522,7 +522,7 @@ A nickname is bound to the member key that proved it, while a session of that me
 - A proof that is refused because another member holds the name, and whose signature is valid, does not mark its frame as seen: when the holder has left and the same frame comes again, it is read again. A proof whose signature is not valid keeps its mark, so its copies are dropped as duplicates.
 - A second session of a bound nickname is gone at an observer at most one sweep tick (10 s) after a path to it comes up, and at once when the gossip link comes up.
 
-A member holds one session, the newest. A proof with a higher run replaces the older sessions of the member, in the proof book and in the roster, as a goodbye does. A proof with a run that is not higher is a late copy and is not held.
+A member holds one session, the newest. A proof with a higher run replaces the older sessions of the member, in the proof book and in the roster, as a goodbye does, when its sender is live (in the roster after the frame). A proof of a sender that is not live, such as an old copy of a frame that a relay hands out, replaces nothing and is not held: it comes again with the next frame of that sender. A duplicate `joined` frame gives a proof back only to a session that is live, and a quiet session gets its proof back when it returns. A proof with a run that is not higher is a late copy and is not held.
 The proof book holds 1024 sessions at most. When it is full, the oldest session that is not in the roster goes first, and a book of sessions in the roster refuses the new proof.
 
 ## 8. Shared state: the CRDT channels

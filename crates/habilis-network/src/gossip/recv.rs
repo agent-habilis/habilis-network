@@ -973,8 +973,9 @@ async fn roster_gate(
 /// A copy of a `joined` frame gives back the proof that the book lost for its session, and nothing else. A
 /// member signs its answer to a proof request once for each run, so an asker that dropped the proof of that
 /// session (the session left the roster and came back) gets the same frame again, and the frame is a
-/// duplicate there. Only a session that is in the roster gets its proof back: a copy for any other session
-/// keeps nothing, so a flood of old copies cannot fill the book. The copy is no arrival and no heartbeat.
+/// duplicate there. Only a session that is live gets its proof back: a copy for any other session (a quiet one
+/// too) keeps nothing, so a flood of old copies cannot fill the book or move a binding. The copy is no arrival
+/// and no heartbeat.
 async fn restore_lost_proof(
     verified: &Verified,
     state: &mut EventLoopState,
@@ -988,8 +989,11 @@ async fn restore_lost_proof(
         }
     );
     let key = verified.key();
-    let in_roster = state.peers.contains(&key) || state.quiet.contains(&key);
-    if !joined || !in_roster || verified.joined_proof().is_none() {
+    // A session that is live only. A quiet session counts as held in the roster: with its proof back it would
+    // bind the nickname, and the live session of another member under it would be refused and ended. It gets
+    // its proof back when it returns: then it is live, and the answer to the ask is this same frame.
+    let live = state.peers.contains(&key);
+    if !joined || !live || verified.joined_proof().is_none() {
         return;
     }
     if state.proofs.proof_of(&key).is_some() {
@@ -6565,6 +6569,102 @@ mod dedup_counter_tests {
             Plane::Gossip,
             frame.serialize().expect("serialize").into_bytes(),
         )
+    }
+
+    /// A `joined` frame of `member` for `run`, stamped `age_secs` seconds ago.
+    fn old_joined_run_of(
+        session: &Identity,
+        member: &Identity,
+        run: u64,
+        age_secs: i64,
+    ) -> (Plane, Bytes) {
+        use crate::protocol::UnixSecs;
+        let proof = member.prove(
+            &session.author_key(),
+            "alice",
+            MeshId::from("test").as_ref(),
+            run,
+        );
+        let mut message =
+            Message::new_joined_with_proof(&MeshId::from("test"), &nick("alice"), &proof);
+        message.timestamp = UnixSecs::from(UnixSecs::now().as_secs() - age_secs);
+        let frame = message.sign(session);
+        (
+            Plane::Gossip,
+            frame.serialize().expect("serialize").into_bytes(),
+        )
+    }
+
+    /// A member that restored a lower run counter has a live session at run 3. An unseen historical `joined`
+    /// frame of the same member at run 9 (stamped 3 days ago) must not replace it: the live session would end,
+    /// with the frames that wait for it, for a session that is not there. A FRESH `joined` of a real restart at a
+    /// higher run is presence, and it replaces the old session at once: that case must stay as it is.
+    #[test]
+    fn a_historical_joined_of_a_member_with_a_higher_run_does_not_replace_its_live_session() {
+        let member = Identity::generate();
+        let (live, historical, restart) = (
+            Identity::generate(),
+            Identity::generate(),
+            Identity::generate(),
+        );
+        let first = reader_with(fresh_state(), vec![joined_of(&live, &member, "alice", 3)]);
+        assert!(
+            first.peers.contains(&live.author_key()),
+            "the live session is in the roster"
+        );
+
+        let replayed = reader_with(
+            first,
+            vec![old_joined_run_of(&historical, &member, 9, 3 * 86_400)],
+        );
+
+        assert!(
+            replayed.peers.contains(&live.author_key()),
+            "a historical joined of the same member at a higher run ended its live session"
+        );
+        assert!(
+            !replayed.peers.contains(&historical.author_key()),
+            "the sender of a historical frame entered the roster"
+        );
+
+        let restarted = reader_with(replayed, vec![joined_of(&restart, &member, "alice", 9)]);
+
+        assert!(
+            restarted.peers.contains(&restart.author_key())
+                && !restarted.peers.contains(&live.author_key()),
+            "a fresh joined of a real restart at a higher run did not replace the old session at once"
+        );
+    }
+
+    /// A duplicate `joined` of a QUIET session gives its proof back only to a session that is live. A quiet
+    /// session that got its proof back would bind the nickname (it counts as held in the roster), and the live
+    /// session of another member under that nickname would be refused and ended.
+    #[test]
+    fn a_duplicate_joined_of_a_quiet_session_does_not_end_a_live_session() {
+        let member = Identity::generate();
+        let (quiet, live) = (Identity::generate(), Identity::generate());
+        let frame = joined_of(&quiet, &member, "alice", 1);
+        let mut state = reader_with(fresh_state(), vec![frame.clone()]);
+        assert!(
+            state.proofs.proof_of(&quiet.author_key()).is_some(),
+            "the proof of the session is held after its frame"
+        );
+        state.peers.remove(&quiet.author_key());
+        state.quiet.insert(quiet.author_key());
+        state.proofs.forget(&quiet.author_key());
+        state.peers.insert(live.author_key());
+        state.names.insert(live.author_key(), nick("alice"));
+
+        let after = reader_with(state, vec![frame]);
+
+        assert!(
+            after.peers.contains(&live.author_key()),
+            "a duplicate joined of a quiet session ended a live session"
+        );
+        assert!(
+            after.proofs.proof_of(&quiet.author_key()).is_none(),
+            "a quiet session got its proof back from a duplicate joined"
+        );
     }
 
     /// An old signed `joined` frame of a member proves nothing about the member now: its sender does not enter
