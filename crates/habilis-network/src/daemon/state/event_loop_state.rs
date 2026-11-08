@@ -2702,8 +2702,13 @@ impl EventLoopState {
                 ours.is_none_or(|ours| proof.identity == ours && proof.run >= run)
             };
             let ours_here = key == self.identity.author_key();
-            let admitted =
-                ours_here || ours.is_none() || self.proofs.proof_for(&key, own).is_some_and(proved);
+            // the pending proof counts here too: the session of a newer run of our member shows it
+            let admitted = ours_here
+                || ours.is_none()
+                || self
+                    .proofs
+                    .proof_for_admission(&key, own)
+                    .is_some_and(proved);
             if !admitted {
                 self.proofs.note_gate_refused();
             }

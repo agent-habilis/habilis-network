@@ -625,6 +625,22 @@ impl ProofExchange {
             .filter(|(named, _)| named == nickname)
             .map(|(_, proof)| proof)
     }
+
+    /// [`Self::proof_for`], and then the pending proof of the session: for the ADMISSION of a session only. A
+    /// pending proof (valid, inactive) is the proof that its session shows, as in [`Self::admits`]; it binds
+    /// nothing and is no active proof.
+    pub(crate) fn proof_for_admission(
+        &self,
+        session: &AuthorKey,
+        nickname: &Nickname,
+    ) -> Option<&IdentityProof> {
+        let kept = self
+            .book
+            .get(session)
+            .or_else(|| self.pending_entry(session));
+        kept.filter(|(named, _)| named == nickname)
+            .map(|(_, proof)| proof)
+    }
 }
 
 #[cfg(test)]

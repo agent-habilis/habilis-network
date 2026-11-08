@@ -930,21 +930,22 @@ async fn roster_gate(
     end_displaced_sessions(verified, state, app, context).await;
     let admitted = state.admits_session(verified, context.author);
     if admitted {
+        // A pending proof (valid, inactive: its sender was not live when it came) is activated when the sender
+        // is admitted and live: it binds the nickname, replaces the older runs of its member, and ends the
+        // sessions of other members, before the arrival of the sender is shown. Before the report of a newer run
+        // of our member too: the report reads the active proof.
+        if state.proofs.has_pending(&verified.key())
+            && membership_update::leaves_sender_in_roster(verified, state)
+        {
+            state.activate_pending_proof(verified, context.mesh);
+            end_displaced_sessions(verified, state, app, context).await;
+        }
         if let Some(run) = state.newer_run_of_our_member(verified, context.author) {
             let line = format!(
                 "Another, newer run of this member is active (run {run}): this node is superseded: stop it"
             );
             tracing::warn!(target: "habilis_network::lifecycle", run, "a newer run of our member is active");
             context.sink.emit(NodeEvent::Error(line));
-        }
-        // A pending proof (valid, inactive: its sender was not live when it came) is activated when the sender
-        // is admitted and live: it binds the nickname, replaces the older runs of its member, and ends the
-        // sessions of other members, before the arrival of the sender is shown.
-        if state.proofs.has_pending(&verified.key())
-            && membership_update::leaves_sender_in_roster(verified, state)
-        {
-            state.activate_pending_proof(verified, context.mesh);
-            end_displaced_sessions(verified, state, app, context).await;
         }
         return Some(lifecycle::observe(verified, state, context));
     }
@@ -6606,6 +6607,20 @@ mod dedup_counter_tests {
         );
     }
 
+    /// A sink that counts the lines that say that a newer run of our member is active.
+    #[derive(Default)]
+    struct SupersededLines(Mutex<usize>);
+
+    impl NodeSink for SupersededLines {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::Error(text) = event
+                && text.contains("newer run of this member")
+            {
+                *self.0.lock().expect("the count lock is not poisoned") += 1;
+            }
+        }
+    }
+
     /// A sink that counts the lines that say that our nickname is held by another member.
     #[derive(Default)]
     struct HeldLines(Mutex<usize>);
@@ -6844,6 +6859,48 @@ mod dedup_counter_tests {
             !shown.peers.contains(&live.author_key()),
             "run 3 stays beside run 9 after run 9 showed presence"
         );
+    }
+
+    /// The old answer of a NEWER run of OUR OWN member (this node was restarted elsewhere) is kept inactive, as any
+    /// old answer is. The gate of our own nickname admits the alive frames of that session on the kept proof, and when
+    /// the session shows presence the proof is active before the report: this node is told once that it is superseded.
+    #[test]
+    fn the_pending_proof_of_a_newer_run_of_our_member_admits_it_and_the_supersession_is_reported() {
+        use crate::protocol::UnixSecs;
+        let lines = SupersededLines::default();
+        let state = fresh_state();
+        let member = state
+            .member_identity
+            .clone()
+            .expect("a test state has a member key");
+        let newer = Identity::generate();
+        let mesh = MeshId::from("test");
+        let proof = member.prove(&newer.author_key(), "reader", mesh.as_ref(), 6);
+        let mut old = Message::new_joined_with_proof(&mesh, &nick("reader"), &proof);
+        old.timestamp = UnixSecs::from(UnixSecs::now().as_secs() - 3 * 86_400);
+        let signed: Verified = old.sign(&newer);
+        let old_answer = (
+            Plane::Gossip,
+            signed.serialize().expect("serialize").into_bytes(),
+        );
+        let alive = alive_of(&newer, "reader");
+
+        let shown = reader_expecting(
+            state,
+            vec![old_answer, alive],
+            &lines,
+            &[(
+                "habilis_network::lifecycle",
+                "a newer run of our member is active",
+            )],
+        );
+
+        let told = *lines.0.lock().expect("the count lock is not poisoned");
+        assert!(
+            shown.peers.contains(&newer.author_key()),
+            "the newer run of our member was refused although its answer proved it"
+        );
+        assert_eq!(told, 1, "this node was not told once that it is superseded");
     }
 
     /// An old `joined` frame of a QUIET session does not bind the nickname: a quiet session counts as held in the
