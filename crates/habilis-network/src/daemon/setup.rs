@@ -809,14 +809,15 @@ fn last_recorded_run(state: &Path) -> Option<u64> {
 /// The last run that the key file at `key_path` names, if it names one.
 #[cfg(all(unix, feature = "host"))]
 fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
-    use std::io::Read as _;
+    use std::os::unix::fs::FileExt as _;
     let mut reading = OpenOptions::new();
     reading.read(true);
-    let mut file = open_trusted_key_file(key_path, &mut reading).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    let tail = bytes.get(40..48)?;
-    <[u8; 8]>::try_from(tail).ok().map(u64::from_le_bytes)
+    let file = open_trusted_key_file(key_path, &mut reading).ok()?;
+    // Only the 8 bytes of the counter are read: the seed in the first 32 bytes never enters this process's
+    // heap through a buffer that is not wiped.
+    let mut counter = [0u8; 8];
+    file.read_exact_at(&mut counter, 40).ok()?;
+    Some(u64::from_le_bytes(counter))
 }
 
 /// Take the exclusive lock on `<state>.key.lock` and keep it as long as the returned file lives, so two
@@ -1797,6 +1798,34 @@ mod tests {
             super::load_or_create_identity(Some(&state)).is_err(),
             "a link in place of the key file was followed"
         );
+    }
+
+    /// The last run that the key file names is read from the bytes 40 to 48, and a file that is shorter names
+    /// none. The seed in the first 32 bytes is not needed to read it.
+    #[test]
+    fn the_last_run_is_read_from_the_bytes_40_to_48_of_the_key_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new("habilis-last-run");
+        let key = dir.path().join("session.key");
+        let mut named = vec![7u8; 40];
+        named.extend_from_slice(&41u64.to_le_bytes());
+        fs::write(&key, &named).expect("a key file with a run");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("a private mode");
+        assert_eq!(
+            super::last_recorded_run_in(&key),
+            Some(41),
+            "the run is named"
+        );
+        fs::write(&key, &named[..47]).expect("a key file one byte short");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("a private mode");
+        assert_eq!(
+            super::last_recorded_run_in(&key),
+            None,
+            "a file that is one byte short names no run"
+        );
+        fs::write(&key, [7u8; 40]).expect("a key file with no run");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("a private mode");
+        assert_eq!(super::last_recorded_run_in(&key), None, "no run is named");
     }
 
     /// A key path that is a FIFO with no writer must be refused, not waited for: a read-only open of such a
