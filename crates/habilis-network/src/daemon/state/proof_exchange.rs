@@ -29,7 +29,9 @@ const EVICTIONS_WAITING_MAX: usize = 64;
 /// (they are free) sets off one ask for each key to its own endpoint: each ask is a signature and a task that
 /// holds a frame. The budget is checked before the request is signed.
 const ASKS_PER_ENDPOINT: usize = 8;
-/// The proof requests that this node sends, for each `ASK_BUDGET_WINDOW`, in all.
+/// The proof requests that this node sends, for each `ASK_BUDGET_WINDOW`, in all: the asks after the first of an
+/// endpoint need room in it. The first ask of each endpoint is guaranteed (it counts in it, and it needs none), so
+/// a window holds at most this number plus one for each endpoint that has a path to this node.
 const ASKS_IN_ALL: usize = 64;
 /// The window of the budget of the proof requests.
 const ASK_BUDGET_WINDOW: Duration = Duration::from_secs(10);
@@ -281,7 +283,13 @@ impl ProofExchange {
             Some((start, count)) if in_window(*start) => (*start, *count),
             _ => (now, 0),
         };
-        if all_count >= ASKS_IN_ALL || count >= ASKS_PER_ENDPOINT {
+        // The first ask of an endpoint in the window is guaranteed: it needs no room in the budget in all (it counts
+        // in it). The budget in all would otherwise be the vector of a starvation: one peer with a few endpoints
+        // that have a path to us uses all of it, and every honest endpoint is deferred. Only the asks after the
+        // first need both budgets.
+        let first = count == 0;
+        let over_all = all_count >= ASKS_IN_ALL && !first;
+        if over_all || count >= ASKS_PER_ENDPOINT {
             self.ask_budget_all = Some((all_start, all_count));
             return false;
         }
@@ -674,22 +682,58 @@ mod tests {
         );
     }
 
-    /// The budget in all holds at 64 for the window, whatever the number of endpoints, and its map of endpoints is
-    /// bounded: fed 10 times its cap of endpoints, it holds the cap at most.
+    /// The first ask of each endpoint in a window is guaranteed: it needs no room in the budget in all (it counts in
+    /// it). Fed 10 times its cap of endpoints, each asking once, all are allowed, and the map of the endpoints
+    /// holds its cap at most. An endpoint that asks again, when the budget in all is full, is refused.
     #[test]
-    fn the_budget_of_the_proof_requests_stays_inside_its_bounds_at_10_times_the_cap() {
+    fn the_first_ask_of_each_endpoint_is_guaranteed_and_the_map_stays_inside_its_cap_at_10_times_the_cap()
+     {
         let mut book = ProofExchange::with_cap(QUIET_CAP);
         let start = Instant::now();
-        let endpoints = 10 * ASK_BUDGET_ENDPOINTS_MAX;
+        let endpoints = u32::try_from(10 * ASK_BUDGET_ENDPOINTS_MAX).expect("a small number");
 
         let allowed: usize = (0..endpoints)
-            .filter(|index| book.may_ask(endpoint_of(u32::try_from(*index).unwrap_or(0)), start))
+            .filter(|index| book.may_ask(endpoint_of(*index), start))
             .count();
 
-        assert_eq!(allowed, ASKS_IN_ALL, "the budget in all for one window");
+        assert_eq!(
+            allowed,
+            usize::try_from(endpoints).expect("a small number"),
+            "the first ask of each endpoint is guaranteed, whatever the budget in all"
+        );
         assert!(
             book.ask_budget_endpoints() <= ASK_BUDGET_ENDPOINTS_MAX,
             "the map of the endpoints holds more than its cap"
+        );
+        assert!(
+            !book.may_ask(endpoint_of(endpoints - 1), start),
+            "a second ask of an endpoint was allowed while the budget in all was full"
+        );
+    }
+
+    /// The budget in all (64 for each window) is for the asks after the first of an endpoint: 8 endpoints with their
+    /// own budget of 8 use it up, and the 9th endpoint still gets its first ask.
+    #[test]
+    fn the_budget_in_all_is_used_up_by_the_asks_after_the_first_and_the_next_endpoint_still_asks() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+
+        let from_eight: usize = (0..8)
+            .map(|index| {
+                (0..ASKS_PER_ENDPOINT)
+                    .filter(|_| book.may_ask(endpoint_of(index), start))
+                    .count()
+            })
+            .sum();
+
+        assert_eq!(from_eight, ASKS_IN_ALL, "8 endpoints use the budget in all");
+        assert!(
+            book.may_ask(endpoint_of(8), start),
+            "the ninth endpoint did not get its first ask"
+        );
+        assert!(
+            !book.may_ask(endpoint_of(8), start),
+            "the ninth endpoint got a second ask from a full budget"
         );
     }
 

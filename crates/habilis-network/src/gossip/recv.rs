@@ -7630,10 +7630,47 @@ mod dedup_counter_tests {
         );
     }
 
-    /// The budget in all: 80 endpoints with one fresh session each sign 64 requests in a window, and the other 16
-    /// asks wait in the map of the deferred asks.
+    /// The budget in all, for asks that come from endpoints that have asked already: 20 endpoints with 8 fresh
+    /// sessions each. The first ask of each endpoint is guaranteed (it counts in the budget in all, and it needs
+    /// no room in it), and the others need the budget in all, which is 64 for each window. The first 8 endpoints
+    /// use it up (64 asks); the 12 endpoints that come after get only their guaranteed first ask: 64 + 12 signed, and
+    /// the other 84 asks wait in the map of the deferred asks (64 at most: the oldest are dropped).
     #[test]
-    fn eighty_endpoints_with_one_fresh_session_each_sign_the_budget_in_all_and_no_more() {
+    fn twenty_endpoints_with_eight_fresh_sessions_each_sign_the_budget_in_all_and_each_first_ask() {
+        let mut initial = fresh_state();
+        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        for endpoint_index in 0..20u8 {
+            let endpoint = endpoint_id(100 + endpoint_index);
+            initial.linked_endpoints.insert(endpoint);
+            for index in 0..8u8 {
+                let session = Identity::generate();
+                let name = format!("spread-{endpoint_index}-{index}");
+                initial.peers.insert(session.author_key());
+                initial.names.insert(session.author_key(), nick(&name));
+                initial.place_endpoint(
+                    session.author_key(),
+                    &nick(&name),
+                    iroh::EndpointAddr::new(endpoint),
+                );
+                arrivals.push(alive_of(&session, &name));
+            }
+        }
+
+        let reader = reader_with(initial, arrivals);
+
+        assert_eq!(
+            reader.proof_requests_signed.load(Ordering::Relaxed),
+            64 + 12,
+            "20 endpoints with 8 sessions each did not sign the budget in all plus the first ask of the last 12"
+        );
+    }
+
+    /// 80 endpoints with one fresh session each (a mesh of 80 honest members that ask in one window): each is the
+    /// first ask of its endpoint, so each is guaranteed, and all 80 are signed. Before the guarantee the budget in
+    /// all allowed 64 of them and deferred 16 (the old test `eighty_endpoints_with_one_fresh_session_each_sign_the_
+    /// budget_in_all_and_no_more` asserted 64 signed and 16 waiting).
+    #[test]
+    fn eighty_endpoints_with_one_fresh_session_each_are_all_asked() {
         let mut initial = fresh_state();
         let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
         for index in 0..80u8 {
@@ -7654,13 +7691,57 @@ mod dedup_counter_tests {
 
         assert_eq!(
             reader.proof_requests_signed.load(Ordering::Relaxed),
-            64,
-            "80 endpoints signed more than the budget of the node in one window"
+            80,
+            "80 endpoints with one session each were not all asked: a first ask is guaranteed"
         );
         assert_eq!(
             reader.proofs.deferred_len(),
-            16,
-            "the asks over the budget wait in the map of the deferred asks"
+            0,
+            "no ask waits: the first ask of each endpoint needs no room in the budget in all"
+        );
+    }
+
+    /// One attacker with 8 endpoints that have a path to us floods 200 fresh sessions and uses the whole budget in
+    /// all. An honest session at ANOTHER endpoint, with its own budget, must still be asked in that window: the
+    /// first ask of each endpoint is guaranteed, so it is not deferred by the budget, and the push-out of the shared
+    /// map of deferred asks cannot reach it. Its retry clock shows that the request went out.
+    #[test]
+    fn an_honest_session_is_asked_while_one_attacker_with_eight_endpoints_uses_the_budget_in_all() {
+        let mut initial = fresh_state();
+        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        for endpoint_index in 0..8u8 {
+            let endpoint = endpoint_id(110 + endpoint_index);
+            initial.linked_endpoints.insert(endpoint);
+            for index in 0..25u8 {
+                let session = Identity::generate();
+                let name = format!("fresh-{endpoint_index}-{index}");
+                initial.peers.insert(session.author_key());
+                initial.names.insert(session.author_key(), nick(&name));
+                initial.place_endpoint(
+                    session.author_key(),
+                    &nick(&name),
+                    iroh::EndpointAddr::new(endpoint),
+                );
+                arrivals.push(alive_of(&session, &name));
+            }
+        }
+        let honest = Identity::generate();
+        let honest_endpoint = endpoint_id(130);
+        initial.linked_endpoints.insert(honest_endpoint);
+        initial.peers.insert(honest.author_key());
+        initial.names.insert(honest.author_key(), nick("honest"));
+        initial.place_endpoint(
+            honest.author_key(),
+            &nick("honest"),
+            iroh::EndpointAddr::new(honest_endpoint),
+        );
+        arrivals.push(alive_of(&honest, "honest"));
+
+        let reader = reader_with(initial, arrivals);
+
+        assert!(
+            !reader.asks_for_session(&honest.author_key(), &nick("honest")),
+            "the honest session was not asked: the attacker used the budget in all and the ask was deferred"
         );
     }
 
