@@ -7136,6 +7136,38 @@ mod dedup_counter_tests {
         });
     }
 
+    /// The goodbye of a session that IS in the roster and has an endpoint retained for it (it shares its nickname with
+    /// another live key, which holds the dial hint) tears down the pool state of that endpoint too: its pooled
+    /// connection and its dial-failure cooldown go, and the shared-endpoint check stays.
+    #[test]
+    fn the_goodbye_of_a_roster_session_tears_down_the_pool_state_of_its_retained_endpoint() {
+        let session = Identity::generate();
+        let (retained, shared) = (endpoint_id(66), endpoint_id(67));
+        let mut initial = fresh_state();
+        initial.peers.insert(session.author_key());
+        initial.names.insert(session.author_key(), nick("carol"));
+        initial.retain_refused_endpoint(session.author_key(), iroh::EndpointAddr::new(retained));
+        let other = Identity::generate().author_key();
+        initial.retain_refused_endpoint(other, iroh::EndpointAddr::new(shared));
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            initial.unicast_pool.note_dial_failure(retained).await;
+            initial.unicast_pool.note_dial_failure(shared).await;
+        });
+
+        let reader = reader_with(initial, vec![left_of(&session, "carol")]);
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            assert!(
+                !reader.unicast_pool.is_cooling(retained).await,
+                "the retained endpoint of a roster session that left kept its pool state"
+            );
+            assert!(
+                reader.unicast_pool.is_cooling(shared).await,
+                "the endpoint of another retained key lost its pool state"
+            );
+        });
+    }
+
     /// The end of an intruder is no goodbye that it signed: the member that lost the name at a node can
     /// come back there. While the other member holds the name its frames are refused, and when that
     /// member leaves they are admitted again, with no restart of the first. Two honest members that
