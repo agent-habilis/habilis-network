@@ -947,7 +947,15 @@ async fn roster_gate(
             tracing::warn!(target: "habilis_network::lifecycle", run, "a newer run of our member is active");
             context.sink.emit(NodeEvent::Error(line));
         }
-        return Some(lifecycle::observe(verified, state, context));
+        let observed = lifecycle::observe(verified, state, context);
+        // The check before `observe` is pure. A quiet peer whose clock stepped back returns when `observe` completes
+        // its run of rising frames, and that check read the last frame of the run as stale: the peer is in the
+        // roster now with its proof still pending, so it is activated here (one frame late).
+        if state.proofs.has_pending(&verified.key()) && state.peers.contains(&verified.key()) {
+            state.activate_pending_proof(verified, context.mesh);
+            end_displaced_sessions(verified, state, app, context).await;
+        }
+        return Some(observed);
     }
     // A goodbye is signed by the key that leaves, whatever nickname the frame names: the gate refuses the
     // nickname, not the departure of a key of the roster, so the session of that key ends.
@@ -6901,6 +6909,66 @@ mod dedup_counter_tests {
             "the newer run of our member was refused although its answer proved it"
         );
         assert_eq!(told, 1, "this node was not told once that it is superseded");
+    }
+
+    /// A quiet peer whose clock stepped back returns after a run of rising frames (the roster rule of `observe`).
+    /// The check before `observe` is pure and reads the last frame of the run as stale, so a pending proof of that peer
+    /// was not activated when the peer entered the roster. The proof is activated right after `observe`: the peer
+    /// that is back holds its nickname.
+    #[test]
+    fn the_pending_proof_of_a_peer_whose_clock_stepped_back_is_activated_when_the_run_returns_it() {
+        use crate::lifecycle::membership_update::STEP_BACK_FRAMES;
+        use crate::protocol::UnixSecs;
+        use crate::util::clock::Instant;
+        use std::time::Duration;
+        let (member, session) = (Identity::generate(), Identity::generate());
+        let key = session.author_key();
+        let mut state = fresh_state();
+        state.quiet.insert(key);
+        state.names.insert(key, nick("alice"));
+        let heard = Instant::now()
+            .checked_sub(Duration::from_secs(100))
+            .expect("the monotonic clock has run past 100 s since boot");
+        state.quiet_since.insert(key, heard);
+        // its newest stamp is an hour ahead of the new base of its clock
+        state
+            .peer_stamp
+            .insert(key, UnixSecs::now() + Duration::from_hours(1));
+        let mut state = reader_with(
+            state,
+            vec![old_joined_run_of(&session, &member, 1, 3 * 86_400)],
+        );
+        assert!(
+            state.proofs.has_pending(&key) && state.proofs.proof_of(&key).is_none(),
+            "the old answer of the quiet peer is kept pending"
+        );
+
+        for index in 0..STEP_BACK_FRAMES {
+            let mut alive = Message::new_alive(&MeshId::from("test"), &nick("alice"));
+            alive.timestamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 20);
+            let signed: Verified = alive.sign(&session);
+            let frame = (
+                Plane::Gossip,
+                signed.serialize().expect("serialize").into_bytes(),
+            );
+            state = reader_with(state, vec![frame]);
+            // the next frame comes one alive interval later on our clock
+            if let Some(run) = state.clock_evidence.step_back.get_mut(&key) {
+                run.at = run
+                    .at
+                    .checked_sub(Duration::from_secs(20))
+                    .expect("the monotonic clock has run past 20 s since boot");
+            }
+        }
+
+        assert!(
+            state.peers.contains(&key),
+            "the run of frames did not return the peer"
+        );
+        assert!(
+            state.proofs.proof_of(&key).is_some(),
+            "the peer is back in the roster and its proof is still pending: the nickname is not bound"
+        );
     }
 
     /// An old `joined` frame of a QUIET session does not bind the nickname: a quiet session counts as held in the
