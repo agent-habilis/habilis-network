@@ -79,7 +79,8 @@ fn take(doc: &mut MeshDoc, frame: &Verified, what: &str) {
 
 /// Ingest `frames` until the document refuses one, and say how many it took. A document that is
 /// full (over the line that refuses a write that adds) refuses what comes: the cost of the frames
-/// that it took is a measurement, and the refused ones are not.
+/// that it took is a measurement, and the refused ones are not. A document that takes no frame
+/// gives no measurement, so that case stops the run.
 fn take_until_refused(doc: &mut MeshDoc, frames: &[Verified]) -> usize {
     let mut taken = 0;
     for frame in frames {
@@ -88,7 +89,22 @@ fn take_until_refused(doc: &mut MeshDoc, frames: &[Verified]) -> usize {
         }
         taken += 1;
     }
+    assert!(
+        taken > 0,
+        "the document took no frame: the time is the time of a refusal, not a replay cost"
+    );
     taken
+}
+
+/// A burst of which the document takes no frame is no measurement: the time that it took is the time
+/// of a refusal. The frame here is one that the document already holds.
+#[test]
+#[should_panic(expected = "the document took no frame")]
+fn a_burst_that_the_document_takes_no_frame_of_is_not_a_measurement() {
+    let mut doc = MeshDoc::new_ungated();
+    let frame = plain_frame(0);
+    take(&mut doc, &frame, "the first take of the frame");
+    take_until_refused(&mut doc, &[frame]);
 }
 
 /// The time and the bytes allocated that `step` took.
