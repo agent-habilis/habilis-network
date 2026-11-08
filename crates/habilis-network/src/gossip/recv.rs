@@ -920,12 +920,7 @@ async fn roster_gate(
     // nickname ends the sessions of other members under it only for a sender that is there.
     let claimant_enters = joined && membership_update::leaves_sender_in_roster(verified, state);
     if joined && state.note_joined_proof(verified, context.mesh, context.author, claimant_enters) {
-        let line = format!(
-            "The nickname {} is held by another member with another key. The two nodes do not accept the frames of each other",
-            context.author
-        );
-        tracing::warn!(target: "habilis_network::lifecycle", nickname = %context.author, "our nickname is held by another member");
-        context.sink.emit(NodeEvent::Error(line));
+        report_nickname_held(context);
     }
     end_displaced_sessions(verified, state, app, context).await;
     let admitted = state.admits_session(verified, context.author);
@@ -989,6 +984,16 @@ async fn roster_gate(
     None
 }
 
+/// Tell the operator that another member holds our nickname: the line that the app maps to its `nickname_held` event.
+fn report_nickname_held(context: &HandlerCtx<'_>) {
+    let line = format!(
+        "The nickname {} is held by another member with another key. The two nodes do not accept the frames of each other",
+        context.author
+    );
+    tracing::warn!(target: "habilis_network::lifecycle", nickname = %context.author, "our nickname is held by another member");
+    context.sink.emit(NodeEvent::Error(line));
+}
+
 /// A copy of a `joined` frame gives back the proof that its session lost, and nothing else. A member signs its
 /// answer to a proof request once for each run, so an asker that dropped the proof of that session (the session left
 /// the roster and came back, or its pending proof was dropped at a cap) gets the same frame again, and the frame is a
@@ -1017,7 +1022,11 @@ async fn restore_lost_proof(
         return;
     }
     let live = state.peers.contains(&key);
-    state.note_joined_proof(verified, context.mesh, context.author, live);
+    // The first proof that shows our own nickname bound to another member is the held error: the copy that reads it
+    // first raises it, as the first arrival does, or the signal (`tell_once`) is spent with no line.
+    if state.note_joined_proof(verified, context.mesh, context.author, live) {
+        report_nickname_held(context);
+    }
     if live {
         end_displaced_sessions(verified, state, app, context).await;
     }
@@ -3573,6 +3582,51 @@ mod first_contact_tests {
             assert_eq!(
                 held, 1,
                 "the answer of the claimant did not raise the held event once"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The held error is raised where the first proof of another member under our nickname is read, and a copy of a
+    /// `joined` frame that goes through `restore_lost_proof` reads it too: the signal must not be spent there with no
+    /// line. By the order of the gate a copy follows its first arrival, so this is a guard of the signal, not of a
+    /// seen failure.
+    #[test]
+    fn a_copy_that_goes_through_the_restore_still_raises_the_held_event_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::lifecycle",
+                "our nickname is held by another member",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let (claimant, other_member) = (Identity::generate(), Identity::generate());
+            let (name, mesh_text): (&str, &str) = (node.author.as_ref(), node.mesh.as_ref());
+            let proof = other_member.prove(&claimant.author_key(), name, mesh_text, 1);
+            let joined: Verified =
+                Message::new_joined_with_proof(&node.mesh, &node.author, &proof).sign(&claimant);
+
+            super::restore_lost_proof(&joined, &mut state, &mut app, &context).await;
+            super::restore_lost_proof(&joined, &mut state, &mut app, &context).await;
+
+            let seen: Vec<String> = lines
+                .0
+                .lock()
+                .expect("the lines lock is not poisoned")
+                .clone();
+            let held: usize = seen
+                .iter()
+                .filter(|line| line.contains("is held by another member"))
+                .count();
+            assert_eq!(
+                held, 1,
+                "the copy spent the held signal without a line, or raised it twice: {seen:?}"
             );
             node.endpoint.close().await;
         });
