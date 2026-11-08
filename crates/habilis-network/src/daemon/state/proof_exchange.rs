@@ -21,10 +21,10 @@ const OPEN_ASKS_PER_NICKNAME: usize = 4;
 /// The asks that were skipped for lack of a warm path and wait for one: 64 at most. When the map is full a
 /// new one takes the place of the oldest, whose session falls back to the ask at its next alive frame.
 const DEFERRED_ASKS_MAX: usize = 64;
-/// The sessions whose proof is held while they are not in the roster, and whose eviction of another member's
-/// session waits until they enter it: 64 at most. At the cap the oldest drops, and the sessions that it would
-/// have ended stay until the sweep of their own silence.
-const EVICTIONS_WAITING_MAX: usize = 64;
+/// The proofs that are valid but INACTIVE: the proof of a sender that is not live (an old copy of a frame, a quiet
+/// session), kept for the day that its session proves presence: 64 at most, the oldest dropped when full. A pending
+/// proof binds no nickname, replaces no session and evicts none; it only admits its own session.
+const PENDING_PROOFS_MAX: usize = 64;
 /// The proof requests that one endpoint gets, for each `ASK_BUDGET_WINDOW`. A peer that makes fresh session keys
 /// (they are free) sets off one ask for each key to its own endpoint: each ask is a signature and a task that
 /// holds a frame. The budget is checked before the request is signed.
@@ -100,9 +100,9 @@ pub(crate) struct ProofExchange {
     evicted: Vec<AuthorKey>,
     // the asks that waited for a warm path: `DEFERRED_ASKS_MAX` at most, the oldest dropped when full
     deferred: ProofBook<AuthorKey, DeferredAsk>,
-    // the sessions that hold a proof and are not in the roster yet: `EVICTIONS_WAITING_MAX` at most, the
-    // oldest dropped when full
-    waiting_to_evict: BoundedFifoSet<AuthorKey>,
+    // the valid but inactive proofs of senders that are not live: `PENDING_PROOFS_MAX` at most, the oldest dropped
+    // when full; not in `book`, so nothing that reads the book sees them
+    pending: ProofBook<AuthorKey, (Nickname, IdentityProof)>,
     // the proof requests sent to each endpoint in the window: when it started, and how many;
     // `ASK_BUDGET_ENDPOINTS_MAX` endpoints at most, the oldest dropped when full
     ask_budget: ProofBook<EndpointId, (Instant, usize)>,
@@ -122,7 +122,7 @@ impl ProofExchange {
             replaced: Vec::new(),
             evicted: Vec::new(),
             deferred: ProofBook::with_cap(DEFERRED_ASKS_MAX),
-            waiting_to_evict: BoundedFifoSet::new(EVICTIONS_WAITING_MAX),
+            pending: ProofBook::with_cap(PENDING_PROOFS_MAX),
             ask_budget: ProofBook::with_cap(ASK_BUDGET_ENDPOINTS_MAX),
             ask_budget_all: None,
             ties_refused: 0,
@@ -165,9 +165,11 @@ impl ProofExchange {
     ) -> bool {
         // A cached proof counts only while it agrees with the binding now: a proof that was cached while
         // its session was not in the roster must not pass once another member holds the nickname.
-        let proof_of = self
-            .book
-            .get(session)
+        // A pending proof (valid, inactive) counts for the admission of its own session only: the nickname is
+        // bound to its member, or free, and the session then enters the roster, where the proof is activated.
+        let in_book = self.book.get(session);
+        let kept = in_book.or_else(|| self.pending.get(session));
+        let proof_of = kept
             .filter(|(named, _)| named == nickname)
             .map(|(_, proof)| proof.identity);
         let bound = self.bound_to(nickname, is_held);
@@ -184,7 +186,7 @@ impl ProofExchange {
 
     /// Forget the proof of `session`, which said goodbye, and the requests for it.
     pub(crate) fn forget(&mut self, session: &AuthorKey) {
-        self.waiting_to_evict.remove(session);
+        self.pending.remove(session);
         self.book.remove(session);
         self.asked.remove(session);
         self.deferred.remove(session);
@@ -306,20 +308,49 @@ impl ProofExchange {
         self.ask_budget.len()
     }
 
-    /// The proof of `session` is held, and `session` is not in the roster: the sessions of other members under
-    /// its nickname end when it enters the roster, and not before.
-    pub(crate) fn wait_to_evict(&mut self, session: AuthorKey) {
-        self.waiting_to_evict.insert(session);
+    /// Keep the proof of a sender that is not live as a PENDING proof: valid (its signature was checked), and
+    /// inactive. The higher run of a session wins.
+    fn hold_pending(&mut self, session: AuthorKey, nickname: &Nickname, proof: IdentityProof) {
+        if self
+            .pending
+            .get(&session)
+            .is_some_and(|(_, held)| held.run >= proof.run)
+        {
+            return;
+        }
+        // every entry reads as dead, so a full map drops the oldest one
+        self.pending
+            .insert_evicting(session, (nickname.clone(), proof), |_, _| false);
     }
 
-    /// Whether the eviction for `session` waits, and no longer waits after this call.
-    pub(crate) fn take_waiting_to_evict(&mut self, session: &AuthorKey) -> bool {
-        self.waiting_to_evict.remove(session)
+    /// Whether a pending proof is kept for `session`.
+    pub(crate) fn has_pending(&self, session: &AuthorKey) -> bool {
+        self.pending.get(session).is_some()
     }
 
-    /// Whether the eviction for `session` waits for it to enter the roster.
-    pub(crate) fn is_waiting_to_evict(&self, session: &AuthorKey) -> bool {
-        self.waiting_to_evict.contains(session)
+    /// Take the pending proof of `session` out, if it is for `nickname`. A frame of the session under another
+    /// nickname leaves it where it is.
+    pub(crate) fn take_pending(
+        &mut self,
+        session: &AuthorKey,
+        nickname: &Nickname,
+    ) -> Option<IdentityProof> {
+        let matches = self
+            .pending
+            .get(session)
+            .is_some_and(|(named, _)| named == nickname);
+        if !matches {
+            return None;
+        }
+        let taken = self.pending.get(session).map(|(_, proof)| *proof);
+        self.pending.remove(session);
+        taken
+    }
+
+    /// How many pending proofs are kept.
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 
     /// The sessions that a proof bound the nickname away from since the last call. The caller ends them in
@@ -419,7 +450,8 @@ impl ProofExchange {
     /// `accept` (a test helper that passes a live sender) for a frame whose sender may not be live. `claimant_live` says that the sender is in the
     /// roster (live) after the frame. A proof of a sender that is not live does not replace a live session of its
     /// member: a historical `joined` frame with a higher run (the member restored a lower counter) would end the
-    /// live session, with the frames that wait for it, for a member that is not there. Such a proof is not held.
+    /// live session, with the frames that wait for it, for a member that is not there. Such a proof is kept
+    /// inactive (pending), and it activates when its session proves presence.
     pub(crate) fn accept_live(
         &mut self,
         session: &AuthorKey,
@@ -429,6 +461,15 @@ impl ProofExchange {
         claimant_live: bool,
         is_held: impl Fn(&AuthorKey) -> bool,
     ) -> bool {
+        // A copy of the pending proof of a sender that is still not live costs a lookup, as a copy of a held one.
+        if !claimant_live
+            && self
+                .pending
+                .get(session)
+                .is_some_and(|(_, kept)| kept.run >= proof.run)
+        {
+            return false;
+        }
         // The run is compared first: a copy of the held proof, which comes with each resent or
         // re-announced `joined` frame, costs no signature check.
         if let Some((_, held)) = self.book.get(session)
@@ -452,6 +493,14 @@ impl ProofExchange {
         if !verify_proof(&proof, session, nickname.as_ref(), mesh.as_ref()) {
             return false;
         }
+        // The proof is valid (its signature was checked: a forged one is never kept). If its sender is not live
+        // (an old copy of a frame, a quiet session) it is kept INACTIVE: it binds no nickname, replaces no
+        // session and evicts none, so a replay of an old signed frame changes nothing in the roster. It admits its
+        // own session, and it is activated when that session proves presence.
+        if !claimant_live {
+            self.hold_pending(*session, nickname, proof);
+            return false;
+        }
         // A member holds one session, the newest: a restart makes a new session with a higher run,
         // and the sessions of its older runs go. A proof of a run that is not higher than the run
         // of a session in the roster is a late copy of an older frame, and it does not replace the
@@ -470,12 +519,6 @@ impl ProofExchange {
             self.ties_refused += 1;
             return false;
         }
-        // The proof is of a higher run than a live session of its member. Only a sender that is live replaces
-        // it: a sender that is not (an old copy of a frame, a quiet session) leaves the live session as it is,
-        // and the proof comes again with the next frame of that sender, when it is live.
-        if !claimant_live && runs.iter().any(|(_, _, live)| *live) {
-            return false;
-        }
         for (older, _, live) in runs {
             self.book.remove(&older);
             if live {
@@ -487,6 +530,7 @@ impl ProofExchange {
         let held = self.book.get(session).is_some();
         if held {
             self.deferred.remove(session);
+            self.pending.remove(session);
         }
         held
     }
@@ -549,7 +593,7 @@ impl ProofExchange {
 mod tests {
     use super::{
         ASK_BUDGET_ENDPOINTS_MAX, ASK_BUDGET_WINDOW, ASKS_IN_ALL, ASKS_PER_ENDPOINT,
-        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EVICTIONS_WAITING_MAX, EndpointId,
+        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EndpointId, PENDING_PROOFS_MAX,
         ProofExchange, verify_proof,
     };
     use crate::protocol::identity::Identity;
@@ -627,32 +671,90 @@ mod tests {
         );
     }
 
-    /// The sessions whose eviction waits for them to enter the roster are bounded: fed 10 times the cap, the set
-    /// holds the cap and the newest, and the oldest dropped. A session that is taken no longer waits.
+    /// The pending proofs (valid, inactive: the proofs of senders that are not live) are bounded: fed 10 times the
+    /// cap, the map holds the cap, the oldest is dropped and the newest is kept. They are not in the book, so
+    /// nothing that reads the book sees them. A taken one is gone.
     #[test]
-    fn the_evictions_that_wait_stay_inside_their_cap_when_they_are_fed_10_times_the_cap() {
+    fn the_pending_proofs_stay_inside_their_cap_when_they_are_fed_10_times_the_cap() {
         let mut book = ProofExchange::with_cap(QUIET_CAP);
-        let sessions: Vec<AuthorKey> = (0..10 * EVICTIONS_WAITING_MAX)
+        let mesh = MeshId::from("test");
+        let member = Identity::generate();
+        let alice = Nickname::try_new("alice").expect("a nickname");
+        let sessions: Vec<AuthorKey> = (0..10 * PENDING_PROOFS_MAX)
             .map(|_| Identity::generate().author_key())
             .collect();
 
         for session in &sessions {
-            book.wait_to_evict(*session);
+            let proof = member.prove(session, "alice", mesh.as_ref(), 1);
+            assert!(
+                !book.accept_live(session, &alice, &mesh, proof, false, |_| true),
+                "the proof of a sender that is not live was held active"
+            );
         }
 
-        let waiting: usize = sessions
-            .iter()
-            .filter(|session| book.is_waiting_to_evict(session))
-            .count();
-        assert_eq!(waiting, EVICTIONS_WAITING_MAX, "the cap holds");
+        assert_eq!(book.pending_len(), PENDING_PROOFS_MAX, "the cap holds");
         let (oldest, newest) = (&sessions[0], &sessions[sessions.len() - 1]);
         assert!(
-            !book.is_waiting_to_evict(oldest) && book.is_waiting_to_evict(newest),
-            "the oldest was dropped and the newest waits"
+            !book.has_pending(oldest) && book.has_pending(newest),
+            "the oldest was dropped and the newest is kept"
         );
         assert!(
-            book.take_waiting_to_evict(newest) && !book.is_waiting_to_evict(newest),
-            "a session that is taken no longer waits"
+            book.proof_of(newest).is_none(),
+            "a pending proof is not in the book"
+        );
+        assert!(
+            book.take_pending(newest, &alice).is_some() && !book.has_pending(newest),
+            "a taken pending proof is gone"
+        );
+    }
+
+    /// A pending proof is never stored for a forged proof (its signature is checked first), and it binds no
+    /// nickname, replaces no session and evicts none before it is activated: an attacker cannot use the pending map
+    /// to bind a nickname or to end a live session.
+    #[test]
+    fn a_pending_proof_binds_replaces_and_evicts_nothing_and_a_forged_one_is_never_kept() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let mesh = MeshId::from("test");
+        let (member, other) = (Identity::generate(), Identity::generate());
+        let alice = Nickname::try_new("alice").expect("a nickname");
+        let (live, pending, forged) = (
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+            Identity::generate().author_key(),
+        );
+        let held = member.prove(&live, "alice", mesh.as_ref(), 3);
+        assert!(
+            book.accept_live(&live, &alice, &mesh, held, true, |_| true),
+            "the live session of the member holds its proof"
+        );
+
+        let newer = member.prove(&pending, "alice", mesh.as_ref(), 9);
+        assert!(
+            !book.accept_live(&pending, &alice, &mesh, newer, false, |_| true),
+            "the proof of a sender that is not live was held active"
+        );
+        let mut bad = other.prove(&forged, "alice", mesh.as_ref(), 1);
+        bad.run += 1;
+        assert!(
+            !book.accept_live(&forged, &alice, &mesh, bad, false, |_| true),
+            "a forged proof was accepted"
+        );
+
+        assert!(
+            book.has_pending(&pending) && !book.has_pending(&forged),
+            "the valid proof is pending and the forged one is never kept"
+        );
+        assert!(
+            book.proof_of(&live).is_some(),
+            "the pending proof replaced the live session of its member"
+        );
+        assert!(
+            book.take_replaced().is_empty() && book.take_evicted().is_empty(),
+            "a pending proof replaced or evicted a session"
+        );
+        assert!(
+            book.admits(&pending, &alice, |_| true),
+            "a pending proof of the member that holds the nickname admits its own session"
         );
     }
 

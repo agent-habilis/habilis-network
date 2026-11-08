@@ -2546,10 +2546,11 @@ impl EventLoopState {
     /// our own nickname bound to another member, which is the join error of this node.
     ///
     /// `claimant_enters` says that the sender of the frame is in the roster, or is about to be put there by this
-    /// frame. When the proof binds the nickname, the sessions of other members under it end only then. When
-    /// it is false (an old copy of the frame, that proves no presence) the proof is kept and the end waits
-    /// until the sender enters the roster ([`Self::evict_for_waiting_claimant`]): a replay of an old
-    /// signed frame must not end a live session for a member that is not there.
+    /// frame. Then the proof is ACTIVE: it binds the nickname, replaces the older sessions of its member, and ends
+    /// the sessions of other members under the nickname. When it is false (an old copy of the frame, that proves no
+    /// presence; a quiet session) the proof is kept PENDING: valid and inactive. It binds nothing, replaces nothing
+    /// and ends nothing, and it admits its own session; it is activated when that session proves presence
+    /// ([`Self::activate_pending_proof`]). A replay of an old signed frame changes nothing in the roster.
     pub(crate) fn note_joined_proof(
         &mut self,
         message: &Verified,
@@ -2566,21 +2567,11 @@ impl EventLoopState {
             let proved = verify_proof(&proof, &key, message.author.as_ref(), mesh.as_ref());
             return proved && self.proofs.tell_once(&key);
         }
-        let member = proof.identity;
         // Read before the proof is held: holding it drops the older sessions of the same member from the
         // book (a newer run replaces them, and they end with a `left` line), and they must not read as
         // sessions of another member.
-        let intruders: Vec<AuthorKey> = self
-            .keys_named(&message.author)
-            .into_iter()
-            .filter(|held| {
-                *held != key
-                    && self
-                        .proofs
-                        .proof_of(held)
-                        .is_none_or(|held_proof| held_proof.identity != member)
-            })
-            .collect();
+        let intruders: Vec<AuthorKey> =
+            self.sessions_of_other_members(&key, &message.author, proof.identity);
         let refused_before = self.proofs.bound_refused();
         let to_verify = proof;
         let (peers, quiet) = (&self.peers, &self.quiet);
@@ -2602,38 +2593,51 @@ impl EventLoopState {
             // copies are dropped as duplicates and cost a lookup. One key leaves a bounded set.
             self.seen.remove(&message.dedup_key());
         }
-        if bound && claimant_enters {
-            // The nickname is bound to `member` here: a session of another member that was admitted
-            // while no proof bound it (or went quiet under it) does not keep the name.
+        if bound {
+            // The proof is active (its sender is live), and the nickname is bound to its member here: a
+            // session of another member that was admitted while no proof bound it (or went quiet under it)
+            // does not keep the name.
             self.proofs.evict(intruders);
-        } else if bound {
-            self.proofs.wait_to_evict(key);
         }
         false
     }
 
-    /// The end of the sessions of other members, for a proof that was held while its sender was not in the
-    /// roster: the sender of `message` enters it now, so the nickname is bound to its member and the sessions
-    /// of other members under it end.
-    pub(crate) fn evict_for_waiting_claimant(&mut self, message: &Verified) {
-        let key = message.key();
-        if !self.proofs.is_waiting_to_evict(&key) {
-            return;
-        }
-        // The wait stays until a frame under the nickname that the proof names comes: a frame of the same
-        // session under another nickname is admitted, and it must not use the wait up.
-        let Some(held) = self.proofs.proof_for(&key, &message.author) else {
-            return;
-        };
-        let member = held.identity;
-        self.proofs.take_waiting_to_evict(&key);
-        let named: Vec<AuthorKey> = self.keys_named(&message.author);
+    /// The sessions under `nickname` in the roster (live or quiet) that do not belong to `member`, apart from
+    /// `key`: the sessions that a proof of `member` for `nickname` displaces.
+    fn sessions_of_other_members(
+        &self,
+        key: &AuthorKey,
+        nickname: &Nickname,
+        member: iroh::PublicKey,
+    ) -> Vec<AuthorKey> {
+        let named: Vec<AuthorKey> = self.keys_named(nickname);
         let others = named.into_iter().filter(|other| {
             let proof = self.proofs.proof_of(other);
-            *other != key && proof.is_none_or(|proof| proof.identity != member)
+            other != key && proof.is_none_or(|proof| proof.identity != member)
         });
-        let intruders: Vec<AuthorKey> = others.collect();
-        self.proofs.evict(intruders);
+        others.collect()
+    }
+
+    /// Activate the pending proof of the sender of `message`, which is admitted and live now (the caller checked
+    /// both): the proof binds its nickname, replaces the older sessions of its member, and ends the sessions of
+    /// other members, as a proof of a live sender does. The pending proof is used only for the nickname that it
+    /// names: a frame of the same session under another nickname leaves it pending.
+    pub(crate) fn activate_pending_proof(&mut self, message: &Verified, mesh: &MeshId) {
+        let key = message.key();
+        let Some(proof) = self.proofs.take_pending(&key, &message.author) else {
+            return;
+        };
+        let intruders: Vec<AuthorKey> =
+            self.sessions_of_other_members(&key, &message.author, proof.identity);
+        let (peers, quiet) = (&self.peers, &self.quiet);
+        let bound = self
+            .proofs
+            .accept_live(&key, &message.author, mesh, proof, true, |session| {
+                peers.contains(session) || quiet.contains(session)
+            });
+        if bound {
+            self.proofs.evict(intruders);
+        }
     }
 
     /// The run of a session of our own member that is newer than ours, when this frame is the first to show

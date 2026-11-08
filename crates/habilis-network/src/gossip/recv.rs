@@ -937,12 +937,13 @@ async fn roster_gate(
             tracing::warn!(target: "habilis_network::lifecycle", run, "a newer run of our member is active");
             context.sink.emit(NodeEvent::Error(line));
         }
-        // A proof that was held while its sender was out of the roster ends the sessions of other members under
-        // the nickname when the sender enters it, and before its arrival is shown.
-        if state.proofs.is_waiting_to_evict(&verified.key())
+        // A pending proof (valid, inactive: its sender was not live when it came) is activated when the sender
+        // is admitted and live: it binds the nickname, replaces the older runs of its member, and ends the
+        // sessions of other members, before the arrival of the sender is shown.
+        if state.proofs.has_pending(&verified.key())
             && membership_update::leaves_sender_in_roster(verified, state)
         {
-            state.evict_for_waiting_claimant(verified);
+            state.activate_pending_proof(verified, context.mesh);
             end_displaced_sessions(verified, state, app, context).await;
         }
         return Some(lifecycle::observe(verified, state, context));
@@ -6804,6 +6805,80 @@ mod dedup_counter_tests {
             restarted.peers.contains(&restart.author_key())
                 && !restarted.peers.contains(&live.author_key()),
             "a fresh joined of a real restart at a higher run did not replace the old session at once"
+        );
+    }
+
+    /// The cached answer of a real NEWER session (run 9) is one frame for its whole run, stamped when it was first
+    /// signed: for a session that runs long it is OLD, and it proves no presence. While run 3 of the same member is
+    /// live, the frame must not replace it, and its proof must not be lost: it is kept inactive, and it admits its
+    /// own session. The nickname is bound to the SAME member by run 3, so the alive frames of run 9 are admitted by
+    /// the kept proof, run 9 enters the roster, and then it replaces run 3. Without that, run 9 is refused for good
+    /// (it has no proof) and its answers are dropped (it is not in the roster): a deadlock.
+    #[test]
+    fn the_old_answer_of_a_real_newer_run_is_kept_and_its_session_is_admitted_when_it_shows_presence()
+     {
+        let member = Identity::generate();
+        let (live, newer) = (Identity::generate(), Identity::generate());
+        let first = reader_with(fresh_state(), vec![joined_of(&live, &member, "alice", 3)]);
+        assert!(
+            first.peers.contains(&live.author_key()),
+            "the live run 3 is in the roster"
+        );
+
+        let answered = reader_with(
+            first,
+            vec![old_joined_run_of(&newer, &member, 9, 3 * 86_400)],
+        );
+
+        assert!(
+            answered.peers.contains(&live.author_key()),
+            "the old answer of run 9 ended the live run 3"
+        );
+        let shown = reader_with(answered, vec![alive_of(&newer, "alice")]);
+
+        assert!(
+            shown.peers.contains(&newer.author_key()),
+            "the newer session was refused although its answer proved its member: its proof was lost"
+        );
+        assert!(
+            !shown.peers.contains(&live.author_key()),
+            "run 3 stays beside run 9 after run 9 showed presence"
+        );
+    }
+
+    /// An old `joined` frame of a QUIET session does not bind the nickname: a quiet session counts as held in the
+    /// roster, so a proof that is kept for it would refuse the frames of a live session of another member under
+    /// that nickname, whose arrival has not proved anything yet. The kept proof does nothing until its session
+    /// proves presence; then it binds and ends the other session.
+    #[test]
+    fn an_old_joined_of_a_quiet_session_does_not_bind_the_nickname_against_a_live_session() {
+        let (member, quiet, live) = (
+            Identity::generate(),
+            Identity::generate(),
+            Identity::generate(),
+        );
+        let mut initial = fresh_state();
+        initial.quiet.insert(quiet.author_key());
+        initial.names.insert(quiet.author_key(), nick("alice"));
+        let with_live = reader_with(initial, vec![alive_of(&live, "alice")]);
+        assert!(
+            with_live.peers.contains(&live.author_key()),
+            "the live session under the free nickname is in the roster"
+        );
+
+        let mut after_old = reader_with(
+            with_live,
+            vec![old_joined_run_of(&quiet, &member, 1, 3 * 86_400)],
+        );
+
+        let again: Verified = Message::new_alive(&MeshId::from("test"), &nick("alice")).sign(&live);
+        assert!(
+            after_old.admits_session(&again, &nick("reader")),
+            "an old joined of a quiet session bound the nickname: the live session was refused"
+        );
+        assert!(
+            after_old.proofs.proof_of(&quiet.author_key()).is_none(),
+            "the proof of a quiet sender that proved no presence is active"
         );
     }
 
