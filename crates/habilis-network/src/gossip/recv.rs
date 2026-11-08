@@ -970,6 +970,12 @@ async fn roster_gate(
         if matches!(verified.kind, MessageKind::PeerInfo) {
             retain_refused_peer_info_address(verified, state);
         }
+        // A claimant of OUR nickname that is chatty sends no `Alive` (`tick_alive` stays silent after any broadcast), so
+        // its other frames are asked for the proof too, after the address is retained: the same ask path, retry clock
+        // and budgets as for its `Alive` frame.
+        if verified.author == *context.author {
+            lifecycle::ask_for_proof(verified, state, context).await;
+        }
         return Some(lifecycle::Observed::refused());
     }
     let alive = matches!(
@@ -3627,6 +3633,60 @@ mod first_contact_tests {
             assert_eq!(
                 held, 1,
                 "the copy spent the held signal without a line, or raised it twice: {seen:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A claimant of OUR nickname that is chatty sends no `Alive` (a node that broadcast something recently sends none):
+    /// its frames are a `PeerInfo` and app frames, which the gate refuses as no membership kind. The first of them is
+    /// asked for its proof too, once for each wait of the retry clock, and the answer raises the held event.
+    #[test]
+    fn a_chatty_claimant_of_our_nickname_is_asked_for_its_proof_by_its_other_frames() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let claimant = Identity::generate();
+            let endpoint = endpoint_id(89);
+            state.linked_endpoints.insert(endpoint);
+            let address = iroh::EndpointAddr::new(endpoint);
+            let info: Verified = {
+                use crate::protocol::messages::MessageBody;
+                use crate::protocol::peer_addr_error;
+                let body = MessageBody::try_new(
+                    &peer_addr_error::endpoint_addr_to_json(&address).to_string(),
+                )
+                .expect("an address body");
+                Message::new_peer_info(&node.mesh, &node.author, body).sign(&claimant)
+            };
+            let chatter: Verified = Message::new_app(
+                &node.mesh,
+                &node.author,
+                AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("hello"),
+                ),
+            )
+            .sign(&claimant);
+
+            for frame in [info, chatter] {
+                ingest(
+                    frame.serialize().expect("serialize").into_bytes(),
+                    &mut state,
+                    &mut app,
+                    &context,
+                )
+                .await;
+            }
+
+            assert_eq!(
+                state.proof_requests_signed.load(Ordering::Relaxed),
+                1,
+                "a claimant of our nickname that sends only a PeerInfo and an app frame was not asked, or was asked twice in one wait"
             );
             node.endpoint.close().await;
         });
