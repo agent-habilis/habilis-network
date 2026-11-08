@@ -1198,20 +1198,23 @@ async fn answer_proof_request(
 fn return_path(state: &EventLoopState, asker: &AuthorKey) -> Option<iroh::EndpointId> {
     // The address in the roster may be the old one of an asker that moved: it counts only when a unicast can
     // start on it, as for the arrival.
-    let known = state
+    // The rendezvous is no path to the asker (a beacon gossips as the rendezvous), and it is left out of each
+    // candidate before the choice: a cached address that is the rendezvous must not hide the arrival.
+    let not_rendezvous = |eid: &iroh::EndpointId| Some(*eid) != state.rendezvous_id;
+    let known: Option<iroh::EndpointId> = state
         .address_of(asker)
         .map(|address| address.id)
+        .filter(not_rendezvous)
         .filter(|eid| transport::can_unicast(*eid, state));
     // A request can come before the `PeerInfo` of its sender: then the connection that it arrived on is
     // the return path, if a unicast can start on it.
-    let arrival = state
+    let arrival: Option<iroh::EndpointId> = state
         .state_digest_serves
         .unicast
         .arrived_from
+        .filter(not_rendezvous)
         .filter(|eid| transport::can_unicast(*eid, state));
-    known
-        .or(arrival)
-        .filter(|eid| Some(*eid) != state.rendezvous_id)
+    known.or(arrival)
 }
 
 /// Keep the proof answer of this run in the log of its author, once. The answer is a signed `joined` frame
@@ -4209,6 +4212,29 @@ mod first_contact_tests {
             );
             node.endpoint.close().await;
         });
+    }
+
+    /// The rendezvous is not a path to the asker. When the address in the roster of the asker is the rendezvous (a
+    /// beacon gossips as the rendezvous), it must not hide a usable arrival connection: the rendezvous is left out
+    /// of each candidate before the choice, and the arrival is tried.
+    #[test]
+    fn a_cached_address_that_is_the_rendezvous_does_not_hide_a_usable_arrival() {
+        let mut state = fresh_state();
+        let asker = Identity::generate().author_key();
+        let (rendezvous, arrival) = (endpoint_id(84), endpoint_id(85));
+        state.rendezvous_id = Some(rendezvous);
+        state.peers.insert(asker);
+        state.names.insert(asker, nick("asker"));
+        state.place_endpoint(asker, &nick("asker"), iroh::EndpointAddr::new(rendezvous));
+        state.direct.insert(rendezvous, DirectState::Direct);
+        state.direct.insert(arrival, DirectState::Direct);
+        state.state_digest_serves.unicast.arrived_from = Some(arrival);
+
+        assert_eq!(
+            super::return_path(&state, &asker),
+            Some(arrival),
+            "the cached address was the rendezvous: it hid the usable arrival and the answer went nowhere"
+        );
     }
 
     /// The answer to a proof request goes where a send can go. An asker that moved to another endpoint can
