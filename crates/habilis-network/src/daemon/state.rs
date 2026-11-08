@@ -1647,6 +1647,47 @@ mod tests {
         );
     }
 
+    /// A key that is retained again after its endpoint was released has one place in the queue, the newest.
+    /// The stale place at the head must not make the next key at the cap release the endpoint that the key
+    /// holds now, while older keys stay.
+    #[test]
+    fn a_key_that_is_retained_again_does_not_lose_its_endpoint_to_its_stale_place() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::REFUSED_ENDPOINTS_CAP;
+        let keys: Vec<AuthorKey> = (0..=cap + 1)
+            .map(|index| test_key(&format!("again-{index}")))
+            .collect();
+        let again = keys[0];
+        let address = iroh::EndpointAddr::new(endpoint_id(91));
+        state.retain_refused_endpoint(again, address.clone());
+        state.release_refused_endpoint(&again);
+        for key in &keys[1..cap] {
+            state.retain_refused_endpoint(*key, address.clone());
+        }
+        state.retain_refused_endpoint(again, address.clone());
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "the map is at its cap before the key that pushes the oldest out"
+        );
+
+        state.retain_refused_endpoint(keys[cap], address);
+
+        assert!(
+            state.refused_endpoints.contains_key(&again),
+            "the key that was retained again lost its endpoint to its stale place in the queue"
+        );
+        assert!(
+            !state.refused_endpoints.contains_key(&keys[1]),
+            "the oldest key that is still retained was not the one to go"
+        );
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "the cap holds after the newest key"
+        );
+    }
+
     /// A card binds nothing for a key that said goodbye, since a key never speaks again and the
     /// card is a replay, and nothing for a key that no roster holds: no name, no hint.
     #[test]

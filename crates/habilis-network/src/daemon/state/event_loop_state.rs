@@ -2784,6 +2784,12 @@ impl EventLoopState {
     pub(crate) fn retain_refused_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
         let id = endpoint.id;
         if !self.refused_endpoints.contains_key(&key) {
+            // The place that this key left in the queue when its endpoint was released is stale: at the cap
+            // it would be popped first and would release the endpoint that the key gets now. The queue is
+            // longer than the map only when some place is stale.
+            if self.refused_order.len() > self.refused_endpoints.len() {
+                self.refused_order.retain(|queued| *queued != key);
+            }
             while self.refused_endpoints.len() >= REFUSED_ENDPOINTS_CAP {
                 let Some(oldest) = self.refused_order.pop_front() else {
                     break;
