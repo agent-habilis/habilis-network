@@ -687,16 +687,12 @@ fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
 /// missing file is `NotFound`; a file that fails a check is `PermissionDenied`.
 #[cfg(all(unix, feature = "host"))]
 fn open_trusted_key_file(key_path: &Path, options: &mut OpenOptions) -> io::Result<File> {
-    use rustix::fs::OFlags;
     use rustix::io::Errno;
     use rustix::process::geteuid;
     use std::io::{Error, ErrorKind};
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
-    // `NONBLOCK`: a read-only open of a FIFO with no writer waits for one, and the file type is checked only
-    // after the open. A regular file ignores the flag.
-    let flags = i32::try_from((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits()).unwrap_or(0);
     let file: File = options
-        .custom_flags(flags)
+        .custom_flags(no_link_flags())
         .open(key_path)
         .map_err(|error| {
             if error.raw_os_error() == Some(Errno::LOOP.raw_os_error()) {
@@ -719,6 +715,16 @@ fn open_trusted_key_file(key_path: &Path, options: &mut OpenOptions) -> io::Resu
         Some(why) => Err(Error::new(ErrorKind::PermissionDenied, why)),
         None => Ok(file),
     }
+}
+
+/// The flags for every file that the member key, the run counter and the lock keep in the state folder: no
+/// link is followed, so a link that is planted at the path cannot make a start lock, write or cut the file
+/// that it points to. `NONBLOCK`: an open of a FIFO with no peer waits for one, and a regular file ignores the
+/// flag.
+#[cfg(all(unix, feature = "host"))]
+fn no_link_flags() -> i32 {
+    use rustix::fs::OFlags;
+    i32::try_from((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits()).unwrap_or(0)
 }
 
 /// Write the member key file: the 32 bytes of the seed, then the start time of the process that owns
@@ -918,6 +924,7 @@ fn open_key_lock(state: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false).mode(0o600);
     options
+        .custom_flags(no_link_flags())
         .open(&lock_path)
         .with_context(|| format!("the lock file {} cannot be opened", lock_path.display()))
 }
@@ -981,6 +988,7 @@ fn lock_run_counter(state: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false).mode(0o600);
+    options.custom_flags(no_link_flags());
     let lock = options.open(state.with_extension("run.lock"))?;
     lock.lock()?;
     Ok(lock)
@@ -997,6 +1005,7 @@ fn write_run(state: &Path, run: u64) -> Result<()> {
     let tmp_path = state.with_extension("run.tmp");
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true).mode(0o600);
+    options.custom_flags(no_link_flags());
     let mut file = options.open(&tmp_path)?;
     file.write_all(&run.to_le_bytes())?;
     file.sync_all()?;
@@ -1815,6 +1824,51 @@ mod tests {
         assert!(
             super::hold_member_key_once(Some(&private)).is_ok(),
             "a private folder (mode 0700) was refused"
+        );
+    }
+
+    /// The lock files and the temporary file of the run counter are opened without following a link, as the key
+    /// file is: a link that is planted at one of those paths must not make a start lock, write or cut the file
+    /// that it points to. Each case is its own state path, with a target that must stay as it was.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn the_lock_files_and_the_temporary_run_file_are_not_opened_through_a_link() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let dir = TempDir::new("habilis-lock-links");
+        let planted = |name: &str| {
+            let state = dir.path().join(format!("{name}.json"));
+            let target = dir.path().join(format!("{name}.target"));
+            fs::write(&target, b"untouched").expect("a target file");
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("a mode");
+            (state, target)
+        };
+
+        let (lock_state, lock_target) = planted("key-lock");
+        symlink(&lock_target, lock_state.with_extension("key.lock"))
+            .expect("a link at the key lock");
+        assert!(
+            super::hold_member_key_once(Some(&lock_state)).is_err(),
+            "the key lock was opened through a link"
+        );
+
+        let (run_state, run_target) = planted("run-lock");
+        symlink(&run_target, run_state.with_extension("run.lock")).expect("a link at the run lock");
+        assert!(
+            super::next_run(Some(&run_state), false).is_err(),
+            "the run lock was opened through a link"
+        );
+
+        let (tmp_state, tmp_target) = planted("run-tmp");
+        symlink(&tmp_target, tmp_state.with_extension("run.tmp"))
+            .expect("a link at the temporary file");
+        assert!(
+            super::next_run(Some(&tmp_state), false).is_err(),
+            "the temporary run file was opened through a link"
+        );
+        assert_eq!(
+            fs::read(&tmp_target).expect("the target"),
+            b"untouched",
+            "the counter was written through a link to its target"
         );
     }
 
