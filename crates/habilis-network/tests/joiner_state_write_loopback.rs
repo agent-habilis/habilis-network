@@ -88,8 +88,11 @@ async fn merge(node: &Node<Writer>) -> Result<(), String> {
     written.await.expect("the loop answers")
 }
 
-/// Merge on `node` until it goes through or `WITHIN` has passed, and give the last result.
-async fn merge_within(node: &Node<Writer>, started: Instant) -> Result<(), String> {
+/// Merge on `node` until it goes through or `WITHIN` has passed, and give the last result. The
+/// deadline is the one of this node: a deadline shared with the node before it runs out while that
+/// node retries, and this one gets no window of its own.
+async fn merge_within(node: &Node<Writer>) -> Result<(), String> {
+    let started = Instant::now();
     let mut last = merge(node).await;
     while last.is_err() && started.elapsed() < WITHIN {
         time::sleep(Duration::from_millis(100)).await;
@@ -108,8 +111,8 @@ fn two_joiners_of_a_mesh_with_empty_state_both_write_state_within_a_few_seconds(
         let first = spawn(&topic, "first").await;
         let second = spawn(&topic, "second").await;
         let started = Instant::now();
-        let second_result = merge_within(&second, started).await;
-        let first_result = merge_within(&first, started).await;
+        let second_result = merge_within(&second).await;
+        let first_result = merge_within(&first).await;
         let took = started.elapsed();
         let _ = second.leave().await;
         let _ = first.leave().await;

@@ -89,16 +89,25 @@ fn a_late_observer_holds_one_holder_of_a_shared_nickname_within_seconds() {
         let observer = join_as(&mesh, "carol").await;
 
         let started = Instant::now();
-        let mut held_one_at: Option<Duration> = None;
+        // The window under test starts when the observer first lists two holders, not when it
+        // joined: the discovery of the two members and the exchange of their proofs come first, and
+        // they take what a loaded host gives them. An observer that binds the nickname before it
+        // ever lists two holders had no window at all.
+        let mut two_at: Option<Instant> = None;
+        let mut window: Option<Duration> = None;
         let mut max_rows = 0;
         while started.elapsed() < Duration::from_secs(90) {
             let rows = rows_named(&observer, "alice").await;
             max_rows = max_rows.max(rows);
-            if rows == 1 && held_one_at.is_none() {
-                held_one_at = Some(started.elapsed());
+            if rows > 1 && two_at.is_none() {
+                two_at = Some(Instant::now());
+            }
+            if rows == 1 {
+                window = Some(two_at.map_or(Duration::ZERO, |at| at.elapsed()));
                 eprintln!(
-                    "LATE_OBSERVER one holder after {:?} (max rows {max_rows})",
-                    started.elapsed()
+                    "LATE_OBSERVER one holder after {:?}, two holders for {:?} (max rows {max_rows})",
+                    started.elapsed(),
+                    window.unwrap_or_default()
                 );
                 break;
             }
@@ -107,7 +116,7 @@ fn a_late_observer_holds_one_holder_of_a_shared_nickname_within_seconds() {
         let _ = observer.node.leave().await;
         let _ = second.node.leave().await;
         let _ = first.node.leave().await;
-        let at = held_one_at.expect("the observer never held one holder of the nickname");
+        let at = window.expect("the observer never held one holder of the nickname");
         assert!(
             at < Duration::from_secs(10),
             "the observer held two holders of one nickname for {at:?}"
