@@ -2164,6 +2164,12 @@ fn is_loggable(kind: &MessageKind) -> bool {
             | MessageKind::LinkState
             | MessageKind::Ping
             | MessageKind::Pong { .. }
+            // A proof request is addressed plumbing with an empty body. It reaches here only
+            // sharded, because `ingest` hands a frame with a shard header to `handle_shard`
+            // before the arm that dispatches an infra kind. Its addressee reads it and answers,
+            // so a copy in the log is one that a digest of that addressee asks for again, on the
+            // resend budget. `is_plumbing` already lists it.
+            | MessageKind::ProofRequest { .. }
             // Durable state lives in its own un-pruned log, never the chat
             // message-log / poll-fetch buffer (it also returns before reaching
             // here; this keeps the predicate honest if that changes).
@@ -2274,7 +2280,8 @@ mod arms_reclaim_tests {
 mod is_loggable_tests {
     use super::{is_loggable, retained_after_lifecycle};
     use crate::lifecycle::membership_update::MembershipUpdate;
-    use crate::protocol::{MessageKind, PresenceSubtype};
+    use crate::protocol::identity::Identity;
+    use crate::protocol::{AuthorKey, MessageKind, PresenceSubtype};
 
     /// A stale `joined` or `alive` is a copy of a departed key's presence: it stays out of the
     /// log. A stale chat frame and a fresh presence frame go in.
@@ -2351,6 +2358,20 @@ mod is_loggable_tests {
         assert!(
             !is_loggable(&MessageKind::PeerInfo),
             "peer info is not loggable"
+        );
+    }
+
+    /// A proof request reaches this predicate only when it is sharded: `ingest` hands a frame with
+    /// a shard header to `handle_shard` before the arm that dispatches an infra kind. A request
+    /// that the log keeps is one that a digest of its addressee asks for again.
+    #[test]
+    fn a_proof_request_is_not_loggable() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            !is_loggable(&MessageKind::ProofRequest {
+                to: AuthorKey::from(*Identity::generate().public())
+            }),
+            "a proof request is not loggable"
         );
     }
 }
