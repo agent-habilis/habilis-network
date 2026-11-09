@@ -1100,6 +1100,12 @@ fn lock_run_counter_within(
     let mut give_up = started + stall;
     loop {
         match lock.try_lock() {
+            // The flag is read here as well as in the wait below: a lock that nobody holds, or one that the
+            // holder let go while this worker slept, is taken without ever reaching the wait.
+            Ok(()) if cancel.load(Ordering::Relaxed) => anyhow::bail!(
+                "the start was cancelled before it took the run lock {}",
+                lock_path.display()
+            ),
             Ok(()) => return Ok(lock),
             Err(TryLockError::WouldBlock) => {
                 if cancel.load(Ordering::Relaxed) {
@@ -2701,6 +2707,29 @@ mod tests {
         assert!(
             !state.with_extension("run").exists(),
             "the cancelled start took the run lock when the holder let go, and wrote a run counter"
+        );
+    }
+
+    /// A start that is cancelled before the lock is free writes no run counter either. The wait reads the flag
+    /// only where it sleeps, so a lock that nobody holds is taken at the first try and the flag is never read.
+    /// The run counter of a start that does not exist is then written, and the next real start skips a number.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_cancelled_start_that_finds_the_run_lock_free_writes_no_run_counter() {
+        use std::sync::atomic::AtomicBool;
+        let dir = TempDir::new("habilis-run-lock-cancel-free");
+        let state = dir.path().join("session.json");
+        let cancelled = AtomicBool::new(true);
+
+        let run = super::next_run(Some(&state), false, &cancelled);
+
+        assert!(
+            run.is_err(),
+            "a cancelled start counted a run on a free lock, and the run it counted is {run:?}"
+        );
+        assert!(
+            !state.with_extension("run").exists(),
+            "the cancelled start wrote the counter file, so the next real start skips a number"
         );
     }
 
