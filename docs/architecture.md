@@ -483,7 +483,8 @@ The body of a state digest is `{"heads": [...]}`, with two optional flags that a
 A holder with nothing missing answers a `first` request with one `closing` digest alone, point-to-point.
 The waiting node ends its wait on a `closing` digest that came point-to-point and whose heads it holds.
 A digest on gossip never ends the wait.
-An old node ignores `first`, so its asker waits for the 30 s deadline.
+Every node of the mesh reads `first`: `Message::parse` refuses a frame whose wire version is not its own, so one mesh runs one version of this field.
+The 30 s deadline covers a request that no `closing` digest answers: no holder is there, the answer is lost, or the holder has changes the node misses and sends those frames instead.
 
 ### 7.6 Multipart bodies
 

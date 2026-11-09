@@ -1467,6 +1467,15 @@ impl EventLoopState {
     /// proof, direct path and backoff for the regraft after the link loss. The path watch goes:
     /// nothing names this endpoint, and a stale entry nudges it on each tick. A later sweep drops
     /// the rest.
+    ///
+    /// The one exception is the eviction of a full orphan set: it takes an unlinked orphan where
+    /// there is one, and a linked orphan only when every one of the
+    /// [`ORPHANED_ENDPOINTS_MAX`] orphans is linked. That orphan loses its direct path, and so the
+    /// regraft of [`plan_regraft_on_link_loss`](Self::plan_regraft_on_link_loss) when its link
+    /// later falls. The state must go with it: nothing sweeps an endpoint that left the set, and
+    /// the link loss does not either ([`unlink`](Self::unlink) keeps the maps), so a path kept here
+    /// would stay for the life of the process. One slower relink, among 1024 linked endpoints that
+    /// no nickname binds, costs less than a map that grows with no bound.
     pub(crate) fn release_unbound_endpoint(&mut self, endpoint: EndpointId) {
         if self.linked_endpoints.contains(&endpoint) {
             self.path_kinds.remove(&endpoint);
