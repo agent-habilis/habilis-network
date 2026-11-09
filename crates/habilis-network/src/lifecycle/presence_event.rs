@@ -285,15 +285,22 @@ fn proof_ask_target(
     key: &AuthorKey,
     nickname: &Nickname,
     own: &Nickname,
+    inbound: Option<EndpointId>,
     state: &EventLoopState,
 ) -> Option<EndpointId> {
     if !state.asks_for_session(key, nickname, own) {
         return None;
     }
-    let target: Option<EndpointId> = state
+    // The rendezvous is no path to a member: a beacon gossips as the rendezvous, so the address of
+    // the member that hosts it can be the rendezvous id. That address must not hide the endpoint
+    // that just sent an authenticated frame, as it must not hide the arrival of an answer
+    // (`return_path`): with no other path the proof of that member is never asked.
+    let not_rendezvous = |eid: &EndpointId| Some(*eid) != state.rendezvous_id;
+    let known: Option<EndpointId> = state
         .address_of(key)
         .map(|address| address.id)
-        .filter(|eid| Some(*eid) != state.rendezvous_id);
+        .filter(not_rendezvous);
+    let target: Option<EndpointId> = known.or_else(|| inbound.filter(not_rendezvous));
     if target.is_none() {
         tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request skipped: no address");
     }
@@ -329,7 +336,7 @@ async fn send_proof_ask(
         state.proofs.undefer(key);
         return;
     }
-    let Some(eid) = proof_ask_target(key, nickname, context.author, state) else {
+    let Some(eid) = proof_ask_target(key, nickname, context.author, inbound, state) else {
         // A session with no address yet (a restart sends its alive frame before its endpoint, and a meta
         // card gives the endpoint with no ask of its own) waits for it like an ask that waits for a path: the
         // sweep tick sends it once the address and a path are there, and not at the next alive frame.
@@ -491,6 +498,7 @@ mod ask_tests {
                 &session.author_key(),
                 &nick("alice"),
                 &nick("reader"),
+                None,
                 &state
             )
             .is_none(),
@@ -508,10 +516,42 @@ mod ask_tests {
                 &session.author_key(),
                 &nick("alice"),
                 &nick("reader"),
+                None,
                 &state
             ),
             Some(endpoint),
             "with an address the request goes to the endpoint of the session"
+        );
+    }
+
+    /// A beacon gossips as the rendezvous, so the address of the member that hosts it can be the
+    /// rendezvous id. The rendezvous is no path to that member, and it must not hide the endpoint
+    /// that just sent an authenticated frame: with no other path the proof of that member is never
+    /// asked, and its nickname stays unbound.
+    #[test]
+    fn a_cached_address_that_is_the_rendezvous_does_not_hide_the_endpoint_that_sent_the_frame() {
+        let session = Identity::generate();
+        let mut state = fresh_state();
+        let (rendezvous, inbound) = (endpoint_id(84), endpoint_id(85));
+        state.rendezvous_id = Some(rendezvous);
+        state.peers.insert(session.author_key());
+        state.names.insert(session.author_key(), nick("alice"));
+        state.place_endpoint(
+            session.author_key(),
+            &nick("alice"),
+            EndpointAddr::new(rendezvous),
+        );
+
+        assert_eq!(
+            super::proof_ask_target(
+                &session.author_key(),
+                &nick("alice"),
+                &nick("reader"),
+                Some(inbound),
+                &state
+            ),
+            Some(inbound),
+            "the cached address was the rendezvous: it hid the endpoint that the frame came on"
         );
     }
 
