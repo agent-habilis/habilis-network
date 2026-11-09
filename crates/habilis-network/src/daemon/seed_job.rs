@@ -446,6 +446,17 @@ fn merge_paths(merge: &serde_json::Value, prefix: &mut Vec<String>, paths: &mut 
     }
 }
 
+/// The merges of a replay that were not sent go back to the document, which gives them again at a
+/// tick. Every refusal of a replay passes: the clock moves, and a cut frees the space of a document
+/// at its memory line. A write that the seed lacks and that no other node sends is lost else.
+fn return_rest(state: &mut EventLoopState, rest: &[serde_json::Value], stamps: &StampedPaths) {
+    for merge in rest {
+        state
+            .doc_mut(Channel::State)
+            .return_restores((merge.clone(), stamps.clone()));
+    }
+}
+
 /// Whether the frame of a replay `merge` fits a message: the stamp of each path is the one that
 /// the replay names for it (the largest stamp for a path that it names none for).
 fn replay_frame_fits(
@@ -502,21 +513,16 @@ pub(crate) fn replay_frames(
             Ok(None) => continue,
             Err(error) => {
                 tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: the document refused a frame of it");
+                return_rest(state, &merges[index..], stamps);
                 break;
             }
         };
         let body = match doc.compose_replay_body(&change, stamps) {
             Ok(body) => body,
             Err(error @ DocError::ClockAhead { .. }) => {
-                // No time can be taken now. The queue item is gone, so the frames that were not
-                // made go back to the document, which gives them again at a tick: a write that the
-                // seed lacks and that no other node sends is lost else.
+                // No time can be taken now, and the queue item is gone (see `return_rest`).
                 tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: a frame of it does not compose");
-                for rest in &merges[index..] {
-                    state
-                        .doc_mut(Channel::State)
-                        .return_restores((rest.clone(), stamps.clone()));
-                }
+                return_rest(state, &merges[index..], stamps);
                 break;
             }
             // Every other refusal ends the replay. Each variant is named, so the lint
@@ -536,12 +542,14 @@ pub(crate) fn replay_frames(
                 | _),
             ) => {
                 tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: a frame of it does not compose");
+                return_rest(state, &merges[index..], stamps);
                 break;
             }
         };
         let signed =
             Message::new_channel_event(mesh, me, body, Channel::State).sign(&state.identity);
         let Ok(bytes) = signed.serialize() else {
+            return_rest(state, &merges[index..], stamps);
             break;
         };
         let _ = state.doc_mut(Channel::State).ingest(&signed);
@@ -1272,6 +1280,42 @@ mod tests {
         assert!(
             !later.is_empty(),
             "when the wall clock has moved, it is sent"
+        );
+    }
+
+    /// A replay that the memory line of the document refuses goes back to the document. The
+    /// refusal passes when a cut frees space, and a write that the seed lacks and that no other
+    /// node sends is lost else.
+    #[test]
+    fn a_replay_that_meets_a_full_document_goes_back_to_the_document() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::allow_warn(
+            "habilis_network::gossip",
+            "the replay of the state channel stopped: the document refused a frame of it",
+        );
+        // Shared with the job that writes the leaves below.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let mesh = MeshId::from("test");
+        let mut state = testing::fresh_state();
+        let mut doc = MeshDoc::new_state(None);
+        doc.finish_sync();
+        write_leaves(&mut doc, &identity, &me, 300);
+        // The lines of a seed of one frame: the leaves above are over the memory line of that
+        // seed, so the document refuses the restore below.
+        state.state_doc = doc.limits(Limits::with_seed_frames(1));
+        let patch = json!({ "a": 7 });
+        let stamps: StampedPaths = vec![(vec!["a".to_owned()], Stamp::new(5, "aa".to_owned()))];
+
+        let frames = replay_frames(&mut state, &patch, &stamps, &me, &mesh);
+
+        assert!(
+            frames.is_empty(),
+            "a document over its memory line takes no frame of the replay"
+        );
+        assert!(
+            state.doc(Channel::State).has_restores(),
+            "the replay waits in the document for the space that the next cut frees"
         );
     }
 
