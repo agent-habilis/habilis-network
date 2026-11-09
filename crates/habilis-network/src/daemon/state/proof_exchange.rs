@@ -340,9 +340,12 @@ impl ProofExchange {
             Some((start, count, first)) if in_window(start) => (start, count, first),
             _ => (now, 0, 0),
         };
+        // An endpoint that the full map did not track has its asks in the reserve only. They count here as well,
+        // or the endpoint starts again at 0 as soon as the map drops a count and has room for it, and it signs
+        // twice its cap inside one window of the reserve.
         let (start, count) = match self.ask_budget.get(&endpoint) {
             Some((start, count)) if in_window(*start) => (*start, *count),
-            _ => (now, 0),
+            _ => self.reserve_count_of(endpoint, now).unwrap_or((now, 0)),
         };
         // A count that is inside its window is never dropped to make room: an endpoint that used its asks would
         // get a second budget. A full map of live counts defers an endpoint that it does not track.
@@ -394,6 +397,17 @@ impl ProofExchange {
                 in_window(*counted_at)
             });
         true
+    }
+
+    /// The asks that the reserve gave to `endpoint` in its window, with the start of that window. `None` when the
+    /// reserve has no window of its own that still runs, or gave that endpoint none.
+    fn reserve_count_of(&self, endpoint: EndpointId, now: Instant) -> Option<(Instant, usize)> {
+        let reserve: &BoundReserve = self.ask_budget_bound.as_ref()?;
+        if now.saturating_duration_since(reserve.start) >= ASK_BUDGET_WINDOW {
+            return None;
+        }
+        let count: usize = reserve.by_endpoint.get(&endpoint).copied()?;
+        Some((reserve.start, count))
     }
 
     /// Take one ask out of the reserve of the claims of bound nicknames, if there is room for `nickname` and for
@@ -1405,6 +1419,51 @@ mod tests {
         assert!(
             asked <= ASKS_PER_ENDPOINT,
             "one endpoint got {asked} asks of the reserve in a window, over the cap of {ASKS_PER_ENDPOINT} that every endpoint has"
+        );
+    }
+
+    /// The asks that the reserve gave to an endpoint count when the map of counts has room again. The map drops a
+    /// count that is outside its window, so an endpoint that the full map did not track becomes tracked while the
+    /// window of the reserve still runs. Its count must not start at 0 there, or it signs twice its cap inside one
+    /// window of the reserve.
+    #[test]
+    fn the_asks_of_the_reserve_count_when_the_map_has_room_again() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let claims: Vec<Nickname> = ["alice", "bob"]
+            .iter()
+            .map(|name| Nickname::try_new(name).expect("a nickname"))
+            .collect();
+        // 256 endpoints fill the map with live counts at second 0
+        for index in 0..256u32 {
+            assert!(
+                book.may_ask_for(endpoint_of(index), None, start),
+                "a first ask"
+            );
+        }
+        // the claims of one new endpoint at second 5 use its cap, untracked, in a reserve window that ends at 15
+        let two_claims_to_their_cap = claims
+            .iter()
+            .flat_map(|claim| (0..ASKS_PER_BOUND_NICKNAME).map(move |_| claim));
+        let from_the_reserve: usize = two_claims_to_their_cap
+            .filter(|claim| book.may_ask_for(endpoint_of(1000), Some(claim), at(5)))
+            .count();
+        assert_eq!(
+            from_the_reserve, ASKS_PER_ENDPOINT,
+            "the reserve did not give the endpoint its cap, so the count below proves nothing"
+        );
+
+        // at second 11 the counts of second 0 are outside their window, so the map has room for this endpoint
+        let after_the_room: usize = (0..ASKS_PER_ENDPOINT)
+            .filter(|_| book.may_ask_for(endpoint_of(1000), None, at(11)))
+            .count();
+
+        assert_eq!(
+            after_the_room,
+            0,
+            "the endpoint got {after_the_room} asks more inside the window of its reserve, so it signed up to {} in it",
+            ASKS_PER_ENDPOINT + after_the_room
         );
     }
 
