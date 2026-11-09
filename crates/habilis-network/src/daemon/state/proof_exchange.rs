@@ -103,20 +103,6 @@ struct Retry {
 /// is held in the roster. A session that claims a bound nickname with no proof of that member is
 /// not admitted ([`Self::admits`]), and a proof of another member for it is not held. A nickname
 /// that no held session binds is free: a session with no proof is admitted and binds nothing.
-/// The reserve of the asks of the claims of bound nicknames, in one window. Each map holds at most
-/// `FIRST_ASKS_BOUND` entries, as many as the asks that one window allows.
-#[derive(Debug)]
-struct BoundReserve {
-    /// When the window started.
-    start: Instant,
-    /// The asks that the reserve gave in it.
-    total: usize,
-    /// How many of them went for each nickname.
-    by_nickname: HashMap<Nickname, usize>,
-    /// How many of them went to each endpoint.
-    by_endpoint: HashMap<EndpointId, usize>,
-}
-
 #[derive(Debug)]
 pub(crate) struct ProofExchange {
     // the proofs, as many as the cap at most; the binding of a nickname is derived from them, so
@@ -151,6 +137,20 @@ pub(crate) struct ProofExchange {
     ties_refused: u64,
     bound_refused: u64,
     gate_refused: u64,
+}
+
+/// The reserve of the asks of the claims of bound nicknames, in one window. Each map holds at most
+/// `FIRST_ASKS_BOUND` entries, as many as the asks that one window allows.
+#[derive(Debug)]
+struct BoundReserve {
+    /// When the window started.
+    start: Instant,
+    /// The asks that the reserve gave in it.
+    total: usize,
+    /// How many of them went for each nickname.
+    by_nickname: HashMap<Nickname, usize>,
+    /// How many of them went to each endpoint.
+    by_endpoint: HashMap<EndpointId, usize>,
 }
 
 impl ProofExchange {
