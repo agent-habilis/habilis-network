@@ -36,9 +36,9 @@ pub(super) fn route(message: &Verified, state: &EventLoopState) -> Route {
     }
 }
 
-/// Whether a directed frame to `eid` is parked right now: the relay is lookup
+/// Whether a directed frame to `eid` is refused right now: the relay is lookup
 /// only and no direct path to the peer is proven yet. An unprobed peer is
-/// held too — the alive tick probes every known peer, so the hold is short.
+/// held too — the alive tick probes every known peer, so the refusal is short.
 pub(super) fn held(eid: EndpointId, state: &EventLoopState) -> bool {
     !state.relay_transport.relay_allowed() && state.direct.get(&eid) != Some(&DirectState::Direct)
 }

@@ -167,9 +167,9 @@ pub(crate) async fn handle_gossip_event(
                     // proof; `conn_path` cannot see which path is selected.
                     state.direct.insert(node_id, DirectState::Direct);
                 }
-                // A frame parked across a gap in the links waits for the next link:
-                // `meshed` stays set through the gap, so the first-link edge below
-                // does not come again, and a `PeerInfo` may not either.
+                // A broadcast that failed to send across a gap in the links waits for the next
+                // link: `meshed` stays set through the gap, so the first-link edge below does not
+                // come again, and a `PeerInfo` may not either.
                 if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty()
                 {
                     flush_pending(state, context, "link up").await;
@@ -416,9 +416,8 @@ pub(crate) async fn flush_pending(
     let mut delivered = 0usize;
     let mut requeued = 0usize;
     for (message, bytes) in state.pending_outbound.take() {
-        // Re-route each frame through the send decision rather than blanket-
-        // broadcasting: a directed frame buffered while unmeshed must still
-        // take unicast, never the gossip flood.
+        // Each buffered frame is a broadcast: it goes through the send decision, which sends it on
+        // the gossip flood.
         match transport::deliver(&message, bytes.clone(), state, context.sender).await {
             Ok(Delivered::Done) => delivered += 1,
             // Only a directed frame dials, and a directed frame is never buffered.
@@ -442,18 +441,6 @@ pub(crate) async fn flush_pending(
         edge,
         "meshed: flushed buffered messages"
     );
-}
-
-/// A frame of a flush whose dial failed, back on the loop: put it in `pending_outbound` again.
-pub(crate) fn requeue_failed(
-    state: &mut EventLoopState,
-    _context: &HandlerCtx<'_>,
-    message: Verified,
-    bytes: WireFrame,
-) {
-    if !requeue(state, message, bytes) {
-        tracing::warn!(target: "habilis_network::gossip", "buffered outbound message undeliverable and the buffer is full; dropped");
-    }
 }
 
 /// Put a frame that failed to deliver back in `pending_outbound`. Returns whether the frame was kept.
@@ -1631,9 +1618,9 @@ async fn handle_peer_info(
             });
         }
     }
-    // A buffered directed frame addressed to this author may just have become
-    // deliverable — its endpoint binding and dial address are now registered.
-    // Only while meshed: the pre-mesh backlog waits for the meshed edge.
+    // A buffered broadcast that failed to send gets another try now: the binding and the dial
+    // address of this author are registered. Only while meshed: the pre-mesh backlog waits for the
+    // meshed edge.
     if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
         flush_pending(state, context, "peer info arrival").await;
     }
@@ -2422,33 +2409,77 @@ mod first_contact_tests {
         });
     }
 
-    /// A meshed send to a peer whose direct path is proven goes out, and is not refused.
+    /// A meshed send to a peer whose direct path is proven goes by unicast at once. The peer has no
+    /// gossip link in this test, so nothing waits for one: the frame reaches a real acceptor on the
+    /// peer's unicast endpoint.
     #[test]
-    fn a_meshed_directed_send_to_a_probed_peer_is_not_refused() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let node = Node::spawn().await;
-            let context = node.context();
-            let mut state = fresh_state();
-            state.standing.insert(Standing::Meshed);
-            state.relay_transport = PayloadPath::DirectOnly;
-            let (bob, eid) = (test_key("bob"), endpoint_id(7));
-            state.retain_refused_endpoint(bob, iroh::EndpointAddr::new(eid));
-            state.direct.insert(eid, DirectState::Direct);
-            let frame = Message::new_pong(
-                &node.mesh,
-                &node.author,
-                bob,
-                &protocol::MessageId::random(),
-            )
-            .sign(&Identity::generate());
+    fn a_meshed_directed_send_across_a_link_gap_reaches_a_real_acceptor_at_once() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::Router;
 
-            let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
-            assert!(
-                sent.is_ok(),
-                "the send to a probed peer was refused: {sent:?}"
-            );
-            node.endpoint.close().await;
-        });
+                use std::time::Duration;
+
+                use tokio::time;
+
+                use crate::transport::{UNICAST_ALPN, UnicastAcceptor, UnicastPool};
+
+                let node = Node::spawn().await;
+                let context = node.context();
+                let bob = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind bob");
+                let (inbox, mut frames) = mpsc::channel(8);
+                let router = Router::builder(bob.clone())
+                    .accept(
+                        UNICAST_ALPN,
+                        UnicastAcceptor::with_idle(
+                            inbox,
+                            PayloadPath::DirectOnly,
+                            Duration::from_mins(1),
+                        ),
+                    )
+                    .spawn();
+                lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob.addr());
+                let mut state = fresh_state();
+                state.standing.insert(Standing::Meshed);
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
+                state.names.insert(test_key("bob"), nick("bob"));
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob.addr());
+                state.direct.insert(bob.id(), DirectState::Direct);
+                let frame = Message::new_pong(
+                    &node.mesh,
+                    &node.author,
+                    test_key("bob"),
+                    &protocol::MessageId::random(),
+                )
+                .sign(&Identity::generate());
+                let bytes = frame.serialize().expect("serialize");
+
+                let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+                assert!(
+                    sent.is_ok(),
+                    "the send across the gap was refused: {sent:?}"
+                );
+                assert!(
+                    state.pending_outbound.is_empty(),
+                    "a directed frame was buffered across the gap"
+                );
+                let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
+                assert_eq!(
+                    delivered.ok().flatten(),
+                    Some(bytes.into_bytes()),
+                    "bob never got the frame by unicast"
+                );
+                router.shutdown().await.expect("shut bob down");
+                node.endpoint.close().await;
+            },
+        );
     }
 
     /// A broadcast sent while unmeshed is still buffered for the meshed edge.

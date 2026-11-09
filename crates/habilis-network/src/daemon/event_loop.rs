@@ -42,7 +42,7 @@ use crate::daemon::state_file::StateFile;
 use crate::doc::SelfWriteGate;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::{Mesh, MeshName};
-use crate::protocol::messages::{Authored, Verified};
+use crate::protocol::messages::Authored;
 use crate::protocol::{MeshId, Nickname, UnixSecs, identity};
 use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
@@ -80,7 +80,6 @@ pub use event_loop_error::EventLoopError;
 use tick_gap::TickGap;
 
 use crate::daemon::state;
-use crate::protocol::messages;
 #[cfg(feature = "host")]
 use crate::transport::ipc;
 #[cfg(feature = "multihop")]
@@ -168,7 +167,7 @@ async fn run_checked<Driver: NodeDriver>(
         #[cfg(feature = "multihop")]
         multihop: transports.multihop.clone(),
     };
-    let (direct_rx, path_rx, flush_failed_rx) = wire_transports(
+    let (direct_rx, path_rx) = wire_transports(
         &mut state,
         &endpoints.endpoint,
         transports,
@@ -272,7 +271,6 @@ async fn run_checked<Driver: NodeDriver>(
         lan_contacts: endpoints.lan_contacts,
         direct_rx,
         path_rx,
-        flush_failed_rx,
         owned,
     }))
     .await
@@ -444,7 +442,6 @@ fn wire_transports(
 ) -> (
     mpsc::UnboundedReceiver<probe::DirectOutcome>,
     mpsc::UnboundedReceiver<probe::PathChange>,
-    mpsc::UnboundedReceiver<(Verified, messages::WireFrame)>,
 ) {
     #[cfg(feature = "multihop")]
     {
@@ -489,9 +486,6 @@ fn wire_transports(
     let (path_tx, path_rx) = mpsc::unbounded_channel();
     state.webrtc_admission.set_path_sink(path_tx.clone());
     state.path_changes = path_tx;
-    // A flushed frame whose dial failed comes back here; the loop buffers it again.
-    let (flush_failed_tx, flush_failed_rx) = mpsc::unbounded_channel();
-    state.flush_failed = flush_failed_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
     if rendezvous_params.answers_jsep() {
         state.rendezvous_flags.insert(RendezvousFlag::AnswersJsep);
@@ -499,7 +493,7 @@ fn wire_transports(
         state.rendezvous_flags.remove(&RendezvousFlag::AnswersJsep);
     }
     state.write_peer_count();
-    (direct_rx, path_rx, flush_failed_rx)
+    (direct_rx, path_rx)
 }
 
 /// Starts the rendezvous: an eager member co-hosts from t=0, and everyone else defers to the heal
@@ -874,8 +868,6 @@ struct EventLoop<Driver: NodeDriver> {
     /// Path watcher reports (`transport::probe::on_path_change`). Never closes,
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
-    /// Flushed frames whose dial failed (`gossip::requeue_failed`). Never closes, like `direct_rx`.
-    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, messages::WireFrame)>,
     /// Closed with the rendezvous as the loop ends.
     owned: OwnedEndpoints,
 }
@@ -926,7 +918,6 @@ struct Loop<'node, Driver: NodeDriver> {
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
-    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, messages::WireFrame)>,
     anchors: TickAnchors,
     resubscribe_attempts: u32,
     owned: OwnedEndpoints,
@@ -1089,12 +1080,6 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         );
     }
 
-    fn flush_failed(&mut self, (message, bytes): (Verified, messages::WireFrame)) {
-        self.state.idle.external += 1;
-        let context = self.parts.handler_ctx(&self.sender);
-        gossip::requeue_failed(&mut self.state, &context, message, bytes);
-    }
-
     /// A lane slot freed: the offers that waited for it are made now.
     async fn top_up_lanes(&mut self) {
         self.state.idle.external += 1;
@@ -1184,7 +1169,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.sweep += 1;
         sweep_arm(&mut self.anchors, &mut self.state, self.parts.sink);
         let context = self.parts.handler_ctx(&self.sender);
-        // The sweep can end a nickname clash, and a directed frame waits in the buffer for that.
+        // The sweep is one more retry for a buffered broadcast that failed to send.
         if self.state.standing.contains(&Standing::Meshed)
             && !self.state.pending_outbound.is_empty()
         {
@@ -1548,7 +1533,6 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         lan_contacts,
         direct_rx,
         path_rx,
-        flush_failed_rx,
         owned,
     } = loop_state;
 
@@ -1626,7 +1610,6 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         lan_contacts,
         direct_rx,
         path_rx,
-        flush_failed_rx,
         anchors,
         resubscribe_attempts,
         owned,
@@ -1675,7 +1658,6 @@ async fn run_loop<Driver: NodeDriver>(
                 lp.gossip_event(event).await;
             }
             Some(outcome) = lp.direct_rx.recv() => { lp.direct_outcome(outcome).await; },
-            Some(failed) = lp.flush_failed_rx.recv() => { lp.flush_failed(failed); },
             () = slot_freed.notified() => { lp.top_up_lanes().await; },
             () = underlay_slot_freed.notified() => {
                 lp.state.idle.external += 1;

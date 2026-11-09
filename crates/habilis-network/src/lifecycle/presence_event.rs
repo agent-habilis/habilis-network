@@ -124,8 +124,7 @@ pub(crate) async fn handle_presence(
             tracing::info!(target: "habilis_network::lifecycle", nickname = %departed, "peer left");
         }
         state.write_peer_count();
-        // A departure is a flush edge: the frames to the key that left are gone from the buffer
-        // (`forget_key`), and the rest go now.
+        // A departure is a flush edge: the buffered broadcasts that failed to send get another try.
         if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
             gossip::flush_pending(state, context, "peer left").await;
         }

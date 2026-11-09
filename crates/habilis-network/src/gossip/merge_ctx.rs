@@ -122,7 +122,7 @@ pub async fn send_app(
         if let Err(error @ transport::SendError::Held { .. }) = &outcome {
             // The caller retries; the lane session is asked now, so the retry can find it.
             transport::note_held(state, error);
-            offer_for_parked(state, context, &frame);
+            offer_for_held(state, context, &frame);
         }
         if outcome.is_ok() {
             super::recv::retain_own_app_broadcast(state, &frame, class);
@@ -667,7 +667,7 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &Handl
 /// Offer the session of the peer now, if a held frame asked for it. Without this the offer waits
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
-fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
+fn offer_for_held(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
     let Some(key) = sole_addressee(&frame.kind) else {
         return;
     };
@@ -906,9 +906,9 @@ mod tests {
                 );
 
                 state.want_lane_session(node.bob, clock::Instant::now());
-                super::offer_for_parked(&mut state, &context, &frame);
+                super::offer_for_held(&mut state, &context, &frame);
                 assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
-                super::offer_for_parked(&mut state, &context, &frame);
+                super::offer_for_held(&mut state, &context, &frame);
                 assert_eq!(state.webrtc_admission.in_flight(), 1, "not a second round");
 
                 state.webrtc_admission.close();
@@ -928,7 +928,7 @@ mod tests {
                 let node = testing::LaneNode::start().await;
                 let context = node.context();
                 let mut state = node.state();
-                super::offer_for_parked(&mut state, &context, &node.frame_to_bob());
+                super::offer_for_held(&mut state, &context, &node.frame_to_bob());
                 assert_eq!(
                     state.webrtc_admission.in_flight(),
                     0,
