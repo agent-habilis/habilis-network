@@ -227,7 +227,7 @@ Issue #29 records each decision.
 - No `for` loop header holds a combinator chain: a `git grep` for `for … in … .iter()/.into_iter()/.chars()/.lines()/.split() .method(` finds 0 lines (2026-10-27). The reviewer keeps it that way. (P16)
 - `arc_reason` in `scripts/style-check/style-check.ts` (Z28): an `Arc<` type or an `Arc::new(` needs a one-line `//` reason on its line or the line above, saying why the handle is shared (the owners that hold it, or the trait object). `Arc::clone` is not flagged. A site without a reason fails the gate. Where a borrow works, remove the `Arc` instead of commenting it.
 - Avoid `unsafe`. Use safe code if it exists, even if it costs a new line or a small loss of detail. If no safe way exists, use `unsafe` and give the reason as a `///` doc comment on the item that holds it. The doc says why no safe way exists. The `#[expect(unsafe_code, reason = "...")]` and the `// SAFETY:` comment stay as well. A new `unsafe` needs a row in the `#[expect]` table below.
-- Every `unsafe fn` has a `# Safety` section: the 4 in `habilis-network-ffi/src/ffi.rs` each carry one. `unsafe_code` is denied everywhere else, and 6 `expect(unsafe_code)` sites remain. (D4)
+- Every `unsafe fn` has a `# Safety` section: the 4 in `habilis-network-ffi/src/ffi.rs` each carry one. `unsafe_code` is denied everywhere else, and 9 `expect(unsafe_code)` sites remain. (D4)
 - The docs follow the rustdoc rules: the `Doc links` step of `ci.yml` runs `cargo doc --workspace --no-deps --all-features` with `RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links`. (D10)
 - `clippy::doc_markdown` (in `pedantic`) refuses an identifier in a doc comment that has no backticks. `clippy.toml` extends its list of domain terms. It does not check the rest of the Markdown, so the reviewer does. (D11)
 - `clippy::new_without_default` (default group, not silenced) refuses a `pub fn new() -> Self` with no `Default` impl. A probe with `-D clippy::new_without_default` fails on the bare type and passes once `impl Default` is added (2026-10-28). A `Default` for a type with public fields is still the reviewer's call. (R17)
@@ -277,7 +277,7 @@ Issue #29 records each decision.
 
 ### Remaining `#[expect]` attributes
 
-Nine `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C ABI of the ffi crate, and libc calls that have no safe wrapper), and one that suppresses `deprecated`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
+Ten `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate, a counting allocator, and libc calls that have no safe wrapper), and one that suppresses `deprecated`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -290,6 +290,7 @@ Nine `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C 
 | `habilis-network-util/src/resident_memory.rs` (mmap) | `unsafe_code` | `libc` `mmap` and `munmap`: the pages must go back at once, which a heap allocation does not do on macOS |
 | `habilis-network-ffi/src/ffi.rs` (crate) | `unsafe_code` | this module is the C ABI: raw pointers from the foreign caller, and a boxed handle it owns |
 | `habilis-network-ffi/tests/ffi_smoke.rs` (crate) | `unsafe_code` | the surface under test is `unsafe extern "C"`; calling it is the test |
+| `habilis-network-doc/tests/replay_cost.rs` (crate) | `unsafe_code` | the test counts the bytes of a replay, and a counting allocator needs an `unsafe GlobalAlloc` impl |
 
 ### Rules of the guide that do not apply
 

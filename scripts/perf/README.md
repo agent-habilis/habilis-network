@@ -263,7 +263,7 @@ A host with too little memory for N = 16 fails the host tests and prints `SKIPPE
 
 ## Ratio test
 
-`ratio.test.ts` is a benchmark, not a unit test. It runs `bench.ts` for about 20 min and needs a quiet host, so CI skips it: `bun run test` ignores the file (`package.json`), and a bare `bun test` skips its two host tests when `RATIO_BIN` is not set. The test has no start gate and no A/B gate (those are in `b4.ts`): `bench.ts` only aborts a run when the load passes `MAX_LOAD_PER_CORE` x cores, so the load at the start of a run is what the operator reads in `host.jsonl`. Run it by hand:
+`ratio.test.ts` is a benchmark, not a unit test. It runs `bench.ts` for about 20 min and needs a quiet host, so CI skips it: `bun run test` ignores the file (`package.json`), and a bare `bun test` skips its two host tests when `RATIO_BIN` is not set. The test takes two of the load gates of `b4.ts`. It waits for the start gate before the run, for at most 20 min, and it fails a run whose phase breaks the phase gate. It has no A/B fairness gate: that gate compares a pair of arms, and it stays in `b4.ts`. `bench.ts` aborts a run of its own when the load passes `MAX_LOAD_PER_CORE` x cores. Run the test by hand:
 
 ```bash
 RATIO_BIN=<binary> bun test scripts/perf/ratio.test.ts
