@@ -75,6 +75,7 @@ fn fresh_state_that_waits_with_book(address_book: memory::MemoryLookup) -> Event
                 member: Some(Arc::new(Identity::generate())),
                 run: 1,
                 key_lock: None,
+                keys_state: None,
             },
             secrets: MeshSecrets::default(),
             per_peer_gate: None,

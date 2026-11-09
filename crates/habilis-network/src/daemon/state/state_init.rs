@@ -1,5 +1,6 @@
 use super::MeshSecrets;
 use std::fs::File;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "host")]
@@ -33,6 +34,14 @@ pub(crate) struct RunKeys {
     /// process ends, so a crash frees the key. `None` where there is no member key to keep.
     // shared with every clone of the keys: the lock goes when the last one drops
     pub(crate) key_lock: Option<Arc<File>>,
+    /// The state path that the member key and the run counter live under, as the setup resolved it:
+    /// the explicit state file, or the default path of the mesh. A caller that binds the pair to an
+    /// owner reads it, because the explicit state file alone names no pair under the default path.
+    #[cfg_attr(
+        not(all(unix, feature = "host")),
+        expect(dead_code, reason = "only the binding of a host to its owner reads it")
+    )]
+    pub(crate) keys_state: Option<PathBuf>,
 }
 
 /// Everything `EventLoopState::new` needs beyond the clock, grouped for the

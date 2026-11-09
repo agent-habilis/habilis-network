@@ -801,6 +801,18 @@ pub(crate) struct EpochWrite {
     pub(crate) attempts: u8,
 }
 
+/// The state file of this start, holding the lock on the member key: the cleanup of that file
+/// deletes the member key and the run counter, so the lock has to outlive the cleanup (see
+/// [`StateFile::key_lock`]).
+#[cfg(feature = "host")]
+fn state_file_holding_the_key_lock(
+    state_file: Option<StateFile>,
+    // shared with the loop state, which holds the same lock for as long as this node runs
+    key_lock: Option<Arc<File>>,
+) -> Option<StateFile> {
+    state_file.map(|file| file.key_lock(key_lock))
+}
+
 impl EventLoopState {
     /// Build a fresh event-loop state. `now` is passed explicitly so
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
@@ -881,7 +893,7 @@ impl EventLoopState {
             #[cfg(test)]
             ask_dial_addrs: Vec::new(),
             run: init.keys.run,
-            key_lock: init.keys.key_lock,
+            key_lock: init.keys.key_lock.as_ref().map(Arc::clone),
             newest_own_run_seen: 0,
             surfaced: HashSet::new(),
             last_sent_at: now,
@@ -923,7 +935,9 @@ impl EventLoopState {
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
-            state_file: init.state_file,
+            // The lock goes to the state file as well: its cleanup deletes the member key, so the
+            // lock must outlive that cleanup (see `StateFile::key_lock`).
+            state_file: state_file_holding_the_key_lock(init.state_file, init.keys.key_lock),
             live_count: None,
             message_log: MessageLog::new(MESSAGE_LOG_SIZE),
             receive_memory: ReceiveMemory::default(),
