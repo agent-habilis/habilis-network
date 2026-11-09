@@ -544,20 +544,6 @@ fn membership_race(
     });
 }
 
-/// Three members of the logging chat app on a loopback topic mesh.
-fn logging_race(name: &str, delay: Duration, expected: Duration, settle: bool) {
-    let guard = habilis_network_test_tracing::init();
-    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let nonce: u64 = rand::random();
-        let topic = format!("first-broadcast-{nonce}");
-
-        let creator = LoggingMember::start(&topic, "creator").await;
-        let j1 = LoggingMember::start(&topic, "joiner-one").await;
-        let j2 = LoggingMember::start(&topic, "joiner-two").await;
-        run_race(name, delay, expected, settle, [creator, j1, j2]).await;
-    });
-}
-
 #[test]
 #[ignore = "run by cargo task matrix"]
 fn a_broadcast_sent_right_after_join_reaches_the_creator() {
@@ -608,36 +594,6 @@ fn a_broadcast_sent_after_the_mesh_settled_reaches_the_creator() {
         "default list, 20 s after join",
         Vec::new(),
         false,
-        Duration::from_secs(20),
-        Duration::from_secs(5),
-        true,
-    );
-}
-
-/// The reporter's case: an app that logs chat, so that anti-entropy can resend it.
-#[test]
-#[ignore = "run by cargo task matrix"]
-fn a_logged_broadcast_sent_right_after_join_reaches_the_creator() {
-    logging_race("logging app, at once", Duration::ZERO, EXPECTED, false);
-}
-
-#[test]
-#[ignore = "run by cargo task matrix"]
-fn a_logged_broadcast_sent_a_second_after_join_reaches_the_creator() {
-    logging_race(
-        "logging app, after 1 s",
-        Duration::from_secs(1),
-        EXPECTED,
-        false,
-    );
-}
-
-/// Control for the logging app.
-#[test]
-#[ignore = "run by cargo task matrix"]
-fn a_logged_broadcast_sent_after_the_mesh_settled_reaches_the_creator() {
-    logging_race(
-        "logging app, 20 s after join",
         Duration::from_secs(20),
         Duration::from_secs(5),
         true,

@@ -98,19 +98,6 @@ pub const LINKSTATE_MAX_AGE: Duration = LINKSTATE_INTERVAL.saturating_mul(3);
 /// hole punch.
 pub const MULTIHOP_RELAY_STUCK: Duration = Duration::from_secs(20);
 
-/// Max ids advertised per digest **window**. A digest carries up to two
-/// windows: an **open-ended newest** one (`[lo, i64::MAX]`, which drives
-/// reconnect recovery — holders re-send every *newer* message the sender
-/// lacks) and a rolling **closed** older one (`[lo, hi]`, which reconciles
-/// deep interior gaps without re-sending the out-of-window remainder). At
-/// 70 ids each (~140 total) the body packs the 16-byte dedup keys
-/// Base58-encoded (~22 chars/id) to ~3.1 KB; plus the `{windows:[…]}` and
-/// message envelope (the mesh id alone is ~80 chars) it stays under
-/// `MAX_MESSAGE_SIZE` (3840) — guarded by the `digest_fits_gossip_cap`
-/// test. Sized to a single gossip message, **not** the (larger,
-/// configurable) log, which the rolling cursor sweeps across rounds.
-pub const ANTIENTROPY_DIGEST_WINDOW_IDS: usize = 70;
-
 /// Max messages re-broadcast in response to one received digest, so a
 /// far-behind peer can't trigger an unbounded burst. This throttles
 /// deep-backfill throughput (~`this × peers` messages per
@@ -1089,22 +1076,6 @@ pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
 /// small crafted frame bought that from every member at once. Comfortably under
 /// [`ANTIENTROPY_INTERVAL`], so the honest cadence is never refused.
 pub const ANTIENTROPY_SERVE_COOLDOWN: Duration = Duration::from_secs(5);
-
-/// How many members answer one chat digest.
-///
-/// Every member that holds a message the asker lacks used to answer, so one
-/// digest bought up to `ANTIENTROPY_MAX_RESEND` broadcasts from each of the N - 1
-/// others, and each broadcast reaches N - 1 links: about N^3 deliveries per
-/// digest round. Of those, all but the first copy of a message are wasted. A
-/// few answerers cover a lost answer and a holder that lacks the message, and
-/// the answerers change with every digest (see `answers_digest`), so a message
-/// that only one member holds still comes back within a few rounds.
-pub const ANTIENTROPY_ANSWERERS: usize = 3;
-
-/// How many resends the outbox of the event loop holds. A digest answer is at
-/// most `ANTIENTROPY_MAX_RESEND` messages, so this is a few answers. When it is
-/// full the resend is dropped and counted: the next digest asks again.
-pub const RESEND_OUTBOX_CAP: usize = 256;
 
 /// How many state digest answers one asker may get per channel on the unicast
 /// plane in one [`ANTIENTROPY_SERVE_COOLDOWN`] window; the same heads get

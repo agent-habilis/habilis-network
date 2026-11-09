@@ -16,7 +16,7 @@ use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
 use crate::doc;
 
-use crate::transport::{ResendOutbox, UdpTransport};
+use crate::transport::UdpTransport;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -314,17 +314,6 @@ pub struct EventLoopState {
     lane_wanted: HashMap<EndpointId, Instant>,
     /// The proven peers whose gossip link went down, with the time of their quick re-graft.
     regraft_at: HashMap<EndpointId, Instant>,
-    /// When each author's digest was last served. Keyed on the author key rather
-    /// than the nickname, which an author picks freely. The key is an `Option`
-    /// because a digest built with no signature is a valid input of the tests: `None`
-    /// is its own bucket, as the empty string was.
-    digest_serves: Cooldown<AuthorKey>,
-    /// When we last reported an author whose digest we could not read. An `Option` key
-    /// for the same reason as `digest_serves`.
-    digest_unreadable: Cooldown<AuthorKey>,
-    /// Where a digest answer goes, so that the loop never waits to send it. The
-    /// task that drains it takes `resend_receiver` when the loop starts.
-    pub(crate) resend_outbox: ResendOutbox,
     /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
     /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -332,7 +321,6 @@ pub struct EventLoopState {
     /// Tests only: how many frames the hook dropped.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) test_drops_fired: u32,
-    pub(crate) resend_receiver: Option<mpsc::Receiver<transport::Resend>>,
     /// When each asker's state or meta digest was last served, per plane. A
     /// new node sends a digest pair for every peer it sees, all with the same
     /// heads, and every holder hears each one; the plane is in the key so the
@@ -605,17 +593,6 @@ pub struct EventLoopState {
     /// Gates foreign-card writes (unlike `state`), since a `meta` card carries a
     /// peer's cryptographic identity.
     pub(crate) meta_doc: MeshDoc,
-    /// Rolling start index for the **chat** anti-entropy digest window: each
-    /// round advertises `message_log[digest_cursor ..]` (up to
-    /// `ANTIENTROPY_DIGEST_MAX_IDS`), then advances/wraps so a log larger
-    /// than one digest is swept over several rounds. (State/meta reconcile by
-    /// automerge heads and need no cursor.)
-    ///
-    /// A position in the log in bound order, and the log changes between rounds:
-    /// an insert before the cursor moves every later position by one, so a sweep
-    /// can skip a slice or list one twice. Each window is still right by
-    /// itself, and the next sweep covers a skipped slice, so it only delays.
-    pub(crate) digest_cursor: usize,
     /// This member's signing identity (Ed25519). Shared with the
     /// send path so messages we author are signed before broadcast.
     /// The public key is the durable identity; the nickname is a
@@ -689,7 +666,6 @@ impl EventLoopState {
             password: mesh_password,
             key: mesh_key,
         } = init.secrets;
-        let (resend_outbox, resend_receiver) = ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
         // Per-channel keys, domain-separated from each other and from every other seed-derived
         // secret. `None` (passwordless): the docs and the broadcast chat stay plaintext.
         let [state_key, meta_key, broadcast_key] = Self::channel_keys(mesh_key.as_ref());
@@ -719,14 +695,10 @@ impl EventLoopState {
             graft_backoff: graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
-            digest_serves: Cooldown::new(tuning::ANTIENTROPY_SERVE_COOLDOWN),
-            digest_unreadable: Cooldown::new(super::UNREADABLE_DIGEST_LOG_WINDOW),
-            resend_outbox,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drop: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drops_fired: 0,
-            resend_receiver: Some(resend_receiver),
             state_digest_serves: antientropy::ServeBudget::default(),
             fast_rounds: antientropy::FastRounds::default(),
             peers: HashSet::new(),
@@ -789,7 +761,6 @@ impl EventLoopState {
             shard_cache: ShardCache::default(),
             state_doc: MeshDoc::new_ungated().key(state_key),
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
-            digest_cursor: 0,
             identity: init.identity,
             self_seq: 0,
             self_prev: None,
@@ -2194,20 +2165,6 @@ impl EventLoopState {
         self.message_log.len()
     }
 
-    /// Whether this author's digest may be served now.
-    ///
-    /// Answering one costs up to `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts,
-    /// so without a per-peer gate a single crafted digest buys that from every
-    /// member — an amplifier that grows with the mesh. Serving at most one per
-    /// window per author bounds it to the honest cadence.
-    pub fn admit_digest(&mut self, author: AuthorKey, now: Instant) -> bool {
-        if self.digest_serves.on_cooldown(&author, now) {
-            return false;
-        }
-        self.digest_serves.note(author, now);
-        true
-    }
-
     /// The selected path of a pair: the path watcher's last report if it has one,
     /// else any live connection of the admission table (see
     /// [`crate::transport::probe::pair_kind`]).
@@ -2228,17 +2185,6 @@ impl EventLoopState {
                 .webrtc
                 .as_ref()
                 .is_some_and(|handle| handle.has_session(&peer))
-    }
-
-    /// Whether to report that this author's digest could not be read: once per
-    /// author per window. The author runs a build with another digest format, or
-    /// sends garbage; either way the two never repair each other's gaps.
-    pub fn report_unreadable_digest(&mut self, author: AuthorKey, now: Instant) -> bool {
-        if self.digest_unreadable.on_cooldown(&author, now) {
-            return false;
-        }
-        self.digest_unreadable.note(author, now);
-        true
     }
 
     /// Record a peer's endpoint address, learned from its published card.

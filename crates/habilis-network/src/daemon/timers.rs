@@ -147,8 +147,6 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         idle_linkstate = idle.linkstate,
         idle_external = idle.external,
         idle_broadcasts = idle.broadcasts,
-        idle_resent = idle.resent,
-        idle_resend_dropped = idle.resend_dropped,
         // A total since the process started, unlike the idle fields above, which are per interval.
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"

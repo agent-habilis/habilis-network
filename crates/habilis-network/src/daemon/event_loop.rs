@@ -17,7 +17,7 @@ use crate::protocol;
 use crate::util;
 use crate::{lookup, transport};
 use iroh_gossip::net;
-use n0_future::{task, time};
+use n0_future::time;
 #[cfg(feature = "host")]
 use serde::de;
 use std::{future, path, process};
@@ -84,7 +84,7 @@ use crate::daemon::state;
 use crate::transport::ipc;
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
-use crate::transport::{outbox, probe, webrtc};
+use crate::transport::{probe, webrtc};
 use crate::util::version;
 use tokio::sync::Notify;
 /// Never returns normally — exits the process on ctrl-c / SIGTERM.
@@ -580,15 +580,6 @@ fn join_gossip(
     let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
 
     let sender = MeshSender::new(gossip_sender);
-    // The task that sends the digest answers, so that the loop never waits for
-    // the gossip actor to take them.
-    if let Some(resends) = state.resend_receiver.take() {
-        task::spawn(outbox::drain(
-            resends,
-            sender.clone(),
-            state.unicast_pool.clone(),
-        ));
-    }
     (sender, receiver)
 }
 
@@ -643,8 +634,6 @@ async fn antientropy_arm(
         &mut anchors.antientropy_wall,
         antientropy_interval(),
     );
-    gossip::antientropy::broadcast_digest(state, context.sender, context.mesh, context.author)
-        .await;
     gossip::antientropy::broadcast_state_digests(
         state,
         context.sender,

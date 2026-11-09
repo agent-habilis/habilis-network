@@ -69,11 +69,6 @@ fn rendezvous_return_after(local: EndpointId) -> Duration {
     period + Duration::from_millis(share_ms)
 }
 
-/// How long an author whose digest we could not read stays unreported. A build
-/// that does not know the window format sends one every round, and one line per
-/// author per window says it without filling the log.
-const UNREADABLE_DIGEST_LOG_WINDOW: Duration = Duration::from_mins(10);
-
 /// The most link vectors that wait for the binding of their author: one per author, and a mesh
 /// holds fewer members than this. A flood of authors that never bind cannot grow the park.
 #[cfg(feature = "multihop")]
@@ -2656,63 +2651,6 @@ mod tests {
         assert!(
             state.mark_seen(&message),
             "a re-send of a frame still in the log is a duplicate"
-        );
-    }
-
-    /// **One digest per peer per window.**
-    ///
-    /// Serving a digest costs up to `ANTIENTROPY_MAX_RESEND` mesh-wide
-    /// broadcasts. With the budget counted per digest and nothing per peer, one
-    /// small crafted frame bought 64 floods from every member that received it,
-    /// so the cost grew with the mesh rather than with the attacker.
-    #[test]
-    fn an_unreadable_digest_is_reported_once_per_author_and_window() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let now = Instant::now();
-        assert!(
-            state.report_unreadable_digest(author_of("aa"), now),
-            "the first is reported"
-        );
-        assert!(
-            !state.report_unreadable_digest(author_of("aa"), now + Duration::from_secs(10)),
-            "the same author every round is one line, not one line per round"
-        );
-        assert!(
-            state.report_unreadable_digest(author_of("bb"), now),
-            "another author is reported on its own"
-        );
-        assert!(
-            state.report_unreadable_digest(
-                author_of("aa"),
-                now + super::UNREADABLE_DIGEST_LOG_WINDOW + Duration::from_secs(1)
-            ),
-            "the author is reported again after the window"
-        );
-    }
-
-    #[test]
-    fn a_peer_is_served_one_digest_per_window() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let now = Instant::now();
-        let window = tuning::ANTIENTROPY_SERVE_COOLDOWN;
-
-        assert!(
-            state.admit_digest(author_of("aa"), now),
-            "the first is served"
-        );
-        assert!(
-            !state.admit_digest(author_of("aa"), now),
-            "a second digest inside the window must not buy another round of resends"
-        );
-        assert!(
-            state.admit_digest(author_of("bb"), now),
-            "one peer's flood must not deny another peer service"
-        );
-        assert!(
-            state.admit_digest(author_of("aa"), now + window + Duration::from_millis(1)),
-            "the honest cadence resumes after the window"
         );
     }
 

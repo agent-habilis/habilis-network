@@ -29,7 +29,6 @@ use tokio::sync::oneshot;
 
 use tokio::{sync, time};
 /// Two anti-entropy cycles (10 s each) and margin, less than the 90 s dedup of the gossip layer.
-const REPAIR: Duration = Duration::from_secs(40);
 const MEETING: Duration = Duration::from_mins(1);
 /// The window of the state test: two digest rounds and the cooldown of an answer, and less than the
 /// 30 s of the alive tick, whose deferred `PeerInfo` gives alice the proof of bob back and turns the
@@ -255,71 +254,6 @@ fn has_read(read: &Arc<Mutex<Vec<String>>>, text: &str) -> bool {
         .any(|got| got == text)
 }
 
-/// Wait until `text` is in `read`; the time it took, or `None`.
-async fn waits_for(
-    // the app writes what it reads here, and the test reads it after the run
-    read: &Arc<Mutex<Vec<String>>>,
-    text: &str,
-    deadline: Duration,
-) -> Option<Duration> {
-    let started = Instant::now();
-    while started.elapsed() < deadline {
-        if has_read(read, text) {
-            return Some(started.elapsed());
-        }
-        time::sleep(Duration::from_millis(250)).await;
-    }
-    has_read(read, text).then(|| started.elapsed())
-}
-
-/// A frame that the author sent, one member read and bob dropped comes again from the member that
-/// holds it. The author logs no app frame of her own (`send_app` keeps none), so a third member
-/// that ingested the frame is the one that has it to resend: carol answers bob's digest. Her
-/// resend has the payload that bob's gossip layer already named, unless it carries a nonce.
-#[test]
-fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
-    let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
-    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let _one_at_a_time = serial().lock().await;
-        let nonce: u64 = rand::random();
-        let topic = format!("resend-dedup-{nonce}");
-
-        let (alice, _alice_read) = spawn(&topic, "alice").await;
-        let (bob, bob_read) = spawn(&topic, "bob").await;
-        let (carol, carol_read) = spawn(&topic, "carol").await;
-
-        // A first frame that reaches both proves that the three are meshed.
-        let meeting = Instant::now();
-        while !(has_read(&bob_read, "hello") && has_read(&carol_read, "hello")) {
-            assert!(meeting.elapsed() < MEETING, "the three never meshed");
-            say(&alice, "hello").await;
-            time::sleep(Duration::from_secs(1)).await;
-        }
-
-        drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;
-        say(&alice, "dropped-once").await;
-        assert_dropped_once(&bob).await;
-        assert!(
-            waits_for(&carol_read, "dropped-once", Duration::from_secs(10))
-                .await
-                .is_some(),
-            "carol never read the frame, so nobody holds it to resend"
-        );
-
-        let after = waits_for(&bob_read, "dropped-once", REPAIR).await;
-        eprintln!("the dropped frame reached the app after: {after:?}");
-        assert!(
-            after.is_some(),
-            "a frame the app dropped never came again inside {REPAIR:?}: the resend has the \
-         payload that the gossip layer already named"
-        );
-
-        alice.leave().await.expect("alice leaves");
-        bob.leave().await.expect("bob leaves");
-        carol.leave().await.expect("carol leaves");
-    });
-}
-
 #[test]
 fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
@@ -387,87 +321,6 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
             !answers.is_empty() && answers.iter().all(|line| !line.contains("broadcast=0")),
             "a state digest was answered point-to-point, so the dedup was not what the repair beat\n{}",
             lines_since(before)
-        );
-
-        alice.leave().await.expect("alice leaves");
-        bob.leave().await.expect("bob leaves");
-    });
-}
-
-/// The author holds what she broadcast. A peer that holds her frame then has nothing to resend to
-/// her: her digest names it. Without it the peer answers every digest round of hers with a resend
-/// of her own frame, forever.
-#[test]
-fn a_peer_does_not_resend_to_its_author_the_frame_she_kept() {
-    let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
-    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let _one_at_a_time = serial().lock().await;
-        let nonce: u64 = rand::random();
-        let topic = format!("resend-author-{nonce}");
-
-        let (alice, _alice_read) = spawn(&topic, "alice").await;
-        let (bob, bob_read) = spawn(&topic, "bob").await;
-
-        let meeting = Instant::now();
-        while !has_read(&bob_read, "hello") {
-            assert!(meeting.elapsed() < MEETING, "the pair never meshed");
-            say(&alice, "hello").await;
-            time::sleep(Duration::from_secs(1)).await;
-        }
-        // One digest round of each node to settle, then two rounds in which nothing may be resent.
-        time::sleep(Duration::from_secs(12)).await;
-        let before = logs().len();
-        time::sleep(Duration::from_secs(25)).await;
-        let log = logs();
-        let resends: Vec<&str> = log[before..]
-            .lines()
-            .filter(|line| line.contains("anti-entropy: resent messages a peer was missing"))
-            .collect();
-        for line in &resends {
-            eprintln!("resend: {line}");
-        }
-        assert!(
-            resends.is_empty(),
-            "{} resends in two digest rounds although every frame was delivered",
-            resends.len()
-        );
-
-        alice.leave().await.expect("alice leaves");
-        bob.leave().await.expect("bob leaves");
-    });
-}
-
-/// The acceptance of the dedup and of the author's log together, with two members: alice sends,
-/// bob drops the frame, and alice is the only member that can resend it. With the nonce alone
-/// there is no holder (she kept nothing); with her log alone her resend has the payload that
-/// bob's gossip layer already named. Only both bring the frame back.
-#[test]
-fn a_frame_the_app_dropped_comes_back_from_its_author_when_she_kept_it() {
-    let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
-    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let _one_at_a_time = serial().lock().await;
-        let nonce: u64 = rand::random();
-        let topic = format!("resend-author-dedup-{nonce}");
-
-        let (alice, _alice_read) = spawn(&topic, "alice").await;
-        let (bob, bob_read) = spawn(&topic, "bob").await;
-
-        let meeting = Instant::now();
-        while !has_read(&bob_read, "hello") {
-            assert!(meeting.elapsed() < MEETING, "the pair never meshed");
-            say(&alice, "hello").await;
-            time::sleep(Duration::from_secs(1)).await;
-        }
-
-        drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;
-        say(&alice, "dropped-once").await;
-        assert_dropped_once(&bob).await;
-
-        let after = waits_for(&bob_read, "dropped-once", REPAIR).await;
-        eprintln!("the dropped frame reached the app after: {after:?}");
-        assert!(
-            after.is_some(),
-            "a frame the app dropped never came back from its author inside {REPAIR:?}"
         );
 
         alice.leave().await.expect("alice leaves");

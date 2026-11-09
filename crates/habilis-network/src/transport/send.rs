@@ -9,8 +9,10 @@ mod delivered;
 pub use delivered::Delivered;
 mod deliver;
 mod route;
+#[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+pub(crate) use deliver::resolve;
 pub use deliver::{deliver, deliver_in_background};
-pub(crate) use deliver::{lane_for, note_held, resolve, send_best_effort, unicast_answer_target};
+pub(crate) use deliver::{lane_for, note_held, send_best_effort, unicast_answer_target};
 #[cfg(test)]
 use route::{Route, route};
 mod lane;

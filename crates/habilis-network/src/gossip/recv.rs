@@ -59,10 +59,8 @@ async fn mesh_on_first_link(
     // alone, and their answers re-send frames every hop there
     // already saw: iroh-gossip drops a message id it has seen,
     // so none of it reaches us. Ask again over a link that can
-    // carry the answer. The chat log asks too: a broadcast sent
-    // before this link could not reach us, and the tick that
-    // would ask for it can be an interval away.
-    tracing::debug!(target: "habilis_network::gossip", "asked for state and chat again on the first real-peer link");
+    // carry the answer.
+    tracing::debug!(target: "habilis_network::gossip", "asked for state again on the first real-peer link");
     antientropy::broadcast_state_digests(
         state,
         context.sender,
@@ -71,7 +69,6 @@ async fn mesh_on_first_link(
         antientropy::DigestTrigger::Event,
     )
     .await;
-    antientropy::broadcast_digest(state, context.sender, context.mesh, context.author).await;
     // Re-publish anything whose value depends on being meshed
     // (the app's card dial hint); see `NodeApp::on_meshed`.
     app.on_meshed(state, context).await;
@@ -714,8 +711,8 @@ async fn dispatch_infra(
             }
             return ControlFlow::Break(());
         }
+        // A chat digest is no longer answered: a peer on an older build sends one, and it is dropped here.
         MessageKind::Digest => {
-            antientropy::handle_digest(message, state, &context.our_pubkey);
             return ControlFlow::Break(());
         }
         MessageKind::Ping => {
@@ -1921,12 +1918,10 @@ mod is_loggable_tests {
 #[cfg(test)]
 mod retain_own_broadcast_tests {
     use crate::testing;
-    use std::collections::HashSet;
 
-    use crate::daemon::message_log::{MissingQuery, WindowRange};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::Verified;
-    use crate::protocol::{DedupKey, MeshId, Message, Nickname};
+    use crate::protocol::{MeshId, Message, Nickname};
 
     use crate::gossip::app;
     use crate::protocol;
@@ -2022,222 +2017,6 @@ mod retain_own_broadcast_tests {
             "an own frame that is directed or unlogged is not retained"
         );
     }
-
-    /// The end-to-end property, as the two peers actually exchange it: a holder
-    /// computing gaps against our digest must find **nothing** to re-send.
-    /// Before the fix this returned our own `joined` on every round, forever.
-    #[test]
-    fn a_peer_offers_nothing_back_against_our_digest() {
-        // Us: we broadcast our own `joined`, and receive the peer's.
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut us = testing::fresh_state();
-        let ours = joined(&us, "us");
-        super::retain_own_broadcast(&mut us, ours.clone());
-        let mut them = testing::fresh_state();
-        let theirs = joined(&them, "them");
-        super::retain_own_broadcast(&mut them, theirs.clone());
-        // Each side ingests the other's presence, as gossip delivers it.
-        super::push_to_log(&mut us, theirs);
-        super::push_to_log(&mut them, ours);
-
-        // We advertise what we hold; they compute what we are missing.
-        let window = us.message_log.recent_window(64).expect("non-empty log");
-        let have: HashSet<DedupKey> = window.ids.into_iter().collect();
-        let offered = them.message_log.missing_in_window(MissingQuery {
-            range: WindowRange {
-                lo: window.lo,
-                hi: window.hi,
-            },
-            have: &have,
-            max: 64,
-            // "us" is the peer whose digest advertised the window; presence is
-            // undirected, so the addressee gate passes it either way.
-            requester: &testing::test_key("us"),
-        });
-        assert!(
-            offered.is_empty(),
-            "two converged peers must have nothing to re-send; got {} message(s) — \
-             the anti-entropy loop is back",
-            offered.len()
-        );
-    }
-}
-
-/// A change the channel doc evicts from its orphan buffer is recovered when
-/// anti-entropy re-serves it. The re-served frame is the original signed one,
-/// so it carries the dedup key the receive path recorded on first arrival.
-#[cfg(test)]
-mod evicted_orphan_tests {
-    use iroh::endpoint::presets;
-    use iroh_gossip::net::Gossip;
-    use serde_json::json;
-
-    use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::EventLoopState;
-    use crate::doc::Ingested;
-    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::SilentSink;
-    use crate::protocol::identity::Identity;
-    use crate::protocol::messages::{Authored, Verified};
-    use crate::protocol::{Channel, MeshId, Message, Nickname};
-    use crate::testing::{endpoint_id, fresh_state, nick};
-    use crate::transport::MeshSender;
-    use habilis_network_util::consts::DOC_PENDING_AUTHOR_MAX;
-
-    use iroh_gossip::proto;
-    /// State frames never reach the app, so it only has to exist.
-    struct Inert;
-
-    #[async_trait::async_trait]
-    impl NodeApp for Inert {
-        fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass::BEAT.union(AppClass::VALID)
-        }
-
-        async fn on_app_frame(
-            &mut self,
-            _frame: InboundApp<'_>,
-            _state: &mut EventLoopState,
-            _ctx: &HandlerCtx<'_>,
-        ) -> bool {
-            false
-        }
-    }
-
-    /// `count` state changes by one author, each depending on the one before.
-    fn chain(
-        writer: &mut EventLoopState,
-        mesh: &MeshId,
-        author: &Nickname,
-        count: usize,
-    ) -> Vec<Verified> {
-        let seed = *writer.identity.public().as_bytes();
-        (0..count)
-            .map(|step| {
-                let state_doc = writer.doc(Channel::State);
-                let change = state_doc
-                    .build_change(&json!({ format!("k{step}"): step }), &seed)
-                    .expect("a JSON object merges")
-                    .expect("a non-empty merge yields a change");
-                let (wire, _plain) = writer
-                    .doc(Channel::State)
-                    .compose_wire_body(&change, None)
-                    .expect("compose the wire body");
-                let frame = Message::new_channel_event(mesh, author, wire, Channel::State)
-                    .sign(&writer.identity);
-                assert!(
-                    matches!(
-                        writer.doc_mut(Channel::State).ingest(&frame),
-                        Ingested::Applied { .. }
-                    ),
-                    "the state document applies the frame"
-                );
-                frame
-            })
-            .collect()
-    }
-
-    fn holds(state: &EventLoopState, step: usize) -> bool {
-        state
-            .doc(Channel::State)
-            .to_json()
-            .get(format!("k{step}"))
-            .is_some()
-    }
-
-    #[test]
-    fn an_evicted_orphan_is_recovered_when_its_frame_is_re_served() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            ::habilis_network_test_tracing::expect_warn(
-                "habilis_network::gossip",
-                "channel orphan buffer full for this author",
-            );
-            let mesh = MeshId::from("test");
-            let mut writer = fresh_state();
-            let frames = chain(
-                &mut writer,
-                &mesh,
-                &nick("writer"),
-                DOC_PENDING_AUTHOR_MAX + 32,
-            );
-
-            let endpoint = iroh::Endpoint::builder(presets::Minimal)
-                .bind()
-                .await
-                .expect("bind a local endpoint");
-            let gossip = Gossip::builder().spawn(endpoint.clone());
-            let topic = gossip
-                .subscribe(proto::TopicId::from_bytes([3u8; 32]), vec![])
-                .await
-                .expect("subscribe to a peerless topic");
-            let (gossip_sender, _receiver) = topic.split();
-            let sender = MeshSender::new(gossip_sender);
-            let identity = Identity::generate();
-            let our_pubkey = identity.author_key();
-            let reader_nick = nick("reader");
-            let sink = SilentSink;
-            let context = HandlerCtx {
-                sender: &sender,
-                endpoint: &endpoint,
-                mesh: &mesh,
-                author: &reader_nick,
-                identity: &identity,
-                our_pubkey,
-                max_peers: 16,
-                rendezvous_id: endpoint_id(9),
-                external_msg_tx: None,
-                sink: &sink,
-            };
-            let mut reader = fresh_state();
-            let mut app = Inert;
-            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
-
-            // Newest first: every frame but the root arrives as an orphan, so the
-            // per-author ceiling evicts the stalest of them before the root lands.
-            let newest_first: Vec<&Verified> = frames.iter().rev().collect();
-            for frame in newest_first {
-                super::ingest(wire(frame), &mut reader, &mut app, &context).await;
-            }
-            let missing: Vec<&Verified> = (0..frames.len())
-                .filter(|&step| !holds(&reader, step))
-                .map(|step| &frames[step])
-                .collect();
-            assert!(
-                !missing.is_empty(),
-                "nothing was evicted, so this test proves nothing"
-            );
-            let missing_refs = missing.iter();
-            let fresh = missing_refs.filter(|frame| reader.seen.contains(&frame.dedup_key()));
-            let already_seen: usize = fresh.count();
-            assert_eq!(
-                already_seen,
-                0,
-                "{already_seen} of the {} dropped frames are still in the seen set, so \
-                 their re-send will be discarded as a repeat",
-                missing.len()
-            );
-
-            // What anti-entropy does for a peer whose heads show the gap: re-serve
-            // the author's original signed frames.
-            for frame in &missing {
-                super::ingest(wire(frame), &mut reader, &mut app, &context).await;
-            }
-
-            let held = (0..frames.len())
-                .filter(|&step| holds(&reader, step))
-                .count();
-            assert_eq!(
-                held,
-                frames.len(),
-                "the reader holds {held} of {} changes after the {} evicted ones were \
-                 re-served; {already_seen} of those were already in the seen set, so \
-                 the receive path dropped them as duplicates",
-                frames.len(),
-                missing.len()
-            );
-            endpoint.close().await;
-        });
-    }
 }
 
 #[cfg(test)]
@@ -2253,7 +2032,6 @@ mod first_contact_tests {
         ChannelEvent, dispatch_channel, dispatch_infra, handle_gossip_event, ingest, pong_for,
     };
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::message_log::{self, MissingQuery};
     use crate::daemon::state::{EventLoopState, PingRound};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
@@ -3061,55 +2839,6 @@ mod first_contact_tests {
             assert!(
                 last.contains("many unknown versions"),
                 "the last line says that many versions are unknown: {last:?}"
-            );
-            node.endpoint.close().await;
-        });
-    }
-
-    /// A relay forwards a directed frame of another key and keeps no copy, whatever the app
-    /// returns. The engine cannot open the body, and no app of the workspace asks to keep such a
-    /// frame, so a copy would be one that only the log cap bounds. The engine gives no repair for a
-    /// directed frame: the author keeps none, and a relay keeps none. A key that was away gets the
-    /// frame only if the app protocol sends it again.
-    #[test]
-    fn a_relayed_directed_frame_is_not_kept_whatever_the_app_returns() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let node = Node::spawn().await;
-            let context = node.context();
-            let mut state = fresh_state();
-            // the app and the test share the counter
-            let reads = Arc::new(atomic::AtomicUsize::new(0));
-            // `Counting` returns `true` for every frame, the answer that asked for a copy.
-            let mut app = Counting(Arc::clone(&reads));
-            let addressee = test_key("twin#addressee");
-            let params = AppFrameParams::new(
-                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                Some(addressee),
-                None,
-                MessageBody::from("for one key"),
-            );
-            let frame =
-                Message::new_app(&node.mesh, &nick("alice"), params).sign(&Identity::generate());
-            let wire = frame.serialize().expect("serialize");
-
-            ingest(wire.into_bytes(), &mut state, &mut app, &context).await;
-
-            assert_eq!(
-                reads.load(Ordering::Relaxed),
-                1,
-                "the app sees the frame of another key once"
-            );
-            let have = HashSet::new();
-            let query = MissingQuery {
-                range: message_log::seconds(UnixSecs::ZERO, UnixSecs::MAX),
-                have: &have,
-                max: 16,
-                requester: &addressee,
-            };
-            assert_eq!(
-                state.message_log.missing_in_window(query).len(),
-                0,
-                "a relay kept a directed frame of another key"
             );
             node.endpoint.close().await;
         });
@@ -4439,8 +4168,8 @@ mod first_contact_tests {
             );
             assert_eq!(
                 digests_on_link_up(endpoint_id(1)).await,
-                3,
-                "the first real-peer link: one state, one meta and one chat digest"
+                2,
+                "the first real-peer link: one state and one meta digest"
             );
             assert_eq!(
                 digests_on_link_up(endpoint_id(2)).await,

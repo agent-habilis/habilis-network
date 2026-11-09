@@ -32,11 +32,6 @@ pub(crate) struct IdleCounters {
     /// driver behind `user` CPU: each one is an Ed25519 signature plus a
     /// serialization.
     pub broadcasts: u64,
-    /// Messages a digest answer put in the resend outbox.
-    pub resent: u64,
-    /// Messages a digest answer could not put there because it was full: the
-    /// next digest asks for them again.
-    pub resend_dropped: u64,
 }
 
 impl IdleCounters {
