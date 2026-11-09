@@ -14,8 +14,6 @@
 //   a connection was full), and the worst count a node logged (a lower bound: the log
 //   line appears at each power of two).
 // - disc_nodes / worst_disc: the same for `send_overflow_disconnects`.
-// - resent / resend_dropped: the sum of the `idle_resent` and `idle_resend_dropped`
-//   deltas of every census line, which is the total over the run.
 // - mem_med / mem_max: peak resident memory of the nodes, in MB.
 // - load1 median and max, from host.log; canary pauses of the host over 0.5 s.
 
@@ -51,8 +49,6 @@ function summarize(run: string): string {
   const discs = new Map<string, number>();
   let up = 0;
   let down = 0;
-  let resent = 0;
-  let resendDropped = 0;
   for (const file of readdirSync(run).filter((f) => /^n.*\.err$/.test(f))) {
     const text = clean(readFileSync(`${run}/${file}`, "utf8"));
     stalls.push(...numbers(text, /timer stalled[^\n]*?mono_gap_ms=(\d+)/));
@@ -62,8 +58,6 @@ function summarize(run: string): string {
     if (refused.length > 0) discs.set(file, Math.max(...refused));
     up += text.split("gossip neighbor up").length - 1;
     down += text.split("gossip neighbor down").length - 1;
-    resent += numbers(text, /idle_resent=(\d+)/).reduce((a, b) => a + b, 0);
-    resendDropped += numbers(text, /idle_resend_dropped=(\d+)/).reduce((a, b) => a + b, 0);
   }
 
   const loads: number[] = [];
@@ -92,7 +86,6 @@ function summarize(run: string): string {
     `min=${rosterMin} | stalls=${stalls.length} longest_s=${stalls.length ? Math.floor(maxOf(stalls) / 1000) : 0} ` +
     `| up=${up} down=${down} | drop_nodes=${drops.size} worst_drop=${maxOf([...drops.values()])} ` +
     `| disc_nodes=${discs.size} worst_disc=${maxOf([...discs.values()])} ` +
-    `| resent=${resent} resend_dropped=${resendDropped} ` +
     `| mem_med=${memMed} mem_max=${memMax} ` +
     `| load1 median=${loadMed} max=${loadMax} ` +
     `| canary_pauses=${gaps.length}`

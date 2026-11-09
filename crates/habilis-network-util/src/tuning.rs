@@ -98,10 +98,9 @@ pub const LINKSTATE_MAX_AGE: Duration = LINKSTATE_INTERVAL.saturating_mul(3);
 /// hole punch.
 pub const MULTIHOP_RELAY_STUCK: Duration = Duration::from_secs(20);
 
-/// Max messages re-broadcast in response to one received digest, so a
-/// far-behind peer can't trigger an unbounded burst. This throttles
-/// deep-backfill throughput (~`this × peers` messages per
-/// `ANTIENTROPY_INTERVAL`). Hidden flag `--antientropy-max-resend` (tests raise it for deep backfill).
+/// Max state or meta frames in one answer to a received digest, so a far-behind peer cannot
+/// trigger an unbounded burst. Chat is no longer answered, so this caps only a state or meta
+/// answer. Hidden flag `--antientropy-max-resend` (tests raise it for deep backfill).
 pub const ANTIENTROPY_MAX_RESEND: usize = 64;
 
 /// The live value, after any CLI override of [`ANTIENTROPY_MAX_RESEND`].

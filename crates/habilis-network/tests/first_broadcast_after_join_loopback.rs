@@ -3,28 +3,18 @@
 //!
 //! Three members on a local relay: the creator C and two joiners J1 and J2. Each joiner sends a
 //! broadcast as soon as `join` returns. A frame sent before the node is meshed is parked and
-//! flushed on its first non-rendezvous link (`gossip::recv::flush_pending`), and the creator asks
-//! for what it missed with a digest on its first real link (`gossip::antientropy`). The lost
-//! message is the one that neither path brings.
+//! flushed on its first non-rendezvous link (`gossip::recv::flush_pending`). The chat log and its
+//! resends are removed, so the race measures only that flush.
 //!
-//! The tests record WHEN each broadcast reaches two observers, the creator and the other
-//! joiner, up to `OBSERVE`, and fail if the creator gets one later than the bound of the race (`EXPECTED`, or 5 s for the control). The failure
-//! message carries the arrival times and classifies each message:
+//! The tests record WHEN each broadcast reaches two observers, the creator and the other joiner,
+//! up to `OBSERVE`, and fail if the creator gets one later than the bound of the race (`EXPECTED`,
+//! or 5 s for the control). The failure message carries the arrival times and classifies each
+//! message:
 //! - nobody got it: the send or the flush dropped it;
 //! - only the creator: the flood stopped at the first hop;
-//! - the creator missed it and the other joiner got it: the creator's inbound path;
-//! - both, late: a resend. An arrival near 90 s is the sender's own gossip actor dropping the
-//!   resend as a duplicate until iroh-gossip forgets the message id (`message_id_retention`).
-//!
-//! They also read the length of each member's message log before the send and at the end, which
-//! is where anti-entropy finds what it serves: a sender whose log did not grow while the
-//! creator's did cannot serve its own message again.
+//! - the creator missed it and the other joiner got it: the creator's inbound path.
 //!
 //! `transport: Vec::new()` is the default list of the mesh (udp, webrtc, multihop, gossip).
-//!
-//! Two apps run the race. The membership app never retains chat, so anti-entropy cannot resend
-//! it there. The logging app retains every chat frame it receives, as agent-gossip's app does,
-//! and so exercises the resend. Each report names its app.
 //!
 //! Debug greps for a run: `RUST_LOG=habilis_network::messages=info,habilis_network::gossip=debug`.
 //! Every test is `#[ignore]`: each stands up three real members and runs under a host grant, with

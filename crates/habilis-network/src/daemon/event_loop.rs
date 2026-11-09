@@ -621,8 +621,8 @@ async fn alive_arm(
     }
 }
 
-/// The anti-entropy tick: note the gap, advertise the chat digest, then both
-/// channel digests, so peers can request anything we hold that they miss.
+/// The anti-entropy tick: note the gap, then advertise both channel digests, so peers can
+/// request anything we hold that they miss.
 async fn antientropy_arm(
     anchors: &mut TickAnchors,
     state: &mut EventLoopState,

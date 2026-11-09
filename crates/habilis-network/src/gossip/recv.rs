@@ -711,7 +711,7 @@ async fn dispatch_infra(
             }
             return ControlFlow::Break(());
         }
-        // A chat digest is no longer answered: a peer on an older build sends one, and it is dropped here.
+        // A chat digest is no longer answered and is dropped here. The Digest kind is removed in a later commit of the chat-log plan.
         MessageKind::Digest => {
             return ControlFlow::Break(());
         }
@@ -2016,6 +2016,284 @@ mod retain_own_broadcast_tests {
             0,
             "an own frame that is directed or unlogged is not retained"
         );
+    }
+}
+
+/// A change the channel doc evicts from its orphan buffer is recovered when
+/// anti-entropy re-serves it. The re-served frame is the original signed one,
+/// so it carries the dedup key the receive path recorded on first arrival.
+#[cfg(test)]
+mod evicted_orphan_tests {
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use serde_json::json;
+
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::doc::Ingested;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::{Authored, Verified};
+    use crate::protocol::{Channel, MeshId, Message, Nickname};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+    use habilis_network_util::consts::DOC_PENDING_AUTHOR_MAX;
+
+    use iroh_gossip::proto;
+    /// State frames never reach the app, so it only has to exist.
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    /// `count` state changes by one author, each depending on the one before.
+    fn chain(
+        writer: &mut EventLoopState,
+        mesh: &MeshId,
+        author: &Nickname,
+        count: usize,
+    ) -> Vec<Verified> {
+        let seed = *writer.identity.public().as_bytes();
+        (0..count)
+            .map(|step| {
+                let state_doc = writer.doc(Channel::State);
+                let change = state_doc
+                    .build_change(&json!({ format!("k{step}"): step }), &seed)
+                    .expect("a JSON object merges")
+                    .expect("a non-empty merge yields a change");
+                let (wire, _plain) = writer
+                    .doc(Channel::State)
+                    .compose_wire_body(&change, None)
+                    .expect("compose the wire body");
+                let frame = Message::new_channel_event(mesh, author, wire, Channel::State)
+                    .sign(&writer.identity);
+                assert!(
+                    matches!(
+                        writer.doc_mut(Channel::State).ingest(&frame),
+                        Ingested::Applied { .. }
+                    ),
+                    "the state document applies the frame"
+                );
+                frame
+            })
+            .collect()
+    }
+
+    fn holds(state: &EventLoopState, step: usize) -> bool {
+        state
+            .doc(Channel::State)
+            .to_json()
+            .get(format!("k{step}"))
+            .is_some()
+    }
+
+    #[test]
+    fn an_evicted_orphan_is_recovered_when_its_frame_is_re_served() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "channel orphan buffer full for this author",
+            );
+            let mesh = MeshId::from("test");
+            let mut writer = fresh_state();
+            let frames = chain(
+                &mut writer,
+                &mesh,
+                &nick("writer"),
+                DOC_PENDING_AUTHOR_MAX + 32,
+            );
+
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([3u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let mut reader = fresh_state();
+            let mut app = Inert;
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+
+            // Newest first: every frame but the root arrives as an orphan, so the
+            // per-author ceiling evicts the stalest of them before the root lands.
+            let newest_first: Vec<&Verified> = frames.iter().rev().collect();
+            for frame in newest_first {
+                super::ingest(wire(frame), &mut reader, &mut app, &context).await;
+            }
+            let missing: Vec<&Verified> = (0..frames.len())
+                .filter(|&step| !holds(&reader, step))
+                .map(|step| &frames[step])
+                .collect();
+            assert!(
+                !missing.is_empty(),
+                "nothing was evicted, so this test proves nothing"
+            );
+            let missing_refs = missing.iter();
+            let fresh = missing_refs.filter(|frame| reader.seen.contains(&frame.dedup_key()));
+            let already_seen: usize = fresh.count();
+            assert_eq!(
+                already_seen,
+                0,
+                "{already_seen} of the {} dropped frames are still in the seen set, so \
+                 their re-send will be discarded as a repeat",
+                missing.len()
+            );
+
+            // What anti-entropy does for a peer whose heads show the gap: re-serve
+            // the author's original signed frames.
+            for frame in &missing {
+                super::ingest(wire(frame), &mut reader, &mut app, &context).await;
+            }
+
+            let held = (0..frames.len())
+                .filter(|&step| holds(&reader, step))
+                .count();
+            assert_eq!(
+                held,
+                frames.len(),
+                "the reader holds {held} of {} changes after the {} evicted ones were \
+                 re-served; {already_seen} of those were already in the seen set, so \
+                 the receive path dropped them as duplicates",
+                frames.len(),
+                missing.len()
+            );
+            endpoint.close().await;
+        });
+    }
+}
+
+/// A chat digest is dropped at the infra arm: no answer, and the seen set does not change.
+#[cfg(test)]
+mod chat_digest_tests {
+    use std::ops::ControlFlow;
+
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::lifecycle::membership_update::MembershipUpdate;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::Authored;
+    use crate::protocol::{MeshId, Message, MessageBody, MessageKind};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+
+    /// The app takes no frame in this test, so it only has to exist.
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_chat_digest_is_dropped_at_the_infra_arm_without_a_state_change() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mesh = MeshId::from("test");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([4u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let peer = Identity::generate();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey: identity.author_key(),
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let digest = Message::new_frame(
+                &mesh,
+                &nick("peer"),
+                MessageKind::Digest,
+                MessageBody::from("{}"),
+            )
+            .sign(&peer);
+            let mut state = fresh_state();
+            let seen_before = state.seen.len();
+            let mut app = Inert;
+            let update = MembershipUpdate {
+                returned: false,
+                joined_new: false,
+                stale: false,
+            };
+            let flow =
+                super::dispatch_infra(&digest, true, &update, &mut state, &mut app, &context).await;
+            assert!(
+                matches!(flow, ControlFlow::Break(())),
+                "a chat digest must stop at the infra arm"
+            );
+            assert_eq!(
+                state.seen.len(),
+                seen_before,
+                "a chat digest must not change the seen set"
+            );
+            endpoint.close().await;
+        });
     }
 }
 

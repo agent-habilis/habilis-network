@@ -328,7 +328,7 @@ pub(crate) async fn handle_state_digest(
             return answered;
         }
         for bytes in frames {
-            // A new name for each answer, as for the resend of a message (see `resend_one`).
+            // A new name for each answer, so the peer does not drop it as a repeat.
             let answer = bytes.copy_with_resend_nonce(rand::random());
             let _ = context.sender.broadcast(answer).await;
         }

@@ -6,8 +6,8 @@
 //! a new gossip message, and the app drops it only where it already knows the frame inside.
 //!
 //! Two nodes on a loopback mesh. The app logs what it reads, so the log can be repaired. Two
-//! sites send a resend on gossip: the answer to a chat digest (`resend_one`), and the answer to a
-//! state digest when the asker's endpoint is not proven. One test for each.
+//! site sends a resend on gossip: the answer to a state digest when the asker's endpoint is not
+//! proven. The chat digest answer is removed.
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 

@@ -171,7 +171,7 @@ mod tests {
         );
     }
 
-    /// The anti-entropy digest of the chat log is plumbing, not a change of a shared document.
+    /// A chat digest is plumbing, not a change of a shared document. The kind is removed in a later commit.
     #[test]
     fn a_message_log_digest_is_not_document_traffic() {
         assert_eq!(
