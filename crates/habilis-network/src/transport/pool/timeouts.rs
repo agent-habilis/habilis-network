@@ -30,3 +30,9 @@ pub(super) const PATH_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a connection stays busy after a send finished, if the peer has not read the frame. A
 /// reader that is slower than this is not protected: the connection can be evicted under its frame.
 pub(super) const BUSY_AFTER_FINISH: Duration = Duration::from_secs(2);
+
+/// How long one send may take: the open of the stream and the write of the frame. A peer that accepts the
+/// connection and reads nothing fills its limit of streams, and the open then waits. Each send sits in a task of
+/// its own, so a wait without a bound grows the tasks of this node for as long as the peer makes it send. The
+/// budget is the dial's, because a send that waits this long is as dead as a peer that does not answer a dial.
+pub(super) const SEND_TIMEOUT: Duration = Duration::from_secs(3);

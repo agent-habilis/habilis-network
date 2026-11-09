@@ -214,6 +214,43 @@ mod tests {
         });
     }
 
+    /// A send to a peer that reads nothing ends. The peer accepts the connection, never accepts a stream and keeps
+    /// the connection alive, so every finished stream stays open: once its limit of streams is full, `open_uni`
+    /// waits. Each send sits in a task of its own, so a wait without a bound grows the tasks of the node for as
+    /// long as the peer answers nothing.
+    #[test]
+    fn a_send_to_a_peer_that_reads_nothing_ends_within_its_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(600)).await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+
+            let fills_the_streams_of_the_peer = async {
+                for _ in 0..4096u32 {
+                    if super::unicast_pool::send_one(&connection, b"frame", None, None)
+                        .await
+                        .is_err()
+                    {
+                        return true;
+                    }
+                }
+                false
+            };
+            let refused = time::timeout(
+                super::timeouts::SEND_TIMEOUT * 3,
+                fills_the_streams_of_the_peer,
+            )
+            .await;
+
+            assert_eq!(
+                refused,
+                Ok(true),
+                "a send to a peer that reads nothing is still waiting, or 4096 sends never filled the streams of the peer, so the wait of a send has no bound to prove"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
     #[test]
     fn a_send_restarts_the_idle_timeout() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
