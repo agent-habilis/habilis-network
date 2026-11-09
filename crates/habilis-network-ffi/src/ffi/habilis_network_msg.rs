@@ -10,7 +10,8 @@ use std::ffi::{c_char, c_int};
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HabilisNetworkMsg {
-    /// The nickname of the sender, NUL-terminated. Two members can use one nickname.
+    /// The nickname of the sender, NUL-terminated. Two members can use one nickname only if no
+    /// member key proved it.
     pub nick: [c_char; super::NICK_CAP],
     /// The key of the sender: 64 lowercase hex digits and the NUL. A reply to this key goes to
     /// the sender alone.

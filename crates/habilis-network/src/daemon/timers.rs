@@ -380,9 +380,10 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &AuthorKey) {
     let heavy = is_heavy_run(run);
     let meta = state.doc_mut(Channel::Meta).census(heavy);
     let shared = state.doc_mut(Channel::State).census(heavy);
-    let peer_nicks = meta.peer_nicks.as_deref().unwrap_or_default();
-    let absent = absent_entries(peer_nicks, &state.peers, me);
-    let peer_entries = peer_nicks.len();
+    let peer_slots = meta.peer_slots.as_deref().unwrap_or_default();
+    let absent = absent_entries(peer_slots, &state.peers, me);
+    let peer_entries = peer_slots.len();
+    let replay_waiting = state.replay_queue.len();
     tracing::info!(
         target: "habilis_network::lifecycle",
         doc_meta_epoch = meta.epoch,
@@ -398,6 +399,20 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &AuthorKey) {
         doc_state_frame_bytes = shared.frame_bytes,
         doc_state_save_bytes = shared.save_bytes.unwrap_or(0),
         doc_state_json_bytes = shared.json_bytes.unwrap_or(0),
+        doc_state_refused_time = shared.refused_time,
+        doc_state_unstamped_paths = shared.unstamped_paths,
+        doc_state_seed_left_out = shared.seed_left_out,
+        doc_state_dropped_restores = shared.dropped_restores,
+        doc_state_replay_unsettled = shared.replay_unsettled,
+        doc_state_ops = shared.ops_held,
+        doc_state_seed_bytes = shared.seed_bytes,
+        doc_state_seed_ops = shared.seed_ops,
+        doc_state_remote_refused = shared.refused_remote,
+        doc_state_full_refused = shared.refused_local,
+        doc_state_held_writes = shared.held_writes,
+        doc_state_cuts = state.state_cuts,
+        doc_state_cuts_failed = state.state_cuts_failed,
+        doc_state_replay_queue = replay_waiting,
         doc_save_taken = heavy,
         "doc census"
     );
@@ -413,6 +428,12 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_known_endpoints = sizes.known_endpoints,
         col_quiet = sizes.quiet,
         col_left_keys = sizes.left_keys,
+        col_proofs = sizes.proofs,
+        col_proofs_refused = sizes.proofs_refused,
+        col_proofs_ties_refused = sizes.proofs_ties_refused,
+        col_proofs_answers_refused = sizes.proofs_answers_refused,
+        col_proofs_bound_refused = sizes.proofs_bound_refused,
+        col_proofs_gate_refused = sizes.proofs_gate_refused,
         col_reassembled_groups = sizes.reassembled_groups,
         col_pending_outbound = sizes.pending_outbound,
         col_message_log = sizes.message_log,

@@ -1,11 +1,23 @@
 use super::Plane;
 use std::collections::HashMap;
 
+use iroh::EndpointId;
+
 use crate::protocol::{AuthorKey, Channel};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
     ANTIENTROPY_SERVE_COOLDOWN, ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_MIN_INTERVAL,
 };
+
+/// Who is asking, for the budget. On gossip the digest reaches the whole mesh and a few members
+/// answer it, so the asker is its author key. On unicast the asker is the connection that the digest
+/// came on: a member mints author keys for free, so a budget for each key would give one connection
+/// as many answers as it has keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Asker {
+    Key(AuthorKey),
+    Connection(EndpointId),
+}
 
 /// The state digest answers served in the current window, per asker, channel
 /// and plane: at most [`ANTIENTROPY_SERVES_PER_WINDOW`] on the unicast plane,
@@ -18,8 +30,7 @@ use crate::util::tuning::{
 /// digest with made-up heads would be new every time.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ServeBudget {
-    /// The asker's key: every digest is verified, so it always has one.
-    pub(super) windows: HashMap<(AuthorKey, Channel, Plane), Served>,
+    pub(super) windows: HashMap<(Asker, Channel, Plane), Served>,
     /// The unicast form of the digests: the switch, the connection that the frame at hand came on,
     /// and the chat digest that is out.
     pub(crate) unicast: super::UnicastDigests,
@@ -44,12 +55,7 @@ impl ServeBudget {
     }
 
     /// Whether an answer to these heads may go out now.
-    pub(crate) fn admits(
-        &self,
-        key: &(AuthorKey, Channel, Plane),
-        heads: u64,
-        now: Instant,
-    ) -> bool {
+    pub(crate) fn admits(&self, key: &(Asker, Channel, Plane), heads: u64, now: Instant) -> bool {
         match self.windows.get(key) {
             Some(served) if now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN => {
                 // The same heads are answered again after the fast-round interval on
@@ -63,8 +69,23 @@ impl ServeBudget {
         }
     }
 
+    /// Record an answer that went out on gossip, and, when it fell back from a unicast answer, the serve of
+    /// the connection too.
+    pub(crate) fn note_fallback(
+        &mut self,
+        gossip: (Asker, Channel, Plane),
+        connection: Option<(Asker, Channel, Plane)>,
+        heads: u64,
+        now: Instant,
+    ) {
+        self.note(gossip, heads, now);
+        if let Some(key) = connection {
+            self.note(key, heads, now);
+        }
+    }
+
     /// Record an answer to these heads, dropping windows that have ended.
-    pub(crate) fn note(&mut self, key: (AuthorKey, Channel, Plane), heads: u64, now: Instant) {
+    pub(crate) fn note(&mut self, key: (Asker, Channel, Plane), heads: u64, now: Instant) {
         self.windows
             .retain(|_, served| now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN);
         let served = self.windows.entry(key).or_insert_with(|| Served {

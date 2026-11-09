@@ -8,13 +8,13 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
+#[cfg(feature = "host")]
+use super::setup;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::TestHold;
 use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 #[cfg(feature = "multihop")]
 use crate::protocol;
-#[cfg(feature = "host")]
-use crate::util;
 use crate::{lookup, transport};
 use iroh_gossip::net;
 use n0_future::{task, time};
@@ -35,6 +35,7 @@ use std::time::Duration;
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr, RelayUrl, Watcher as _};
 use iroh_gossip::api::{ApiError, Event, GossipReceiver, GossipTopic};
+use n0_future::task::JoinError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 #[cfg(feature = "host")]
@@ -44,7 +45,7 @@ use crate::gossip::antientropy::Plane;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::{Mesh, MeshName};
 use crate::protocol::messages::{Authored, Verified};
-use crate::protocol::{MeshId, Nickname, UnixSecs, identity};
+use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
 // The timer-driver clock, distinct from `clock::Instant` off wasm32 (there it is
@@ -74,7 +75,7 @@ use super::node::SignalHandling;
 use super::shutdown;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
 use super::state::{EventLoopState, MeshSecrets};
-use super::timers;
+use super::{seed_job, timers};
 use crate::daemon::setup::LiveCount;
 use ctx_parts::CtxParts;
 pub use event_loop_error::EventLoopError;
@@ -151,7 +152,7 @@ async fn run_checked<Driver: NodeDriver>(
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
     let mut state: EventLoopState = initial_state(
-        mesh.identity,
+        mesh.keys,
         MeshSecrets {
             password: mesh.mesh_password.take(),
             key: mesh.mesh_key.take(),
@@ -162,6 +163,7 @@ async fn run_checked<Driver: NodeDriver>(
         started,
         state_file,
     );
+    seed_job::creator_has_nothing_to_sync(&mut state, mesh.is_creator);
     let owned = OwnedEndpoints {
         router: endpoints.router,
         owner: endpoints.endpoint_owner,
@@ -366,14 +368,11 @@ fn host_state_file<Driver: NodeDriver>(
         .take()
         .or_else(|| {
             let base = runtime.runtime_base.as_deref()?;
-            exit_on_quit.then(|| {
-                util::mesh_runtime_dir(base, mesh.mesh.as_str())
-                    .join(format!("{}.state.json", mesh.author))
-            })
+            exit_on_quit.then(|| setup::default_state_path(base, &mesh.mesh, &mesh.author))
         })
         .map(|path| {
             let owner_pid = runtime.owner.map(shutdown::Owner::pid);
-            let pubkey = mesh.identity.author_key();
+            let pubkey = mesh.keys.session.author_key();
             let file = StateFile::new(path, &mesh.mesh, &mesh.author, &mesh.name, &pubkey)
                 .base(runtime.runtime_base.clone());
             file.topic(mesh.topic_string.as_deref())
@@ -404,8 +403,8 @@ type StateFileSeed = Option<path::PathBuf>;
 /// The event loop's state, with the mesh's identity and secrets moved in. The state file goes
 /// with it, so the first write the loop makes lands in the right place.
 fn initial_state(
-    // The loop holds the identity across `&mut state`, so it keeps a shared handle.
-    identity: Arc<identity::Identity>,
+    // The loop holds the keys across `&mut state`, so it keeps shared handles.
+    keys: state::RunKeys,
     secrets: MeshSecrets,
     mint_mesh: Option<Mesh>,
     transports: &TransportSet,
@@ -419,7 +418,7 @@ fn initial_state(
         state::StateInit {
             #[cfg(feature = "host")]
             state_file,
-            identity,
+            keys,
             secrets,
             per_peer_gate,
             // The *same* table the Router's signal acceptor holds, not a fresh
@@ -1147,6 +1146,10 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         )
         .await;
         self.state.state_digest_serves.unicast.arrived_from = None;
+        // A frame on a unicast connection shows that a connection to its endpoint is up: the proof
+        // requests that waited for one go now.
+        let sign = Some(lifecycle::PathSign::Unicast(frame.from));
+        lifecycle::retry_deferred_asks(&mut self.state, &context, sign).await;
     }
 
     fn prune(&mut self) {
@@ -1154,8 +1157,24 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         timers::tick_prune(&mut self.state, self.parts.sink);
         let context = self.parts.handler_ctx(&self.sender);
         timers::tick_epoch(&mut self.state, &context.our_pubkey);
+        seed_job::tick(&mut self.state, context.author, context.mesh);
         timers::tick_doc_census(&mut self.state, &context.our_pubkey);
         timers::tick_collection_census(&self.state);
+    }
+
+    /// The build of a seed of the state channel is done: sign the chain and send it, root first.
+    /// A node that cannot reach the overlay keeps the frames for when it meshes.
+    async fn seed_built(&mut self, outcome: Result<seed_job::SeedOutcome, JoinError>) {
+        let context = self.parts.handler_ctx(&self.sender);
+        let frames = seed_job::finish(&mut self.state, outcome, context.author, context.mesh);
+        seed_job::send_frames(&mut self.state, &self.sender, frames, true).await;
+    }
+
+    /// Send the replay of the writes that a seed lacks, and the restores that are due, which the
+    /// tick of the state channel queued.
+    async fn send_replays(&mut self) {
+        let context = self.parts.handler_ctx(&self.sender);
+        seed_job::send_replays(&mut self.state, &self.sender, context.author, context.mesh).await;
     }
 
     async fn alive(&mut self) {
@@ -1212,6 +1231,9 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             sink: context.sink,
         };
         gossip::write_entry_again(&mut self.state, &write).await;
+        seed_job::sync_deadline(&mut self.state);
+        // The proof requests that waited for a warm path and got none from a unicast frame: once more.
+        lifecycle::retry_deferred_asks(&mut self.state, &context, None).await;
     }
 
     /// The heal tick: heal the mesh while the gossip stream lives, else resubscribe the topic.
@@ -1715,9 +1737,17 @@ async fn run_loop<Driver: NodeDriver>(
                 Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },
             },
-            _ = lp.intervals.prune.tick() => { lp.prune(); },
+            _ = lp.intervals.prune.tick() => {
+                lp.prune();
+                lifecycle::end_pending_endpoints(&mut lp.state).await;
+                lp.send_replays().await;
+            },
+            outcome = seed_job::seed_job_done(&mut lp.state.seed_job) => { lp.seed_built(outcome).await; },
             _ = lp.intervals.alive.tick() => { lp.alive().await; },
-            _ = lp.intervals.sweep.tick() => { lp.sweep().await; },
+            _ = lp.intervals.sweep.tick() => {
+                lp.sweep().await;
+                lifecycle::end_pending_endpoints(&mut lp.state).await;
+            },
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
             Ok(()) = lp.rung_rx.changed() => { lp.rung_change(); },
             found_rival = beacon::probe_verdict(&mut lp.rival_probe) => { lp.probe_verdict(found_rival).await; },

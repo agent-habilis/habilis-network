@@ -73,7 +73,11 @@ function lacksMemory(): boolean {
 
 const HOST_TEST_MS = 40 * 60 * 1000;
 
-test(
+// A bare `bun test` of the repository must not start a benchmark of 20 minutes: the two host tests run
+// only when RATIO_BIN names a binary. (`bun run test` also path-ignores this file, see package.json.)
+const hostTest = process.env.RATIO_BIN ? test : test.skip;
+
+hostTest(
   `goal: at N=${NODES} the metadata bytes per data byte are at most half of the baseline`,
   async () => {
     if (lacksMemory()) return;
@@ -83,7 +87,7 @@ test(
   HOST_TEST_MS,
 );
 
-test(
+hostTest(
   `budget: at N=${NODES} the metadata bytes per data byte stay within 10 percent of the head value`,
   async () => {
     if (lacksMemory()) return;

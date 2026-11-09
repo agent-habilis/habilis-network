@@ -73,6 +73,13 @@ pub struct SetupParams {
     /// Supplied up front rather than patched onto the returned config, so the
     /// config is complete the moment it exists.
     pub live_count: Option<LiveCount>,
+    /// Keep the member key and the run counter in the default state path when `state_file` is `None`
+    /// (a daemon that the CLI started with no `--state-file`): a restart after a crash then keeps its
+    /// member key and counts its run on, where an ephemeral key would show peers a new member under the
+    /// nickname that the old session still holds. A flag, because the in-process sessions also carry a
+    /// `runtime_base` and keep no files on purpose: with the default path they would share a key file
+    /// for each nickname. `false` by default; only the CLI session sets it.
+    pub keys_in_default_state: bool,
 }
 
 impl SetupParams {
@@ -94,6 +101,20 @@ impl SetupParams {
             per_peer_gate: None,
             cohost: None,
             live_count: None,
+            keys_in_default_state: false,
+        }
+    }
+
+    /// Keep the member key and the run counter in the default state path when there is no state file.
+    #[must_use]
+    pub fn keys_in_default_state(
+        self,
+        // Whether the member key and the run counter live in the default state path when `state_file` is `None`.
+        keys_in_default_state: bool,
+    ) -> Self {
+        Self {
+            keys_in_default_state,
+            ..self
         }
     }
 

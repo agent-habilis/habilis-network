@@ -146,8 +146,15 @@ crosses a phase edge counts whole in one phase.
 An oracle line with `to` counts for each recipient. The summary takes the receipt time of
 the recipient, or the send time if there is no receipt. It then takes the first census of
 that recipient at or after that time. The data bytes count in the phase of that census.
-The wire bytes of the payload are in the same census, so the two sides stay in one phase.
 If no census follows, the phase of the time itself is used.
+
+The two sides of the ratio can still land in two phases. The receipt time is the time at
+which the poll served the payload, and the daemon counts the wire bytes of that payload
+when it reads the frame, which is earlier. A census between the two counts the wire bytes
+in the earlier phase and the data bytes in the later one. A poll that is late serves
+several payloads at once, and several censuses can fall in that gap, so the error is not
+bounded to one payload or to one interval. It needs an arrival inside such a gap: the
+poll follows the bell, so the gap is short while the host keeps up.
 
 An oracle line with no `to` counts in the phase that holds its send time.
 
@@ -256,7 +263,7 @@ A host with too little memory for N = 16 fails the host tests and prints `SKIPPE
 
 ## Ratio test
 
-`ratio.test.ts` is a benchmark, not a unit test. It runs `bench.ts` for about 20 min and needs a quiet host, so CI skips it (`package.json`, `test` script). Run it by hand:
+`ratio.test.ts` is a benchmark, not a unit test. It runs `bench.ts` for about 20 min and needs a quiet host, so CI skips it: `bun run test` ignores the file (`package.json`), and a bare `bun test` skips its two host tests when `RATIO_BIN` is not set. The test has no start gate and no A/B gate (those are in `b4.ts`): `bench.ts` only aborts a run when the load passes `MAX_LOAD_PER_CORE` x cores, so the load at the start of a run is what the operator reads in `host.jsonl`. Run it by hand:
 
 ```bash
 RATIO_BIN=<binary> bun test scripts/perf/ratio.test.ts

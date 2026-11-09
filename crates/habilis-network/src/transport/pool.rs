@@ -4,6 +4,7 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
+mod batch_slots;
 mod in_flight_dial;
 mod registration;
 mod timeouts;
@@ -208,6 +209,51 @@ mod tests {
 
             time::resume();
             pool.warm_or_dial(server).await.expect("a send dials again");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A send to a peer that reads nothing ends. The peer accepts the connection, never accepts a stream and keeps
+    /// the connection alive, so every finished stream stays open: once its limit of streams is full, `open_uni`
+    /// waits. Each send sits in a task of its own, so a wait without a bound grows the tasks of the node for as
+    /// long as the peer answers nothing.
+    #[test]
+    fn a_send_to_a_peer_that_reads_nothing_ends_within_its_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(600)).await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+
+            let fills_the_streams_of_the_peer = async {
+                let mut sent = 0u32;
+                for _ in 0..4096u32 {
+                    match super::unicast_pool::send_one(&connection, b"frame", None, None).await {
+                        Ok(()) => sent += 1,
+                        Err(error) => return (sent, Some(error.to_string())),
+                    }
+                }
+                (sent, None)
+            };
+            let ended = time::timeout(
+                super::timeouts::SEND_TIMEOUT * 3,
+                fills_the_streams_of_the_peer,
+            )
+            .await;
+
+            let (sent, refusal) = ended.expect(
+                "a send to a peer that reads nothing is still waiting, so the wait of a send has no bound",
+            );
+            let refusal: String = refusal.expect(
+                "4096 sends never filled the streams of the peer, so the wait of a send has no bound to prove",
+            );
+            assert!(
+                sent > 0,
+                "the first send already failed with \"{refusal}\", so the refusal below is not the one of a full peer"
+            );
+            assert!(
+                refusal.contains(super::timeouts::SEND_TIMED_OUT),
+                "the send of the frame number {sent} ended with \"{refusal}\", which is not the deadline of a send"
+            );
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });

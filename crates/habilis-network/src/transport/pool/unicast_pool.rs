@@ -1,9 +1,11 @@
 //! The dial side of the unicast plane: the per-peer connection pool.
 
+use super::batch_slots::BatchSlots;
 use super::in_flight_dial::InFlightDial;
 use super::registration::Registration;
 use super::timeouts::{
     BUSY_AFTER_FINISH, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT, PATH_SELECT_TIMEOUT,
+    SEND_TIMED_OUT, SEND_TIMEOUT,
 };
 use super::warm_send::WarmSend;
 use crate::transport::admission::{BusyGuard, SignalAdmission};
@@ -92,6 +94,9 @@ pub(in crate::transport::pool) struct PoolInner {
     /// [`DIAL_FAILURE_COOLDOWN`] gate. An entry clears on a successful dial or
     /// a graceful `Left`; expired ones are pruned on the next `note`.
     pub(in crate::transport::pool) dial_failures: Mutex<Cooldown<EndpointId>>,
+    /// The answer batches in flight: a peer cannot draw more of them than its share, however many
+    /// author keys it signs its digests with.
+    pub(in crate::transport::pool) batch_slots: BatchSlots,
     /// Times the inline-dial path was entered. Counted on entry rather than at
     /// the dial itself, because the question a caller on the event loop needs
     /// answered is whether it *could* have waited here — a detached pool bails
@@ -162,6 +167,7 @@ impl UnicastPool {
                 probe_hold,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
+                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -228,6 +234,7 @@ impl UnicastPool {
                 probe_hold: PROBE_HOLD,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
+                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -301,6 +308,13 @@ impl UnicastPool {
             .is_ok_and(|addrs| addrs.get(&address.id) == Some(address))
     }
 
+    /// The dial address remembered for `eid`, if any.
+    #[cfg(test)]
+    pub(crate) fn remembered_address(&self, eid: EndpointId) -> Option<EndpointAddr> {
+        let addrs = self.inner.addrs.lock().ok()?;
+        addrs.get(&eid).cloned()
+    }
+
     /// Drop the remembered dial address of `eid`. The pooled connection stays open: the caller
     /// uses this when only the address has no owner left.
     pub(crate) fn forget_addr(&self, eid: EndpointId) {
@@ -353,6 +367,14 @@ impl UnicastPool {
                     && payload_path::selected_is_ip(&pooled.connection)
             })
         })
+    }
+
+    /// Whether a connection to `eid` is open. It does not count as a use of it.
+    pub(crate) async fn has_warm(&self, eid: EndpointId) -> bool {
+        let conns = self.inner.conns.lock().await;
+        conns
+            .get(&eid)
+            .is_some_and(|pooled| pooled.connection.close_reason().is_none())
     }
 
     /// The pooled connection to `eid`, if one is open. Taking it counts as
@@ -481,6 +503,11 @@ impl UnicastPool {
         eid: EndpointId,
         frames: Vec<messages::WireFrame>,
     ) -> bool {
+        // A batch holds its frames until the last one is written, and a peer that does not read keeps
+        // them there: a peer has its share of batches in flight, and the table has its total.
+        let Some(slot) = self.inner.batch_slots.take(eid) else {
+            return false;
+        };
         let frames: Vec<Bytes> = frames
             .into_iter()
             .map(messages::WireFrame::into_bytes)
@@ -491,6 +518,7 @@ impl UnicastPool {
             }
             let pool = self.clone();
             task::spawn(async move {
+                let _slot = slot;
                 pool.send_batch(eid, &connection, &frames).await;
             });
             return true;
@@ -508,6 +536,7 @@ impl UnicastPool {
             return false;
         };
         task::spawn(async move {
+            let _slot = slot;
             let pool = &in_flight.pool;
             let connection = match pool.warm_or_dial(eid).await {
                 Ok(connection) => connection,
@@ -540,6 +569,12 @@ impl UnicastPool {
                 return;
             }
         }
+    }
+
+    /// A slot of the answer batches to `eid`, held by a test to fill them.
+    #[cfg(test)]
+    pub(crate) fn take_batch_slot(&self, eid: EndpointId) -> Option<super::batch_slots::Slot> {
+        self.inner.batch_slots.take(eid)
     }
 
     /// Put `eid` on the dial-failure cooldown, as a failed dial does.
@@ -813,14 +848,29 @@ async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> 
 /// after it is dropped because the connection stays pooled, so the sender does not
 /// await `stopped()` (which would block the event loop on the inline
 /// unicast-only path). Only the busy mark waits for it, in a task of its own.
-async fn send_one(
+pub(super) async fn send_one(
     connection: &Connection,
     bytes: &[u8],
     busy: Option<BusyGuard>,
     tally: Option<&WireOutTally>,
 ) -> Result<()> {
-    let mut stream = connection.open_uni().await?;
-    stream.write_all(bytes).await?;
+    // The open and the write share one deadline: a peer that reads nothing fills its limit of streams, and the
+    // open of the next stream then waits for room that never comes. The send sits in a task of its own, so a
+    // wait without a bound grows the tasks of this node.
+    let deadline = PoolInstant::now() + SEND_TIMEOUT;
+    let mut stream = match time::timeout(SEND_TIMEOUT, connection.open_uni()).await {
+        Ok(opened) => opened?,
+        Err(_) => bail!("{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: no stream was opened"),
+    };
+    let left: Duration = deadline.saturating_duration_since(PoolInstant::now());
+    if let Ok(written) = time::timeout(left, stream.write_all(bytes)).await {
+        written?;
+    } else {
+        // The frame is cut short, so the stream is reset and not finished: dropping it finishes it, and the peer
+        // would read the prefix as a whole frame. A reset also drops what is still buffered here.
+        let _ = stream.reset(0u32.into());
+        bail!("{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: the peer read nothing");
+    }
     stream.finish()?;
     if let Some(tally) = tally {
         tally.note(bytes);

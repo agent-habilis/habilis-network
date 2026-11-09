@@ -95,6 +95,12 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
         self.set.iter()
     }
 
+    /// The item that the next eviction drops: the oldest.
+    #[must_use]
+    pub fn oldest(&self) -> Option<&T> {
+        self.order.front()
+    }
+
     #[must_use]
     /// The number of items.
     pub fn len(&self) -> usize {

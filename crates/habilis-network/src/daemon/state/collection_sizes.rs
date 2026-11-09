@@ -14,6 +14,12 @@ pub(crate) struct CollectionSizes {
     pub(crate) known_endpoints: usize,
     pub(crate) quiet: usize,
     pub(crate) left_keys: usize,
+    pub(crate) proofs: usize,
+    pub(crate) proofs_refused: usize,
+    pub(crate) proofs_ties_refused: usize,
+    pub(crate) proofs_answers_refused: usize,
+    pub(crate) proofs_bound_refused: usize,
+    pub(crate) proofs_gate_refused: usize,
     pub(crate) reassembled_groups: usize,
     pub(crate) pending_outbound: usize,
     pub(crate) message_log: usize,
@@ -56,6 +62,12 @@ impl CollectionSizes {
         sizes.known_endpoints = state.known_endpoints.len();
         sizes.quiet = state.quiet.len();
         sizes.left_keys = state.left_keys.len();
+        sizes.proofs = state.proofs.len();
+        sizes.proofs_refused = usize::try_from(state.proofs.refused()).unwrap_or(0);
+        sizes.proofs_ties_refused = usize::try_from(state.proofs.ties_refused()).unwrap_or(0);
+        sizes.proofs_answers_refused = usize::try_from(state.proofs.answers_refused()).unwrap_or(0);
+        sizes.proofs_bound_refused = usize::try_from(state.proofs.bound_refused()).unwrap_or(0);
+        sizes.proofs_gate_refused = usize::try_from(state.proofs.gate_refused()).unwrap_or(0);
         sizes.reassembled_groups = state.receive_memory.reassembled_groups.len();
         sizes.pending_outbound = state.pending_outbound.len();
         sizes.author_seqs = state.author_seqs.len();
@@ -78,7 +90,9 @@ impl CollectionSizes {
 #[cfg(test)]
 mod tests {
     use super::CollectionSizes;
-    use crate::testing::{self, fresh_state, test_key};
+    use crate::protocol::MeshId;
+    use crate::protocol::identity::Identity;
+    use crate::testing::{self, fresh_state, nick, test_key};
     use crate::util::clock::Instant;
 
     #[test]
@@ -88,6 +102,47 @@ mod tests {
             CollectionSizes::default(),
             "a new node holds nothing in any collection",
         );
+    }
+
+    #[test]
+    fn the_proof_gauge_counts_the_held_proofs() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let session = Identity::generate().author_key();
+        let proof = Identity::generate().prove(&session, "ant", mesh.as_ref(), 1);
+        let held = state
+            .proofs
+            .accept(&session, &nick("ant"), &mesh, proof, |_| true);
+        assert!(held, "the proof is held");
+        assert_eq!(
+            CollectionSizes::read(&state).proofs,
+            1,
+            "the gauge counts the held proof"
+        );
+    }
+
+    #[test]
+    fn the_proof_refusals_are_read_by_the_census() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let session = Identity::generate().author_key();
+        let member = Identity::generate();
+        let held = member.prove(&session, "ant", mesh.as_ref(), 2);
+        let tie = Identity::generate().prove(&session, "ant", mesh.as_ref(), 2);
+        assert!(
+            state
+                .proofs
+                .accept(&session, &nick("ant"), &mesh, held, |_| true),
+            "the first proof is held"
+        );
+        assert!(
+            !state
+                .proofs
+                .accept(&session, &nick("ant"), &mesh, tie, |_| true),
+            "a tie is refused"
+        );
+        let sizes = CollectionSizes::read(&state);
+        assert_eq!(sizes.proofs_ties_refused, 1, "the census counts the tie");
     }
 
     #[test]

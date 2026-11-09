@@ -10,8 +10,8 @@ pub use delivered::Delivered;
 mod deliver;
 mod route;
 pub(crate) use deliver::{
-    can_unicast, lane_for, note_held, resolve, send_best_effort, unicast_answer_target,
-    unicast_peers,
+    can_unicast, lane_for, note_held, resolve, send_best_effort, send_dialing_back,
+    unicast_answer_target, unicast_peers,
 };
 pub use deliver::{deliver, deliver_in_background};
 #[cfg(test)]
@@ -21,13 +21,14 @@ pub use lane::Lane;
 mod pending_send;
 pub use pending_send::PendingSend;
 mod send_error;
-pub use send_error::SendError;
+pub use send_error::{SendError, StateRefusal};
 #[cfg(test)]
 #[cfg(test)]
 #[cfg(test)]
 #[cfg(test)]
 mod tests {
     use crate::daemon::state::Standing;
+    use std::iter;
     use std::sync::Arc;
 
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
@@ -1246,6 +1247,81 @@ mod tests {
         });
     }
 
+    /// The closing digest of a peer ends the first-sync wait only when it came point-to-point: on
+    /// gossip it is the answer of no request of this node.
+    #[test]
+    fn a_closing_digest_ends_the_first_sync_wait_only_when_it_came_on_unicast() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::doc::MeshDoc;
+            use crate::gossip::antientropy;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_doc = MeshDoc::new_state(None);
+            let bob = Identity::generate();
+            let body = MessageBody::try_new(
+                &serde_json::json!({ "heads": [], "closing": true }).to_string(),
+            )
+            .expect("a JSON body");
+            let closing =
+                Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State)
+                    .sign(&bob);
+
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
+                .await;
+            assert!(
+                state.doc(Channel::State).is_awaiting_first_sync(),
+                "a closing digest on gossip is no answer to the request of this node"
+            );
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            state.first_asked_at = Some(clock::Instant::now());
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
+                .await;
+            assert!(
+                !state.doc(Channel::State).is_awaiting_first_sync(),
+                "on unicast, soon after this node asked, it is the answer"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// Any member can unicast a closing digest with no heads. It answers no request of this node,
+    /// so it must not end the wait for the first sync: the node would write with a clock that has
+    /// not heard of the writes before its restart.
+    #[test]
+    fn a_closing_digest_when_this_node_asked_nobody_does_not_end_the_wait() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::doc::MeshDoc;
+            use crate::gossip::antientropy;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_doc = MeshDoc::new_state(None);
+            let bob = Identity::generate();
+            let body = MessageBody::try_new(
+                &serde_json::json!({ "heads": [], "closing": true }).to_string(),
+            )
+            .expect("a JSON body");
+            let closing =
+                Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State)
+                    .sign(&bob);
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
+                .await;
+
+            assert!(
+                state.doc(Channel::State).is_awaiting_first_sync(),
+                "this node asked nobody, so the closing digest is the answer of no request"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
     /// A peer holds every change it signed, since a change's actor is its
     /// signer's key and a session key lives no longer than its document. So
     /// its own changes are never missing from it, even when it advertises
@@ -1600,6 +1676,51 @@ mod tests {
         });
     }
 
+    /// Each peer has its share of answer batches in flight, and a batch past it is refused, so the
+    /// frames of a batch that a peer does not read are not piled up without a bound. The caller of
+    /// a refusal answers on gossip. A finished batch frees its slot.
+    #[test]
+    fn a_peer_that_holds_its_share_of_batches_is_refused_the_next_one() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (endpoint, _sender) = loopback_node().await;
+            let state = state_with_pool(&endpoint, bob_endpoint.addr());
+            let bob = bob_endpoint.id();
+            let held: Vec<_> = iter::from_fn(|| state.unicast_pool.take_batch_slot(bob)).collect();
+            let frame = || {
+                vec![
+                    Message::new_digest(
+                        &MeshId::from("test"),
+                        &nick("alice"),
+                        MessageBody::from("{}"),
+                    )
+                    .sign(&state.identity)
+                    .serialize()
+                    .expect("serialize"),
+                ]
+            };
+
+            let refused = state
+                .unicast_pool
+                .send_batch_in_background(bob, frame())
+                .await;
+
+            assert!(!held.is_empty(), "the test filled the slots of the peer");
+            assert!(
+                !refused,
+                "a peer with its share of batches in flight is refused"
+            );
+            drop(held);
+            let sent = state
+                .unicast_pool
+                .send_batch_in_background(bob, frame())
+                .await;
+            assert!(sent, "a peer whose batches are done is sent the next one");
+            bob_endpoint.close().await;
+            endpoint.close().await;
+        });
+    }
+
     /// A node sends its state and meta digests back to back, so a holder
     /// answers the same warm peer twice at once. The in-flight guard exists
     /// for a cold peer's dial; a warm connection must take both batches.
@@ -1740,6 +1861,89 @@ mod tests {
                 "the frames as they were signed, in order"
             );
             returned_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// A member mints author keys for free, so the unicast budget cannot be keyed by the author key:
+    /// every fresh key would draw a full budget and a batch of its own. The connection that the
+    /// digests come on is the asker. Twenty fresh keys on one connection draw the budget of that
+    /// connection, not twenty budgets.
+    #[test]
+    fn many_fresh_keys_on_one_connection_draw_one_unicast_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+            use crate::util::tuning::ANTIENTROPY_SERVES_PER_WINDOW;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let context = net.context();
+
+            let mut batches = 0;
+            for _ in 0..20 {
+                let fresh = Identity::generate();
+                let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &fresh);
+                let answered =
+                    antientropy::handle_state_digest(Channel::State, &digest, &mut state, &context)
+                        .await;
+                if answered != Answered::default() {
+                    batches += 1;
+                }
+            }
+
+            assert!(
+                batches <= ANTIENTROPY_SERVES_PER_WINDOW,
+                "20 fresh keys on one connection drew {batches} answers, more than the budget of {ANTIENTROPY_SERVES_PER_WINDOW}"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// The answers that fall back to gossip count against the connection too: a member that rotates author
+    /// keys on one connection, while the unicast send cannot start, would otherwise draw a broadcast of
+    /// every frame for each key, since each key has a gossip budget of its own.
+    #[test]
+    fn answers_that_fall_back_to_gossip_count_against_the_connection_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+            use crate::util::tuning::ANTIENTROPY_SERVES_PER_WINDOW;
+
+            let silent = UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+            let bob = iroh::SecretKey::generate().public();
+            let silent_addr = iroh::EndpointAddr::from_parts(
+                bob,
+                [iroh::TransportAddr::Ip(
+                    silent.local_addr().expect("silent addr"),
+                )],
+            );
+            let (net, mut state, _frames) = holder(silent_addr, 3).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob);
+
+            let mut broadcasts = 0;
+            for round in 0..20 {
+                // Other heads each time: the same heads on one connection are answered once at a time.
+                let heads = serde_json::json!([format!("{round:064x}")]);
+                let fresh = Identity::generate();
+                let digest = digest(&net.mesh, Channel::State, &heads, &fresh);
+                let answered = antientropy::handle_state_digest(
+                    Channel::State,
+                    &digest,
+                    &mut state,
+                    &net.context(),
+                )
+                .await;
+                if answered.broadcast > 0 {
+                    broadcasts += 1;
+                }
+            }
+
+            assert!(
+                broadcasts <= ANTIENTROPY_SERVES_PER_WINDOW,
+                "20 fresh keys on one connection drew {broadcasts} broadcasts, more than the budget of {ANTIENTROPY_SERVES_PER_WINDOW}"
+            );
             net.endpoint.close().await;
         });
     }

@@ -24,8 +24,9 @@ use crate::protocol::peer_addr_error;
 use crate::transport;
 use crate::transport::{proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
-use n0_future::task;
 use n0_future::time::Instant as n0future_Instant;
+use n0_future::{task, time};
+use std::time::Duration;
 use tokio::sync::oneshot;
 /// Build → sign → deliver one outbound `App` frame — the payload-generic
 /// counterpart to the application's own (chain-stamping, sharding, sealing) chat /
@@ -579,6 +580,39 @@ pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
 ) -> Result<(), transport::SendError> {
+    let mut waited: u32 = 0;
+    loop {
+        let written = write_state_merge(state, params.clone()).await;
+        let clock_ahead = matches!(
+            written,
+            Err(transport::SendError::State(
+                transport::StateRefusal::ClockAhead
+            ))
+        );
+        if !clock_ahead || waited >= CLOCK_AHEAD_RETRIES {
+            return written;
+        }
+        // The clock of the document is at the top of its window: the next time is 1 ms above the
+        // bound, and the bound moves with the wall clock. Nothing was sent and no time was taken,
+        // so the write waits a millisecond and tries again. The wait is short and bounded: the
+        // loop is held at most `CLOCK_AHEAD_RETRIES` ms, and only while a clock is wrong.
+        waited += 1;
+        time::sleep(CLOCK_AHEAD_STEP).await;
+    }
+}
+
+/// How many times a write that finds the clock of the shared state ahead of this machine tries
+/// again, a millisecond apart, before it gives `ClockAhead` to the caller.
+const CLOCK_AHEAD_RETRIES: u32 = 50;
+
+/// The wait between two tries of a write that found the clock ahead.
+const CLOCK_AHEAD_STEP: Duration = Duration::from_millis(1);
+
+/// One try of [`broadcast_state_merge`].
+async fn write_state_merge(
+    state: &mut EventLoopState,
+    params: StateMergeParams<'_>,
+) -> Result<(), transport::SendError> {
     use crate::doc::Ingested;
 
     let StateMergeParams {
@@ -604,7 +638,7 @@ pub async fn broadcast_state_merge(
     let fork_doc = state.doc(channel);
     let built = fork_doc
         .build_change(&merge, &actor_seed)
-        .map_err(|error| transport::SendError::Internal(error.into()))?;
+        .map_err(transport::SendError::of_doc)?;
     let Some(change_bytes) = built else {
         return Ok(());
     };
@@ -616,8 +650,7 @@ pub async fn broadcast_state_merge(
     //    `plain_body` keeps the plaintext for our own surfacing below.
     let channel_doc = state.doc(channel);
     let composed = channel_doc.compose_wire_body(&change_bytes, surface.then_some(&merge));
-    let (wire_body, plain_body) =
-        composed.map_err(|error| transport::SendError::Internal(error.into()))?;
+    let (wire_body, plain_body) = composed.map_err(transport::SendError::of_doc)?;
     let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
     let bytes = signed
         .serialize()
@@ -815,7 +848,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
 /// [`retain_own_broadcast`](super::recv::retain_own_broadcast) for why a node
 /// that does not hold its own presence makes anti-entropy unconvergeable.
 pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
+    let joined = state.own_joined(context.mesh, context.author);
     broadcast_msg(context.sender, &joined).await;
     super::recv::retain_own_broadcast(state, joined);
     broadcast_peer_info(state, context).await;
@@ -1388,8 +1421,7 @@ mod tests {
                     sink: &SilentSink,
                 };
                 let mut state = fresh_state();
-                let own_key = state.identity.author_key();
-                let slot = own_key.to_string();
+                let slot = state.identity.author_key().to_string();
                 state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
                 // The overlay is up, so a write goes to gossip, and gossip is stopped below.
                 state.standing.insert(Standing::Meshed);
@@ -1508,8 +1540,7 @@ mod tests {
                     sink: &SilentSink,
                 };
                 let mut state = fresh_state();
-                let own_key = state.identity.author_key();
-                let slot = own_key.to_string();
+                let slot = state.identity.author_key().to_string();
                 state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
                 let entry = serde_json::json!({
                     "card": {"name": "alice"},
