@@ -1207,6 +1207,15 @@ fn member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identi
     Ok(None)
 }
 
+/// [`bind_to_owner`] for the keys of a start, under the path that they came from. The explicit state
+/// file is not that path: a start with no state file of its own keeps its pair under the default
+/// path of the mesh, and a caller that read the explicit file alone would bind nothing.
+#[cfg(feature = "host")]
+pub(crate) fn bind_keys_to_owner(keys: RunKeys, owner_start: Option<u64>) -> RunKeys {
+    let state = keys.keys_state.clone();
+    bind_to_owner(keys, state.as_deref(), owner_start)
+}
+
 /// Bind the member key and the run counter to the process that owns the daemon. The pair is kept in
 /// files so that a restart of the same agent keeps its identity, and the files are named for the pid
 /// of the agent. After a crash a later agent can get the same pid, and it must not take the identity
@@ -1431,6 +1440,7 @@ fn run_keys_holding(
     let member_known = state.is_some_and(|state| state.with_extension("key").exists());
     Ok(RunKeys {
         key_lock,
+        keys_state: state.map(Path::to_path_buf),
         // shared with the loop and its handlers, which hold clones
         session: sync::Arc::new(identity::Identity::generate()),
         member: member_key(state)?,
@@ -2604,6 +2614,52 @@ mod tests {
             key_lock: None,
             ..keys
         }
+    }
+
+    /// The owner binding reads the path that the keys came from. A start with no state file of its
+    /// own keeps its pair under the default path of the mesh, and the explicit state file is `None`
+    /// there: a binding that read that field alone stamped nothing, and a later owner of the same
+    /// pid kept the key and the run of this one.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn the_owner_binding_reads_the_path_that_the_keys_came_from() {
+        let dir = TempDir::new("habilis-owner-default-path");
+        // The path of the keys of a start that named no state file: the default path of its mesh.
+        let state = dir.path().join("in-the-default-folder.state.json");
+        let start = 1_700_000_123;
+        let keys = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the keys");
+        assert!(keys.member_new, "the premise: this start made the pair");
+
+        // What the caller of this binding passed before: the explicit state file, which such a
+        // start does not have.
+        let unbound = super::bind_to_owner(keys.clone(), None, Some(start));
+        assert_eq!(
+            owner_in_key_file(&state),
+            Some(0),
+            "a binding without the path of the keys stamps no owner"
+        );
+        assert!(
+            unbound.member.is_some(),
+            "and it keeps the member key as it was"
+        );
+
+        let bound = super::bind_keys_to_owner(keys, Some(start));
+
+        assert_eq!(
+            owner_in_key_file(&state),
+            Some(start),
+            "the binding that reads the path of the keys stamps the owner of this start"
+        );
+        assert!(bound.member.is_some(), "the member key stays");
+    }
+
+    /// The start time of the owner that the key file of `state` names.
+    #[cfg(all(unix, feature = "host"))]
+    fn owner_in_key_file(state: &Path) -> Option<u64> {
+        let bytes = fs::read(state.with_extension("key")).ok()?;
+        let tail = bytes.get(32..40)?;
+        let eight = <[u8; 8]>::try_from(tail).ok()?;
+        Some(u64::from_le_bytes(eight))
     }
 
     /// Each start records its run in the key file, beside the counter file.

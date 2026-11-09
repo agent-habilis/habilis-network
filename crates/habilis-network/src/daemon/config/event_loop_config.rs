@@ -255,8 +255,7 @@ impl EventLoopConfig {
         // later process that gets the same pid.
         let start = process::live_start_time(pid);
         let keys = self.mesh.keys.clone();
-        self.mesh.keys =
-            super::super::setup::bind_to_owner(keys, self.runtime.state_file.as_deref(), start);
+        self.mesh.keys = super::super::setup::bind_keys_to_owner(keys, start);
         Ok(self)
     }
 
