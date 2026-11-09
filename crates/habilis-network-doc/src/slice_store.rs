@@ -28,17 +28,20 @@ use serde_json::{Map, Value, json};
 use crate::wire;
 
 /// The most gone keys one store holds. It matches the author cap, so the set holds a key for each
-/// author the store can hold. An overflow evicts the oldest key early, which the engine roster gate
-/// makes harmless: the roster refuses that author until it leaves.
+/// author the store can hold. An overflow evicts the oldest key early. That is harmless only when
+/// the engine roster gate refuses an author that is not in the roster. The gate is a requirement of
+/// the wiring commit, it does not exist yet.
 const GONE_CAP: usize = 256;
 
 /// The default time a key stays gone. The engine forgets a quiet author after `QUIET_TTL`, one hour,
-/// so this is that time plus a margin: a forgotten key stays refused past the forget.
+/// so this is that time plus a margin: a forgotten key stays refused past the forget. The wiring
+/// commit must assert `gone_ttl >= QUIET_TTL` (1 hour, `heartbeat.rs`) in an engine test.
 const DEFAULT_GONE_TTL: Duration = Duration::from_hours(2);
 
-/// The bytes that a signed frame adds to its body. Measured at 406 to 414 bytes for a short mesh
-/// name and nickname, with room for longer names.
-const FRAME_OVERHEAD_BYTES: usize = 512;
+/// The frame overhead of the worst case: a 512-character mesh id and a 32-character nickname add
+/// 473 bytes to a body. A store uses it until the engine sets the overhead of its session with
+/// `with_frame_overhead`. A test checks that this bound covers the worst case.
+const WORST_FRAME_OVERHEAD: usize = 512;
 
 /// The entries of one digest page. A page is a JSON array of `[key, version, hash]` rows, about
 /// 145 bytes each, so 22 rows and the frame envelope fit one message of `MAX_MESSAGE_SIZE`. A
@@ -315,6 +318,7 @@ pub struct SliceStore {
     channel: Channel,
     key: Option<SymmetricKey>,
     limits: SliceLimits,
+    frame_overhead: usize,
     slices: HashMap<AuthorKey, Slice>,
     buckets: HashMap<AuthorKey, Bucket>,
     /// The gone keys, oldest first, with the time each one left.
@@ -355,10 +359,20 @@ impl SliceStore {
             channel,
             key: None,
             limits,
+            frame_overhead: WORST_FRAME_OVERHEAD,
             slices: HashMap::new(),
             buckets: HashMap::new(),
             gone: VecDeque::new(),
         }
+    }
+
+    /// Sets the bytes that a signed frame adds to its body, for the mesh id and nickname of this
+    /// session. The engine signs a probe channel event with an empty body, and passes its length
+    /// minus two, the two quotes of the empty JSON string.
+    #[must_use]
+    pub fn with_frame_overhead(mut self, overhead: usize) -> Self {
+        self.frame_overhead = overhead;
+        self
     }
 
     /// Sets the channel key of a passworded mesh. `None` keeps the bodies in plain JSON.
@@ -537,7 +551,12 @@ impl SliceStore {
         }
         match self.ingest(frame, false, now) {
             SliceIngest::Applied => Ok(()),
-            SliceIngest::Refused(error) => Err(error),
+            SliceIngest::Refused(error) => {
+                if matches!(error, SliceError::TooLarge { .. }) {
+                    self.refund_token(&key);
+                }
+                Err(error)
+            }
             SliceIngest::Duplicate | SliceIngest::Stale | SliceIngest::Conflict => {
                 Err(SliceError::StaleDraft)
             }
@@ -636,12 +655,13 @@ impl SliceStore {
 
     /// The keys of `theirs` whose slice this store would take: a key it lacks, or a key at a
     /// lower version or at the same version with a lower hash. A gone key is never wanted.
-    #[must_use]
-    pub fn wanted_from(&self, theirs: &[DigestEntry]) -> Vec<AuthorKey> {
-        theirs
-            .iter()
-            .filter(|entry| !self.is_gone(&entry.key))
-            .filter(|entry| match self.slices.get(&entry.key) {
+    pub fn wanted_from<'a>(
+        &'a self,
+        theirs: &'a [DigestEntry],
+    ) -> impl Iterator<Item = AuthorKey> + 'a {
+        let unknown = theirs.iter().filter(move |entry| !self.is_gone(&entry.key));
+        unknown
+            .filter(move |entry| match self.slices.get(&entry.key) {
                 None => true,
                 Some(held) => {
                     entry.version > held.version
@@ -649,7 +669,6 @@ impl SliceStore {
                 }
             })
             .map(|entry| entry.key)
-            .collect()
     }
 
     /// The number of author buckets, for the tests that check a refused key keeps none.
@@ -674,10 +693,13 @@ impl SliceStore {
             Some(key) => wire::encrypt_body(&plain, key).map_err(|_| SliceError::Seal)?,
             None => plain,
         };
-        let bytes = body.as_str().len();
-        let limit = self.limits.slice_bytes.saturating_sub(FRAME_OVERHEAD_BYTES);
-        if bytes > limit {
-            return Err(SliceError::TooLarge { bytes, limit });
+        let escaped = serde_json::to_string(body.as_str()).map_or(usize::MAX, |text| text.len());
+        let limit = self.limits.slice_bytes.saturating_sub(self.frame_overhead);
+        if escaped > limit {
+            return Err(SliceError::TooLarge {
+                bytes: escaped,
+                limit,
+            });
         }
         if !self.take_token(own, now) {
             return Err(SliceError::RateLimited);
@@ -701,6 +723,14 @@ impl SliceStore {
             self.gone.pop_front();
         }
         self.gone.push_back((key, now));
+    }
+
+    /// Gives one token back to `own`, up to the burst.
+    fn refund_token(&mut self, own: &AuthorKey) {
+        let burst = self.limits.burst;
+        if let Some(bucket) = self.buckets.get_mut(own) {
+            bucket.tokens = bucket.tokens.saturating_add(1).min(burst);
+        }
     }
 
     /// Takes one write token of `own` at `now`, after the tokens it earned since its last write.
@@ -732,8 +762,8 @@ impl SliceStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        DigestEntry, FRAME_OVERHEAD_BYTES, LocalDraft, PAGE_ENTRIES, SliceError, SliceIngest,
-        SliceLimits, SliceStore, wire,
+        DigestEntry, LocalDraft, PAGE_ENTRIES, SliceError, SliceIngest, SliceLimits, SliceStore,
+        WORST_FRAME_OVERHEAD, wire,
     };
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
@@ -1065,7 +1095,7 @@ mod tests {
 
     #[test]
     fn prepare_local_refused_for_size_spends_no_token() {
-        let limits = SliceLimits::new(64 + FRAME_OVERHEAD_BYTES, Duration::from_secs(1), 256, 1);
+        let limits = SliceLimits::new(64 + WORST_FRAME_OVERHEAD, Duration::from_secs(1), 256, 1);
         let mut store = small_store(limits);
         let now = Instant::now();
         let blob = json!({"blob": "x".repeat(200)});
@@ -1186,8 +1216,9 @@ mod tests {
         let probe = small_store(limits)
             .prepare_local(&key(1), object(json!({"blob": ""})), now)
             .expect("a probe draft");
-        let empty = probe.body().as_str().len();
-        let body_limit = 3072 - FRAME_OVERHEAD_BYTES;
+        let empty: usize =
+            serde_json::to_string(probe.body().as_str()).map_or(0, |text| text.len());
+        let body_limit = 3072 - WORST_FRAME_OVERHEAD;
         let under = json!({"blob": "x".repeat(body_limit - 1 - empty)});
         let mut store = small_store(limits);
         let draft: LocalDraft = store
@@ -1402,17 +1433,14 @@ mod tests {
 
     /// One page as the engine sends it: a JSON array of `[key, version, hash]` rows.
     fn page_json(page: &[DigestEntry]) -> String {
-        let rows: Vec<Value> = page
-            .iter()
-            .map(|entry| {
-                json!([
-                    String::from_utf8_lossy(&entry.key().hex()).into_owned(),
-                    entry.version(),
-                    String::from_utf8_lossy(&entry.hash().hex()).into_owned(),
-                ])
-            })
-            .collect();
+        let rows: Vec<Value> = page.iter().map(row_json).collect();
         json!({"entries": rows}).to_string()
+    }
+
+    fn row_json(entry: &DigestEntry) -> Value {
+        let key = String::from_utf8_lossy(&entry.key().hex()).into_owned();
+        let hash = String::from_utf8_lossy(&entry.hash().hex()).into_owned();
+        json!([key, entry.version(), hash])
     }
 
     /// Advances a xorshift generator and returns a value below `bound`.
@@ -1590,11 +1618,11 @@ mod tests {
         );
         let high = [DigestEntry::new(key(1), 9, ContentHash::of(b"high"))];
         assert!(
-            store.wanted_from(&high).is_empty(),
+            store.wanted_from(&high).next().is_none(),
             "a forgotten key must not be wanted"
         );
         assert!(
-            store.wanted_from(&theirs).is_empty(),
+            store.wanted_from(&theirs).next().is_none(),
             "a forgotten key must not be wanted"
         );
     }
@@ -1607,8 +1635,9 @@ mod tests {
             DigestEntry::new(key(1), 4, ContentHash::of(b"lower")),
             DigestEntry::new(key(2), 1, ContentHash::of(b"new")),
         ];
+        let wanted: Vec<AuthorKey> = store.wanted_from(&theirs).collect();
         assert_eq!(
-            store.wanted_from(&theirs),
+            wanted,
             vec![key(2)],
             "a new key must be wanted and a lower version of a held key must not"
         );
@@ -1664,5 +1693,99 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The frame overhead of a probe channel event with `mesh` and `nickname` and an empty body.
+    fn probe_overhead(mesh: &MeshId, nickname: &Nickname) -> usize {
+        let probe = Verified::fixture_unchecked(
+            Message::new_channel_event(mesh, nickname, MessageBody::from(""), Channel::Meta),
+            key(7),
+        );
+        probe.serialize().expect("a probe must serialize").len() - 2
+    }
+
+    /// The escaped length of the body of a draft whose value has `blob` as its only string.
+    fn escaped_body_len(store: &mut SliceStore, blob: &str) -> usize {
+        let draft = store
+            .prepare_local(&key(1), object(json!({"blob": blob})), Instant::now())
+            .expect("a draft");
+        serde_json::to_string(draft.body().as_str()).map_or(usize::MAX, |text| text.len())
+    }
+
+    #[test]
+    fn a_body_of_quotes_is_refused_in_prepare_local_at_its_escaped_size() {
+        let mut store = small_store(SliceLimits::new(3072, Duration::from_secs(1), 256, 5));
+        let items = vec![""; 800];
+        assert!(
+            matches!(
+                store.prepare_local(&key(1), object(json!({"q": items})), Instant::now()),
+                Err(SliceError::TooLarge { .. })
+            ),
+            "a body whose escaped JSON is past the limit must be refused in prepare_local"
+        );
+    }
+
+    #[test]
+    fn a_long_mesh_id_leaves_less_room_for_the_body() {
+        let limits = SliceLimits::new(3072, Duration::from_secs(1), 256, 1);
+        let short_mesh = MeshId::from("test");
+        let long_mesh = MeshId::from(&*"a".repeat(512));
+        let nickname = Nickname::from("peer");
+        let short_overhead = probe_overhead(&short_mesh, &nickname);
+        let long_overhead = probe_overhead(&long_mesh, &nickname);
+        assert!(
+            long_overhead > short_overhead,
+            "a longer mesh id must add more overhead"
+        );
+        let base = escaped_body_len(&mut small_store(limits), "");
+        let pad = 3072 - short_overhead - base;
+        let blob = "x".repeat(pad);
+        let mut short = small_store(limits).with_frame_overhead(short_overhead);
+        assert!(
+            short
+                .prepare_local(&key(1), object(json!({"blob": blob})), Instant::now())
+                .is_ok(),
+            "a body that fits with the short mesh id must draft"
+        );
+        let mut long = small_store(limits).with_frame_overhead(long_overhead);
+        assert!(
+            matches!(
+                long.prepare_local(&key(1), object(json!({"blob": blob})), Instant::now()),
+                Err(SliceError::TooLarge { .. })
+            ),
+            "the same body must be refused with the long mesh id"
+        );
+    }
+
+    #[test]
+    fn a_too_large_commit_refunds_the_token() {
+        let limits = SliceLimits::new(3072, Duration::from_secs(1), 256, 1);
+        let mut store = small_store(limits).with_frame_overhead(0);
+        let now = Instant::now();
+        let draft = store
+            .prepare_local(&key(1), object(json!({"a": "x".repeat(2_800)})), now)
+            .expect("the draft fits when the overhead is zero");
+        let signed = frame_of(&draft, key(1));
+        assert!(
+            matches!(
+                store.commit_local(draft, &signed, now),
+                Err(SliceError::TooLarge { .. })
+            ),
+            "the frame with its real overhead must be refused at commit"
+        );
+        assert!(
+            store.prepare_local(&key(1), Map::new(), now).is_ok(),
+            "a refused commit must refund the only token"
+        );
+    }
+
+    #[test]
+    fn the_worst_case_overhead_covers_the_longest_mesh_id_and_nickname() {
+        let mesh = MeshId::from(&*"a".repeat(512));
+        let nickname = Nickname::from(&*"n".repeat(32));
+        assert!(
+            probe_overhead(&mesh, &nickname) <= WORST_FRAME_OVERHEAD,
+            "the worst-case overhead must cover a 512-character mesh id and a 32-character nickname"
+        );
     }
 }
