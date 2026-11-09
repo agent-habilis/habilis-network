@@ -2292,6 +2292,13 @@ mod chat_digest_tests {
                 seen_before,
                 "a chat digest must not change the seen set"
             );
+            let mut sent = sender.broadcast_frames();
+            sent.extend(state.unicast_pool.sent_frames());
+            assert!(sent.is_empty(), "a chat digest must send no frame");
+            assert!(
+                state.pending_outbound.is_empty(),
+                "a chat digest must queue no frame"
+            );
             endpoint.close().await;
         });
     }

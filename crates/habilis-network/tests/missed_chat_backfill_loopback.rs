@@ -1,10 +1,7 @@
-//! A node gets the chat it missed before its first real-peer link within one
-//! round trip of that link, not on its next anti-entropy tick.
-//!
-//! Every node has a window from its join to its first real-peer link in which
-//! a broadcast cannot reach it; the mesh creator's own rendezvous leaves it
-//! alone for up to one reclaim tick. The state channels ask again on that link.
-//! This pins the tick away so only the chat log's own ask can deliver.
+//! A chat broadcast that a late joiner missed is not delivered to it after the late joiner meets
+//! the mesh. Chat has no backfill now: no digest, tick or resend carries it. The tick runs at one
+//! second, so a tick-driven chat resend would have time to act, and the test waits five ticks
+//! before it asserts that the frame did not arrive.
 
 #![cfg(feature = "host")]
 
@@ -98,8 +95,7 @@ impl NodeDriver for Chat {
         let _ = ops::deliver(&frame, bytes.clone(), state, context.sender)
             .await
             .expect("a meshed node broadcasts");
-        // The sender keeps its own frame, as a chat app does, so any peer late
-        // meets first can answer it.
+        // The sender keeps its own frame, as a chat app does. Chat is not answered now.
         let _ = state.message_log_mut().push(frame.clone());
         let _ = sent.send(frame.id.clone());
         false
@@ -162,7 +158,7 @@ impl Joined {
 }
 
 fn pin_antientropy_tick() {
-    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_hours(1)));
+    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_secs(1)));
 }
 
 fn nick(name: &str) -> Nickname {
@@ -224,7 +220,7 @@ fn a_chat_broadcast_missed_by_a_late_joiner_is_not_delivered() {
             late_saw.wait_for(&nick("early"), BUDGET).await,
             "late never met the mesh"
         );
-        let got = late_chat.wait_for(&sent, BUDGET).await;
+        let got = late_chat.wait_for(&sent, Duration::from_secs(5)).await;
         eprintln!(
             "late got the missed frame: {got} after {:?}",
             started.elapsed()
