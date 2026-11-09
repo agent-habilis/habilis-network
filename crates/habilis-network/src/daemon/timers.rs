@@ -157,6 +157,7 @@ pub(crate) async fn tick_state_refresh(
         idle_antientropy = idle.antientropy,
         idle_state_refresh = idle.state_refresh,
         idle_linkstate = idle.linkstate,
+        idle_seed_built = idle.seed_built,
         idle_external = ext.total(),
         idle_ext_gossip_rx = ext.gossip_rx,
         idle_ext_neighbor_up = ext.neighbor_up,

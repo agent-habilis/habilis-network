@@ -56,12 +56,28 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
     state
 }
 
+/// [`fresh_state`] for a node with no member key: a client that proves no nickname, which answers
+/// no proof request.
+pub(crate) fn fresh_state_without_member_key() -> EventLoopState {
+    let mut state = fresh_state_that_waits_with_book_and_member(memory::MemoryLookup::new(), false);
+    // A test that is not about the first sync writes at once: the wait ends here.
+    state.doc_mut(Channel::State).finish_sync();
+    state
+}
+
 /// [`fresh_state`] as the daemon starts: the state document waits for its first sync.
 pub(crate) fn fresh_state_that_waits() -> EventLoopState {
     fresh_state_that_waits_with_book(memory::MemoryLookup::new())
 }
 
 fn fresh_state_that_waits_with_book(address_book: memory::MemoryLookup) -> EventLoopState {
+    fresh_state_that_waits_with_book_and_member(address_book, true)
+}
+
+fn fresh_state_that_waits_with_book_and_member(
+    address_book: memory::MemoryLookup,
+    member_key: bool,
+) -> EventLoopState {
     EventLoopState::new(
         StateInit {
             #[cfg(feature = "host")]
@@ -72,7 +88,7 @@ fn fresh_state_that_waits_with_book(address_book: memory::MemoryLookup) -> Event
                 // shared with the loop and its handlers, which hold clones
                 session: Arc::new(Identity::generate()),
                 // shared with the loop and its handlers, which hold clones
-                member: Some(Arc::new(Identity::generate())),
+                member: member_key.then(|| Arc::new(Identity::generate())),
                 run: 1,
                 key_lock: None,
                 keys_state: None,

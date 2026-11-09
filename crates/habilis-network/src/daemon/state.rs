@@ -106,7 +106,8 @@ mod tests {
         UnixSecs,
     };
     use crate::testing::{
-        author_of, endpoint_id, fresh_state, fresh_state_with_book, nick, test_key,
+        author_of, endpoint_id, fresh_state, fresh_state_with_book, fresh_state_without_member_key,
+        nick, test_key,
     };
 
     /// The proof of a session is signed by the member key, over the session key, the nickname and
@@ -234,6 +235,31 @@ mod tests {
             }
         }
         assert_eq!(answered + 1, 30, "the answers stop at the per-minute cap");
+    }
+
+    /// A node with no member key answers no proof request, and it spends no slot of the cap: a
+    /// slot spent for it would count a refusal for an answer that the node could never send.
+    #[test]
+    fn a_node_with_no_member_key_spends_no_slot_of_the_answer_cap() {
+        let mut state = fresh_state_without_member_key();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let asker = AuthorKey::from([200u8; 32]);
+        let now = Instant::now();
+        let own = state.identity.author_key();
+
+        for _ in 0..2 {
+            assert!(
+                state.proof_answer(&own, &asker, &me, &mesh, now).is_none(),
+                "a node with no member key has no answer to give"
+            );
+        }
+
+        assert_eq!(
+            state.proofs.answers_refused(),
+            0,
+            "no answer was refused, because none was ever possible"
+        );
     }
 
     /// An alive frame from a roster member whose session has no proof asks once. An alive frame

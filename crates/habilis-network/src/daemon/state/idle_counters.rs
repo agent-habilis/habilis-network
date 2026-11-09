@@ -59,6 +59,9 @@ pub(crate) struct IdleCounters {
     pub antientropy: u64,
     pub state_refresh: u64,
     pub linkstate: u64,
+    /// The arm of a build of a seed that ended. It is no timer and no inbound frame: the tick of a
+    /// cut started the build, and the loop wakes when it is done.
+    pub seed_built: u64,
     /// The arms driven by something other than a maintenance timer. Their sum
     /// is the census field `idle_external`.
     pub ext: ExternalArms,

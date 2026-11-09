@@ -152,11 +152,14 @@ impl BlobStore {
             else {
                 break;
             };
-            if self
+            // An entry that overflowed its owners is kept when the recorded owners are released,
+            // because an owner past the cap was never recorded and can still hold a ticket: its
+            // eviction dangles a ticket as much as the eviction of an entry with an owner.
+            let held = self
                 .map
                 .get(&oldest)
-                .is_some_and(|entry| !entry.owners.is_empty())
-            {
+                .is_some_and(|entry| !entry.owners.is_empty() || entry.overflowed);
+            if held {
                 self.held_evicted += 1;
                 tracing::warn!(
                     target: "habilis_network::blob",
