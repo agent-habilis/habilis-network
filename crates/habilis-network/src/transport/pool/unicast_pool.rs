@@ -369,12 +369,17 @@ impl UnicastPool {
         })
     }
 
-    /// Whether a connection to `eid` is open. It does not count as a use of it.
+    /// Whether a connection to `eid` is open and can carry a payload. It does not count as a use of
+    /// it. The payload check is the one of [`Self::send_if_warm`]: an open connection that the
+    /// relay selected, on a mesh whose relay is lookup only, refuses every payload
+    /// ([`RELAY_REFUSED`]), so a caller that reads it as a path pays for the frame it builds and
+    /// loses it at the send.
     pub(crate) async fn has_warm(&self, eid: EndpointId) -> bool {
         let conns = self.inner.conns.lock().await;
-        conns
-            .get(&eid)
-            .is_some_and(|pooled| pooled.connection.close_reason().is_none())
+        conns.get(&eid).is_some_and(|pooled| {
+            pooled.connection.close_reason().is_none()
+                && payload_allowed_on(&pooled.connection, self.inner.relay_transport)
+        })
     }
 
     /// The pooled connection to `eid`, if one is open. Taking it counts as

@@ -379,7 +379,11 @@ async fn send_proof_ask(
         let claimed = (!state.peers.contains(key)).then_some(nickname);
         state.note_proof_request_sent(key, claimed);
     } else {
-        tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request skipped: the send failed");
+        // The retry clock does not start for a request that did not go out, so the next alive frame
+        // asks again. That frame can be 30 s away, and a session that sends no more of them would
+        // never be asked, so the ask waits in the same map as the ones that wait for a path.
+        tracing::debug!(target: "habilis_network::lifecycle", member = %nickname, "proof request deferred: the send failed");
+        state.proofs.defer_ask(*key, nickname, Instant::now());
     }
 }
 
