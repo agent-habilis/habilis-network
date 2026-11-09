@@ -45,3 +45,7 @@ pub use doc_error::DocError;
 mod mesh_doc;
 
 pub use mesh_doc::{Ingested, MeshDoc, SelfWriteGate};
+
+mod slice_store;
+
+pub use slice_store::{SliceLimits, SliceStore};
