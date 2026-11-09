@@ -75,8 +75,15 @@ async fn start(name: &str, state: &Path) -> Result<EventLoopConfig, SetupError> 
 fn a_second_start_of_the_state_path_of_a_running_node_fails_and_works_after_it_left() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
+        // For `Permissions::from_mode` below, which makes the state folder private to this user.
+        use std::os::unix::fs::PermissionsExt as _;
+
         let dir = env::temp_dir().join(format!("habilis-state-lock-loop-{}", process::id()));
         fs::create_dir_all(&dir).expect("a temp dir");
+        // `create_dir_all` takes the umask of the shell, and a setup refuses a state folder that
+        // the group or the others can write. Under a umask of 0002 the folder is 0775, and the
+        // first start would fail before it ever takes the lock that this test is about.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("a private temp dir");
         let state = dir.join("member.json");
 
         let config = start("lock-first", &state).await.expect("the first start");
