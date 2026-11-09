@@ -272,8 +272,9 @@ impl SeedPlan {
     /// Build the chain of the seed of `epoch` from this plan: the live JSON cut by leaf path into
     /// merges that each fit one frame, written as a chain of changes on the genesis of `epoch`.
     /// `fits` takes one merge and says whether its frame is small enough, as [`pack_entry`] does.
-    /// `actor_seed` is the actor of the chain, the signing key of the cutter. An empty document
-    /// gives a chain of 1 change that writes a key and deletes it, so a seed always has a root.
+    /// `actor_seed` is the actor of the chain, the signing key of the cutter. The root of every
+    /// chain is a change that writes a key and deletes it: it carries the mark, which `fits` does
+    /// not measure, so no merge shares a frame with it. An empty document gives that root alone.
     /// The plan reads nothing from the document, so this runs on any thread.
     ///
     /// # Errors
@@ -303,14 +304,11 @@ impl SeedPlan {
             .map_err(DocError::encode)?;
         fork.set_actor(actor_for(actor_seed));
         let mut changes: Vec<Vec<u8>> = Vec::new();
-        if merges.is_empty() {
-            let mut tx = fork.transaction();
-            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
-            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
-            tx.commit();
-            let all: Vec<Vec<u8>> = raw_changes(&fork, &[]);
-            changes.extend(all.into_iter().skip(1));
-        }
+        // The root is a carrier change of its own (a key written and deleted), because its frame
+        // carries the mark of the chain. `fits` measures a merge with no mark, so a merge that the
+        // pack filled to the line would go over a message once the mark goes on it, and the whole
+        // cut would fail. An empty document needs the carrier anyway: a seed always has a root.
+        push_carrier_change(&mut fork, epoch, &mut changes)?;
         for merge in &merges {
             let heads: Vec<ChangeHash> = fork.get_heads();
             let mut tx = fork.transaction();
@@ -319,7 +317,7 @@ impl SeedPlan {
             changes.extend(raw_changes(&fork, &heads));
         }
         let (mut origins, unstamped) = seed_origins_from(&self.stamps, &fork, &changes)?;
-        // The tombstones go on carrier changes (a key written and deleted, as for an empty seed), in
+        // The tombstones go on carrier changes (a key written and deleted, as the root is), in
         // the order of their paths, as many on a frame as fit its byte budget and its entry cap.
         let mut queue: VecDeque<(Vec<String>, Stamp)> = VecDeque::new();
         for (path, stamp) in &self.tombstones {
@@ -333,12 +331,7 @@ impl SeedPlan {
             carried.push(Vec::new());
         }
         while !queue.is_empty() {
-            let heads: Vec<ChangeHash> = fork.get_heads();
-            let mut tx = fork.transaction();
-            tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
-            tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
-            tx.commit();
-            changes.extend(raw_changes(&fork, &heads));
+            push_carrier_change(&mut fork, epoch, &mut changes)?;
             origins.push(Vec::new());
             carried.push(take_tombstones(&mut queue, DOC_REPLAY_ENTRIES_MAX));
             if changes.len() > DOC_SEED_FRAMES_MAX {
@@ -366,6 +359,26 @@ impl SeedPlan {
 
 /// What a restore asks the glue to write: a merge and a stamp for each path.
 pub type Restores = (Value, StampedPaths);
+
+/// Add a carrier change to `fork` and its raw bytes to `changes`: a key written and deleted, which
+/// writes no path of the document. The root of a seed is one, because its frame carries the mark,
+/// and so is each frame that carries tombstones alone.
+///
+/// # Errors
+/// [`DocError::Encode`] when the write does not apply.
+fn push_carrier_change(
+    fork: &mut Automerge,
+    epoch: u64,
+    changes: &mut Vec<Vec<u8>>,
+) -> Result<(), DocError> {
+    let before: Vec<ChangeHash> = fork.get_heads();
+    let mut tx = fork.transaction();
+    tx.put(&ROOT, "seed", epoch).map_err(DocError::encode)?;
+    tx.delete(&ROOT, "seed").map_err(DocError::encode)?;
+    tx.commit();
+    changes.extend(raw_changes(fork, &before));
+    Ok(())
+}
 
 /// Take tombstones from the front of `queue` for one frame: at most `entries`, and as many as fit
 /// `DOC_SEED_TOMBSTONE_FRAME_BYTES` (the bytes of the paths and 32 for each entry). One entry is
@@ -7239,29 +7252,23 @@ mod tests {
         let chain = doc
             .build_seed(3, &actor, within(600))
             .expect("the live json splits");
-        // The root frame names no stamp, although its change writes paths.
+        // The first frame that writes paths names no stamp. The root carries the mark, and its
+        // change writes none, so the stamps of the root are empty by right.
         let who = signer(&cutter);
-        let body = change_body_stamped(
-            &chain.changes[0],
-            None,
-            3,
-            Some(&chain.mark),
-            Some(chain.time),
-            &[],
-        )
-        .expect("a body");
-        let mut frames = vec![Verified::fixture_unchecked(
-            Message::new_channel_event(&MeshId::from("test"), &cutter, body, Channel::State)
-                .unverified_key(who),
-            who,
-        )];
-        let later = chain.changes.iter().enumerate().skip(1);
-        for (index, bytes) in later {
-            let stamps = &chain.origins[index];
-            let tail = change_body_stamped(bytes, None, 3, None, Some(chain.time), stamps)
+        let stripped = 1;
+        let mut frames: Vec<Verified> = Vec::new();
+        let numbered = chain.changes.iter().enumerate();
+        for (index, bytes) in numbered {
+            let mark = (index == 0).then_some(&chain.mark);
+            let stamps: &[Stamp] = if index == stripped {
+                &[]
+            } else {
+                &chain.origins[index]
+            };
+            let body = change_body_stamped(bytes, None, 3, mark, Some(chain.time), stamps)
                 .expect("a body");
             frames.push(Verified::fixture_unchecked(
-                Message::new_channel_event(&MeshId::from("test"), &cutter, tail, Channel::State)
+                Message::new_channel_event(&MeshId::from("test"), &cutter, body, Channel::State)
                     .unverified_key(who),
                 who,
             ));

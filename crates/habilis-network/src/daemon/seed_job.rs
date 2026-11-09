@@ -96,8 +96,9 @@ fn mix(key: &AuthorKey, epoch: u64) -> u64 {
 /// Whether the frame of `merge`, as a seed would carry it (with the stamps of the plan for its
 /// paths, sealed if the mesh has a key, signed and serialized), leaves the margin of the envelope
 /// under a message. It is the check of the daemon for a seed: a frame that fits here fits at the
-/// send. The stamps are the real ones of the plan. A time has 13 digits in production, as many as
-/// `LARGEST_TIME`, so they cost what the worst stamp costs, less the tags that the frame names once.
+/// send, the mark of the root included. The stamps are the real ones of the plan. A time has 13
+/// digits in production, as many as `LARGEST_TIME`, so they cost what the worst stamp costs, less
+/// the tags that the frame names once.
 fn seed_frame_fits(job: &SeedJob, plan: &SeedPlan, merge: &serde_json::Value) -> bool {
     let stamps: Vec<Stamp> = plan.stamps_for(merge).collect();
     frame_fits_with(job, merge, &stamps)
@@ -1691,6 +1692,43 @@ mod tests {
             stamps.push(Stamp::new(LARGEST_TIME, "ffffffffffffffff".to_owned()));
         }
         stamps
+    }
+
+    /// The root of a seed carries the mark of its chain, which the measure of a merge does not see.
+    /// A root that the pack filled to the line then goes over a message, `signed_frames` fails, the
+    /// cut backs off, and the epoch of a full document never resets. A seal costs the mark most,
+    /// because the body of a sealed frame is the base64 of its ciphertext.
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_frame_of_a_sealed_seed_packed_to_the_line_fits_a_message() {
+        // Shared with the job that builds on another thread.
+        let identity = Arc::new(Identity::generate());
+        let me = testing::nick("me");
+        let key = SymmetricKey::from_bytes([7; 32]);
+        let mut doc = MeshDoc::new_state(Some(key.clone()));
+        doc.finish_sync();
+        write_leaves(&mut doc, &identity, &me, 3_000);
+        let plan = doc.seed_plan().expect("a plan");
+        let sealed_job = || {
+            let mut job = job_of(&identity, 1);
+            // Shared with the job that builds on another thread.
+            job.seal = Some(Arc::new(key.clone()));
+            job
+        };
+        let outcome = spawn_build(plan, sealed_job())
+            .await
+            .expect("the build ends");
+        let chain = outcome.chain.expect("the seed is built");
+        let frames = super::signed_frames(&chain, &sealed_job()).expect("the frames sign");
+        let numbered = frames.iter().enumerate();
+        for (position, (_signed, bytes)) in numbered {
+            let wire = bytes.as_bytes().len();
+            assert!(
+                wire <= MAX_MESSAGE_SIZE,
+                "the frame {position} of {} takes {wire} bytes, over the {MAX_MESSAGE_SIZE} of a \
+                 message",
+                frames.len()
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
