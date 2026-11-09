@@ -151,8 +151,10 @@ If no census follows, the phase of the time itself is used.
 The two sides of the ratio can still land in two phases. The receipt time is the time at
 which the poll served the payload, and the daemon counts the wire bytes of that payload
 when it reads the frame, which is earlier. A census between the two counts the wire bytes
-in the earlier phase and the data bytes in the later one. The error is one payload and one
-census interval at most, and it needs an arrival inside that gap.
+in the earlier phase and the data bytes in the later one. A poll that is late serves
+several payloads at once, and several censuses can fall in that gap, so the error is not
+bounded to one payload or to one interval. It needs an arrival inside such a gap: the
+poll follows the bell, so the gap is short while the host keeps up.
 
 An oracle line with no `to` counts in the phase that holds its send time.
 
