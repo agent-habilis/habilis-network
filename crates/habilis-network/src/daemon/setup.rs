@@ -27,6 +27,8 @@ use super::setup_error::SetupError;
 use iroh::{Endpoint, RelayUrl};
 use rand::RngCore;
 use tokio::sync::{mpsc, watch};
+#[cfg(all(unix, feature = "host"))]
+use zeroize::Zeroizing;
 
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::lookup;
@@ -666,11 +668,15 @@ fn load_or_create_identity(state: Option<&Path>) -> Result<identity::Identity> {
     reading.read(true);
     match open_trusted_key_file(&key_path, &mut reading) {
         Ok(mut file) => {
-            let mut bytes = Vec::new();
+            // The file holds the raw seed of this member, so both buffers that touch it wipe
+            // themselves: a plain `Vec` leaves the seed in freed heap pages for the life of the
+            // process.
+            let mut bytes: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
             file.read_to_end(&mut bytes)?;
-            let seed: Option<[u8; 32]> = bytes
+            let seed: Option<Zeroizing<[u8; 32]>> = bytes
                 .get(..32)
-                .and_then(|seed| <[u8; 32]>::try_from(seed).ok());
+                .and_then(|seed| <[u8; 32]>::try_from(seed).ok())
+                .map(Zeroizing::new);
             if let Some(seed) = seed {
                 return Ok(identity::Identity::from_seed(&seed));
             }
@@ -1234,7 +1240,8 @@ pub(crate) fn bind_to_owner(
         return keys;
     };
     let key_path = state.with_extension("key");
-    let bytes = fs::read(&key_path).unwrap_or_default();
+    // The read takes the seed as well as the owner start, so the buffer wipes itself.
+    let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(fs::read(&key_path).unwrap_or_default());
     let tail = bytes
         .get(32..40)
         .and_then(|tail| <[u8; 8]>::try_from(tail).ok());
