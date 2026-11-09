@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::mem;
 use std::time::Duration;
@@ -53,6 +54,10 @@ const FIRST_ASKS_IN_ALL: usize = 256;
 /// another bound nickname waits one window.
 const FIRST_ASKS_BOUND: usize = 64;
 const ASKS_PER_BOUND_NICKNAME: usize = 4;
+/// The endpoints that the reserve counts. A window gives `FIRST_ASKS_BOUND` asks, so it adds that many endpoints
+/// at most, and a new window keeps the ones that are still inside their own window: twice that number bounds the
+/// map. Over it, the entries with the oldest first ask go.
+const RESERVE_ENDPOINTS_MAX: usize = 2 * FIRST_ASKS_BOUND;
 /// The window of the budget of the proof requests.
 const ASK_BUDGET_WINDOW: Duration = Duration::from_secs(10);
 /// The endpoints that have a count in the budget: 256 at most. A count outside its window is dropped first, the
@@ -64,6 +69,24 @@ const DEFERRED_ASK_TTL: Duration = Duration::from_secs(30);
 /// The least time between two tries of one deferred ask, so a flood of frames from one endpoint makes at most one
 /// signature for each session and gap.
 const DEFERRED_ASK_GAP: Duration = Duration::from_secs(1);
+
+/// The counts of the endpoints that are still inside their own window at `now`, at most
+/// `RESERVE_ENDPOINTS_MAX` of them, the oldest first ask dropped first.
+fn live_counts(
+    counts: HashMap<EndpointId, (Instant, usize)>,
+    now: Instant,
+) -> HashMap<EndpointId, (Instant, usize)> {
+    let mut live: Vec<(EndpointId, (Instant, usize))> = counts
+        .into_iter()
+        .filter(|(_, (first_ask, _))| now.saturating_duration_since(*first_ask) < ASK_BUDGET_WINDOW)
+        .collect();
+    if live.len() > RESERVE_ENDPOINTS_MAX {
+        // The newest first asks stay: they hold their cap for the longest, and the oldest ones end soonest anyway.
+        live.sort_unstable_by_key(|(_, (first_ask, _))| Reverse(*first_ask));
+        live.truncate(RESERVE_ENDPOINTS_MAX);
+    }
+    live.into_iter().collect()
+}
 
 /// The wait after the ask number `tries` (0 for the first): 30 s, 60 s, 120 s, then 10 minutes.
 fn retry_wait(tries: u8) -> Duration {
@@ -149,8 +172,11 @@ struct BoundReserve {
     total: usize,
     /// How many of them went for each nickname.
     by_nickname: HashMap<Nickname, usize>,
-    /// How many of them went to each endpoint.
-    by_endpoint: HashMap<EndpointId, usize>,
+    /// The first ask of each endpoint that the reserve served, and how many it got. The window of an endpoint is
+    /// its own, so a reserve that starts a new window keeps the entries that are inside theirs. A window gives
+    /// `FIRST_ASKS_BOUND` asks, so it adds that many entries at most, and a new window holds the ones it kept
+    /// besides: `RESERVE_ENDPOINTS_MAX` in all.
+    by_endpoint: HashMap<EndpointId, (Instant, usize)>,
 }
 
 impl ProofExchange {
@@ -399,15 +425,13 @@ impl ProofExchange {
         true
     }
 
-    /// The asks that the reserve gave to `endpoint` in its window, with the start of that window. `None` when the
-    /// reserve has no window of its own that still runs, or gave that endpoint none.
+    /// The asks that the reserve gave to `endpoint` inside the window of that endpoint, with its first ask.
+    /// `None` when the reserve gave it none, or when its own window has passed.
     fn reserve_count_of(&self, endpoint: EndpointId, now: Instant) -> Option<(Instant, usize)> {
         let reserve: &BoundReserve = self.ask_budget_bound.as_ref()?;
-        if now.saturating_duration_since(reserve.start) >= ASK_BUDGET_WINDOW {
-            return None;
-        }
-        let count: usize = reserve.by_endpoint.get(&endpoint).copied()?;
-        Some((reserve.start, count))
+        let (first_ask, count): (Instant, usize) = reserve.by_endpoint.get(&endpoint).copied()?;
+        let inside: bool = now.saturating_duration_since(first_ask) < ASK_BUDGET_WINDOW;
+        inside.then_some((first_ask, count))
     }
 
     /// Take one ask out of the reserve of the claims of bound nicknames, if there is room for `nickname` and for
@@ -427,7 +451,15 @@ impl ProofExchange {
             Some(reserve) if now.saturating_duration_since(reserve.start) < ASK_BUDGET_WINDOW => {
                 reserve
             }
-            _ => BoundReserve {
+            // A new window of the reserve keeps the count of every endpoint that is inside its own window: the
+            // window of an endpoint starts at its first ask, and it must not end with the window of the reserve.
+            Some(passed) => BoundReserve {
+                start: now,
+                total: 0,
+                by_nickname: HashMap::new(),
+                by_endpoint: live_counts(passed.by_endpoint, now),
+            },
+            None => BoundReserve {
                 start: now,
                 total: 0,
                 by_nickname: HashMap::new(),
@@ -435,14 +467,23 @@ impl ProofExchange {
             },
         };
         let used = reserve.by_nickname.get(nickname).copied().unwrap_or(0);
-        let from_endpoint = reserve.by_endpoint.get(&endpoint).copied().unwrap_or(0);
+        let (first_ask, from_endpoint) = match reserve.by_endpoint.get(&endpoint).copied() {
+            Some((first_ask, count))
+                if now.saturating_duration_since(first_ask) < ASK_BUDGET_WINDOW =>
+            {
+                (first_ask, count)
+            }
+            _ => (now, 0),
+        };
         let allowed = reserve.total < FIRST_ASKS_BOUND
             && used < ASKS_PER_BOUND_NICKNAME
             && from_endpoint < ASKS_PER_ENDPOINT;
         if allowed {
             reserve.total += 1;
             reserve.by_nickname.insert(nickname.clone(), used + 1);
-            reserve.by_endpoint.insert(endpoint, from_endpoint + 1);
+            reserve
+                .by_endpoint
+                .insert(endpoint, (first_ask, from_endpoint + 1));
         }
         self.ask_budget_bound = Some(reserve);
         allowed
@@ -1464,6 +1505,53 @@ mod tests {
             0,
             "the endpoint got {after_the_room} asks more inside the window of its reserve, so it signed up to {} in it",
             ASKS_PER_ENDPOINT + after_the_room
+        );
+    }
+
+    /// The window of an endpoint is its own, not the window of the reserve. A reserve window that started before
+    /// the first ask of an endpoint ends before that endpoint has had its 10 s, and a count that goes with the
+    /// reserve would give the endpoint a second budget inside the same 10 s.
+    #[test]
+    fn the_count_of_an_endpoint_keeps_the_window_of_its_own_first_ask() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let claims: Vec<Nickname> = ["alice", "bob", "carol"]
+            .iter()
+            .map(|name| Nickname::try_new(name).expect("a nickname"))
+            .collect();
+        // 256 endpoints fill the map with live counts at second 0, so the claims below go untracked
+        for index in 0..256u32 {
+            assert!(
+                book.may_ask_for(endpoint_of(index), None, start),
+                "a first ask"
+            );
+        }
+        // another endpoint starts the window of the reserve at second 0
+        assert!(
+            book.may_ask_for(endpoint_of(900), Some(&claims[2]), start),
+            "the claim that starts the window of the reserve was refused"
+        );
+        // the endpoint under test uses its cap at second 8, so its own window ends at second 18
+        let two_claims_to_their_cap = claims[..2]
+            .iter()
+            .flat_map(|claim| (0..ASKS_PER_BOUND_NICKNAME).map(move |_| claim));
+        let from_the_reserve: usize = two_claims_to_their_cap
+            .filter(|claim| book.may_ask_for(endpoint_of(1000), Some(claim), at(8)))
+            .count();
+        assert_eq!(
+            from_the_reserve, ASKS_PER_ENDPOINT,
+            "the reserve did not give the endpoint its cap, so the count below proves nothing"
+        );
+
+        // at second 11 the window of the reserve (0 to 10) has passed, but the one of the endpoint has not
+        let after_the_rollover: usize = (0..ASKS_PER_ENDPOINT)
+            .filter(|_| book.may_ask_for(endpoint_of(1000), None, at(11)))
+            .count();
+
+        assert_eq!(
+            after_the_rollover, 0,
+            "the endpoint got {after_the_rollover} asks more 3 s after its first ask, so the window of the reserve bounded it and not its own"
         );
     }
 
