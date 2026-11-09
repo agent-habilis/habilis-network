@@ -374,16 +374,18 @@ pub(crate) fn tick_epoch(state: &mut EventLoopState, own: &AuthorKey) {
 /// The sizes of the meta and the state document, on a line of their own, once per call (the
 /// 1-minute tick): the changes and frames that the node keeps for good, their bytes, the JSON, the
 /// save, and the entries of the per-peer map of members that are gone, every
-/// [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read 0. A reader of the numbers can tell
-/// what a keyframe scheme would save.
+/// [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read `None`. A reader of the numbers can
+/// tell what a keyframe scheme would save.
 pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &AuthorKey) {
     let run = census_run(state);
     let heavy = is_heavy_run(run);
     let meta = state.doc_mut(Channel::Meta).census(heavy);
     let shared = state.doc_mut(Channel::State).census(heavy);
-    let peer_slots = meta.peer_slots.as_deref().unwrap_or_default();
-    let absent = absent_entries(peer_slots, &state.peers, me);
-    let peer_entries = peer_slots.len();
+    // A light run measures none of these, and a 0 on the line would read as a measurement: the
+    // keys of a light run say `None`, so an operator cannot take the gap for an empty document.
+    let peer_slots: Option<&[String]> = meta.peer_slots.as_deref();
+    let absent: Option<usize> = peer_slots.map(|slots| absent_entries(slots, &state.peers, me));
+    let peer_entries: Option<usize> = peer_slots.map(<[String]>::len);
     let replay_waiting = state.replay_queue.len();
     tracing::info!(
         target: "habilis_network::lifecycle",
@@ -391,15 +393,15 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &AuthorKey) {
         doc_meta_changes = meta.changes,
         doc_meta_frames = meta.frames,
         doc_meta_frame_bytes = meta.frame_bytes,
-        doc_meta_save_bytes = meta.save_bytes.unwrap_or(0),
-        doc_meta_json_bytes = meta.json_bytes.unwrap_or(0),
-        doc_meta_peer_entries = peer_entries,
-        doc_meta_absent_entries = absent,
+        doc_meta_save_bytes = ?meta.save_bytes,
+        doc_meta_json_bytes = ?meta.json_bytes,
+        doc_meta_peer_entries = ?peer_entries,
+        doc_meta_absent_entries = ?absent,
         doc_state_changes = shared.changes,
         doc_state_frames = shared.frames,
         doc_state_frame_bytes = shared.frame_bytes,
-        doc_state_save_bytes = shared.save_bytes.unwrap_or(0),
-        doc_state_json_bytes = shared.json_bytes.unwrap_or(0),
+        doc_state_save_bytes = ?shared.save_bytes,
+        doc_state_json_bytes = ?shared.json_bytes,
         doc_state_refused_time = shared.refused_time,
         doc_state_unstamped_paths = shared.unstamped_paths,
         doc_state_seed_left_out = shared.seed_left_out,
