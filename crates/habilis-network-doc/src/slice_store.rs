@@ -27,8 +27,18 @@ use serde_json::{Map, Value, json};
 
 use crate::wire;
 
-/// The most gone keys one store holds. The oldest leaves first.
+/// The most gone keys one store holds. It matches the author cap, so the set holds a key for each
+/// author the store can hold. An overflow evicts the oldest key early, which the engine roster gate
+/// makes harmless: the roster refuses that author until it leaves.
 const GONE_CAP: usize = 256;
+
+/// The default time a key stays gone. The engine forgets a quiet author after `QUIET_TTL`, one hour,
+/// so this is that time plus a margin: a forgotten key stays refused past the forget.
+const DEFAULT_GONE_TTL: Duration = Duration::from_hours(2);
+
+/// The bytes that a signed frame adds to its body. Measured at 406 to 414 bytes for a short mesh
+/// name and nickname, with room for longer names.
+const FRAME_OVERHEAD_BYTES: usize = 512;
 
 /// The caps that bound a [`SliceStore`].
 ///
@@ -82,7 +92,7 @@ impl SliceLimits {
             max_authors,
             burst,
             tombstone_ttl: Duration::from_mins(10),
-            gone_ttl: Duration::from_mins(30),
+            gone_ttl: DEFAULT_GONE_TTL,
         }
     }
 
@@ -380,21 +390,34 @@ impl SliceStore {
         if self.is_gone(&key) {
             return SliceIngest::Refused(SliceError::GoneKey);
         }
-        let is_new = self
-            .slices
-            .get(&key)
-            .is_none_or(|held| body.version > held.version);
+        let hash = frame.content_hash();
+        let is_new = match self.slices.get(&key) {
+            None => true,
+            Some(held) => match body.version.cmp(&held.version) {
+                Ordering::Greater => true,
+                Ordering::Less => return SliceIngest::Stale,
+                Ordering::Equal if hash == held.hash => return SliceIngest::Duplicate,
+                Ordering::Equal if hash < held.hash => false,
+                Ordering::Equal => return SliceIngest::Conflict,
+            },
+        };
+        if !self.slices.contains_key(&key) && self.slices.len() >= self.limits.max_authors {
+            return SliceIngest::Refused(SliceError::TooManyAuthors {
+                limit: self.limits.max_authors,
+            });
+        }
         if live && is_new && !self.take_token(&key, now) {
             return SliceIngest::Refused(SliceError::RateLimited);
         }
         let incoming = Slice {
             frame: frame.clone(),
             version: body.version,
-            hash: frame.content_hash(),
+            hash,
             value: body.value,
             since: now,
         };
-        self.place(key, incoming)
+        self.slices.insert(key, incoming);
+        SliceIngest::Applied
     }
 
     /// Makes the draft of the next write of the own slice `own`, with `value` as its object.
@@ -494,6 +517,22 @@ impl SliceStore {
         }
     }
 
+    /// Drops the slice and the bucket of `key`, and puts the key in the gone set.
+    ///
+    /// The engine calls it for an author that is in neither the live nor the quiet roster after
+    /// `QUIET_TTL`, so a crashed author or a missed tombstone does not stay in the store.
+    pub fn forget(&mut self, key: &AuthorKey, now: Instant) {
+        self.slices.remove(key);
+        self.buckets.remove(key);
+        self.keep_gone(*key, now);
+    }
+
+    /// The number of author buckets, for the tests that check a refused key keeps none.
+    #[cfg(test)]
+    fn bucket_count(&self) -> usize {
+        self.buckets.len()
+    }
+
     /// Builds the draft of `own` with `value`, then spends its token.
     fn draft_at(
         &mut self,
@@ -511,11 +550,9 @@ impl SliceStore {
             None => plain,
         };
         let bytes = body.as_str().len();
-        if bytes > self.limits.slice_bytes {
-            return Err(SliceError::TooLarge {
-                bytes,
-                limit: self.limits.slice_bytes,
-            });
+        let limit = self.limits.slice_bytes.saturating_sub(FRAME_OVERHEAD_BYTES);
+        if bytes > limit {
+            return Err(SliceError::TooLarge { bytes, limit });
         }
         if !self.take_token(own, now) {
             return Err(SliceError::RateLimited);
@@ -565,35 +602,13 @@ impl SliceStore {
         bucket.tokens -= 1;
         true
     }
-
-    /// Keeps `incoming` as the slice of `key` when it wins the version and hash rules.
-    fn place(&mut self, key: AuthorKey, incoming: Slice) -> SliceIngest {
-        let Some(held) = self.slices.get(&key) else {
-            if self.slices.len() >= self.limits.max_authors {
-                return SliceIngest::Refused(SliceError::TooManyAuthors {
-                    limit: self.limits.max_authors,
-                });
-            }
-            self.slices.insert(key, incoming);
-            return SliceIngest::Applied;
-        };
-        let wins = match incoming.version.cmp(&held.version) {
-            Ordering::Greater => true,
-            Ordering::Less => return SliceIngest::Stale,
-            Ordering::Equal if incoming.hash == held.hash => return SliceIngest::Duplicate,
-            Ordering::Equal => incoming.hash < held.hash,
-        };
-        if !wins {
-            return SliceIngest::Conflict;
-        }
-        self.slices.insert(key, incoming);
-        SliceIngest::Applied
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalDraft, SliceError, SliceIngest, SliceLimits, SliceStore, wire};
+    use super::{
+        FRAME_OVERHEAD_BYTES, LocalDraft, SliceError, SliceIngest, SliceLimits, SliceStore, wire,
+    };
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
         AuthorKey, Channel, MeshId, Message, MessageBody, Nickname, SymmetricKey,
@@ -923,7 +938,7 @@ mod tests {
 
     #[test]
     fn prepare_local_refused_for_size_spends_no_token() {
-        let limits = SliceLimits::new(64, Duration::from_secs(1), 256, 1);
+        let limits = SliceLimits::new(64 + FRAME_OVERHEAD_BYTES, Duration::from_secs(1), 256, 1);
         let mut store = small_store(limits);
         let now = Instant::now();
         let blob = json!({"blob": "x".repeat(200)});
@@ -941,22 +956,133 @@ mod tests {
     }
 
     #[test]
-    fn commit_local_refuses_a_draft_too_large_and_keeps_nothing() {
-        let limits = SliceLimits::new(64, Duration::from_secs(1), 256, 5);
-        let mut store = small_store(limits);
+    fn commit_local_refuses_a_frame_past_the_cap() {
         let now = Instant::now();
-        let draft = store
-            .prepare_local(&key(1), object(json!({"a": "x".repeat(20)})), now)
+        let mut source = small_store(SliceLimits::new(4096, Duration::from_secs(1), 256, 5));
+        let draft = source
+            .prepare_local(&key(1), object(json!({"a": "x".repeat(300)})), now)
             .expect("a draft");
         let frame = frame_of(&draft, key(1));
+        let mut store = small_store(SliceLimits::new(576, Duration::from_secs(1), 256, 5));
         assert!(
             matches!(
                 store.commit_local(draft, &frame, now),
-                Err(SliceError::TooLarge { limit: 64, .. })
+                Err(SliceError::TooLarge { limit: 576, .. })
             ),
-            "a frame past the cap must be refused as too large"
+            "a frame past the cap must be refused as too large, even when its draft fit"
         );
-        assert_eq!(store.authors(), 0, "a refused draft must leave no slice");
+        assert_eq!(store.authors(), 0, "a refused frame must leave no slice");
+    }
+
+    #[test]
+    fn live_new_key_on_a_full_store_is_refused_and_keeps_no_bucket() {
+        let mut store = small_store(SliceLimits::new(3072, Duration::from_secs(1), 1, 5));
+        apply(&mut store, &frame(key(1), 1, json!({})));
+        assert_eq!(
+            store.ingest(&frame(key(2), 1, json!({})), true, Instant::now()),
+            SliceIngest::Refused(SliceError::TooManyAuthors { limit: 1 }),
+            "a live new key on a full store must be refused"
+        );
+        assert_eq!(
+            store.bucket_count(),
+            0,
+            "a refused key must leave no bucket"
+        );
+    }
+
+    #[test]
+    fn a_gone_key_is_refused_before_a_full_store() {
+        let limits =
+            SliceLimits::new(3072, Duration::from_secs(1), 2, 5).tombstone_ttl(Duration::ZERO);
+        let mut store = small_store(limits);
+        let start = Instant::now();
+        store.ingest(&frame(key(1), 1, json!({})), false, start);
+        store.ingest(&frame(key(2), 1, json!({})), false, start);
+        store.ingest(&frame(key(2), 2, Value::Null), false, start);
+        store.expire_tombstones(start);
+        assert_eq!(
+            store.ingest(&frame(key(3), 1, json!({})), false, start),
+            SliceIngest::Applied,
+            "a freed slot must take a new author"
+        );
+        assert_eq!(
+            store.ingest(&frame(key(2), 3, json!({})), true, start),
+            SliceIngest::Refused(SliceError::GoneKey),
+            "a gone key must be refused before the store is found full"
+        );
+        assert_eq!(
+            store.ingest(&frame(key(4), 1, json!({})), true, start),
+            SliceIngest::Refused(SliceError::TooManyAuthors { limit: 2 }),
+            "a new key on a full store must be refused"
+        );
+    }
+
+    #[test]
+    fn forget_removes_the_slice_and_the_bucket_and_refuses_the_key() {
+        let mut store = store();
+        let now = Instant::now();
+        store.ingest(&frame(key(1), 1, json!({})), true, now);
+        assert_eq!(store.bucket_count(), 1, "a live write must keep a bucket");
+        store.forget(&key(1), now);
+        assert_eq!(store.authors(), 0, "forget must remove the slice");
+        assert_eq!(store.bucket_count(), 0, "forget must remove the bucket");
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 2, json!({}))),
+            SliceIngest::Refused(SliceError::GoneKey),
+            "a forgotten key must be refused"
+        );
+    }
+
+    #[test]
+    fn a_forgotten_key_is_accepted_again_after_the_gone_ttl() {
+        let mut store = store();
+        let start = Instant::now();
+        store.forget(&key(1), start);
+        store.expire_tombstones(start + Duration::from_mins(119));
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, json!({}))),
+            SliceIngest::Refused(SliceError::GoneKey),
+            "a forgotten key must stay refused before the gone TTL ends"
+        );
+        store.expire_tombstones(start + Duration::from_hours(2));
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, json!({}))),
+            SliceIngest::Applied,
+            "a forgotten key must be accepted after the gone TTL ends"
+        );
+    }
+
+    #[test]
+    fn prepare_local_checks_the_body_limit_that_leaves_room_for_the_frame() {
+        let limits = SliceLimits::new(3072, Duration::from_secs(1), 256, 1);
+        let now = Instant::now();
+        let probe = small_store(limits)
+            .prepare_local(&key(1), object(json!({"blob": ""})), now)
+            .expect("a probe draft");
+        let empty = probe.body().as_str().len();
+        let body_limit = 3072 - FRAME_OVERHEAD_BYTES;
+        let under = json!({"blob": "x".repeat(body_limit - 1 - empty)});
+        let mut store = small_store(limits);
+        let draft: LocalDraft = store
+            .prepare_local(&key(1), object(under), now)
+            .expect("a body just under the limit must draft");
+        let frame = frame_of(&draft, key(1));
+        store
+            .commit_local(draft, &frame, now)
+            .expect("a body just under the limit must commit");
+        let over = json!({"blob": "x".repeat(body_limit + 1 - empty)});
+        let mut fresh = small_store(limits);
+        assert!(
+            matches!(
+                fresh.prepare_local(&key(1), object(over), now),
+                Err(SliceError::TooLarge { limit, .. }) if limit == body_limit
+            ),
+            "a body just over the limit must be refused in prepare_local"
+        );
+        assert!(
+            fresh.prepare_local(&key(1), Map::new(), now).is_ok(),
+            "the refused body must not spend the only token"
+        );
     }
 
     #[test]
