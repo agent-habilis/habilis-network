@@ -146,8 +146,13 @@ crosses a phase edge counts whole in one phase.
 An oracle line with `to` counts for each recipient. The summary takes the receipt time of
 the recipient, or the send time if there is no receipt. It then takes the first census of
 that recipient at or after that time. The data bytes count in the phase of that census.
-The wire bytes of the payload are in the same census, so the two sides stay in one phase.
 If no census follows, the phase of the time itself is used.
+
+The two sides of the ratio can still land in two phases. The receipt time is the time at
+which the poll served the payload, and the daemon counts the wire bytes of that payload
+when it reads the frame, which is earlier. A census between the two counts the wire bytes
+in the earlier phase and the data bytes in the later one. The error is one payload and one
+census interval at most, and it needs an arrival inside that gap.
 
 An oracle line with no `to` counts in the phase that holds its send time.
 
