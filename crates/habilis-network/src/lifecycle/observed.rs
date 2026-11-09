@@ -339,7 +339,6 @@ mod churn_red {
                 NodeEvent::Ready { .. }
                 | NodeEvent::Info(_)
                 | NodeEvent::Error(_)
-                | NodeEvent::Fork { .. }
                 | NodeEvent::PingReport { .. }
                 | NodeEvent::StateChanged { .. } => return,
             };
@@ -610,49 +609,6 @@ mod churn_red {
             first, second,
             "two synthetic joined for one peer have two ids"
         );
-    }
-
-    /// H4. Each `joined_new` makes this node announce its own `joined` again, and retain it.
-    /// Five peers that join make five new `joined` frames, each one a message that every other
-    /// peer receives, and the cost of a burst of joiners grows with the square of the roster.
-    #[test]
-    fn h4_every_new_peer_makes_us_announce_again() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let rig = Rig::new().await;
-            let context = rig.context();
-            let mut state = fresh_state();
-            let mut app = Inert;
-            assert_eq!(state.message_log.len(), 0, "the log starts empty");
-            for name in [
-                "swift-cedar",
-                "lost-heron",
-                "calm-otter",
-                "bold-finch",
-                "wild-crane",
-            ] {
-                let who = nick(name);
-                let joined = Message::new_joined(&rig.mesh, &who).sign(&Identity::generate());
-                let observed = observe(&joined, &mut state, &context);
-                handle_presence(
-                    PresenceEvent {
-                        message: &joined,
-                        subtype: PresenceSubtype::Joined,
-                        update: &observed.update,
-                        surfaceable: observed.surfaceable,
-                    },
-                    &mut state,
-                    &mut app,
-                    &context,
-                )
-                .await;
-            }
-            let own_joined = state.message_log.len();
-            assert!(
-                own_joined <= 1,
-                "five arrivals made {own_joined} new frames of ours (one re-announced joined each)"
-            );
-            rig.endpoint.close().await;
-        });
     }
 
     /// H4, receive side. The same peer announces itself four times in one second, each frame with a

@@ -12,7 +12,7 @@ use super::{
 use crate::daemon::cohost_arm;
 use crate::daemon::doc::MeshDoc;
 use crate::daemon::probe_backoff::ProbeBackoff;
-use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
+use crate::daemon::reassembly::{ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
 use crate::doc;
 
@@ -24,7 +24,6 @@ use std::time::Duration;
 
 use iroh::{EndpointAddr, EndpointId};
 
-use crate::daemon::message_log::MessageLog;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
@@ -44,7 +43,7 @@ use crate::util::tuning::{
 };
 
 use crate::gossip::{antientropy, lan};
-use crate::protocol::{crypto, messages};
+use crate::protocol::crypto;
 #[cfg(test)]
 use crate::testing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -573,7 +572,6 @@ pub struct EventLoopState {
     /// alongside every `write_peer_count`. `None` for the common
     /// non-advertising case (no shared counter to maintain).
     pub(crate) live_count: Option<LiveCount>,
-    pub(crate) message_log: MessageLog,
     /// What the receive path remembers about frames it handled or refused, each in a bounded set.
     pub(crate) receive_memory: ReceiveMemory,
     /// Partial multipart bodies buffering toward reassembly — dedicated and
@@ -604,21 +602,6 @@ pub struct EventLoopState {
     /// our `Msg` stream is a `seq`+`prev` hash chain.
     pub(crate) self_seq: u64,
     pub(crate) self_prev: Option<ContentHash>,
-    /// Phase 2 fork detection: per author key, the content hash
-    /// seen at each `Msg` `seq`. A *different* hash at an already-seen
-    /// `(author, seq)` is cryptographic proof of equivocation → a `fork`
-    /// event. Order-independent (gossip delivers out of order).
-    pub(crate) author_seqs: HashMap<AuthorKey, HashMap<u64, ContentHash>>,
-    /// Author keys already flagged as forked, so one `fork` event fires
-    /// per offending key rather than per message.
-    pub(crate) forked: HashSet<AuthorKey>,
-    /// Cross-author DAG (Phase 3): `by_hash` maps each known `Msg`'s content
-    /// hash to its timestamp (for the `ts ≥ max(parents.ts)` backdating
-    /// rule); `dag_heads` is the current tip set (hashes with no observed
-    /// child) — the `parents` stamped on the next `Msg` we author. Both are
-    /// pruned alongside the message-log eviction.
-    pub(crate) by_hash: HashMap<ContentHash, UnixSecs>,
-    pub(crate) dag_heads: HashSet<ContentHash>,
     /// When the last *verified* inbound gossip message arrived — the
     /// starvation watchdog's signal. Keyed on messages, not neighbor
     /// events: the roster-collapse showed links can look alive (or flap)
@@ -755,7 +738,6 @@ impl EventLoopState {
             #[cfg(feature = "host")]
             state_file: init.state_file,
             live_count: None,
-            message_log: MessageLog::new(MESSAGE_LOG_SIZE),
             receive_memory: ReceiveMemory::default(),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
@@ -764,10 +746,6 @@ impl EventLoopState {
             identity: init.identity,
             self_seq: 0,
             self_prev: None,
-            author_seqs: HashMap::new(),
-            forked: HashSet::new(),
-            by_hash: HashMap::new(),
-            dag_heads: HashSet::new(),
             last_inbound_at: now,
             last_recovery_at: None,
             recovery_trips: 0,
@@ -1437,18 +1415,6 @@ impl EventLoopState {
         self.left_keys.peers.contains(&key) || self.left_keys.strangers.contains(&key)
     }
 
-    /// Drop a departed key's presence frames from the log and from the indexes kept beside it,
-    /// as an eviction would (see `gossip::recv::push_to_log`).
-    pub(crate) fn drop_departed_presence(&mut self, key: &AuthorKey) {
-        for gone in self.message_log.drop_presence_of(key) {
-            let hash = gone.content_hash();
-            self.forget_hash(&hash);
-            if let Some(seq) = gone.seq {
-                self.forget_msg_seq(&gone.key(), seq, &hash);
-            }
-        }
-    }
-
     /// A `NeighborDown` for `peer`: the gossip link is gone, the path verdict
     /// stays. It describes the pooled unicast connection, which outlives the
     /// link; erasing it parked every directed frame on a link flap until the
@@ -1751,12 +1717,10 @@ impl EventLoopState {
     /// message. Delegates to the bounded [`BoundedFifoSet`], inverting its
     /// "was newly inserted" answer into "was a duplicate".
     ///
-    /// A frame still in the message log is a duplicate too. The log keeps a frame as long as
-    /// anti-entropy may re-send it, while `seen` is fed by every kind, most of which the log
-    /// never keeps, so under enough of that traffic it forgets a retained frame first.
+    /// The seen set alone is the dedup: a frame that the bounded set has forgotten is delivered again.
     pub(crate) fn mark_seen(&mut self, message: &Verified) -> bool {
         let key = message.dedup_key();
-        self.message_log.contains(&key) || !self.seen.insert(key)
+        !self.seen.insert(key)
     }
 
     /// Try to reassemble the sharded body the `trigger` shard belongs to:
@@ -1764,13 +1728,6 @@ impl EventLoopState {
     /// when it completes its group (and the group has not been surfaced
     /// before), return the synthesized logical `Message` — a surfacing view
     /// whose `id` is the group, so sender and receivers name it alike.
-    ///
-    /// Small (logged) groups get a second completion path off the message
-    /// log: their shards are all retained there, so a shard healed by
-    /// anti-entropy *after* the store's stale-group TTL reaped the partial
-    /// buffer still completes the body — dedup (`seen`) means the healed
-    /// shard is the only one re-ingested, and the store alone would sit on
-    /// 1-of-N forever.
     pub(crate) fn reassemble(&mut self, trigger: &Verified) -> Option<Authored> {
         let shard = trigger.shard.as_ref()?;
         if self
@@ -1780,52 +1737,13 @@ impl EventLoopState {
         {
             return None;
         }
-        match self.reassembly.ingest(trigger, Instant::now()) {
-            ShardIngest::Complete(logical) => {
-                self.receive_memory
-                    .reassembled_groups
-                    .insert(shard.group.clone());
-                Some(*logical)
-            }
-            ShardIngest::Buffered | ShardIngest::Dropped => {
-                let logical = self.reassemble_from_log(trigger)?;
-                // The store may still hold a partial buffer for this group
-                // (e.g. just the trigger, post-TTL) — release its budget.
-                self.reassembly.forget(trigger);
-                self.receive_memory
-                    .reassembled_groups
-                    .insert(shard.group.clone());
-                Some(logical)
-            }
-            _ => None,
-        }
-    }
-
-    /// The log-backed completion path for a **small** (logged) group: scan
-    /// the message log for this author's shards and synthesize when every
-    /// slot is present. Mirrors the store's synthesis exactly.
-    fn reassemble_from_log(&self, trigger: &Verified) -> Option<Authored> {
-        let shard = trigger.shard.as_ref()?;
-        // A verified shard always has its author key.
-        let author = trigger.key();
-        if !messages::shard_fits_log(trigger) {
+        let ShardIngest::Complete(logical) = self.reassembly.ingest(trigger, Instant::now()) else {
             return None;
-        }
-        let slots = self
-            .message_log
-            .collect_shards(&shard.group, &author, shard.total);
-        if slots.iter().any(Option::is_none) {
-            return None; // a shard is still missing
-        }
-        let mut body = String::new();
-        for slot in &slots {
-            body.push_str(slot.expect("every slot filled above").body.as_str());
-        }
-        // The concatenation of valid bodies is itself valid (no new control
-        // chars), but fail closed rather than surface a malformed body.
-        let body = protocol::MessageBody::try_new(&body).ok()?;
-        let header = slots[0].expect("shard 0 present");
-        Some(reassembly::synthesize_from(header, body, &shard.group))
+        };
+        self.receive_memory
+            .reassembled_groups
+            .insert(shard.group.clone());
+        Some(*logical)
     }
 
     /// Record a `conn_path` reading for `peer`; a reading that proves nothing
@@ -1935,91 +1853,7 @@ impl EventLoopState {
         self.recovery_trips = self.recovery_trips.saturating_add(1);
         self.last_recovery_at = Some(now);
     }
-
-    /// Record a `Msg`'s `(author, seq, content-hash)` for fork detection.
-    /// Returns `true` **exactly once** per offending key — when a *different*
-    /// content hash is first seen at an already-recorded `(author, seq)`,
-    /// which is cryptographic proof the author equivocated (signed two
-    /// conflicting messages at one seq). Order-independent. The caller emits
-    /// a `fork` event on `true`; the message itself is still processed.
-    pub(crate) fn note_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: ContentHash) -> bool {
-        let seen = self.author_seqs.entry(*author).or_default();
-        match seen.get(&seq) {
-            Some(existing) if *existing != hash => {} // conflict → fall through
-            Some(_) => return false,                  // same message, already recorded
-            None => {
-                seen.insert(seq, hash);
-                return false;
-            }
-        }
-        // Equivocation: flag the key, returning true only on first detection.
-        self.forked.insert(*author)
-    }
-
-    /// The `parents` to stamp on the next `Msg` we author: the current DAG
-    /// tips, sorted (deterministic) and capped to `MAX_DAG_PARENTS` to
-    /// bound message size. Usually a single head on a quiet mesh.
-    pub fn dag_parents(&self) -> impl Iterator<Item = ContentHash> {
-        let mut heads: Vec<ContentHash> = self.dag_heads.iter().copied().collect();
-        heads.sort_unstable();
-        heads.truncate(MAX_DAG_PARENTS);
-        heads.into_iter()
-    }
-
-    /// Fold a content `Msg` (hash `hash`, `parents`, timestamp `ts`) into the
-    /// DAG — for messages we receive *and* ones we author. Returns `true` if
-    /// `ts` is **before** a known parent's timestamp (a backdating violation
-    /// to flag). Updates `by_hash` and moves the tip set: the named parents
-    /// are no longer tips, and `hash` becomes one. Unknown parents are left
-    /// alone (the set converges via anti-entropy).
-    pub fn note_dag(&mut self, hash: ContentHash, parents: &[ContentHash], ts: UnixSecs) -> bool {
-        let mut backdated = false;
-        for parent in parents {
-            if let Some(&parent_ts) = self.by_hash.get(parent)
-                && ts < parent_ts
-            {
-                backdated = true;
-            }
-            self.dag_heads.remove(parent);
-        }
-        self.by_hash.insert(hash, ts);
-        self.dag_heads.insert(hash);
-        backdated
-    }
-
-    /// Prune an evicted message's content hash from the DAG indexes, keeping
-    /// `by_hash`/`dag_heads` bounded alongside the message-log `VecDeque`.
-    pub fn forget_hash(&mut self, hash: &ContentHash) {
-        self.by_hash.remove(hash);
-        self.dag_heads.remove(hash);
-    }
-
-    /// Prune an evicted `Msg`'s `(author, seq)` from the fork-detection
-    /// index, bounding `author_seqs`/`forked` to the message-log window: an
-    /// identity whose messages have all aged out drops off both maps (so a
-    /// sybil that fires once and vanishes is forgotten).
-    ///
-    /// Only drops the slot when `hash` is the one we recorded for that
-    /// `(author, seq)`. A fork retains *two* messages at one `(author, seq)`;
-    /// evicting the twin we did **not** record must not clear the recorded
-    /// evidence, or a later anti-entropy resend of the still-retained twin
-    /// would re-detect the equivocation as a fresh first sighting.
-    pub fn forget_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: &ContentHash) {
-        if let Some(seqs) = self.author_seqs.get_mut(author)
-            && seqs.get(&seq).is_some_and(|recorded| recorded == hash)
-        {
-            seqs.remove(&seq);
-            if seqs.is_empty() {
-                self.author_seqs.remove(author);
-                self.forked.remove(author);
-            }
-        }
-    }
 }
-
-/// Max `parents` stamped on a `Msg` — bounds the wire size of the causal
-/// links. A quiet mesh has one head; this only bites under heavy concurrency.
-const MAX_DAG_PARENTS: usize = 16;
 
 // ── Consumer surface ───────────────────────────────────────────────────────
 //
@@ -2122,13 +1956,6 @@ impl EventLoopState {
         self.mint_mesh.as_ref()
     }
 
-    /// Stamp the next position on this author's hash chain, advancing it.
-    /// `prev` is the content hash of the message just authored.
-    pub fn advance_chain(&mut self, previous: ContentHash) {
-        self.self_seq += 1;
-        self.self_prev = Some(previous);
-    }
-
     /// This author's current chain position — the `seq` the next message takes
     /// and the hash it points back to.
     #[must_use]
@@ -2150,19 +1977,6 @@ impl EventLoopState {
     /// Receiver-side partial-body store.
     pub fn reassembly_mut(&mut self) -> &mut ReassemblyStore {
         &mut self.reassembly
-    }
-
-    /// The anti-entropy message log — the retained window a reconnecting peer
-    /// recovers from. Returns any message evicted by the push.
-    pub fn message_log_mut(&mut self) -> &mut MessageLog {
-        &mut self.message_log
-    }
-
-    /// How many messages the anti-entropy log holds. Tests only.
-    #[cfg(feature = "iroh-test-utils")]
-    #[must_use]
-    pub fn message_log_len(&self) -> usize {
-        self.message_log.len()
     }
 
     /// The selected path of a pair: the path watcher's last report if it has one,

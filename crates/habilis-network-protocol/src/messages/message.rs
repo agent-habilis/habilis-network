@@ -239,7 +239,7 @@ impl Message {
 
     /// A state anti-entropy digest whose `body` is the windowed digest the
     /// sender advertises (a `DigestBody` of `WireWindow`s over the `State`
-    /// events it holds — the unbounded analogue of the chat digest). Test-only;
+    /// events it holds). Test-only;
     /// production uses [`new_channel_digest`](Self::new_channel_digest).
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]

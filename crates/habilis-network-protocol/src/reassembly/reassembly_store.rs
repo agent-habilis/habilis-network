@@ -8,10 +8,9 @@ use crate::messages::{Authored, Verified};
 use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, ShardGroup};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
-    LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
-    REASSEMBLY_MAX_GROUP_LIFETIME, REASSEMBLY_REPAIR_IDLE, REASSEMBLY_REPAIR_MAX_IDXS,
-    REASSEMBLY_SLOT_MIN_CHARGE_BYTES, REASSEMBLY_SLOT_OVERHEAD_BYTES, REASSEMBLY_STALE,
-    REASSEMBLY_TOTAL_BUDGET_BYTES,
+    REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES, REASSEMBLY_MAX_GROUP_LIFETIME,
+    REASSEMBLY_REPAIR_IDLE, REASSEMBLY_REPAIR_MAX_IDXS, REASSEMBLY_SLOT_MIN_CHARGE_BYTES,
+    REASSEMBLY_SLOT_OVERHEAD_BYTES, REASSEMBLY_STALE, REASSEMBLY_TOTAL_BUDGET_BYTES,
 };
 
 /// What one buffered shard costs against the byte budgets: its body plus the
@@ -260,15 +259,13 @@ impl ReassemblyStore {
         }
     }
 
-    /// The big (unlogged) groups that stalled long enough to ask their author
-    /// for the missing shards, each at most once per
-    /// [`REASSEMBLY_REPAIR_IDLE`] window. Small groups are excluded —
-    /// their shards live in the message log and heal via anti-entropy, which
-    /// re-sends a directed shard point-to-point to its addressee.
+    /// The groups that stalled long enough to ask their author for the missing shards, each at most
+    /// once per [`REASSEMBLY_REPAIR_IDLE`] window. Every group qualifies, a small one included: no log
+    /// keeps its shards, so the repair is their only heal.
     pub fn repair_tickets(&mut self, now: Instant) -> impl Iterator<Item = RepairTicket> {
         let mut tickets = Vec::new();
         for ((author, group_id), group) in &mut self.groups {
-            if group.total <= LOGGED_SHARD_GROUP_MAX_TOTAL || group.is_complete() {
+            if group.is_complete() {
                 continue;
             }
             let idle = now.duration_since(group.last_seen);

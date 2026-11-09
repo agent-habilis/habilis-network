@@ -53,13 +53,6 @@ pub const MAX_MESSAGE_SIZE: usize = 3840;
 /// `protocol::messages::shard`).
 pub const MAX_SHARD_TOTAL: u32 = 65_536;
 
-/// Largest shard group whose frames still enter the message log (and thus
-/// heal via anti-entropy) — exactly the old 16-shard behavior. A bigger
-/// group's shards skip the log so one huge body can't evict the mesh's whole
-/// anti-entropy history; those transfers are transport-reliable instead
-/// (QUIC streams on the unicast connection).
-pub const LOGGED_SHARD_GROUP_MAX_TOTAL: u32 = 16;
-
 /// Upper bound on a logical (possibly multipart) body the daemon will accept
 /// from a caller — a **local input + surfacing bound, not a wire bound** (the
 /// wire is bounded by the reassembly byte budgets below). Enforced by the
@@ -150,12 +143,10 @@ pub const REASSEMBLY_REPAIR_IDLE: Duration = Duration::from_mins(1);
 /// successive rounds.
 pub const REASSEMBLY_REPAIR_MAX_IDXS: usize = 64;
 
-/// Byte budget of the sender-side shard cache — the serialized frames of
-/// recent big (unlogged) outbound groups, kept so a receiver's
-/// `shard/repair` request can be served. Big groups skip the message log
-/// (they must not evict the anti-entropy history), so this cache is their
-/// only re-serve source. Whole-group FIFO eviction; sized to hold one
-/// max-size group.
+/// Byte budget of the sender-side shard cache: the serialized frames of recent outbound groups,
+/// kept so a receiver's `shard/repair` request can be served. Every group is cached, and this cache
+/// is the only re-serve source for a shard. Whole-group FIFO eviction; sized to hold one max-size
+/// group.
 pub const SHARD_CACHE_BUDGET_BYTES: usize = REASSEMBLY_GROUP_MAX_BYTES;
 
 /// Largest single file the blob channel will offload. Streamed from disk on

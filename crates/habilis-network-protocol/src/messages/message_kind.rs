@@ -78,7 +78,7 @@ pub enum MessageKind {
     /// (`{"k":"change",…}`) applied to the channel's `MeshDoc`
     /// CRDT. Carried on the gossip topic like everything else; the signed frame
     /// is retained as the doc's re-serve store. Signed like any message; never
-    /// entered into the chat message-log, never surfaced via poll/fetch.
+    /// never surfaced via poll/fetch.
     State,
     /// Anti-entropy digest for the **state** channel — the dedicated counterpart
     /// to [`Digest`](MessageKind::Digest). Body is the doc's automerge heads; a

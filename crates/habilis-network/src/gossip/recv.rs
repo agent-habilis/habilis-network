@@ -16,10 +16,8 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::MembershipUpdate;
-use crate::protocol::messages::{
-    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log,
-};
-use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
+use crate::protocol::messages::{Authored, MessageBody, MessageError, Proof, Verified, WireFrame};
+use crate::protocol::{AuthorKey, Channel, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
 use crate::{lifecycle, lookup};
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
@@ -531,9 +529,8 @@ pub(crate) async fn ingest(
     // message must carry a valid signature over its canonical bytes. Verifying before `mark_seen`
     // stops a forged/unsigned message from poisoning the dedup window with a replayed id and
     // suppressing the genuine signed copy. Relayed and anti-entropy copies keep their original
-    // author's signature, so they verify here too. Canonical bytes are computed once and reused for
-    // the verify, the content hash at the log site, and the shard/retain steps below.
-    let (verified, canonical) = match message.verify_canonical() {
+    // author's signature, so they verify here too.
+    let verified = match message.verify() {
         Ok(checked) => checked,
         Err(message) => {
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, "dropping message with missing/invalid signature");
@@ -602,7 +599,6 @@ pub(crate) async fn ingest(
         handle_shard(
             InboundFrame {
                 message: &verified,
-                canonical: &canonical,
                 surfaceable,
             },
             state,
@@ -631,13 +627,10 @@ pub(crate) async fn ingest(
 
     maybe_push_inbound(context, &view, surfaceable, app_class.as_ref());
 
-    // `true` means the kind is fully handled and never reaches retention.
-    let stop = match &view.kind {
+    match &view.kind {
         // The app-payload seam: dispatch RPC legs / chat / task frames.
-        // `false` means the frame is plumbing or addressed elsewhere —
-        // stop before retention.
         MessageKind::App { .. } => {
-            !app.on_app_frame(
+            app.on_app_frame(
                 InboundApp {
                     message: &view,
                     surfaceable,
@@ -645,7 +638,7 @@ pub(crate) async fn ingest(
                 state,
                 context,
             )
-            .await
+            .await;
         }
         // Everything the engine owns itself. Spelled out rather than `_` so
         // a new kind has to be routed deliberately.
@@ -658,32 +651,18 @@ pub(crate) async fn ingest(
         | MessageKind::StateDigest
         | MessageKind::Meta
         | MessageKind::MetaDigest
-        | MessageKind::LinkState => dispatch_infra(
-            &verified,
-            surfaceable,
-            &observed.update,
-            state,
-            app,
-            context,
-        )
-        .await
-        .is_break(),
-        _ => false,
-    };
-    if stop {
-        return;
-    }
-
-    if retained_after_lifecycle(&observed.update, &verified.kind) {
-        retain_and_index(
-            verified,
-            RetainMeta {
-                canonical: &canonical,
-                class: app_class.as_ref(),
-            },
-            state,
-            context,
-        );
+        | MessageKind::LinkState => {
+            let _ = dispatch_infra(
+                &verified,
+                surfaceable,
+                &observed.update,
+                state,
+                app,
+                context,
+            )
+            .await;
+        }
+        _ => {}
     }
 }
 
@@ -927,7 +906,6 @@ fn pong_for(
 
 struct InboundFrame<'message> {
     message: &'message Verified,
-    canonical: &'message [u8],
     surfaceable: bool,
 }
 
@@ -943,8 +921,8 @@ async fn handle_shard(
 ) {
     let InboundFrame {
         message,
-        canonical,
         surfaceable,
+        ..
     } = frame;
     // A directed shard (task leg / RPC) not addressed to us is relayed at the
     // gossip layer but never retained or reassembled here — a third party must
@@ -952,28 +930,6 @@ async fn handle_shard(
     // single-frame path hands such a frame to the app, which decides.
     if !addressed_to_us(message, &context.our_pubkey) {
         return;
-    }
-    // The raw shard's own per-tag policy (loggability/chain) — computed from its
-    // fragment body, matching the pre-thread behavior of the internal classify.
-    let kind_tag = message.kind.app_tag();
-    let shard_class = kind_tag.map(|_| app.classify(&message.authored()));
-    // Only a small group's shards enter the message log (anti-entropy heals
-    // them like any message — point-to-point when the shard is directed, so
-    // the addressee still recovers); a big group would evict the mesh's whole
-    // anti-entropy history, so its shards stay out of the log — on the send
-    // side too (`shard_fits_log`) — and the group heals via shard repair.
-    // (RPC shards are plumbing — `retain_and_index` skips them by kind
-    // either way.)
-    if shard_fits_log(message) {
-        retain_and_index(
-            message.clone(),
-            RetainMeta {
-                canonical,
-                class: shard_class.as_ref(),
-            },
-            state,
-            context,
-        );
     }
     if let Some(logical) = state.reassemble(message) {
         // The same gate the single-frame path runs, now on the reassembled body:
@@ -1001,136 +957,6 @@ async fn handle_shard(
             )
             .await;
     }
-}
-
-/// Fork detection, cross-author DAG folding, and chat-log retention for a
-/// surviving inbound message. Coupled to logging on purpose: only a message we
-/// actually **retain** is folded into the indexes, so `by_hash`/`dag_heads`/
-/// `author_seqs` stay bounded by the log window (pruned on eviction). A
-/// rate-dropped chat frame, one addressed to another peer, or a `State` event
-/// returned earlier and never reaches here. Only a **broadcast chat** `app_msg`
-/// carries `seq`/parents; task-related `app_msg` frames (offer/context/change)
-/// are presence-like — `broadcast_task` stamps them without a chain, so they
-/// must stay out of the fork/DAG indexes (see the `task` glossary invariant).
-/// Presence is loggable but not indexed.
-#[derive(Clone, Copy)]
-struct RetainMeta<'meta> {
-    canonical: &'meta [u8],
-    class: Option<&'meta AppClass>,
-}
-
-/// Whether a frame that membership read goes into the log. A stale presence frame does not: it is
-/// a copy of a departed key's `joined` or `alive`, which `drop_departed_presence` took out of the
-/// log on the goodbye, and `seen` may have forgotten it since. Retained again, it would be a
-/// resend subject again. A stale chat frame stays retainable: the departed key's chat is kept.
-fn retained_after_lifecycle(update: &MembershipUpdate, kind: &MessageKind) -> bool {
-    !(update.stale
-        && matches!(
-            kind,
-            MessageKind::Presence {
-                subtype: PresenceSubtype::Joined | PresenceSubtype::Alive
-            }
-        ))
-}
-
-fn retain_and_index(
-    message: Verified,
-    meta: RetainMeta<'_>,
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-) {
-    let RetainMeta { canonical, class } = meta;
-    // App frames carry the app's per-tag policy (`classify`, computed once by the
-    // caller and threaded in here); infra kinds (`class == None`) use the engine's
-    // own rule. A beat is plumbing — never retained/indexed.
-    let loggable = class.map_or_else(|| is_loggable(&message.kind), |cls| cls.loggable());
-    let beat = class.is_some_and(|cls| cls.beat());
-    if !loggable || beat {
-        return;
-    }
-    if class.is_some_and(|cls| cls.chained()) {
-        let hash = ContentHash::of(canonical);
-        // A second, *different* content hash at an already-seen `(author, seq)`
-        // is cryptographic proof of equivocation — surface a `fork` once per
-        // offending key (order-independent; we keep both).
-        if let Some(seq) = message.seq
-            && state.note_msg_seq(&message.key(), seq, hash)
-        {
-            context.sink.emit(NodeEvent::Fork {
-                nickname: message.author.clone(),
-                pubkey: message.key().to_string(),
-                seq,
-            });
-            tracing::warn!(target: "habilis_network::gossip", author = %message.author, seq, "fork detected: conflicting messages at same seq");
-        }
-        // Fold into the DAG tip set; flag a backdated timestamp.
-        if state.note_dag(hash, &message.parents, message.timestamp) {
-            tracing::warn!(target: "habilis_network::gossip", author = %message.author, "message timestamp precedes a referenced parent; possible backdating");
-        }
-    }
-    push_to_log(state, message);
-}
-
-/// Push a retained message into the anti-entropy log, keeping the DAG + fork
-/// indexes bounded with the log window as the push evicts.
-pub(super) fn push_to_log(state: &mut EventLoopState, message: Verified) {
-    if let Some(evicted) = state.message_log.push(message) {
-        let evicted_hash = evicted.content_hash();
-        state.forget_hash(&evicted_hash);
-        if let Some(seq) = evicted.seq {
-            state.forget_msg_seq(&evicted.key(), seq, &evicted_hash);
-        }
-    }
-}
-
-/// Retain a message **this node just broadcast** in its own anti-entropy log.
-///
-/// Gossip never echoes a node's own publications back to it, so a message we
-/// author reaches every peer's [`ingest`] but never our own. Without this our
-/// `message_log` — and so the digest we advertise — omits everything we wrote,
-/// with two consequences:
-///
-/// * We cannot serve our own `joined` to a peer that missed it, which is the
-///   one repair anti-entropy exists to make.
-/// * Worse, every peer that *does* hold it reads the omission as a gap and
-///   re-sends it to us on **every** digest round, forever: we can never
-///   acknowledge it, because we can never receive it. Each such message is a
-///   permanent per-round broadcast to the whole mesh, and since a re-announced
-///   `joined` mints a fresh id, the unconvergeable set ratchets upward — the
-///   mesh-wide CPU/traffic runaway this guards against.
-///
-/// The state/meta channel already retains its own writes for exactly this
-/// reason; see [`super::broadcast_state_merge`].
-pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: Verified) {
-    if !is_loggable(&message.kind) {
-        return;
-    }
-    // Ours by construction, so it can never arrive again — but mark it seen so
-    // a peer still running the old resend behaviour is deduped at the gate
-    // rather than double-pushed here.
-    state.mark_seen(&message);
-    push_to_log(state, message);
-}
-
-/// Keep an app broadcast that this node sent, when the app's class says it is loggable. The same
-/// reason as for [`retain_own_broadcast`]: a peer that holds the frame resends it to its author
-/// on every digest round, forever, if the author's digest never lists it, and the author cannot
-/// serve it to a peer that missed it. The class comes from the app, as at the ingest of a frame
-/// (`retain_and_index`), so an app that does not log its frames keeps none. A directed frame is
-/// not kept: its body is sealed on the way out and only its addressee may be served.
-pub(crate) fn retain_own_app_broadcast(
-    state: &mut EventLoopState,
-    message: &Verified,
-    class: AppClass,
-) {
-    if !class.loggable()
-        || class.beat()
-        || !matches!(message.kind, MessageKind::App { to: None, .. })
-    {
-        return;
-    }
-    state.mark_seen(message);
-    push_to_log(state, message.clone());
 }
 
 /// Route a received `State`/`Meta` event to its channel doc, then — for `meta` —
@@ -1694,41 +1520,6 @@ async fn handle_peer_info(
     }
 }
 
-/// `Alive` keepalives, `PeerInfo` endpoint plumbing, anti-entropy `Digest`s,
-/// and ping/pong probes are infrastructure; everything else (real chat frames
-/// and `joined`/`left` presence) goes in the log (and so to `poll`/`fetch`).
-/// App-frame loggability is the app's own per-tag policy ([`NodeApp::classify`]);
-/// this predicate covers only the engine's infra kinds.
-///
-/// `PeerInfo` is classified as non-loggable here so the rule is encoded in one
-/// place rather than relying on its match arm's early `return`: a future code
-/// path that reaches the log gate must not start persisting endpoint-address
-/// plumbing into the poll/fetch buffer.
-fn is_loggable(kind: &MessageKind) -> bool {
-    !matches!(
-        kind,
-        MessageKind::Presence {
-            subtype: PresenceSubtype::Alive
-        } | MessageKind::PeerInfo
-            | MessageKind::Digest | MessageKind::StateDigest | MessageKind::MetaDigest
-            // A newer vector replaces this one, and a peer never logs it (its
-            // handler ends before retention), so a copy kept here is one no peer
-            // holds and every digest asks this node for again.
-            | MessageKind::LinkState
-            | MessageKind::Ping
-            | MessageKind::Pong { .. }
-            // Durable state lives in its own un-pruned log, never the chat
-            // message-log / poll-fetch buffer (it also returns before reaching
-            // here; this keeps the predicate honest if that changes).
-            | MessageKind::State
-            | MessageKind::Meta
-            // App-frame loggability is decided by the app's `classify`, never
-            // this infra predicate. An App kind that reaches here has no class: it is the
-            // opaque directed frame of a relay, which is not kept.
-            | MessageKind::App { .. }
-    )
-}
-
 #[cfg(test)]
 mod arms_reclaim_tests {
 
@@ -1819,202 +1610,6 @@ mod arms_reclaim_tests {
         assert!(
             super::arms_reclaim(false, 2, true),
             "a node below the release count arms the reclaim for the beacon"
-        );
-    }
-}
-
-#[cfg(test)]
-mod is_loggable_tests {
-    use super::{is_loggable, retained_after_lifecycle};
-    use crate::lifecycle::membership_update::MembershipUpdate;
-    use crate::protocol::{MessageKind, PresenceSubtype};
-
-    /// A stale `joined` or `alive` is a copy of a departed key's presence: it stays out of the
-    /// log. A stale chat frame and a fresh presence frame go in.
-    #[test]
-    fn a_stale_presence_frame_is_not_retained() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let stale = MembershipUpdate {
-            returned: false,
-            joined_new: false,
-            stale: true,
-        };
-        let fresh = MembershipUpdate {
-            returned: false,
-            joined_new: true,
-            stale: false,
-        };
-        let joined = MessageKind::Presence {
-            subtype: PresenceSubtype::Joined,
-        };
-        let alive = MessageKind::Presence {
-            subtype: PresenceSubtype::Alive,
-        };
-        assert!(
-            !retained_after_lifecycle(&stale, &joined),
-            "a stale presence frame is not retained beside a joined frame"
-        );
-        assert!(
-            !retained_after_lifecycle(&stale, &alive),
-            "a stale presence frame is not retained beside an alive frame"
-        );
-        assert!(
-            retained_after_lifecycle(&stale, &MessageKind::app_broadcast("app_msg")),
-            "a stale presence frame is still retained beside an app broadcast"
-        );
-        assert!(
-            retained_after_lifecycle(&fresh, &joined),
-            "a fresh presence frame is retained beside a joined frame"
-        );
-    }
-
-    #[test]
-    fn alive_presence_is_not_loggable() {
-        let _guard = ::habilis_network_test_tracing::init();
-        assert!(
-            !is_loggable(&MessageKind::Presence {
-                subtype: PresenceSubtype::Alive
-            }),
-            "alive presence is not loggable"
-        );
-    }
-
-    #[test]
-    fn joined_and_left_presence_are_loggable() {
-        let _guard = ::habilis_network_test_tracing::init();
-        assert!(
-            is_loggable(&MessageKind::Presence {
-                subtype: PresenceSubtype::Joined
-            }),
-            "joined presence is loggable"
-        );
-        assert!(
-            is_loggable(&MessageKind::Presence {
-                subtype: PresenceSubtype::Left
-            }),
-            "left presence is loggable"
-        );
-    }
-
-    #[test]
-    fn peerinfo_is_not_loggable() {
-        // PeerInfo is endpoint plumbing — never logged/surfaced, and the
-        // classifier (not just its early-return) says so.
-        let _guard = ::habilis_network_test_tracing::init();
-        assert!(
-            !is_loggable(&MessageKind::PeerInfo),
-            "peer info is not loggable"
-        );
-    }
-}
-
-/// Replicates the second mesh-wide CPU runaway at its mechanism: a node that
-/// does not retain its **own** broadcasts advertises a digest that omits them,
-/// and since gossip never echoes a node's publications back to it, it can never
-/// acknowledge them — so every peer re-sends them on every anti-entropy round,
-/// forever. Measured at 6 peers: 180 resend events/minute steady-state and
-/// ~108% total CPU, against 12 (join-window only, then silent) and ~54% once
-/// the author retains its own presence.
-#[cfg(test)]
-mod retain_own_broadcast_tests {
-    use crate::testing;
-
-    use crate::daemon::state::EventLoopState;
-    use crate::protocol::messages::Verified;
-    use crate::protocol::{MeshId, Message, Nickname};
-
-    use crate::gossip::app;
-    use crate::protocol;
-    use crate::protocol::messages::AppFrameParams;
-    fn joined(state: &EventLoopState, author: &str) -> Verified {
-        Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author)).sign(&state.identity)
-    }
-
-    /// The invariant: our own `joined` is in our log, so the digest we
-    /// advertise names it.
-    #[test]
-    fn own_presence_lands_in_the_local_log() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = testing::fresh_state();
-        let mine = joined(&state, "me");
-        assert_eq!(state.message_log.len(), 0, "log starts empty");
-        super::retain_own_broadcast(&mut state, mine);
-        assert_eq!(
-            state.message_log.len(),
-            1,
-            "a node must hold the presence it just broadcast — it is the only source for it"
-        );
-    }
-
-    /// Plumbing we broadcast but never log stays out, so retaining our own
-    /// sends does not quietly widen what anti-entropy replays.
-    #[test]
-    fn own_unloggable_plumbing_is_not_retained() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = testing::fresh_state();
-        let body = protocol::MessageBody::try_new("{}").expect("valid body");
-        let peer_info =
-            Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
-                .sign(&state.identity);
-        super::retain_own_broadcast(&mut state, peer_info);
-        assert_eq!(
-            state.message_log.len(),
-            0,
-            "PeerInfo is never logged inbound, so it must not be logged outbound either"
-        );
-    }
-
-    fn app_frame(state: &EventLoopState, to: Option<&str>) -> Verified {
-        Message::new_app(
-            &MeshId::from("💬test"),
-            &Nickname::from("me"),
-            AppFrameParams::new(
-                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                to.map(testing::test_key),
-                None,
-                protocol::MessageBody::from("hello"),
-            ),
-        )
-        .sign(&state.identity)
-    }
-
-    fn class(loggable: bool) -> app::AppClass {
-        app::AppClass::NONE
-            .plus_if(app::AppClass::LOGGABLE, loggable)
-            .union(app::AppClass::VALID)
-    }
-
-    /// An app broadcast that the app logs is held by its author, as at the ingest of a peer: the
-    /// author can serve it to a peer that missed it, and the peers that hold it do not resend it
-    /// to her on every round.
-    #[test]
-    fn an_own_app_broadcast_that_the_app_logs_is_retained() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = testing::fresh_state();
-        let frame = app_frame(&state, None);
-        super::retain_own_app_broadcast(&mut state, &frame, class(true));
-        assert_eq!(
-            state.message_log.len(),
-            1,
-            "an own app broadcast that the app logs is retained"
-        );
-    }
-
-    /// The class is the app's, not the kind's: an app that does not log its frames keeps none, and a
-    /// directed frame is never kept (its body is sealed on the way out, and only its addressee may
-    /// be served).
-    #[test]
-    fn an_own_app_frame_that_the_app_does_not_log_or_that_is_directed_is_not_retained() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = testing::fresh_state();
-        let broadcast = app_frame(&state, None);
-        super::retain_own_app_broadcast(&mut state, &broadcast, class(false));
-        let directed = app_frame(&state, Some("you"));
-        super::retain_own_app_broadcast(&mut state, &directed, class(true));
-        assert_eq!(
-            state.message_log.len(),
-            0,
-            "an own frame that is directed or unlogged is not retained"
         );
     }
 }
@@ -2292,6 +1887,7 @@ mod chat_digest_tests {
                 seen_before,
                 "a chat digest must not change the seen set"
             );
+            // A peerless topic records no failed broadcast; commit 4 removes the arm.
             let mut sent = sender.broadcast_frames();
             sent.extend(state.unicast_pool.sent_frames());
             assert!(sent.is_empty(), "a chat digest must send no frame");
@@ -4422,7 +4018,7 @@ mod first_contact_tests {
     /// A node whose first digests went out over the rendezvous alone can have
     /// every answer dropped on the way: each hop already saw those frames, and
     /// iroh-gossip drops a message id it has seen. So it asks again on its
-    /// first real-peer link, and on no other link; the chat log asks there too.
+    /// first real-peer link, and on no other link.
     /// `idle.broadcasts` counts digest broadcasts and nothing else a link-up
     /// sends; the test sender cannot record frames, so the count stands in for
     /// the three digests.
@@ -4589,25 +4185,6 @@ mod link_state_tests {
             lookup::multihop_handle_config(PayloadPath::DirectOnly),
         )
         .expect("underlay on the derived key")
-    }
-
-    // A link-state vector is replaced by the next one and is never logged by the
-    // peers that receive it. A node that kept its own would hold messages that no
-    // peer holds, and every digest would ask it for them again: measured at
-    // N = 33, 38% of the vectors a node received were repeats.
-    #[test]
-    fn a_link_vector_this_node_broadcast_is_not_retained_in_its_log() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let secret = SecretKey::from_bytes(&[53; 32]);
-            let handle = handle_for(&secret).await;
-            let mut state = fresh_state();
-            let body = gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
-            let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body)
-                .sign(&Identity::generate());
-            super::retain_own_broadcast(&mut state, message);
-            assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
-            handle.close().await;
-        });
     }
 
     // A signature proves who made a vector, not that the maker is a member, and
@@ -5336,6 +4913,104 @@ mod parked_link_state_tests {
                 "a taken vector frees its place"
             );
             theirs.close().await;
+        });
+    }
+}
+
+/// A repeated chat broadcast frame reaches the app once: the seen set drops the repeat.
+#[cfg(test)]
+mod repeat_tests {
+    use std::sync::{Arc, Mutex};
+
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::{AppFrameParams, Authored};
+    use crate::protocol::{AppTag, MeshId, Message, MessageBody};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+
+    /// Counts the chat frames the app is handed.
+    struct Counting(Arc<Mutex<usize>>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for Counting {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::LOGGABLE.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            *self.0.lock().expect("the counter lock") += 1;
+            false
+        }
+    }
+
+    #[test]
+    fn a_repeated_chat_broadcast_is_surfaced_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mesh = MeshId::from("test");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let peer = Identity::generate();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey: identity.author_key(),
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let chat = Message::new_app(
+                &mesh,
+                &nick("peer"),
+                AppFrameParams::new(
+                    AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("\"hello\""),
+                ),
+            )
+            .sign(&peer);
+            let bytes = chat.serialize().expect("serialize").into_bytes();
+            let mut state = fresh_state();
+            // Shared with the app, which counts the frames it is handed.
+            let surfaced = Arc::new(Mutex::new(0));
+            let mut app = Counting(Arc::clone(&surfaced));
+            super::ingest(bytes.clone(), &mut state, &mut app, &context).await;
+            super::ingest(bytes, &mut state, &mut app, &context).await;
+            let count = *surfaced.lock().expect("the counter lock");
+            assert_eq!(
+                count, 1,
+                "a repeated chat frame must reach the app once, got {count}"
+            );
+            endpoint.close().await;
         });
     }
 }

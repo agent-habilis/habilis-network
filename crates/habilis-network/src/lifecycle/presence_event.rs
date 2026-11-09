@@ -84,7 +84,6 @@ pub(crate) async fn handle_presence(
         if state.key_said_goodbye(key) {
             return;
         }
-        state.drop_departed_presence(&key);
         // The roster is keyed by author key, so a goodbye ends that key and no other: another key
         // under the same nickname stays a peer. Any key can sign a goodbye under any nickname, and
         // the goodbye of a key that is not in the roster removes nothing. It is kept apart from

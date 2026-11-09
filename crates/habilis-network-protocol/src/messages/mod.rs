@@ -71,7 +71,7 @@ pub use wire::WireFrame;
 
 pub use body::{BodyError, MessageBody};
 pub use id::{IdError, MessageId};
-pub use shard::{Shard, ShardGroup, shard_fits_log};
+pub use shard::{Shard, ShardGroup};
 
 /// Maximum serialized message size — a network-wide wire contract kept
 /// under iroh-gossip's payload budget so a message we accept always fits

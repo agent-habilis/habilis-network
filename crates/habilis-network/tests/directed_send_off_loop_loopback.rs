@@ -128,13 +128,6 @@ impl Member {
             .expect("the loop answers")
             .expect("alice knows bob")
     }
-
-    async fn message_log_len(&self) -> usize {
-        self.membership
-            .request(|reply| Request::InspectTest(InspectTest::MessageLogLen { reply }))
-            .await
-            .expect("the loop answers")
-    }
 }
 
 #[test]
@@ -184,7 +177,7 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
         };
         let local = async {
             time::sleep(ASK_AFTER).await;
-            let _ = alice.message_log_len().await;
+            let _ = alice.knows("bob").await;
             started.elapsed()
         };
         let ((verdict, send_done), local_done) = tokio::join!(send, local);

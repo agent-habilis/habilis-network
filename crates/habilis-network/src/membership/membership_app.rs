@@ -393,13 +393,6 @@ pub enum InspectTest {
         /// Gets the endpoint id.
         reply: oneshot::Sender<iroh::EndpointId>,
     },
-    /// Tests only: how many messages this node holds in its log, the ones that anti-entropy
-    /// can serve to a peer that asks. A broadcast that a node sent itself is there only if the
-    /// send path retains it.
-    MessageLogLen {
-        /// Gets the count.
-        reply: oneshot::Sender<usize>,
-    },
     /// Tests only: how many gossip connections the recursion rule has closed since the process
     /// started (the census field `gossip_recursion_closes_total`): a total, shared by every
     /// member of the process. A pair that cannot leave the gossip path closes and dials again,
@@ -1019,10 +1012,6 @@ impl MembershipApp {
         context: &HandlerCtx<'_>,
     ) -> bool {
         match request {
-            InspectTest::MessageLogLen { reply } => {
-                let _ = reply.send(state.message_log.len());
-                false
-            }
             InspectTest::GossipRecursionCloses { reply } => {
                 let _ = reply.send(payload_path::gossip_recursion_closes());
                 false

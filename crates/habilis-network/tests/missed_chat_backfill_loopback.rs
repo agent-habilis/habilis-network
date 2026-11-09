@@ -95,8 +95,6 @@ impl NodeDriver for Chat {
         let _ = ops::deliver(&frame, bytes.clone(), state, context.sender)
             .await
             .expect("a meshed node broadcasts");
-        // The sender keeps its own frame, as a chat app does. Chat is not answered now.
-        let _ = state.message_log_mut().push(frame.clone());
         let _ = sent.send(frame.id.clone());
         false
     }

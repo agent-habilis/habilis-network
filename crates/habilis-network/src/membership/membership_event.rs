@@ -77,15 +77,6 @@ pub enum MembershipEvent {
         /// The key of the member: 64 lowercase hex digits. Two members can share a nickname.
         key: String,
     },
-    /// A peer's per-author hash chain forked — two signed messages at one `seq`.
-    Fork {
-        /// The nickname of the member.
-        nick: String,
-        /// The public key of the member, in hex.
-        pubkey: String,
-        /// The sequence number of the message.
-        seq: u64,
-    },
     /// The shared state changed.
     StateChanged {
         /// The channel of the write.
@@ -163,15 +154,6 @@ fn classify(event: NodeEvent) -> Option<MembershipEvent> {
         NodeEvent::PeerReturn { nickname, key } => Some(MembershipEvent::Returned {
             nick: nickname.to_string(),
             key: key.to_string(),
-        }),
-        NodeEvent::Fork {
-            nickname,
-            pubkey,
-            seq,
-        } => Some(MembershipEvent::Fork {
-            nick: nickname.to_string(),
-            pubkey,
-            seq,
         }),
         NodeEvent::StateChanged {
             channel,

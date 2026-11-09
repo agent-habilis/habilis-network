@@ -82,12 +82,9 @@ mod tests {
     };
     use crate::daemon::state::{BeaconNote, PeerInfoFlood, RendezvousFlag, Standing};
     use crate::protocol::{
-        AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, Nickname,
-        UnixSecs,
+        AppFrameParams, AuthorKey, MeshId, Message, MessageBody, MessageId, Nickname, UnixSecs,
     };
-    use crate::testing::{
-        author_of, endpoint_id, fresh_state, fresh_state_with_book, nick, test_key,
-    };
+    use crate::testing::{endpoint_id, fresh_state, fresh_state_with_book, nick, test_key};
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
@@ -1695,190 +1692,6 @@ mod tests {
         message
     }
 
-    /// A content hash for a test: the hash of the name.
-    fn hash_of(name: &str) -> ContentHash {
-        ContentHash::of(name.as_bytes())
-    }
-
-    #[test]
-    fn note_msg_seq_detects_equivocation_once() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let key = author_of("alice-key");
-        // First sighting at a seq → recorded, no fork.
-        assert!(
-            !state.note_msg_seq(&key, 0, hash_of("hashA")),
-            "the same hash at seq 0 is no equivocation"
-        );
-        // Same message again (same hash) → no fork.
-        assert!(
-            !state.note_msg_seq(&key, 0, hash_of("hashA")),
-            "repeating the same hash at seq 0 is still no equivocation"
-        );
-        // Different hash at the SAME seq → fork, reported exactly once.
-        assert!(
-            state.note_msg_seq(&key, 0, hash_of("hashB")),
-            "conflict is a fork"
-        );
-        assert!(
-            !state.note_msg_seq(&key, 0, hash_of("hashC")),
-            "already flagged: one event per key"
-        );
-    }
-
-    #[test]
-    fn note_msg_seq_is_per_key_and_per_seq() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        assert!(
-            !state.note_msg_seq(&author_of("alice"), 0, hash_of("h0")),
-            "alice's first message at seq 0 is no equivocation"
-        );
-        // A new seq for the same author is just the next entry, not a fork.
-        assert!(
-            !state.note_msg_seq(&author_of("alice"), 1, hash_of("h1")),
-            "alice's first message at seq 1 is no equivocation"
-        );
-        // A different key reusing seq 0 with its own hash is independent.
-        assert!(
-            !state.note_msg_seq(&author_of("bob"), 0, hash_of("other")),
-            "bob's seq 0 is not alice's equivocation"
-        );
-        // But a conflict on alice's seq 0 still fires.
-        assert!(
-            state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")),
-            "a second hash at alice's seq 0 is equivocation"
-        );
-    }
-
-    #[test]
-    fn forget_msg_seq_prunes_author_and_fork_flag() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_msg_seq(&author_of("alice"), 0, hash_of("h0"));
-        assert!(
-            state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")),
-            "fork"
-        );
-        assert!(
-            state.forked.contains(&author_of("alice")),
-            "alice is flagged as a fork"
-        );
-        // Evicting the *recorded* twin (hash "h0") drops alice from both maps.
-        state.forget_msg_seq(&author_of("alice"), 0, &hash_of("h0"));
-        assert!(
-            !state.author_seqs.contains_key(&author_of("alice")),
-            "forgetting alice drops her sequence state"
-        );
-        assert!(
-            !state.forked.contains(&author_of("alice")),
-            "fork flag pruned with author"
-        );
-    }
-
-    #[test]
-    fn forget_msg_seq_keeps_evidence_when_other_twin_evicted() {
-        // A fork keeps two twins at one (author, seq). Evicting the twin we did
-        // NOT record must not clear the recorded slot / fork flag — otherwise a
-        // later resend of the still-retained twin re-detects the fork as new.
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_msg_seq(&author_of("alice"), 0, hash_of("recorded"));
-        assert!(
-            state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")),
-            "fork fires"
-        );
-        assert!(
-            state.forked.contains(&author_of("alice")),
-            "alice stays flagged as a fork after one twin is evicted"
-        );
-        // Evict the non-recorded twin ("twin"): the slot for "recorded" stays.
-        state.forget_msg_seq(&author_of("alice"), 0, &hash_of("twin"));
-        assert!(
-            state.author_seqs.contains_key(&author_of("alice")),
-            "recorded slot retained"
-        );
-        assert!(
-            state.forked.contains(&author_of("alice")),
-            "fork flag retained"
-        );
-        // A resend of the recorded twin does not re-fire the fork (already
-        // flagged), proving the evidence survived the eviction.
-        assert!(
-            !state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")),
-            "the evicted twin is not seen as a new equivocation"
-        );
-    }
-
-    #[test]
-    fn note_dag_moves_tip_set() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        // First message (no parents) becomes the sole tip.
-        assert!(
-            !state.note_dag(hash_of("h1"), &[], UnixSecs::from(100)),
-            "a root node with no parents is not flagged"
-        );
-        let tips_h1: Vec<_> = state.dag_parents().collect();
-        assert_eq!(
-            tips_h1,
-            vec![hash_of("h1")],
-            "h1 is the only tip after its first note"
-        );
-        // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
-        assert!(
-            !state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from(101)),
-            "a child of h1 is not flagged"
-        );
-        let tips_h2: Vec<_> = state.dag_parents().collect();
-        assert_eq!(
-            tips_h2,
-            vec![hash_of("h2")],
-            "h2 replaces h1 as the only tip"
-        );
-    }
-
-    #[test]
-    fn note_dag_keeps_concurrent_tips() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_dag(hash_of("a"), &[], UnixSecs::from(1));
-        state.note_dag(hash_of("b"), &[], UnixSecs::from(1)); // concurrent: no shared parent
-        let mut both = vec![hash_of("a"), hash_of("b")];
-        both.sort();
-        let tips: Vec<_> = state.dag_parents().collect();
-        assert_eq!(tips, both, "both tips, in hash order");
-    }
-
-    #[test]
-    fn note_dag_flags_backdating() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_dag(hash_of("parent"), &[], UnixSecs::from(200));
-        // Child claims an earlier timestamp than a parent it references.
-        assert!(
-            state.note_dag(hash_of("child"), &[hash_of("parent")], UnixSecs::from(100)),
-            "a child stamped before its parent is flagged as backdated"
-        );
-        // A forward timestamp is fine.
-        assert!(
-            !state.note_dag(hash_of("ok"), &[hash_of("parent")], UnixSecs::from(300)),
-            "a child stamped after its parent is not flagged"
-        );
-    }
-
-    #[test]
-    fn forget_hash_prunes_dag() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_dag(hash_of("h"), &[], UnixSecs::from(1));
-        state.forget_hash(&hash_of("h"));
-        assert!(
-            state.dag_parents().next().is_none(),
-            "forgetting the hash leaves no parents in the DAG"
-        );
-    }
-
     /// A valid (curve-point) `EndpointId` derived deterministically from
     /// a seed — `EndpointId::from_bytes` rejects arbitrary bytes.
     // The `known_endpoints` / `quiet` fields are `BoundedFifoSet`s wired with
@@ -2630,30 +2443,6 @@ mod tests {
         );
     }
 
-    /// A frame still in the message log has been processed. Anti-entropy re-sends any frame a
-    /// peer holds, and `seen` alone forgets one under enough traffic of the kinds the log never
-    /// keeps; the re-send would then be reprocessed and re-surfaced.
-    #[test]
-    fn a_retained_frame_stays_a_duplicate_after_seen_forgets_it() {
-        use crate::util::tuning::SEEN_IDS_CAP;
-
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let message = msg_with_id(&MessageId::random());
-        assert!(
-            !state.mark_seen(&message),
-            "first sighting is not a duplicate"
-        );
-        state.message_log.push(message.clone());
-        for _ in 0..SEEN_IDS_CAP {
-            state.mark_seen(&msg_with_id(&MessageId::random()));
-        }
-        assert!(
-            state.mark_seen(&message),
-            "a re-send of a frame still in the log is a duplicate"
-        );
-    }
-
     #[test]
     fn mark_seen_keys_on_pubkey_not_id() {
         // Two messages sharing an id but signed by different keys must NOT
@@ -3399,32 +3188,6 @@ mod tests {
                     .expect("a cooldown in whole seconds fits a usize")
                     + 1,
             "expired cooldown entries are pruned (map stays bounded)"
-        );
-    }
-
-    #[test]
-    fn dedup_window_covers_the_retention_window() {
-        use crate::util::tuning::MESSAGE_LOG_SIZE;
-
-        // The cap relationship itself is asserted at compile time where both
-        // consts live; this covers the behaviour it exists for.
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let earliest = msg_with_id(&MessageId::random());
-        assert!(
-            !state.mark_seen(&earliest),
-            "the earliest retained message is still remembered as seen"
-        );
-        // Mark a full buffer's worth of later messages.
-        for _ in 1..MESSAGE_LOG_SIZE {
-            state.mark_seen(&msg_with_id(&MessageId::random()));
-        }
-        // The earliest is still within the dedup window, so an anti-entropy
-        // resend of it (while it is still retained in the log) is dropped as
-        // a duplicate rather than surfaced a second time.
-        assert!(
-            state.mark_seen(&earliest),
-            "a resend of a still-retained message must be deduped, not re-surfaced"
         );
     }
 

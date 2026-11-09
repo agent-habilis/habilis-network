@@ -34,7 +34,7 @@ use habilis_network::embed::{
 };
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{
-    self, Blocking, Inbound, Inspect, InspectTest, Membership, Messaging, Request,
+    self, Blocking, Inbound, Inspect, Membership, Messaging, Request,
 };
 use habilis_network::ops::{app_frame, send_app};
 use habilis_network::protocol::{
@@ -189,8 +189,6 @@ trait Peer: Sized {
     async fn broadcast(&self, text: &str) -> Result<(), String>;
     /// Whether a broadcast with this text has reached this member.
     fn saw_broadcast(&mut self, text: &str) -> bool;
-    /// How many messages the member holds in the log that anti-entropy serves from.
-    async fn log_len(&self) -> usize;
     /// How many members this one counts, itself included.
     async fn peer_count(&self) -> usize;
     async fn leave(self);
@@ -205,13 +203,6 @@ impl Peer for Member {
 
     fn saw_broadcast(&mut self, text: &str) -> bool {
         Member::saw_broadcast(self, text)
-    }
-
-    async fn log_len(&self) -> usize {
-        self.membership
-            .request(|reply| Request::InspectTest(InspectTest::MessageLogLen { reply }))
-            .await
-            .expect("the loop answers")
     }
 
     async fn peer_count(&self) -> usize {
@@ -235,7 +226,6 @@ struct Chat {
 
 enum ChatSession {
     Send(String, oneshot::Sender<Result<(), String>>),
-    LogLen(oneshot::Sender<usize>),
     PeerCount(oneshot::Sender<usize>),
 }
 
@@ -288,10 +278,6 @@ impl NodeDriver for Chat {
                 let sent = send_app(state, context, frame, class).await.map(|_| ());
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true
-            }
-            ChatSession::LogLen(reply) => {
-                let _ = reply.send(state.message_log_len());
-                false
             }
             ChatSession::PeerCount(reply) => {
                 let _ = reply.send(state.member_count());
@@ -358,15 +344,6 @@ impl Peer for LoggingMember {
             .any(|received| received == text)
     }
 
-    async fn log_len(&self) -> usize {
-        let (reply, answer) = oneshot::channel();
-        self.node
-            .send(ChatSession::LogLen(reply))
-            .await
-            .expect("the loop takes the request");
-        answer.await.expect("the loop answers")
-    }
-
     async fn peer_count(&self) -> usize {
         let (reply, answer) = oneshot::channel();
         self.node
@@ -408,35 +385,12 @@ async fn watch<Participant: Peer>(
     }
 }
 
-/// The lengths of the three message logs: the creator, joiner one and joiner two.
-async fn log_lens<Participant: Peer>(members: [&Participant; 3]) -> [usize; 3] {
-    [
-        members[0].log_len().await,
-        members[1].log_len().await,
-        members[2].log_len().await,
-    ]
-}
-
 /// The report line of a run, for the failure message and the log.
-fn report(
-    name: &str,
-    app: &str,
-    probes: &[Probe; 2],
-    before: [usize; 3],
-    after: [usize; 3],
-) -> String {
-    let growth = |index: usize| {
-        i64::try_from(after[index]).unwrap_or(i64::MAX)
-            - i64::try_from(before[index]).unwrap_or(i64::MAX)
-    };
+fn report(name: &str, app: &str, probes: &[Probe; 2]) -> String {
     format!(
-        "DIAG {name} [app: {app}]: joiner one's broadcast: {}; joiner two's broadcast: {}; message \
-         log growth (end minus before the sends): creator {:+}, joiner one {:+}, joiner two {:+}",
+        "DIAG {name} [app: {app}]: joiner one's broadcast: {}; joiner two's broadcast: {}",
         probes[0].describe(),
         probes[1].describe(),
-        growth(0),
-        growth(1),
-        growth(2),
     )
 }
 
@@ -479,7 +433,6 @@ async fn measure_race<Participant: Peer>(
     if settle {
         wait_until_meshed([&creator, &j1, &j2]).await;
     }
-    let before = log_lens([&creator, &j1, &j2]).await;
     time::sleep(delay).await;
     let first = Probe::sent(format!("{name} one"));
     j1.broadcast(&first.text)
@@ -492,13 +445,7 @@ async fn measure_race<Participant: Peer>(
 
     let mut probes = [first, second];
     watch(&mut creator, &mut j1, &mut j2, &mut probes).await;
-    let line = report(
-        name,
-        Participant::APP,
-        &probes,
-        before,
-        log_lens([&creator, &j1, &j2]).await,
-    );
+    let line = report(name, Participant::APP, &probes);
     eprintln!("{line}");
     let in_time = probes
         .iter()

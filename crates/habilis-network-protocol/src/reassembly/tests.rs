@@ -697,12 +697,12 @@ fn completion_releases_the_budget() {
 }
 
 #[test]
-fn repair_tickets_target_stalled_big_groups_once_per_window() {
-    use habilis_network_util::consts::{LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_REPAIR_IDLE};
+fn repair_tickets_target_every_stalled_group_once_per_window() {
+    use habilis_network_util::consts::REASSEMBLY_REPAIR_IDLE;
     let _guard = ::habilis_network_test_tracing::init();
     let start = Instant::now();
     let mut store = ReassemblyStore::default();
-    // A small group (logged, heals via anti-entropy) and a big one.
+    // A small group and a big one: both are repaired from the sender's cache.
     let small = group("00000000-0000-4000-8000-00000000000a");
     let big = group("00000000-0000-4000-8000-00000000000b");
     ingest(
@@ -726,7 +726,7 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
             Shard {
                 group: big.clone(),
                 index: 0,
-                total: LOGGED_SHARD_GROUP_MAX_TOTAL + 4,
+                total: 20,
             },
         ),
         start,
@@ -739,7 +739,7 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
             Shard {
                 group: big.clone(),
                 index: 2,
-                total: LOGGED_SHARD_GROUP_MAX_TOTAL + 4,
+                total: 20,
             },
         ),
         start,
@@ -755,26 +755,34 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
     // Stalled: only the big group is ticketed, with exactly its gaps.
     let stalled = start + REASSEMBLY_REPAIR_IDLE;
     let tickets: Vec<_> = store.repair_tickets(stalled).collect();
-    assert_eq!(tickets.len(), 1, "small groups heal via anti-entropy");
     assert_eq!(
-        tickets[0].group, big,
+        tickets.len(),
+        2,
+        "every stalled group is ticketed, small ones too"
+    );
+    let big_ticket = tickets
+        .iter()
+        .find(|ticket| ticket.group == big)
+        .expect("the big group is ticketed");
+    assert_eq!(
+        big_ticket.group, big,
         "the repair ticket targets the stalled big group"
     );
     assert_eq!(
-        tickets[0].author,
+        big_ticket.author,
         author_of("a"),
         "the repair ticket names the key that sent the shards"
     );
     assert!(
-        !tickets[0].missing.contains(&0),
+        !big_ticket.missing.contains(&0),
         "the repair ticket does not ask for shard 0, which is held"
     );
     assert!(
-        !tickets[0].missing.contains(&2),
+        !big_ticket.missing.contains(&2),
         "the repair ticket does not ask for shard 2, which is held"
     );
     assert!(
-        tickets[0].missing.contains(&1),
+        big_ticket.missing.contains(&1),
         "the repair ticket asks for the missing shard 1"
     );
 
@@ -789,8 +797,8 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
     let next_tickets: Vec<_> = store.repair_tickets(next).collect();
     assert_eq!(
         next_tickets.len(),
-        1,
-        "the next window issues one repair ticket"
+        2,
+        "the next window issues one repair ticket per stalled group"
     );
 }
 
@@ -798,7 +806,7 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
 /// the shards, so the repair ask goes to the key that holds them.
 #[test]
 fn a_repair_ticket_of_a_twin_nickname_goes_to_the_key_that_sent_the_shards() {
-    use habilis_network_util::consts::{LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_REPAIR_IDLE};
+    use habilis_network_util::consts::REASSEMBLY_REPAIR_IDLE;
     let _guard = ::habilis_network_test_tracing::init();
     let start = Instant::now();
     let mut store = ReassemblyStore::default();
@@ -808,7 +816,7 @@ fn a_repair_ticket_of_a_twin_nickname_goes_to_the_key_that_sent_the_shards() {
         let shard = Shard {
             group: shard_group.clone(),
             index: 0,
-            total: LOGGED_SHARD_GROUP_MAX_TOTAL + 4,
+            total: 20,
         };
         ingest(&mut store, &shard_msg("body", key, shard), start);
     }
@@ -896,4 +904,54 @@ fn author_budget_never_exceeded_under_random_streams() {
             "the author budget is never exceeded under random streams"
         );
     }
+}
+
+#[test]
+fn a_small_group_that_lost_a_shard_completes_from_its_repair_ticket() {
+    use habilis_network_util::consts::REASSEMBLY_REPAIR_IDLE;
+    let _guard = ::habilis_network_test_tracing::init();
+    let start = Instant::now();
+    let mut store = ReassemblyStore::default();
+    let small = group("00000000-0000-4000-8000-00000000000c");
+    let first = shard_msg(
+        "one",
+        "a",
+        Shard {
+            group: small.clone(),
+            index: 0,
+            total: 2,
+        },
+    );
+    let second = shard_msg(
+        "two",
+        "a",
+        Shard {
+            group: small.clone(),
+            index: 1,
+            total: 2,
+        },
+    );
+    ingest(&mut store, &first, start);
+
+    // The second shard is lost. Once the group stalls, its repair ticket asks for it.
+    let stalled = start + REASSEMBLY_REPAIR_IDLE;
+    let tickets: Vec<_> = store.repair_tickets(stalled).collect();
+    let ticket = tickets
+        .iter()
+        .find(|ticket| ticket.group == small)
+        .expect("a stalled small group is ticketed");
+    assert_eq!(
+        ticket.missing,
+        vec![1],
+        "the ticket asks for the lost shard"
+    );
+
+    // The author re-serves that shard, and the body completes.
+    assert!(
+        matches!(
+            ingest(&mut store, &second, stalled),
+            ShardIngest::Complete(_)
+        ),
+        "the re-served shard completes the small group"
+    );
 }

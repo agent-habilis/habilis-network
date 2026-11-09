@@ -93,7 +93,7 @@ pub async fn send_app(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
     frame: Verified,
-    class: AppClass,
+    _class: AppClass,
 ) -> Result<transport::Delivered, transport::SendError> {
     if frame.wire_len() > MAX_MESSAGE_SIZE {
         return Err(transport::SendError::Oversize(format!(
@@ -124,9 +124,6 @@ pub async fn send_app(
             transport::note_held(state, error);
             offer_for_held(state, context, &frame);
         }
-        if outcome.is_ok() {
-            super::recv::retain_own_app_broadcast(state, &frame, class);
-        }
         return outcome;
     }
     // An unmeshed node refuses a directed frame at once: it is not buffered.
@@ -139,7 +136,6 @@ pub async fn send_app(
     if state.pending_outbound.push((frame.clone(), bytes)) {
         // Buffered until the meshed edge flushes it through the same send
         // decision (see `gossip::recv::flush_pending`). A buffered broadcast is still ours.
-        super::recv::retain_own_app_broadcast(state, &frame, class);
         Ok(transport::Delivered::Done)
     } else {
         Err(transport::SendError::internal(anyhow::anyhow!(
@@ -655,13 +651,9 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
 /// Called once at the top of the event loop; the caller bumps
 /// `last_sent_at` afterwards.
 ///
-/// Takes `state` only to retain the `joined` locally — see
-/// [`retain_own_broadcast`](super::recv::retain_own_broadcast) for why a node
-/// that does not hold its own presence makes anti-entropy unconvergeable.
 pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
     broadcast_msg(context.sender, &joined).await;
-    super::recv::retain_own_broadcast(state, joined);
     broadcast_peer_info(state, context).await;
 }
 

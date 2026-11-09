@@ -24,10 +24,7 @@ pub(crate) mod app;
 pub(crate) mod config;
 pub(crate) mod handler_ctx;
 pub(crate) mod node;
-// In-memory accounting stores owned by `EventLoopState`. `pub(crate)` so
-// the gossip anti-entropy layer (and its tests) can name `MessageLog`; still crate-internal.
 pub(crate) use crate::doc;
-pub(crate) mod message_log;
 pub(crate) mod params;
 // Dedicated, byte-budgeted buffer for partial multipart bodies — reassembly
 // no longer reads the message log, so log eviction can't break it.
