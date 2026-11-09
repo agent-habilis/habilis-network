@@ -191,6 +191,31 @@ pub fn change_body_tombstoned(
     origins: &[Stamp],
     tombstones: &[(Vec<String>, Stamp)],
 ) -> Result<MessageBody, DocError> {
+    // One body for one meaning, which is how `parse_change_full` reads it back: a stamp or a
+    // tombstone needs the time of the change, and the tombstones are paths of a seed root in the
+    // order of the paths, none twice, none empty and none over the cap. A body that breaks a rule
+    // parses on no node, so the composer refuses it here: the caller would sign a frame that the
+    // whole mesh ignores, and the writes it names would be lost.
+    if (!origins.is_empty() || !tombstones.is_empty()) && time.is_none() {
+        return Err(DocError::encode(
+            "a change with stamps or tombstones carries the time of the change",
+        ));
+    }
+    let mut above: Option<&Vec<String>> = None;
+    for (path, _) in tombstones {
+        let bytes: usize = path.iter().map(String::len).sum();
+        if path.is_empty() || bytes > DOC_TOMBSTONE_PATH_BYTES_MAX {
+            return Err(DocError::encode(
+                "a tombstone names a path that is empty or over the bytes of a path",
+            ));
+        }
+        if above.is_some_and(|held| held >= path) {
+            return Err(DocError::encode(
+                "the tombstones are not in the order of their paths, or one of them is there twice",
+            ));
+        }
+        above = Some(path);
+    }
     let mut tags: Vec<String> = Vec::new();
     let mut named: Vec<(u64, u32)> = Vec::with_capacity(origins.len());
     for stamp in origins {
@@ -402,6 +427,7 @@ mod tests {
         change_body_timed, change_body_tombstoned, decrypt_body, encrypt_body, merge_body,
         parse_change, parse_change_body, parse_change_full,
     };
+    use crate::StampedPaths;
     use habilis_network_protocol::SymmetricKey;
 
     fn key(byte: u8) -> SymmetricKey {
@@ -518,6 +544,62 @@ mod tests {
         assert!(
             parse_change_full(no_time).is_none(),
             "tombstones with no time of the change are no body"
+        );
+    }
+
+    /// The composer refuses what no parser accepts. A body of tombstones out of order, or of stamps
+    /// with no time of the change, reads as no body on every node: a caller that gets one signs a
+    /// frame that the whole mesh ignores, and the writes it names are lost.
+    #[test]
+    fn a_change_that_no_parser_accepts_composes_into_no_body() {
+        /// One tombstone of `keys`, with the same stamp for all of them: the order of the paths is
+        /// what the cases below vary.
+        fn dead(keys: &[&str]) -> (Vec<String>, Stamp) {
+            let owned = keys.iter().map(|key| (*key).to_owned());
+            (owned.collect(), Stamp::new(9, "aa".to_owned()))
+        }
+        let _guard = ::habilis_network_test_tracing::init();
+        let over_the_cap: String = "x".repeat(super::DOC_TOMBSTONE_PATH_BYTES_MAX + 1);
+        let cases: Vec<(StampedPaths, Option<u64>, &str)> = vec![
+            (
+                vec![dead(&["b"]), dead(&["a"])],
+                Some(7),
+                "tombstones out of the order of their paths",
+            ),
+            (
+                vec![dead(&["a"]), dead(&["a"])],
+                Some(7),
+                "the same tombstone path twice",
+            ),
+            (vec![dead(&[])], Some(7), "an empty path"),
+            (
+                vec![dead(&[over_the_cap.as_str()])],
+                Some(7),
+                "a path over the cap",
+            ),
+            (
+                vec![dead(&["a"])],
+                None,
+                "tombstones with no time of the change",
+            ),
+        ];
+        for (tombstones, time, why) in cases {
+            assert!(
+                change_body_tombstoned(&[1, 2, 3], None, 0, None, time, &[], &tombstones).is_err(),
+                "the composer gave a body for {why}"
+            );
+        }
+        let stamp = Stamp::new(9, "aa".to_owned());
+        assert!(
+            change_body_stamped(&[1, 2, 3], None, 0, None, None, &[stamp]).is_err(),
+            "the composer gave a body for stamps with no time of the change"
+        );
+        let fine = vec![dead(&["a"]), dead(&["a", "b"]), dead(&["b"])];
+        let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &[], &fine)
+            .expect("the control: a canonical list composes");
+        assert!(
+            parse_change_full(body.as_str()).is_some(),
+            "the control: a canonical list parses"
         );
     }
 

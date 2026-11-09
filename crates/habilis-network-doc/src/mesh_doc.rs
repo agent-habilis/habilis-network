@@ -4063,7 +4063,7 @@ mod tests {
         SeedMark, change_body_stamped, change_body_timed, change_body_tombstoned, encrypt_body,
         parse_change_full,
     };
-    use crate::{DocError, Stamp, StampedPaths};
+    use crate::{DocError, Stamp};
     use automerge::Change;
     use automerge::transaction::Transactable;
     use habilis_network_protocol::messages::Verified;
@@ -7614,27 +7614,28 @@ mod tests {
         );
     }
 
+    /// The parser refuses a tombstone list that is not canonical, whatever wrote the body: a body
+    /// comes from the wire, and a peer puts on it what it wants. The composer refuses the same
+    /// lists, so the bodies here are raw.
     #[test]
     fn a_tombstone_body_that_is_not_canonical_is_refused() {
         let _guard = ::habilis_network_test_tracing::init();
-        let stamp = Stamp::new(9, "aa".to_owned());
-        let one = |path: Vec<&str>| (owned_path(path), stamp.clone());
-        let cases: Vec<(StampedPaths, &str)> = vec![
-            (vec![one(vec!["a"]), one(vec!["a"])], "the same path twice"),
-            (vec![one(vec!["b"]), one(vec!["a"])], "paths out of order"),
-            (vec![one(vec![])], "an empty path"),
-            (
-                vec![one(vec![
-                    &"x".repeat(super::DOC_TOMBSTONE_PATH_BYTES_MAX + 1),
-                ])],
-                "a path over the cap",
-            ),
+        let long = "x".repeat(super::DOC_TOMBSTONE_PATH_BYTES_MAX + 1);
+        let cases: Vec<(Value, &str)> = vec![
+            (json!([[["a"], 9, 0], [["a"], 9, 0]]), "the same path twice"),
+            (json!([[["b"], 9, 0], [["a"], 9, 0]]), "paths out of order"),
+            (json!([[[], 9, 0]]), "an empty path"),
+            (json!([[[long], 9, 0]]), "a path over the cap"),
         ];
         for (tombstones, why) in cases {
-            let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &[], &tombstones)
-                .expect("a body");
-            assert!(parse_change_full(body.as_str()).is_none(), "refused: {why}");
+            let body = json!({ "k": "change", "c": "Ldp", "t": 7, "x": tombstones, "a": ["aa"] });
+            assert!(
+                parse_change_full(&body.to_string()).is_none(),
+                "refused: {why}"
+            );
         }
+        let stamp = Stamp::new(9, "aa".to_owned());
+        let one = |path: Vec<&str>| (owned_path(path), stamp.clone());
         let fine = vec![one(vec!["a"]), one(vec!["a", "b"]), one(vec!["b"])];
         let body =
             change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &[], &fine).expect("a body");
