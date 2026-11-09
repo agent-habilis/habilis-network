@@ -41,6 +41,8 @@ pub(crate) struct CollectionSizes {
     pub(crate) direct: usize,
     pub(crate) linked_endpoints: usize,
     pub(crate) graft_backoff: usize,
+    pub(crate) refused_endpoints: usize,
+    pub(crate) orphaned_endpoints: usize,
 }
 
 /// A counter of the state as a gauge of the census, saturated at the width of this target: a
@@ -91,6 +93,8 @@ impl CollectionSizes {
         sizes.direct = state.direct.len();
         sizes.linked_endpoints = state.linked_endpoints.len();
         sizes.graft_backoff = state.graft_backoff.len();
+        sizes.refused_endpoints = state.refused_endpoints.len();
+        sizes.orphaned_endpoints = state.orphaned_endpoints.len();
         sizes
     }
 }
@@ -116,6 +120,32 @@ mod tests {
         );
         assert_ne!(super::counted(over), 0, "and it is never 0");
         assert_eq!(super::counted(7), 7, "a count that fits is itself");
+    }
+
+    /// The capped collections of the endpoints that no nickname binds: a mesh that refuses many
+    /// keys, or that links many endpoints of its own, fills them, and a reader of the census that
+    /// hunts for growth must see them.
+    #[test]
+    fn the_census_counts_the_refused_and_the_orphaned_endpoints() {
+        let mut state = fresh_state();
+        state.retain_refused_endpoint(
+            test_key("ant"),
+            iroh::EndpointAddr::new(testing::endpoint_id(1)),
+        );
+        // Only a linked endpoint becomes an orphan: an unlinked one is forgotten at once.
+        state.linked_endpoints.insert(testing::endpoint_id(2));
+        state.release_unbound_endpoint(testing::endpoint_id(2));
+
+        let sizes = CollectionSizes::read(&state);
+
+        assert_eq!(
+            sizes.refused_endpoints, 1,
+            "the refused endpoint is counted"
+        );
+        assert_eq!(
+            sizes.orphaned_endpoints, 1,
+            "the orphaned endpoint is counted"
+        );
     }
 
     #[test]
