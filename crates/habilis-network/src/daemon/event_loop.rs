@@ -1167,7 +1167,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     async fn seed_built(&mut self, outcome: Result<seed_job::SeedOutcome, JoinError>) {
         let context = self.parts.handler_ctx(&self.sender);
         let frames = seed_job::finish(&mut self.state, outcome, context.author, context.mesh);
-        seed_job::send_frames(&mut self.state, &self.sender, frames, true).await;
+        seed_job::send_frames(&mut self.state, &self.sender, frames, seed_job::Chain::Seed).await;
     }
 
     /// Send the replay of the writes that a seed lacks, and the restores that are due, which the

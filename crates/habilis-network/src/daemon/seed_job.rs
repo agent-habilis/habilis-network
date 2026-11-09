@@ -181,27 +181,36 @@ pub(crate) fn signed_frames(
     Ok(frames)
 }
 
-/// Send frames in order: with `take_first` (a seed) each one is taken by this node as a candidate
-/// first (it adopts its own seed after the wait, like every node), and then it goes to the overlay,
-/// or waits in the buffer of a node that does not reach it yet. A send that fails stops the chain
-/// and holds the next cut back. Returns how many frames went out.
+/// What a chain of frames carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Chain {
+    /// A seed: this node takes each frame as a candidate before it goes out, as every node adopts
+    /// its own seed after the wait, and a send that fails holds the next cut back.
+    Seed,
+    /// A replay or a restore of writes that the seed lacks. It holds no cut back: the document
+    /// gives the writes again at a later tick.
+    Replay,
+}
+
+/// Send frames in order: each one goes to the overlay, or waits in the buffer of a node that does
+/// not reach it yet. A send that fails stops the chain. Returns how many frames went out.
 pub(crate) async fn send_frames(
     state: &mut EventLoopState,
     sender: &MeshSender,
     frames: Vec<(Verified, WireFrame)>,
-    take_first: bool,
+    chain: Chain,
 ) -> usize {
     let mut sent = 0;
     for (signed, bytes) in frames {
-        if take_first {
+        if chain == Chain::Seed {
             let _ = state.doc_mut(Channel::State).ingest(&signed);
         }
         if state.overlay_reachable() {
             if let Err(error) = sender.broadcast(bytes).await {
-                cut_failed(state, &error);
+                chain_failed(state, chain, &error);
                 return sent;
             }
-        } else if !buffer_frame(state, (signed, bytes)) {
+        } else if !buffer_frame(state, chain, (signed, bytes)) {
             return sent;
         }
         sent += 1;
@@ -209,14 +218,26 @@ pub(crate) async fn send_frames(
     sent
 }
 
+/// A chain that stopped. The cut of a seed failed, and the next one waits. A replay that stopped is
+/// no failed cut: the document holds the writes and a later tick sends them, and a hold of the cut
+/// would keep the document over its ceiling for longer at each try.
+fn chain_failed(state: &mut EventLoopState, chain: Chain, error: &impl Display) {
+    match chain {
+        Chain::Seed => cut_failed(state, error),
+        Chain::Replay => {
+            tracing::warn!(target: "habilis_network::gossip", %error, "the replay of the state channel stopped: a frame of it did not go out");
+        }
+    }
+}
+
 /// Hold a frame for a node that the overlay does not reach yet. The buffer is bounded and shared
 /// with the chat, and a full one refuses the new frame: for a seed that is a hole in the chain, so
 /// the cut fails and the node does not go on with the rest.
-fn buffer_frame(state: &mut EventLoopState, frame: (Verified, WireFrame)) -> bool {
+fn buffer_frame(state: &mut EventLoopState, chain: Chain, frame: (Verified, WireFrame)) -> bool {
     if state.pending_outbound.push(frame) {
         return true;
     }
-    cut_failed(state, &"the buffer of outbound frames is full");
+    chain_failed(state, chain, &"the buffer of outbound frames is full");
     false
 }
 
@@ -225,13 +246,20 @@ fn buffer_frame(state: &mut EventLoopState, frame: (Verified, WireFrame)) -> boo
 /// another thread; this is for a test that measures the send, and for a tool.
 ///
 /// # Errors
-/// When the document holds a candidate, or the seed does not build.
+/// When a build of the loop runs, when the document holds a candidate, or when the seed does not
+/// build.
 pub(crate) async fn cut_now(
     state: &mut EventLoopState,
     me: &Nickname,
     mesh: &MeshId,
     sender: &MeshSender,
 ) -> anyhow::Result<usize> {
+    // The loop started a build for this epoch. Its chain and the chain of this call carry one
+    // actor and one epoch, so a peer that takes a tail of each adopts neither seed at its wait.
+    anyhow::ensure!(
+        state.seed_job.is_none(),
+        "a build of a seed of this node runs, so the state channel is not cut here"
+    );
     let plan = state.doc(Channel::State).seed_plan()?;
     let job = job_for(
         state,
@@ -249,7 +277,7 @@ pub(crate) async fn cut_now(
         took: started.elapsed(),
     };
     let frames = finish(state, Ok(outcome), me, mesh);
-    Ok(send_frames(state, sender, frames, true).await)
+    Ok(send_frames(state, sender, frames, Chain::Seed).await)
 }
 
 /// One tick of the state channel, on the minute timer: the document counts its epoch and the size
@@ -568,7 +596,7 @@ pub(crate) async fn send_replays(
     let waiting = state.replay_queue.take();
     for (patch, stamps) in waiting {
         let frames = replay_frames(state, &patch, &stamps, me, mesh);
-        send_frames(state, sender, frames, false).await;
+        send_frames(state, sender, frames, Chain::Replay).await;
     }
 }
 
@@ -659,9 +687,9 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        Instant, LARGEST_TIME, SeedJob, SeedOutcome, buffer_frame, closing_digest_seen,
-        creator_has_nothing_to_sync, far_jump_allowed, finish, frame_fits_with, queue_replay,
-        rank_of, replay_frames, spawn_build, sync_deadline, tick,
+        Chain, Instant, LARGEST_TIME, SeedJob, SeedOutcome, buffer_frame, closing_digest_seen,
+        creator_has_nothing_to_sync, cut_now, far_jump_allowed, finish, frame_fits_with,
+        queue_replay, rank_of, replay_frames, spawn_blocking, spawn_build, sync_deadline, tick,
     };
     use tokio::time::interval;
 
@@ -1081,7 +1109,7 @@ mod tests {
         let cap = PENDING_OUTBOUND_CAP;
         for _ in 0..cap {
             assert!(
-                buffer_frame(&mut state, (frame.clone(), bytes.clone())),
+                buffer_frame(&mut state, Chain::Seed, (frame.clone(), bytes.clone())),
                 "room"
             );
         }
@@ -1090,7 +1118,7 @@ mod tests {
             "a buffer with room fails no cut"
         );
         assert!(
-            !buffer_frame(&mut state, (frame, bytes)),
+            !buffer_frame(&mut state, Chain::Seed, (frame, bytes)),
             "a full buffer refuses the frame"
         );
         assert_eq!(state.state_cuts_failed, 1, "and the cut fails");
@@ -1280,6 +1308,78 @@ mod tests {
         assert!(
             !later.is_empty(),
             "when the wall clock has moved, it is sent"
+        );
+    }
+
+    /// `cut_now` refuses while a build of the loop runs. The two chains would carry one actor and
+    /// one epoch, and a peer that takes a tail of each adopts neither seed.
+    #[test]
+    fn cut_now_refuses_while_a_build_of_a_seed_runs() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                // Shared with the leaves that it writes below.
+                let identity = Arc::new(Identity::generate());
+                let me = testing::nick("me");
+                let mesh = MeshId::from("test");
+                let node = testing::LaneNode::start().await;
+                let mut state = node.state();
+                let mut doc = MeshDoc::new_state(None);
+                doc.finish_sync();
+                write_leaves(&mut doc, &identity, &me, 300);
+                state.state_doc = doc.limits(Limits::with_seed_frames(40));
+                state.seed_job = Some(spawn_blocking(|| SeedOutcome {
+                    epoch: 1,
+                    chain: Err(DocError::CandidateHeld),
+                    took: Duration::ZERO,
+                }));
+
+                let refused = cut_now(&mut state, &me, &mesh, &node.sender).await;
+
+                let error = refused
+                    .expect_err("a cut beside a build is refused")
+                    .to_string();
+                assert!(
+                    error.contains("a build of a seed of this node runs"),
+                    "the refusal names the build that runs, and it says: {error}"
+                );
+                node.endpoint.close().await;
+            },
+        );
+    }
+
+    /// A replay that the buffer of a cut-off node refuses holds no cut back: the document keeps
+    /// the writes for a later tick, and a hold would keep the document over its ceiling for longer
+    /// at each try.
+    #[test]
+    fn a_replay_that_the_buffer_refuses_holds_no_cut_back() {
+        let identity = Identity::generate();
+        let me = testing::nick("me");
+        let mut doc = MeshDoc::new_state(None);
+        doc.finish_sync();
+        let frame = write_merge(&mut doc, &identity, &me, &json!({ "a": 1 }));
+        let bytes = frame.serialize().expect("a wire frame");
+        let mut state = testing::fresh_state();
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "the replay of the state channel stopped: a frame of it did not go out",
+        );
+        for _ in 0..PENDING_OUTBOUND_CAP {
+            assert!(
+                buffer_frame(&mut state, Chain::Replay, (frame.clone(), bytes.clone())),
+                "the premise: the buffer takes the frames until its cap"
+            );
+        }
+
+        assert!(
+            !buffer_frame(&mut state, Chain::Replay, (frame, bytes)),
+            "a full buffer refuses the frame"
+        );
+        assert_eq!(
+            state.state_cuts_failed, 0,
+            "a replay that did not go out is no failed cut"
         );
     }
 
