@@ -259,6 +259,39 @@ mod tests {
         });
     }
 
+    /// A write that fails drops the connection it failed on, and not the one that another dial
+    /// pooled while it waited. A send that times out holds for `SEND_TIMEOUT`, which is long enough
+    /// for a parallel send to replace a dead connection, and an eviction by endpoint id alone would
+    /// put that replacement out of the pool as well.
+    #[test]
+    fn a_write_that_fails_leaves_the_connection_that_a_later_dial_pooled() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(600)).await;
+            let dead = pool.warm_or_dial(server).await.expect("dial");
+            // The pool must hold a replacement, so the dead connection leaves the map open: a
+            // second dial pools the replacement under the same endpoint id.
+            pool.inner.conns.lock().await.remove(&server);
+            let live = pool.warm_or_dial(server).await.expect("dial again");
+            assert_ne!(
+                dead.stable_id(),
+                live.stable_id(),
+                "two dials give two connections"
+            );
+            dead.close(0u32.into(), b"dead");
+
+            pool.send_batch(server, &dead, &[bytes::Bytes::from_static(b"frame")])
+                .await;
+
+            assert_eq!(
+                pool.connection(server).map(|pooled| pooled.stable_id()),
+                Some(live.stable_id()),
+                "the write failed on the closed connection, so the pool keeps the live one"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
     #[test]
     fn a_send_restarts_the_idle_timeout() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {

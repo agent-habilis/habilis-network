@@ -271,7 +271,7 @@ impl UnicastPool {
                 return;
             };
             tracing::debug!(target: LOG_TARGET, %error, "unicast send failed; dropping connection and redialing");
-            pool.inner.conns.lock().await.remove(&eid);
+            pool.evict_if_same(eid, &connection).await;
             if let Err(redial_error) = pool.dial_and_send(eid, bytes).await {
                 tracing::debug!(target: LOG_TARGET, %redial_error, "redial after a failed warm send also failed; frame dropped");
             }
@@ -386,6 +386,23 @@ impl UnicastPool {
         pooled.last_used = PoolInstant::now();
         pooled.hold = Hold::Used;
         Some(pooled.connection.clone())
+    }
+
+    /// Drop the pooled connection of `eid`, but only if it is still `connection`. A write that
+    /// fails takes up to [`SEND_TIMEOUT`], and another send can dial a replacement in that time: an
+    /// eviction by endpoint id alone throws the replacement away, and every send that follows pays
+    /// for a cold dial.
+    pub(in crate::transport::pool) async fn evict_if_same(
+        &self,
+        eid: EndpointId,
+        connection: &Connection,
+    ) {
+        let mut conns = self.inner.conns.lock().await;
+        let pooled_id: Option<usize> = conns.get(&eid).map(|pooled| pooled.connection.stable_id());
+        let same = pooled_id == Some(connection.stable_id());
+        if same {
+            conns.remove(&eid);
+        }
     }
 
     /// Close the connections nothing has used for [`PoolInner::idle`], and the
@@ -561,11 +578,16 @@ impl UnicastPool {
 
     /// Write `frames` to `conn` one stream at a time, in order, stopping and
     /// dropping the connection at the first write error.
-    async fn send_batch(&self, eid: EndpointId, connection: &Connection, frames: &[Bytes]) {
+    pub(in crate::transport::pool) async fn send_batch(
+        &self,
+        eid: EndpointId,
+        connection: &Connection,
+        frames: &[Bytes],
+    ) {
         for bytes in frames {
             if let Err(error) = self.send_marked(eid, connection, bytes).await {
                 tracing::debug!(target: LOG_TARGET, %eid, %error, "batch cut short; dropping the connection");
-                self.inner.conns.lock().await.remove(&eid);
+                self.evict_if_same(eid, connection).await;
                 return;
             }
         }
@@ -609,7 +631,7 @@ impl UnicastPool {
             bail!("{RELAY_REFUSED}");
         }
         if let Err(error) = self.send_marked(eid, &connection, &bytes).await {
-            self.inner.conns.lock().await.remove(&eid);
+            self.evict_if_same(eid, &connection).await;
             return Err(error);
         }
         Ok(())
