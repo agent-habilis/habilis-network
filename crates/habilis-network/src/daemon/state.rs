@@ -1830,6 +1830,41 @@ mod tests {
         );
     }
 
+    /// The pooled connection and the dial cooldown of a dropped orphan need the async pool, which the drop cannot
+    /// call: the drop queues the teardown, as every other release of an unbound endpoint does. With no queue the
+    /// connection stays open until the idle sweep of the pool finds it, and the cooldown refuses the next dial of
+    /// an endpoint that nothing holds any more.
+    #[test]
+    fn the_orphan_that_a_full_set_drops_waits_for_the_teardown_of_the_pool() {
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoint_at = |index: u32| {
+            let mut bytes = [17u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        let mut state = fresh_state();
+        for index in 0..u32::try_from(cap).expect("a small number") {
+            let linked = endpoint_at(index);
+            state.linked_endpoints.insert(linked);
+            state.release_unbound_endpoint(linked);
+        }
+        assert!(
+            state.take_teardown_pending().is_empty(),
+            "a linked orphan queues no teardown: it keeps its pool until its link ends"
+        );
+        assert_eq!(state.orphaned_endpoints.len(), cap, "the set is full");
+
+        let newcomer = endpoint_at(u32::try_from(cap).expect("a small number"));
+        state.linked_endpoints.insert(newcomer);
+        state.release_unbound_endpoint(newcomer);
+
+        assert_eq!(
+            state.take_teardown_pending(),
+            vec![endpoint_at(0)],
+            "the oldest orphan was dropped, and its pooled connection waits for no teardown"
+        );
+    }
+
     /// An orphan that another key bound again before the full set dropped it keeps its state: the endpoint is bound, as
     /// the callers of `forget_endpoint_state` and the drain of the teardown check, and the nickname that binds it needs
     /// its address, direct path and proof for a dial. The set forgets the endpoint; the state stays.

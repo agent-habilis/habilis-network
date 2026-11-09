@@ -1429,7 +1429,8 @@ impl EventLoopState {
     /// the state of the dropped orphan goes with it (`drop_endpoint_state`): no eviction leaves state that no sweep
     /// finds again, whether the orphan lost its link after it came in (it waits for the next sweep), or the endpoints
     /// that are linked outnumber the cap (`--max-peers` has no upper limit), unless a nickname or a retained key binds
-    /// the endpoint again by then. The pooled connection falls back to the idle sweep of the pool.
+    /// the endpoint again by then. The pooled connection of the dropped orphan waits in the teardown
+    /// queue, and falls back to the idle sweep of the pool only when that queue is full.
     fn insert_orphan(&mut self, endpoint: EndpointId) {
         if self.orphaned_endpoints.len() >= ORPHANED_ENDPOINTS_MAX
             && !self.orphaned_endpoints.contains(&endpoint)
@@ -1448,6 +1449,14 @@ impl EventLoopState {
                 // backoff, rival flag, direct path, watches, kinds, pool address): it is not an orphan any more.
                 if !self.endpoint_is_bound(dropped) {
                     self.drop_endpoint_state(dropped);
+                    // The pooled connection and the dial cooldown of the dropped orphan need the
+                    // async pool, which this path cannot call: the loop closes them from the
+                    // teardown queue, as it does for every other endpoint that nothing binds. A
+                    // full queue leaves them to the idle sweep of the pool, and the orphan does not
+                    // go back into the set that just dropped it.
+                    if self.teardown_pending.len() < TEARDOWN_PENDING_MAX {
+                        self.teardown_pending.insert(dropped);
+                    }
                 }
             }
         }
