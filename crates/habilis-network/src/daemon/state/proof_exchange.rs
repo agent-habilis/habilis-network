@@ -48,8 +48,9 @@ const FIRST_ASKS_IN_ALL: usize = 256;
 /// The first asks for sessions that claim a bound nickname (a restart of the member that holds the name, or an
 /// intruder), for each window, outside the shared `FIRST_ASKS_IN_ALL`: an attacker that keeps many endpoints with a
 /// path asking cannot starve the restart of a member that holds a name. The asks of the reserve count in the work in
-/// all. At most `ASKS_PER_BOUND_NICKNAME` for each nickname: an attacker that claims 16 bound nicknames with 4 fresh
-/// sessions each uses the whole reserve, and the restart of another bound nickname waits one window.
+/// all. At most `ASKS_PER_BOUND_NICKNAME` for each nickname, and at most `ASKS_PER_ENDPOINT` for each endpoint: an
+/// attacker that claims 16 bound nicknames with 4 fresh sessions each uses the whole reserve, and the restart of
+/// another bound nickname waits one window.
 const FIRST_ASKS_BOUND: usize = 64;
 const ASKS_PER_BOUND_NICKNAME: usize = 4;
 /// The window of the budget of the proof requests.
@@ -102,6 +103,20 @@ struct Retry {
 /// is held in the roster. A session that claims a bound nickname with no proof of that member is
 /// not admitted ([`Self::admits`]), and a proof of another member for it is not held. A nickname
 /// that no held session binds is free: a session with no proof is admitted and binds nothing.
+/// The reserve of the asks of the claims of bound nicknames, in one window. Each map holds at most
+/// `FIRST_ASKS_BOUND` entries, as many as the asks that one window allows.
+#[derive(Debug)]
+struct BoundReserve {
+    /// When the window started.
+    start: Instant,
+    /// The asks that the reserve gave in it.
+    total: usize,
+    /// How many of them went for each nickname.
+    by_nickname: HashMap<Nickname, usize>,
+    /// How many of them went to each endpoint.
+    by_endpoint: HashMap<EndpointId, usize>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ProofExchange {
     // the proofs, as many as the cap at most; the binding of a nickname is derived from them, so
@@ -129,9 +144,7 @@ pub(crate) struct ProofExchange {
     // the proof requests sent to each endpoint in the window: when it started, and how many;
     // `ASK_BUDGET_ENDPOINTS_MAX` endpoints at most, the oldest dropped when full
     ask_budget: ProofBook<EndpointId, (Instant, usize)>,
-    // the reserve of the claims of bound nicknames in its window: when it started, how many asks it gave, and how
-    // many for each nickname (`FIRST_ASKS_BOUND` entries at most, the asks of a window)
-    ask_budget_bound: Option<(Instant, usize, HashMap<Nickname, usize>)>,
+    ask_budget_bound: Option<BoundReserve>,
     // the proof requests sent in all in the window: when it started, how many, and how many of them were the
     // guaranteed first ask of an endpoint
     ask_budget_all: Option<(Instant, usize, usize)>,
@@ -312,7 +325,7 @@ impl ProofExchange {
     /// `may_ask` for a session that CLAIMS A BOUND NICKNAME (`claim`: a restart of the member that holds the
     /// name, or an intruder). The asks of such a session have a reserve of their own, outside the shared budgets, while
     /// its endpoint is under its cap of 8, and they are not refused because the map of counts is full of live counts
-    /// (the ask goes out untracked, and no live count is dropped):
+    /// (the ask goes out untracked, no live count is dropped, and the reserve keeps the cap of that endpoint itself):
     /// an attacker that keeps many endpoints asking cannot starve the restart of a member that holds a name. The
     /// reserve is `FIRST_ASKS_BOUND` for each window and `ASKS_PER_BOUND_NICKNAME` for each nickname, and the asks
     /// that it allows count in the work in all.
@@ -344,7 +357,7 @@ impl ProofExchange {
         // A full map of live counts leaves the ask untracked: it counts in the reserve and in the work in all.
         if count < ASKS_PER_ENDPOINT
             && let Some(nickname) = claim
-            && self.take_bound_reserve(nickname, now)
+            && self.take_bound_reserve(endpoint, nickname, now)
         {
             self.ask_budget_all = Some((all_start, all_count + 1, all_first));
             if tracked || has_room {
@@ -383,24 +396,41 @@ impl ProofExchange {
         true
     }
 
-    /// Take one ask out of the reserve of the claims of bound nicknames, if there is room for `nickname`. The reserve
-    /// has its own window; its map of nicknames holds at most `FIRST_ASKS_BOUND` entries, as many as the asks that it
-    /// allows in a window.
-    fn take_bound_reserve(&mut self, nickname: &Nickname, now: Instant) -> bool {
-        let (start, total, mut by_nickname) = match self.ask_budget_bound.take() {
-            Some((start, total, by_nickname))
-                if now.saturating_duration_since(start) < ASK_BUDGET_WINDOW =>
-            {
-                (start, total, by_nickname)
+    /// Take one ask out of the reserve of the claims of bound nicknames, if there is room for `nickname` and for
+    /// `endpoint`. The reserve has its own window; its map of nicknames and its map of endpoints hold at most
+    /// `FIRST_ASKS_BOUND` entries each, as many as the asks that it allows in a window.
+    ///
+    /// The count of the endpoint is kept here as well as in `ask_budget`, because a full map of live counts leaves
+    /// the ask untracked there: an endpoint that claims several bound nicknames would otherwise get
+    /// `ASKS_PER_BOUND_NICKNAME` asks for each of them, over the cap that every endpoint has.
+    fn take_bound_reserve(
+        &mut self,
+        endpoint: EndpointId,
+        nickname: &Nickname,
+        now: Instant,
+    ) -> bool {
+        let mut reserve = match self.ask_budget_bound.take() {
+            Some(reserve) if now.saturating_duration_since(reserve.start) < ASK_BUDGET_WINDOW => {
+                reserve
             }
-            _ => (now, 0, HashMap::new()),
+            _ => BoundReserve {
+                start: now,
+                total: 0,
+                by_nickname: HashMap::new(),
+                by_endpoint: HashMap::new(),
+            },
         };
-        let used = by_nickname.get(nickname).copied().unwrap_or(0);
-        let allowed = total < FIRST_ASKS_BOUND && used < ASKS_PER_BOUND_NICKNAME;
+        let used = reserve.by_nickname.get(nickname).copied().unwrap_or(0);
+        let from_endpoint = reserve.by_endpoint.get(&endpoint).copied().unwrap_or(0);
+        let allowed = reserve.total < FIRST_ASKS_BOUND
+            && used < ASKS_PER_BOUND_NICKNAME
+            && from_endpoint < ASKS_PER_ENDPOINT;
         if allowed {
-            by_nickname.insert(nickname.clone(), used + 1);
+            reserve.total += 1;
+            reserve.by_nickname.insert(nickname.clone(), used + 1);
+            reserve.by_endpoint.insert(endpoint, from_endpoint + 1);
         }
-        self.ask_budget_bound = Some((start, total + usize::from(allowed), by_nickname));
+        self.ask_budget_bound = Some(reserve);
         allowed
     }
 
@@ -439,7 +469,10 @@ impl ProofExchange {
         // valid proofs as it likes for its own name. So each member has a cap in it, `PENDING_PER_MEMBER`, and keeps
         // its HIGHEST runs (only the member signs its runs, so a replay is always below its real newest one): a
         // member over its cap replaces its own lowest run, or is refused if the run is not above it. A full class
-        // drops the lowest run of the member that has the most entries, so no member pushes out another.
+        // drops the lowest run of the member that has the most entries, so a member that holds several entries never
+        // pushes out the one entry of another. With a full class of members that hold one entry each the choice is
+        // between members: the proof of one of them goes, and its session is admitted at its next ask (30 s, 60 s,
+        // 120 s). The class holds `PENDING_PROOFS_CLASS_MAX` members, as many as a mesh of that size has.
         let member = proof.identity;
         let own: Vec<(AuthorKey, u64)> = self
             .pending_held
@@ -781,9 +814,10 @@ impl ProofExchange {
 #[cfg(test)]
 mod tests {
     use super::{
-        ASK_BUDGET_ENDPOINTS_MAX, ASK_BUDGET_WINDOW, ASKS_IN_ALL, ASKS_PER_ENDPOINT,
-        DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EndpointId, FIRST_ASKS_IN_ALL,
-        PENDING_PER_MEMBER, PENDING_PROOFS_CLASS_MAX, ProofExchange, verify_proof,
+        ASK_BUDGET_ENDPOINTS_MAX, ASK_BUDGET_WINDOW, ASKS_IN_ALL, ASKS_PER_BOUND_NICKNAME,
+        ASKS_PER_ENDPOINT, DEFERRED_ASK_GAP, DEFERRED_ASK_TTL, DEFERRED_ASKS_MAX, EndpointId,
+        FIRST_ASKS_IN_ALL, PENDING_PER_MEMBER, PENDING_PROOFS_CLASS_MAX, ProofExchange,
+        verify_proof,
     };
     use crate::protocol::identity::Identity;
     use crate::protocol::{AuthorKey, MeshId, Nickname};
@@ -1145,6 +1179,52 @@ mod tests {
         );
     }
 
+    /// A full class of the holders, with one entry for each member: the class keeps its cap, the new proof is kept,
+    /// and the entry of one earlier member goes. Every entry is the restart proof of a member that holds a name, so
+    /// the class cannot grow and one of them must go. The member whose proof went is admitted at its next ask.
+    #[test]
+    fn a_full_class_of_one_entry_for_each_member_keeps_its_cap_and_takes_the_new_proof() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let mesh = MeshId::from("test");
+        let members = PENDING_PROOFS_CLASS_MAX + 1;
+        let restarts: Vec<AuthorKey> = (0..members)
+            .map(|index| {
+                let member = Identity::generate();
+                let name = format!("member{index:02}");
+                let nickname = Nickname::try_new(&name).expect("a nickname");
+                let live = Identity::generate().author_key();
+                let held = member.prove(&live, &name, mesh.as_ref(), 3);
+                assert!(
+                    book.accept_live(&live, &nickname, &mesh, held, true, |_| true),
+                    "the live session of a member did not hold its proof"
+                );
+                let restart = Identity::generate().author_key();
+                let newest = member.prove(&restart, &name, mesh.as_ref(), 100);
+                book.accept_live(&restart, &nickname, &mesh, newest, false, |_| true);
+                restart
+            })
+            .collect();
+
+        let kept: usize = restarts
+            .iter()
+            .filter(|restart| book.has_pending(restart))
+            .count();
+
+        assert_eq!(
+            book.pending_len(),
+            PENDING_PROOFS_CLASS_MAX,
+            "a class of one entry for each member grew past the cap that bounds it"
+        );
+        assert!(
+            book.has_pending(restarts.last().expect("the last restart")),
+            "the newest restart proof was refused by a full class, so a member that restarts last never gets in"
+        );
+        assert_eq!(
+            kept, PENDING_PROOFS_CLASS_MAX,
+            "the new proof did not take the place of exactly one earlier member"
+        );
+    }
+
     /// The pending proof of a session whose member already holds the nickname (it can only be a restart of that
     /// member) is not pushed out by a flood of pending proofs of other keys: the attacker signs fresh proofs of its
     /// own, under nicknames that are free, inside old frames, and each one is a valid pending proof.
@@ -1293,6 +1373,38 @@ mod tests {
         assert!(
             !book.may_ask_for(endpoint_of(0), Some(&bob), start),
             "A got more asks by a claim after the reserve dropped its live count"
+        );
+    }
+
+    /// An untracked ask of the reserve keeps the cap of its endpoint. With the map full of live counts the count of a
+    /// new endpoint is not kept, so its asks all read as the first one: an endpoint that claims several bound
+    /// nicknames would get 4 asks for each of them, and each ask is a signature and a task that holds a frame.
+    #[test]
+    fn an_untracked_claim_keeps_the_cap_of_its_endpoint() {
+        let mut book = ProofExchange::with_cap(QUIET_CAP);
+        let start = Instant::now();
+        let claims: Vec<Nickname> = ["alice", "bob", "carol"]
+            .iter()
+            .map(|name| Nickname::try_new(name).expect("a nickname"))
+            .collect();
+        // 256 endpoints fill the map with live counts, so the count of the endpoint below is not kept
+        for index in 0..256u32 {
+            assert!(
+                book.may_ask_for(endpoint_of(index), None, start),
+                "a first ask"
+            );
+        }
+
+        let every_claim_to_its_cap = claims
+            .iter()
+            .flat_map(|claim| (0..ASKS_PER_BOUND_NICKNAME).map(move |_| claim));
+        let asked: usize = every_claim_to_its_cap
+            .filter(|claim| book.may_ask_for(endpoint_of(1000), Some(claim), start))
+            .count();
+
+        assert!(
+            asked <= ASKS_PER_ENDPOINT,
+            "one endpoint got {asked} asks of the reserve in a window, over the cap of {ASKS_PER_ENDPOINT} that every endpoint has"
         );
     }
 
