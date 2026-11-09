@@ -43,6 +43,12 @@ pub(crate) struct CollectionSizes {
     pub(crate) graft_backoff: usize,
 }
 
+/// A counter of the state as a gauge of the census, saturated at the width of this target: a
+/// 32-bit node (wasm32 is one) holds counts that pass `u32::MAX`.
+fn counted(count: u64) -> usize {
+    usize::try_from(count).unwrap_or(usize::MAX)
+}
+
 impl CollectionSizes {
     pub(crate) fn read(state: &EventLoopState) -> Self {
         let (message_log, message_log_bytes) = state.message_log.size();
@@ -63,11 +69,13 @@ impl CollectionSizes {
         sizes.quiet = state.quiet.len();
         sizes.left_keys = state.left_keys.len();
         sizes.proofs = state.proofs.len();
-        sizes.proofs_refused = usize::try_from(state.proofs.refused()).unwrap_or(0);
-        sizes.proofs_ties_refused = usize::try_from(state.proofs.ties_refused()).unwrap_or(0);
-        sizes.proofs_answers_refused = usize::try_from(state.proofs.answers_refused()).unwrap_or(0);
-        sizes.proofs_bound_refused = usize::try_from(state.proofs.bound_refused()).unwrap_or(0);
-        sizes.proofs_gate_refused = usize::try_from(state.proofs.gate_refused()).unwrap_or(0);
+        // A count that does not fit the width of this target saturates: a 0 would read as a node
+        // that refused nothing, which is the opposite of what the count says.
+        sizes.proofs_refused = counted(state.proofs.refused());
+        sizes.proofs_ties_refused = counted(state.proofs.ties_refused());
+        sizes.proofs_answers_refused = counted(state.proofs.answers_refused());
+        sizes.proofs_bound_refused = counted(state.proofs.bound_refused());
+        sizes.proofs_gate_refused = counted(state.proofs.gate_refused());
         sizes.reassembled_groups = state.receive_memory.reassembled_groups.len();
         sizes.pending_outbound = state.pending_outbound.len();
         sizes.author_seqs = state.author_seqs.len();
@@ -94,6 +102,21 @@ mod tests {
     use crate::protocol::identity::Identity;
     use crate::testing::{self, fresh_state, nick, test_key};
     use crate::util::clock::Instant;
+
+    /// A count that passes the width of the target saturates. A 0 would read as a node that
+    /// refused nothing, and the count says the opposite.
+    #[test]
+    fn a_count_that_does_not_fit_the_target_saturates() {
+        let over = u64::from(u32::MAX) + 1;
+
+        assert_eq!(
+            super::counted(over),
+            usize::try_from(over).unwrap_or(usize::MAX),
+            "a count above the 32-bit width is the largest gauge of the target, not 0"
+        );
+        assert_ne!(super::counted(over), 0, "and it is never 0");
+        assert_eq!(super::counted(7), 7, "a count that fits is itself");
+    }
 
     #[test]
     fn a_new_node_holds_nothing_in_any_collection() {

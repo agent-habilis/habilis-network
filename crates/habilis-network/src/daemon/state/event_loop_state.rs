@@ -2601,9 +2601,13 @@ impl EventLoopState {
         mesh: &MeshId,
         now: Instant,
     ) -> Option<Verified> {
-        if *request_to != self.identity.author_key()
-            || !self.proofs.may_answer(asker, now, self.peers.len())
-        {
+        if *request_to != self.identity.author_key() {
+            return None;
+        }
+        // A node with no member key answers nothing: a slot of the cap spent here would count a
+        // refusal for an answer that this node could never send.
+        self.member_identity.as_ref()?;
+        if !self.proofs.may_answer(asker, now, self.peers.len()) {
             return None;
         }
         if let Some(held) = &self.own_answer {

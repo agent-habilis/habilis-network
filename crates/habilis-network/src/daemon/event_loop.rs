@@ -1742,7 +1742,10 @@ async fn run_loop<Driver: NodeDriver>(
                 lifecycle::end_pending_endpoints(&mut lp.state).await;
                 lp.send_replays().await;
             },
-            outcome = seed_job::seed_job_done(&mut lp.state.seed_job) => { lp.seed_built(outcome).await; },
+            outcome = seed_job::seed_job_done(&mut lp.state.seed_job) => {
+                lp.state.idle.seed_built += 1;
+                lp.seed_built(outcome).await;
+            },
             _ = lp.intervals.alive.tick() => { lp.alive().await; },
             _ = lp.intervals.sweep.tick() => {
                 lp.sweep().await;

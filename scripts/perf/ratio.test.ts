@@ -61,8 +61,11 @@ function measure(): Promise<number> {
   return measured;
 }
 
-// A skip never passes by itself: without RATIO_ALLOW_SKIP the test fails.
+// A skip never passes by itself: without RATIO_ALLOW_SKIP the test fails. A measurement that one
+// test already took is checked by the other, whatever the memory is now: the run is over, and the
+// ratio of it is the subject of both tests.
 function lacksMemory(): boolean {
+  if (measured !== undefined) return false;
   const { nodes, why } = chooseNodes(availableBytes());
   if (nodes >= NODES) return false;
   const message = `SKIPPED: this host fits ${nodes} daemons, the test needs ${NODES} (${why})`;
