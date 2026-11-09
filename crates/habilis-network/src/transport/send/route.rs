@@ -18,8 +18,8 @@ pub(super) enum Route {
     /// multihop transport — the send decision doesn't distinguish.
     Unicast(EndpointId),
     /// Directed to a known endpoint whose only path is the relay, on a mesh
-    /// where the relay carries no payload: parked until a direct path is
-    /// proven, never sent relayed.
+    /// where the relay carries no payload: refused until a direct path is
+    /// proven, never sent relayed. The caller retries the send.
     Held(EndpointId),
     /// Directed with no known endpoint: an error, never gossip.
     Undeliverable,

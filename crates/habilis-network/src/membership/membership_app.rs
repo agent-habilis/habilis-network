@@ -1641,7 +1641,6 @@ mod tests {
     use crate::daemon::state::Standing;
     #[cfg(feature = "host")]
     use crate::gossip::app::{InboundApp, NodeApp};
-    #[cfg(feature = "host")]
     use crate::protocol::{AuthorKey, Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
     #[cfg(feature = "host")]

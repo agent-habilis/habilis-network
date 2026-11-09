@@ -17,7 +17,7 @@ use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::MembershipUpdate;
 use crate::protocol::messages::{
-    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log, sole_addressee,
+    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log,
 };
 use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
@@ -39,7 +39,6 @@ use crate::protocol::{peer_addr_error, seal_error};
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 use crate::transport::{probe, proven_endpoints, webrtc};
-use tokio::sync::mpsc;
 
 use crate::transport::Delivered;
 use crate::{doc, transport};
@@ -406,9 +405,8 @@ pub(crate) async fn drain_queued<S>(
 /// Drain `pending_outbound` onto the wire, in order. Runs on the meshed
 /// edges — the first real-peer `NeighborUp`, and a degraded node's first
 /// inbound message after a fault (starvation recovery / resume) — and again
-/// on every later `NeighborUp` and `PeerInfo` arrival while frames remain buffered: a frame that
-/// fails to deliver (typically a directed frame whose addressee's endpoint
-/// isn't known yet at the first flush) is re-buffered for that retry, not
+/// on every later `NeighborUp` and `PeerInfo` arrival while frames remain buffered. The buffer
+/// holds broadcast frames only: a frame that fails to deliver is re-buffered for that retry, not
 /// dropped.
 pub(crate) async fn flush_pending(
     state: &mut EventLoopState,
@@ -423,15 +421,13 @@ pub(crate) async fn flush_pending(
         // take unicast, never the gossip flood.
         match transport::deliver(&message, bytes.clone(), state, context.sender).await {
             Ok(Delivered::Done) => delivered += 1,
-            Ok(Delivered::Pending(handle)) => {
+            // Only a directed frame dials, and a directed frame is never buffered.
+            Ok(Delivered::Pending(_)) => {
+                debug_assert!(false, "a buffered broadcast frame dialed");
                 delivered += 1;
-                watch_flush(handle, message, bytes, state.flush_failed.clone());
-            }
-            Err(error) if sole_addressee(&message.kind).is_some() => {
-                tracing::warn!(target: "habilis_network::gossip", %error, "buffered directed message undeliverable; dropped");
             }
             Err(error) => {
-                if requeue(state, context, message, bytes) {
+                if requeue(state, message, bytes) {
                     requeued += 1;
                     tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not deliverable yet; requeued");
                 } else {
@@ -448,54 +444,20 @@ pub(crate) async fn flush_pending(
     );
 }
 
-/// A flushed frame whose unicast leg runs on a task. If the dial or the write fails, the frame goes
-/// back to the loop through `failed`, which buffers it again as a flush does for a frame that cannot
-/// be delivered yet: a failed dial never loses a buffered frame.
-fn watch_flush(
-    handle: transport::PendingSend,
-    message: Verified,
-    bytes: WireFrame,
-    failed: mpsc::UnboundedSender<(Verified, WireFrame)>,
-) {
-    n0future_task::spawn(async move {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not delivered; requeued");
-                let _ = failed.send((message, bytes));
-            }
-            Err(_) => {
-                let _ = failed.send((message, bytes));
-            }
-        }
-    });
-}
-
 /// A frame of a flush whose dial failed, back on the loop: put it in `pending_outbound` again.
 pub(crate) fn requeue_failed(
     state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
+    _context: &HandlerCtx<'_>,
     message: Verified,
     bytes: WireFrame,
 ) {
-    if sole_addressee(&message.kind).is_some() {
-        tracing::warn!(target: "habilis_network::gossip", "buffered directed message undeliverable; dropped");
-    } else if !requeue(state, context, message, bytes) {
+    if !requeue(state, message, bytes) {
         tracing::warn!(target: "habilis_network::gossip", "buffered outbound message undeliverable and the buffer is full; dropped");
     }
 }
 
-/// Put a frame that failed to deliver back in `pending_outbound`. A frame that is held for a lane
-/// peer asks for its session, at every flush: a frame that was parked before the peer was known has
-/// no other chance to ask, and without the session the lane pair never links. Returns whether the
-/// frame was kept.
-fn requeue(
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-    message: Verified,
-    bytes: WireFrame,
-) -> bool {
-    super::merge_ctx::park_and_offer(state, context, &message, &bytes);
+/// Put a frame that failed to deliver back in `pending_outbound`. Returns whether the frame was kept.
+fn requeue(state: &mut EventLoopState, message: Verified, bytes: WireFrame) -> bool {
     state.pending_outbound.push((message, bytes))
 }
 
@@ -2412,77 +2374,105 @@ mod first_contact_tests {
         }
     }
 
-    /// A directed frame in the buffer, to a peer that nobody serves: the flush returns at once, the
-    /// dial fails on its task, and the frame comes back to the loop. A directed frame is never
-    /// buffered again: its caller heard of the send already, so the loop drops it with a warning.
-    /// The loop did not wait for the dial.
+    /// A meshed send to a relay-only peer whose direct path is not probed is refused at once. The
+    /// refusal asks for the lane session, so that the caller's retry can find it.
     #[test]
-    fn a_directed_frame_whose_dial_fails_is_dropped_not_parked_again() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            async {
-                ::habilis_network_test_tracing::expect_warn(
-                    "habilis_network::gossip",
-                    "buffered directed message undeliverable; dropped",
-                );
-                let node = Node::spawn().await;
-                let context = node.context();
-                let silent = net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
-                let bob = iroh::SecretKey::generate().public();
-                let bob_addr = iroh::EndpointAddr::from_parts(
-                    bob,
-                    [iroh::TransportAddr::Ip(
-                        silent.local_addr().expect("silent addr"),
-                    )],
-                );
-                lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob_addr.clone());
-                let mut state = fresh_state();
-                state.standing.insert(Standing::Meshed);
-                state.unicast_pool = transport::UnicastPool::new(node.endpoint.clone(), false);
-                state.direct.insert(bob, DirectState::Direct);
-                state.names.insert(test_key("bob"), nick("bob"));
-                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob_addr);
-                let (failed_tx, mut failed_rx) = mpsc::unbounded_channel();
-                state.flush_failed = failed_tx;
-                let frame = Message::new_pong(
-                    &node.mesh,
-                    &node.author,
-                    test_key("bob"),
-                    &protocol::MessageId::random(),
-                )
-                .sign(&Identity::generate());
-                let bytes = frame.serialize().expect("serialize");
-                assert!(
-                    state.pending_outbound.push((frame.clone(), bytes)),
-                    "the directed frame is in the buffer before the flush"
-                );
+    fn a_meshed_directed_send_to_a_held_peer_is_refused_and_asks_for_the_lane_session() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.insert(Standing::Meshed);
+            state.relay_transport = PayloadPath::DirectOnly;
+            let (bob, eid) = (test_key("bob"), endpoint_id(7));
+            state.retain_refused_endpoint(bob, iroh::EndpointAddr::new(eid));
+            state.direct.insert(eid, DirectState::RelayOnly);
+            state
+                .path_kinds
+                .insert(eid, transport::probe::PathKind::Relay);
+            let frame = Message::new_pong(
+                &node.mesh,
+                &node.author,
+                bob,
+                &protocol::MessageId::random(),
+            )
+            .sign(&Identity::generate());
 
-                let started = std_Instant::now();
-                super::flush_pending(&mut state, &context, "test").await;
-                assert!(
-                    started.elapsed() < std_Duration::from_millis(500),
-                    "the flush waited for the dial"
-                );
-                assert!(
-                    state.pending_outbound.take().is_empty(),
-                    "the frame was handed to its task, so the buffer is empty until the dial fails"
-                );
+            let refused = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+            let Err(error) = &refused else {
+                panic!("the send to a held peer was not refused: {refused:?}");
+            };
+            assert!(
+                matches!(error, transport::SendError::Held { .. }),
+                "the refusal is not Held: {error}"
+            );
+            assert!(
+                error.to_string().contains("not probed yet") && error.to_string().contains("retry"),
+                "the refusal does not tell the caller to retry: {error}"
+            );
+            assert!(
+                state.lane_session_wanted(eid, clock::Instant::now()),
+                "the refused send did not ask for the lane session"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "a refused directed frame was buffered"
+            );
+            node.endpoint.close().await;
+        });
+    }
 
-                let (failed, returned) =
-                    tokio_time::timeout(std_Duration::from_secs(10), failed_rx.recv())
-                        .await
-                        .expect("the failed dial reports back to the loop")
-                        .expect("the loop keeps its channel");
-                super::requeue_failed(&mut state, &context, failed.clone(), returned);
+    /// A meshed send to a peer whose direct path is proven goes out, and is not refused.
+    #[test]
+    fn a_meshed_directed_send_to_a_probed_peer_is_not_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.insert(Standing::Meshed);
+            state.relay_transport = PayloadPath::DirectOnly;
+            let (bob, eid) = (test_key("bob"), endpoint_id(7));
+            state.retain_refused_endpoint(bob, iroh::EndpointAddr::new(eid));
+            state.direct.insert(eid, DirectState::Direct);
+            let frame = Message::new_pong(
+                &node.mesh,
+                &node.author,
+                bob,
+                &protocol::MessageId::random(),
+            )
+            .sign(&Identity::generate());
 
-                assert!(
-                    state.pending_outbound.take().is_empty(),
-                    "a directed frame whose dial failed was parked again"
-                );
-                node.endpoint.close().await;
-            },
-        );
+            let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+            assert!(
+                sent.is_ok(),
+                "the send to a probed peer was refused: {sent:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A broadcast sent while unmeshed is still buffered for the meshed edge.
+    #[test]
+    fn a_broadcast_while_unmeshed_is_buffered() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.remove(&Standing::Meshed);
+            let frame = Message::new_joined(&node.mesh, &node.author).sign(&Identity::generate());
+
+            let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+            assert!(
+                sent.is_ok(),
+                "the broadcast while unmeshed was refused: {sent:?}"
+            );
+            assert_eq!(
+                state.pending_outbound.take().len(),
+                1,
+                "the broadcast was not buffered for the meshed edge"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// A directed frame names a key, so a nickname that two live peers use does not make it
@@ -3258,80 +3248,6 @@ mod first_contact_tests {
             }
             node.endpoint.close().await;
         });
-    }
-
-    /// The frame of the field red: a directed frame parked across a gap in the links reaches
-    /// its addressee at the next `NeighborUp`, with no `PeerInfo`.
-    #[test]
-    fn a_directed_frame_parked_across_a_gap_in_the_links_is_delivered_at_the_next_neighbor_up() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            async {
-                use iroh::protocol::Router;
-
-                use crate::protocol::MessageId;
-                use crate::transport::{UNICAST_ALPN, UnicastAcceptor, UnicastPool};
-
-                let node = Node::spawn().await;
-                let context = node.context();
-                let bob = iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::Disabled)
-                    .bind()
-                    .await
-                    .expect("bind bob");
-                let (inbox, mut frames) = mpsc::channel(8);
-                let router = Router::builder(bob.clone())
-                    .accept(
-                        UNICAST_ALPN,
-                        UnicastAcceptor::with_idle(
-                            inbox,
-                            PayloadPath::DirectOnly,
-                            std_Duration::from_mins(1),
-                        ),
-                    )
-                    .spawn();
-                lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob.addr());
-                let mut state = fresh_state();
-                state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
-                state.names.insert(test_key("bob"), nick("bob"));
-                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob.addr());
-                feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
-                feed(Event::NeighborDown(bob.id()), &mut state, &context).await;
-                assert!(
-                    state.standing.contains(&Standing::Meshed),
-                    "the gap does not clear meshed"
-                );
-                let frame = Message::new_pong(
-                    &node.mesh,
-                    &node.author,
-                    test_key("bob"),
-                    &MessageId::random(),
-                )
-                .sign(&Identity::generate());
-                let bytes = frame.serialize().expect("serialize");
-                assert!(
-                    state.pending_outbound.push((frame, bytes.clone())),
-                    "a directed frame parked across a gap is queued"
-                );
-
-                feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
-
-                let delivered =
-                    tokio_time::timeout(std_Duration::from_secs(5), frames.recv()).await;
-                assert_eq!(
-                    delivered.ok().flatten(),
-                    Some(bytes.into_bytes()),
-                    "bob never got the parked frame"
-                );
-                assert!(
-                    state.pending_outbound.is_empty(),
-                    "the directed frame stays parked across a second gap"
-                );
-                router.shutdown().await.expect("shutdown");
-                node.endpoint.close().await;
-            },
-        );
     }
 
     /// A node that reaches the release count tells gossip to leave the
@@ -4946,75 +4862,6 @@ mod left_tests {
             endpoint.close().await;
             leaver_endpoint.close().await;
         });
-    }
-}
-
-#[cfg(all(test, feature = "host"))]
-mod requeue_tests {
-    use crate::daemon::state::Standing;
-
-    use crate::testing::{LaneNode, nick, test_key};
-
-    use crate::transport;
-    use crate::util::clock;
-    /// A frame is parked before its addressee is known. The peer becomes known with a relay-only
-    /// address, the flush delivers the frame again and it is held: the requeue asks for the session
-    /// and offers it at once, so that the frame does not wait for the next tick of the retry pass.
-    #[test]
-    fn a_frame_parked_before_its_peer_is_known_asks_for_the_session_at_the_flush() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            async {
-                let node = LaneNode::start().await;
-                let context = node.context();
-                let mut state = node.state();
-                state.standing.insert(Standing::Meshed);
-                let address = state
-                    .peer_endpoints
-                    .remove(&nick("bob"))
-                    .expect("the fixture knows bob");
-                let frame = node.frame_to_bob();
-                let bytes = frame.serialize().expect("serialize");
-                let now = clock::Instant::now();
-                drop(
-                    transport::resolve(&frame, bytes.clone(), &state)
-                        .expect_err("no endpoint is known for bob yet"),
-                );
-                assert!(
-                    super::requeue(&mut state, &context, frame.clone(), bytes.clone()),
-                    "a frame parked before its peer is known is requeued"
-                );
-                assert!(!state.lane_session_wanted(node.bob, now), "bob is unknown");
-                assert_eq!(
-                    state.webrtc_admission.in_flight(),
-                    0,
-                    "one admission slot is in flight after the requeue"
-                );
-
-                state.bind_peer_endpoint(test_key("bob"), nick("bob"), address);
-                drop(
-                    transport::resolve(&frame, bytes.clone(), &state)
-                        .expect_err("a lookup-only relay holds the frame"),
-                );
-                assert!(
-                    super::requeue(&mut state, &context, frame, bytes),
-                    "a second requeue is accepted"
-                );
-
-                assert!(
-                    state.lane_session_wanted(node.bob, now),
-                    "the requeued frame asks"
-                );
-                assert_eq!(
-                    state.webrtc_admission.in_flight(),
-                    1,
-                    "and the offer is in flight at once"
-                );
-                state.webrtc_admission.close();
-                node.endpoint.close().await;
-            },
-        );
     }
 }
 

@@ -6,8 +6,8 @@ use iroh::EndpointId;
 use std::{error, fmt};
 /// Why a frame could not be sent.
 ///
-/// [`SendError::Held`] is the one a caller parks rather than fails on (`send_app`), so it
-/// is a variant and not a downcast. [`SendError::Internal`] holds the causes no caller acts on.
+/// [`SendError::Held`] is a refusal that the caller can retry later, so it is a variant and not a
+/// downcast. [`SendError::Internal`] holds the causes no caller acts on.
 ///
 /// # Examples
 ///
@@ -23,8 +23,8 @@ use std::{error, fmt};
 #[non_exhaustive]
 #[must_use]
 pub enum SendError {
-    /// The frame waits for a direct path: its peer's only path is the relay, which is lookup
-    /// only on this mesh.
+    /// The send is refused: its peer's only path is the relay, which is lookup only on this mesh,
+    /// and no direct path is probed yet. The caller can retry the send later.
     Held {
         /// The endpoint the frame is held for.
         eid: EndpointId,
@@ -55,7 +55,7 @@ impl fmt::Display for SendError {
         match self {
             Self::Held { eid } => write!(
                 f,
-                "directed message held: {eid}'s only path is the relay, which is lookup only on this mesh"
+                "directed message to {eid} refused: its path is not probed yet, and the relay is lookup only on this mesh; retry the send later"
             ),
             Self::Undeliverable(message)
             | Self::Oversize(message)

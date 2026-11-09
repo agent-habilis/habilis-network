@@ -34,11 +34,10 @@ use tokio::sync::oneshot;
 /// path uses ([`crate::transport::deliver`]) — unicast to a sole addressee,
 /// gossip for a broadcast (`to == None`).
 ///
-/// Reliability matches the engine's own plumbing: while unmeshed the frame is
-/// buffered into `pending_outbound` and flushed through the send decision on
-/// the meshed edge; a directed frame whose addressee is still unknown at that
-/// flush is re-buffered and retried as `PeerInfo`s arrive (dropped only when
-/// the bounded buffer overflows).
+/// Reliability: a broadcast frame sent while unmeshed is buffered into `pending_outbound` and
+/// flushed on the meshed edge (see `gossip::recv::flush_pending`). A directed frame is never
+/// buffered: a send that cannot reach its addressee now returns an error, and the caller decides
+/// whether to retry.
 ///
 /// This is a **single-frame** send: unlike the application's chat path it does not split a
 /// large body across shards (that logic is entangled with the application's per-author hash
@@ -64,16 +63,17 @@ use tokio::sync::oneshot;
 /// peer that missed it. A frame the app does not log is not kept. The log holds a frame
 /// once, so a consumer that also pushes the same frame into it costs a lookup, not a duplicate.
 ///
-/// A directed frame to a cold peer comes back as [`crate::transport::Delivered::Pending`]: the dial runs on a task,
-/// and the caller awaits the handle off its event loop.
+/// A directed frame to a cold peer comes back as [`crate::transport::Delivered::Pending`]: the
+/// dial runs on a task, and the caller awaits the handle off its event loop.
 ///
 /// # Errors
 /// Refuses a body too large for one frame, propagates a serialize/deliver
 /// failure, and errors if the unmeshed buffer is full. A directed frame names its recipient by
 /// author key, so two live peers that use one nickname are two addressees, and neither send is
 /// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. An unmeshed
-/// node refuses a directed frame to a key that no roster, quiet set or known address holds
-/// ([`crate::transport::SendError::Undeliverable`]), because nobody can deliver it later.
+/// node refuses every directed frame ([`crate::transport::SendError::Undeliverable`]), and a
+/// meshed node refuses a frame to a relay-only peer whose direct path is not probed yet
+/// ([`crate::transport::SendError::Held`]). The caller retries, and nothing is buffered.
 ///
 /// # Examples
 ///
@@ -119,6 +119,11 @@ pub async fn send_app(
         // `to` — the same routing the application's send path rides. A directed
         // frame with no path comes back as an error for the caller to act on.
         let outcome = transport::deliver(&frame, bytes, state, context.sender).await;
+        if let Err(error @ transport::SendError::Held { .. }) = &outcome {
+            // The caller retries; the lane session is asked now, so the retry can find it.
+            transport::note_held(state, error);
+            offer_for_parked(state, context, &frame);
+        }
         if outcome.is_ok() {
             super::recv::retain_own_app_broadcast(state, &frame, class);
         }
@@ -131,7 +136,6 @@ pub async fn send_app(
         )));
     }
     // An unmeshed node buffers a broadcast frame for the meshed edge.
-    park_and_offer(state, context, &frame, &bytes);
     if state.pending_outbound.push((frame.clone(), bytes)) {
         // Buffered until the meshed edge flushes it through the same send
         // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.
@@ -660,29 +664,7 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &Handl
     broadcast_peer_info(state, context).await;
 }
 
-/// A directed frame that is parked because the node is not meshed yet still asks for the session
-/// of a peer that needs one: a node becomes meshed by its first link to a member, and on a lane pair
-/// that link needs the session, so a frame that waited for the link could never ask for it. The rule
-/// is the one of a frame held on a meshed node ([`crate::transport::note_held`]).
-fn mark_parked(state: &mut EventLoopState, frame: &Verified, bytes: &WireFrame) {
-    if let Err(error) = transport::resolve(frame, bytes.clone(), state) {
-        transport::note_held(state, &error);
-    }
-}
-
-/// A directed frame is parked, by `send_app` or by a flush that held it again: ask for the session
-/// of its peer, and offer it now. One helper for both, so that the two cannot drift.
-pub(crate) fn park_and_offer(
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-    frame: &Verified,
-    bytes: &WireFrame,
-) {
-    mark_parked(state, frame, bytes);
-    offer_for_parked(state, context, frame);
-}
-
-/// Offer the session of the peer now, if the parked frame asked for it. Without this the offer waits
+/// Offer the session of the peer now, if a held frame asked for it. Without this the offer waits
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
 fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
@@ -699,18 +681,14 @@ fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame:
 
 #[cfg(test)]
 mod tests {
-    use crate::daemon::state::Standing;
-    use crate::transport::UdpTransport;
-
-    use super::{farewell_targets, mark_parked, peer_info_json};
-    use crate::protocol::{MeshId, Message};
+    use super::{farewell_targets, peer_info_json};
+    use crate::protocol::MeshId;
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
 
-    use crate::protocol;
-    use crate::protocol::messages::AppFrameParams;
     use crate::protocol::peer_addr_error;
     #[cfg(feature = "host")]
     use crate::testing;
+    #[cfg(feature = "host")]
     use crate::util::clock;
     /// The mirror dials the hint of a live peer whose key made it. It skips a hint from a card (no
     /// verified key, even when a key is admitted under the nickname later), a hint of a quiet key,
@@ -905,68 +883,6 @@ mod tests {
         assert_eq!(
             read, id,
             "a reader that predates the flag still reads the address"
-        );
-    }
-
-    /// A node that is not meshed parks a directed frame to a lane peer, and the park asks for the
-    /// peer's session.
-    #[test]
-    fn an_unmeshed_directed_frame_to_a_lane_peer_marks_the_peer_wanted() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.standing.remove(&Standing::Meshed);
-        state.local_udp_transport = UdpTransport::Present;
-        let bob = endpoint_id(1);
-        state.names.insert(test_key("bob"), nick("bob"));
-        state.bind_peer_endpoint(
-            test_key("bob"),
-            nick("bob"),
-            iroh::EndpointAddr::new(bob)
-                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
-        );
-        let frame = Message::new_pong(
-            &MeshId::from("test"),
-            &nick("alice"),
-            test_key("bob"),
-            &protocol::MessageId::random(),
-        )
-        .sign(&protocol::Identity::generate());
-        let bytes = frame.serialize().expect("serialize");
-        let now = clock::Instant::now();
-        assert!(
-            !state.lane_session_wanted(bob, now),
-            "nothing is parked yet"
-        );
-
-        mark_parked(&mut state, &frame, &bytes);
-
-        assert!(state.lane_session_wanted(bob, now), "the parked frame asks");
-    }
-
-    /// A broadcast has no addressee, so parking it asks for nothing.
-    #[test]
-    fn an_unmeshed_broadcast_asks_for_no_session() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.standing.remove(&Standing::Meshed);
-        let bob = endpoint_id(1);
-        state.names.insert(test_key("bob"), nick("bob"));
-        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
-        let frame = Message::new_app(
-            &MeshId::from("test"),
-            &nick("alice"),
-            AppFrameParams::new(
-                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                None,
-                None,
-                protocol::MessageBody::from("hi"),
-            ),
-        )
-        .sign(&protocol::Identity::generate());
-        mark_parked(&mut state, &frame, &frame.serialize().expect("serialize"));
-        assert!(
-            !state.lane_session_wanted(bob, clock::Instant::now()),
-            "an unmeshed broadcast asks for no session"
         );
     }
 

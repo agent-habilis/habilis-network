@@ -200,9 +200,8 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
                 {
                     state.forget_peer_endpoint(nickname.as_str());
                 }
-                // A ghost was never shown and is never quiet: its parked frames have no taker, and
-                // the drop is silent because nobody saw the peer.
-                state.drop_buffered_frames_to(&key);
+                // A ghost was never shown and is never quiet, so nobody saw the peer and the drop is
+                // silent.
                 tracing::trace!(
                     key = %key,
                     age_secs = age,
@@ -225,18 +224,6 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         // again leaves first: it is the newest lapse, and the cap must drop an older one before it.
         state.clock_evidence.lapsed_quiet.remove(&key);
         state.clock_evidence.lapsed_quiet.insert(key);
-        // It stayed quiet for the whole TTL, so it is not expected back: the frames parked for it
-        // would be asked for again at each flush for ever. It can still return on a new live
-        // frame, and then the frames are lost, so the loss is reported once for the key.
-        let dropped = state.drop_buffered_frames_to(&key);
-        if dropped > 0 {
-            let line = format!(
-                "{dropped} frames parked for {key} were dropped: the key stayed quiet for over {} s",
-                QUIET_TTL.as_secs()
-            );
-            tracing::warn!(target: "habilis_network::gossip", %key, dropped, "dropped the frames parked for a key that stayed quiet past the quiet TTL");
-            sink.emit(NodeEvent::Error(line));
-        }
     }
     // Keep `quiet_since` bounded to current `quiet` membership: peers that
     // returned (drained from `quiet`) or fell off the bounded `quiet` FIFO
@@ -383,12 +370,10 @@ mod tests {
     use super::{
         AuthorKey, Instant, QUIET_TTL, confirm_suspend, forgive_stall, note_suspend, tick_sweep,
     };
-    use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
+    use crate::gossip::event::SilentSink;
     use crate::util::tuning;
-    use std::sync::Mutex;
     use std::time::Duration;
 
-    use crate::protocol::messages::sole_addressee;
     use crate::{protocol, testing};
     /// A `PeerInfo` of a key that another key shadows binds no hint, but its address goes into
     /// the unicast book. When the key is no peer, quiet or lapsed any more, the sweep releases the
@@ -703,124 +688,6 @@ mod tests {
         assert!(
             state.quiet.contains(&test_key("lost-heron")),
             "a peer quiet for a minute stays"
-        );
-    }
-
-    /// A directed frame parked for `key`, as a send leaves it while the key has no endpoint.
-    fn park_frame_for(state: &mut EventLoopState, key: AuthorKey) {
-        use crate::protocol::identity::Identity;
-        use crate::protocol::messages::Message;
-        use crate::protocol::{MeshId, MessageId};
-        let mesh = MeshId::from("test");
-        let frame = Message::new_pong(&mesh, &nick("alice"), key, &MessageId::random())
-            .sign(&Identity::generate());
-        let bytes = frame.serialize().expect("serialize");
-        assert!(state.pending_outbound.push((frame, bytes)), "room");
-    }
-
-    /// A key that went quiet may return, so its parked frames wait. A key that stayed quiet past
-    /// the quiet TTL is gone for good, and the frames parked for it go with it: the flush would
-    /// ask for them at every tick for ever.
-    #[test]
-    fn a_frame_parked_for_a_key_that_lapsed_is_dropped_and_one_for_a_quiet_key_waits() {
-        let _guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::expect_warn(
-            "habilis_network::gossip",
-            "dropped the frames parked for a key that stayed quiet",
-        );
-        let mut state = fresh_state();
-        let long_gone = Instant::now()
-            .checked_sub(QUIET_TTL + Duration::from_secs(60))
-            .expect("the monotonic clock has run past the quiet TTL since boot");
-        let recent = Instant::now()
-            .checked_sub(Duration::from_secs(60))
-            .expect("the monotonic clock has run past 60 s since boot");
-        for (name, heard) in [("swift-cedar", long_gone), ("lost-heron", recent)] {
-            state.quiet_for_test(name);
-            state.quiet_since.insert(test_key(name), heard);
-            park_frame_for(&mut state, test_key(name));
-        }
-
-        tick_sweep(&mut state, &SilentSink);
-
-        let parked = state.pending_outbound.take();
-        let waiting: Vec<AuthorKey> = parked
-            .iter()
-            .filter_map(|entry| sole_addressee(&entry.0.kind).copied())
-            .collect();
-        assert_eq!(
-            waiting,
-            vec![test_key("lost-heron")],
-            "only the frame of the key that is still quiet waits"
-        );
-    }
-
-    /// A sink that keeps the text of each error line.
-    #[derive(Default)]
-    struct ErrorLines(Mutex<Vec<String>>);
-
-    impl NodeSink for ErrorLines {
-        fn emit(&self, event: NodeEvent) {
-            if let NodeEvent::Error(text) = event {
-                self.0
-                    .lock()
-                    .expect("the lines lock is not poisoned")
-                    .push(text);
-            }
-        }
-    }
-
-    /// A key that stayed quiet past the TTL can return on a new live frame, and then its parked
-    /// frames are gone. The loss is one error line for the key, with the count, so the app and the
-    /// operator can see it. A ghost was never shown, so its drop stays silent (see below).
-    #[test]
-    fn the_lapse_of_a_key_reports_the_count_of_the_frames_it_dropped() {
-        let _guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::expect_warn(
-            "habilis_network::gossip",
-            "dropped the frames parked for a key that stayed quiet",
-        );
-        let mut state = fresh_state();
-        let lapsed = test_key("swift-cedar");
-        let long_gone = Instant::now()
-            .checked_sub(QUIET_TTL + Duration::from_secs(60))
-            .expect("the monotonic clock has run past the quiet TTL since boot");
-        state.quiet_for_test("swift-cedar");
-        state.quiet_since.insert(lapsed, long_gone);
-        park_frame_for(&mut state, lapsed);
-        park_frame_for(&mut state, lapsed);
-        let lines = ErrorLines::default();
-
-        tick_sweep(&mut state, &lines);
-
-        let seen = lines.0.lock().expect("the lines lock is not poisoned");
-        assert_eq!(seen.len(), 1, "one line for the key: {seen:?}");
-        assert!(
-            seen[0].contains(&lapsed.to_string()) && seen[0].contains("2 "),
-            "the line does not name the key and the count 2: {:?}",
-            seen[0]
-        );
-    }
-
-    /// A ghost is evicted without a trace: it was never shown and cannot return as a quiet peer.
-    /// The frames parked for it go too.
-    #[test]
-    fn a_frame_parked_for_an_evicted_ghost_is_dropped() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let ghost = test_key("ghost-oak");
-        let expired_at = Instant::now()
-            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .expect("the monotonic clock has run past the alive timeout since boot");
-        state.last_seen.insert(ghost, expired_at);
-        state.peer_for_test("ghost-oak");
-        park_frame_for(&mut state, ghost);
-
-        tick_sweep(&mut state, &SilentSink);
-
-        assert!(
-            state.pending_outbound.is_empty(),
-            "the frame parked for an evicted ghost stayed in the buffer"
         );
     }
 
