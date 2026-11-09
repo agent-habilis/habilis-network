@@ -259,7 +259,7 @@ const FIXTURE_MESH: &str = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrf
 fn test_unknown_ext_fields_ignored() {
     let _guard = ::habilis_network_test_tracing::init();
     let json = format!(
-        r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi","ext":{{"future_field":"value","another":42}}}}"#
+        r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi","ext":{{"future_field":"value","another":42}}}}"#
     );
     let parsed =
         Message::parse(json.as_bytes()).expect("the JSON literal in this test is a valid message");
@@ -278,7 +278,7 @@ fn test_unknown_ext_fields_ignored() {
 fn test_missing_ext_defaults_to_empty_object() {
     let _guard = ::habilis_network_test_tracing::init();
     let json = format!(
-        r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"}}"#
+        r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"}}"#
     );
     let parsed =
         Message::parse(json.as_bytes()).expect("the JSON literal in this test is a valid message");
@@ -310,7 +310,7 @@ fn test_version_mismatch_rejected() {
 #[test]
 fn parse_rejects_non_uuid_id() {
     let _guard = ::habilis_network_test_tracing::init();
-    let json = r#"{"v":"13.0","id":"not-a-uuid","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{}}"#;
+    let json = r#"{"v":"14.0","id":"not-a-uuid","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{}}"#;
     assert!(
         Message::parse(json.as_bytes()).is_err(),
         "a message with a non-uuid id is refused"
@@ -321,7 +321,7 @@ fn parse_rejects_non_uuid_id() {
 fn parse_rejects_control_char_body() {
     let _guard = ::habilis_network_test_tracing::init();
     let json = format!(
-        r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"evil\u0000body","ext":{{}}}}"#
+        r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"evil\u0000body","ext":{{}}}}"#
     );
     assert!(
         Message::parse(json.as_bytes()).is_err(),
@@ -333,7 +333,7 @@ fn parse_rejects_control_char_body() {
 fn parse_rejects_unsafe_author_nickname() {
     let _guard = ::habilis_network_test_tracing::init();
     let json = format!(
-        r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a#b","ts":0,"body":"hi","ext":{{}}}}"#
+        r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a#b","ts":0,"body":"hi","ext":{{}}}}"#
     );
     assert!(
         Message::parse(json.as_bytes()).is_err(),
@@ -349,7 +349,7 @@ fn parse_rejects_malformed_integrity_fields() {
     // so a crafted value never reaches the fork/DAG indexes or sig verify.
     let base = |extra: &str| {
         format!(
-            r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"{extra},"ext":{{}}}}"#
+            r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"{extra},"ext":{{}}}}"#
         )
     };
     // Each malformed field comes with a well-formed partner, so that the pairing rule (a key
@@ -995,16 +995,16 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
 /// The wire form of a signed message, captured from the code at the base commit with a fixed key
 /// (`SecretKey::from_bytes(&[7; 32])`). A change that moves one byte of it is a wire change.
 // The verified.rs doctests repeat this literal, so a change to it touches both files.
-const SIGNED_WIRE: &str = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"c5281ce4ac05d99e044c97bc5acfd291c4861f17ac164c1b4b472c7bbe43386c71539a97090af6fb870886b6af51f6f8563abb5ffc0d290e5ad9e69e548c1b08","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+const SIGNED_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"7f640d1c198f65d7c272b7206ce3d7ed31c289eca9e09a1c8e28adf770ec02499a7a4b68d837c774a3b8d4bd9a6358e2bd67278f98dbac3ce5fe2e60e5f99006","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 
 /// The same message with no `pubkey` and no `sig` key: the canonical pre-signing form.
-const UNSIGNED_WIRE: &str = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+const UNSIGNED_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 
 /// [`UNSIGNED_WIRE`] with both keys present and empty.
-const EMPTY_KEYS_WIRE: &str = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"","sig":"","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+const EMPTY_KEYS_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"","sig":"","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 
 /// [`SIGNED_WIRE`] with the `sig` key removed: a key and no signature.
-const KEY_ONLY_WIRE: &str = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+const KEY_ONLY_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 
 const SIGNED_PUBKEY: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 /// The canonical bytes of [`SIGNED_WIRE`], hex, one line per piece: a 4-byte little-endian length,
@@ -1013,7 +1013,7 @@ const SIGNED_CANONICAL_HEX: &str = concat!(
     "10000000",
     "686162696c69732d6d6573682f6d7367",
     "04000000",
-    "31332e30",
+    "31342e30",
     "24000000",
     "30303030303030302d303030302d303030302d303030302d303030303030303030303031",
     "1e000000",
@@ -1044,7 +1044,7 @@ const UNSIGNED_CANONICAL_HEX: &str = concat!(
     "10000000",
     "686162696c69732d6d6573682f6d7367",
     "04000000",
-    "31332e30",
+    "31342e30",
     "24000000",
     "30303030303030302d303030302d303030302d303030302d303030303030303030303031",
     "1e000000",
@@ -1106,7 +1106,7 @@ fn a_signed_message_keeps_its_wire_form() {
     );
     assert_eq!(
         parsed.content_hash().to_string(),
-        "51b0bb6cff1227752fc96d52935faa3f487d4caf601845c52c91adbdc363f544",
+        "5f53e66bbf1e6ef252c020e27d4be5b98ebd396b3c0f418dcc4bc66861d1f5b9",
         "the content hash keeps its hex form"
     );
     assert_eq!(
@@ -1143,7 +1143,7 @@ fn a_message_with_no_key_fields_parses_as_unsigned() {
     );
     assert_eq!(
         parsed.content_hash().to_string(),
-        "761191f0a4f3de755e2a2d0e9850a757074665c280628a003ecf721b8a20d7ba",
+        "6cc28900477478bd631741c7fe84c91f0f9f12bcec88f1fa9235e810d857c727",
         "the unsigned content hash keeps its hex form"
     );
 }
@@ -1381,7 +1381,7 @@ fn a_nickname_as_the_recipient_of_a_frame_is_refused_at_parse() {
         ("pong", pong_probe.as_str()),
     ] {
         let json = format!(
-            r#"{{"v":"13.0","id":"{FIXTURE_ID}","type":"{kind}",{extra}"to":"bob","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"","ext":{{}}}}"#
+            r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"{kind}",{extra}"to":"bob","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"","ext":{{}}}}"#
         );
         assert!(
             Message::parse(json.as_bytes()).is_err(),
@@ -1403,6 +1403,22 @@ fn a_frame_of_wire_version_12_0_is_refused_by_its_version() {
         assert!(
             matches!(&refused, MessageError::UnsupportedVersion(version) if version == "12.0"),
             "the {kind} frame of the old wire was not refused by its version: {refused:?}"
+        );
+    }
+}
+
+/// Golden: the chat digest kind is gone. A `digest` frame at the current version is a parse error,
+/// and so is the same frame at `13.0`, the version that still carried the kind.
+#[test]
+fn a_digest_frame_is_not_a_message_kind_any_more() {
+    let _guard = ::habilis_network_test_tracing::init();
+    for version in ["14.0", "13.0"] {
+        let frame = format!(
+            r#"{{"v":"{version}","id":"00000000-0000-0000-0000-000000000001","type":"digest","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"[]","ext":{{}}}}"#
+        );
+        assert!(
+            Message::parse(frame.as_bytes()).is_err(),
+            "a digest frame at {version} must not parse"
         );
     }
 }

@@ -65,7 +65,6 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
         MessageKind::PeerInfo
         | MessageKind::State
         | MessageKind::Meta
-        | MessageKind::Digest
         | MessageKind::StateDigest
         | MessageKind::MetaDigest
         | MessageKind::LinkState
@@ -89,7 +88,6 @@ pub(crate) fn is_live_kind(kind: &MessageKind) -> bool {
         | MessageKind::PeerInfo
         | MessageKind::State
         | MessageKind::Meta
-        | MessageKind::Digest
         | MessageKind::StateDigest
         | MessageKind::MetaDigest
         | MessageKind::LinkState
@@ -206,7 +204,6 @@ fn compute_proving(
             subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
         }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
         | MessageKind::StateDigest
@@ -692,7 +689,6 @@ mod tests {
             MessageKind::PeerInfo,
             MessageKind::StateDigest,
             MessageKind::MetaDigest,
-            MessageKind::Digest,
         ] {
             let stale_copy = compute(&kind, test_key(who.as_str()), old, &state);
             assert!(

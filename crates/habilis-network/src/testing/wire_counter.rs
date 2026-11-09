@@ -44,7 +44,7 @@ impl FrameClass {
             | MessageKind::Meta
             | MessageKind::StateDigest
             | MessageKind::MetaDigest => Self::Document,
-            MessageKind::Digest | MessageKind::Ping | MessageKind::Pong { .. } | _ => Self::Other,
+            MessageKind::Ping | MessageKind::Pong { .. } | _ => Self::Other,
         }
     }
 }
@@ -171,13 +171,12 @@ mod tests {
         );
     }
 
-    /// A chat digest is plumbing, not a change of a shared document. The kind is removed in a later commit.
     #[test]
-    fn a_message_log_digest_is_not_document_traffic() {
+    fn a_ping_is_not_document_traffic() {
         assert_eq!(
-            FrameClass::of(&MessageKind::Digest),
+            FrameClass::of(&MessageKind::Ping),
             FrameClass::Other,
-            "a message log digest counted as document traffic"
+            "a ping counted as document traffic"
         );
         for kind in [
             MessageKind::State,

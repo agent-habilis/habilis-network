@@ -53,12 +53,6 @@ pub enum MessageKind {
     },
     /// The identity of a peer.
     PeerInfo,
-    /// Anti-entropy digest. Body is a JSON array of recent message ids
-    /// the sender holds; a receiver re-broadcasts any of *its* logged
-    /// messages absent from that list, so a peer that missed them
-    /// (partition / sleep / late join) recovers. Plumbing like
-    /// `PeerInfo`: never logged or surfaced via `poll`/`fetch`.
-    Digest,
     /// Liveness probe broadcast by a node running an RTT round. Every
     /// receiver auto-responds with a `Pong` addressed back to the
     /// pinger. Plumbing like `PeerInfo`/`Digest`: never logged or surfaced
@@ -80,12 +74,11 @@ pub enum MessageKind {
     /// is retained as the doc's re-serve store. Signed like any message; never
     /// never surfaced via poll/fetch.
     State,
-    /// Anti-entropy digest for the **state** channel — the dedicated counterpart
-    /// to [`Digest`](MessageKind::Digest). Body is the doc's automerge heads; a
+    /// Anti-entropy digest for the **state** channel. Body is the doc's automerge heads; a
     /// receiver computes the changes the sender lacks (`changes_since`) and
     /// re-broadcasts their frames, so a cold/late joiner (advertising an empty or
     /// genesis-only frontier) pulls the whole history over successive rounds.
-    /// Separate from `Digest` for its own resend budget. Plumbing like `Digest`.
+    ///
     StateDigest,
     /// A durable event on the **meta** channel — a second shared-state channel,
     /// identical machinery to [`State`](MessageKind::State) but with the
@@ -113,7 +106,6 @@ impl fmt::Display for MessageKind {
             MessageKind::App { tag, .. } => write!(f, "{tag}"),
             MessageKind::Presence { .. } => write!(f, "presence"),
             MessageKind::PeerInfo => write!(f, "peerinfo"),
-            MessageKind::Digest => write!(f, "digest"),
             MessageKind::Ping => write!(f, "ping"),
             MessageKind::Pong { .. } => write!(f, "pong"),
             MessageKind::State => write!(f, "state"),
@@ -135,7 +127,6 @@ impl MessageKind {
             MessageKind::App { tag, .. } => Some(tag),
             MessageKind::Presence { .. }
             | MessageKind::PeerInfo
-            | MessageKind::Digest
             | MessageKind::Ping
             | MessageKind::Pong { .. }
             | MessageKind::State

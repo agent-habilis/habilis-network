@@ -30,7 +30,6 @@ pub fn sole_addressee(kind: &MessageKind) -> Option<&AuthorKey> {
         MessageKind::App { to, .. } => to.as_ref(),
         MessageKind::Presence { .. }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::State
         | MessageKind::StateDigest

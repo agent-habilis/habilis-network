@@ -145,7 +145,6 @@ fn log(direction: &'static str, message: &Message) {
             subtype: PresenceSubtype::Alive,
         }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
         | MessageKind::StateDigest
         | MessageKind::MetaDigest
         | MessageKind::Ping

@@ -24,7 +24,7 @@ use super::{
 ///
 /// Wire format (compact JSON, one line):
 /// ```json
-/// {"v":"13.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
+/// {"v":"14.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
 /// ```
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
@@ -187,13 +187,6 @@ impl Message {
     #[must_use]
     pub fn new_peer_info(mesh: &MeshId, author: &Nickname, addr_data: MessageBody) -> Self {
         Self::new(mesh, author, MessageKind::PeerInfo, addr_data)
-    }
-
-    /// An anti-entropy digest carrying `ids_json` (a JSON array of the
-    /// recent message ids we hold) in the body.
-    #[must_use]
-    pub fn new_digest(mesh: &MeshId, author: &Nickname, ids_json: MessageBody) -> Self {
-        Self::new(mesh, author, MessageKind::Digest, ids_json)
     }
 
     /// A multihop link-state advertisement; `vector_json` is a serialized
@@ -468,7 +461,7 @@ impl Message {
     /// ```compile_fail,E0624
     /// use habilis_network_protocol::messages::Message;
     ///
-    /// const SIGNED: &str = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"c5281ce4ac05d99e044c97bc5acfd291c4861f17ac164c1b4b472c7bbe43386c71539a97090af6fb870886b6af51f6f8563abb5ffc0d290e5ad9e69e548c1b08","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+    /// const SIGNED: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"7f640d1c198f65d7c272b7206ce3d7ed31c289eca9e09a1c8e28adf770ec02499a7a4b68d837c774a3b8d4bd9a6358e2bd67278f98dbac3ce5fe2e60e5f99006","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
     ///
     /// let message = Message::parse(SIGNED.as_bytes()).unwrap();
     /// let canonical = message.canonical_bytes();

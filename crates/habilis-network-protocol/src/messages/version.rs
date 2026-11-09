@@ -2,6 +2,10 @@
 
 /// Protocol version embedded in every message.
 ///
+/// The version is `14.0` since the chat digest kind is removed: a `digest` frame of a `13.0` peer is
+/// refused by its version, and no chat digest is answered any more. The version before it,
+/// `13.0`, is described in the next paragraph.
+///
 /// The version is `13.0` since the recipient of a directed frame
 /// (`to` of an `app` and of a `pong` frame) is an author key and no longer a nickname. A nickname
 /// is a label that two live keys can share, so a frame to a nickname reached both. A `12.0` peer
@@ -55,4 +59,4 @@
 /// - `4.0` — the native application-payload port.
 /// - `3.0` — the application-payload migration.
 /// - `2.0` — RFC 6902 → RFC 7386 shared state.
-pub(crate) const VERSION: &str = "13.0";
+pub(crate) const VERSION: &str = "14.0";

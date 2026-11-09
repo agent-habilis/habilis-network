@@ -644,7 +644,6 @@ pub(crate) async fn ingest(
         // a new kind has to be routed deliberately.
         MessageKind::Presence { .. }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
         | MessageKind::State
@@ -688,10 +687,6 @@ async fn dispatch_infra(
             if !update.stale {
                 handle_peer_info(message, state, context).await;
             }
-            return ControlFlow::Break(());
-        }
-        // A chat digest is no longer answered and is dropped here. The Digest kind is removed in a later commit of the chat-log plan.
-        MessageKind::Digest => {
             return ControlFlow::Break(());
         }
         MessageKind::Ping => {
@@ -1228,7 +1223,6 @@ fn addressed_to_us(message: &Message, us: &AuthorKey) -> bool {
         MessageKind::App { to: None, .. }
         | MessageKind::Presence { .. }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
         | MessageKind::State
@@ -1267,8 +1261,7 @@ fn maybe_push_inbound(
         || !addressed_to_us(message, &context.our_pubkey)
         || matches!(
             message.kind,
-            MessageKind::Digest
-                | MessageKind::StateDigest
+            MessageKind::StateDigest
                 | MessageKind::MetaDigest
                 | MessageKind::State
                 | MessageKind::Meta
@@ -1785,115 +1778,6 @@ mod evicted_orphan_tests {
                  the receive path dropped them as duplicates",
                 frames.len(),
                 missing.len()
-            );
-            endpoint.close().await;
-        });
-    }
-}
-
-/// A chat digest is dropped at the infra arm: no answer, and the seen set does not change.
-#[cfg(test)]
-mod chat_digest_tests {
-    use std::ops::ControlFlow;
-
-    use iroh::endpoint::presets;
-    use iroh_gossip::net::Gossip;
-    use iroh_gossip::proto;
-
-    use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::EventLoopState;
-    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::SilentSink;
-    use crate::lifecycle::membership_update::MembershipUpdate;
-    use crate::protocol::identity::Identity;
-    use crate::protocol::messages::Authored;
-    use crate::protocol::{MeshId, Message, MessageBody, MessageKind};
-    use crate::testing::{endpoint_id, fresh_state, nick};
-    use crate::transport::MeshSender;
-
-    /// The app takes no frame in this test, so it only has to exist.
-    struct Inert;
-
-    #[async_trait::async_trait]
-    impl NodeApp for Inert {
-        fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass::BEAT.union(AppClass::VALID)
-        }
-
-        async fn on_app_frame(
-            &mut self,
-            _frame: InboundApp<'_>,
-            _state: &mut EventLoopState,
-            _ctx: &HandlerCtx<'_>,
-        ) -> bool {
-            false
-        }
-    }
-
-    #[test]
-    fn a_chat_digest_is_dropped_at_the_infra_arm_without_a_state_change() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let mesh = MeshId::from("test");
-            let endpoint = iroh::Endpoint::builder(presets::Minimal)
-                .bind()
-                .await
-                .expect("bind a local endpoint");
-            let gossip = Gossip::builder().spawn(endpoint.clone());
-            let topic = gossip
-                .subscribe(proto::TopicId::from_bytes([4u8; 32]), vec![])
-                .await
-                .expect("subscribe to a peerless topic");
-            let (gossip_sender, _receiver) = topic.split();
-            let sender = MeshSender::new(gossip_sender);
-            let identity = Identity::generate();
-            let peer = Identity::generate();
-            let reader_nick = nick("reader");
-            let sink = SilentSink;
-            let context = HandlerCtx {
-                sender: &sender,
-                endpoint: &endpoint,
-                mesh: &mesh,
-                author: &reader_nick,
-                identity: &identity,
-                our_pubkey: identity.author_key(),
-                max_peers: 16,
-                rendezvous_id: endpoint_id(9),
-                external_msg_tx: None,
-                sink: &sink,
-            };
-            let digest = Message::new_frame(
-                &mesh,
-                &nick("peer"),
-                MessageKind::Digest,
-                MessageBody::from("{}"),
-            )
-            .sign(&peer);
-            let mut state = fresh_state();
-            let seen_before = state.seen.len();
-            let mut app = Inert;
-            let update = MembershipUpdate {
-                returned: false,
-                joined_new: false,
-                stale: false,
-            };
-            let flow =
-                super::dispatch_infra(&digest, true, &update, &mut state, &mut app, &context).await;
-            assert!(
-                matches!(flow, ControlFlow::Break(())),
-                "a chat digest must stop at the infra arm"
-            );
-            assert_eq!(
-                state.seen.len(),
-                seen_before,
-                "a chat digest must not change the seen set"
-            );
-            // A peerless topic records no failed broadcast; commit 4 removes the arm.
-            let mut sent = sender.broadcast_frames();
-            sent.extend(state.unicast_pool.sent_frames());
-            assert!(sent.is_empty(), "a chat digest must send no frame");
-            assert!(
-                state.pending_outbound.is_empty(),
-                "a chat digest must queue no frame"
             );
             endpoint.close().await;
         });
@@ -2584,7 +2468,7 @@ mod first_contact_tests {
             let text = frame.serialize().expect("serialize").into_bytes();
             let old = String::from_utf8(text.to_vec())
                 .expect("a frame is text")
-                .replacen(r#""v":"13.0""#, r#""v":"12.0""#, 1);
+                .replacen(r#""v":"14.0""#, r#""v":"12.0""#, 1);
             assert!(old.contains("12.0"), "the test frame names version 12.0");
 
             ingest(Bytes::from(old.clone()), &mut state, &mut app, &context).await;
@@ -2637,7 +2521,7 @@ mod first_contact_tests {
             let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
             let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
             let version = format!(r"\u0007\u001b[31m{}", "x".repeat(500));
-            let hostile = text.replacen(r#""v":"13.0""#, &format!(r#""v":"{version}""#), 1);
+            let hostile = text.replacen(r#""v":"14.0""#, &format!(r#""v":"{version}""#), 1);
 
             ingest(Bytes::from(hostile), &mut state, &mut app, &context).await;
 
@@ -2694,7 +2578,7 @@ mod first_contact_tests {
 
             // Two passes over `cap + 1` versions: an evicting set names every frame of both.
             for version in (0..=cap).chain(0..=cap) {
-                let other = text.replacen(r#""v":"13.0""#, &format!(r#""v":"v{version}""#), 1);
+                let other = text.replacen(r#""v":"14.0""#, &format!(r#""v":"v{version}""#), 1);
                 ingest(Bytes::from(other), &mut state, &mut app, &context).await;
             }
 
