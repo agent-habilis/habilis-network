@@ -1180,7 +1180,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             gossip::broadcast_peer_info(&mut self.state, &context).await;
             self.state.last_sent_at = Instant::now();
         }
-        probe::prove_routed_pairs(&mut self.state, &context).await;
+        probe::prove_routed_pairs(&mut self.state, &context);
         self.app.on_tick(&mut self.state, &context).await;
     }
 
@@ -1431,7 +1431,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         }
         probe::regraft_due(&mut self.state, &context).await;
         probe::refill_isolated(&mut self.state, &context).await;
-        webrtc::session_policy::detach_sessions_under_udp(&mut self.state, &context).await;
+        webrtc::session_policy::detach_sessions_under_udp(&mut self.state, &context);
         gossip::antientropy::resume_fast_rounds(&mut self.state, &context).await;
     }
 

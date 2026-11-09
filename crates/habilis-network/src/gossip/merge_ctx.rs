@@ -138,7 +138,7 @@ pub async fn send_app(
     // An unmeshed node buffers a broadcast frame for the meshed edge.
     if state.pending_outbound.push((frame.clone(), bytes)) {
         // Buffered until the meshed edge flushes it through the same send
-        // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.
+        // decision (see `gossip::recv::flush_pending`). A buffered broadcast is still ours.
         super::recv::retain_own_app_broadcast(state, &frame, class);
         Ok(transport::Delivered::Done)
     } else {
@@ -521,7 +521,8 @@ pub async fn broadcast_state_merge(
     } else {
         // No gossip path yet: buffer until we mesh. (The change is already in
         // the local doc, so heads anti-entropy still reconciles it if the
-        // buffer is full.)
+        // buffer is full. That holds only until mechanism B is replaced, in a
+        // later phase.)
         state.pending_outbound.push((signed, bytes));
     }
     Ok(())

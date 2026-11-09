@@ -402,12 +402,16 @@ pub(crate) async fn drain_queued<S>(
     );
 }
 
-/// Drain `pending_outbound` onto the wire, in order. Runs on the meshed
-/// edges — the first real-peer `NeighborUp`, and a degraded node's first
-/// inbound message after a fault (starvation recovery / resume) — and again
-/// on every later `NeighborUp` and `PeerInfo` arrival while frames remain buffered. The buffer
-/// holds broadcast frames only: a frame that fails to deliver is re-buffered for that retry, not
-/// dropped.
+/// Drain `pending_outbound` onto the wire, in order. The buffer holds broadcast frames only. A
+/// broadcast fails to send only when the gossip sender refuses it, and then the frame is
+/// re-buffered for the next flush. These edges run a flush:
+/// - the first real-peer `NeighborUp`;
+/// - a `NeighborUp` on a meshed node (`link up`);
+/// - the first inbound message after a fault (`inbound traffic resumed`);
+/// - the silence sweep (`silence sweep`, in `daemon::event_loop`).
+///
+/// A `PeerInfo` arrival, a departure, and a direct path do not flush: none of them can change
+/// whether the gossip sender accepts a broadcast.
 pub(crate) async fn flush_pending(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
@@ -1618,12 +1622,6 @@ async fn handle_peer_info(
             });
         }
     }
-    // A buffered broadcast that failed to send gets another try now: the binding and the dial
-    // address of this author are registered. Only while meshed: the pre-mesh backlog waits for the
-    // meshed edge.
-    if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
-        flush_pending(state, context, "peer info arrival").await;
-    }
     let now = Instant::now();
     // Simultaneous-open tie-break: on a peer's *first* sighting, only the
     // numerically lower endpoint id dials.
@@ -2413,7 +2411,7 @@ mod first_contact_tests {
     /// gossip link in this test, so nothing waits for one: the frame reaches a real acceptor on the
     /// peer's unicast endpoint.
     #[test]
-    fn a_meshed_directed_send_across_a_link_gap_reaches_a_real_acceptor_at_once() {
+    fn a_meshed_directed_send_to_a_proven_peer_arrives_by_unicast_at_once() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,

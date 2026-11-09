@@ -2552,14 +2552,14 @@ mod tests {
                 );
 
                 state.path_kinds.insert(bob, PathKind::Relay);
-                session_policy::detach_sessions_under_udp(&mut state, &context).await;
+                session_policy::detach_sessions_under_udp(&mut state, &context);
                 assert!(
                     handle.has_session(&bob),
                     "the pair still reads as the relay"
                 );
 
                 state.path_kinds.insert(bob, PathKind::Ip);
-                session_policy::detach_sessions_under_udp(&mut state, &context).await;
+                session_policy::detach_sessions_under_udp(&mut state, &context);
                 assert!(!handle.has_session(&bob), "UDP is selected again");
                 assert_eq!(
                     state.direct.get(&bob),

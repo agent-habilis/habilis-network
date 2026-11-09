@@ -7,7 +7,6 @@ use super::path_change::{NO_PATH_GRACE, PathChange};
 use super::path_kind::PathKind;
 use super::step::StepInput;
 use super::{kinds, pair_to_climb, step};
-use crate::daemon::state::Standing;
 
 use crate::transport::UdpTransport;
 use std::collections::HashMap;
@@ -22,7 +21,7 @@ use crate::util::clock::Instant;
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 
-use crate::{gossip, transport};
+use crate::transport;
 use n0_future::{task, time};
 /// Start a path watcher for every raced peer not yet watched: a peer with UDP
 /// on both ends, on a node running `WebRTC`, where this node offers (the lower
@@ -128,14 +127,10 @@ pub(crate) fn ensure_watchers(
     }
 }
 
-/// Record `peer` as proven direct again; whether frames parked while it was
-/// not now need a flush. The race's offer round restores `Direct` through
+/// Record `peer` as proven direct again. The race's offer round restores `Direct` through
 /// `graft_proven`, but UDP can come back before any round attaches.
-pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool {
-    let was = state.direct.insert(peer, DirectState::Direct);
-    was != Some(DirectState::Direct)
-        && state.standing.contains(&Standing::Meshed)
-        && !state.pending_outbound.is_empty()
+pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) {
+    state.direct.insert(peer, DirectState::Direct);
 }
 
 /// Once per alive tick, nudge every watched peer riding `WebRTC`. A nudge is
@@ -299,16 +294,12 @@ pub(crate) async fn on_path_change(
                 let _ = handle.detach(&peer);
                 tracing::info!(target: transport::LOG_TARGET, %peer, "udp selected again; webrtc session detached");
             }
-            if mark_proven(state, peer) {
-                gossip::flush_pending(state, context, "direct path back").await;
-            }
+            mark_proven(state, peer);
         }
         PathAction::Rerace => {
             if matches!(kind, PathKind::Multihop | PathKind::Gossip) {
                 // Off the relay, so frames may flow; but the pair has no lane yet.
-                if mark_proven(state, peer) {
-                    gossip::flush_pending(state, context, "path off the relay").await;
-                }
+                mark_proven(state, peer);
                 tracing::info!(target: transport::LOG_TARGET, %peer, ?kind, "pair is off the relay; racing for a lane");
             } else {
                 if state.direct.get(&peer) == Some(&DirectState::Direct) {
@@ -377,7 +368,7 @@ pub(crate) fn proven_by_route(
 
 /// Mark the pairs that [`proven_by_route`] returns, and flush what waited for them. Runs on the
 /// sweep tick.
-pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+pub(crate) fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let members = state.member_addresses();
     let peers: Vec<EndpointId> = members
         .iter()
@@ -387,10 +378,9 @@ pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, context: &Han
     let proven = proven_by_route(peers, &state.direct, &state.path_watchers, |peer| {
         state.pair_path_kind(peer)
     });
-    let mut flush = false;
     for peer in proven {
         tracing::info!(target: transport::LOG_TARGET, %peer, "pair is off the relay on a multihop route; proven");
-        flush |= mark_proven(state, peer);
+        mark_proven(state, peer);
         // The proof must not remove the trigger of the session: a held frame used to open it, and a
         // pair that is proven is no longer held. A multihop route has no lane of its own, so the
         // pair keeps racing for one, as the watcher's report of a multihop path does.
@@ -402,8 +392,5 @@ pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, context: &Han
         if !has_session && let Some(address) = state.member_address_of(peer) {
             webrtc::negotiate_session::negotiate_session(state, context, peer, address);
         }
-    }
-    if flush {
-        gossip::flush_pending(state, context, "path off the relay").await;
     }
 }
