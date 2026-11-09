@@ -775,8 +775,9 @@ pub(crate) async fn handle_state_digest(
     let frames: Vec<WireFrame> = missing.iter().filter_map(serialize).collect();
     let mut answered = Answered::default();
     if frames.is_empty() {
-        if body.first {
-            answer_first_request(state, context, channel, target).await;
+        // The serve is noted only for an answer that went out: the asker repeats its digest while
+        // it waits, and a refused repeat would hold it to its first-sync deadline.
+        if body.first && answer_first_request(state, context, channel, target).await {
             state
                 .state_digest_serves
                 .note(serve(plane, target), heads, now);
@@ -857,16 +858,18 @@ pub(crate) async fn handle_state_digest(
 
 /// A request of a node that waits for its first sync found nothing missing: answer it with one
 /// closing digest, point-to-point. On gossip it would read as the answer of every node that sees
-/// it, so with no unicast path there is no answer, and the asker waits for its deadline.
+/// it, so with no unicast path there is no answer, and the asker waits for its deadline. Returns
+/// whether the answer went to the pool of the connection, which the caller reads to charge the
+/// serve.
 async fn answer_first_request(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
     channel: Channel,
     target: Option<EndpointId>,
-) {
+) -> bool {
     let Some(eid) = target else {
-        tracing::debug!(me = %context.author, ?channel, "state anti-entropy: no unicast path for the empty answer to a first request, so the asker waits for its deadline");
-        return;
+        tracing::debug!(target: "habilis_network::gossip", me = %context.author, ?channel, "state anti-entropy: no unicast path for the empty answer to a first request, so the asker waits for its deadline");
+        return false;
     };
     let origin = DigestOrigin {
         mesh: context.mesh,
@@ -882,7 +885,8 @@ async fn answer_first_request(
         }
         None => false,
     };
-    tracing::debug!(me = %context.author, ?channel, sent, "state anti-entropy: answered a first request with nothing to send");
+    tracing::debug!(target: "habilis_network::gossip", me = %context.author, ?channel, sent, "state anti-entropy: answered a first request with nothing to send");
+    sent
 }
 
 /// The signed change frames the author of `digest` lacks on `channel`, up to
@@ -1440,13 +1444,67 @@ mod tests {
     use crate::protocol::{
         AuthorKey, Channel, DedupKey, Identity, MeshId, Message, MessageBody, Nickname, UnixSecs,
     };
-    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
+    use crate::testing::{self, endpoint_id, fresh_state, nick, test_key};
+    use crate::util::clock::Instant;
 
     use crate::protocol::messages;
     use crate::transport::Resend;
     use crate::util::{consts, tuning};
     use crate::{gossip, protocol, transport};
     use tokio::sync::mpsc;
+    /// A first request whose empty answer cannot go out uses no serve. The asker repeats its
+    /// digest while it waits, and a repeat that this node refuses would leave the asker waiting
+    /// for its first-sync deadline, which is the wait that the answer is there to end.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_first_request_whose_empty_answer_cannot_go_out_uses_no_serve() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = testing::LaneNode::start().await;
+                let mut state = node.state();
+                state.standing.insert(Standing::Meshed);
+                let context = node.context();
+                // The asker is no linked neighbor with a direct path, so the answer has no unicast
+                // path and cannot go out.
+                let asker = Identity::generate();
+                let body = gossip::json_body(&HeadsBody {
+                    heads: Vec::new(),
+                    closing: false,
+                    first: true,
+                })
+                .expect("a body of a first request");
+                let digest =
+                    Message::new_channel_digest(&node.mesh, &nick("bob"), body, Channel::State)
+                        .sign(&asker);
+
+                let answered =
+                    super::handle_state_digest(Channel::State, &digest, &mut state, &context).await;
+
+                assert_eq!(
+                    answered.unicast + answered.broadcast,
+                    0,
+                    "the premise: no frame of an answer went out"
+                );
+                let key = (
+                    super::Asker::Key(digest.key()),
+                    Channel::State,
+                    super::Plane::Gossip,
+                );
+                assert!(
+                    state.state_digest_serves.admits(
+                        &key,
+                        super::heads_key(&digest),
+                        Instant::now()
+                    ),
+                    "an answer that did not go out leaves the serve of the window unused"
+                );
+                node.endpoint.close().await;
+            },
+        );
+    }
+
     /// A fresh node asks for the meta channel too: the first meta ask is noted once, and the
     /// window of the far jump of the meta root opens at it and does not renew.
     #[test]

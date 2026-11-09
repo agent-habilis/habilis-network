@@ -9,6 +9,12 @@ use crate::util::tuning::{
     ANTIENTROPY_SERVE_COOLDOWN, ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_MIN_INTERVAL,
 };
 
+/// The most windows that the budget keeps. A digest names any author key, so a member feeds this
+/// map from outside: without a cap one burst of digests under fresh keys holds a window for each
+/// key, and the scan for the windows that ended grows with them. A window that goes early gives
+/// its asker one answer more, which is what an asker that never asked gets anyway.
+const WINDOWS_MAX: usize = 256;
+
 /// Who is asking, for the budget. On gossip the digest reaches the whole mesh and a few members
 /// answer it, so the asker is its author key. On unicast the asker is the connection that the digest
 /// came on: a member mints author keys for free, so a budget for each key would give one connection
@@ -84,10 +90,29 @@ impl ServeBudget {
         }
     }
 
-    /// Record an answer to these heads, dropping windows that have ended.
-    pub(crate) fn note(&mut self, key: (Asker, Channel, Plane), heads: u64, now: Instant) {
+    /// Room for one window more, at the cap: the windows that ended go first, and then the oldest
+    /// of the ones that are live. A window that ended holds no answer back ([`Self::admits`] reads
+    /// its age), so it is kept until the cap for the scan that it saves.
+    fn make_room(&mut self, now: Instant) {
+        if self.windows.len() < WINDOWS_MAX {
+            return;
+        }
         self.windows
             .retain(|_, served| now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN);
+        while self.windows.len() >= WINDOWS_MAX {
+            let oldest = self.windows.iter().min_by_key(|(_, served)| served.since);
+            let Some(key) = oldest.map(|(key, _)| *key) else {
+                return;
+            };
+            self.windows.remove(&key);
+        }
+    }
+
+    /// Record an answer to these heads, inside the cap of the windows.
+    pub(crate) fn note(&mut self, key: (Asker, Channel, Plane), heads: u64, now: Instant) {
+        if !self.windows.contains_key(&key) {
+            self.make_room(now);
+        }
         let served = self.windows.entry(key).or_insert_with(|| Served {
             since: now,
             answers: 0,
@@ -95,5 +120,34 @@ impl ServeBudget {
         });
         served.answers += 1;
         served.heads.insert(heads, now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Plane;
+    use super::{Asker, ServeBudget, WINDOWS_MAX};
+    use crate::protocol::Channel;
+    use crate::testing;
+    use crate::util::clock::Instant;
+
+    /// One member mints author keys for free, and a digest names any of them: the map of the
+    /// windows stays inside its cap when it is fed 10 times the cap inside one window.
+    #[test]
+    fn the_windows_stay_inside_their_cap_when_they_are_fed_10_times_the_cap() {
+        let mut budget = ServeBudget::default();
+        let now = Instant::now();
+        let fed = WINDOWS_MAX * 10;
+        for index in 0..fed {
+            let asker = Asker::Key(testing::test_key(&format!("asker-{index}")));
+            let heads = u64::try_from(index).unwrap_or(u64::MAX);
+            budget.note((asker, Channel::State, Plane::Gossip), heads, now);
+        }
+
+        assert!(
+            budget.windows.len() <= WINDOWS_MAX,
+            "{fed} askers of one window must leave at most {WINDOWS_MAX} windows, and {} are held",
+            budget.windows.len()
+        );
     }
 }
