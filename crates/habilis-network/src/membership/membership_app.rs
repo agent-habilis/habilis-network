@@ -1642,7 +1642,6 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::gossip::app::{InboundApp, NodeApp};
     #[cfg(feature = "host")]
-    use crate::protocol::messages::sole_addressee;
     use crate::protocol::{AuthorKey, Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
     #[cfg(feature = "host")]
@@ -1906,10 +1905,11 @@ mod tests {
     }
 
     /// Two live keys use one nickname. A send by nickname is refused, because the engine never
-    /// picks one of them. A send to a key reaches the key that the caller names.
+    /// picks one of them. A send to a key is refused at once while unmeshed: a directed frame is
+    /// not buffered, so nothing is queued for the caller's key.
     #[cfg(feature = "host")]
     #[test]
-    fn a_send_to_a_key_reaches_one_of_two_keys_that_share_a_nickname() {
+    fn a_send_to_a_key_of_two_keys_that_share_a_nickname_is_refused_while_unmeshed() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = LaneNode::start().await;
             let context = node.context();
@@ -1950,17 +1950,14 @@ mod tests {
                 reply: key_reply,
             });
             app.handle_session(to_key, &mut state, &context).await;
-            assert_eq!(
-                by_key.await.expect("the request is answered"),
-                Ok(()),
-                "the send to a key of the nickname was refused"
+            let outcome = by_key.await.expect("the request is answered");
+            assert!(
+                matches!(outcome, Err(ref error) if error.contains("not meshed yet")),
+                "the send to a key of the nickname was not refused while unmeshed: {outcome:?}"
             );
-            let buffered = state.pending_outbound.take();
-            assert_eq!(buffered.len(), 1, "the accepted frame is in the buffer");
-            assert_eq!(
-                sole_addressee(&buffered[0].0.kind),
-                Some(&second),
-                "the frame does not name the key that the caller chose"
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the refused directed frame was buffered"
             );
             node.endpoint.close().await;
         });

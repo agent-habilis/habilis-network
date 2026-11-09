@@ -116,24 +116,22 @@ pub async fn send_app(
     messages::log_out(&frame);
     if state.standing.contains(&Standing::Meshed) {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
-        // `to` — the same routing the application's send path rides. A frame
-        // held off a relay-only peer is parked, not failed: the proven direct
-        // path flushes it (see `gossip::recv::flush_pending`).
-        match transport::deliver(&frame, bytes.clone(), state, context.sender).await {
-            Err(transport::SendError::Held { .. }) => {
-                park_and_offer(state, context, &frame, &bytes);
-            }
-            outcome => {
-                if outcome.is_ok() {
-                    super::recv::retain_own_app_broadcast(state, &frame, class);
-                }
-                return outcome;
-            }
+        // `to` — the same routing the application's send path rides. A directed
+        // frame with no path comes back as an error for the caller to act on.
+        let outcome = transport::deliver(&frame, bytes, state, context.sender).await;
+        if outcome.is_ok() {
+            super::recv::retain_own_app_broadcast(state, &frame, class);
         }
-    } else {
-        // An unmeshed node buffers a directed frame for the meshed edge.
-        park_and_offer(state, context, &frame, &bytes);
+        return outcome;
     }
+    // An unmeshed node refuses a directed frame at once: it is not buffered.
+    if let Some(key) = sole_addressee(&frame.kind) {
+        return Err(transport::SendError::Undeliverable(format!(
+            "directed message to {key} undeliverable: this node is not meshed yet"
+        )));
+    }
+    // An unmeshed node buffers a broadcast frame for the meshed edge.
+    park_and_offer(state, context, &frame, &bytes);
     if state.pending_outbound.push((frame.clone(), bytes)) {
         // Buffered until the meshed edge flushes it through the same send
         // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.

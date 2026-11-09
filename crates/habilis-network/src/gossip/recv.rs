@@ -17,7 +17,7 @@ use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::MembershipUpdate;
 use crate::protocol::messages::{
-    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log,
+    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log, sole_addressee,
 };
 use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
@@ -427,6 +427,9 @@ pub(crate) async fn flush_pending(
                 delivered += 1;
                 watch_flush(handle, message, bytes, state.flush_failed.clone());
             }
+            Err(error) if sole_addressee(&message.kind).is_some() => {
+                tracing::warn!(target: "habilis_network::gossip", %error, "buffered directed message undeliverable; dropped");
+            }
             Err(error) => {
                 if requeue(state, context, message, bytes) {
                     requeued += 1;
@@ -475,7 +478,9 @@ pub(crate) fn requeue_failed(
     message: Verified,
     bytes: WireFrame,
 ) {
-    if !requeue(state, context, message, bytes) {
+    if sole_addressee(&message.kind).is_some() {
+        tracing::warn!(target: "habilis_network::gossip", "buffered directed message undeliverable; dropped");
+    } else if !requeue(state, context, message, bytes) {
         tracing::warn!(target: "habilis_network::gossip", "buffered outbound message undeliverable and the buffer is full; dropped");
     }
 }
@@ -2319,7 +2324,7 @@ mod first_contact_tests {
     use crate::gossip;
     use crate::gossip::split;
     use crate::lifecycle::heartbeat;
-    use crate::protocol::messages::{AppFrameParams, sole_addressee};
+    use crate::protocol::messages::AppFrameParams;
     use crate::transport::outbox::Resend;
     use crate::transport::proven_endpoints::ProvenEndpoints;
     use crate::transport::{PayloadPath, webrtc};
@@ -2408,14 +2413,19 @@ mod first_contact_tests {
     }
 
     /// A directed frame in the buffer, to a peer that nobody serves: the flush returns at once, the
-    /// dial fails on its task, and the frame comes back to the loop and is buffered again. It is
-    /// not lost, and the loop did not wait for the dial.
+    /// dial fails on its task, and the frame comes back to the loop. A directed frame is never
+    /// buffered again: its caller heard of the send already, so the loop drops it with a warning.
+    /// The loop did not wait for the dial.
     #[test]
-    fn a_pending_frame_whose_dial_fails_is_parked_again() {
+    fn a_directed_frame_whose_dial_fails_is_dropped_not_parked_again() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
             async {
+                ::habilis_network_test_tracing::expect_warn(
+                    "habilis_network::gossip",
+                    "buffered directed message undeliverable; dropped",
+                );
                 let node = Node::spawn().await;
                 let context = node.context();
                 let silent = net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
@@ -2445,7 +2455,7 @@ mod first_contact_tests {
                 let bytes = frame.serialize().expect("serialize");
                 assert!(
                     state.pending_outbound.push((frame.clone(), bytes)),
-                    "a pending frame is parked again after a failed dial"
+                    "the directed frame is in the buffer before the flush"
                 );
 
                 let started = std_Instant::now();
@@ -2466,20 +2476,21 @@ mod first_contact_tests {
                         .expect("the loop keeps its channel");
                 super::requeue_failed(&mut state, &context, failed.clone(), returned);
 
-                let parked = state.pending_outbound.take();
-                assert_eq!(parked.len(), 1, "the frame is in the buffer again");
-                assert_eq!(parked[0].0.id, frame.id, "and it is the same frame");
+                assert!(
+                    state.pending_outbound.take().is_empty(),
+                    "a directed frame whose dial failed was parked again"
+                );
                 node.endpoint.close().await;
             },
         );
     }
 
     /// A directed frame names a key, so a nickname that two live peers use does not make it
-    /// undeliverable: the frame to the second key of the nickname waits only for an endpoint of
-    /// that key. The flush keeps it until the key retains one, and then the send decision routes
-    /// it to that endpoint, not to the dial hint that the first key owns.
+    /// undeliverable. The second key of the nickname has no endpoint of its own yet, so a send to
+    /// it is refused and nothing is buffered. Once the key retains an endpoint, the send decision
+    /// routes the frame to that endpoint, not to the dial hint that the first key owns.
     #[test]
-    fn a_buffered_frame_to_the_second_key_of_a_nickname_waits_for_its_own_endpoint() {
+    fn a_directed_frame_to_the_second_key_of_a_nickname_routes_to_its_own_endpoint() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -2501,16 +2512,14 @@ mod first_contact_tests {
             )
             .sign(&Identity::generate());
             let bytes = frame.serialize().expect("serialize");
+            let refused = ops::send_app(&mut state, &context, frame.clone(), AppClass::NONE).await;
             assert!(
-                state.pending_outbound.push((frame.clone(), bytes.clone())),
-                "the frame is parked before the flush"
+                matches!(refused, Err(transport::SendError::Undeliverable(_))),
+                "the send to the second key, with no endpoint of its own, was not refused: {refused:?}"
             );
-
-            super::flush_pending(&mut state, &context, "test").await;
-
             assert!(
-                !state.pending_outbound.is_empty(),
-                "the flush dropped a frame that a later flush can deliver"
+                state.pending_outbound.is_empty(),
+                "a refused directed frame was buffered"
             );
 
             state.retain_refused_endpoint(second, iroh::EndpointAddr::new(endpoint_id(6)));
@@ -2527,11 +2536,11 @@ mod first_contact_tests {
         });
     }
 
-    /// A directed frame to either of two live keys that use a nickname is accepted. An unmeshed
-    /// node buffers each frame with its own key as the recipient, in the order of the sends, and
-    /// tells the caller `Ok`.
+    /// A directed frame to either of two live keys that use a nickname is refused while unmeshed.
+    /// The refusal names the key, so the caller can tell the two keys apart, and nothing is
+    /// buffered.
     #[test]
-    fn an_unmeshed_send_to_either_key_of_a_nickname_is_buffered() {
+    fn an_unmeshed_send_to_either_key_of_a_nickname_is_refused() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -2548,31 +2557,28 @@ mod first_contact_tests {
                 let frame =
                     Message::new_pong(&node.mesh, &node.author, to, &protocol::MessageId::random())
                         .sign(&Identity::generate());
-                let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+                let refused = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
                 assert!(
-                    sent.is_ok(),
-                    "the send to a key of the nickname was refused"
+                    matches!(
+                        &refused,
+                        Err(transport::SendError::Undeliverable(error)) if error.contains(&to.to_string())
+                    ),
+                    "the send to {to} was not refused while unmeshed: {refused:?}"
                 );
             }
 
-            let buffered = state.pending_outbound.take();
-            let recipients: Vec<AuthorKey> = buffered
-                .iter()
-                .filter_map(|(frame, _)| sole_addressee(&frame.kind).copied())
-                .collect();
-            assert_eq!(
-                recipients,
-                [second, first],
-                "the buffer lost a frame or the key of a recipient"
+            assert!(
+                state.pending_outbound.is_empty(),
+                "a refused directed frame was buffered"
             );
             node.endpoint.close().await;
         });
     }
 
-    /// An unmeshed node buffers a directed frame until the meshed edge. A key that no roster, quiet
-    /// set or address book holds is a key that nobody can deliver to, and the caller was told `Ok`
-    /// before. It is refused at once and the buffer stays empty. A quiet key, and a key that only
-    /// has a retained endpoint, can still return or be dialed, so their frames wait.
+    /// An unmeshed node refuses a directed frame at once, whatever the key. A key that no roster,
+    /// quiet set or address book holds is undeliverable. A quiet key, and a key that only has a
+    /// retained endpoint, are not delivered to now either, and the caller hears it at once. The
+    /// buffer holds broadcast frames only.
     #[test]
     fn an_unmeshed_send_to_a_key_outside_the_roster_is_refused() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -2602,13 +2608,16 @@ mod first_contact_tests {
             );
 
             for key in [quiet, hinted] {
-                let sent = ops::send_app(&mut state, &context, frame_to(key), AppClass::NONE).await;
-                assert!(sent.is_ok(), "the unmeshed send to {key} was refused");
+                let outcome =
+                    ops::send_app(&mut state, &context, frame_to(key), AppClass::NONE).await;
+                assert!(
+                    matches!(outcome, Err(transport::SendError::Undeliverable(_))),
+                    "the unmeshed send to {key} was not refused: {outcome:?}"
+                );
             }
-            assert_eq!(
-                state.pending_outbound.take().len(),
-                2,
-                "the frames of the quiet key and of the key with an endpoint wait"
+            assert!(
+                state.pending_outbound.is_empty(),
+                "a refused directed frame was buffered"
             );
             node.endpoint.close().await;
         });
