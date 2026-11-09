@@ -40,6 +40,11 @@ const DEFAULT_GONE_TTL: Duration = Duration::from_hours(2);
 /// name and nickname, with room for longer names.
 const FRAME_OVERHEAD_BYTES: usize = 512;
 
+/// The entries of one digest page. A page is a JSON array of `[key, version, hash]` rows, about
+/// 145 bytes each, so 22 rows and the frame envelope fit one message of `MAX_MESSAGE_SIZE`. A
+/// test measures the biggest page.
+const PAGE_ENTRIES: usize = 22;
+
 /// The caps that bound a [`SliceStore`].
 ///
 /// # Examples
@@ -243,6 +248,55 @@ impl LocalDraft {
     pub fn body(&self) -> &MessageBody {
         &self.body
     }
+}
+
+/// One author in a version digest: its key, its version, and the hash of its signed frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DigestEntry {
+    key: AuthorKey,
+    version: u64,
+    hash: ContentHash,
+}
+
+impl DigestEntry {
+    /// Makes the entry of `key` at `version`, whose signed frame hashes to `hash`.
+    #[must_use]
+    pub fn new(key: AuthorKey, version: u64, hash: ContentHash) -> Self {
+        Self { key, version, hash }
+    }
+
+    /// The author key of the entry.
+    #[must_use]
+    pub fn key(&self) -> AuthorKey {
+        self.key
+    }
+
+    /// The version of the entry.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// The hash of the signed frame of the entry.
+    #[must_use]
+    pub fn hash(&self) -> ContentHash {
+        self.hash
+    }
+}
+
+/// The version digest of a store: the round that two peers exchange to find what each one lacks.
+///
+/// This is the version-vector sync. It replaces the heads digest. The root is the hash of every
+/// entry, sorted by key, so two stores with the same slices have the same root. Keep this round
+/// when the store changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VersionDigest {
+    /// The hash of all entries, sorted by key.
+    pub root: ContentHash,
+    /// The entries, sorted by key, in pages of at most `PAGE_ENTRIES` entries each.
+    pub pages: Vec<Vec<DigestEntry>>,
 }
 
 /// The slices of one channel, keyed by author key.
@@ -527,6 +581,77 @@ impl SliceStore {
         self.keep_gone(*key, now);
     }
 
+    /// Returns the version digest of the store, the version-vector sync round.
+    ///
+    /// The entries are the held slices. A gone key has no slice, so it is never listed.
+    #[must_use]
+    pub fn digest(&self) -> VersionDigest {
+        let mut entries: Vec<DigestEntry> = self
+            .slices
+            .iter()
+            .map(|(key, slice)| DigestEntry::new(*key, slice.version, slice.hash))
+            .collect();
+        entries.sort_by(|left, right| left.key.as_bytes().cmp(right.key.as_bytes()));
+        let mut bytes = Vec::with_capacity(entries.len() * 72);
+        for entry in &entries {
+            bytes.extend_from_slice(entry.key.as_bytes());
+            bytes.extend_from_slice(&entry.version.to_be_bytes());
+            bytes.extend_from_slice(entry.hash.as_bytes());
+        }
+        VersionDigest {
+            root: ContentHash::of(&bytes),
+            pages: entries
+                .chunks(PAGE_ENTRIES)
+                .map(<[DigestEntry]>::to_vec)
+                .collect(),
+        }
+    }
+
+    /// Whether the digest of this store has the root `root`, so two peers with equal stores
+    /// need to exchange one root only.
+    #[must_use]
+    pub fn matches(&self, root: &ContentHash) -> bool {
+        self.digest().root == *root
+    }
+
+    /// The stored frames that `theirs` lacks, or holds at a lower version, or holds at the same
+    /// version with a higher hash. A gone key is never offered.
+    pub fn missing_for<'a>(
+        &'a self,
+        theirs: &'a [DigestEntry],
+    ) -> impl Iterator<Item = Verified> + 'a {
+        self.slices
+            .iter()
+            .filter(
+                move |(key, slice)| match theirs.iter().find(|entry| entry.key == **key) {
+                    None => true,
+                    Some(entry) => {
+                        entry.version < slice.version
+                            || (entry.version == slice.version && slice.hash < entry.hash)
+                    }
+                },
+            )
+            .map(|(_, slice)| slice.frame.clone())
+    }
+
+    /// The keys of `theirs` whose slice this store would take: a key it lacks, or a key at a
+    /// lower version or at the same version with a lower hash. A gone key is never wanted.
+    #[must_use]
+    pub fn wanted_from(&self, theirs: &[DigestEntry]) -> Vec<AuthorKey> {
+        theirs
+            .iter()
+            .filter(|entry| !self.is_gone(&entry.key))
+            .filter(|entry| match self.slices.get(&entry.key) {
+                None => true,
+                Some(held) => {
+                    entry.version > held.version
+                        || (entry.version == held.version && entry.hash < held.hash)
+                }
+            })
+            .map(|entry| entry.key)
+            .collect()
+    }
+
     /// The number of author buckets, for the tests that check a refused key keeps none.
     #[cfg(test)]
     fn bucket_count(&self) -> usize {
@@ -607,12 +732,14 @@ impl SliceStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        FRAME_OVERHEAD_BYTES, LocalDraft, SliceError, SliceIngest, SliceLimits, SliceStore, wire,
+        DigestEntry, FRAME_OVERHEAD_BYTES, LocalDraft, PAGE_ENTRIES, SliceError, SliceIngest,
+        SliceLimits, SliceStore, wire,
     };
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
-        AuthorKey, Channel, MeshId, Message, MessageBody, Nickname, SymmetricKey,
+        AuthorKey, Channel, ContentHash, MeshId, Message, MessageBody, Nickname, SymmetricKey,
     };
+    use habilis_network_util::consts::MAX_MESSAGE_SIZE;
     use serde_json::{Map, Value, json};
     use std::time::{Duration, Instant};
 
@@ -1260,6 +1387,282 @@ mod tests {
                 SliceIngest::Applied,
                 "a resend of a new version must never spend a token"
             );
+        }
+    }
+
+    /// The digest entries of `store`, in key order, from its pages.
+    fn entries_of(store: &SliceStore) -> Vec<DigestEntry> {
+        store.digest().pages.into_iter().flatten().collect()
+    }
+
+    /// The key of the peer `index`, for the tests that need several authors.
+    fn author_key(index: usize) -> AuthorKey {
+        many_key(index + 1)
+    }
+
+    /// One page as the engine sends it: a JSON array of `[key, version, hash]` rows.
+    fn page_json(page: &[DigestEntry]) -> String {
+        let rows: Vec<Value> = page
+            .iter()
+            .map(|entry| {
+                json!([
+                    String::from_utf8_lossy(&entry.key().hex()).into_owned(),
+                    entry.version(),
+                    String::from_utf8_lossy(&entry.hash().hex()).into_owned(),
+                ])
+            })
+            .collect();
+        json!({"entries": rows}).to_string()
+    }
+
+    /// Advances a xorshift generator and returns a value below `bound`.
+    fn pick(seed: &mut u64, bound: usize) -> usize {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        usize::try_from(*seed % u64::try_from(bound).unwrap_or(1)).unwrap_or(0)
+    }
+
+    /// Copies the slices that `to` lacks from `from`, on the resend path.
+    fn sync(nodes: &mut [SliceStore], from: usize, to: usize, now: Instant) {
+        let theirs = entries_of(&nodes[to]);
+        let frames: Vec<Verified> = nodes[from].missing_for(&theirs).collect();
+        for frame in &frames {
+            nodes[to].ingest(frame, false, now);
+        }
+    }
+
+    #[test]
+    fn root_is_equal_for_equal_stores_and_changes_with_any_slice() {
+        let mut first_store = store();
+        let mut second_store = store();
+        let one = frame(key(1), 1, json!({"a": 1}));
+        let two = frame(key(2), 1, json!({"b": 2}));
+        apply(&mut first_store, &one);
+        apply(&mut first_store, &two);
+        apply(&mut second_store, &two.clone());
+        apply(&mut second_store, &one.clone());
+        assert_eq!(
+            first_store.digest().root,
+            second_store.digest().root,
+            "equal stores must have one root"
+        );
+        assert!(
+            second_store.matches(&first_store.digest().root),
+            "equal stores must match each other's root"
+        );
+        apply(&mut first_store, &frame(key(1), 2, json!({"a": 3})));
+        assert_ne!(
+            first_store.digest().root,
+            second_store.digest().root,
+            "a new version must change the root"
+        );
+        assert!(
+            !second_store.matches(&first_store.digest().root),
+            "a changed store must not match the old root"
+        );
+    }
+
+    #[test]
+    fn a_digest_page_fits_one_message_with_256_authors() {
+        let mut store = small_store(SliceLimits::new(3072, Duration::from_secs(1), 256, 5));
+        for index in 0..256 {
+            apply(
+                &mut store,
+                &frame(author_key(index), 1_000, json!({"n": index})),
+            );
+        }
+        let digest = store.digest();
+        assert_eq!(
+            digest.pages.len(),
+            256_usize.div_ceil(PAGE_ENTRIES),
+            "pages must hold the entries"
+        );
+        assert_eq!(
+            digest.pages[0].len(),
+            PAGE_ENTRIES,
+            "a full page must hold PAGE_ENTRIES"
+        );
+        for page in &digest.pages {
+            let body = page_json(page);
+            let message = Message::new_channel_digest(
+                &MeshId::from("test"),
+                &Nickname::from("peer"),
+                MessageBody::from(body.as_str()),
+                Channel::Meta,
+            );
+            let frame = Verified::fixture_unchecked(message, key(1));
+            let wire = frame.serialize().expect("a page must serialize");
+            assert!(
+                wire.len() <= MAX_MESSAGE_SIZE,
+                "a page of {} entries must fit one message, it has {} bytes",
+                page.len(),
+                wire.len()
+            );
+        }
+    }
+
+    #[test]
+    fn missing_for_offers_an_author_the_other_side_lacks() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"a": 1})));
+        let offered: Vec<Verified> = store.missing_for(&[]).collect();
+        assert_eq!(offered.len(), 1, "a lacking author must be offered");
+        assert_eq!(
+            offered[0].key(),
+            key(1),
+            "the offered frame must be the author's own"
+        );
+    }
+
+    #[test]
+    fn missing_for_offers_a_higher_version_and_never_a_lower_one() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 2, json!({"a": 2})));
+        let behind = [DigestEntry::new(key(1), 1, ContentHash::of(b"old"))];
+        assert_eq!(
+            store.missing_for(&behind).count(),
+            1,
+            "a higher version must be offered"
+        );
+        let ahead = [DigestEntry::new(key(1), 3, ContentHash::of(b"new"))];
+        assert_eq!(
+            store.missing_for(&ahead).count(),
+            0,
+            "a lower version must never be offered"
+        );
+    }
+
+    #[test]
+    fn missing_for_resolves_an_equal_version_by_the_lower_hash() {
+        let one = frame(key(1), 1, json!({"a": 1}));
+        let other = frame(key(1), 1, json!({"a": 2}));
+        let (low, high) = if one.content_hash() < other.content_hash() {
+            (one, other)
+        } else {
+            (other, one)
+        };
+        let mut holds_high = store();
+        apply(&mut holds_high, &high);
+        let theirs_low = [DigestEntry::new(key(1), 1, low.content_hash())];
+        assert_eq!(
+            holds_high.missing_for(&theirs_low).count(),
+            0,
+            "the higher hash must not be offered against the lower hash"
+        );
+        let mut holds_low = store();
+        apply(&mut holds_low, &low);
+        let theirs_high = [DigestEntry::new(key(1), 1, high.content_hash())];
+        assert_eq!(
+            holds_low.missing_for(&theirs_high).count(),
+            1,
+            "the lower hash must be offered against the higher hash"
+        );
+    }
+
+    #[test]
+    fn missing_for_offers_a_tombstone_as_its_frame() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 2, Value::Null));
+        let behind = [DigestEntry::new(key(1), 1, ContentHash::of(b"live"))];
+        let offered: Vec<Verified> = store.missing_for(&behind).collect();
+        assert_eq!(offered.len(), 1, "a tombstone must be offered");
+        assert!(
+            offered[0].body.as_str().contains("null"),
+            "the offered tombstone must be its own signed frame with a null value"
+        );
+    }
+
+    #[test]
+    fn a_forgotten_key_is_never_offered_listed_or_wanted() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"a": 1})));
+        store.forget(&key(1), Instant::now());
+        let theirs = [DigestEntry::new(key(1), 1, ContentHash::of(b"held"))];
+        assert_eq!(
+            store.missing_for(&[]).count(),
+            0,
+            "a forgotten key must not be offered"
+        );
+        assert!(
+            entries_of(&store).is_empty(),
+            "a forgotten key must not be listed"
+        );
+        let high = [DigestEntry::new(key(1), 9, ContentHash::of(b"high"))];
+        assert!(
+            store.wanted_from(&high).is_empty(),
+            "a forgotten key must not be wanted"
+        );
+        assert!(
+            store.wanted_from(&theirs).is_empty(),
+            "a forgotten key must not be wanted"
+        );
+    }
+
+    #[test]
+    fn wanted_from_lists_a_key_the_store_would_take() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 5, json!({"a": 5})));
+        let theirs = [
+            DigestEntry::new(key(1), 4, ContentHash::of(b"lower")),
+            DigestEntry::new(key(2), 1, ContentHash::of(b"new")),
+        ];
+        assert_eq!(
+            store.wanted_from(&theirs),
+            vec![key(2)],
+            "a new key must be wanted and a lower version of a held key must not"
+        );
+    }
+
+    #[test]
+    fn peers_that_exchange_digests_and_frames_converge() {
+        const NODES: usize = 3;
+        let limits = SliceLimits::new(3072, Duration::from_millis(1), 256, 1_000);
+        let mut nodes: Vec<SliceStore> = (0..NODES).map(|_| small_store(limits)).collect();
+        let start = Instant::now();
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        for tick in 0..200_u64 {
+            let now = start + Duration::from_millis(tick);
+            if pick(&mut seed, 3) == 0 {
+                let author = pick(&mut seed, NODES);
+                let own = author_key(author);
+                let draft = nodes[author]
+                    .prepare_local(&own, object(json!({"tick": tick})), now)
+                    .expect("a write must draft");
+                let signed = frame_of(&draft, own);
+                nodes[author]
+                    .commit_local(draft, &signed, now)
+                    .expect("the own write must commit");
+            } else {
+                let from = pick(&mut seed, NODES);
+                let to = pick(&mut seed, NODES);
+                if from != to {
+                    sync(&mut nodes, from, to, now);
+                }
+            }
+        }
+        for _ in 0..NODES {
+            for from in 0..NODES {
+                for to in 0..NODES {
+                    if from != to {
+                        sync(&mut nodes, from, to, start);
+                    }
+                }
+            }
+        }
+        let first = nodes[0].view();
+        for node in &nodes[1..] {
+            assert_eq!(node.view(), first, "peers must converge to one view");
+        }
+        for index in 0..NODES {
+            let own = author_key(index);
+            for node in &nodes {
+                assert_eq!(
+                    node.version(&own),
+                    nodes[index].version(&own),
+                    "every peer must hold the latest version of author {index}"
+                );
+            }
         }
     }
 }
