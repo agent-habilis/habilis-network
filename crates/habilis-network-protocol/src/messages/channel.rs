@@ -24,7 +24,17 @@ pub enum Channel {
 }
 
 impl Channel {
-    pub(crate) fn event_kind(self) -> MessageKind {
+    /// The kind of the frame that carries a change on this channel.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_protocol::{Channel, MessageKind};
+    ///
+    /// assert_eq!(Channel::Meta.event_kind(), MessageKind::Meta);
+    /// ```
+    #[must_use]
+    pub fn event_kind(self) -> MessageKind {
         match self {
             Channel::State => MessageKind::State,
             Channel::Meta => MessageKind::Meta,
