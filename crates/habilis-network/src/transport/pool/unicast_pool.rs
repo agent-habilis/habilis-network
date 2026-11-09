@@ -5,7 +5,7 @@ use super::in_flight_dial::InFlightDial;
 use super::registration::Registration;
 use super::timeouts::{
     BUSY_AFTER_FINISH, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT, PATH_SELECT_TIMEOUT,
-    SEND_TIMEOUT,
+    SEND_TIMED_OUT, SEND_TIMEOUT,
 };
 use super::warm_send::WarmSend;
 use crate::transport::admission::{BusyGuard, SignalAdmission};
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use iroh::endpoint::{Connection, SendStream};
+use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::time::Instant as PoolInstant;
 use tokio::sync::{Mutex, watch};
@@ -842,13 +842,6 @@ async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> 
     }
 }
 
-/// Open a stream of its own for the frame and write the whole frame on it.
-async fn open_and_write(connection: &Connection, bytes: &[u8]) -> Result<SendStream> {
-    let mut stream = connection.open_uni().await?;
-    stream.write_all(bytes).await?;
-    Ok(stream)
-}
-
 /// One message per unidirectional stream: open, write the whole frame, finish.
 /// No length framing is needed — the accept side reads the stream to EOF and
 /// gets exactly one serialized `Message`. The finished stream keeps flushing
@@ -861,13 +854,23 @@ pub(super) async fn send_one(
     busy: Option<BusyGuard>,
     tally: Option<&WireOutTally>,
 ) -> Result<()> {
-    // The open and the write share one budget: a peer that reads nothing fills its limit of streams, and the
+    // The open and the write share one deadline: a peer that reads nothing fills its limit of streams, and the
     // open of the next stream then waits for room that never comes. The send sits in a task of its own, so a
-    // wait without a bound grows the tasks of this node. A send that is dropped here resets its stream.
-    let mut stream = match time::timeout(SEND_TIMEOUT, open_and_write(connection, bytes)).await {
-        Ok(written) => written?,
-        Err(_) => bail!("a unicast send timed out after {SEND_TIMEOUT:?}: the peer read nothing"),
+    // wait without a bound grows the tasks of this node.
+    let deadline = PoolInstant::now() + SEND_TIMEOUT;
+    let mut stream = match time::timeout(SEND_TIMEOUT, connection.open_uni()).await {
+        Ok(opened) => opened?,
+        Err(_) => bail!("{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: no stream was opened"),
     };
+    let left: Duration = deadline.saturating_duration_since(PoolInstant::now());
+    if let Ok(written) = time::timeout(left, stream.write_all(bytes)).await {
+        written?;
+    } else {
+        // The frame is cut short, so the stream is reset and not finished: dropping it finishes it, and the peer
+        // would read the prefix as a whole frame. A reset also drops what is still buffered here.
+        let _ = stream.reset(0u32.into());
+        bail!("{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: the peer read nothing");
+    }
     stream.finish()?;
     if let Some(tally) = tally {
         tally.note(bytes);

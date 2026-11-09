@@ -225,26 +225,34 @@ mod tests {
             let connection = pool.warm_or_dial(server).await.expect("dial");
 
             let fills_the_streams_of_the_peer = async {
+                let mut sent = 0u32;
                 for _ in 0..4096u32 {
-                    if super::unicast_pool::send_one(&connection, b"frame", None, None)
-                        .await
-                        .is_err()
-                    {
-                        return true;
+                    match super::unicast_pool::send_one(&connection, b"frame", None, None).await {
+                        Ok(()) => sent += 1,
+                        Err(error) => return (sent, Some(error.to_string())),
                     }
                 }
-                false
+                (sent, None)
             };
-            let refused = time::timeout(
+            let ended = time::timeout(
                 super::timeouts::SEND_TIMEOUT * 3,
                 fills_the_streams_of_the_peer,
             )
             .await;
 
-            assert_eq!(
-                refused,
-                Ok(true),
-                "a send to a peer that reads nothing is still waiting, or 4096 sends never filled the streams of the peer, so the wait of a send has no bound to prove"
+            let (sent, refusal) = ended.expect(
+                "a send to a peer that reads nothing is still waiting, so the wait of a send has no bound",
+            );
+            let refusal: String = refusal.expect(
+                "4096 sends never filled the streams of the peer, so the wait of a send has no bound to prove",
+            );
+            assert!(
+                sent > 0,
+                "the first send already failed with \"{refusal}\", so the refusal below is not the one of a full peer"
+            );
+            assert!(
+                refusal.contains(super::timeouts::SEND_TIMED_OUT),
+                "the send of the frame number {sent} ended with \"{refusal}\", which is not the deadline of a send"
             );
             router.shutdown().await.expect("shutdown");
             client.close().await;

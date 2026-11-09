@@ -36,3 +36,6 @@ pub(super) const BUSY_AFTER_FINISH: Duration = Duration::from_secs(2);
 /// its own, so a wait without a bound grows the tasks of this node for as long as the peer makes it send. The
 /// budget is the dial's, because a send that waits this long is as dead as a peer that does not answer a dial.
 pub(super) const SEND_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The error of a send that passed [`SEND_TIMEOUT`]. A caller that tells the two apart reads it.
+pub(super) const SEND_TIMED_OUT: &str = "unicast send timed out";
