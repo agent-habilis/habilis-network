@@ -90,7 +90,7 @@ async fn broadcast_state_digest(
 }
 
 /// The signed heads digest for `channel`, or `None` while no gossip path can
-/// carry it. Unlike the chat digest this does not wait for `meshed`: a node
+/// carry it. This does not wait for `meshed`: a node
 /// whose only neighbor is the rendezvous relay still exchanges presence over
 /// that link, so its documents must travel the same way. Gating on `meshed`
 /// left two peers behind one relay with converged rosters and documents that
@@ -928,8 +928,8 @@ mod tests {
     }
 
     /// A state/meta heads digest round-trips and stays tiny — automerge heads are
-    /// a bounded frontier (a handful of 32-byte hashes), so unlike the windowed
-    /// chat digest there is no overflow risk as the doc's history grows.
+    /// a bounded frontier (a handful of 32-byte hashes), so there is no overflow
+    /// risk as the doc's history grows.
     #[test]
     fn state_heads_digest_round_trips_and_is_small() {
         let _guard = ::habilis_network_test_tracing::init();

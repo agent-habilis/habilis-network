@@ -55,7 +55,7 @@ pub enum MessageKind {
     PeerInfo,
     /// Liveness probe broadcast by a node running an RTT round. Every
     /// receiver auto-responds with a `Pong` addressed back to the
-    /// pinger. Plumbing like `PeerInfo`/`Digest`: never logged or surfaced
+    /// pinger. Plumbing like `PeerInfo`: never logged or surfaced
     /// via `poll`/`fetch` — only the originator's `ping_report` event surfaces.
     Ping,
     /// Response to a `Ping`, addressed to the original pinger (`to`). `probe` is
@@ -92,7 +92,7 @@ pub enum MessageKind {
     /// A multihop-routing **link-state** advertisement: the author's own measured
     /// links + underlay address (`body` is a serialized
     /// `habilis_network_iroh_multihop_transport::LinkVector`). Broadcast
-    /// plumbing like `Digest`/`Ping` — never logged, never surfaced, never
+    /// plumbing like `Ping` — never logged, never surfaced, never
     /// chain/DAG-folded; every node folds the freshest vector per origin into its
     /// routing graph. Ephemeral (a fresh vector supersedes the old by `seq`), so
     /// it rides gossip rather than a durable channel log.

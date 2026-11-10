@@ -1407,18 +1407,28 @@ fn a_frame_of_wire_version_12_0_is_refused_by_its_version() {
     }
 }
 
-/// Golden: the chat digest kind is gone. A `digest` frame at the current version is a parse error,
-/// and so is the same frame at `13.0`, the version that still carried the kind.
+/// A frame of the `13.0` wire is refused by its version. The frame is a chat `digest`, the kind that
+/// `13.0` still carried, so the parse fails on the kind too: the version is the cause to name.
+#[test]
+fn a_frame_of_wire_version_13_0_is_refused_by_its_version() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let frame = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"digest","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"[]","ext":{}}"#;
+    let refused = Message::parse(frame.as_bytes()).expect_err("a 13.0 frame parses");
+    assert!(
+        matches!(&refused, MessageError::UnsupportedVersion(version) if version == "13.0"),
+        "the 13.0 frame was not refused by its version: {refused:?}"
+    );
+}
+
+/// Golden: the chat digest kind is gone. A `digest` frame at the current version is not a message
+/// kind, so it fails in the JSON, not in the version.
 #[test]
 fn a_digest_frame_is_not_a_message_kind_any_more() {
     let _guard = ::habilis_network_test_tracing::init();
-    for version in ["14.0", "13.0"] {
-        let frame = format!(
-            r#"{{"v":"{version}","id":"00000000-0000-0000-0000-000000000001","type":"digest","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"[]","ext":{{}}}}"#
-        );
-        assert!(
-            Message::parse(frame.as_bytes()).is_err(),
-            "a digest frame at {version} must not parse"
-        );
-    }
+    let frame = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"digest","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"[]","ext":{}}"#;
+    let refused = Message::parse(frame.as_bytes()).expect_err("a digest frame parses");
+    assert!(
+        matches!(&refused, MessageError::Source { .. }),
+        "a digest frame at 14.0 was not refused as an unknown kind: {refused:?}"
+    );
 }

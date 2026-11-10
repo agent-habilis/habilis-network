@@ -230,10 +230,8 @@ impl Message {
         Self::new(mesh, author, channel.digest_kind(), body)
     }
 
-    /// A state anti-entropy digest whose `body` is the windowed digest the
-    /// sender advertises (a `DigestBody` of `WireWindow`s over the `State`
-    /// events it holds). Test-only;
-    /// production uses [`new_channel_digest`](Self::new_channel_digest).
+    /// A state anti-entropy digest whose `body` is the sender's automerge heads.
+    /// Test-only; production uses [`new_channel_digest`](Self::new_channel_digest).
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
     pub fn new_state_digest(mesh: &MeshId, author: &Nickname, body: MessageBody) -> Self {
