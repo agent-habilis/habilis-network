@@ -272,7 +272,6 @@ impl NodeDriver for Chat {
                         MessageBody::try_new(&text).expect("a short body"),
                     ),
                 );
-                let class = self.classify(&frame.authored());
                 let sent = send_app(state, context, frame).await.map(|_| ());
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true

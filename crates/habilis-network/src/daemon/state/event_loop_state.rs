@@ -92,7 +92,6 @@ impl Default for Goodbyes {
     }
 }
 
-/// What the receive path remembers about frames it handled or refused. Each set is bounded.
 /// The documents of the two shared-state channels, behind one type so that a change of store
 /// touches this type alone.
 #[derive(Debug)]
@@ -189,6 +188,7 @@ impl ChannelDocs {
     }
 }
 
+/// What the receive path remembers about frames it handled or refused. Each set is bounded.
 #[derive(Debug)]
 pub(crate) struct ReceiveMemory {
     /// Shard groups already reassembled and surfaced, keyed by their author as the store keys them:
@@ -721,7 +721,7 @@ pub struct EventLoopState {
 }
 
 impl EventLoopState {
-    /// The JSON view of the shared state of `channel`.
+    /// The shared state of `channel` as JSON.
     #[must_use]
     pub fn view(&self, channel: protocol::Channel) -> serde_json::Value {
         self.docs.to_json(channel)

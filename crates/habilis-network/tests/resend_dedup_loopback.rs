@@ -114,7 +114,6 @@ impl NodeDriver for Chat {
                         MessageBody::from(text.as_str()),
                     ),
                 );
-                let class = self.classify(&frame.authored());
                 let _ = send_app(state, context, frame)
                     .await
                     .expect("a small frame is accepted");
@@ -141,7 +140,7 @@ impl NodeDriver for Chat {
                 true
             }
             Request::Read(response) => {
-                let _ = response.send(state.docs.to_json(Channel::State));
+                let _ = response.send(state.view(Channel::State));
                 false
             }
             Request::ForgetProof(peer, done) => {
