@@ -29,9 +29,7 @@ use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::meshes::Mesh;
 use crate::protocol::messages::{Authored, Verified, WireFrame};
-use crate::protocol::{
-    AuthorKey, ContentHash, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs,
-};
+use crate::protocol::{AuthorKey, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
@@ -614,12 +612,6 @@ pub struct EventLoopState {
     /// The public key is the durable identity; the nickname is a
     /// non-unique display label.
     pub(crate) identity: Arc<Identity>,
-    /// Our own per-author log cursor (Phase 2): `self_seq` is the next
-    /// `Msg` sequence number to emit, `self_prev` the content hash of our
-    /// last sent `Msg` (`None` until the first). Advanced on every send so
-    /// our `Msg` stream is a `seq`+`prev` hash chain.
-    pub(crate) self_seq: u64,
-    pub(crate) self_prev: Option<ContentHash>,
     /// When the last *verified* inbound gossip message arrived — the
     /// starvation watchdog's signal. Keyed on messages, not neighbor
     /// events: the roster-collapse showed links can look alive (or flap)
@@ -764,8 +756,6 @@ impl EventLoopState {
                 meta: Self::meta_channel(init.per_peer_gate, meta_key),
             },
             identity: init.identity,
-            self_seq: 0,
-            self_prev: None,
             last_inbound_at: now,
             last_recovery_at: None,
             recovery_trips: 0,
@@ -1962,13 +1952,6 @@ impl EventLoopState {
     #[must_use]
     pub fn mint_mesh(&self) -> Option<&Mesh> {
         self.mint_mesh.as_ref()
-    }
-
-    /// This author's current chain position — the `seq` the next message takes
-    /// and the hash it points back to.
-    #[must_use]
-    pub fn chain_head(&self) -> (u64, Option<ContentHash>) {
-        (self.self_seq, self.self_prev)
     }
 
     /// Arm a ping round, replacing any already in flight.
