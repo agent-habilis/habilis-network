@@ -94,6 +94,32 @@ impl Default for Goodbyes {
 }
 
 /// What the receive path remembers about frames it handled or refused. Each set is bounded.
+/// The documents of the two shared-state channels, behind one type so that a change of store
+/// touches this type alone.
+#[derive(Debug)]
+pub(crate) struct ChannelDocs {
+    state: MeshDoc,
+    meta: MeshDoc,
+}
+
+impl ChannelDocs {
+    fn get(&self, channel: protocol::Channel) -> &MeshDoc {
+        match channel {
+            protocol::Channel::State => &self.state,
+            protocol::Channel::Meta => &self.meta,
+            _ => unreachable!("a channel added later needs its own document"),
+        }
+    }
+
+    fn get_mut(&mut self, channel: protocol::Channel) -> &mut MeshDoc {
+        match channel {
+            protocol::Channel::State => &mut self.state,
+            protocol::Channel::Meta => &mut self.meta,
+            _ => unreachable!("a channel added later needs its own document"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ReceiveMemory {
     /// Shard groups already reassembled and surfaced, keyed by their author as the store keys them:
@@ -581,15 +607,8 @@ pub struct EventLoopState {
     /// the re-serve source for peers' `shard/repair` requests (big groups
     /// skip the message log, so anti-entropy can't heal them).
     pub(crate) shard_cache: ShardCache,
-    /// The `state` channel: an automerge CRDT plus the signed change frames that
-    /// carried it (the re-serve store). Convergence and card authorization live
-    /// in [`crate::daemon::doc`]; reconciliation is heads-based anti-entropy. This is the
-    /// document a consumer's `state get` surface reads.
-    pub(crate) state_doc: MeshDoc,
-    /// The `meta` channel's document — a second, independent shared-state channel.
-    /// Gates foreign-card writes (unlike `state`), since a `meta` card carries a
-    /// peer's cryptographic identity.
-    pub(crate) meta_doc: MeshDoc,
+    /// The shared documents of the `state` and `meta` channels.
+    pub(crate) docs: ChannelDocs,
     /// This member's signing identity (Ed25519). Shared with the
     /// send path so messages we author are signed before broadcast.
     /// The public key is the durable identity; the nickname is a
@@ -740,8 +759,10 @@ impl EventLoopState {
             receive_memory: ReceiveMemory::default(),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
-            state_doc: MeshDoc::new_ungated().key(state_key),
-            meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
+            docs: ChannelDocs {
+                state: MeshDoc::new_ungated().key(state_key),
+                meta: Self::meta_channel(init.per_peer_gate, meta_key),
+            },
             identity: init.identity,
             self_seq: 0,
             self_prev: None,
@@ -1865,20 +1886,12 @@ impl EventLoopState {
     /// [`Channel`](crate::protocol::Channel) at every call site.
     #[must_use]
     pub fn doc(&self, channel: protocol::Channel) -> &MeshDoc {
-        match channel {
-            protocol::Channel::State => &self.state_doc,
-            protocol::Channel::Meta => &self.meta_doc,
-            _ => unreachable!("a channel added later needs its own document"),
-        }
+        self.docs.get(channel)
     }
 
     /// Mutable [`Self::doc`], for applying a local change before broadcast.
     pub fn doc_mut(&mut self, channel: protocol::Channel) -> &mut MeshDoc {
-        match channel {
-            protocol::Channel::State => &mut self.state_doc,
-            protocol::Channel::Meta => &mut self.meta_doc,
-            _ => unreachable!("a channel added later needs its own document"),
-        }
+        self.docs.get_mut(channel)
     }
 
     /// This member's signing identity.
