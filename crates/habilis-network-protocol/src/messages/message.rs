@@ -19,7 +19,7 @@ use super::{
 /// A protocol frame — serialized as JSON on the wire. The transport
 /// envelope beneath the app layer: for an app frame (e.g. chat, `app_msg`),
 /// `body` carries a whole serialized app payload opaque to this layer;
-/// plumbing kinds (presence, digests, ping/pong, state/meta) carry their own
+/// plumbing kinds (presence, state digests, ping/pong, state/meta) carry their own
 /// opaque bodies.
 ///
 /// Wire format (compact JSON, one line):
@@ -183,7 +183,7 @@ impl Message {
     }
 
     /// A durable state event whose opaque payload is `body`. Routed to the
-    /// un-pruned `daemon::state_log`, not the chat message-log. Harness
+    /// un-pruned `daemon::state_log`. Harness
     /// constructor; production uses [`new_channel_event`](Self::new_channel_event).
     #[cfg(any(test, feature = "adversarial"))]
     #[must_use]
@@ -335,8 +335,8 @@ impl Message {
         self.signer.map(|signed| signed.key)
     }
 
-    /// The 16-byte dedup / anti-entropy key (`SHA-256(pubkey ‖ id)[..16]`).
-    /// Dedup, the message/state logs, and the digest all key on this rather
+    /// The 16-byte dedup key (`SHA-256(pubkey ‖ id)[..16]`).
+    /// Dedup keys on this rather
     /// than the sender-chosen id, so a forged message reusing a victim's id
     /// cannot suppress the genuine one. See `identity::dedup_key16`.
     #[must_use]

@@ -70,7 +70,7 @@ impl PartialGroup {
 type GroupKey = (AuthorKey, ShardGroup);
 
 /// The dedicated buffer partial multipart bodies reassemble in — decoupled
-/// from the message log so log eviction can never break reassembly, and
+/// from the seen set so its eviction can never break reassembly, and
 /// bounded by **byte budgets** (per group, per author, global) plus a
 /// stale-group TTL instead of a shard-count cap. "Unbounded message size" is
 /// achieved by budgeted, evictable buffering, never an unbounded collection.
@@ -298,8 +298,8 @@ impl ReassemblyStore {
 
 /// Build the logical-message surfacing view from a completed group: shard 0's
 /// envelope (kind/author/pubkey/mesh/ts), the concatenated body, the group as
-/// `id`, and no `shard`/chain (the view is neither a wire message nor a chain
-/// entry — the shards are). `None` only when the concatenated body fails
+/// `id`, and no `shard` (the view is not a wire message; the shards are).
+/// `None` only when the concatenated body fails
 /// validation — fail closed rather than surface a malformed body.
 fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Authored> {
     // Sized up front: this runs on every completed multipart body, and the
@@ -314,9 +314,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 }
 
 /// The shared synthesis step: `envelope` (a shard-0 frame) becomes the logical
-/// view with the concatenated `body`, the group as `id`, and no `shard`/chain.
-/// Also used by the message-log completion path (`EventLoopState::
-/// reassemble_from_log`) so the two paths can't drift.
+/// view with the concatenated `body`, the group as `id`, and no `shard`.
 #[must_use]
 /// # Panics
 /// If the envelope carries no shard header; callers only pass shard messages.

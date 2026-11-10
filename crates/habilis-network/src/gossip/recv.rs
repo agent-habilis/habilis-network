@@ -575,8 +575,9 @@ pub(crate) async fn ingest(
     if verified.shard.is_none() && state.mark_seen(&verified) {
         return;
     }
-    // A shard of a group already surfaced is a repeat: it is not a sighting of its author. A shard of
-    // a partial group still passes here, and the store ignores a slot it already holds.
+    // A shard of a group already surfaced is a repeat, and it is not a sighting of its author. A repeat
+    // of a partial shard still counts as a sighting and reaches the lifecycle. That is accepted, because
+    // a partial group lives at most one reassembly TTL.
     if verified.shard.as_ref().is_some_and(|shard| {
         state
             .receive_memory
@@ -4088,8 +4089,7 @@ mod first_contact_tests {
                 message.sign(&author)
             };
             let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
-            // The app and the test share the frames it records.
-            let mut app = Recorded(Arc::new(Mutex::new(Vec::new())));
+            let mut app = Inert;
             let mut state = fresh_state();
             let first = shard(0, "hello ");
             let key = first.key();
@@ -4140,15 +4140,14 @@ mod first_contact_tests {
             let mut state = fresh_state();
             let (alice, bob) = (Identity::generate(), Identity::generate());
 
-            for (author, text) in [(&alice, "alice "), (&bob, "bob ")] {
+            for (author, first, second) in [(&alice, "alice ", "one"), (&bob, "bob ", "two")] {
                 ingest(
-                    wire(&shard(author, 0, text)),
+                    wire(&shard(author, 0, first)),
                     &mut state,
                     &mut app,
                     &context,
                 )
                 .await;
-                let second = if text.starts_with('a') { "one" } else { "two" };
                 ingest(
                     wire(&shard(author, 1, second)),
                     &mut state,

@@ -1730,6 +1730,7 @@ impl EventLoopState {
     pub(crate) fn reassemble(&mut self, trigger: &Verified) -> Option<Authored> {
         let shard = trigger.shard.as_ref()?;
         let group = (trigger.key(), shard.group.clone());
+        // A guard for a caller that did not check the gate in recv.rs: a completed group is not surfaced twice.
         if self.receive_memory.reassembled_groups.contains(&group) {
             return None;
         }

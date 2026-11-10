@@ -118,12 +118,12 @@ pub(crate) fn verify(pubkey: &PublicKey, bytes: &[u8], signature: &Signature) ->
     pubkey.verify(bytes, signature).is_ok()
 }
 
-/// A 16-byte dedup / anti-entropy key binding an author's public key to a
-/// message id: `SHA-256(pubkey ‖ id)[..16]`. Dedup and the digest key on
+/// A 16-byte dedup key binding an author's public key to a
+/// message id: `SHA-256(pubkey ‖ id)[..16]`. Dedup keys on
 /// this, not the bare id, so a peer that signs its own message under a
 /// **victim's** id produces a different key — it can no longer suppress the
-/// victim's genuine message (they hash apart) or hide it from anti-entropy.
-/// 16 bytes keeps the digest wire format unchanged; binding the pubkey (not
+/// victim's genuine message (they hash apart).
+/// 16 bytes keeps the key short; binding the pubkey (not
 /// the content) preserves the fresh-id re-announce path (a new id ⇒ a new
 /// key ⇒ not falsely deduped).
 #[must_use]
