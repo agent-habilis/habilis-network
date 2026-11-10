@@ -1113,7 +1113,7 @@ fn gate_and_decrypt<F: Proof>(
         if !addressed_to_us(frame, &context.our_pubkey) {
             // Relay: an opaque directed frame — forwarded, never validated, surfaced or
             // retained. The engine cannot open it, so it has no classification, and an
-            // `App` kind without one is not loggable (see `is_loggable`).
+            // `App` kind without one is not pushed to the consumer.
             return Gated::Pass {
                 class: None,
                 view: frame.authored(),
@@ -1280,8 +1280,8 @@ fn maybe_push_inbound(
     {
         return;
     }
-    // An App frame reaches an in-process consumer only when it is loggable (not RPC
-    // plumbing) and not a liveness beat — the app's per-tag policy, threaded in
+    // An App frame reaches an in-process consumer only when its class says PUSH (not RPC
+    // plumbing) and it is not a liveness beat — the app's per-tag policy, threaded in
     // from the caller's single classification. An infra frame (`class == None`,
     // `app_tag` also `None`) is always pushable past the structural guards above.
     let kind_tag = message.kind.app_tag();

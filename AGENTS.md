@@ -387,7 +387,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `DedupKey` | `habilis-network-protocol/src/dedup_key.rs` | The 16-byte dedup and anti-entropy key of a message. |
 | `AuthorKey` | `habilis-network-protocol/src/author_key.rs` | The public key of the author of a message. |
 | `Signer` | `habilis-network-protocol/src/message/mod.rs` | The pair of an `AuthorKey` and its signature. A message holds both or neither (`Message::signer`). |
-| `ContentHash` | `habilis-network-protocol/src/content_hash.rs` | The hash of a message that `prev` and `parents` link to. |
+| `ContentHash` | `habilis-network-protocol/src/content_hash.rs` | The SHA-256 of the canonical bytes of a message, used by the slice store. |
 | `BlobDigest` | `habilis-network/src/blob/mod.rs` | The SHA-256 of a blob. |
 | `StreamId`, `StreamSecret` | `habilis-network-stream/src/hash.rs` | The public id and the bearer secret of a stream. |
 | `PlayerHandle`, `Frame` | `habilis-network-netplay/src/handle.rs`, `frame.rs` | A roster slot and a simulation frame. |

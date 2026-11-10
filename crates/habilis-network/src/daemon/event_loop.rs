@@ -742,10 +742,7 @@ async fn advertise_links(
         return;
     };
     state.idle.broadcasts += 1;
-    // Not retained in the log, unlike a chat message: the next tick's vector
-    // replaces this one, and peers never log what they receive (see
-    // `is_loggable`), so a retained copy would be one that nobody else holds and
-    // that every digest asks us for again.
+    // The next tick's vector replaces this one, so nothing is kept of it.
     let vector_msg =
         protocol::Message::new_link_state(context.mesh, context.author, body).sign(&state.identity);
     gossip::broadcast_msg(context.sender, &vector_msg).await;

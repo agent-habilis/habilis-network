@@ -46,9 +46,8 @@ impl<'de> Deserialize<'de> for Message {
 impl TryFrom<WireIn> for Message {
     type Error = &'static str;
 
-    /// Shape-check the history-integrity fields at the boundary, so a crafted
-    /// value never reaches signature verification or the fork/DAG indexes
-    /// (which key on `prev`/`parents` as content hashes). An empty `pubkey` and an empty `sig`
+    /// Shape-check the integrity fields (`pubkey`, `sig`) at the boundary, so a crafted
+    /// value never reaches signature verification. An empty `pubkey` and an empty `sig`
     /// is the canonical unsigned form — the receive path drops anything that
     /// then fails verification; a *present* key/sig/hash must be well-formed
     /// lowercase hex of the right length (Ed25519 pubkey 32B, signature 64B,

@@ -109,9 +109,9 @@ pub(crate) fn encode<S: Serialize>(value: &S) -> Option<String> {
 impl<T: Config> NodeApp for RollbackDriver<T> {
     /// Every flag off but `valid`.
     ///
-    /// `loggable: false` is a correctness requirement, not a preference:
-    /// a `true` here would enter every input frame into the engine's message
-    /// log and its anti-entropy repair. A frame of this crate is also always
+    /// `PUSH` is off: this is a correctness requirement, not a preference.
+    /// A `PUSH` here would hand every input frame to the inbound channel of the
+    /// engine's consumer. A frame of this crate is also always
     /// directed, and `send_app` keeps only a broadcast frame of its own.
     /// It lives in the library so a consumer cannot get it wrong.
     fn classify(&self, message: &Authored) -> AppClass {

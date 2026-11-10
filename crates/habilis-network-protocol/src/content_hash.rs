@@ -4,9 +4,8 @@ use sha2::Sha256;
 
 use crate::identity;
 use std::fmt;
-/// The SHA-256 of the canonical bytes of a message: its id for another author's `prev`
-/// backlink, for the DAG `parents`, and for fork detection. It is recomputed on receive and
-/// never trusted off the wire.
+/// The SHA-256 of the canonical bytes of a message, used by the slice store. It is recomputed on
+/// receive and never trusted off the wire.
 ///
 /// On the wire, and in the signed bytes of the message that names it, the hash is its
 /// 64-character lowercase hex text, so [`Display`](std::fmt::Display) is part of the format.

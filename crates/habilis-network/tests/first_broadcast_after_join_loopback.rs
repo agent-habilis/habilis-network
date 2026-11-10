@@ -322,7 +322,7 @@ impl LoggingMember {
 }
 
 impl Peer for LoggingMember {
-    const APP: &'static str = "logging chat (loggable: true)";
+    const APP: &'static str = "pushing chat (PUSH)";
 
     async fn broadcast(&self, text: &str) -> Result<(), String> {
         let (reply, answer) = oneshot::channel();

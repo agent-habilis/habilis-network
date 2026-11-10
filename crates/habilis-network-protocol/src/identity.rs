@@ -4,8 +4,7 @@
 //! Distinct from the two other keys in the system: the transport
 //! `EndpointId` (authenticates the *connection*) and the seed-derived
 //! rendezvous key (shared by every member — see [`super::crypto`]). This
-//! is the first **per-author** credential, and the root of
-//! `docs/history-integrity.md`.
+//! is the first **per-author** credential.
 //!
 //! The public key is the durable identity; the [`crate::Nickname`] is a display
 //! label bound to it trust-on-first-use by the receiver.
@@ -15,7 +14,7 @@
 //! restart therefore mints a *new* key, so under the same nickname it is
 //! seen as a new identity (peers that pinned the old key flag it). Stable
 //! cross-restart identity (on-disk persistence) is a documented follow-up;
-//! see `docs/history-integrity.md`.
+//! see the protocol docs.
 
 use std::fmt;
 

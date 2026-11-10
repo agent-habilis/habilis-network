@@ -344,9 +344,8 @@ fn parse_rejects_unsafe_author_nickname() {
 #[test]
 fn parse_rejects_malformed_integrity_fields() {
     let _guard = ::habilis_network_test_tracing::init();
-    // Each history-integrity field (pubkey / sig / prev / parents) must be
-    // rejected at `parse` when present but not well-formed lowercase hex,
-    // so a crafted value never reaches the fork/DAG indexes or sig verify.
+    // Each integrity field (pubkey / sig) must be rejected at `parse` when present but not
+    // well-formed lowercase hex, so a crafted value never reaches signature verification.
     let base = |extra: &str| {
         format!(
             r#"{{"v":"15.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"{extra},"ext":{{}}}}"#
@@ -897,9 +896,33 @@ const KEY_ONLY_WIRE: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-0000000
 const SIGNED_PUBKEY: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 /// The canonical bytes of [`SIGNED_WIRE`], hex, one line per piece: a 4-byte little-endian length,
 /// then the field.
-const SIGNED_CANONICAL_HEX: &str = "10000000686162696c69732d6d6573682f6d73670400000031352e302400000030303030303030302d303030302d303030302d303030302d3030303030303030303030311e0000007b2274797065223a22617070222c22746167223a226170705f6d7367227d3e0000004835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b6777473609000000616c6963652d626f740800000000f15365000000000d00000068656c6c6f2c20676f6c64656e4000000065613461366336336532396335323061626566353530376231333265633566393935343737366165626562653762393234323165656136393134343664323263040000006e756c6c020000007b7d";
+const SIGNED_CANONICAL_HEX: &str = concat!(
+    "10000000686162696c69732d6d6573682f6d7367",
+    "0400000031352e30",
+    "2400000030303030303030302d303030302d303030302d303030302d303030303030303030303031",
+    "1e0000007b2274797065223a22617070222c22746167223a226170705f6d7367227d",
+    "3e0000004835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b67774736",
+    "09000000616c6963652d626f74",
+    "0800000000f1536500000000",
+    "0d00000068656c6c6f2c20676f6c64656e",
+    "4000000065613461366336336532396335323061626566353530376231333265633566393935343737366165626562653762393234323165656136393134343664323263",
+    "040000006e756c6c",
+    "020000007b7d",
+);
 /// The canonical bytes of [`UNSIGNED_WIRE`]. The `pubkey` field is the empty `00000000`.
-const UNSIGNED_CANONICAL_HEX: &str = "10000000686162696c69732d6d6573682f6d73670400000031352e302400000030303030303030302d303030302d303030302d303030302d3030303030303030303030311e0000007b2274797065223a22617070222c22746167223a226170705f6d7367227d3e0000004835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b6777473609000000616c6963652d626f740800000000f15365000000000d00000068656c6c6f2c20676f6c64656e00000000040000006e756c6c020000007b7d";
+const UNSIGNED_CANONICAL_HEX: &str = concat!(
+    "10000000686162696c69732d6d6573682f6d7367",
+    "0400000031352e30",
+    "2400000030303030303030302d303030302d303030302d303030302d303030303030303030303031",
+    "1e0000007b2274797065223a22617070222c22746167223a226170705f6d7367227d",
+    "3e0000004835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b67774736",
+    "09000000616c6963652d626f74",
+    "0800000000f1536500000000",
+    "0d00000068656c6c6f2c20676f6c64656e",
+    "00000000",
+    "040000006e756c6c",
+    "020000007b7d",
+);
 
 fn hex(bytes: &[u8]) -> String {
     identity::encode_hex(bytes)
@@ -1294,5 +1317,20 @@ fn a_frame_of_wire_version_14_0_is_refused_by_its_version() {
     assert!(
         Message::parse(current.as_bytes()).is_ok(),
         "the control frame of the same fields at 15.0 does not parse"
+    );
+}
+
+/// The signed wire form of the `14.0` build, captured before the wire change: it carries `seq` and
+/// `prev`. Kept so that the old frame is refused by its version, as the `13.0` test does.
+const OLD_14_0_SIGNED_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"7f640d1c198f65d7c272b7206ce3d7ed31c289eca9e09a1c8e28adf770ec02499a7a4b68d837c774a3b8d4bd9a6358e2bd67278f98dbac3ce5fe2e60e5f99006","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+
+/// A frame of the `14.0` wire is refused by its version, exactly: the version is the cause to name.
+#[test]
+fn the_old_14_0_signed_literal_is_refused_by_its_version() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let refused = Message::parse(OLD_14_0_SIGNED_WIRE.as_bytes()).expect_err("a 14.0 frame parses");
+    assert!(
+        matches!(&refused, MessageError::UnsupportedVersion(version) if version == "14.0"),
+        "the 14.0 golden was not refused by its version: {refused:?}"
     );
 }

@@ -30,7 +30,7 @@ use crate::AuthorKey;
 /// ```compile_fail,E0308
 /// use habilis_network_protocol::messages::{Message, Verified};
 ///
-/// const UNSIGNED: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+/// const UNSIGNED: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","ext":{}}"#;
 ///
 /// fn takes(_: &Verified) {}
 ///

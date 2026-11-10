@@ -593,7 +593,7 @@ pub struct EventLoopState {
     /// This member's signing identity (Ed25519). Shared with the
     /// send path so messages we author are signed before broadcast.
     /// The public key is the durable identity; the nickname is a
-    /// non-unique display label (see `docs/history-integrity.md`).
+    /// non-unique display label.
     pub(crate) identity: Arc<Identity>,
     /// Our own per-author log cursor (Phase 2): `self_seq` is the next
     /// `Msg` sequence number to emit, `self_prev` the content hash of our
