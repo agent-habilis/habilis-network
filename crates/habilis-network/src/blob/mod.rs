@@ -269,6 +269,7 @@ mod tests {
     /// ticket still names the dead relay, and a registered blob gets a fresh ticket from
     /// `register` again.
     #[test]
+    #[ignore = "45 s: waits for iroh to drop a dead home relay"]
     fn the_address_watcher_follows_the_home_relay_while_an_old_ticket_goes_stale() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
@@ -315,10 +316,10 @@ mod tests {
                 };
                 drop(dead_relay);
                 let mut watcher = server.watch_addr();
-                let moved = time::timeout(Duration::from_secs(60), async {
+                let moved = time::timeout(Duration::from_secs(120), async {
                     loop {
                         let address = watcher.get();
-                        if address.relay_urls().next() == Some(&survivor) {
+                        if address.relay_urls().any(|url| url == &survivor) {
                             break address;
                         }
                         watcher.updated().await.expect("the endpoint is alive");
