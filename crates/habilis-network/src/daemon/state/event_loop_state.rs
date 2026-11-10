@@ -1440,8 +1440,12 @@ impl EventLoopState {
         self.rival_holders.remove(&key);
         self.names.remove(&key);
         self.clock_evidence.name_stamp.remove(&key);
+        // The endpoint that was retained for this key goes with it, and comes back with the hints: the caller
+        // tears the endpoints down, and `end_unbound_endpoints` keeps the shared-binding check.
+        let retained: Option<EndpointAddr> = self.refused_endpoints.get(&key).cloned();
         self.release_refused_endpoint(&key);
-        let left_hints = self.forget_hints_of(key);
+        let mut left_hints = self.forget_hints_of(key);
+        left_hints.extend(retained);
         self.rebind_refused_endpoints();
         left_hints
     }

@@ -989,31 +989,6 @@ fn hex(bytes: &[u8]) -> String {
     identity::encode_hex(bytes)
 }
 
-// The join gate of the state channel: a node of 13.0 writes state changes with no Lamport time, and
-// a 14.0 node refuses such a change, so the version must keep the two apart at the parse.
-#[test]
-fn a_message_of_version_13_is_refused_and_the_error_names_both_versions() {
-    let _guard = ::habilis_network_test_tracing::init();
-    let previous = SIGNED_WIRE.replacen(r#""v":"16.0""#, r#""v":"13.0""#, 1);
-    assert_ne!(
-        previous, SIGNED_WIRE,
-        "the literal carries the current version once"
-    );
-    let Err(error) = Message::parse(previous.as_bytes()) else {
-        panic!("a 16.0 build parsed a message of version 13.0");
-    };
-    assert!(
-        matches!(&error, MessageError::UnsupportedVersion(version) if version == "13.0"),
-        "the refusal is an unsupported version: {error}"
-    );
-    assert_eq!(
-        error.to_string(),
-        "unsupported protocol version: 13.0 (this build reads 16.0)",
-        "the error names the wire version and the version of this build"
-    );
-}
-
-// A 15.0 frame has no identity proof and no `ProofRequest` kind, so a 16.0 build refuses it by its version.
 #[test]
 fn a_message_of_version_15_is_refused_and_the_error_names_both_versions() {
     let _guard = ::habilis_network_test_tracing::init();

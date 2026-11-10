@@ -51,23 +51,8 @@
 /// only because it lands inside the same interop break rather than needing one
 /// of its own.
 ///
-/// - `14.0` — the change body of the `state` and `meta` channels may carry an epoch key `e` (left
-///   out at epoch 0), and the digest window ids are Base64 and not Base58. The change body of the
-///   `state` channel carries a time `t` (a change with no valid `t` is refused), and the seed and
-///   replay frames of a state epoch carry the stamps `o`
-///   with their tag table `a`, and the tombstones `x`. A `Joined` body can carry the identity proof
-///   of the member (`<identity hex>:<run>:<sig hex>`; the signature covers the nickname and the mesh
-///   behind their lengths, label `v2`), and a `ProofRequest` kind is addressed to one
-///   peer. A `13.0` peer and a `14.0` peer do not form a mesh: each side refuses every frame of
-///   the other, with an error that names the wire version and its own. Without the bump a node
-///   that writes no `t` would have all its state writes refused by a node that reads it, with no
-///   report. The meaning of `t` is a time of the wall clock in milliseconds (a hybrid logical
-///   clock): a node takes `max(clock + 1, now)` and refuses a `t` more than 1 hour above its own
-///   wall clock (2 hours for the frames of a seed, which copy the stamps of their cutter).
-///   Without the bump for the epoch key, a `13.0` peer would read a change of epoch above 0 as a
-///   change of epoch 0 whose dependency is missing, keep it as an orphan, and be sent the same
-///   frames again and again, while a `14.0` peer would ignore the frames of the old one. The
-///   state digest request can also carry the flag `first`.
+/// - `14.0` — main's 14.0 (#48) was a parallel format that this branch never reads; its identity
+///   proof is part of 16.0.
 /// - `13.0` — the recipient of a directed frame (`to` of an `app` and of a `pong` frame) is an
 ///   author key, not a nickname. A `12.0` peer and a `13.0` peer do not form a mesh: the join
 ///   succeeds, then each side refuses every frame of the other, with an error that names the wire

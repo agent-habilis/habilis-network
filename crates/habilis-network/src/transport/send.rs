@@ -22,7 +22,7 @@ pub use lane::Lane;
 mod pending_send;
 pub use pending_send::PendingSend;
 mod send_error;
-pub use send_error::{SendError, StateRefusal};
+pub use send_error::SendError;
 #[cfg(test)]
 #[cfg(test)]
 #[cfg(test)]

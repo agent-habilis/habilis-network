@@ -4898,6 +4898,47 @@ mod first_contact_tests {
             node.endpoint.close().await;
         });
     }
+
+    #[test]
+    fn a_copy_that_goes_through_the_restore_still_raises_the_held_event_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::lifecycle",
+                "our nickname is held by another member",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let (claimant, other_member) = (Identity::generate(), Identity::generate());
+            let (name, mesh_text): (&str, &str) = (node.author.as_ref(), node.mesh.as_ref());
+            let proof = other_member.prove(&claimant.author_key(), name, mesh_text, 1);
+            let joined: Verified =
+                Message::new_joined_with_proof(&node.mesh, &node.author, &proof).sign(&claimant);
+
+            super::restore_lost_proof(&joined, &mut state, &mut app, &context).await;
+            super::restore_lost_proof(&joined, &mut state, &mut app, &context).await;
+
+            let seen: Vec<String> = lines
+                .0
+                .lock()
+                .expect("the lines lock is not poisoned")
+                .clone();
+            let held: usize = seen
+                .iter()
+                .filter(|line| line.contains("is held by another member"))
+                .count();
+            assert_eq!(
+                held, 1,
+                "the copy spent the held signal without a line, or raised it twice: {seen:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
 }
 
 #[cfg(all(test, feature = "host"))]
