@@ -262,6 +262,90 @@ mod tests {
         );
     }
 
+    /// **The address watcher follows the home relay, so a ticket minted earlier goes stale.**
+    ///
+    /// A ticket holds the address at `register` time. When the home relay of the server goes
+    /// away, the endpoint homes on another relay and the watcher shows the new address. The old
+    /// ticket still names the dead relay, and a registered blob gets a fresh ticket from
+    /// `register` again.
+    #[test]
+    fn the_address_watcher_follows_the_home_relay_while_an_old_ticket_goes_stale() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::lookup::test_relay::spawn_plain;
+                use crate::protocol::meshes::RelayChoice;
+                use iroh::Watcher as _;
+                // Dropping the home relay is the point of the test, so its probes and its
+                // sockets fail on purpose.
+                ::habilis_network_test_tracing::allow_warn(
+                    "iroh::net_report::reportgen",
+                    "probe failed",
+                );
+                ::habilis_network_test_tracing::allow_warn(
+                    "iroh_relay::server::http_server",
+                    "error accepting upgraded connection",
+                );
+                let (url_a, relay_a) = spawn_plain().await.expect("relay a");
+                let (url_b, relay_b) = spawn_plain().await.expect("relay b");
+                let mut lookups = LookupOpts::loopback();
+                lookups.relay_lookup = RelayChoice::Custom(vec![url_a.clone(), url_b.clone()]);
+                let server =
+                    BlobServer::start(lookups, temp_spool(), None, PayloadPath::RelayAllowed)
+                        .await
+                        .expect("start producer");
+                server.online().await;
+                let src = temp_file(b"stale ticket bytes");
+                let content_id = ContentId::new("blob-test-stale-ticket");
+                let old_ticket = server
+                    .register(&src, content_id.clone())
+                    .await
+                    .expect("register");
+                let home = old_ticket
+                    .address
+                    .relay_urls()
+                    .next()
+                    .cloned()
+                    .expect("the first ticket names the home relay");
+                let (survivor, survivor_relay, dead_relay) = if home == url_a {
+                    (url_b, relay_b, relay_a)
+                } else {
+                    (url_a, relay_a, relay_b)
+                };
+                drop(dead_relay);
+                let mut watcher = server.watch_addr();
+                let moved = time::timeout(Duration::from_secs(60), async {
+                    loop {
+                        let address = watcher.get();
+                        if address.relay_urls().next() == Some(&survivor) {
+                            break address;
+                        }
+                        watcher.updated().await.expect("the endpoint is alive");
+                    }
+                })
+                .await
+                .expect("the watcher shows the surviving relay");
+                assert_eq!(
+                    old_ticket.address.relay_urls().next(),
+                    Some(&home),
+                    "the ticket minted before the move still names the dead relay"
+                );
+                let fresh = server
+                    .register(&src, content_id)
+                    .await
+                    .expect("register again");
+                assert_eq!(
+                    fresh.address, moved,
+                    "register on a spooled blob mints a ticket with the current address"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+                drop(survivor_relay);
+            },
+        );
+    }
+
     /// A loopback fetch runs on a direct path, so a producer whose mesh keeps
     /// the relay for lookup only (the default) serves it — and the ticket
     /// carries the policy to the consumer.

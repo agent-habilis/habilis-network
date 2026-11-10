@@ -135,6 +135,10 @@ impl BlobServer {
     /// The address of the serving endpoint as it changes: the IP addresses and the home relay.
     /// A ticket holds the address at the time of [`Self::register`], so a caller that keeps
     /// the server for a long time reads this to learn of a later change.
+    ///
+    /// `register` of a blob that is already spooled takes the dedup path and mints a ticket with
+    /// the current address of the endpoint, so the cheap refresh loop is: the address changed,
+    /// `register` again, publish the new ticket.
     #[must_use]
     pub fn watch_addr(&self) -> impl iroh::Watcher<Value = iroh::EndpointAddr> + use<> {
         self.endpoint.watch_addr()
