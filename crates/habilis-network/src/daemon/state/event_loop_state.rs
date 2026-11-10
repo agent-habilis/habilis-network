@@ -38,7 +38,7 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, LANE_WANTED, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
+    KNOWN_ENDPOINTS_CAP, LANE_WANTED, PENDING_OUTBOUND_CAP, QUIET_CAP, REASSEMBLED_GROUPS_CAP,
     RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED, UNSUPPORTED_VERSION_CAP,
 };
 
@@ -132,7 +132,7 @@ impl ReceiveMemory {
 impl Default for ReceiveMemory {
     fn default() -> Self {
         Self {
-            reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
+            reassembled_groups: BoundedFifoSet::new(REASSEMBLED_GROUPS_CAP),
             refused_versions: HashSet::new(),
             many_versions_told: false,
         }
@@ -554,8 +554,7 @@ pub struct EventLoopState {
     /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
     /// re-sends, the rendezvous double-path) can deliver the same message
     /// twice; `mark_seen` drops the repeat before it reaches the log /
-    /// inbound push channel / agent. Bounded (`SEEN_IDS_CAP`, 2× the message log)
-    /// so it always covers the retention window.
+    /// inbound push channel / agent. Bounded (`SEEN_IDS_CAP`).
     pub(crate) seen: BoundedFifoSet<DedupKey>,
     /// User messages sent before we had a real-peer link (no gossip
     /// path yet — a bare `broadcast` would be a lost one-shot). Drained in

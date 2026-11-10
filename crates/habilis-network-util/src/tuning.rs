@@ -10,23 +10,13 @@
 use std::time::Duration;
 
 use std::sync;
-/// In-memory message-log capacity: how many recent messages each member
-/// retains as the anti-entropy recovery source and poll/fetch history. A
-/// bigger log lets a reconnecting peer recover a longer gap. It also anchors
-/// the shared IPC response cap.
-pub const MESSAGE_LOG_SIZE: usize = 1000;
-const _: () = assert!(MESSAGE_LOG_SIZE >= 1, "a zero-length log retains nothing");
+/// How many completed shard groups are remembered, so that a group is surfaced once. A group
+/// that a repeat of its shards would re-complete is not surfaced again.
+pub const REASSEMBLED_GROUPS_CAP: usize = 1000;
 
-/// How many recently-seen message ids are retained for duplicate
-/// suppression. Kept at **2× the message log** so it always covers the
-/// retention window with margin: anti-entropy resends any message still
-/// in the log, and a resend whose id had scrolled out of this set would be
-/// reprocessed and **re-surfaced**. Derived, so the two cannot drift.
-pub const SEEN_IDS_CAP: usize = MESSAGE_LOG_SIZE * 2;
-const _: () = assert!(
-    SEEN_IDS_CAP >= MESSAGE_LOG_SIZE,
-    "the dedup set must outlive the message log"
-);
+/// How many recently-seen message ids are retained for duplicate suppression. Shard frames are
+/// not in this set: the reassembly store dedups their slots.
+pub const SEEN_IDS_CAP: usize = 2000;
 
 /// How many outbound frames are buffered while the node has no gossip link
 /// yet (sent before the first `NeighborUp`). Flushed in order once connected;

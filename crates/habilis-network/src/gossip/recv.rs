@@ -570,8 +570,9 @@ pub(crate) async fn ingest(
     // signing its own message under a **victim's** id gets a different key and
     // cannot suppress the victim's genuine message. Re-broadcasts of
     // `joined`/`Alive` mint fresh ids so they are never falsely suppressed
-    // here. Only authenticated messages reach this gate.
-    if state.mark_seen(&verified) {
+    // here. Only authenticated messages reach this gate. A shard stays out of the set: the
+    // reassembly store dedups its own slots, and a reaped group must complete when a shard is served again.
+    if verified.shard.is_none() && state.mark_seen(&verified) {
         return;
     }
     // Identity is the signing key, not the nickname (p2panda-style): the
@@ -1787,7 +1788,7 @@ mod evicted_orphan_tests {
 #[cfg(test)]
 mod first_contact_tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
-    use crate::protocol::UnixSecs;
+    use crate::protocol::{Shard, ShardGroup, UnixSecs};
     use crate::transport::UdpTransport;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
@@ -1818,7 +1819,7 @@ mod first_contact_tests {
     use crate::transport::outbox::Resend;
     use crate::transport::proven_endpoints::ProvenEndpoints;
     use crate::transport::{PayloadPath, webrtc};
-    use crate::util::{clock, tuning};
+    use crate::util::{clock, consts, tuning};
     use crate::{lookup, protocol, transport};
     use iroh_gossip::proto;
     use n0_future::task;
@@ -1826,7 +1827,7 @@ mod first_contact_tests {
     use std::collections::HashSet;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex, atomic};
-    use std::time::{Duration as std_Duration, Instant as std_Instant};
+    use std::time::{Duration, Duration as std_Duration, Instant as std_Instant};
     use std::{future, net};
     use tokio::sync::mpsc;
     use tokio::{task as tokio_task, time as tokio_time};
@@ -3980,6 +3981,78 @@ mod first_contact_tests {
             assert!(
                 change_first.peerinfo_flood.is_none(),
                 "a state frame does not mark its author present"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An app that records the text of each app frame it is handed.
+    struct Recorded(Arc<Mutex<Vec<String>>>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for Recorded {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            let text = frame.message.body.as_str().to_owned();
+            self.0.lock().expect("no poison").push(text);
+            true
+        }
+    }
+
+    /// A partial shard group that the store reaps is not finished by a later shard: the first shard
+    /// is served again by its author, and the group completes with the shard that arrived after the
+    /// reap. The first shard is in the dedup set, so its repeat is a duplicate before the store sees it.
+    #[test]
+    fn a_reaped_shard_group_completes_when_its_first_shard_is_served_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let author = Identity::generate();
+            let group = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440000")
+                .expect("a valid group");
+            let shard = |index: u32, text: &str| {
+                let mut message = Message::new_app(
+                    &node.mesh,
+                    &nick("bob"),
+                    AppFrameParams::new(
+                        protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::from(text),
+                    ),
+                );
+                message.shard = Some(Shard::new(group.clone(), 2).index(index));
+                message.sign(&author)
+            };
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+            // The app and the test share the frames it records.
+            let delivered = Arc::new(Mutex::new(Vec::new()));
+            let mut app = Recorded(Arc::clone(&delivered));
+            let mut state = fresh_state();
+
+            let first = shard(0, "hello ");
+            ingest(wire(&first), &mut state, &mut app, &context).await;
+            let reaped_at =
+                clock::Instant::now() + consts::REASSEMBLY_STALE + Duration::from_secs(1);
+            assert!(
+                state.reassembly.sweep_stale(reaped_at) > 0,
+                "the partial group was not reaped"
+            );
+            ingest(wire(&shard(1, "world")), &mut state, &mut app, &context).await;
+            ingest(wire(&first), &mut state, &mut app, &context).await;
+
+            assert_eq!(
+                *delivered.lock().expect("no poison"),
+                ["hello world".to_owned()],
+                "the reaped group did not complete when its first shard was served again"
             );
             node.endpoint.close().await;
         });

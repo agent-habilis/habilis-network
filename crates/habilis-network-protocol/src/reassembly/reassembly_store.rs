@@ -249,16 +249,6 @@ impl ReassemblyStore {
         )
     }
 
-    /// Drop the partial group that `shard_msg` belongs to (its author's group) and release
-    /// its budget — the log-backed completion path calls this after finishing a group the
-    /// store had only a fragment of (e.g. post-TTL, when dedup let just one healed shard
-    /// re-ingest). A message with no shard header or no author key names no group.
-    pub fn forget(&mut self, shard_msg: &Verified) {
-        if let Some(shard) = shard_msg.shard.as_ref() {
-            self.evict(&(shard_msg.key(), shard.group.clone()));
-        }
-    }
-
     /// The groups that stalled long enough to ask their author for the missing shards, each at most
     /// once per [`REASSEMBLY_REPAIR_IDLE`] window. Every group qualifies, a small one included: no log
     /// keeps its shards, so the repair is their only heal.
