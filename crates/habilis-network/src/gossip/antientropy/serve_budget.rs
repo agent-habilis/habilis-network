@@ -118,6 +118,15 @@ impl ServeBudget {
             answers: 0,
             heads: HashMap::new(),
         });
+        // A window that ended starts again at this answer. `admits` reads the age of `since`, so a
+        // window that keeps the old one stays ended: from there it admits every ask, and the map of
+        // its heads grows with every answer. The cooldown is longer than `FAST_ROUND_MIN_INTERVAL`,
+        // so no heads of the window that ended would hold a repeat back.
+        if now.duration_since(served.since) >= ANTIENTROPY_SERVE_COOLDOWN {
+            served.since = now;
+            served.answers = 0;
+            served.heads.clear();
+        }
         served.answers += 1;
         served.heads.insert(heads, now);
     }
@@ -125,11 +134,35 @@ impl ServeBudget {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::super::Plane;
     use super::{Asker, ServeBudget, WINDOWS_MAX};
     use crate::protocol::Channel;
     use crate::testing;
     use crate::util::clock::Instant;
+    use crate::util::tuning::ANTIENTROPY_SERVE_COOLDOWN;
+
+    /// A window that ended starts again at the answer that follows it. `admits` reads the age of
+    /// `since`, so a window that keeps the `since` of the window that ended stays ended: from there
+    /// it holds no answer back, and the map of its heads grows with every one of them.
+    #[test]
+    fn a_window_that_ended_starts_again_at_the_answer_that_follows_it() {
+        let mut budget = ServeBudget::default();
+        let now = Instant::now();
+        let asker = Asker::Key(testing::test_key("asker"));
+        let key = (asker, Channel::State, Plane::Gossip);
+        budget.note(key, 1, now);
+        let later = now + ANTIENTROPY_SERVE_COOLDOWN + Duration::from_secs(1);
+        assert!(budget.admits(&key, 2, later), "the first window ended");
+        budget.note(key, 2, later);
+
+        assert!(
+            !budget.admits(&key, 3, later),
+            "one gossip answer per window, and the answer at the end of the first window opened a \
+             window of its own"
+        );
+    }
 
     /// One member mints author keys for free, and a digest names any of them: the map of the
     /// windows stays inside its cap when it is fed 10 times the cap inside one window.
