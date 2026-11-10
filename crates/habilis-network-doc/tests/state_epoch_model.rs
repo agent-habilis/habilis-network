@@ -387,10 +387,7 @@ impl Sim {
         for (index, patch, stamps) in replays {
             let limit = self.fits;
             let fits = |merge: &Value| merge.to_string().len() <= limit;
-            let chunks = self.nodes[index]
-                .doc
-                .split_replay(&patch, fits)
-                .expect("the replay splits");
+            let chunks = self.nodes[index].doc.split_replay(&patch, fits);
             for chunk in chunks {
                 self.commit_replay(index, &chunk, &stamps);
             }

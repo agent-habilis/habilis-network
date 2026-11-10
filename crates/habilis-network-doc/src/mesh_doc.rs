@@ -20,7 +20,7 @@ use habilis_network_util::consts::{
 };
 
 use crate::wire::SeedMark;
-use crate::{DocError, Limits, Stamp, TimeSource, pack_entry, split, wire};
+use crate::{DocError, Limits, Stamp, TimeSource, split, wire};
 use habilis_network_util::clock;
 
 use automerge::transaction;
@@ -271,7 +271,7 @@ impl SeedPlan {
 
     /// Build the chain of the seed of `epoch` from this plan: the live JSON cut by leaf path into
     /// merges that each fit one frame, written as a chain of changes on the genesis of `epoch`.
-    /// `fits` takes one merge and says whether its frame is small enough, as [`pack_entry`] does.
+    /// `fits` takes one merge and says whether its frame is small enough, as [`pack_entry`](crate::pack_entry) does.
     /// `actor_seed` is the actor of the chain, the signing key of the cutter. The root of every
     /// chain is a change that writes a key and deletes it: it carries the mark, which `fits` does
     /// not measure, so no merge shares a frame with it. An empty document gives that root alone.
@@ -405,17 +405,24 @@ fn take_tombstones(queue: &mut VecDeque<(Vec<String>, Stamp)>, entries: usize) -
 /// A path with a stamp each.
 pub type StampedPaths = Vec<(Vec<String>, Stamp)>;
 
-/// The merges of a split replay, in the order to send them: one frame for each merge.
+/// The merges of a split replay, in the order to send them: one frame for each merge, and the
+/// leaves that no frame can carry.
 #[derive(Debug)]
 #[must_use]
-pub struct ReplayMerges(Vec<Value>);
+pub struct ReplayMerges {
+    merges: Vec<Value>,
+    /// How many leaves no frame of a replay can carry. Each one is left out, as of a seed.
+    pub left_out: u64,
+    /// The path of the first leaf that was left out, for the warn of the caller.
+    pub first_left_out: Option<Vec<String>>,
+}
 
 impl IntoIterator for ReplayMerges {
     type Item = Value;
     type IntoIter = vec::IntoIter<Value>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        self.merges.into_iter()
     }
 }
 
@@ -1103,20 +1110,20 @@ impl MeshDoc {
     /// frame (`fits` measures the real frame, as for [`Self::build_seed`]). A sender that has more
     /// leaves to write again than one frame names sends one frame for each merge.
     ///
-    /// # Errors
-    /// [`DocError::TooLarge`] when one leaf does not fit a frame. No merge comes out then, so the
-    /// caller never sends a part of the replay.
-    pub fn split_replay(
-        &self,
-        replay: &Value,
-        fits: impl FnMut(&Value) -> bool,
-    ) -> Result<ReplayMerges, DocError> {
+    /// A leaf that no frame can carry is left out and counted in [`ReplayMerges::left_out`], and the
+    /// leaves that fit are still sent. This is the rule of a seed ([`Self::build_seed`]): the leaf
+    /// stays in the document, so a replay that refuses the whole patch for it refuses it again for
+    /// ever, and the writes of the other leaves go with it.
+    pub fn split_replay(&self, replay: &Value, fits: impl FnMut(&Value) -> bool) -> ReplayMerges {
         let mut within_frame = fits;
-        let cuts: Result<Vec<Value>, DocError> = pack_entry(replay, |merge| {
+        let (merges, left_out) = split::pack_carryable(replay, |merge| {
             count_paths(merge) <= DOC_REPLAY_ENTRIES_MAX && within_frame(merge)
-        })
-        .collect();
-        Ok(ReplayMerges(cuts?))
+        });
+        ReplayMerges {
+            merges,
+            left_out: left_out.count,
+            first_left_out: left_out.first,
+        }
     }
 
     /// The plaintext body string to surface for `frame`, decrypting an `enc`
@@ -2044,7 +2051,7 @@ impl MeshDoc {
     /// fit one frame, written as a chain of changes on the genesis of `epoch`. A node that starts
     /// the epoch sends the chain, and a node that adopts it holds the same live values, with no
     /// history. `fits` takes one merge and says whether its frame is small enough, as
-    /// [`pack_entry`] does: the caller measures the real frame, signed and sealed.
+    /// [`pack_entry`](crate::pack_entry) does: the caller measures the real frame, signed and sealed.
     /// `actor_seed` is the actor of the chain, the signing key of the cutter, as for
     /// [`Self::build_change`]. An empty document gives a chain of 1 change that writes a key and
     /// deletes it, so a seed always has a root. This is [`Self::seed_plan`], [`SeedPlan::build`]
@@ -4978,16 +4985,28 @@ mod tests {
         carrier
     }
 
+    /// A leaf that no frame can carry is left out of a replay, and the leaves that fit are still
+    /// sent. The leaf stays in the document, so a replay that refuses the whole patch for it
+    /// refuses it again for ever, and the sender of the patch drops it: the writes of the other
+    /// leaves are lost, and no other node sends them. This is the rule of a seed
+    /// ([`split::pack_carryable`]) on the replay.
     #[test]
-    fn a_replay_with_a_leaf_that_does_not_fit_gives_the_error_and_no_merge() {
+    fn a_replay_with_a_leaf_that_does_not_fit_sends_the_leaves_that_do() {
         let _guard = ::habilis_network_test_tracing::init();
         let doc = MeshDoc::new_ungated().state_epochs();
         let patch = json!({ "a": 1, "b": "x".repeat(200) });
         let fits = |merge: &Value| merge.to_string().len() <= 60;
-        let result = doc.split_replay(&patch, fits);
+        let split = doc.split_replay(&patch, fits);
+        assert_eq!(split.left_out, 1, "the leaf b is longer than a frame");
+        assert_eq!(
+            split.first_left_out.as_deref(),
+            Some(&[String::from("b")][..]),
+            "the warn of the caller names the leaf that was left out"
+        );
+        let merges: Vec<Value> = split.into_iter().collect();
         assert!(
-            matches!(result, Err(DocError::TooLarge { .. })),
-            "the leaf b is longer than a frame, so the whole replay is refused: {result:?}"
+            merges.iter().any(|merge| merge.get("a").is_some()),
+            "the leaf a fits a frame, so the replay still writes it: {merges:?}"
         );
     }
 

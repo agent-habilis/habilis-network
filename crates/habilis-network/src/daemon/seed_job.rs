@@ -506,7 +506,7 @@ fn replay_frame_fits(
 
 /// The signed frames that write `patch` again, with the stamps of the old epoch: the replay of the
 /// writes that a seed lacks after a switch, or a restore. The patch is split into merges that each
-/// fit a frame (all or none: a leaf that does not fit sends nothing and warns), and each merge is
+/// fit a frame (a leaf that no frame can carry is left out and warns), and each merge is
 /// built on the document as the last one left it and taken by it at once, so the frames follow
 /// one another. A write that puts a value back is not refused at the lines of the state, only over
 /// the memory line (`MeshDoc::build_restore`).
@@ -525,14 +525,19 @@ pub(crate) fn replay_frames(
     let split = state
         .doc(Channel::State)
         .split_replay(patch, |merge| replay_frame_fits(&job, merge, &known));
-    let merges = match split {
-        Ok(merges) => merges,
-        Err(error) => {
-            tracing::warn!(target: "habilis_network::gossip", %error, "a value of the replay of the state channel is too large for a frame, so the replay is not sent");
-            return Vec::new();
-        }
-    };
-    let merges: Vec<serde_json::Value> = merges.into_iter().collect();
+    if split.left_out > 0 {
+        let leaves = split.left_out;
+        let names: Vec<&str> = split
+            .first_left_out
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        let joined: String = names.join("/");
+        let shown: String = joined.chars().take(200).collect();
+        tracing::warn!(target: "habilis_network::gossip", leaves, path = %shown, "a value of the replay of the state channel is too large for a frame, so it is left out of the replay");
+    }
+    let merges: Vec<serde_json::Value> = split.into_iter().collect();
     let numbered: Vec<(usize, &serde_json::Value)> = merges.iter().enumerate().collect();
     let mut frames: Vec<(Verified, WireFrame)> = Vec::new();
     for (index, merge) in numbered {
