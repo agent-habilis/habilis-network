@@ -39,7 +39,7 @@ mod ticket;
 pub use blob_digest::BlobDigest;
 pub(crate) use consts::{BAD_SECRET, BLOB_ALPN, DONE, RELAY_REFUSED_CODE, UNKNOWN_BLOB};
 pub use consts::{HASH_LEN, SECRET_LEN};
-pub use consume::fetch;
+pub use consume::{fetch, fetch_with_endpoint};
 pub use content_id::ContentId;
 pub use error::BlobError;
 pub use offload_request::{OffloadRequest, offload};
@@ -169,6 +169,54 @@ mod tests {
         fs::remove_file(&src).ok();
         server.shutdown().await;
         out
+    }
+
+    /// **A caller's long-lived endpoint serves many fetches and stays open.**
+    ///
+    /// `fetch` binds a cold endpoint and closes it on every call. A caller that
+    /// already holds an endpoint passes it to `fetch_with_endpoint`, which must
+    /// dial from it and leave it open for the next fetch.
+    #[test]
+    fn a_caller_endpoint_serves_two_fetches_and_stays_open() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .expect("start producer");
+                let endpoint = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                for (name, payload) in [
+                    ("blob-test-reuse-a", &b"first bytes"[..]),
+                    ("blob-test-reuse-b", &b"second bytes"[..]),
+                ] {
+                    let src = temp_file(payload);
+                    let ticket = server
+                        .register(&src, ContentId::new(name))
+                        .await
+                        .expect("register");
+                    let mut out = Vec::new();
+                    super::fetch_with_endpoint(&endpoint, &ticket, &mut out, None)
+                        .await
+                        .expect("fetch from the caller endpoint");
+                    assert_eq!(out, payload, "the fetch returns the registered bytes");
+                    assert!(
+                        !endpoint.is_closed(),
+                        "the caller endpoint stays open after a fetch"
+                    );
+                    fs::remove_file(&src).ok();
+                }
+                endpoint.close().await;
+                server.shutdown().await;
+            },
+        );
     }
 
     /// A loopback fetch runs on a direct path, so a producer whose mesh keeps

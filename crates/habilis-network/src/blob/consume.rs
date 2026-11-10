@@ -64,6 +64,44 @@ where
         .map_err(BlobError::internal)
 }
 
+/// [`fetch`] over an endpoint the caller already holds, so a caller that fetches
+/// often does not bind a cold endpoint for each blob. The endpoint is left open:
+/// the caller owns it and closes it. The endpoint must have been built with the
+/// relay and lookup policy the caller wants, because `ticket.lookups` is not
+/// applied to it.
+///
+/// # Errors
+/// The same as [`fetch`].
+///
+/// # Examples
+///
+/// It fetches a blob over an endpoint that the caller keeps. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::Endpoint;
+/// use habilis_network::ops::blob::{BlobTicket, fetch_with_endpoint};
+/// use tokio::io::AsyncWrite;
+///
+/// # async fn demo<Writer: AsyncWrite + Unpin>(endpoint: &Endpoint, ticket: &BlobTicket, out: &mut Writer) {
+/// let _ = fetch_with_endpoint(endpoint, ticket, out, None).await;
+/// # }
+/// ```
+pub async fn fetch_with_endpoint<Writer>(
+    endpoint: &Endpoint,
+    ticket: &BlobTicket,
+    out: &mut Writer,
+    password: Option<Password>,
+) -> Result<(), BlobError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let token = auth_token(ticket, password.as_ref())?;
+    add_peer_addr(&address_book(endpoint), ticket.address.clone());
+    fetch_over(endpoint, ticket, &token, out)
+        .await
+        .map_err(BlobError::internal)
+}
+
 async fn fetch_with_token<Writer>(
     ticket: &BlobTicket,
     out: &mut Writer,
