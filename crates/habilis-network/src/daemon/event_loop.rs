@@ -8,13 +8,13 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
+#[cfg(feature = "host")]
+use super::setup;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::TestHold;
 use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 #[cfg(feature = "multihop")]
 use crate::protocol;
-#[cfg(feature = "host")]
-use crate::util;
 use crate::{lookup, transport};
 use iroh_gossip::net;
 use n0_future::{task, time};
@@ -35,15 +35,17 @@ use std::time::Duration;
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr, RelayUrl, Watcher as _};
 use iroh_gossip::api::{ApiError, Event, GossipReceiver, GossipTopic};
+use n0_future::task::JoinError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::doc::SelfWriteGate;
+use crate::gossip::antientropy::Plane;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::{Mesh, MeshName};
 use crate::protocol::messages::{Authored, Verified};
-use crate::protocol::{MeshId, Nickname, UnixSecs, identity};
+use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
 // The timer-driver clock, distinct from `clock::Instant` off wasm32 (there it is
@@ -73,7 +75,7 @@ use super::node::SignalHandling;
 use super::shutdown;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
 use super::state::{EventLoopState, MeshSecrets};
-use super::timers;
+use super::{seed_job, timers};
 use crate::daemon::setup::LiveCount;
 use ctx_parts::CtxParts;
 pub use event_loop_error::EventLoopError;
@@ -150,7 +152,7 @@ async fn run_checked<Driver: NodeDriver>(
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
     let mut state: EventLoopState = initial_state(
-        mesh.identity,
+        mesh.keys,
         MeshSecrets {
             password: mesh.mesh_password.take(),
             key: mesh.mesh_key.take(),
@@ -161,6 +163,7 @@ async fn run_checked<Driver: NodeDriver>(
         started,
         state_file,
     );
+    seed_job::creator_has_nothing_to_sync(&mut state, mesh.is_creator);
     let owned = OwnedEndpoints {
         router: endpoints.router,
         owner: endpoints.endpoint_owner,
@@ -365,14 +368,11 @@ fn host_state_file<Driver: NodeDriver>(
         .take()
         .or_else(|| {
             let base = runtime.runtime_base.as_deref()?;
-            exit_on_quit.then(|| {
-                util::mesh_runtime_dir(base, mesh.mesh.as_str())
-                    .join(format!("{}.state.json", mesh.author))
-            })
+            exit_on_quit.then(|| setup::default_state_path(base, &mesh.mesh, &mesh.author))
         })
         .map(|path| {
             let owner_pid = runtime.owner.map(shutdown::Owner::pid);
-            let pubkey = mesh.identity.author_key();
+            let pubkey = mesh.keys.session.author_key();
             let file = StateFile::new(path, &mesh.mesh, &mesh.author, &mesh.name, &pubkey)
                 .base(runtime.runtime_base.clone());
             file.topic(mesh.topic_string.as_deref())
@@ -403,8 +403,8 @@ type StateFileSeed = Option<path::PathBuf>;
 /// The event loop's state, with the mesh's identity and secrets moved in. The state file goes
 /// with it, so the first write the loop makes lands in the right place.
 fn initial_state(
-    // The loop holds the identity across `&mut state`, so it keeps a shared handle.
-    identity: Arc<identity::Identity>,
+    // The loop holds the keys across `&mut state`, so it keeps shared handles.
+    keys: state::RunKeys,
     secrets: MeshSecrets,
     mint_mesh: Option<Mesh>,
     transports: &TransportSet,
@@ -418,7 +418,7 @@ fn initial_state(
         state::StateInit {
             #[cfg(feature = "host")]
             state_file,
-            identity,
+            keys,
             secrets,
             per_peer_gate,
             // The *same* table the Router's signal acceptor holds, not a fresh
@@ -463,6 +463,7 @@ fn wire_transports(
     state
         .unicast_pool
         .set_admission(state.webrtc_admission.clone());
+    state.unicast_pool.set_tally(state.idle.wire_out.clone());
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = transports.relay_transport;
@@ -585,7 +586,7 @@ fn join_gossip(
     }
     let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
 
-    let sender = MeshSender::new(gossip_sender);
+    let sender = MeshSender::new(gossip_sender).counting(state.idle.wire_out.clone());
     // The task that sends the digest answers, so that the loop never waits for
     // the gossip actor to take them.
     if let Some(resends) = state.resend_receiver.take() {
@@ -649,16 +650,7 @@ async fn antientropy_arm(
         &mut anchors.antientropy_wall,
         antientropy_interval(),
     );
-    gossip::antientropy::broadcast_digest(state, context.sender, context.mesh, context.author)
-        .await;
-    gossip::antientropy::broadcast_state_digests(
-        state,
-        context.sender,
-        context.mesh,
-        context.author,
-        gossip::antientropy::DigestTrigger::Tick,
-    )
-    .await;
+    gossip::antientropy::tick_digests(state, context).await;
 }
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
@@ -864,7 +856,7 @@ struct EventLoop<Driver: NodeDriver> {
     /// Inbound unicast frames from the `UNICAST_ALPN` acceptor, drained into
     /// `gossip::ingest` (same validation + dedup path as gossip). `Option` so
     /// the `select!` arm can disable itself if the channel ever closes.
-    unicast_rx: Option<mpsc::Receiver<bytes::Bytes>>,
+    unicast_rx: Option<mpsc::Receiver<transport::UnicastFrame>>,
     /// The members of this mesh that the LAN announces (`gossip::lan`). `Option` so the arm is
     /// off without an mDNS handle and when the channel closes.
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
@@ -922,7 +914,7 @@ struct Loop<'node, Driver: NodeDriver> {
     quit_rx: mpsc::Receiver<()>,
     exit_on_quit: bool,
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
-    unicast_rx: Option<mpsc::Receiver<bytes::Bytes>>,
+    unicast_rx: Option<mpsc::Receiver<transport::UnicastFrame>>,
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
@@ -1026,29 +1018,29 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
 
     /// Finalizes the ping round at its deadline.
     fn ping_deadline(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.deadlines += 1;
         finalize_ping_round(&mut self.state, self.parts.sink);
     }
 
     /// Sends the second probe of the ping round.
     async fn second_probe(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.deadlines += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::send_second_probe(&mut self.state, &context).await;
     }
 
     fn poll_deadline(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.deadlines += 1;
         self.app.poll_deadline_elapsed();
     }
 
     fn expire_deadlines(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.deadlines += 1;
         self.app.expire_deadlines(TokioInstant::now());
     }
 
     async fn ipc(&mut self, (command, response): IpcMessage<Driver::Ipc>) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.ipc += 1;
         let context = self.parts.handler_ctx(&self.sender);
         let request = super::app::IpcRequest {
             command,
@@ -1065,7 +1057,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     async fn http(&mut self, request: Driver::Http) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.http += 1;
         let context = self.parts.handler_ctx(&self.sender);
         self.app
             .handle_http(request, &mut self.state, &context)
@@ -1073,13 +1065,13 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     async fn gossip_event(&mut self, event: Option<Result<Event, ApiError>>) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.note_gossip(event.as_ref());
         let context = self.parts.handler_ctx(&self.sender);
         gossip::handle_gossip_event(event, &mut self.state, &mut self.app, &context).await;
     }
 
     async fn direct_outcome(&mut self, outcome: probe::DirectOutcome) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.direct_rx += 1;
         let context = self.parts.handler_ctx(&self.sender);
         probe::on_outcome(outcome, &mut self.state, &context).await;
         probe::ensure_watchers(
@@ -1090,14 +1082,14 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     fn flush_failed(&mut self, (message, bytes): (Verified, messages::WireFrame)) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::requeue_failed(&mut self.state, &context, message, bytes);
     }
 
     /// A lane slot freed: the offers that waited for it are made now.
     async fn top_up_lanes(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         probe::top_up_lane_offers(&mut self.state, &context).await;
     }
@@ -1117,19 +1109,19 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     /// the best first hop to a pair on the relay can be another now, and waiting for the stuck
     /// deadline and a link-state tick would cost 20 s or more.
     fn route_wake(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         route_wake_arm(&mut self.state, &context);
     }
 
     async fn lan_event(&mut self, event: lookup::LanEvent) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::lan::on_lan_event(event, &mut self.state, &context).await;
     }
 
     async fn path_change(&mut self, change: probe::PathChange) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.path_rx += 1;
         let context = self.parts.handler_ctx(&self.sender);
         if Some(change.peer) == self.state.rendezvous_id {
             webrtc::rendezvous::offer_rendezvous_on_path_loss(&mut self.state, &context);
@@ -1139,15 +1131,50 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     /// Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
-    async fn unicast(&mut self, bytes: bytes::Bytes) {
-        self.state.idle.external += 1;
+    async fn unicast(&mut self, frame: transport::UnicastFrame) {
+        self.state.idle.ext.unicast += 1;
         let context = self.parts.handler_ctx(&self.sender);
-        gossip::ingest(bytes, &mut self.state, &mut self.app, &context).await;
+        // The digest handlers answer a unicast digest on the plane it came by, to the endpoint of
+        // its connection.
+        self.state.state_digest_serves.unicast.arrived_from = Some(frame.from);
+        gossip::ingest_from(
+            Plane::Unicast,
+            frame.bytes,
+            &mut self.state,
+            &mut self.app,
+            &context,
+        )
+        .await;
+        self.state.state_digest_serves.unicast.arrived_from = None;
+        // A frame on a unicast connection shows that a connection to its endpoint is up: the proof
+        // requests that waited for one go now.
+        let sign = Some(lifecycle::PathSign::Unicast(frame.from));
+        lifecycle::retry_deferred_asks(&mut self.state, &context, sign).await;
     }
 
     fn prune(&mut self) {
         self.state.idle.prune += 1;
         timers::tick_prune(&mut self.state, self.parts.sink);
+        let context = self.parts.handler_ctx(&self.sender);
+        timers::tick_epoch(&mut self.state, &context.our_pubkey);
+        seed_job::tick(&mut self.state, context.author, context.mesh);
+        timers::tick_doc_census(&mut self.state, &context.our_pubkey);
+        timers::tick_collection_census(&self.state);
+    }
+
+    /// The build of a seed of the state channel is done: sign the chain and send it, root first.
+    /// A node that cannot reach the overlay keeps the frames for when it meshes.
+    async fn seed_built(&mut self, outcome: Result<seed_job::SeedOutcome, JoinError>) {
+        let context = self.parts.handler_ctx(&self.sender);
+        let frames = seed_job::finish(&mut self.state, outcome, context.author, context.mesh);
+        seed_job::send_frames(&mut self.state, &self.sender, frames, seed_job::Chain::Seed).await;
+    }
+
+    /// Send the replay of the writes that a seed lacks, and the restores that are due, which the
+    /// tick of the state channel queued.
+    async fn send_replays(&mut self) {
+        let context = self.parts.handler_ctx(&self.sender);
+        seed_job::send_replays(&mut self.state, &self.sender, context.author, context.mesh).await;
     }
 
     async fn alive(&mut self) {
@@ -1197,6 +1224,16 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         }
         probe::prove_routed_pairs(&mut self.state, &context).await;
         self.app.on_tick(&mut self.state, &context).await;
+        let write = gossip::MergeCtx {
+            mesh: context.mesh,
+            author: context.author,
+            sender: context.sender,
+            sink: context.sink,
+        };
+        gossip::write_entry_again(&mut self.state, &write).await;
+        seed_job::sync_deadline(&mut self.state);
+        // The proof requests that waited for a warm path and got none from a unicast frame: once more.
+        lifecycle::retry_deferred_asks(&mut self.state, &context, None).await;
     }
 
     /// The heal tick: heal the mesh while the gossip stream lives, else resubscribe the topic.
@@ -1270,7 +1307,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
 
     /// A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
     fn rung_change(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.rung_change += 1;
         apply_rung_change(
             &mut self.state,
             &mut self.rendezvous_params,
@@ -1284,7 +1321,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     /// another 15s interval before anyone binds it would hand back the claim latency this change
     /// was meant to leave untouched.
     async fn probe_verdict(&mut self, found_rival: bool) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.probe_verdict += 1;
         let found_rival = verdict_after_known_holders(found_rival, &self.state);
         let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
         self.state
@@ -1347,7 +1384,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     /// A probe task of the private ladder answered. Its own arm, so that the walk that asked for
     /// it walks again at once and no tick has to wait.
     async fn rung_report(&mut self, report: beacon::RungReport) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.rung_report += 1;
         self.state.rungs.note(report, Instant::now());
         let context = self.parts.handler_ctx(&self.sender);
         let arm = CohostArm {
@@ -1460,7 +1497,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     // interval is itself in that interval's numbers.
     async fn state_refresh(&mut self) {
         self.state.idle.state_refresh += 1;
-        timers::tick_state_refresh(&mut self.state, self.parts.endpoint).await;
+        timers::tick_state_refresh(&mut self.state, self.parts.endpoint, &self.gossip).await;
     }
 
     async fn linkstate(&mut self) {
@@ -1470,7 +1507,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     async fn session_request(&mut self, request: Driver::Session) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.session += 1;
         let context = self.parts.handler_ctx(&self.sender);
         if self
             .app
@@ -1678,7 +1715,7 @@ async fn run_loop<Driver: NodeDriver>(
             Some(failed) = lp.flush_failed_rx.recv() => { lp.flush_failed(failed); },
             () = slot_freed.notified() => { lp.top_up_lanes().await; },
             () = underlay_slot_freed.notified() => {
-                lp.state.idle.external += 1;
+                lp.state.idle.ext.other += 1;
                 #[cfg(feature = "multihop")]
                 lp.underlay_round_ended().await;
             }
@@ -1688,7 +1725,7 @@ async fn run_loop<Driver: NodeDriver>(
                 Some(event) => { lp.lan_event(event).await; },
             },
             Some(address) = address_changes.next() => {
-                lp.state.idle.external += 1;
+                lp.state.idle.ext.address += 1;
                 if lp.state.address_flood_due(&address) {
                     let context = lp.parts.handler_ctx(&lp.sender);
                     gossip::broadcast_peer_info(&mut lp.state, &context).await;
@@ -1697,12 +1734,23 @@ async fn run_loop<Driver: NodeDriver>(
             }
             Some(change) = lp.path_rx.recv() => { lp.path_change(change).await; },
             frame = recv_opt(&mut lp.unicast_rx) => match frame {
-                Some(bytes) => { lp.unicast(bytes).await; },
+                Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },
             },
-            _ = lp.intervals.prune.tick() => { lp.prune(); },
+            _ = lp.intervals.prune.tick() => {
+                lp.prune();
+                lifecycle::end_pending_endpoints(&mut lp.state).await;
+                lp.send_replays().await;
+            },
+            outcome = seed_job::seed_job_done(&mut lp.state.seed_job) => {
+                lp.state.idle.seed_built += 1;
+                lp.seed_built(outcome).await;
+            },
             _ = lp.intervals.alive.tick() => { lp.alive().await; },
-            _ = lp.intervals.sweep.tick() => { lp.sweep().await; },
+            _ = lp.intervals.sweep.tick() => {
+                lp.sweep().await;
+                lifecycle::end_pending_endpoints(&mut lp.state).await;
+            },
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
             Ok(()) = lp.rung_rx.changed() => { lp.rung_change(); },
             found_rival = beacon::probe_verdict(&mut lp.rival_probe) => { lp.probe_verdict(found_rival).await; },

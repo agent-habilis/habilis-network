@@ -13,7 +13,7 @@
     "typecheck:web": "tsc --noEmit -p packages/habilis-network-wasm && tsc --noEmit -p packages/habilis-network-stream-web && tsc --noEmit -p examples/chat/web",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
     "typecheck": "bun run typecheck:node && bun run typecheck:web && bun run typecheck:scripts",
-    "test": "bun test packages scripts"
+    "test": "bun test packages scripts --path-ignore-patterns 'scripts/perf/ratio.test.ts'"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

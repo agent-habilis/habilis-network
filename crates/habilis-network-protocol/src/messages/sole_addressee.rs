@@ -26,7 +26,7 @@ use super::MessageKind;
 #[must_use]
 pub fn sole_addressee(kind: &MessageKind) -> Option<&AuthorKey> {
     match kind {
-        MessageKind::Pong { to, .. } => Some(to),
+        MessageKind::Pong { to, .. } | MessageKind::ProofRequest { to } => Some(to),
         MessageKind::App { to, .. } => to.as_ref(),
         MessageKind::Presence { .. }
         | MessageKind::PeerInfo

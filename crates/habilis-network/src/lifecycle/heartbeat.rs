@@ -389,7 +389,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::protocol::messages::sole_addressee;
-    use crate::{protocol, testing};
+    use crate::{lifecycle, protocol, testing};
     /// A `PeerInfo` of a key that another key shadows binds no hint, but its address goes into
     /// the unicast book. When the key is no peer, quiet or lapsed any more, the sweep releases the
     /// address too, or the book grows with each such endpoint.
@@ -416,6 +416,102 @@ mod tests {
             state.refused_endpoints.is_empty(),
             "the retained endpoint of a key that left the roster stayed"
         );
+    }
+
+    /// The sweep releases the endpoint of a refused key that left the roster, in sync code, and it cannot call the
+    /// async pool. The endpoint goes to a list that the loop drains: its pooled connection and its dial cooldown
+    /// go then, and an endpoint that another key still binds keeps its pool state.
+    #[test]
+    fn the_sweep_hands_the_released_endpoints_to_the_teardown_of_the_pool() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let (gone, shared) = (testing::endpoint_id(54), testing::endpoint_id(55));
+            let (left, staying) = (test_key("twin#left"), test_key("twin#staying"));
+            state.peers.insert(staying);
+            state.names.insert(staying, nick("twin"));
+            state.retain_refused_endpoint(left, iroh::EndpointAddr::new(gone));
+            state.retain_refused_endpoint(staying, iroh::EndpointAddr::new(shared));
+            state.unicast_pool.note_dial_failure(gone).await;
+            state.unicast_pool.note_dial_failure(shared).await;
+
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+
+            assert!(
+                !state.unicast_pool.is_cooling(gone).await,
+                "the endpoint that the sweep released kept its dial cooldown in the pool"
+            );
+            assert!(
+                state.unicast_pool.is_cooling(shared).await,
+                "an endpoint that a key of the roster still retains lost its pool state"
+            );
+        });
+    }
+
+    /// An endpoint that is still LINKED keeps its pooled connection and its multihop origin when the sweep releases
+    /// it: routes run through that neighbor. The teardown waits until the link has ended and nothing binds the
+    /// endpoint.
+    #[test]
+    fn the_teardown_of_a_released_endpoint_waits_until_its_link_ends() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let linked = testing::endpoint_id(56);
+            let left = test_key("twin#left");
+            state.retain_refused_endpoint(left, iroh::EndpointAddr::new(linked));
+            state.linked_endpoints.insert(linked);
+            state.unicast_pool.note_dial_failure(linked).await;
+
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+            assert!(
+                state.unicast_pool.is_cooling(linked).await,
+                "the teardown closed the pool state of an endpoint that is still linked"
+            );
+
+            state.linked_endpoints.remove(&linked);
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+            assert!(
+                !state.unicast_pool.is_cooling(linked).await,
+                "the pool state of an endpoint whose link ended stayed"
+            );
+        });
+    }
+
+    /// More endpoints are released at once than the queue of the teardown holds (256): the others are not lost. They
+    /// wait in the orphan set, and the sweep that follows the drain queues them again, so every released endpoint
+    /// gets its teardown.
+    #[test]
+    fn a_release_of_more_endpoints_than_the_queue_holds_loses_none_of_them() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let released: Vec<iroh::EndpointId> = (0..300u32)
+                .map(|index| {
+                    let mut bytes = [9u8; 32];
+                    bytes[..4].copy_from_slice(&index.to_le_bytes());
+                    iroh::SecretKey::from_bytes(&bytes).public()
+                })
+                .collect();
+            for endpoint in &released {
+                state.unicast_pool.note_dial_failure(*endpoint).await;
+                state.release_unbound_endpoint(*endpoint);
+            }
+
+            lifecycle::end_pending_endpoints(&mut state).await;
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+            tick_sweep(&mut state, &SilentSink);
+            lifecycle::end_pending_endpoints(&mut state).await;
+
+            let mut still_cooling = 0usize;
+            for endpoint in &released {
+                still_cooling += usize::from(state.unicast_pool.is_cooling(*endpoint).await);
+            }
+            assert_eq!(
+                still_cooling, 0,
+                "{still_cooling} of 300 released endpoints never got their teardown: the queue dropped them"
+            );
+        });
     }
 
     /// The key that held the hint of a nickname crashes: no `Left`, only silence. The sweep moves

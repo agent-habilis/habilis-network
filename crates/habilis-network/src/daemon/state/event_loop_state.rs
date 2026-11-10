@@ -4,7 +4,9 @@ use super::ParkedLinkStates;
 use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
+use super::chat_continuations::ChatContinuations;
 use super::peer_info_flood::PeerInfoFlood;
+use super::proof_exchange::ProofExchange;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshSecrets, PingRound,
     Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
@@ -15,10 +17,14 @@ use crate::daemon::probe_backoff::ProbeBackoff;
 use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
 use crate::doc;
+use crate::doc::StampedPaths;
 
 use crate::transport::{ResendOutbox, UdpTransport};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::fs::File;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -27,15 +33,16 @@ use iroh::{EndpointAddr, EndpointId};
 use crate::daemon::message_log::MessageLog;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
-use crate::protocol::identity::Identity;
+use crate::protocol::identity::{Identity, IdentityProof, verify_proof};
 use crate::protocol::meshes::Mesh;
 use crate::protocol::messages::{Authored, Verified, WireFrame, sole_addressee};
 use crate::protocol::{
-    AuthorKey, ContentHash, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs,
+    AuthorKey, ContentHash, DedupKey, MeshId, Message, Nickname, ShardGroup, SymmetricKey, UnixSecs,
 };
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
+use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
@@ -43,7 +50,7 @@ use crate::util::tuning::{
     RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED, UNSUPPORTED_VERSION_CAP,
 };
 
-use crate::gossip::{antientropy, lan};
+use crate::gossip::{antientropy, apply_merge_patch, lan};
 use crate::protocol::{crypto, messages};
 #[cfg(test)]
 use crate::testing;
@@ -54,7 +61,10 @@ use crate::transport::underlay_webrtc;
 use crate::transport::{graft_backoff, probe, proven_endpoints};
 use crate::util::tuning;
 use iroh::address_lookup::memory;
+use n0_future::task::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
+
+use crate::daemon::seed_job::SeedOutcome;
 
 /// A run of live frames of one key, counted for a stamp that proves nothing alone: a stamp before
 /// our join (`live_run`) or a stamp at or below the newest on record of a quiet peer (`step_back`). `last` is the stamp of the latest
@@ -75,6 +85,13 @@ pub(crate) struct PendingSuspend {
     pub(crate) at: Instant,
 }
 
+/// The proof answer of this run and whether the log of its author holds it yet.
+#[derive(Debug, Clone)]
+pub(crate) struct OwnAnswer {
+    frame: Verified,
+    kept: bool,
+}
+
 /// The keys that said goodbye, in two bounded sets. Any key can sign a goodbye, so the goodbyes of
 /// keys that were never peers of ours fill at the pace of the senders. They live apart from the
 /// goodbyes of peers, or a flood of them would push the tombstone of a real leaver out of its set.
@@ -83,6 +100,13 @@ pub(crate) struct PendingSuspend {
 pub(crate) struct Goodbyes {
     peers: BoundedFifoSet<AuthorKey>,
     strangers: BoundedFifoSet<AuthorKey>,
+}
+
+impl Goodbyes {
+    /// The goodbyes held, of peers and of strangers.
+    pub(crate) fn len(&self) -> usize {
+        self.peers.len() + self.strangers.len()
+    }
 }
 
 impl Default for Goodbyes {
@@ -232,9 +256,10 @@ pub struct EventLoopState {
     pub(crate) linked_endpoints: HashSet<EndpointId>,
     /// Endpoints whose dial hint the sweep pruned while they still had a link. The state of such
     /// an endpoint stays for the regraft that follows the link loss. A later sweep drops it once
-    /// the link is gone and no nickname binds the endpoint. Bounded by `linked_endpoints`: an entry
-    /// leaves at the first sweep that sees no link.
-    pub(crate) orphaned_endpoints: HashSet<EndpointId>,
+    /// the link is gone and no nickname binds the endpoint. It also holds the endpoints that found the queue of the
+    /// teardown full. `ORPHANED_ENDPOINTS_MAX` at most. A full set drops an orphan that is not linked (its state is
+    /// forgotten already, and its pool state falls back to the idle sweep), never a linked one: see `insert_orphan`.
+    pub(crate) orphaned_endpoints: BoundedFifoSet<EndpointId>,
     /// When `linked_endpoints` last became empty, `None` while it holds a link. The census warns
     /// of a silent partition only when this gap outlasts a heal: see
     /// [`Self::silent_partition_due`].
@@ -312,6 +337,9 @@ pub struct EventLoopState {
     pub(crate) join_fallback_at: Option<Instant>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
+    /// How many doc censuses this loop has run: one in `DOC_HEAVY_EVERY` is heavy. The count is of
+    /// this loop, so that each document of a process that runs several loops gets its heavy census.
+    pub(crate) doc_census_runs: u64,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
     /// session although nothing was sent over a connection yet.
     lane_wanted: HashMap<EndpointId, Instant>,
@@ -322,12 +350,20 @@ pub struct EventLoopState {
     /// because a digest built with no signature is a valid input of the tests: `None`
     /// is its own bucket, as the empty string was.
     digest_serves: Cooldown<AuthorKey>,
+    /// The chat continuations that an author gets inside its cooldown. Bounded: a run lives for one
+    /// cooldown window, at most `CHAT_CONTINUATION_AUTHORS_MAX` authors hold one, and a new author
+    /// is refused when the table is full (see `ChatContinuations`).
+    chat_continuations: ChatContinuations,
     /// When we last reported an author whose digest we could not read. An `Option` key
     /// for the same reason as `digest_serves`.
     digest_unreadable: Cooldown<AuthorKey>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
     pub(crate) resend_outbox: ResendOutbox,
+    /// Tests only: the next ask of a fast round fails to start, once, as a send does when the
+    /// connection cannot be opened. A default build has no such field.
+    #[cfg(test)]
+    fail_next_ask: bool,
     /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
     /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -367,7 +403,17 @@ pub struct EventLoopState {
     /// The endpoint of a `PeerInfo` that bound no dial hint, because another live key holds the
     /// nickname of its signer. It waits here: the signer takes the nickname over when the other
     /// key leaves, and the sweep releases the endpoint of a signer that left the roster.
+    ///
+    /// Bounded by [`REFUSED_ENDPOINTS_CAP`]: when a new key arrives at the cap, the oldest key goes and
+    /// its endpoint state with it.
     pub(crate) refused_endpoints: HashMap<AuthorKey, EndpointAddr>,
+    /// The endpoints that sync code released, waiting for the teardown of the pool (its pooled connection and its
+    /// dial cooldown), which the loop does where it can be async: `TEARDOWN_PENDING_MAX` at most. An endpoint that
+    /// finds it full waits in `orphaned_endpoints` and is queued again by the next sweep.
+    teardown_pending: BoundedFifoSet<EndpointId>,
+    /// The keys of `refused_endpoints` in the order that they were retained, oldest first. It may hold a key
+    /// that left the map; it is cut to the keys of the map when it grows past twice the cap.
+    refused_order: VecDeque<AuthorKey>,
     /// The newest stamp that we heard from each peer in a frame that proved it was alive, on the
     /// clock of that peer. A quiet peer returns only on a frame stamped after it: two stamps of
     /// one clock compare at any skew between that clock and ours.
@@ -418,6 +464,31 @@ pub struct EventLoopState {
     /// more than `QUIET_CAP` departures ago, that this node never held, counts as an arrival
     /// until its author goes quiet.
     pub(crate) left_keys: Goodbyes,
+    /// The identity proofs of the sessions this node verified, and the sessions it asked for one.
+    /// Bounded by `QUIET_CAP`: a full book drops its oldest dead session, and refuses a new proof
+    /// when every held session is live.
+    pub(crate) proofs: ProofExchange,
+    /// The proof answer of this run, signed once: every asker gets this same frame, so the log of this
+    /// node keeps one entry for the run and every repeat is a duplicate at the peers. A restart is a new
+    /// run, with a new state and a new answer. One frame at most.
+    own_answer: Option<OwnAnswer>,
+    /// The proof requests that this node signed, to show that a path-less ask signs none.
+    #[cfg(test)]
+    pub(crate) proof_requests_signed: AtomicU64,
+    /// For each proof request that was sent: the dial address that the pool remembered for its endpoint at
+    /// that moment, to show that the address was registered before the request went.
+    #[cfg(test)]
+    pub(crate) ask_dial_addrs: Vec<Option<EndpointAddr>>,
+    /// The run number of this start, which the proof of this session names.
+    run: u64,
+    /// The lock on the member key of this start: it lives as long as this node runs, so a second start of
+    /// the same state path is refused for as long as this one lives. Held, never read.
+    #[expect(dead_code, reason = "held for the lock it carries, never read")]
+    // shared with the clones of the keys that the setup still holds: the lock goes when the last drops
+    key_lock: Option<Arc<File>>,
+    /// The highest run above ours that a session of our own member proved: a newer run of this member is
+    /// active elsewhere, and this node is superseded. One number, so the memory is bounded.
+    newest_own_run_seen: u64,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
@@ -604,6 +675,37 @@ pub struct EventLoopState {
     /// in [`crate::daemon::doc`]; reconciliation is heads-based anti-entropy. This is the
     /// document a consumer's `state get` surface reads.
     pub(crate) state_doc: MeshDoc,
+    /// The key that seals the bodies of the state channel (`None` on a mesh with no password): the
+    /// build of a seed on another thread seals the frames that it measures with it.
+    pub(crate) state_seal: Option<Arc<SymmetricKey>>,
+    /// The build of the seed of a cut that runs on a blocking thread, one at a time. The event loop
+    /// waits for it in its `select!` and then signs and sends the chain.
+    pub(crate) seed_job: Option<JoinHandle<SeedOutcome>>,
+    /// The values that the state channel must write again after an epoch switch (the replay of
+    /// the writes that the seed lacks) or as a restore: a merge and the stamp of each path. The
+    /// loop drains it after each tick and sends the frames. Bounded by `REPLAY_QUEUE_CAP`: when it
+    /// is full the new item is refused and counted, and the node warns.
+    pub(crate) replay_queue: BoundedQueue<(serde_json::Value, StampedPaths)>,
+    /// The cuts of the state channel that this node made (a seed built, signed and sent), and the
+    /// cuts that failed, since the node started: one integer each, for the census line.
+    pub(crate) state_cuts: u64,
+    pub(crate) state_cuts_failed: u64,
+    /// When the state document stops waiting for its first sync and writes with the clock that it
+    /// has (see `tuning::STATE_SYNC_WAIT`): counted from the start of the node, so a node with no peer
+    /// is not held for ever.
+    pub(crate) state_sync_deadline: Instant,
+    /// When this node last sent a request for the first sync of the state channel (a digest with
+    /// the flag `first`, on gossip or point-to-point). A closing digest ends the wait only for a
+    /// short time after it (see `seed_job::closing_digest_seen`): a closing digest that arrives
+    /// when this node asked nobody is the answer of no request, and any member can send one.
+    pub(crate) first_asked_at: Option<Instant>,
+    /// When this node sent its FIRST request for the first sync, set once. It is not renewed by a
+    /// later digest or ask: the far jump of an epoch is allowed only within a few seconds of it (see
+    /// `seed_job::far_jump_allowed`), so it does not stay open for the whole wait.
+    pub(crate) first_request_at: Option<Instant>,
+    /// The same for the meta channel: when this node sent its first meta request, set once, while
+    /// the meta document awaits a far root.
+    pub(crate) meta_first_request_at: Option<Instant>,
     /// The `meta` channel's document — a second, independent shared-state channel.
     /// Gates foreign-card writes (unlike `state`), since a `meta` card carries a
     /// peer's cryptographic identity.
@@ -624,6 +726,8 @@ pub struct EventLoopState {
     /// The public key is the durable identity; the nickname is a
     /// non-unique display label (see `docs/history-integrity.md`).
     pub(crate) identity: Arc<Identity>,
+    /// The key that survives a restart. It signs the proof of this session and nothing else.
+    pub(crate) member_identity: Option<Arc<Identity>>,
     /// Our own per-author log cursor (Phase 2): `self_seq` is the next
     /// `Msg` sequence number to emit, `self_prev` the content hash of our
     /// last sent `Msg` (`None` until the first). Advanced on every send so
@@ -678,8 +782,35 @@ pub struct EventLoopState {
     /// mesh, `derive_secret(mesh_key, "broadcast")` — domain-separated from
     /// the state/meta doc keys. `None` ⇒ chat stays plaintext. Wiped on drop.
     pub(crate) broadcast_key: Option<SymmetricKey>,
+    /// The switch of the meta document to a new epoch whose entry of this node is not written
+    /// again yet, and the sweeps that failed to write it. One slot, so it is bounded.
+    pub(crate) epoch_write: EpochWrite,
     /// Where the event loop's wakeups went since the last census.
     pub(crate) idle: IdleCounters,
+}
+
+/// The write of the entry of this node after the meta document moved to a new epoch. The sweep tick
+/// writes the entry and empties the slot. A second switch before that keeps the entry of the first. A
+/// failed write puts the switch back, and at `DOC_EPOCH_WRITE_ATTEMPTS` failures the switch is given
+/// up, so a send that never works cannot keep the slot for ever.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EpochWrite {
+    /// The switch whose entry waits to be written.
+    pub(crate) switch: Option<doc::EpochSwitch>,
+    /// How many sweeps failed to write it.
+    pub(crate) attempts: u8,
+}
+
+/// The state file of this start, holding the lock on the member key: the cleanup of that file
+/// deletes the member key and the run counter, so the lock has to outlive the cleanup (see
+/// [`StateFile::key_lock`]).
+#[cfg(feature = "host")]
+fn state_file_holding_the_key_lock(
+    state_file: Option<StateFile>,
+    // shared with the loop state, which holds the same lock for as long as this node runs
+    key_lock: Option<Arc<File>>,
+) -> Option<StateFile> {
+    state_file.map(|file| file.key_lock(key_lock))
 }
 
 impl EventLoopState {
@@ -687,6 +818,10 @@ impl EventLoopState {
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
     /// per-channel keys are derived, rather than lingering in the caller.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the member key is one field over the limit; the constructor is split in a later commit"
+    )]
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
         let MeshSecrets {
             password: mesh_password,
@@ -698,7 +833,7 @@ impl EventLoopState {
         let [state_key, meta_key, broadcast_key] = Self::channel_keys(mesh_key.as_ref());
         Self {
             linked_endpoints: HashSet::new(),
-            orphaned_endpoints: HashSet::new(),
+            orphaned_endpoints: BoundedFifoSet::new(ORPHANED_ENDPOINTS_MAX),
             zero_links_since: None,
             direct: HashMap::new(),
             relay_transport: transport::PayloadPath::DirectOnly,
@@ -721,11 +856,15 @@ impl EventLoopState {
             redials: redial::Redials::default(),
             join_fallback_at: None,
             graft_backoff: graft_backoff::GraftBackoff::default(),
+            doc_census_runs: 0,
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
             digest_serves: Cooldown::new(tuning::ANTIENTROPY_SERVE_COOLDOWN),
+            chat_continuations: ChatContinuations::default(),
             digest_unreadable: Cooldown::new(super::UNREADABLE_DIGEST_LOG_WINDOW),
             resend_outbox,
+            #[cfg(test)]
+            fail_next_ask: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drop: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -742,9 +881,20 @@ impl EventLoopState {
             names: HashMap::new(),
             hint_owner: HashMap::new(),
             refused_endpoints: HashMap::new(),
+            refused_order: VecDeque::new(),
+            teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             peer_stamp: HashMap::new(),
             clock_evidence: ClockEvidence::default(),
             left_keys: Goodbyes::default(),
+            proofs: ProofExchange::with_cap(QUIET_CAP),
+            own_answer: None,
+            #[cfg(test)]
+            proof_requests_signed: AtomicU64::new(0),
+            #[cfg(test)]
+            ask_dial_addrs: Vec::new(),
+            run: init.keys.run,
+            key_lock: init.keys.key_lock.as_ref().map(Arc::clone),
+            newest_own_run_seen: 0,
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
@@ -785,16 +935,31 @@ impl EventLoopState {
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
-            state_file: init.state_file,
+            // The lock goes to the state file as well: its cleanup deletes the member key, so the
+            // lock must outlive that cleanup (see `StateFile::key_lock`).
+            state_file: state_file_holding_the_key_lock(init.state_file, init.keys.key_lock),
             live_count: None,
             message_log: MessageLog::new(MESSAGE_LOG_SIZE),
             receive_memory: ReceiveMemory::default(),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
-            state_doc: MeshDoc::new_ungated().key(state_key),
+            state_doc: MeshDoc::new_state(state_key),
+            state_seal: mesh_key.as_ref().map(|key| {
+                // Shared with the job that builds a seed on a blocking thread.
+                Arc::new(key.derive(b"state-doc"))
+            }),
+            seed_job: None,
+            replay_queue: BoundedQueue::new(REPLAY_QUEUE_CAP),
+            state_cuts: 0,
+            state_cuts_failed: 0,
+            state_sync_deadline: Instant::now() + tuning::state_sync_wait(),
+            first_asked_at: None,
+            first_request_at: None,
+            meta_first_request_at: None,
             meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
-            identity: init.identity,
+            identity: init.keys.session,
+            member_identity: init.keys.member,
             self_seq: 0,
             self_prev: None,
             author_seqs: HashMap::new(),
@@ -808,6 +973,7 @@ impl EventLoopState {
             mesh_password,
             mint_mesh: None,
             broadcast_key,
+            epoch_write: EpochWrite::default(),
             idle: IdleCounters::default(),
         }
     }
@@ -819,6 +985,39 @@ impl EventLoopState {
     }
 
     /// The `meta` channel: gated by the application's per-peer map when it keeps one, free-form otherwise.
+    /// Keep `switch` until the sweep writes the entry of this node again. If a switch is waiting
+    /// already, its entry is kept: the document holds no entry of ours since the first switch except
+    /// the writes made after it, so the new entry is partial. The two merge, the newer fields win
+    /// (a deletion was applied to the waiting entry when it was made, see `follow_own_write`).
+    pub(crate) fn note_epoch_switch(&mut self, mut switch: doc::EpochSwitch) {
+        self.epoch_write.attempts = 0;
+        let waiting = self
+            .epoch_write
+            .switch
+            .take()
+            .and_then(|held| held.own_entry);
+        switch.own_entry = match (waiting, switch.own_entry.take()) {
+            (Some(mut older), Some(newer)) => {
+                apply_merge_patch(&mut older, &newer);
+                Some(older)
+            }
+            (older, newer) => newer.or(older),
+        };
+        self.epoch_write.switch = Some(switch);
+    }
+
+    /// Put `switch` back in the slot after a failed write, for the next sweep to try again, unless
+    /// it failed `DOC_EPOCH_WRITE_ATTEMPTS` times. Returns whether the switch waits.
+    pub(crate) fn retry_epoch_switch(&mut self, switch: doc::EpochSwitch) -> bool {
+        self.epoch_write.attempts = self.epoch_write.attempts.saturating_add(1);
+        if self.epoch_write.attempts >= DOC_EPOCH_WRITE_ATTEMPTS {
+            self.epoch_write.attempts = 0;
+            return false;
+        }
+        self.epoch_write.switch = Some(switch);
+        true
+    }
+
     fn meta_channel(
         per_peer_gate: Option<doc::SelfWriteGate>,
         key: Option<SymmetricKey>,
@@ -828,6 +1027,7 @@ impl EventLoopState {
             None => MeshDoc::new_ungated(),
         }
         .key(key)
+        .awaiting_far_root()
     }
 
     /// The number of members of the mesh as this node counts them: the peers whose arrival was
@@ -1203,23 +1403,17 @@ impl EventLoopState {
         hinted.chain(retained).any(|address| address.id == endpoint)
     }
 
-    /// Drop the state of an endpoint that no nickname binds any more. A linked endpoint keeps its
-    /// proof, direct path and backoff for the regraft after the link loss. The path watch goes:
-    /// nothing names this endpoint, and a stale entry nudges it on each tick. A later sweep drops
-    /// the rest.
-    pub(crate) fn release_unbound_endpoint(&mut self, endpoint: EndpointId) {
-        if self.linked_endpoints.contains(&endpoint) {
-            self.path_kinds.remove(&endpoint);
-            self.path_watchers.remove(&endpoint);
-            self.orphaned_endpoints.insert(endpoint);
-        } else {
-            self.forget_endpoint_state(endpoint);
-        }
+    /// The endpoints that were released since the last call, for the teardown of the pool: the loop passes them on
+    /// to `end_unbound_endpoints`, which keeps the shared-binding check.
+    pub(crate) fn take_teardown_pending(&mut self) -> Vec<EndpointId> {
+        let released: Vec<EndpointId> = self.teardown_pending.iter().copied().collect();
+        self.teardown_pending = BoundedFifoSet::new(TEARDOWN_PENDING_MAX);
+        released
     }
 
-    /// Drop every state that is keyed by `endpoint`: the backoff, the proof, the rival flag, the
-    /// direct state, the path state and the address of the endpoint, in the pool and in the book.
-    pub(crate) fn forget_endpoint_state(&mut self, endpoint: EndpointId) {
+    /// The state of `endpoint` that sync code can drop: its address, backoff, proof, rival flag, direct path, path
+    /// watch and kind, and its address in the pool. It queues no teardown of the pool.
+    fn drop_endpoint_state(&mut self, endpoint: EndpointId) {
         self.address_book.remove_endpoint_info(endpoint);
         self.graft_backoff.reset(endpoint);
         self.proven_endpoints.forget_endpoint(endpoint);
@@ -1230,9 +1424,91 @@ impl EventLoopState {
         self.unicast_pool.forget_addr(endpoint);
     }
 
+    /// Put `endpoint` in the orphan set. A full set drops one orphan, an orphan that is NOT linked if there is one (the
+    /// oldest of them all otherwise), and
+    /// the state of the dropped orphan goes with it (`drop_endpoint_state`): no eviction leaves state that no sweep
+    /// finds again, whether the orphan lost its link after it came in (it waits for the next sweep), or the endpoints
+    /// that are linked outnumber the cap (`--max-peers` has no upper limit), unless a nickname or a retained key binds
+    /// the endpoint again by then. The pooled connection of the dropped orphan waits in the teardown
+    /// queue, and falls back to the idle sweep of the pool only when that queue is full.
+    fn insert_orphan(&mut self, endpoint: EndpointId) {
+        if self.orphaned_endpoints.len() >= ORPHANED_ENDPOINTS_MAX
+            && !self.orphaned_endpoints.contains(&endpoint)
+        {
+            let unlinked: Option<EndpointId> = self
+                .orphaned_endpoints
+                .iter()
+                .find(|orphan| !self.linked_endpoints.contains(*orphan))
+                .copied();
+            let victim: Option<EndpointId> =
+                unlinked.or_else(|| self.orphaned_endpoints.oldest().copied());
+            if let Some(dropped) = victim {
+                self.orphaned_endpoints.remove(&dropped);
+                // The same check as every caller of `forget_endpoint_state` and the drain of the teardown make: an
+                // endpoint that a nickname or a retained key binds again keeps ALL its state (address, proof,
+                // backoff, rival flag, direct path, watches, kinds, pool address): it is not an orphan any more.
+                if !self.endpoint_is_bound(dropped) {
+                    self.drop_endpoint_state(dropped);
+                    // The pooled connection and the dial cooldown of the dropped orphan need the
+                    // async pool, which this path cannot call: the loop closes them from the
+                    // teardown queue, as it does for every other endpoint that nothing binds. A
+                    // full queue leaves them to the idle sweep of the pool, and the orphan does not
+                    // go back into the set that just dropped it.
+                    if self.teardown_pending.len() < TEARDOWN_PENDING_MAX {
+                        self.teardown_pending.insert(dropped);
+                    }
+                }
+            }
+        }
+        self.orphaned_endpoints.insert(endpoint);
+    }
+
+    /// Drop the state of an endpoint that no nickname binds any more. A linked endpoint keeps its
+    /// proof, direct path and backoff for the regraft after the link loss. The path watch goes:
+    /// nothing names this endpoint, and a stale entry nudges it on each tick. A later sweep drops
+    /// the rest.
+    ///
+    /// The one exception is the eviction of a full orphan set: it takes an unlinked orphan where
+    /// there is one, and a linked orphan only when every one of the
+    /// [`ORPHANED_ENDPOINTS_MAX`] orphans is linked. That orphan loses its direct path, and so the
+    /// regraft of [`plan_regraft_on_link_loss`](Self::plan_regraft_on_link_loss) when its link
+    /// later falls. The state must go with it: nothing sweeps an endpoint that left the set, and
+    /// the link loss does not either ([`unlink`](Self::unlink) keeps the maps), so a path kept here
+    /// would stay for the life of the process. One slower relink, among 1024 linked endpoints that
+    /// no nickname binds, costs less than a map that grows with no bound.
+    pub(crate) fn release_unbound_endpoint(&mut self, endpoint: EndpointId) {
+        if self.linked_endpoints.contains(&endpoint) {
+            self.path_kinds.remove(&endpoint);
+            self.path_watchers.remove(&endpoint);
+            self.insert_orphan(endpoint);
+        } else {
+            self.forget_endpoint_state(endpoint);
+        }
+    }
+
+    /// Drop every state that is keyed by `endpoint`: the backoff, the proof, the rival flag, the
+    /// direct state, the path state and the address of the endpoint, in the pool and in the book.
+    pub(crate) fn forget_endpoint_state(&mut self, endpoint: EndpointId) {
+        self.drop_endpoint_state(endpoint);
+        // Sync code released it (the heartbeat prune, the capacity drop of the retained endpoints) and cannot call
+        // the async pool: the loop closes its pooled connection and its cooldown later (`take_teardown_pending`).
+        // Only here, when nothing links the endpoint any more: a linked one keeps its pool and its multihop origin
+        // until its link ends (`drop_orphaned_endpoint_state`). A full queue does not drop the endpoint: it waits in
+        // the orphan set, and the sweep that follows the drain queues it again. The set holds at most the endpoints
+        // that the maps of the hints and of the retained endpoints could release, which are capped.
+        if self.teardown_pending.len() >= TEARDOWN_PENDING_MAX
+            && !self.teardown_pending.contains(&endpoint)
+        {
+            self.insert_orphan(endpoint);
+        } else {
+            self.teardown_pending.insert(endpoint);
+        }
+    }
+
     /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
     /// stamps and runs, its claim to the rendezvous, its name, and every dial hint that its
-    /// `PeerInfo` made, under each nickname it used. Returns the address of each hint that went.
+    /// `PeerInfo` made, under each nickname it used. Returns the address of each hint that went, and the endpoint that
+    /// was retained for the key, if there was one.
     pub(crate) fn forget_key(&mut self, key: AuthorKey) -> Vec<EndpointAddr> {
         self.peers.remove(&key);
         self.last_seen.remove(&key);
@@ -1246,13 +1522,18 @@ impl EventLoopState {
         self.clock_evidence.heard.remove(&key);
         self.clock_evidence.returned_unshown.remove(&key);
         self.clock_evidence.lapsed_quiet.remove(&key);
+        self.proofs.forget(&key);
         self.proven_endpoints.forget_trust(&key);
         self.rival_holders.remove(&key);
         self.names.remove(&key);
         self.clock_evidence.name_stamp.remove(&key);
+        // The endpoint that was retained for this key goes with it, and comes back with the hints: the caller
+        // tears the endpoints down, and `end_unbound_endpoints` keeps the shared-binding check.
+        let retained: Option<EndpointAddr> = self.refused_endpoints.get(&key).cloned();
         self.release_refused_endpoint(&key);
         self.drop_buffered_frames_to(&key);
-        let left_hints = self.forget_hints_of(key);
+        let mut left_hints = self.forget_hints_of(key);
+        left_hints.extend(retained);
         self.rebind_refused_endpoints();
         left_hints
     }
@@ -1523,6 +1804,12 @@ impl EventLoopState {
             && self.zero_links_since.is_some_and(|since| {
                 now.saturating_duration_since(since) >= tuning::silent_partition_after()
             })
+    }
+
+    /// Tests only: the gap of zero links began at `since`, so a test need not wait for a heal.
+    #[cfg(test)]
+    pub(crate) fn start_zero_links_gap_at(&mut self, since: Instant) {
+        self.zero_links_since = Some(since);
     }
 
     /// Whether a reclaim tick asks another known peer for a link: the fast reclaim window is
@@ -2072,6 +2359,24 @@ impl EventLoopState {
 /// links. A quiet mesh has one head; this only bites under heavy concurrency.
 const MAX_DAG_PARENTS: usize = 16;
 
+/// How many replays and restores of the state channel wait for the loop to send them. A tick adds
+/// at most 2 (the replay of a switch and the restores that are due), and the loop sends them after
+/// the tick, so 8 is room for 4 ticks of a loop that is slow.
+const REPLAY_QUEUE_CAP: usize = 8;
+
+/// How many keys have an endpoint retained in `refused_endpoints`. The map takes the address of any signed
+/// `PeerInfo` whose key is not the holder of its nickname, and a member mints keys for free, so a flood of them
+/// would fill it until the next sweep. 256 is more than the live roster of a mesh of the size that one node
+/// serves (the beacon limit is far below it), so a real peer is not pushed out; at the cap the oldest key goes
+/// and its endpoint state with it.
+pub(crate) const REFUSED_ENDPOINTS_CAP: usize = 256;
+/// The released endpoints that wait for the teardown of the pool: 256 at most.
+const TEARDOWN_PENDING_MAX: usize = 256;
+/// The orphan endpoints: 1024 at most, 4 times the queue of the teardown, which each sweep (10 s) takes up to 256 of
+/// out of the set, so a full set drains in 4 sweeps. It is far above the link cap (the linked endpoints that lose
+/// their hint). At the cap the oldest is dropped, and its pool state goes with the idle sweep.
+pub(crate) const ORPHANED_ENDPOINTS_MAX: usize = 1024;
+
 // ── Consumer surface ───────────────────────────────────────────────────────
 //
 // The application driver (`NodeApp` / `NodeDriver`) is handed `&mut
@@ -2173,6 +2478,358 @@ impl EventLoopState {
         self.mint_mesh.as_ref()
     }
 
+    /// The proof that this session speaks as `nickname` on `mesh` in run `run`. A node with no
+    /// member key has none.
+    #[must_use]
+    pub(crate) fn own_proof(
+        &self,
+        nickname: &Nickname,
+        mesh: &MeshId,
+        run: u64,
+    ) -> Option<IdentityProof> {
+        let member = self.member_identity.as_ref()?;
+        Some(member.prove(
+            &self.identity.author_key(),
+            nickname.as_ref(),
+            mesh.as_ref(),
+            run,
+        ))
+    }
+
+    /// The `joined` frame this node announces: signed by the session key, with the proof of the
+    /// session in the body.
+    pub(crate) fn own_joined(&self, mesh: &MeshId, nickname: &Nickname) -> Verified {
+        let joined = match self.own_proof(nickname, mesh, self.run) {
+            Some(proof) => Message::new_joined_with_proof(mesh, nickname, &proof),
+            None => Message::new_joined(mesh, nickname),
+        };
+        joined.sign(&self.identity)
+    }
+
+    /// The request to send for an `alive` frame whose session this node holds no proof for. It asks
+    /// for a member of the roster and for a session that claims a bound nickname, since the proof is
+    /// the way in. A stranger under a free nickname is not asked. The asks of sessions outside the
+    /// roster are limited to 4 open for each nickname, so a flood of forged keys under one bound
+    /// nickname replaces its own asks and no other.
+    #[cfg(test)]
+    pub(crate) fn proof_request_for(
+        &self,
+        alive: &Verified,
+        own: &Nickname,
+        mesh: &MeshId,
+    ) -> Option<Verified> {
+        self.asks_for_proof(alive, own)
+            .then(|| self.proof_request_to(&alive.key(), own, mesh))
+    }
+
+    /// The signed request for the proof of `session`.
+    pub(crate) fn proof_request_to(
+        &self,
+        session: &AuthorKey,
+        own: &Nickname,
+        mesh: &MeshId,
+    ) -> Verified {
+        #[cfg(test)]
+        self.proof_requests_signed.fetch_add(1, Ordering::Relaxed);
+        Message::new_proof_request(mesh, own, *session).sign(&self.identity)
+    }
+
+    /// Whether a frame of a session that this node holds no proof for asks for one now: the session is in
+    /// the roster or claims a bound nickname, and its retry clock lets a request go. It does not sign
+    /// anything, so a caller that has no path to send over can ask first and pay nothing.
+    #[cfg(test)]
+    pub(crate) fn asks_for_proof(&self, alive: &Verified, own: &Nickname) -> bool {
+        self.asks_for_session(&alive.key(), &alive.author, own)
+    }
+
+    /// `asks_for_proof` for a session named by its key and its nickname.
+    pub(crate) fn asks_for_session(
+        &self,
+        key: &AuthorKey,
+        nickname: &Nickname,
+        own: &Nickname,
+    ) -> bool {
+        // A session of a bound nickname with no proof is no peer yet, and it is asked as well: the
+        // proof is the way in. So is a session that claims OUR nickname (`own`): its proof is the only way to tell
+        // this node that another member holds the nickname, and the start `joined` of the claimant, which a node that
+        // was not yet its neighbor misses, is sent once.
+        let asked_for = self.peers.contains(key)
+            || nickname == own
+            || self
+                .proofs
+                .is_bound(nickname, |session| self.session_is_held(session));
+        asked_for && self.proofs.wants_proof(key, Instant::now())
+    }
+
+    /// The sessions whose ask waits for a warm path and may be tried now, with their nicknames. With an
+    /// `arrived` endpoint, only those whose address is that endpoint: a frame that came from it shows
+    /// that a connection to it is up. Only the sessions that are returned are marked as tried: the asks at
+    /// another endpoint keep their free first try.
+    pub(crate) fn deferred_asks_to_try(
+        &mut self,
+        arrived: Option<EndpointId>,
+    ) -> Vec<(AuthorKey, Nickname)> {
+        let now = Instant::now();
+        let mut due = Vec::new();
+        for (key, nickname) in self.proofs.deferred_due(now) {
+            let at_endpoint = arrived.is_none_or(|endpoint| {
+                self.address_of(&key).map(|address| address.id) == Some(endpoint)
+            });
+            // A session that the roster refused is not in `names`: its ask keeps the nickname that it
+            // claimed. A session that no roster entry or binding names any more is dropped by the ask
+            // itself (`asks_for_session`).
+            if at_endpoint {
+                due.push((key, nickname));
+            }
+        }
+        for (key, _) in &due {
+            self.proofs.mark_deferred_tried(key, now);
+        }
+        due
+    }
+
+    /// Record the dial address that the pool remembers for `endpoint`, as a proof request goes to it.
+    #[cfg(test)]
+    pub(crate) fn note_ask_dial_address(&mut self, endpoint: EndpointId) {
+        let remembered = self.unicast_pool.remembered_address(endpoint);
+        self.ask_dial_addrs.push(remembered);
+    }
+
+    /// The request for the proof of `session` went out: its retry clock starts. A request that
+    /// did not go out, for lack of a warm path, is not noted, so the next alive frame asks again.
+    pub(crate) fn note_proof_request_sent(
+        &mut self,
+        session: &AuthorKey,
+        claimed: Option<&Nickname>,
+    ) {
+        let (peers, quiet) = (&self.peers, &self.quiet);
+        self.proofs
+            .note_asked(session, Instant::now(), claimed, |asked| {
+                peers.contains(asked) || quiet.contains(asked)
+            });
+    }
+
+    /// The answer to a proof request: a signed `joined` frame with the proof of this session, if
+    /// the request is for this node and the answers of the last minute are under the cap.
+    pub(crate) fn proof_answer(
+        &mut self,
+        request_to: &AuthorKey,
+        asker: &AuthorKey,
+        own: &Nickname,
+        mesh: &MeshId,
+        now: Instant,
+    ) -> Option<Verified> {
+        if *request_to != self.identity.author_key() {
+            return None;
+        }
+        // A node with no member key answers nothing: a slot of the cap spent here would count a
+        // refusal for an answer that this node could never send.
+        self.member_identity.as_ref()?;
+        if !self.proofs.may_answer(asker, now, self.peers.len()) {
+            return None;
+        }
+        if let Some(held) = &self.own_answer {
+            return Some(held.frame.clone());
+        }
+        let proof = self.own_proof(own, mesh, self.run)?;
+        let frame = Message::new_joined_with_proof(mesh, own, &proof).sign(&self.identity);
+        self.own_answer = Some(OwnAnswer {
+            frame: frame.clone(),
+            kept: false,
+        });
+        Some(frame)
+    }
+
+    /// The proof answer of this run, once, for the caller that keeps it in the log: it is the same frame
+    /// for every asker, and only the first send of it is kept.
+    pub(crate) fn take_answer_to_keep(&mut self) -> Option<Verified> {
+        let held = self.own_answer.as_mut().filter(|held| !held.kept)?;
+        held.kept = true;
+        Some(held.frame.clone())
+    }
+
+    /// Whether `session`, which is not a live peer, claims a nickname that a member of the roster holds by its proof
+    /// (a restart of that member, or an intruder), or OUR nickname `own`, which is bound to this node. Such an ask has a
+    /// reserve in the budget of the proof requests: at most 4 for each nickname in a window.
+    pub(crate) fn claims_bound_nickname(
+        &self,
+        session: &AuthorKey,
+        nickname: &Nickname,
+        own: &Nickname,
+    ) -> bool {
+        let (peers, quiet) = (&self.peers, &self.quiet);
+        !peers.contains(session)
+            && (nickname == own
+                || self.proofs.is_bound(nickname, |held| {
+                    peers.contains(held) || quiet.contains(held)
+                }))
+    }
+
+    /// Whether `session` is in the roster, live or quiet. A quiet peer may return, so it still
+    /// holds its nickname; a session that left or timed out holds nothing.
+    pub(crate) fn session_is_held(&self, session: &AuthorKey) -> bool {
+        self.peers.contains(session) || self.quiet.contains(session)
+    }
+
+    /// Hold the proof in the body of a `joined` frame, if it verifies for the author of the frame.
+    /// A frame with an empty or bad body holds none. True means: this is the first proof that shows
+    /// our own nickname bound to another member, which is the join error of this node.
+    ///
+    /// `claimant_enters` says that the sender of the frame is in the roster, or is about to be put there by this
+    /// frame. Then the proof is ACTIVE: it binds the nickname, replaces the older sessions of its member, and ends
+    /// the sessions of other members under the nickname. When it is false (an old copy of the frame, that proves no
+    /// presence; a quiet session) the proof is kept PENDING: valid and inactive. It binds nothing, replaces nothing
+    /// and ends nothing, and it admits its own session; it is activated when that session proves presence
+    /// ([`Self::activate_pending_proof`]). A replay of an old signed frame changes nothing in the roster.
+    pub(crate) fn note_joined_proof(
+        &mut self,
+        message: &Verified,
+        mesh: &MeshId,
+        own: &Nickname,
+        claimant_enters: bool,
+    ) -> bool {
+        let Some(proof) = message.joined_proof() else {
+            return false;
+        };
+        let key = message.key();
+        let ours = self.member_identity.as_ref().map(|member| member.public());
+        if message.author == *own && ours.is_some_and(|ours| proof.identity != ours) {
+            let proved = verify_proof(&proof, &key, message.author.as_ref(), mesh.as_ref());
+            return proved && self.proofs.tell_once(&key);
+        }
+        // Read before the proof is held: holding it drops the older sessions of the same member from the
+        // book (a newer run replaces them, and they end with a `left` line), and they must not read as
+        // sessions of another member.
+        let intruders: Vec<AuthorKey> =
+            self.sessions_of_other_members(&key, &message.author, proof.identity);
+        let refused_before = self.proofs.bound_refused();
+        let to_verify = proof;
+        let (peers, quiet) = (&self.peers, &self.quiet);
+        let bound = self.proofs.accept_live(
+            &key,
+            &message.author,
+            mesh,
+            proof,
+            claimant_enters,
+            |session| peers.contains(session) || quiet.contains(session),
+        );
+        if self.proofs.bound_refused() > refused_before
+            && verify_proof(&to_verify, &key, message.author.as_ref(), mesh.as_ref())
+        {
+            // Another member holds the name, so this proof, which is signed by its member, is refused for
+            // now. The frame is not kept as seen: when the holder leaves and the same frame comes again
+            // (the answer of a member is one frame for its whole run), it must be read again and not
+            // dropped as a duplicate. A proof that is not signed by its member keeps its key, so its
+            // copies are dropped as duplicates and cost a lookup. One key leaves a bounded set.
+            self.seen.remove(&message.dedup_key());
+        }
+        if bound {
+            // The proof is active (its sender is live), and the nickname is bound to its member here: a
+            // session of another member that was admitted while no proof bound it (or went quiet under it)
+            // does not keep the name.
+            self.proofs.evict(intruders);
+        }
+        false
+    }
+
+    /// The sessions under `nickname` in the roster (live or quiet) that do not belong to `member`, apart from
+    /// `key`: the sessions that a proof of `member` for `nickname` displaces.
+    fn sessions_of_other_members(
+        &self,
+        key: &AuthorKey,
+        nickname: &Nickname,
+        member: iroh::PublicKey,
+    ) -> Vec<AuthorKey> {
+        let named: Vec<AuthorKey> = self.keys_named(nickname);
+        let others = named.into_iter().filter(|other| {
+            let proof = self.proofs.proof_of(other);
+            other != key && proof.is_none_or(|proof| proof.identity != member)
+        });
+        others.collect()
+    }
+
+    /// Activate the pending proof of the sender of `message`, which is admitted and live now (the caller checked
+    /// both): the proof binds its nickname, replaces the older sessions of its member, and ends the sessions of
+    /// other members, as a proof of a live sender does. The pending proof is used only for the nickname that it
+    /// names: a frame of the same session under another nickname leaves it pending.
+    pub(crate) fn activate_pending_proof(&mut self, message: &Verified, mesh: &MeshId) {
+        let key = message.key();
+        let Some(proof) = self.proofs.take_pending(&key, &message.author) else {
+            return;
+        };
+        let intruders: Vec<AuthorKey> =
+            self.sessions_of_other_members(&key, &message.author, proof.identity);
+        let (peers, quiet) = (&self.peers, &self.quiet);
+        let bound = self
+            .proofs
+            .accept_live(&key, &message.author, mesh, proof, true, |session| {
+                peers.contains(session) || quiet.contains(session)
+            });
+        if bound {
+            self.proofs.evict(intruders);
+        }
+    }
+
+    /// The run of a session of our own member that is newer than ours, when this frame is the first to show
+    /// it: a newer run of this member is active elsewhere, so this node is superseded. It is admitted as
+    /// before, and the caller says so once for each run number.
+    pub(crate) fn newer_run_of_our_member(
+        &mut self,
+        message: &Verified,
+        own: &Nickname,
+    ) -> Option<u64> {
+        let ours = self
+            .member_identity
+            .as_ref()
+            .map(|member| member.public())?;
+        let key = message.key();
+        if message.author != *own || key == self.identity.author_key() {
+            return None;
+        }
+        let run = self
+            .proofs
+            .proof_for(&key, own)
+            .filter(|proof| proof.identity == ours)
+            .map(|proof| proof.run)?;
+        let newer = run > self.run && run > self.newest_own_run_seen;
+        newer.then(|| {
+            self.newest_own_run_seen = run;
+            run
+        })
+    }
+
+    /// Whether the frames of this session reach the roster. A session that claims a nickname that
+    /// another member holds, with no proof of that member, does not. Our own nickname is held by
+    /// our member key. A refusal is counted.
+    pub(crate) fn admits_session(&mut self, message: &Verified, own: &Nickname) -> bool {
+        let key = message.key();
+        if message.author == *own {
+            let ours = self.member_identity.as_ref().map(|member| member.public());
+            // A session of our member is a peer only when its run is not older than the run live here: a
+            // replay of an older run must not enter the roster beside it.
+            let run = self.run;
+            let proved = |proof: &IdentityProof| {
+                ours.is_none_or(|ours| proof.identity == ours && proof.run >= run)
+            };
+            let ours_here = key == self.identity.author_key();
+            // the pending proof counts here too: the session of a newer run of our member shows it
+            let admitted = ours_here
+                || ours.is_none()
+                || self
+                    .proofs
+                    .proof_for_admission(&key, own)
+                    .is_some_and(proved);
+            if !admitted {
+                self.proofs.note_gate_refused();
+            }
+            return admitted;
+        }
+        let (peers, quiet) = (&self.peers, &self.quiet);
+        self.proofs.admits(&key, &message.author, |session| {
+            peers.contains(session) || quiet.contains(session)
+        })
+    }
+
     /// Stamp the next position on this author's hash chain, advancing it.
     /// `prev` is the content hash of the message just authored.
     pub fn advance_chain(&mut self, previous: ContentHash) {
@@ -2227,7 +2884,25 @@ impl EventLoopState {
             return false;
         }
         self.digest_serves.note(author, now);
+        self.chat_continuations
+            .begin(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN);
         true
+    }
+
+    /// Whether a digest of `author` that came by unicast, inside the cooldown that `admit_digest`
+    /// refused it for, is a continuation of its chat ask to serve now: at the pace of the asker, and
+    /// up to its count. Only an author that was served has one. Bounded (see `ChatContinuations`).
+    pub fn admit_chat_continuation(&mut self, author: AuthorKey, now: Instant) -> bool {
+        self.digest_serves.on_cooldown(&author, now)
+            && self
+                .chat_continuations
+                .admit(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN)
+    }
+
+    /// How many authors hold a run of chat continuations: the size gauge of the bound.
+    #[cfg(test)]
+    pub(crate) fn chat_continuations_len(&self) -> usize {
+        self.chat_continuations.len()
     }
 
     /// The selected path of a pair: the path watcher's last report if it has one,
@@ -2301,6 +2976,26 @@ impl EventLoopState {
     /// the only live key of its nickname.
     pub(crate) fn retain_refused_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
         let id = endpoint.id;
+        if !self.refused_endpoints.contains_key(&key) {
+            // The place that this key left in the queue when its endpoint was released is stale: at the cap
+            // it would be popped first and would release the endpoint that the key gets now. The queue is
+            // longer than the map only when some place is stale.
+            if self.refused_order.len() > self.refused_endpoints.len() {
+                self.refused_order.retain(|queued| *queued != key);
+            }
+            while self.refused_endpoints.len() >= REFUSED_ENDPOINTS_CAP {
+                let Some(oldest) = self.refused_order.pop_front() else {
+                    break;
+                };
+                self.release_refused_endpoint(&oldest);
+            }
+            self.refused_order.push_back(key);
+            if self.refused_order.len() > 2 * REFUSED_ENDPOINTS_CAP {
+                let held = &self.refused_endpoints;
+                self.refused_order
+                    .retain(|queued| held.contains_key(queued) || *queued == key);
+            }
+        }
         let displaced = self.refused_endpoints.insert(key, endpoint);
         if let Some(old) = displaced
             && old.id != id
@@ -2309,13 +3004,13 @@ impl EventLoopState {
         }
     }
 
-    /// Give up the retained endpoint of `key`. Its state goes with it, unless a nickname binds the
-    /// endpoint or another retained endpoint names it.
-    pub(crate) fn release_refused_endpoint(&mut self, key: &AuthorKey) {
-        let Some(address) = self.refused_endpoints.remove(key) else {
-            return;
-        };
+    /// Give up the retained endpoint of `key`, and return it. Its state goes with it, unless a nickname binds
+    /// the endpoint or another retained endpoint names it. The caller that tears an endpoint down also
+    /// closes the connection of the pool, and passes the returned endpoint on.
+    pub(crate) fn release_refused_endpoint(&mut self, key: &AuthorKey) -> Option<EndpointId> {
+        let address = self.refused_endpoints.remove(key)?;
         self.release_if_unowned(address.id);
+        Some(address.id)
     }
 
     /// Drop the state of `endpoint` unless a dial hint or a retained endpoint names it.
@@ -2482,6 +3177,30 @@ impl EventLoopState {
     #[cfg(feature = "adversarial")]
     pub fn sever_gossip(&mut self) {
         self.standing.remove(&Standing::GossipOpen);
+    }
+
+    /// Test only: adversarial feature. Put the document of `channel` in `epoch` at once, as an
+    /// adoption does after its wait, and queue the write of the own entry. The Op that calls it
+    /// exists only in an app build with the feature on: no frame and no CLI reaches it.
+    #[cfg(feature = "adversarial")]
+    pub fn force_epoch(&mut self, channel: protocol::Channel, epoch: u64) {
+        let own = self.identity.author_key();
+        let switch = self.doc_mut(channel).restart_at_epoch(epoch, &own);
+        self.note_epoch_switch(switch);
+    }
+
+    /// Tests only: the next ask of a fast round fails to start, once.
+    #[cfg(test)]
+    pub(crate) fn fail_the_next_ask(&mut self) {
+        self.fail_next_ask = true;
+    }
+
+    /// Tests only: whether the injected failure of an ask is due now. It is spent when it is read.
+    #[cfg(test)]
+    pub(crate) fn take_injected_ask_failure(&mut self) -> bool {
+        let due = self.fail_next_ask;
+        self.fail_next_ask = false;
+        due
     }
 
     /// Tests only: drop the next inbound frame that `what` names, once, before the app reads it.

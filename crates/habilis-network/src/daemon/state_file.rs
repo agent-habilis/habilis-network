@@ -90,6 +90,12 @@ pub struct StateFile {
     /// write is 0o600: an app may put a bearer token in here.
     discovery: sync::Mutex<serde_json::Map<String, serde_json::Value>>,
     write_failing: atomic::AtomicBool,
+    /// The lock on the member key of this start. The cleanup of this file deletes the member key
+    /// and the run counter that live beside it, so the lock belongs to the value that does the
+    /// cleanup: a replacement that waits for the lock gets it after the files are gone, and its own
+    /// key and run counter cannot be deleted under it. Held, never read.
+    // shared with the loop state, which holds the same lock for as long as this node runs
+    key_lock: Option<sync::Arc<fs::File>>,
 }
 
 /// The keys of the state file that the daemon owns. A discovery field of the application never
@@ -127,6 +133,7 @@ impl StateFile {
             pubkey: pubkey.to_string(),
             topic: None,
             owner_pid: None,
+            key_lock: None,
             discovery: sync::Mutex::new(serde_json::Map::new()),
             write_failing: atomic::AtomicBool::new(false),
         }
@@ -151,6 +158,13 @@ impl StateFile {
 
     /// Attach the pid of the process the daemon lives for, so every write
     /// publishes it as `owner_pid`. A no-op `None`, as for [`Self::topic`].
+    /// Hold the lock on the member key until this file is cleaned up (see the field of the same
+    /// name).
+    pub(crate) fn key_lock(mut self, key_lock: Option<sync::Arc<fs::File>>) -> Self {
+        self.key_lock = key_lock;
+        self
+    }
+
     pub(crate) fn owner_pid(mut self, owner_pid: Option<u32>) -> Self {
         self.owner_pid = owner_pid;
         self
@@ -277,9 +291,14 @@ impl StateFile {
         fs::rename(&temp, &self.path)
     }
 
-    /// Delete the state file. Safe to call on a path that does not exist.
+    /// Delete the state file, and the member key and the run counter that live beside it. A process
+    /// that leaves takes its identity with it: the next process with the same pid, which names the
+    /// same state file, starts as a new member. Safe to call on a path that does not exist.
     pub(crate) fn remove(&self) {
         let _ = fs::remove_file(&self.path);
+        for extension in ["key", "run", "run.tmp"] {
+            let _ = fs::remove_file(self.path.with_extension(extension));
+        }
     }
 }
 
@@ -543,6 +562,7 @@ mod tests {
 
     use crate::testing;
     use std::error::Error;
+    use std::sync::Arc;
     use std::{env, fs, io, process};
     /// The variants of a public error hold a boxed source, so no third-party type is named in
     /// the public API. This builds them that way.
@@ -871,6 +891,58 @@ mod tests {
         state_file.remove();
     }
 
+    /// The file holds the lock on the member key, so the key and the run counter are gone before a
+    /// replacement can take the lock: a replacement that took it first would have its own key
+    /// deleted by this cleanup. The order follows from the lock being a field of this value, which
+    /// Rust drops after the body of `Drop`.
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_of_the_member_key_is_held_while_the_key_and_the_run_counter_go() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("key-lock");
+        let lock_path = path.with_extension("key.lock");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        let held: fs::File = options.open(&lock_path).expect("the lock file opens");
+        held.try_lock().expect("the lock is free");
+        fs::write(path.with_extension("key"), b"key").expect("a member key file");
+        fs::write(path.with_extension("run"), b"7").expect("a run counter file");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        )
+        // shared with the loop state in production; here the file is the only holder
+        .key_lock(Some(Arc::new(held)));
+        let mut rival_options = fs::OpenOptions::new();
+        rival_options.write(true);
+        let rival: fs::File = rival_options
+            .open(&lock_path)
+            .expect("a second handle on the lock file");
+        assert!(
+            rival.try_lock().is_err(),
+            "the premise: the state file holds the lock of the member key"
+        );
+
+        drop(state_file);
+
+        assert!(
+            !path.with_extension("key").exists(),
+            "the cleanup deletes the member key"
+        );
+        assert!(
+            !path.with_extension("run").exists(),
+            "and the run counter beside it"
+        );
+        assert!(
+            rival.try_lock().is_ok(),
+            "the lock is free once the files are gone, so a replacement starts with its own key"
+        );
+        let _ = fs::remove_file(&lock_path);
+    }
+
     #[test]
     fn remove_clears_file() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -886,6 +958,35 @@ mod tests {
         assert!(path.exists(), "the file exists before remove is called");
         state_file.remove();
         assert!(!path.exists(), "remove deletes the file");
+    }
+
+    /// The member key and the run counter live beside the state file, named for it. A process that
+    /// leaves must not leave them for the next process with the same pid: that process would take the
+    /// member identity and the run count of the one that left.
+    #[test]
+    fn remove_clears_the_member_key_and_the_run_counter() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("remove-keys");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        );
+        state_file.write(0, false);
+        let beside: Vec<PathBuf> = ["key", "run", "run.tmp"]
+            .map(|extension| path.with_extension(extension))
+            .into();
+        for file in &beside {
+            fs::write(file, b"x").expect("a file beside the state file");
+        }
+
+        state_file.remove();
+
+        for file in &beside {
+            assert!(!file.exists(), "remove deletes {}", file.display());
+        }
     }
 
     #[test]

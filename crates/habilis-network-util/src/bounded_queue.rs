@@ -64,6 +64,12 @@ impl<T> BoundedQueue<T> {
     }
 
     #[must_use]
+    /// The number of items.
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    #[must_use]
     /// Whether the queue holds no items.
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
