@@ -132,6 +132,20 @@ impl BlobServer {
         self.endpoint.addr()
     }
 
+    /// The address of the serving endpoint as it changes: the IP addresses and the home relay.
+    /// A ticket holds the address at the time of [`Self::register`], so a caller that keeps
+    /// the server for a long time reads this to learn of a later change.
+    #[must_use]
+    pub fn watch_addr(&self) -> impl iroh::Watcher<Value = iroh::EndpointAddr> + use<> {
+        self.endpoint.watch_addr()
+    }
+
+    /// Waits until the serving endpoint is connected to a home relay. It has no time limit: a
+    /// server with the relay disabled never returns, so a caller bounds it with a timeout.
+    pub async fn online(&self) {
+        self.endpoint.online().await;
+    }
+
     /// Serves in flight right now.
     #[cfg(test)]
     pub(crate) fn inflight(&self) -> usize {

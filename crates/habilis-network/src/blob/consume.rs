@@ -69,9 +69,11 @@ where
 /// the caller owns it and closes it.
 ///
 /// `ticket.lookups` is not applied to the endpoint. Build it with
-/// `build_peer_endpoint(&ticket.lookups)`, or with the same relay ladder as the
-/// producer, so that both sides can reach a common relay. The dial carries the
-/// ticket address, so this adds nothing to the lookup services of the endpoint.
+/// `habilis_network::net::build_peer_endpoint(&ticket.lookups)`, or with the same
+/// relay ladder as the producer, so that both sides can reach a common relay. The
+/// dial carries the ticket address, so this adds nothing to the lookup services of
+/// the endpoint. An endpoint with no lookup services reaches only the exact ticket
+/// address: it does not resolve the producer again if that address changes.
 ///
 /// # Errors
 /// The same as [`fetch`].

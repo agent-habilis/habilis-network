@@ -226,6 +226,42 @@ mod tests {
         );
     }
 
+    /// **A caller can watch the address of the blob server and wait for it to be online.**
+    ///
+    /// The ticket holds the address of the server at the time of `register`. A caller that
+    /// keeps the server for a long time needs the address as it changes, and needs to know when
+    /// the server has a home relay.
+    #[test]
+    fn a_blob_server_exposes_its_address_watcher_and_online_wait() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::Watcher as _;
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .expect("start producer");
+                assert_eq!(
+                    server.watch_addr().get(),
+                    server.address(),
+                    "the watcher holds the address that a ticket carries"
+                );
+                assert!(
+                    time::timeout(Duration::from_millis(200), server.online())
+                        .await
+                        .is_err(),
+                    "with the relay disabled there is no home relay, so online never returns"
+                );
+                server.shutdown().await;
+            },
+        );
+    }
+
     /// A loopback fetch runs on a direct path, so a producer whose mesh keeps
     /// the relay for lookup only (the default) serves it — and the ticket
     /// carries the policy to the consumer.
