@@ -7981,6 +7981,42 @@ mod dedup_counter_tests {
         );
     }
 
+    /// A session whose only address is the rendezvous has no target: an ask that went there would
+    /// draw an answer that hides which member sent it (`proof_ask_target`). The ask waits in the map
+    /// of the asks that wait for a path, as one with no address at all does, so the sweep sends it
+    /// once a real address comes. It is not dropped: the next alive frame is 30 s away, and a
+    /// session that sends no more of them would never be asked again.
+    #[test]
+    fn an_ask_whose_only_address_is_the_rendezvous_waits_for_a_real_one() {
+        let session = Identity::generate();
+        let rendezvous = endpoint_id(9);
+        let mut initial = fresh_state();
+        initial.rendezvous_id = Some(rendezvous);
+        initial.peers.insert(session.author_key());
+        initial.names.insert(session.author_key(), nick("alice"));
+        initial.place_endpoint(
+            session.author_key(),
+            &nick("alice"),
+            iroh::EndpointAddr::new(rendezvous),
+        );
+
+        let after = reader_full(
+            initial,
+            vec![alive_of(&session, "alice")],
+            &SilentSink,
+            None,
+        );
+
+        assert_eq!(
+            (
+                after.proofs.deferred_len(),
+                after.proof_requests_signed.load(Ordering::Relaxed)
+            ),
+            (1, 0),
+            "the ask waits for an address that is not the rendezvous, and nothing is signed"
+        );
+    }
+
     /// A frame that comes on a unicast connection from the endpoint of a session that waits shows that the
     /// endpoint can reach us, and the endpoint id of that connection is authenticated by the transport. The
     /// session may have no gossip link and no connection of ours to it (it dialed us), so the ask goes by a
