@@ -3294,13 +3294,17 @@ mod churn_red {
             let writer = fresh_state();
             let seed = *writer.identity.public().as_bytes();
             let merged = writer
-                .doc(Channel::Meta)
-                .build_change(&serde_json::json!({ "status": "busy" }), &seed)
+                .docs
+                .build_change(
+                    Channel::Meta,
+                    &serde_json::json!({ "status": "busy" }),
+                    &seed,
+                )
                 .expect("a JSON object merges");
             let change = merged.expect("a non-empty merge yields a change");
             let (wire, _plain) = writer
-                .doc(Channel::Meta)
-                .compose_wire_body(&change, None)
+                .docs
+                .compose_wire_body(Channel::Meta, &change, None)
                 .expect("compose the wire body");
             let mut change_frame =
                 Message::new_channel_event(&rig.mesh, &dead, wire, Channel::Meta);
@@ -3340,11 +3344,11 @@ mod churn_red {
 
             // Another node holds the change of the dead peer and gets a digest from a late joiner.
             let mut holder = fresh_state();
-            let _ = holder.doc_mut(Channel::Meta).ingest(&change_frame);
+            let _ = holder.docs.ingest(Channel::Meta, &change_frame);
             assert!(
                 holder
-                    .doc(Channel::Meta)
-                    .changes_since(&[], 10)
+                    .docs
+                    .changes_since_not_by(Channel::Meta, &[], None, 10)
                     .any(|frame| frame.key() == victim_key(&writer)),
                 "precondition: the holder has the change of the dead peer"
             );
@@ -3365,7 +3369,10 @@ mod churn_red {
             );
 
             // The answer reaches the live node.
-            for frame in holder.doc(Channel::Meta).changes_since(&[], 10) {
+            for frame in holder
+                .docs
+                .changes_since_not_by(Channel::Meta, &[], None, 10)
+            {
                 receive(&frame, &mut live, &context);
             }
             let lines = rig.sink.lines();

@@ -440,9 +440,9 @@ pub async fn broadcast_state_merge(
     // rejoined session under a nickname-derived actor would collide seq
     // numbers with its predecessor's history (see `doc::actor_for`).
     let actor_seed = *state.identity.public().as_bytes();
-    let fork_doc = state.doc(channel);
-    let built = fork_doc
-        .build_change(&merge, &actor_seed)
+    let built = state
+        .docs
+        .build_change(channel, &merge, &actor_seed)
         .map_err(|error| transport::SendError::Internal(error.into()))?;
     let Some(change_bytes) = built else {
         return Ok(());
@@ -453,8 +453,9 @@ pub async fn broadcast_state_merge(
     //    writes; the internal card publish stays lean (no delta on the wire).
     //    On a passworded mesh the wire body is sealed under the channel key;
     //    `plain_body` keeps the plaintext for our own surfacing below.
-    let channel_doc = state.doc(channel);
-    let composed = channel_doc.compose_wire_body(&change_bytes, surface.then_some(&merge));
+    let composed = state
+        .docs
+        .compose_wire_body(channel, &change_bytes, surface.then_some(&merge));
     let (wire_body, plain_body) =
         composed.map_err(|error| transport::SendError::Internal(error.into()))?;
     let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
@@ -466,7 +467,7 @@ pub async fn broadcast_state_merge(
     // 3. Apply the signed frame to the live doc through the authorization gate.
     //    Ingest retains the frame as the re-serve store (replacing `StateLog`),
     //    so anti-entropy can forward it with its original signature.
-    let ingested = state.doc_mut(channel).ingest(&signed);
+    let ingested = state.docs.ingest(channel, &signed);
     let after = match ingested {
         Ingested::Applied { doc, .. } => doc,
         Ingested::Duplicate => return Ok(()),

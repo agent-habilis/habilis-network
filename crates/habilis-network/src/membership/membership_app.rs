@@ -985,7 +985,7 @@ impl MembershipApp {
     fn handle_inspect(request: Inspect, state: &mut EventLoopState) -> bool {
         match request {
             Inspect::StateJson { reply } => {
-                let state_json = state.doc(Channel::State).to_json().to_string();
+                let state_json = state.docs.to_json(Channel::State).to_string();
                 let _ = reply.send(state_json);
                 false
             }

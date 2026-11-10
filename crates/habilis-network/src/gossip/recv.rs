@@ -13,7 +13,7 @@ use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
 use crate::daemon::handler_ctx::HandlerCtx;
-use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
+use crate::daemon::state::{ChannelDocs, DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::MembershipUpdate;
 use crate::protocol::messages::{Authored, MessageBody, MessageError, Proof, Verified, WireFrame};
@@ -38,8 +38,8 @@ use crate::protocol::{peer_addr_error, seal_error};
 use crate::transport::underlay_webrtc;
 use crate::transport::{probe, proven_endpoints, webrtc};
 
+use crate::transport;
 use crate::transport::Delivered;
-use crate::{doc, transport};
 use iroh_gossip::api;
 use n0_future::task as n0future_task;
 use std::ops;
@@ -983,12 +983,12 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
-    let changes = state.doc(channel).change_count();
-    ingest_channel_event(event, state.doc_mut(channel), context);
-    if state.doc(channel).change_count() > changes {
+    let changes = state.docs.change_count(channel);
+    ingest_channel_event(event, &mut state.docs, context);
+    if state.docs.change_count(channel) > changes {
         state.fast_rounds.note_change(channel, Instant::now());
     }
-    for key in state.doc_mut(channel).take_dropped() {
+    for key in state.docs.take_dropped(channel) {
         state.seen.remove(&key);
     }
     if channel == Channel::Meta {
@@ -1016,7 +1016,7 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
-fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context: &HandlerCtx<'_>) {
+fn ingest_channel_event(event: ChannelEvent<'_>, docs: &mut ChannelDocs, context: &HandlerCtx<'_>) {
     use crate::doc::Ingested;
 
     let ChannelEvent {
@@ -1028,7 +1028,7 @@ fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context
     // deps land, retains the signed frame for re-serve, and gates card forgery
     // (the card carries the peer's cryptographic identity) — every recipient
     // applies the same gate, so a forgery converges nowhere.
-    match doc.ingest(message) {
+    match docs.ingest(channel, message) {
         Ingested::Applied {
             changed: true,
             doc: after,
@@ -1036,7 +1036,7 @@ fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context
             // On a passworded mesh the received body is ciphertext; surface a
             // plaintext-bodied view so the human/JSON `m` delta still renders.
             // The frame retained for re-serve (inside `ingest`) stays ciphertext.
-            let surfaced = surface_view(message, doc.surface_body(message));
+            let surfaced = surface_view(message, docs.surface_body(channel, message));
             context.sink.emit(NodeEvent::StateChanged {
                 channel,
                 event: Box::new(surfaced),
@@ -1667,20 +1667,20 @@ mod evicted_orphan_tests {
         let seed = *writer.identity.public().as_bytes();
         (0..count)
             .map(|step| {
-                let state_doc = writer.doc(Channel::State);
-                let change = state_doc
-                    .build_change(&json!({ format!("k{step}"): step }), &seed)
+                let change = writer
+                    .docs
+                    .build_change(Channel::State, &json!({ format!("k{step}"): step }), &seed)
                     .expect("a JSON object merges")
                     .expect("a non-empty merge yields a change");
                 let (wire, _plain) = writer
-                    .doc(Channel::State)
-                    .compose_wire_body(&change, None)
+                    .docs
+                    .compose_wire_body(Channel::State, &change, None)
                     .expect("compose the wire body");
                 let frame = Message::new_channel_event(mesh, author, wire, Channel::State)
                     .sign(&writer.identity);
                 assert!(
                     matches!(
-                        writer.doc_mut(Channel::State).ingest(&frame),
+                        writer.docs.ingest(Channel::State, &frame),
                         Ingested::Applied { .. }
                     ),
                     "the state document applies the frame"
@@ -1692,8 +1692,8 @@ mod evicted_orphan_tests {
 
     fn holds(state: &EventLoopState, step: usize) -> bool {
         state
-            .doc(Channel::State)
-            .to_json()
+            .docs
+            .to_json(Channel::State)
             .get(format!("k{step}"))
             .is_some()
     }

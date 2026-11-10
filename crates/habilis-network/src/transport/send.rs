@@ -1062,19 +1062,21 @@ mod tests {
         let mut write = |channel: Channel| -> Vec<WireFrame> {
             (0..changes)
                 .map(|step| {
-                    let change = state
-                        .doc(channel)
-                        .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed);
+                    let change = state.docs.build_change(
+                        channel,
+                        &serde_json::json!({ format!("k{step}"): step }),
+                        &seed,
+                    );
                     let change = change
                         .expect("a JSON object merges")
                         .expect("a non-empty merge yields a change");
                     let (wire, _plain) = state
-                        .doc(channel)
-                        .compose_wire_body(&change, None)
+                        .docs
+                        .compose_wire_body(channel, &change, None)
                         .expect("compose the wire body");
                     let frame = Message::new_channel_event(&mesh, &nick("alice"), wire, channel)
                         .sign(&state.identity);
-                    let _ = state.doc_mut(channel).ingest(&frame);
+                    let _ = state.docs.ingest(channel, &frame);
                     frame.serialize().expect("serialize")
                 })
                 .collect()
@@ -1504,18 +1506,22 @@ mod tests {
         use crate::protocol::Channel;
 
         let seed = *state.identity.public().as_bytes();
-        let doc = state.doc(Channel::State);
-        let change = doc
-            .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed)
+        let change = state
+            .docs
+            .build_change(
+                Channel::State,
+                &serde_json::json!({ format!("k{step}"): step }),
+                &seed,
+            )
             .expect("a JSON object merges")
             .expect("a non-empty merge yields a change");
         let (wire, _plain) = state
-            .doc(Channel::State)
-            .compose_wire_body(&change, None)
+            .docs
+            .compose_wire_body(Channel::State, &change, None)
             .expect("compose the wire body");
         let frame = Message::new_channel_event(mesh, &nick("alice"), wire, Channel::State)
             .sign(&state.identity);
-        let _ = state.doc_mut(Channel::State).ingest(&frame);
+        let _ = state.docs.ingest(Channel::State, &frame);
     }
 
     /// A digest with nothing to answer must not use up the window: the
@@ -1531,7 +1537,7 @@ mod tests {
             let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
             let context = net.context();
             let asker = Identity::generate();
-            let heads: Vec<_> = state.doc(Channel::State).heads().collect();
+            let heads: Vec<_> = state.docs.heads(Channel::State).collect();
             let current = serde_json::to_value(heads).expect("heads");
             let up_to_date = digest(&net.mesh, Channel::State, &current, &asker);
             let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
@@ -1673,7 +1679,7 @@ mod tests {
             assert_eq!(got[..3], expected[..], "the three frames first, in order");
             let last = Message::parse(&got[3]).expect("the last frame parses");
             assert_eq!(last.kind, MessageKind::StateDigest, "then a state digest");
-            let closing_heads: Vec<_> = state.doc(Channel::State).heads().collect();
+            let closing_heads: Vec<_> = state.docs.heads(Channel::State).collect();
             assert_eq!(
                 last.body.as_str(),
                 format!(
@@ -1697,7 +1703,7 @@ mod tests {
 
             let (other_endpoint, _other_sender) = loopback_node().await;
             let (other_net, ahead, _frames) = holder(other_endpoint.addr(), 3).await;
-            let ahead_list: Vec<_> = ahead.doc(Channel::State).heads().collect();
+            let ahead_list: Vec<_> = ahead.docs.heads(Channel::State).collect();
             let ahead_heads = serde_json::json!(ahead_list);
             let (bob_endpoint, _bob_sender) = loopback_node().await;
             let (net, mut state, _none) = holder(bob_endpoint.addr(), 0).await;
@@ -1705,7 +1711,7 @@ mod tests {
             prove_identity(&mut state, &bob, bob_endpoint.id());
             let now = clock::Instant::now();
 
-            let own_list: Vec<_> = state.doc(Channel::State).heads().collect();
+            let own_list: Vec<_> = state.docs.heads(Channel::State).collect();
             let own = serde_json::json!(own_list);
             let up_to_date = digest(&net.mesh, Channel::State, &own, &bob);
             antientropy::handle_state_digest(

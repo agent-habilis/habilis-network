@@ -26,9 +26,10 @@ use iroh::{EndpointAddr, EndpointId};
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
+use crate::doc::{DocError, Ingested};
 use crate::protocol::identity::Identity;
 use crate::protocol::meshes::Mesh;
-use crate::protocol::messages::{Authored, Verified, WireFrame};
+use crate::protocol::messages::{Authored, Message, Verified, WireFrame};
 use crate::protocol::{AuthorKey, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
@@ -115,6 +116,76 @@ impl ChannelDocs {
             protocol::Channel::Meta => &mut self.meta,
             _ => unreachable!("a channel added later needs its own document"),
         }
+    }
+
+    /// The automerge heads of `channel`.
+    pub(crate) fn heads(&self, channel: protocol::Channel) -> impl Iterator<Item = String> + '_ {
+        self.get(channel).heads()
+    }
+
+    /// Whether `channel` holds every change of `heads`.
+    pub(crate) fn holds_heads(&self, channel: protocol::Channel, heads: &[String]) -> bool {
+        self.get(channel).holds_heads(heads)
+    }
+
+    /// How many changes `channel` has applied.
+    pub(crate) fn change_count(&self, channel: protocol::Channel) -> usize {
+        self.get(channel).change_count()
+    }
+
+    /// The JSON view of `channel`.
+    pub(crate) fn to_json(&self, channel: protocol::Channel) -> serde_json::Value {
+        self.get(channel).to_json()
+    }
+
+    /// Applies a signed change frame to `channel`.
+    pub(crate) fn ingest(&mut self, channel: protocol::Channel, frame: &Verified) -> Ingested {
+        self.get_mut(channel).ingest(frame)
+    }
+
+    /// The change that `merge` builds on `channel`, or `None` for a no-op merge.
+    pub(crate) fn build_change(
+        &self,
+        channel: protocol::Channel,
+        merge: &serde_json::Value,
+        actor_seed: &[u8],
+    ) -> Result<Option<Vec<u8>>, DocError> {
+        self.get(channel).build_change(merge, actor_seed)
+    }
+
+    /// The signed body of `change` on `channel`, sealed on a passworded mesh.
+    pub(crate) fn compose_wire_body(
+        &self,
+        channel: protocol::Channel,
+        change: &[u8],
+        merge: Option<&serde_json::Value>,
+    ) -> Result<(protocol::MessageBody, protocol::MessageBody), DocError> {
+        self.get(channel).compose_wire_body(change, merge)
+    }
+
+    /// The changes of `channel` that a peer holding `have` lacks, except those by `author`.
+    pub(crate) fn changes_since_not_by<'a>(
+        &'a self,
+        channel: protocol::Channel,
+        have: &'a [String],
+        author: Option<&'a AuthorKey>,
+        max: usize,
+    ) -> impl Iterator<Item = Verified> + 'a {
+        self.get(channel).changes_since_not_by(have, author, max)
+    }
+
+    /// The plaintext of a sealed `frame` on `channel`, when the channel holds its key.
+    pub(crate) fn surface_body(
+        &self,
+        channel: protocol::Channel,
+        frame: &Message,
+    ) -> Option<String> {
+        self.get(channel).surface_body(frame)
+    }
+
+    /// The keys that `channel` dropped since the last call.
+    pub(crate) fn take_dropped(&mut self, channel: protocol::Channel) -> Vec<DedupKey> {
+        self.get_mut(channel).take_dropped().collect()
     }
 }
 
@@ -650,6 +721,12 @@ pub struct EventLoopState {
 }
 
 impl EventLoopState {
+    /// The JSON view of the shared state of `channel`.
+    #[must_use]
+    pub fn view(&self, channel: protocol::Channel) -> serde_json::Value {
+        self.docs.to_json(channel)
+    }
+
     /// Build a fresh event-loop state. `now` is passed explicitly so
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
@@ -1869,21 +1946,9 @@ impl EventLoopState {
 // Two reasons. The types are the smaller one — several fields are
 // `pub(crate)` collections in private modules, so a consumer could touch the
 // field but never name it. The larger one is that a bare field says nothing
-// about the invariant around it, and the doc pair below is the example: every
-// consumer that wanted one wrote the same `match channel` first.
+// about the invariant around it, and the channel store below is the example:
+// every consumer that wanted a document wrote the same `match channel` first.
 impl EventLoopState {
-    /// The shared document for `channel`. Replaces a `match` on
-    /// [`Channel`](crate::protocol::Channel) at every call site.
-    #[must_use]
-    pub fn doc(&self, channel: protocol::Channel) -> &MeshDoc {
-        self.docs.get(channel)
-    }
-
-    /// Mutable [`Self::doc`], for applying a local change before broadcast.
-    pub fn doc_mut(&mut self, channel: protocol::Channel) -> &mut MeshDoc {
-        self.docs.get_mut(channel)
-    }
-
     /// This member's signing identity.
     #[must_use]
     pub fn identity(&self) -> &Identity {

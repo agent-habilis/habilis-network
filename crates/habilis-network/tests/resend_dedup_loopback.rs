@@ -141,7 +141,7 @@ impl NodeDriver for Chat {
                 true
             }
             Request::Read(response) => {
-                let _ = response.send(state.doc(Channel::State).to_json());
+                let _ = response.send(state.docs.to_json(Channel::State));
                 false
             }
             Request::ForgetProof(peer, done) => {

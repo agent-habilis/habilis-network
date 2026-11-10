@@ -80,7 +80,7 @@ impl NodeDriver for Store {
                 true
             }
             Request::Read(response) => {
-                let _ = response.send(state.doc(Channel::State).to_json());
+                let _ = response.send(state.view(Channel::State));
                 false
             }
         }

@@ -115,7 +115,7 @@ fn heads_digest(
     if !state.overlay_reachable() {
         return None;
     }
-    let heads: Vec<_> = state.doc(channel).heads().collect();
+    let heads: Vec<_> = state.docs.heads(channel).collect();
     let body = super::json_body(&HeadsBody { heads, closing })?;
     Some(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
@@ -136,7 +136,7 @@ async fn ask_back(
     let Ok(body) = decoded else {
         return;
     };
-    if state.doc(channel).holds_heads(&body.heads) {
+    if state.docs.holds_heads(channel, &body.heads) {
         return;
     }
     let key = digest.key();
@@ -148,7 +148,7 @@ async fn ask_back(
         &key,
         channel,
         heads_key_of(state, channel),
-        state.doc(channel).change_count(),
+        state.docs.change_count(channel),
         now,
     ) {
         ask(channel, &key, &digest.author, state, context).await;
@@ -160,7 +160,7 @@ async fn ask_back(
 /// Our own heads key for `channel`, as a digest of ours would carry it (its
 /// body is the heads JSON), without building and signing one.
 fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
-    let heads_list: Vec<_> = state.doc(channel).heads().collect();
+    let heads_list: Vec<_> = state.docs.heads(channel).collect();
     let heads = HeadsBody {
         heads: heads_list,
         closing: false,
@@ -179,8 +179,9 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &Han
     for channel in [Channel::State, Channel::Meta] {
         let now = Instant::now();
         let ahead = state.fast_rounds.ahead(channel);
-        let doc = state.doc(channel);
-        let held_peers = ahead.iter().filter(|peer| doc.holds_heads(&peer.heads));
+        let held_peers = ahead
+            .iter()
+            .filter(|peer| state.docs.holds_heads(channel, &peer.heads));
         let held: Vec<&[String]> = held_peers.map(|peer| peer.heads.as_slice()).collect();
         let answerable = ahead
             .iter()
@@ -235,7 +236,7 @@ async fn ask(
     {
         return false;
     }
-    let changes = state.doc(channel).change_count();
+    let changes = state.docs.change_count(channel);
     state
         .fast_rounds
         .note_asked(*key, channel, ours_key, changes, now);
@@ -365,8 +366,9 @@ fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -
         return Vec::new();
     };
     state
-        .doc(channel)
+        .docs
         .changes_since_not_by(
+            channel,
             &body.heads,
             Some(&digest.key()),
             tuning::antientropy_max_resend(),
@@ -608,18 +610,18 @@ mod budget_tests {
         state.standing.insert(Standing::Meshed);
         let (mesh, author) = (MeshId::from("test"), nick("alice"));
         let seed = *state.identity.public().as_bytes();
-        let state_doc = state.doc(Channel::State);
-        let change = state_doc
-            .build_change(&serde_json::json!({ "k": 1 }), &seed)
+        let change = state
+            .docs
+            .build_change(Channel::State, &serde_json::json!({ "k": 1 }), &seed)
             .expect("a JSON object merges")
             .expect("a non-empty merge yields a change");
         let (wire, _plain) = state
-            .doc(Channel::State)
-            .compose_wire_body(&change, None)
+            .docs
+            .compose_wire_body(Channel::State, &change, None)
             .expect("compose the wire body");
         let frame = protocol::Message::new_channel_event(&mesh, &author, wire, Channel::State)
             .sign(&state.identity);
-        let _ = state.doc_mut(Channel::State).ingest(&frame);
+        let _ = state.docs.ingest(Channel::State, &frame);
         let origin = DigestOrigin {
             mesh: &mesh,
             author: &author,
@@ -790,20 +792,20 @@ mod tests {
         merge: &serde_json::Value,
     ) {
         let seed = *state.identity.public().as_bytes();
-        let meta_doc = state.doc(Channel::Meta);
-        let change = meta_doc
-            .build_change(merge, &seed)
+        let change = state
+            .docs
+            .build_change(Channel::Meta, merge, &seed)
             .expect("a JSON object merges")
             .expect("a non-empty merge yields a change");
         let (wire, _plain) = state
-            .doc(Channel::Meta)
-            .compose_wire_body(&change, None)
+            .docs
+            .compose_wire_body(Channel::Meta, &change, None)
             .expect("compose the wire body");
         let frame =
             Message::new_channel_event(mesh, author, wire, Channel::Meta).sign(&state.identity);
         assert!(
             matches!(
-                state.doc_mut(Channel::Meta).ingest(&frame),
+                state.docs.ingest(Channel::Meta, &frame),
                 Ingested::Applied { .. }
             ),
             "a locally-built change applies"
@@ -827,7 +829,7 @@ mod tests {
         let digest = state_digest(joiner, origin, Channel::Meta)?;
         let frames = missing_frames(Channel::Meta, &digest, holder);
         for frame in &frames {
-            joiner.doc_mut(Channel::Meta).ingest(frame);
+            joiner.docs.ingest(Channel::Meta, frame);
         }
         Some(frames.len())
     }
@@ -850,8 +852,8 @@ mod tests {
             &serde_json::json!({"peers": {"alice": {"status": "idle", "model": "m"}}}),
         );
         let mut bob = rendezvous_only();
-        let bob_heads: Vec<_> = bob.doc(Channel::Meta).heads().collect();
-        let alice_heads: Vec<_> = alice.doc(Channel::Meta).heads().collect();
+        let bob_heads: Vec<_> = bob.docs.heads(Channel::Meta).collect();
+        let alice_heads: Vec<_> = alice.docs.heads(Channel::Meta).collect();
         assert_ne!(bob_heads, alice_heads, "bob joins knowing nothing");
 
         // Round 1: bob's empty frontier pulls alice's change; alice's digest
@@ -864,12 +866,12 @@ mod tests {
             Some(0),
             "alice lacks nothing"
         );
-        let bob_after: Vec<_> = bob.doc(Channel::Meta).heads().collect();
-        let alice_after: Vec<_> = alice.doc(Channel::Meta).heads().collect();
+        let bob_after: Vec<_> = bob.docs.heads(Channel::Meta).collect();
+        let alice_after: Vec<_> = alice.docs.heads(Channel::Meta).collect();
         assert_eq!(bob_after, alice_after, "converged within one round");
         assert_eq!(
-            bob.doc(Channel::Meta).to_json(),
-            alice.doc(Channel::Meta).to_json(),
+            bob.docs.to_json(Channel::Meta),
+            alice.docs.to_json(Channel::Meta),
             "the late joiner converges meta to the same document"
         );
 
