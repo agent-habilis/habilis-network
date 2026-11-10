@@ -73,8 +73,9 @@ typedef struct {
 /*
  * Metadata for one received message, with the key of its author. The text lands
  * NUL-terminated in the caller's buffer; `len` is its length in bytes, excluding
- * the NUL. Two members can use one nickname only if no member key proved it, so a nickname
- * name two authors; the key names one, and habilis_network_msg_send_to_key() sends to it.
+ * the NUL. Two members can use one nickname only if no member key proved it, so
+ * a nickname can name two authors; the key names one, and
+ * habilis_network_msg_send_to_key() sends to it.
  *
  * The struct has no size field: the caller allocates it with this header. It has
  * 144 bytes and alignment 8 on a 64-bit target (140 bytes with a 4-byte size_t):
