@@ -1256,7 +1256,7 @@ fn a_frame_of_wire_version_13_0_is_refused_by_its_version() {
 fn the_golden_key_signs_the_unsigned_fixture_to_the_signed_fixture() {
     let _guard = ::habilis_network_test_tracing::init();
     let unsigned = Message::parse(UNSIGNED_WIRE.as_bytes()).expect("the unsigned literal parses");
-    let signed = unsigned.sign(&identity::Identity::from_secret_bytes([7; 32]));
+    let signed = unsigned.sign(&identity::Identity::fixed_secret([7; 32]));
     assert_eq!(
         serde_json::to_string(&super::Wire(&signed)).expect("the signed message has a wire form"),
         SIGNED_WIRE,
