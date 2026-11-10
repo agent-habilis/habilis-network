@@ -66,9 +66,12 @@ where
 
 /// [`fetch`] over an endpoint the caller already holds, so a caller that fetches
 /// often does not bind a cold endpoint for each blob. The endpoint is left open:
-/// the caller owns it and closes it. The endpoint must have been built with the
-/// relay and lookup policy the caller wants, because `ticket.lookups` is not
-/// applied to it.
+/// the caller owns it and closes it.
+///
+/// `ticket.lookups` is not applied to the endpoint. Build it with
+/// `build_peer_endpoint(&ticket.lookups)`, or with the same relay ladder as the
+/// producer, so that both sides can reach a common relay. The dial carries the
+/// ticket address, so this adds nothing to the lookup services of the endpoint.
 ///
 /// # Errors
 /// The same as [`fetch`].
@@ -96,7 +99,6 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let token = auth_token(ticket, password.as_ref())?;
-    add_peer_addr(&address_book(endpoint), ticket.address.clone());
     fetch_over(endpoint, ticket, &token, out)
         .await
         .map_err(BlobError::internal)

@@ -193,6 +193,8 @@ mod tests {
                 let endpoint = lookup::build_peer_endpoint(&LookupOpts::loopback())
                     .await
                     .expect("caller endpoint");
+                let services = || endpoint.address_lookup().expect("lookup services").len();
+                let services_before = services();
                 for (name, payload) in [
                     ("blob-test-reuse-a", &b"first bytes"[..]),
                     ("blob-test-reuse-b", &b"second bytes"[..]),
@@ -213,6 +215,11 @@ mod tests {
                     );
                     fs::remove_file(&src).ok();
                 }
+                assert_eq!(
+                    services(),
+                    services_before,
+                    "a fetch adds no lookup service to a long-lived endpoint"
+                );
                 endpoint.close().await;
                 server.shutdown().await;
             },
