@@ -575,14 +575,21 @@ pub(crate) async fn ingest(
     if verified.shard.is_none() && state.mark_seen(&verified) {
         return;
     }
+    // A shard of a group already surfaced is a repeat: it is not a sighting of its author. A shard of
+    // a partial group still passes here, and the store ignores a slot it already holds.
+    if verified.shard.as_ref().is_some_and(|shard| {
+        state
+            .receive_memory
+            .reassembled_groups
+            .contains(&(verified.key(), shard.group.clone()))
+    }) {
+        return;
+    }
     // Identity is the signing key, not the nickname (p2panda-style): the
     // signature above authenticates the *key*; the `author` nickname is a
     // non-unique display label and is deliberately **not** pinned/claimed,
     // so a nickname is never "burned" by a restart on a long-lived mesh.
     // Identities are distinguished by their key fingerprint, not the name.
-    // Fork (equivocation) detection and DAG folding happen at the log-push
-    // site below, coupled to retention so their indexes stay bounded by the
-    // log window.
 
     // Heartbeat + membership + surfacing + join horizon. The lifecycle
     // layer owns every roster/presentation side effect; the gossip
@@ -1827,7 +1834,7 @@ mod first_contact_tests {
     use std::collections::HashSet;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex, atomic};
-    use std::time::{Duration, Duration as std_Duration, Instant as std_Instant};
+    use std::time::{Duration, Instant as std_Instant};
     use std::{future, net};
     use tokio::sync::mpsc;
     use tokio::{task as tokio_task, time as tokio_time};
@@ -2270,7 +2277,7 @@ mod first_contact_tests {
             }
             let probe = Message::new_ping(&node.mesh, &node.author);
             let started = TokioInstant::now();
-            let window = started + std_Duration::from_secs(10);
+            let window = started + Duration::from_secs(10);
             state.arm_ping_round(PingRound::new(&probe, started, window, None));
             let update = MembershipUpdate {
                 returned: false,
@@ -3425,12 +3432,12 @@ mod first_contact_tests {
         F: FnMut() -> Fut,
         Fut: Future<Output = bool>,
     {
-        let deadline = std_Instant::now() + std_Duration::from_secs(5);
+        let deadline = std_Instant::now() + Duration::from_secs(5);
         while std_Instant::now() < deadline {
             if check().await {
                 return true;
             }
-            tokio_time::sleep(std_Duration::from_millis(10)).await;
+            tokio_time::sleep(Duration::from_millis(10)).await;
         }
         check().await
     }
@@ -3494,7 +3501,7 @@ mod first_contact_tests {
             state.peers.insert(old.author_key());
             state.peers.insert(new.author_key());
             let now = UnixSecs::now();
-            let earlier = now - std_Duration::from_secs(60);
+            let earlier = now - Duration::from_secs(60);
 
             let first = proving_peer_info(&node, &endpoint_key, &old, earlier);
             super::handle_peer_info(&first, &mut state, &context).await;
@@ -3987,6 +3994,7 @@ mod first_contact_tests {
     }
 
     /// An app that records the text of each app frame it is handed.
+    // The app and the test share the text of the frames it records.
     struct Recorded(Arc<Mutex<Vec<String>>>);
 
     #[async_trait::async_trait]
@@ -4007,9 +4015,8 @@ mod first_contact_tests {
         }
     }
 
-    /// A partial shard group that the store reaps is not finished by a later shard: the first shard
-    /// is served again by its author, and the group completes with the shard that arrived after the
-    /// reap. The first shard is in the dedup set, so its repeat is a duplicate before the store sees it.
+    /// A reaped group completes when its author serves the first shard again. The later shard arrived
+    /// after the reap, and the repeat of the first shard reaches the store, which completes the group.
     #[test]
     fn a_reaped_shard_group_completes_when_its_first_shard_is_served_again() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -4053,6 +4060,110 @@ mod first_contact_tests {
                 *delivered.lock().expect("no poison"),
                 ["hello world".to_owned()],
                 "the reaped group did not complete when its first shard was served again"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A repeat of a shard whose group is already surfaced does not reach the lifecycle: it does not
+    /// refresh the sighting of its author, as a fresh frame would.
+    #[test]
+    fn a_shard_of_a_surfaced_group_does_not_refresh_its_author() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let author = Identity::generate();
+            let group = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440000")
+                .expect("a valid group");
+            let shard = |index: u32, text: &str| {
+                let mut message = Message::new_app(
+                    &node.mesh,
+                    &nick("bob"),
+                    AppFrameParams::new(
+                        protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::from(text),
+                    ),
+                );
+                message.shard = Some(Shard::new(group.clone(), 2).index(index));
+                message.sign(&author)
+            };
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+            // The app and the test share the frames it records.
+            let mut app = Recorded(Arc::new(Mutex::new(Vec::new())));
+            let mut state = fresh_state();
+            let first = shard(0, "hello ");
+            let key = first.key();
+            ingest(wire(&first), &mut state, &mut app, &context).await;
+            ingest(wire(&shard(1, "world")), &mut state, &mut app, &context).await;
+            let surfaced = clock::Instant::now();
+            state.last_seen.insert(key, surfaced);
+            tokio_time::sleep(Duration::from_millis(5)).await;
+
+            ingest(wire(&first), &mut state, &mut app, &context).await;
+
+            assert_eq!(
+                state.last_seen.get(&key),
+                Some(&surfaced),
+                "a repeat of a surfaced shard refreshed the sighting of its author"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A group uuid is chosen by its author, so two authors can reuse one. A surfaced group of one
+    /// author does not hide the group of the other author.
+    #[test]
+    fn a_second_author_reusing_a_group_uuid_completes_its_own_group() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let group = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440000")
+                .expect("a valid group");
+            let shard = |author: &Identity, index: u32, text: &str| {
+                let mut message = Message::new_app(
+                    &node.mesh,
+                    &nick("bob"),
+                    AppFrameParams::new(
+                        protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::from(text),
+                    ),
+                );
+                message.shard = Some(Shard::new(group.clone(), 2).index(index));
+                message.sign(author)
+            };
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+            // The app and the test share the frames it records.
+            let delivered = Arc::new(Mutex::new(Vec::new()));
+            let mut app = Recorded(Arc::clone(&delivered));
+            let mut state = fresh_state();
+            let (alice, bob) = (Identity::generate(), Identity::generate());
+
+            for (author, text) in [(&alice, "alice "), (&bob, "bob ")] {
+                ingest(
+                    wire(&shard(author, 0, text)),
+                    &mut state,
+                    &mut app,
+                    &context,
+                )
+                .await;
+                let second = if text.starts_with('a') { "one" } else { "two" };
+                ingest(
+                    wire(&shard(author, 1, second)),
+                    &mut state,
+                    &mut app,
+                    &context,
+                )
+                .await;
+            }
+
+            assert_eq!(
+                *delivered.lock().expect("no poison"),
+                ["alice one".to_owned(), "bob two".to_owned()],
+                "the second author's group was hidden by the first author's group uuid"
             );
             node.endpoint.close().await;
         });

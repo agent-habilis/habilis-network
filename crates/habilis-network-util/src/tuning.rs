@@ -11,11 +11,13 @@ use std::time::Duration;
 
 use std::sync;
 /// How many completed shard groups are remembered, so that a group is surfaced once. A group
-/// that a repeat of its shards would re-complete is not surfaced again.
+/// that a repeat of its shards would re-complete is not surfaced again. It stays 1000 as the
+/// count of groups a member keeps; the old log size it was tied to no longer exists.
 pub const REASSEMBLED_GROUPS_CAP: usize = 1000;
 
 /// How many recently-seen message ids are retained for duplicate suppression. Shard frames are
-/// not in this set: the reassembly store dedups their slots.
+/// not in this set: the reassembly store dedups their slots. It stays 2000, twice the 1000 that
+/// it was derived from, so the dedup window of a busy room is the same as before.
 pub const SEEN_IDS_CAP: usize = 2000;
 
 /// How many outbound frames are buffered while the node has no gossip link

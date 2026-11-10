@@ -64,8 +64,7 @@ impl PartialGroup {
     }
 }
 
-/// Groups are keyed by `(author key, group)` — the same security boundary
-/// the message-log reassembly had: only the signer fills its own slots, so a
+/// Groups are keyed by `(author key, group)`: only the signer fills its own slots, so a
 /// crafted shard carrying a victim's group id forms a separate,
 /// never-completing set and can't inject a slice into the victim's body.
 type GroupKey = (AuthorKey, ShardGroup);

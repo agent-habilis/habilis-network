@@ -96,10 +96,10 @@ impl Default for Goodbyes {
 /// What the receive path remembers about frames it handled or refused. Each set is bounded.
 #[derive(Debug)]
 pub(crate) struct ReceiveMemory {
-    /// Shard groups already reassembled + surfaced, so a body is surfaced once even if a shard
-    /// is re-fetched (via anti-entropy) after its id aged out of [`EventLoopState::seen`].
-    /// Groups are rare and short-lived.
-    pub(crate) reassembled_groups: BoundedFifoSet<ShardGroup>,
+    /// Shard groups already reassembled and surfaced, keyed by their author as the store keys them:
+    /// a group uuid is chosen by its author, so another author may reuse it. A body is surfaced once
+    /// even if its shard is served again.
+    pub(crate) reassembled_groups: BoundedFifoSet<(AuthorKey, ShardGroup)>,
     /// The protocol versions of frames that did not parse, each one named once in an error line.
     /// The set stops at [`UNSUPPORTED_VERSION_CAP`] and evicts nothing, so a sender that makes up
     /// versions cannot get a line for each frame.
@@ -551,10 +551,10 @@ pub struct EventLoopState {
     /// re-probes the id at once, instead of at the next reclaim tick. `None` when no shed runs.
     pub(crate) beacon_closing: Option<oneshot::Receiver<()>>,
     /// Recently-seen message ids, for duplicate suppression. Gossip
-    /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
-    /// re-sends, the rendezvous double-path) can deliver the same message
-    /// twice; `mark_seen` drops the repeat before it reaches the log /
-    /// inbound push channel / agent. Bounded (`SEEN_IDS_CAP`).
+    /// (GRAFT/repair, topology churn, our own re-broadcasts, the rendezvous
+    /// double-path) can deliver the same message twice; `mark_seen` drops the
+    /// repeat before it reaches the inbound push channel / agent. Bounded
+    /// (`SEEN_IDS_CAP`).
     pub(crate) seen: BoundedFifoSet<DedupKey>,
     /// User messages sent before we had a real-peer link (no gossip
     /// path yet — a bare `broadcast` would be a lost one-shot). Drained in
@@ -574,8 +574,8 @@ pub struct EventLoopState {
     /// What the receive path remembers about frames it handled or refused, each in a bounded set.
     pub(crate) receive_memory: ReceiveMemory,
     /// Partial multipart bodies buffering toward reassembly — dedicated and
-    /// byte-budgeted, decoupled from the message log so log eviction can
-    /// never break reassembly. Swept for stale groups on the prune tick.
+    /// byte-budgeted, decoupled from the seen set so its eviction can never
+    /// break reassembly. Swept for stale groups on the prune tick.
     pub(crate) reassembly: ReassemblyStore,
     /// Serialized frames of our recent big (unlogged) outbound shard groups —
     /// the re-serve source for peers' `shard/repair` requests (big groups
@@ -1729,19 +1729,14 @@ impl EventLoopState {
     /// whose `id` is the group, so sender and receivers name it alike.
     pub(crate) fn reassemble(&mut self, trigger: &Verified) -> Option<Authored> {
         let shard = trigger.shard.as_ref()?;
-        if self
-            .receive_memory
-            .reassembled_groups
-            .contains(&shard.group)
-        {
+        let group = (trigger.key(), shard.group.clone());
+        if self.receive_memory.reassembled_groups.contains(&group) {
             return None;
         }
         let ShardIngest::Complete(logical) = self.reassembly.ingest(trigger, Instant::now()) else {
             return None;
         };
-        self.receive_memory
-            .reassembled_groups
-            .insert(shard.group.clone());
+        self.receive_memory.reassembled_groups.insert(group);
         Some(*logical)
     }
 
