@@ -137,7 +137,7 @@ fn log(direction: &'static str, message: &Message) {
             body = %logged_body(message),
             "state"
         ),
-        // Plumbing: presence alive, peer info, digests, ping and pong, link state,
+        // Plumbing: presence alive, peer info, digests, ping and pong, proof request, link state,
         // and any kind added later. None of them logs a body. The named kinds sit in
         // the same arm as the wildcard, so a new kind stays visible to the omitted
         // patterns lint and no second arm repeats the body.
@@ -149,6 +149,7 @@ fn log(direction: &'static str, message: &Message) {
         | MessageKind::MetaDigest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
+        | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
         | _ => plumbing(),
     }

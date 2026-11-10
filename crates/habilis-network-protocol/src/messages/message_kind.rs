@@ -68,6 +68,13 @@ pub enum MessageKind {
         /// The probe that this pong answers.
         probe: MessageId,
     },
+    /// Sent to `to` alone by a member that holds no proof for the current session of `to`; it asks
+    /// `to` for that proof. Never gossiped, empty body. Addressed by author key, like `Pong`: a
+    /// nickname is a label that two live sessions can share, and only the asked session answers.
+    ProofRequest {
+        /// The session whose proof is asked for, by author key.
+        to: AuthorKey,
+    },
     /// A durable `state`-channel event: one Base58 automerge change
     /// (`{"k":"change",…}`) applied to the channel's `MeshDoc`
     /// CRDT. Carried on the gossip topic like everything else; the signed frame
@@ -108,6 +115,7 @@ impl fmt::Display for MessageKind {
             MessageKind::PeerInfo => write!(f, "peerinfo"),
             MessageKind::Ping => write!(f, "ping"),
             MessageKind::Pong { .. } => write!(f, "pong"),
+            MessageKind::ProofRequest { .. } => write!(f, "proof_request"),
             MessageKind::State => write!(f, "state"),
             MessageKind::StateDigest => write!(f, "state_digest"),
             MessageKind::Meta => write!(f, "meta"),
@@ -129,6 +137,7 @@ impl MessageKind {
             | MessageKind::PeerInfo
             | MessageKind::Ping
             | MessageKind::Pong { .. }
+            | MessageKind::ProofRequest { .. }
             | MessageKind::State
             | MessageKind::StateDigest
             | MessageKind::Meta

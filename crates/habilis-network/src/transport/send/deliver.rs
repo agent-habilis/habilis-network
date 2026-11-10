@@ -155,13 +155,16 @@ pub async fn deliver_in_background(
     deliver(message, bytes, state, sender).await.is_ok()
 }
 
-/// Where an answer to the digest signed by `signer` can go
-/// point-to-point: the endpoint that key proved in its `PeerInfo`, when it is
-/// a linked gossip neighbor with a usable path. Proven, because a nickname is
-/// a label any signer can claim, and one answer is up to a whole resend budget
-/// of frames aimed at whoever holds that endpoint. Linked, because every
-/// holder that hears a digest answers it: the asker's link count bounds how
-/// many answers reach its unicast inbox. `None` means answer on gossip.
+/// Whether a frame can be sent to `eid` by unicast now: its payload path is not held, or the frame
+/// being handled came by unicast from `eid`. The unicast acceptor admits a connection only on a
+/// selected path that is not the relay when the relay is lookup-only, so that arrival proves what a
+/// probe would, before the probe of the node reads it, and the reply goes back on it. The exception
+/// is for the frame at hand: `unicast_arrival` is set only while an unicast frame is handled, so a
+/// send outside a reply, and any other endpoint, keep the check of the path as before.
+pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
+    !super::route::held(eid, state) || state.unicast_arrival == Some(eid)
+}
+
 pub(crate) fn unicast_answer_target(
     signer: &AuthorKey,
     state: &EventLoopState,
@@ -263,6 +266,26 @@ pub(crate) async fn send_best_effort(
     bytes: WireFrame,
     state: &EventLoopState,
 ) -> bool {
+    send_courtesy(eid, bytes, state, false).await
+}
+
+/// [`send_best_effort`] for an endpoint that just sent an authenticated unicast frame: it gets the dial in the
+/// background that a linked neighbour gets. The endpoint id of that connection is checked by the transport, so
+/// the endpoint is as proven as a link would prove it. The caller keeps its own limits on how often it sends.
+pub(crate) async fn send_dialing_back(
+    eid: EndpointId,
+    bytes: WireFrame,
+    state: &EventLoopState,
+) -> bool {
+    send_courtesy(eid, bytes, state, true).await
+}
+
+async fn send_courtesy(
+    eid: EndpointId,
+    bytes: WireFrame,
+    state: &EventLoopState,
+    dial_back: bool,
+) -> bool {
     // Never dial inline: that would let anyone who can be pinged back choose
     // how long this daemon stops answering, once per identity. A linked
     // neighbor still gets a dial, off the loop — its address is proven by the
@@ -274,7 +297,7 @@ pub(crate) async fn send_best_effort(
         .await
     {
         WarmSend::Sent => true,
-        WarmSend::Cold if state.linked_endpoints.contains(&eid) => {
+        WarmSend::Cold if dial_back || state.linked_endpoints.contains(&eid) => {
             state
                 .unicast_pool
                 .dial_and_send_in_background(eid, bytes.into_bytes())

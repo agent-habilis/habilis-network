@@ -4,6 +4,7 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
+mod batch_slots;
 mod in_flight_dial;
 mod registration;
 mod timeouts;
@@ -208,6 +209,84 @@ mod tests {
 
             time::resume();
             pool.warm_or_dial(server).await.expect("a send dials again");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A send to a peer that reads nothing ends. The peer accepts the connection, never accepts a stream and keeps
+    /// the connection alive, so every finished stream stays open: once its limit of streams is full, `open_uni`
+    /// waits. Each send sits in a task of its own, so a wait without a bound grows the tasks of the node for as
+    /// long as the peer answers nothing.
+    #[test]
+    fn a_send_to_a_peer_that_reads_nothing_ends_within_its_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(600)).await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+
+            let fills_the_streams_of_the_peer = async {
+                let mut sent = 0u32;
+                for _ in 0..4096u32 {
+                    match super::unicast_pool::send_one(&connection, b"frame", None, None).await {
+                        Ok(()) => sent += 1,
+                        Err(error) => return (sent, Some(error.to_string())),
+                    }
+                }
+                (sent, None)
+            };
+            let ended = time::timeout(
+                super::timeouts::SEND_TIMEOUT * 3,
+                fills_the_streams_of_the_peer,
+            )
+            .await;
+
+            let (sent, refusal) = ended.expect(
+                "a send to a peer that reads nothing is still waiting, so the wait of a send has no bound",
+            );
+            let refusal: String = refusal.expect(
+                "4096 sends never filled the streams of the peer, so the wait of a send has no bound to prove",
+            );
+            assert!(
+                sent > 0,
+                "the first send already failed with \"{refusal}\", so the refusal below is not the one of a full peer"
+            );
+            assert!(
+                refusal.contains(super::timeouts::SEND_TIMED_OUT),
+                "the send of the frame number {sent} ended with \"{refusal}\", which is not the deadline of a send"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A write that fails drops the connection it failed on, and not the one that another dial
+    /// pooled while it waited. A send that times out holds for `SEND_TIMEOUT`, which is long enough
+    /// for a parallel send to replace a dead connection, and an eviction by endpoint id alone would
+    /// put that replacement out of the pool as well.
+    #[test]
+    fn a_write_that_fails_leaves_the_connection_that_a_later_dial_pooled() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(600)).await;
+            let dead = pool.warm_or_dial(server).await.expect("dial");
+            // The pool must hold a replacement, so the dead connection leaves the map open: a
+            // second dial pools the replacement under the same endpoint id.
+            pool.inner.conns.lock().await.remove(&server);
+            let live = pool.warm_or_dial(server).await.expect("dial again");
+            assert_ne!(
+                dead.stable_id(),
+                live.stable_id(),
+                "two dials give two connections"
+            );
+            dead.close(0u32.into(), b"dead");
+
+            pool.send_batch(server, &dead, &[bytes::Bytes::from_static(b"frame")])
+                .await;
+
+            assert_eq!(
+                pool.connection(server).map(|pooled| pooled.stable_id()),
+                Some(live.stable_id()),
+                "the write failed on the closed connection, so the pool keeps the live one"
+            );
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });
@@ -467,6 +546,44 @@ mod tests {
             .await
             .expect("a frame arrives in time")
             .expect("the server keeps its channel")
+    }
+
+    /// A unicast write is counted in the tally of its own pool, once, under the tag of the frame,
+    /// and not in the tally of another loop.
+    #[test]
+    fn a_unicast_write_is_counted_in_the_sent_bytes() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::daemon::state::{WireOutTally, app_frame_with_tag};
+
+                let (pool, server, router, client, mut frames) =
+                    pool_with_collecting_server().await;
+                let (ours, other) = (WireOutTally::default(), WireOutTally::default());
+                pool.set_tally(ours.clone());
+                let frame = app_frame_with_tag("unicast_count_probe");
+
+                pool.dial_or_warm_send(server, bytes::Bytes::from(frame.clone()))
+                    .await
+                    .expect("the pool sends");
+
+                assert_eq!(next_frame(&mut frames).await, frame, "the frame arrives");
+                assert_eq!(
+                    ours.tag_bytes("unicast_count_probe"),
+                    frame.len() as u64,
+                    "the one frame, once"
+                );
+                assert_eq!(
+                    other.tag_bytes("unicast_count_probe"),
+                    0,
+                    "the tally of another loop does not take the bytes"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
     }
 
     /// Two sends to one cold peer share one dial: the second caller waits for the dial in flight

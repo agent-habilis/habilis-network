@@ -22,7 +22,7 @@ use bytes::Bytes;
 /// ```
 /// use habilis_network_protocol::messages::{Message, Verified, WireFrame};
 ///
-/// const SIGNED: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"be64c678c6336f65be3817c748ba07478c1723863a070d5a09e62a159e06dc6bc01af49a9a2c3e5a5e25fd90e145b46b87cd803915da07fca9453b7b64b4480a","ext":{}}"#;
+/// const SIGNED: &str = r#"{"v":"16.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"8cd9327fcf27692bad243e3154d1c9263633a3923fe1a927cbbf4098b52318861f814eb23d30e6783655ed730a86c6e5fd5fcfd5c3f18fabdf90430b319ea506","ext":{}}"#;
 ///
 /// let verified: Verified = Message::parse(SIGNED.as_bytes()).unwrap().verify().unwrap();
 /// let frame: WireFrame = verified.serialize().unwrap();

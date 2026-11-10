@@ -10,7 +10,7 @@
 //!
 //! `daemon` is orchestration + plumbing: the `select!` loop, IPC
 //! command application (`ipc`), shared handler context (`ctx`),
-//! in-memory accounting (`state`, `message_log`),
+//! in-memory accounting (`state`),
 //! `config`, `setup`, housekeeping `timers`. The behavioral
 //! subsystems are crate-root siblings, each its own `RUST_LOG`
 //! target: `crate::gossip`, `crate::lifecycle`, `crate::beacon`,

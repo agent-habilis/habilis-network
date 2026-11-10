@@ -44,7 +44,9 @@ impl FrameClass {
             | MessageKind::Meta
             | MessageKind::StateDigest
             | MessageKind::MetaDigest => Self::Document,
-            MessageKind::Ping | MessageKind::Pong { .. } | _ => Self::Other,
+            MessageKind::Ping | MessageKind::Pong { .. } | MessageKind::ProofRequest { .. } | _ => {
+                Self::Other
+            }
         }
     }
 }

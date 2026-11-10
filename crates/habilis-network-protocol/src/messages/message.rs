@@ -24,7 +24,7 @@ use super::{
 ///
 /// Wire format (compact JSON, one line):
 /// ```json
-/// {"v":"15.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
+/// {"v":"16.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
 /// ```
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
@@ -123,6 +123,32 @@ impl Message {
         )
     }
 
+    /// A presence message for `author` joining `mesh`, with the identity proof of its session in
+    /// the body. An empty body stays valid: a node with no member key sends `new_joined`.
+    #[must_use]
+    pub fn new_joined_with_proof(
+        mesh: &MeshId,
+        author: &Nickname,
+        proof: &identity::IdentityProof,
+    ) -> Self {
+        // A proof text is hex digits and separators, so it is always a valid body.
+        let body = MessageBody::try_new(&proof.encode()).unwrap_or_else(|_| empty_body());
+        Self::new(
+            mesh,
+            author,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Joined,
+            },
+            body,
+        )
+    }
+
+    /// The identity proof in the body of a `joined` frame. An empty, cut or bad body gives `None`.
+    #[must_use]
+    pub fn joined_proof(&self) -> Option<identity::IdentityProof> {
+        identity::IdentityProof::decode(self.body.as_str())
+    }
+
     /// A presence message for `author` leaving `mesh`. It has no body.
     #[must_use]
     pub fn new_left(mesh: &MeshId, author: &Nickname) -> Self {
@@ -147,6 +173,13 @@ impl Message {
             },
             empty_body(),
         )
+    }
+
+    /// A request for the identity proof of the session `to`, sent to that session alone. It has no
+    /// body.
+    #[must_use]
+    pub fn new_proof_request(mesh: &MeshId, author: &Nickname, to: AuthorKey) -> Self {
+        Self::new(mesh, author, MessageKind::ProofRequest { to }, empty_body())
     }
 
     /// A liveness probe (broadcast). Receivers auto-respond with a
@@ -404,7 +437,7 @@ impl Message {
     /// ```compile_fail,E0624
     /// use habilis_network_protocol::messages::Message;
     ///
-    /// const SIGNED: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"be64c678c6336f65be3817c748ba07478c1723863a070d5a09e62a159e06dc6bc01af49a9a2c3e5a5e25fd90e145b46b87cd803915da07fca9453b7b64b4480a","ext":{}}"#;
+    /// const SIGNED: &str = r#"{"v":"16.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"be64c678c6336f65be3817c748ba07478c1723863a070d5a09e62a159e06dc6bc01af49a9a2c3e5a5e25fd90e145b46b87cd803915da07fca9453b7b64b4480a","ext":{}}"#;
     ///
     /// let message = Message::parse(SIGNED.as_bytes()).unwrap();
     /// let canonical = message.canonical_bytes();

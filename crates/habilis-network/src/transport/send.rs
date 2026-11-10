@@ -11,8 +11,10 @@ mod deliver;
 mod route;
 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
 pub(crate) use deliver::resolve;
+pub(crate) use deliver::{
+    can_unicast, lane_for, note_held, send_best_effort, send_dialing_back, unicast_answer_target,
+};
 pub use deliver::{deliver, deliver_in_background};
-pub(crate) use deliver::{lane_for, note_held, send_best_effort, unicast_answer_target};
 #[cfg(test)]
 use route::{Route, route};
 mod lane;
@@ -20,7 +22,7 @@ pub use lane::Lane;
 mod pending_send;
 pub use pending_send::PendingSend;
 mod send_error;
-pub use send_error::SendError;
+pub use send_error::{SendError, StateRefusal};
 #[cfg(test)]
 #[cfg(test)]
 #[cfg(test)]
@@ -34,7 +36,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, lane_for, note_held, resolve, route};
+    use super::{Lane, Route, can_unicast, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified, WireFrame};
     use crate::protocol::{
@@ -838,6 +840,43 @@ mod tests {
             Route::Undeliverable,
             "the rendezvous addressee is never a directed target"
         );
+    }
+
+    /// A reply goes back on the connection that an unicast frame came by, though no direct path is
+    /// proven for that endpoint yet: the unicast acceptor admits a connection only on a selected
+    /// path that is not the relay when the relay is lookup-only, so the arrival proves what a probe
+    /// would. The exception is for the frame at hand: outside the handling of an unicast frame, and
+    /// for any other endpoint, an unproven path is held as before.
+    #[test]
+    fn a_reply_may_go_back_on_an_admitted_direct_arrival_and_nothing_else_is_let_through() {
+        use crate::daemon::state::DirectState;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_bob();
+        let carol = endpoint_id(2);
+        state.relay_transport = PayloadPath::DirectOnly;
+        state.direct.remove(&bob);
+        assert!(
+            !can_unicast(bob, &state),
+            "the premise: no direct path is proven"
+        );
+
+        state.unicast_arrival = Some(bob);
+        assert!(
+            can_unicast(bob, &state),
+            "the frame at hand came by unicast from bob"
+        );
+        assert!(
+            !can_unicast(carol, &state),
+            "the arrival of bob opens no path to another endpoint"
+        );
+
+        state.unicast_arrival = None;
+        assert!(
+            !can_unicast(bob, &state),
+            "outside the handling of a unicast frame the path is held again"
+        );
+        state.direct.insert(bob, DirectState::Direct);
+        assert!(can_unicast(bob, &state), "a proven direct path still goes");
     }
 
     /// With the relay lookup only, a directed frame is parked until a direct

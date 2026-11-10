@@ -73,8 +73,9 @@ typedef struct {
 /*
  * Metadata for one received message, with the key of its author. The text lands
  * NUL-terminated in the caller's buffer; `len` is its length in bytes, excluding
- * the NUL. Two members can use one nickname, so a nickname names no author; the
- * key does, and habilis_network_msg_send_to_key() sends to it.
+ * the NUL. Two members can use one nickname only if no member key proved it, so
+ * a nickname can name two authors; the key names one, and
+ * habilis_network_msg_send_to_key() sends to it.
  *
  * The struct has no size field: the caller allocates it with this header. It has
  * 144 bytes and alignment 8 on a 64-bit target (140 bytes with a 4-byte size_t):
@@ -107,6 +108,10 @@ const char *habilis_network_mesh_nickname(const habilis_network_mesh *handle);
 /*
  * Send one message, a NUL-terminated UTF-8 text. `to` NULL broadcasts to the
  * whole mesh; otherwise it is a peer nickname and only that peer receives it.
+ * The nickname resolves to one key: the live key of the nickname, else the quiet
+ * key of a peer that can return. A nickname that names no key, and a nickname
+ * that two or more keys use, are refused; a nickname that a member key proved
+ * is never the second of those.
  * A message must fit one frame: habilis_network_max_msg() bytes always do, most text
  * fits well past that, and a message that does not fit is refused, not split.
  * Bulk bytes belong on a stream.
@@ -116,8 +121,8 @@ int habilis_network_msg_send(habilis_network_mesh *handle, const char *to, const
 /*
  * Send one message to the member that holds an author key. `key` is 64 lowercase
  * hex digits: the `key` of a received habilis_network_msg, or of a roster row.
- * Two members can use one nickname, and habilis_network_msg_send() refuses such a
- * nickname; a key names one member. 0 on success, -1 on failure: a text that is
+ * Two members can use a nickname that no member key proved, and habilis_network_msg_send()
+ * refuses such a nickname while both are there; a key always names one member. 0 on success, -1 on failure: a text that is
  * not a key, or a message that does not fit one frame, is refused.
  */
 int habilis_network_msg_send_to_key(habilis_network_mesh *handle, const char *key, const char *text);

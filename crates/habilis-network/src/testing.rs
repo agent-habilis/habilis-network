@@ -18,7 +18,7 @@ use std::sync::Arc;
 use iroh::{EndpointId, SecretKey};
 use sha2::{Digest as _, Sha256};
 
-use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
+use crate::daemon::state::{EventLoopState, MeshSecrets, RunKeys, StateInit};
 use crate::protocol::identity::Identity;
 use crate::protocol::{AuthorKey, Nickname};
 use crate::util::clock::Instant;
@@ -50,12 +50,38 @@ pub(crate) fn fresh_state() -> EventLoopState {
 
 /// [`fresh_state`] with the given address book.
 pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> EventLoopState {
+    fresh_state_that_waits_with_book(address_book)
+}
+
+/// [`fresh_state`] for a node with no member key: a client that proves no nickname, which answers
+/// no proof request.
+pub(crate) fn fresh_state_without_member_key() -> EventLoopState {
+    fresh_state_that_waits_with_book_and_member(memory::MemoryLookup::new(), false)
+}
+
+fn fresh_state_that_waits_with_book(address_book: memory::MemoryLookup) -> EventLoopState {
+    fresh_state_that_waits_with_book_and_member(address_book, true)
+}
+
+fn fresh_state_that_waits_with_book_and_member(
+    address_book: memory::MemoryLookup,
+    member_key: bool,
+) -> EventLoopState {
     EventLoopState::new(
         StateInit {
             #[cfg(feature = "host")]
             state_file: None,
-            // the identity is shared with the loop and its handlers, which hold clones
-            identity: Arc::new(Identity::generate()),
+            // the keys are shared with the loop and its handlers, which hold clones
+            keys: RunKeys {
+                member_new: false,
+                // shared with the loop and its handlers, which hold clones
+                session: Arc::new(Identity::generate()),
+                // shared with the loop and its handlers, which hold clones
+                member: member_key.then(|| Arc::new(Identity::generate())),
+                run: 1,
+                key_lock: None,
+                keys_state: None,
+            },
             secrets: MeshSecrets::default(),
             per_peer_gate: None,
             webrtc_admission: transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS),

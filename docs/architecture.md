@@ -1,7 +1,7 @@
 # habilis-network — Architecture
 
 This document describes the architecture of the habilis-network workspace at version 0.6.0.
-The wire protocol described here is message version `13.0`.
+The wire protocol described here is message version `14.0`.
 The style follows ASD-STE100 Simplified Technical English.
 
 ## Abstract
@@ -143,12 +143,13 @@ A build with `--no-default-features` leaves the portable engine that runs in a b
 
 ## 4. Identity and cryptography
 
-### 4.1 Three keys
+### 4.1 Four keys
 
 | Key | Where it lives | What it authenticates |
 |---|---|---|
 | iroh `EndpointId` (Ed25519) | Minted per endpoint at build time | The connection (QUIC-TLS). |
-| Author `Identity` (Ed25519) | `habilis-network-protocol/src/identity.rs` | Every message the member authors. In-process and ephemeral: a restart mints a new key. |
+| Session `Identity` (Ed25519) | `habilis-network-protocol/src/identity.rs` | Every message that one run of the member authors. New at each start. |
+| Member `Identity` (Ed25519) | `<state>.key` (mode 0600), see section 7.7 | One thing only: the proof that a session belongs to the member. It survives a restart. A host with no files (the browser) has none. |
 | Rendezvous key | Derived from the mesh seed | The bootstrap anchor. Every member can derive it. |
 
 ### 4.2 Derivations
@@ -379,7 +380,7 @@ Peers then see an immediate neighbor-down event instead of an idle timeout.
 `EventLoopState` is layered, and only specific events write each layer:
 
 - **Transport layer** — live gossip links and remembered endpoints. Only neighbor-up and neighbor-down events write the link set. Cooldowns make sure that a flapping peer cannot start a mesh-wide connection storm.
-- **Membership layer** — the roster, keyed by author key, with the nickname of each key, last-seen times and self-advertised endpoints. A nickname is a label, so two live keys can use one.
+- **Membership layer** — the roster, keyed by author key, with the nickname of each key, last-seen times and self-advertised endpoints. A member key binds the nickname that it proved (section 7.7). A nickname that no member key proved is a label, so two live keys can use it.
 - **Heartbeat layer** — the quiet set for peers past the keepalive window.
 - **Presentation layer** — the surfaced subset of the roster, behind the join-horizon gate.
 
@@ -395,9 +396,9 @@ The parser rejects a key with no signature and a signature with no key.
 The signature covers the canonical form of the message with the key and signature fields empty.
 Unknown keys must be ignored, which leaves room for extension.
 
-The parser gates on an **exact** version match, `13.0`.
+The parser gates on an **exact** version match, `14.0`.
 A frame of another version is refused by its version, also when the frame fails to parse on a field that the version changed.
-A `12.0` peer and a `13.0` peer drop every frame of each other.
+A `13.0` peer and a `14.0` peer drop every frame of each other.
 Version `13.0` made the recipient of a directed frame an author key: `to` holds 64 lowercase hex digits, and a nickname there is a parse error.
 The `to` field is part of the signed kind, so the signature binds the recipient.
 The crypto byte-domains are mixed into every signature and derivation transcript.
@@ -412,6 +413,7 @@ A silent domain change makes verification fail invisibly, and the exact gate tur
 | `PeerInfo` | A signed card with the self-advertised endpoint. |
 | `Digest` | Anti-entropy digest of the message log window. |
 | `Ping`, `Pong { to, probe }` | Reachability rounds. A pong names the ping it answers. |
+| `ProofRequest { to }` | Unicast. A node asks one session, named by its author key, for the proof of its member. The session answers with its `joined` frame. |
 | `State`, `StateDigest` | The free-form CRDT channel and its repair digest. |
 | `Meta`, `MetaDigest` | The gated CRDT channel and its repair digest. |
 | `LinkState` | The multihop link vector. Ephemeral, never logged. |
@@ -475,6 +477,14 @@ A receiver compares the window with its own log and re-sends what the sender mis
 The CRDT channels repair differently: their digests carry automerge heads.
 A receiver computes the missing changes and re-broadcasts the original frames with the original signatures intact.
 A cold joiner pulls the whole document history over successive rounds.
+The body of a state digest is `{"heads": [...]}`, with two optional flags that are left out when false.
+`closing` marks the heads that end a point-to-point answer: information on how far the holder is, not a request.
+`first` marks a request of a node that waits for its first sync of the state channel.
+A holder with nothing missing answers a `first` request with one `closing` digest alone, point-to-point.
+The waiting node ends its wait on a `closing` digest that came point-to-point and whose heads it holds.
+A digest on gossip never ends the wait.
+Every node of the mesh reads `first`: `Message::parse` refuses a frame whose wire version is not its own, so one mesh runs one version of this field.
+The 30 s deadline covers a request that no `closing` digest answers: no holder is there, the answer is lost, or the holder has changes the node misses and sends those frames instead.
 
 ### 7.6 Multipart bodies
 
@@ -482,6 +492,39 @@ Bodies above the frame budget split into shards.
 The reassembly store budgets by bytes, never by shard counts, so a forged total costs the sender shards, not the receiver memory.
 Only new shards refresh the staleness clock, so resends cannot keep a dead group alive.
 Large groups skip the message log and repair through a directed shard-repair request served from a sender-side cache.
+
+### 7.7 Member key and nickname
+
+A node holds two keys.
+The session key is new at each start. It signs the frames, it is the automerge actor, and it seals the directed frames.
+The member key is stored in `<state>.key` (mode 0600) and does not change. It signs one thing: the proof of a session.
+The proof is a signature over the session key, the nickname, the mesh and the run number. The run number rises by 1 at each start (`<state>.run`).
+A lock file `<state>.key.lock` is an OS lock that the node holds for its whole life. A second start on the same state path fails and names the file. A start that finds a holder that is stopping waits up to 2 s for it. A node that leaves removes its key and run files with its state file. The run counter has its own lock file, `<state>.run.lock`, which a start holds for one read and one write of the counter. A start that finds it held tries again every 50 ms. The wait ends with an error when the counter file has not been written for 2 s, and in any case after 30 s. The write is read from the modification time of the counter file, with no link followed, so a file system with a coarse clock (FAT keeps 2 s) shows a write late, which the cap of 30 s bounds.
+The state folder must be private to the user. If another user owns it (root excepted), or if its group or other users can write it and it has no sticky bit (as `/tmp` has), the start fails and names the folder, because another user could remove the key file, the run file or the lock while they are held. A folder that only the group can write is refused too, because a trusted group cannot be known: a folder at mode 0775 needs `chmod g-w`. The folders above the state folder are not checked. The state folder is checked by its path, and the files in it are opened by their path, so a folder above it that others can write without the sticky bit can swap the checked folder between the check and the open. This is a known limit: the fix would open the files relative to a handle of the folder that is opened with no link followed.
+The `joined` frame carries the proof.
+A node that holds a session with no proof asks the session for it with a `ProofRequest`, addressed to the session key, and the session answers with its `joined` frame.
+The ask goes when the node admits the session: on its `joined` frame that has no proof, on the `PeerInfo` that gives its address, and on its `alive` frame.
+The request needs a warm path to the session: a pooled connection, or a linked neighbour (the send dials it in the background). A node signs no request for an address that has no such path.
+An ask that finds no warm path waits. A bounded map holds the waiting asks (64 at most: a new one takes the place of the oldest, and a session whose ask was dropped is asked again at its next `alive` frame). An ask waits 30 s at most.
+The ask goes when a path comes up: when the gossip link to the endpoint of the session comes up, when a frame arrives from that endpoint on a unicast connection, or at the 10 s sweep tick, which is the fallback. A session that has no gossip link and no connection of ours can still dial us: for a frame that arrives on its unicast connection, the ask goes by a dial back in the background, as for a linked neighbour, and the limits of the retry stay. A node with no waiting ask pays one comparison.
+A session is asked once for each wait (30 s, then 60 s, then 120 s, then every 10 minutes for as long as the session is visible and has no proof), whatever number of frames come. A node sends at most 8 proof requests to one endpoint for each 10 s window, and the count is made before the request is signed: a peer that makes fresh session keys cannot set off a signature and a task for each key. In all, the requests after the first of an endpoint stop when 64 requests were sent in the window. The first request to an endpoint in a window is exempt from that limit, so one peer that uses all of the 64 cannot starve the other endpoints; the first requests have a limit of their own, 256 for each window. So a window holds at most 256 first requests plus the requests after them up to the 64, whatever the number of endpoints that have a path to the node (a link, a warm connection, or the endpoint that just sent a unicast frame). A session that claims OUR nickname (another member with its own key) is asked for its proof too, on any frame that it sends (a claimant that is chatty sends no `alive`, so its `PeerInfo` and its app frames count), by the same path and under the same budgets (its requests count in the 4 open asks for a nickname and in the reserve below): its answer is the frame that tells this node that another member holds the nickname, and the start `joined` of the claimant, which a node that is not yet its neighbor misses, is sent only once. The requests for a session that claims a bound nickname (a restart of the member that holds the name, or an intruder) have a reserve of their own: 64 for each window, outside the shared 256 and the 64, and at most 4 for each nickname, while the endpoint is under its 8 requests; so they go even when an attacker has used the shared budgets and filled the table. When the table holds only live counts, such a request goes out untracked (it counts in the reserve and in the work in all), and no live count is dropped for it. The limit of the reserve: an attacker that claims 16 bound nicknames with 4 fresh sessions each uses the whole reserve in a window, and the restart of another bound nickname waits for the next window (its request comes again then; no nickname is lost). The limit of the shared budget: an attacker that keeps more than 256 endpoints with a path asking in every window delays the requests for new members under free nicknames, which wait in the map below; it costs the attacker a connection for each endpoint. The count of an endpoint is kept for its whole window: the table holds 256 endpoints, drops only a count that is outside its window, and a request from an endpoint that the full table does not track waits in the map below. An ask over the budget waits in the same map as the asks that wait for a path, and goes when the window has moved.
+A member signs its answer once for each run, and every asker gets that same frame. The member keeps it in its own log once, so a peer that holds it does not send it back to its author at each digest round, and the answers of a join wave do not spread through the mesh as new frames.
+A calm mesh carries no proof bytes beyond the `joined` frames. A host with no files (the browser) holds no member key and sends no proof.
+
+A nickname is bound to the member key that proved it, while a session of that member is in the roster, live or quiet.
+- A session that claims a bound nickname with no proof of that member is not admitted. Its presence, ping, pong and link-state frames are dropped. Its data frames are stored and relayed and change no roster entry.
+- A second member with another member key gets the join error: its proof is not held, and the node that holds the nickname does not admit its session. The node of that second member shows an error event, once for each session.
+- A nickname that no member key proved is free. A session with no proof is admitted and binds nothing, so two live keys can still use it.
+- When the proof of a member binds the nickname at a node, every session under it that belongs to another member, live or quiet, is ended at that node at once, and before the arrival of the member is shown. A session that was shown ends with a `left` line, so every `joined` that was shown gets its `left`. If the member that proved the name was shown already, its `joined` is shown again once, after all the `left` lines that its proof caused, so a reader that keys by nickname does not take the name for gone. A session that was never shown ends with none. The session said no goodbye, so its later frames are not stale: the node keeps its presence frames in its log, as the other nodes do.
+- The first proof that a node processes binds the name, so the order of the proofs decides at each node, and the order of the frames does not. The binding is per node and not global: two nodes can bind one nickname to two members.
+- A proof whose sender is not live ends no session, binds no nickname and replaces no run: it is kept pending (see above). So a replay of an old signed `joined` frame, which proves no presence, ends none. When its session is admitted and live, the proof is activated, and then the sessions of other members under the nickname end.
+- A node with no member key (a browser) proves nothing, so any member with a key that proves its nickname ends that node at every observer.
+- An ended session is no goodbye: its later frames go through the admission again, and are admitted when the member that holds the name is gone.
+- A proof that is refused because another member holds the name, and whose signature is valid, does not mark its frame as seen: when the holder has left and the same frame comes again, it is read again. A proof whose signature is not valid keeps its mark, so its copies are dropped as duplicates.
+- A second session of a bound nickname is gone at an observer at most one sweep tick (10 s) after a path to it comes up, and at once when the gossip link comes up.
+
+A member holds one session, the newest. A proof with a higher run replaces the older sessions of the member, in the proof book and in the roster, as a goodbye does, when its sender is live (in the roster after the frame). A proof of a sender that is not live, such as an old copy of a frame that a relay hands out, or the proof of a quiet session, is kept PENDING: valid (its signature was checked, and a forged one is never kept) and inactive. A pending proof binds no nickname, replaces no session and ends none, and it counts only for the admission of its own session (in the gate of our own nickname too, where it also lets a newer run of our own member be reported as superseding this node): when that session is admitted and live, the proof is activated and does what a proof of a live sender does. A quiet peer whose clock stepped back returns after a run of rising frames, and its proof is activated right after the frame that completes the run. The pending proofs have two classes of 32 at most, the oldest dropped when a class is full: the proofs of a member that already holds the nickname, with a run above every run of that member in the book (the sender can only be a restart of that member, and nobody else can sign its proofs: a replay of the logged frame of a past run is not above, and goes to the other class), and all the others. In the class of the holders each member has 4 proofs at most and keeps its highest runs, so one member cannot push out the restart proof of another, however many valid proofs it signs for its own nickname; a full class drops the lowest run of the member that has the most. The limit of that isolation: the class holds 32 proofs, so when 32 different members that hold a name have one pending proof each, a proof of one more member takes the place of one of them (they tie, so the victim is any of them) and that member waits for its fresh `joined` frame. An attacker would need 32 members that hold names in the mesh, each with a valid proof, to do it. The limit of that rule: when a member already has 4 pending proofs, a new proof with a run not above the lowest of them is refused. A proof of a lower run cannot be told from the replay of a logged frame of a past run, since both are valid signatures of the member, and accepting it would let a replay push out the real newest run. A member that restored an older run counter and has 4 higher pending proofs relies on the fresh `joined` frame that its new session sends at its start: that frame takes the live path, which does not use the pending proofs. So a flood of proofs that an attacker signs for its own nicknames cannot push out the proof of a restart. A dropped proof comes again with a valid `joined` frame of its session (the answer to our request, its arrival, or its re-announce): an `alive` frame carries no proof, and a request that finds no path waits for one. A duplicate `joined` frame gives a proof back to a session that lost it, when the proof passes the acceptance checks: an ACTIVE proof for a live session, and a PENDING proof for any other session (a quiet one, or one that the nickname gate refused). A session that said goodbye gets nothing. A proof with a run that is not higher than a session of the member in the roster is a late copy: the active proof book does not hold it. If its sender is not live it can stay pending, and it admits its session.
+The proof book holds 1024 sessions at most. When it is full, the oldest session that is not in the roster goes first, and a book of sessions in the roster refuses the new proof.
 
 ## 8. Shared state: the CRDT channels
 
@@ -494,13 +537,49 @@ Authenticity is the job of the engine.
 The `state` channel is free-form.
 The `meta` channel carries a **self-write gate**: a per-peer map where one field belongs to the peer the entry names.
 The slot key of that map is the lowercase hex of the author key, not the nickname.
-A nickname is a label that two live keys can share, so a slot named by nickname would belong to both.
+A nickname that no member key proved can be shared by two live keys, so a slot named by nickname would belong to both.
 A key can write the gated field only in the slot that names it.
 The other fields of a slot are not gated, so any author can write them.
 The gate matters because a `meta` card carries the cryptographic identity of a peer.
 Ingest applies each foreign change to a throwaway fork first.
 If the change touches the field of any other peer, the gate rejects it.
 Changes that arrive before their causal dependencies wait in a pending buffer and drain through the same gate.
+
+### 8.1 The bound of the state channel
+
+The `state` channel must run for a year, so it has a bound. The engine measures the document and cuts it into a new epoch when it grows.
+
+**Time.**
+Each state change carries a time `t`. It is the wall clock in milliseconds. A node writes `max(clock + 1, now)`.
+A node refuses a change whose `t` is more than 1 hour above its own clock. A frame of a seed gets 2 hours, because it copies the times of its cutter.
+A write that finds the clock ahead waits up to 50 ms. Then it gets the refusal `ClockAhead`.
+The stamp of a leaf is the time and the actor of the change that holds its value.
+
+**Size lines.**
+- At about 3 MiB or about 20000 operations the members cut a new epoch.
+- At about 3.4 MiB or about 22700 operations a write that adds a value is refused. A delete is not.
+- At the memory line (4 MiB, 26667 paths) every write is refused, a delete too, until the next cut.
+- A write nests 12 levels at most. A leaf that no frame of a seed can carry is refused when it is written.
+- A remote frame over the remote line is refused once and remembered. The set of refused frames holds 4096 at most. The value comes back with the seed of a holder.
+
+**The cut.**
+- Each live member has a rank from 0 up. The roster and the epoch fix the ranks. Rank 0 cuts at once. Rank 1 cuts after 2 ticks. A failed cut backs off before the next one.
+- The seed is a chain of frames with no history. It carries the live values with their stamps, and at most 1024 tombstones.
+- The build runs on a blocking thread, so the event loop keeps its timers.
+- A node adopts a seed only when the whole chain is held, after a wait of 5 ticks. A chain that is not whole is dropped and its keys are forgotten.
+- When two whole seeds of one epoch meet, the lowest key wins. A leaf that no seed frame can carry is left out of the seed. The cut counts it and warns with its path.
+- A browser never cuts.
+
+**The replay rule.**
+A write that the seed lacks is written again after the switch. The author writes it at once. A holder that is not the author waits 1 to 3 ticks. A restore never overwrites a newer write or a newer delete.
+
+**The first sync.**
+A joiner holds its state writes until a peer answers its first request (section 7.5). The wait ends at 30 s at the latest, and the node warns. The creator of a mesh never waits.
+A node that awaits its first sync takes a seed root that is more than 131072 epochs ahead only as the point-to-point answer of that request, within 5 s of it. The window opens once and a later ask does not renew it. A node that does not await refuses such a root.
+
+**Limits of the design.**
+- A member that sends whole seeds with a low key can win every cut. Nothing closes this while a member key is free to make. The effect is bounded: the state grows to the add line, and then a write that adds a value is refused until the member stops.
+- A clock that is wrong by more than 1 hour is not supported.
 
 ## 9. Transports
 
@@ -702,7 +781,8 @@ The socket module compiles out on wasm32, and a browser binds nothing.
 `habilis-network-ffi` exposes opaque handles and blocking calls, declared in `include/habilis_network.h`.
 A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages and reads the shared state as JSON.
 A send names a nickname (`habilis_network_msg_send`) or an author key (`habilis_network_msg_send_to_key`).
-Two live members can use one nickname, so a nickname names no member, and a key does.
+A nickname names its one live member, whether or not a member key proved it. If no live member uses the nickname, it names the one quiet member that does, because a quiet member can return.
+A send refuses a nickname that two or more live members use, or that two or more quiet members use when no live member does. An author key names exactly one member, and it is the way to reach a member whose nickname is shared.
 A receive with `habilis_network_msg_recv` gives the key of the author in `habilis_network_msg.key`.
 The struct has 144 bytes on a 64-bit target and no size field, so a caller built with an older header must be rebuilt.
 A stream node (`habilis_network_streams_*`, `habilis_network_stream_*`) creates and opens byte streams (§9.4).
@@ -739,8 +819,8 @@ What the engine is not:
 - It is not a general-purpose networking library, and it is not published to crates.io.
 - It is not a bulk-transfer system.
   Gossip re-broadcasts and logs every frame, so large payloads go over the `blob` channel or not at all.
-- The author identity is not yet durable.
-  A restart mints a new message key.
+- The identity of a session is not durable.
+  A restart mints a new session key. Only the member key, which signs the proof, survives a restart.
 
 ## 12. References
 

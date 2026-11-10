@@ -647,7 +647,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
 /// `last_sent_at` afterwards.
 ///
 pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
+    let joined = state.own_joined(context.mesh, context.author);
     broadcast_msg(context.sender, &joined).await;
     broadcast_peer_info(state, context).await;
 }
@@ -826,7 +826,7 @@ mod tests {
 
                 let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
                 assert!(
-                    matches!(delivered, Ok(Some(ref bytes)) if !bytes.is_empty()),
+                    matches!(delivered, Ok(Some(ref frame)) if !frame.bytes.is_empty()),
                     "a farewell reaches the peer by unicast, without waiting for anti-entropy"
                 );
                 router.shutdown().await.expect("shutdown");

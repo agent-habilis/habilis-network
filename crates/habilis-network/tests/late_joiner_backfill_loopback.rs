@@ -130,7 +130,11 @@ impl Joined {
 /// a slow join cannot let a tick pass it instead. Per process, and every test
 /// here wants the same value.
 fn pin_antientropy_tick() {
-    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_hours(1)));
+    tuning::init(
+        tuning::Tuning::DEFAULTS
+            .antientropy_interval(Duration::from_hours(1))
+            .state_sync_wait(Duration::ZERO),
+    );
 }
 
 fn nick(name: &str) -> Nickname {

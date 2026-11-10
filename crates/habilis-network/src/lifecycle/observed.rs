@@ -22,6 +22,21 @@ pub(crate) struct Observed {
     pub update: membership_update::MembershipUpdate,
 }
 
+impl Observed {
+    /// A frame that the roster gate refused: it changes no roster entry, shows no arrival and
+    /// surfaces nothing. The frame is still stored and relayed, as any frame is.
+    pub(crate) fn refused() -> Self {
+        Self {
+            surfaceable: false,
+            update: membership_update::MembershipUpdate {
+                returned: false,
+                joined_new: false,
+                stale: true,
+            },
+        }
+    }
+}
+
 /// Heartbeat + membership + surfacing + join-horizon for one received
 /// message. Called by the gossip router *before* kind dispatch. All
 /// membership/presentation side effects live here (lifecycle layer);

@@ -63,6 +63,7 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
         | MessageKind::Ping
         | MessageKind::Pong { .. } => timestamp > now - heartbeat::QUIET_TTL,
         MessageKind::PeerInfo
+        | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::StateDigest
@@ -86,6 +87,7 @@ pub(crate) fn is_live_kind(kind: &MessageKind) -> bool {
             subtype: PresenceSubtype::Left,
         }
         | MessageKind::PeerInfo
+        | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::StateDigest
@@ -208,6 +210,7 @@ fn compute_proving(
         | MessageKind::Pong { .. }
         | MessageKind::StateDigest
         | MessageKind::MetaDigest
+        | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
         | _ => !known,
     };
@@ -363,6 +366,16 @@ pub(crate) fn compute_observed_proving(
 fn drop_stamps(key: AuthorKey, state: &mut EventLoopState) {
     state.peer_stamp.remove(&key);
     state.clock_evidence.name_stamp.remove(&key);
+}
+
+/// Whether the frame leaves its sender in the roster: the frame proves presence and the sender is in it already, or
+/// is about to be put there (new, or back from quiet). A frame that proves none (a stored copy, an old frame, a key
+/// that said goodbye) leaves nobody in it. Read before [`observe`](super::observe), it says what the roster
+/// will hold afterwards, with no change to the state.
+pub(crate) fn leaves_sender_in_roster(message: &Verified, state: &EventLoopState) -> bool {
+    let proves = proves_presence(&message.kind, message.timestamp);
+    let update = compute_for_proving(proves, message, state);
+    !update.stale && (update.joined_new || update.returned || state.peers.contains(&message.key()))
 }
 
 /// Apply a membership update to the mutable state. Mirror of the

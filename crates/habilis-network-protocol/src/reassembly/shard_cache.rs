@@ -34,6 +34,12 @@ struct CachedGroup {
 }
 
 impl ShardCache {
+    /// The groups that the cache holds, and the wire bytes of their frames.
+    #[must_use]
+    pub fn size(&self) -> (usize, usize) {
+        (self.groups.len(), self.bytes)
+    }
+
     /// Cache one just-sent group's frames (indexed by shard `idx`), evicting
     /// the oldest groups past the byte budget. The newest group always stays.
     pub fn insert(&mut self, group: ShardGroup, frames: Vec<WireFrame>) {

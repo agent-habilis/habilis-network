@@ -151,6 +151,11 @@ impl FastRounds {
         }
     }
 
+    /// The peers remembered as ahead, summed over the channels.
+    pub(crate) fn ahead_count(&self) -> usize {
+        self.ahead.values().map(Vec::len).sum()
+    }
+
     /// The peers remembered as ahead for `channel`.
     pub(super) fn ahead(&self, channel: Channel) -> Vec<Waiting> {
         self.ahead.get(&channel).cloned().unwrap_or_default()
