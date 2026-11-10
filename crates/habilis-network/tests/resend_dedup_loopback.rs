@@ -76,9 +76,7 @@ struct Chat {
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass::NONE
-            .union(AppClass::LOGGABLE)
-            .union(AppClass::VALID)
+        AppClass::NONE.union(AppClass::PUSH).union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -117,7 +115,7 @@ impl NodeDriver for Chat {
                     ),
                 );
                 let class = self.classify(&frame.authored());
-                let _ = send_app(state, context, frame, class)
+                let _ = send_app(state, context, frame)
                     .await
                     .expect("a small frame is accepted");
                 let _ = done.send(());

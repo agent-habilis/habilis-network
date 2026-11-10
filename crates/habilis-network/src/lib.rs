@@ -71,7 +71,7 @@ pub mod protocol {
         sole_addressee, validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
-    pub use habilis_network_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};
+    pub use habilis_network_protocol::{BuildMsgParams, build_msg_bytes};
 }
 
 /// Creator-minted invites. The redeem + decode primitives back

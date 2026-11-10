@@ -12,7 +12,6 @@ use crate::transport::MeshSender;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
-use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
@@ -56,12 +55,8 @@ use tokio::sync::oneshot;
 /// broadcast must therefore seal its body under the mesh key before calling
 /// this; the shipped application does so on its broadcast chat path.
 ///
-/// `frame` comes from [`app_frame`], and `class` is what the app says of it
-/// (`app.classify(&frame)`). A **broadcast** frame that the class marks as loggable is kept in
-/// the message log of the sender, as at the ingest of the same frame on a peer. Without it a peer that holds the frame
-/// would resend it to its author on every digest round, and the author could not serve it to a
-/// peer that missed it. A frame the app does not log is not kept. The log holds a frame
-/// once, so a consumer that also pushes the same frame into it costs a lookup, not a duplicate.
+/// `frame` comes from [`app_frame`]. The app classifies it (`app.classify(&frame)`) on the inbound
+/// side, and the send does not take a class.
 ///
 /// A directed frame to a cold peer comes back as [`crate::transport::Delivered::Pending`]: the
 /// dial runs on a task, and the caller awaits the handle off its event loop.
@@ -77,7 +72,7 @@ use tokio::sync::oneshot;
 ///
 /// # Examples
 ///
-/// It sends an application frame to the peers that the class names, and it reports how the send went. The doc test compiles it but does not run it.
+/// It sends an application frame to its addressee or to the gossip flood, and it reports how the send went. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::embed::{EventLoopState, HandlerCtx};
@@ -85,15 +80,14 @@ use tokio::sync::oneshot;
 /// use habilis_network::ops::send_app;
 /// use habilis_network::protocol::Verified;
 ///
-/// # async fn demo(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: Verified, class: AppClass) {
-/// let _ = send_app(state, context, frame, class).await;
+/// # async fn demo(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: Verified) {
+/// let _ = send_app(state, context, frame).await;
 /// # }
 /// ```
 pub async fn send_app(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
     frame: Verified,
-    _class: AppClass,
 ) -> Result<transport::Delivered, transport::SendError> {
     if frame.wire_len() > MAX_MESSAGE_SIZE {
         return Err(transport::SendError::Oversize(format!(

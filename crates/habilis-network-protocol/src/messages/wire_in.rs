@@ -6,7 +6,7 @@ use serde::Deserialize;
 use super::{Message, MessageBody, MessageId, MessageKind, Shard, Signer, default_ext};
 use crate::meshes::MeshId;
 use crate::nickname_error::Nickname;
-use crate::{AuthorKey, ContentHash, identity};
+use crate::{AuthorKey, identity};
 
 use serde::de::Error;
 /// A [`Message`] as the wire has it, read: every field a string or a plain value, so that one
@@ -28,12 +28,6 @@ pub(super) struct WireIn {
     #[serde(default)]
     #[serde(rename = "sig")]
     pub(super) signature: String,
-    #[serde(default)]
-    pub(super) seq: Option<u64>,
-    #[serde(rename = "prev", default)]
-    pub(super) previous: Option<String>,
-    #[serde(default)]
-    pub(super) parents: Vec<String>,
     #[serde(default)]
     pub(super) shard: Option<Shard>,
     #[serde(default = "default_ext")]
@@ -67,17 +61,6 @@ impl TryFrom<WireIn> for Message {
         if !wire.signature.is_empty() && !is_lower_hex(&wire.signature, 64) {
             return Err("malformed signature");
         }
-        let previous: Option<ContentHash> = wire
-            .previous
-            .as_deref()
-            .map(|hash| ContentHash::decode_hex(hash).ok_or("malformed prev hash"))
-            .transpose()?;
-        let parents: Result<Vec<ContentHash>, &str> = wire
-            .parents
-            .iter()
-            .map(|hash| ContentHash::decode_hex(hash).ok_or("malformed parent hash"))
-            .collect();
-        let parents = parents?;
         let signer = match (key, wire.signature.is_empty()) {
             (None, true) => None,
             (Some(_), true) => return Err("pubkey without a signature"),
@@ -97,9 +80,6 @@ impl TryFrom<WireIn> for Message {
             timestamp: UnixSecs::from(wire.timestamp),
             body: wire.body,
             signer,
-            seq: wire.seq,
-            previous,
-            parents,
             shard: wire.shard,
             ext: wire.ext,
         })

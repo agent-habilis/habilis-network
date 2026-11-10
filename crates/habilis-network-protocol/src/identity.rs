@@ -58,6 +58,15 @@ impl Identity {
         }
     }
 
+    /// A fixed identity for the golden tests of the wire form.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_secret_bytes(bytes: [u8; 32]) -> Self {
+        Identity {
+            secret: SecretKey::from_bytes(&bytes),
+        }
+    }
+
     /// The public half of the key.
     #[must_use]
     pub fn public(&self) -> PublicKey {

@@ -1285,7 +1285,7 @@ fn maybe_push_inbound(
     // `app_tag` also `None`) is always pushable past the structural guards above.
     let kind_tag = message.kind.app_tag();
     let app_pushable = match kind_tag {
-        Some(_) => class.is_some_and(|cls| cls.loggable() && !cls.beat()),
+        Some(_) => class.is_some_and(|cls| cls.pushable() && !cls.beat()),
         None => true,
     };
     if app_pushable {
@@ -1934,7 +1934,7 @@ mod first_contact_tests {
             )
             .sign(&Identity::generate());
 
-            let refused = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+            let refused = ops::send_app(&mut state, &context, frame).await;
             let Err(error) = &refused else {
                 panic!("the send to a held peer was not refused: {refused:?}");
             };
@@ -2010,7 +2010,7 @@ mod first_contact_tests {
                 .sign(&Identity::generate());
                 let bytes = frame.serialize().expect("serialize");
 
-                let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+                let sent = ops::send_app(&mut state, &context, frame).await;
                 assert!(
                     sent.is_ok(),
                     "the send across the gap was refused: {sent:?}"
@@ -2041,7 +2041,7 @@ mod first_contact_tests {
             state.standing.remove(&Standing::Meshed);
             let frame = Message::new_joined(&node.mesh, &node.author).sign(&Identity::generate());
 
-            let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+            let sent = ops::send_app(&mut state, &context, frame).await;
             assert!(
                 sent.is_ok(),
                 "the broadcast while unmeshed was refused: {sent:?}"
@@ -2082,7 +2082,7 @@ mod first_contact_tests {
             )
             .sign(&Identity::generate());
             let bytes = frame.serialize().expect("serialize");
-            let refused = ops::send_app(&mut state, &context, frame.clone(), AppClass::NONE).await;
+            let refused = ops::send_app(&mut state, &context, frame.clone()).await;
             assert!(
                 matches!(refused, Err(transport::SendError::Undeliverable(_))),
                 "the send to the second key, with no endpoint of its own, was not refused: {refused:?}"
@@ -2127,7 +2127,7 @@ mod first_contact_tests {
                 let frame =
                     Message::new_pong(&node.mesh, &node.author, to, &protocol::MessageId::random())
                         .sign(&Identity::generate());
-                let refused = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+                let refused = ops::send_app(&mut state, &context, frame).await;
                 assert!(
                     matches!(
                         &refused,
@@ -2166,8 +2166,7 @@ mod first_contact_tests {
                     .sign(&Identity::generate())
             };
 
-            let refused =
-                ops::send_app(&mut state, &context, frame_to(stranger), AppClass::NONE).await;
+            let refused = ops::send_app(&mut state, &context, frame_to(stranger)).await;
             assert!(
                 matches!(refused, Err(transport::SendError::Undeliverable(_))),
                 "the unmeshed send to a stranger was not refused: {refused:?}"
@@ -2178,8 +2177,7 @@ mod first_contact_tests {
             );
 
             for key in [quiet, hinted] {
-                let outcome =
-                    ops::send_app(&mut state, &context, frame_to(key), AppClass::NONE).await;
+                let outcome = ops::send_app(&mut state, &context, frame_to(key)).await;
                 assert!(
                     matches!(outcome, Err(transport::SendError::Undeliverable(_))),
                     "the unmeshed send to {key} was not refused: {outcome:?}"
@@ -2476,7 +2474,7 @@ mod first_contact_tests {
             let text = frame.serialize().expect("serialize").into_bytes();
             let old = String::from_utf8(text.to_vec())
                 .expect("a frame is text")
-                .replacen(r#""v":"14.0""#, r#""v":"12.0""#, 1);
+                .replacen(r#""v":"15.0""#, r#""v":"12.0""#, 1);
             assert!(old.contains("12.0"), "the test frame names version 12.0");
 
             ingest(Bytes::from(old.clone()), &mut state, &mut app, &context).await;
@@ -2529,7 +2527,7 @@ mod first_contact_tests {
             let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
             let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
             let version = format!(r"\u0007\u001b[31m{}", "x".repeat(500));
-            let hostile = text.replacen(r#""v":"14.0""#, &format!(r#""v":"{version}""#), 1);
+            let hostile = text.replacen(r#""v":"15.0""#, &format!(r#""v":"{version}""#), 1);
 
             ingest(Bytes::from(hostile), &mut state, &mut app, &context).await;
 
@@ -2586,7 +2584,7 @@ mod first_contact_tests {
 
             // Two passes over `cap + 1` versions: an evicting set names every frame of both.
             for version in (0..=cap).chain(0..=cap) {
-                let other = text.replacen(r#""v":"14.0""#, &format!(r#""v":"v{version}""#), 1);
+                let other = text.replacen(r#""v":"15.0""#, &format!(r#""v":"v{version}""#), 1);
                 ingest(Bytes::from(other), &mut state, &mut app, &context).await;
             }
 
@@ -5010,7 +5008,7 @@ mod repeat_tests {
     #[async_trait::async_trait]
     impl NodeApp for Counting {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass::LOGGABLE.union(AppClass::VALID)
+            AppClass::PUSH.union(AppClass::VALID)
         }
 
         async fn on_app_frame(

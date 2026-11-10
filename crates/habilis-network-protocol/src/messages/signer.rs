@@ -13,7 +13,7 @@ use crate::AuthorKey;
 ///
 /// ```ignore
 /// use habilis_network_protocol::identity::Identity;
-/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
+/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, MessageBody, build_msg_bytes};
 /// use habilis_network_protocol::meshes::MeshId;
 /// use habilis_network_protocol::Nickname;
 ///
@@ -28,7 +28,7 @@ use crate::AuthorKey;
 /// let author = Nickname::try_new("alice").expect("a nickname");
 /// let tag = AppTag::try_new("chat").expect("a tag");
 /// let body = MessageBody::try_new("hello").expect("a body");
-/// let params = BuildMsgParams::new(tag, &id, &author, body, ChainCtx::genesis());
+/// let params = BuildMsgParams::new(tag, &id, &author, body);
 /// let (_frame, verified) = build_msg_bytes(params, &identity).expect("a message builds");
 ///
 /// let signer = verified.signer.as_ref().expect("a built message is signed");

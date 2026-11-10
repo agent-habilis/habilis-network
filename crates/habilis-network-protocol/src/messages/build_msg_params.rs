@@ -3,17 +3,17 @@
 use crate::meshes::MeshId;
 use crate::nickname_error::Nickname;
 
-use super::{AppTag, ChainCtx, MessageBody};
+use super::{AppTag, MessageBody};
 
-/// The inputs of a test message: the mesh, the author, the body, the chain and the app tag.
+/// The inputs of a test message: the mesh, the author, the body and the app tag.
 ///
 /// # Examples
 ///
-/// The parameters name the tag, mesh, author, body, and chain of one message to build.
+/// The parameters name the tag, mesh, author, and body of one message to build.
 ///
 /// ```
 /// use habilis_network_protocol::identity::Identity;
-/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
+/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, MessageBody, build_msg_bytes};
 /// use habilis_network_protocol::meshes::MeshId;
 /// use habilis_network_protocol::Nickname;
 ///
@@ -28,7 +28,7 @@ use super::{AppTag, ChainCtx, MessageBody};
 /// let author = Nickname::try_new("alice").expect("a nickname");
 /// let tag = AppTag::try_new("chat").expect("a tag");
 /// let body = MessageBody::try_new("hello").expect("a body");
-/// let params = BuildMsgParams::new(tag, &id, &author, body, ChainCtx::genesis());
+/// let params = BuildMsgParams::new(tag, &id, &author, body);
 /// let (_frame, verified) = build_msg_bytes(params, &identity).expect("a message builds");
 ///
 /// assert!(verified.signer.is_some());
@@ -43,8 +43,6 @@ pub struct BuildMsgParams<'mesh> {
     pub author: &'mesh Nickname,
     /// The body to sign.
     pub body: MessageBody,
-    /// Where the message sits in its author's chain.
-    pub chain: ChainCtx,
     /// The app tag to stamp. A parameter, not a constant: this fixture is used
     /// across crates, and hardcoding one consumer's tag made it build a frame
     /// that consumer would then fail to recognise.
@@ -53,7 +51,7 @@ pub struct BuildMsgParams<'mesh> {
 
 #[cfg(any(test, feature = "test-fixtures"))]
 impl<'mesh> BuildMsgParams<'mesh> {
-    /// The tag, the mesh, the author, the body and the chain of one test message. The five types
+    /// The tag, the mesh, the author and the body of one test message. The four types
     /// differ, so no two arguments can be swapped.
     #[must_use]
     pub fn new(
@@ -61,13 +59,11 @@ impl<'mesh> BuildMsgParams<'mesh> {
         mesh: &'mesh MeshId,
         author: &'mesh Nickname,
         body: MessageBody,
-        chain: ChainCtx,
     ) -> Self {
         Self {
             mesh,
             author,
             body,
-            chain,
             tag,
         }
     }

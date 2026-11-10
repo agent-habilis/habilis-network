@@ -868,8 +868,7 @@ impl MembershipApp {
                 body,
             ),
         );
-        let class = self.classify(&frame.authored());
-        match send_app(state, context, frame, class).await {
+        match send_app(state, context, frame).await {
             Ok(Delivered::Done) => {
                 let _ = reply.send(Ok(()));
             }

@@ -24,7 +24,7 @@ use super::{
 ///
 /// Wire format (compact JSON, one line):
 /// ```json
-/// {"v":"14.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
+/// {"v":"15.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
 /// ```
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
@@ -54,20 +54,6 @@ pub struct Message {
     /// broadcast path, and the receive path drops anything that fails verification. See
     /// `docs/history-integrity.md`.
     pub signer: Option<Signer>,
-    /// Per-author hash-linked log (Phase 2), set on `Msg` only: `seq` is
-    /// this author's monotonic counter and `prev` the content hash of their
-    /// previous `Msg` (`None` at `seq 0`). Both are signed. Plumbing /
-    /// presence kinds leave them `None`. The message's own content hash is
-    /// computed locally (`content_hash_hex`), never transmitted. See
-    /// `docs/history-integrity.md`.
-    pub seq: Option<u64>,
-    /// The hash of the previous message of the author.
-    pub previous: Option<ContentHash>,
-    /// Cross-author DAG (Phase 3), `Msg` only: content hashes of the DAG
-    /// tips this author had seen when authoring — the causal links. Signed.
-    /// Empty for the very first message / messages with no observed
-    /// predecessor. See `docs/history-integrity.md`.
-    pub parents: Vec<ContentHash>,
     /// Shard header: present only on a message that is one slice of a body
     /// too large for a single message (see [`Shard`]). `None` on an ordinary
     /// message, so its wire form is unchanged. Signed like every other field.
@@ -87,9 +73,6 @@ impl Message {
             timestamp: UnixSecs::now(),
             body,
             signer: None,
-            seq: None,
-            previous: None,
-            parents: Vec::new(),
             shard: None,
             ext: default_ext(),
         }
@@ -241,7 +224,6 @@ impl Message {
     /// Serialize to compact JSON bytes for the gossip wire. Outside this crate only a [`Verified`]
     /// serializes, through [`Verified::serialize`]: an unverified or an authored view has no wire form.
     /// # Errors
-    /// # Errors
     /// A [`MessageError::Source`] when the JSON does not encode, or
     /// [`MessageError::Oversize`] when the bytes pass `MAX_MESSAGE_SIZE`.
     pub(crate) fn serialize(&self) -> Result<Vec<u8>, MessageError> {
@@ -254,7 +236,6 @@ impl Message {
     }
 
     /// Parse a message from JSON bytes.
-    /// # Errors
     /// # Errors
     /// A [`MessageError::TooLarge`] past `MAX_MESSAGE_SIZE`, a [`MessageError::Source`]
     /// when the JSON does not parse, [`MessageError::UnsupportedVersion`] for another
@@ -288,7 +269,6 @@ impl Message {
     /// [`WireFrame::copy_with_resend_nonce`](super::WireFrame::copy_with_resend_nonce)). Returns the message and the nonce, if any. The trailer is
     /// outside the signature: it changes the gossip message id and nothing else.
     ///
-    /// # Errors
     /// # Errors
     /// A [`MessageError`] as for [`Message::parse`].
     pub fn parse_wire(data: &[u8]) -> Result<(Self, Option<u64>), MessageError> {
@@ -332,20 +312,6 @@ impl Message {
             Some(key) => field(&key.hex()),
             None => field(&[]),
         }
-        // `seq`/`prev` are signed too. `None` encodes as a zero-length field
-        // (distinct from `Some(0)`, which is 8 bytes), so a plumbing message
-        // and a `seq 0` message never collide.
-        match self.seq {
-            Some(value) => field(&value.to_le_bytes()),
-            None => field(&[]),
-        }
-        match &self.previous {
-            Some(value) => field(&value.hex()),
-            None => field(&[]),
-        }
-        // Parents (DAG causal links) are signed too. Serialized as their
-        // deterministic JSON array; empty for no-parent messages.
-        field(&serde_json::to_vec(&self.parents).unwrap_or_default());
         // The shard header is signed so a shard can't be re-grouped or
         // re-indexed by a relay. `None` (ordinary message) folds as `null`.
         field(&serde_json::to_vec(&self.shard).unwrap_or_default());
@@ -376,26 +342,6 @@ impl Message {
     #[must_use]
     pub fn dedup_key(&self) -> DedupKey {
         identity::dedup_key16(self.author_key().as_ref(), &self.id.as_uuid_bytes())
-    }
-
-    /// Stamp the per-author log fields before signing (`Msg` only). `seq`
-    /// is the author's monotonic counter, `prev` the hash of their previous
-    /// `Msg` (`None` at `seq 0`). Consuming-builder so it composes with
-    /// [`sign`](Self::sign): `Message::new_app(..).chain(..).sign(..)`.
-    #[must_use]
-    pub fn chain(mut self, seq: u64, previous: Option<ContentHash>) -> Self {
-        self.seq = Some(seq);
-        self.previous = previous;
-        self
-    }
-
-    /// Stamp the cross-author DAG `parents` (content hashes of the tips
-    /// seen when authoring) before signing. Consuming-builder, composes
-    /// with [`chain`](Self::chain) and [`sign`](Self::sign).
-    #[must_use]
-    pub fn parents(mut self, parents: impl IntoIterator<Item = ContentHash>) -> Self {
-        self.parents = parents.into_iter().collect();
-        self
     }
 
     /// Stamp the [`Shard`] header (which slice of a split body this
@@ -459,7 +405,7 @@ impl Message {
     /// ```compile_fail,E0624
     /// use habilis_network_protocol::messages::Message;
     ///
-    /// const SIGNED: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"7f640d1c198f65d7c272b7206ce3d7ed31c289eca9e09a1c8e28adf770ec02499a7a4b68d837c774a3b8d4bd9a6358e2bd67278f98dbac3ce5fe2e60e5f99006","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+    /// const SIGNED: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"7f640d1c198f65d7c272b7206ce3d7ed31c289eca9e09a1c8e28adf770ec02499a7a4b68d837c774a3b8d4bd9a6358e2bd67278f98dbac3ce5fe2e60e5f99006","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
     ///
     /// let message = Message::parse(SIGNED.as_bytes()).unwrap();
     /// let canonical = message.canonical_bytes();
@@ -540,9 +486,6 @@ impl Message {
             timestamp: UnixSecs::from(1_700_000_000),
             body: body.into(),
             signer: None,
-            seq: None,
-            previous: None,
-            parents: Vec::new(),
             shard: None,
             ext: serde_json::json!({}),
         }

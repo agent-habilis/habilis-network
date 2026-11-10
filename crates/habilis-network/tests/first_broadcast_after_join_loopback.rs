@@ -232,9 +232,7 @@ enum ChatSession {
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass::NONE
-            .union(AppClass::LOGGABLE)
-            .union(AppClass::VALID)
+        AppClass::NONE.union(AppClass::PUSH).union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -275,7 +273,7 @@ impl NodeDriver for Chat {
                     ),
                 );
                 let class = self.classify(&frame.authored());
-                let sent = send_app(state, context, frame, class).await.map(|_| ());
+                let sent = send_app(state, context, frame).await.map(|_| ());
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true
             }

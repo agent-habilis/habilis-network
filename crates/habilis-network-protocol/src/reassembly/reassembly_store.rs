@@ -327,7 +327,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 ///
 /// ```ignore
 /// use habilis_network_protocol::identity::Identity;
-/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
+/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, MessageBody, build_msg_bytes};
 /// use habilis_network_protocol::meshes::MeshId;
 /// use habilis_network_protocol::Nickname;
 ///
@@ -342,7 +342,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 /// let author = Nickname::try_new("alice").expect("a nickname");
 /// let tag = AppTag::try_new("chat").expect("a tag");
 /// let body = MessageBody::try_new("hello").expect("a body");
-/// let params = BuildMsgParams::new(tag, &id, &author, body, ChainCtx::genesis());
+/// let params = BuildMsgParams::new(tag, &id, &author, body);
 /// let (_frame, verified) = build_msg_bytes(params, &identity).expect("a message builds");
 ///
 /// // The ShardGroup of the shard header.
@@ -354,8 +354,5 @@ pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGro
         MessageId::try_new(group_id.as_str()).expect("a shard group is a valid message id");
     envelope.body = body;
     envelope.shard = None;
-    envelope.seq = None;
-    envelope.previous = None;
-    envelope.parents = Vec::new();
     Authored::new(envelope, header.key())
 }

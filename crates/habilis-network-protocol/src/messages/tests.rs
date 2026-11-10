@@ -1,6 +1,6 @@
 use super::{
-    AppFrameParams, AppTag, AppTagError, BuildMsgParams, ChainCtx, CorrIdError, MeshId, Message,
-    MessageBody, MessageId, MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
+    AppFrameParams, AppTag, AppTagError, BuildMsgParams, CorrIdError, MeshId, Message, MessageBody,
+    MessageId, MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
 };
 use crate::AuthorKey;
 use crate::messages::{MessageError, sole_addressee};
@@ -259,7 +259,7 @@ const FIXTURE_MESH: &str = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrf
 fn test_unknown_ext_fields_ignored() {
     let _guard = ::habilis_network_test_tracing::init();
     let json = format!(
-        r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi","ext":{{"future_field":"value","another":42}}}}"#
+        r#"{{"v":"15.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi","ext":{{"future_field":"value","another":42}}}}"#
     );
     let parsed =
         Message::parse(json.as_bytes()).expect("the JSON literal in this test is a valid message");
@@ -278,7 +278,7 @@ fn test_unknown_ext_fields_ignored() {
 fn test_missing_ext_defaults_to_empty_object() {
     let _guard = ::habilis_network_test_tracing::init();
     let json = format!(
-        r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"}}"#
+        r#"{{"v":"15.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"}}"#
     );
     let parsed =
         Message::parse(json.as_bytes()).expect("the JSON literal in this test is a valid message");
@@ -310,7 +310,7 @@ fn test_version_mismatch_rejected() {
 #[test]
 fn parse_rejects_non_uuid_id() {
     let _guard = ::habilis_network_test_tracing::init();
-    let json = r#"{"v":"14.0","id":"not-a-uuid","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{}}"#;
+    let json = r#"{"v":"15.0","id":"not-a-uuid","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{}}"#;
     assert!(
         Message::parse(json.as_bytes()).is_err(),
         "a message with a non-uuid id is refused"
@@ -321,7 +321,7 @@ fn parse_rejects_non_uuid_id() {
 fn parse_rejects_control_char_body() {
     let _guard = ::habilis_network_test_tracing::init();
     let json = format!(
-        r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"evil\u0000body","ext":{{}}}}"#
+        r#"{{"v":"15.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"evil\u0000body","ext":{{}}}}"#
     );
     assert!(
         Message::parse(json.as_bytes()).is_err(),
@@ -333,7 +333,7 @@ fn parse_rejects_control_char_body() {
 fn parse_rejects_unsafe_author_nickname() {
     let _guard = ::habilis_network_test_tracing::init();
     let json = format!(
-        r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a#b","ts":0,"body":"hi","ext":{{}}}}"#
+        r#"{{"v":"15.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a#b","ts":0,"body":"hi","ext":{{}}}}"#
     );
     assert!(
         Message::parse(json.as_bytes()).is_err(),
@@ -349,7 +349,7 @@ fn parse_rejects_malformed_integrity_fields() {
     // so a crafted value never reaches the fork/DAG indexes or sig verify.
     let base = |extra: &str| {
         format!(
-            r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"{extra},"ext":{{}}}}"#
+            r#"{{"v":"15.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"{extra},"ext":{{}}}}"#
         )
     };
     // Each malformed field comes with a well-formed partner, so that the pairing rule (a key
@@ -371,9 +371,7 @@ fn parse_rejects_malformed_integrity_fields() {
             format!(r#"{good_key},"sig":"{}""#, "CD".repeat(64)),
             "malformed signature",
         ),
-        (r#","prev":"xyz""#.to_string(), "malformed prev hash"),
         // Too short.
-        (r#","parents":["00"]"#.to_string(), "malformed parent hash"),
     ] {
         let error =
             Message::parse(base(&extra).as_bytes()).expect_err(&format!("should reject: {extra}"));
@@ -409,7 +407,6 @@ fn build_msg_bytes_message() {
             mesh: &sid(),
             author: &alice,
             body: MessageBody::from("hello"),
-            chain: ChainCtx::genesis(),
         },
         &identity,
     )
@@ -559,115 +556,6 @@ mod signing {
         let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
         assert!(!wire.contains("pubkey"), "{wire}");
         assert!(!wire.contains("\"sig\""), "{wire}");
-    }
-}
-
-mod chain {
-    use super::super::{Message, MessageKind};
-    use crate::ContentHash;
-    use crate::identity::Identity;
-
-    fn message(body: &str) -> Message {
-        Message::fixture(MessageKind::app_broadcast("app_msg"), body)
-    }
-
-    #[test]
-    fn chained_message_carries_seq_prev_and_verifies() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let previous = ContentHash::from([0xaa; 32]);
-        let signed = message("hi")
-            .chain(5, Some(previous))
-            .sign(&Identity::generate());
-        assert_eq!(
-            signed.seq,
-            Some(5),
-            "the chained message carries its sequence number"
-        );
-        assert_eq!(
-            signed.previous,
-            Some(previous),
-            "the chained message carries its previous link"
-        );
-        assert!(
-            signed.verify_signature(),
-            "the chained message verifies its signature"
-        );
-    }
-
-    #[test]
-    fn content_hash_is_stable_and_64_hex() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let stamped = message("x").chain(0, None);
-        assert_eq!(
-            stamped.content_hash(),
-            stamped.content_hash(),
-            "the content hash of a message is stable"
-        );
-        assert_eq!(
-            stamped.content_hash().to_string().len(),
-            64,
-            "the content hash is 64 hex characters"
-        );
-    }
-
-    #[test]
-    fn fork_pair_hashes_differently() {
-        let _guard = ::habilis_network_test_tracing::init();
-        // The equivocation primitive: two different messages at the same
-        // seq hash differently, so a receiver can prove the fork.
-        let alpha = message("alpha").chain(1, None);
-        let beta = message("beta").chain(1, None);
-        assert_ne!(
-            alpha.content_hash(),
-            beta.content_hash(),
-            "a fork pair hashes differently"
-        );
-    }
-
-    #[test]
-    fn tampering_seq_breaks_signature() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut signed = message("x")
-            .chain(3, None)
-            .sign(&Identity::generate())
-            .into_message();
-        signed.seq = Some(4);
-        assert!(!signed.verify_signature(), "seq is a signed field");
-    }
-
-    #[test]
-    fn parents_are_signed_and_round_trip() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let parents = vec![ContentHash::from([0xaa; 32]), ContentHash::from([0xbb; 32])];
-        let draft = message("hi").chain(1, None);
-        let signed = draft.parents(parents.clone()).sign(&Identity::generate());
-        assert_eq!(
-            signed.parents, parents,
-            "the signed message keeps its parents"
-        );
-        let parsed: Message = Message::parse(
-            signed
-                .serialize()
-                .expect("the signed fixture message serializes")
-                .as_bytes(),
-        )
-        .expect("the signed bytes parse back into a message");
-        assert_eq!(parsed.parents, parents, "the parents survive a round trip");
-        assert!(
-            parsed.verify_signature(),
-            "the parsed message verifies its signature"
-        );
-    }
-
-    #[test]
-    fn tampering_parents_breaks_signature() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut signed = message("hi")
-            .parents(vec![ContentHash::from([0xaa; 32])])
-            .sign(&Identity::generate())
-            .into_message();
-        signed.parents.push(ContentHash::from([0xbb; 32]));
-        assert!(!signed.verify_signature(), "parents are signed");
     }
 }
 
@@ -995,81 +883,23 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
 /// The wire form of a signed message, captured from the code at the base commit with a fixed key
 /// (`SecretKey::from_bytes(&[7; 32])`). A change that moves one byte of it is a wire change.
 // The verified.rs doctests repeat this literal, so a change to it touches both files.
-const SIGNED_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"7f640d1c198f65d7c272b7206ce3d7ed31c289eca9e09a1c8e28adf770ec02499a7a4b68d837c774a3b8d4bd9a6358e2bd67278f98dbac3ce5fe2e60e5f99006","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+const SIGNED_WIRE: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"be64c678c6336f65be3817c748ba07478c1723863a070d5a09e62a159e06dc6bc01af49a9a2c3e5a5e25fd90e145b46b87cd803915da07fca9453b7b64b4480a","ext":{}}"#;
 
 /// The same message with no `pubkey` and no `sig` key: the canonical pre-signing form.
-const UNSIGNED_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+const UNSIGNED_WIRE: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","ext":{}}"#;
 
 /// [`UNSIGNED_WIRE`] with both keys present and empty.
-const EMPTY_KEYS_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"","sig":"","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+const EMPTY_KEYS_WIRE: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"","sig":"","ext":{}}"#;
 
 /// [`SIGNED_WIRE`] with the `sig` key removed: a key and no signature.
-const KEY_ONLY_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+const KEY_ONLY_WIRE: &str = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","ext":{}}"#;
 
 const SIGNED_PUBKEY: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 /// The canonical bytes of [`SIGNED_WIRE`], hex, one line per piece: a 4-byte little-endian length,
 /// then the field.
-const SIGNED_CANONICAL_HEX: &str = concat!(
-    "10000000",
-    "686162696c69732d6d6573682f6d7367",
-    "04000000",
-    "31342e30",
-    "24000000",
-    "30303030303030302d303030302d303030302d303030302d303030303030303030303031",
-    "1e000000",
-    "7b2274797065223a22617070222c22746167223a226170705f6d7367227d",
-    "3e000000",
-    "4835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b67774736",
-    "09000000",
-    "616c6963652d626f74",
-    "08000000",
-    "00f1536500000000",
-    "0d000000",
-    "68656c6c6f2c20676f6c64656e",
-    "40000000",
-    "65613461366336336532396335323061626566353530376231333265633566393935343737366165626562653762393234323165656136393134343664323263",
-    "08000000",
-    "0300000000000000",
-    "40000000",
-    "31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131",
-    "44000000",
-    "5b2232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232225d",
-    "04000000",
-    "6e756c6c",
-    "02000000",
-    "7b7d"
-);
+const SIGNED_CANONICAL_HEX: &str = "10000000686162696c69732d6d6573682f6d73670400000031352e302400000030303030303030302d303030302d303030302d303030302d3030303030303030303030311e0000007b2274797065223a22617070222c22746167223a226170705f6d7367227d3e0000004835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b6777473609000000616c6963652d626f740800000000f15365000000000d00000068656c6c6f2c20676f6c64656e4000000065613461366336336532396335323061626566353530376231333265633566393935343737366165626562653762393234323165656136393134343664323263040000006e756c6c020000007b7d";
 /// The canonical bytes of [`UNSIGNED_WIRE`]. The `pubkey` field is the empty `00000000`.
-const UNSIGNED_CANONICAL_HEX: &str = concat!(
-    "10000000",
-    "686162696c69732d6d6573682f6d7367",
-    "04000000",
-    "31342e30",
-    "24000000",
-    "30303030303030302d303030302d303030302d303030302d303030303030303030303031",
-    "1e000000",
-    "7b2274797065223a22617070222c22746167223a226170705f6d7367227d",
-    "3e000000",
-    "4835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b67774736",
-    "09000000",
-    "616c6963652d626f74",
-    "08000000",
-    "00f1536500000000",
-    "0d000000",
-    "68656c6c6f2c20676f6c64656e",
-    "00000000",
-    "",
-    "08000000",
-    "0300000000000000",
-    "40000000",
-    "31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131",
-    "44000000",
-    "5b2232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232225d",
-    "04000000",
-    "6e756c6c",
-    "02000000",
-    "7b7d"
-);
+const UNSIGNED_CANONICAL_HEX: &str = "10000000686162696c69732d6d6573682f6d73670400000031352e302400000030303030303030302d303030302d303030302d303030302d3030303030303030303030311e0000007b2274797065223a22617070222c22746167223a226170705f6d7367227d3e0000004835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b6777473609000000616c6963652d626f740800000000f15365000000000d00000068656c6c6f2c20676f6c64656e00000000040000006e756c6c020000007b7d";
 
 fn hex(bytes: &[u8]) -> String {
     identity::encode_hex(bytes)
@@ -1106,7 +936,7 @@ fn a_signed_message_keeps_its_wire_form() {
     );
     assert_eq!(
         parsed.content_hash().to_string(),
-        "5f53e66bbf1e6ef252c020e27d4be5b98ebd396b3c0f418dcc4bc66861d1f5b9",
+        "29558fdb53a094861b804145ced15bdb7f1b2b0420a754d5874459c8f415870d",
         "the content hash keeps its hex form"
     );
     assert_eq!(
@@ -1143,7 +973,7 @@ fn a_message_with_no_key_fields_parses_as_unsigned() {
     );
     assert_eq!(
         parsed.content_hash().to_string(),
-        "6cc28900477478bd631741c7fe84c91f0f9f12bcec88f1fa9235e810d857c727",
+        "2c985f844f0df3d984389dab2800f34a7bb2e3783b405cec82e04013df018f0d",
         "the unsigned content hash keeps its hex form"
     );
 }
@@ -1381,7 +1211,7 @@ fn a_nickname_as_the_recipient_of_a_frame_is_refused_at_parse() {
         ("pong", pong_probe.as_str()),
     ] {
         let json = format!(
-            r#"{{"v":"14.0","id":"{FIXTURE_ID}","type":"{kind}",{extra}"to":"bob","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"","ext":{{}}}}"#
+            r#"{{"v":"15.0","id":"{FIXTURE_ID}","type":"{kind}",{extra}"to":"bob","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"","ext":{{}}}}"#
         );
         assert!(
             Message::parse(json.as_bytes()).is_err(),
@@ -1420,15 +1250,49 @@ fn a_frame_of_wire_version_13_0_is_refused_by_its_version() {
     );
 }
 
+/// The golden key signs the unsigned fixture to the signed fixture, byte for byte: the signature is
+/// deterministic, so this pins the signed bytes as well as the wire form.
+#[test]
+fn the_golden_key_signs_the_unsigned_fixture_to_the_signed_fixture() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let unsigned = Message::parse(UNSIGNED_WIRE.as_bytes()).expect("the unsigned literal parses");
+    let signed = unsigned.sign(&identity::Identity::from_secret_bytes([7; 32]));
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&signed)).expect("the signed message has a wire form"),
+        SIGNED_WIRE,
+        "the golden key does not sign the fixture to the golden wire form"
+    );
+}
+
 /// Golden: the chat digest kind is gone. A `digest` frame at the current version is not a message
-/// kind, so it fails in the JSON, not in the version.
+/// kind, so it fails in the JSON, not in the version, and the text names the unknown kind.
 #[test]
 fn a_digest_frame_is_not_a_message_kind_any_more() {
     let _guard = ::habilis_network_test_tracing::init();
-    let frame = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"digest","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"[]","ext":{}}"#;
+    let frame = r#"{"v":"15.0","id":"00000000-0000-0000-0000-000000000001","type":"digest","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"[]","ext":{}}"#;
     let refused = Message::parse(frame.as_bytes()).expect_err("a digest frame parses");
     assert!(
-        matches!(&refused, MessageError::Source { .. }),
-        "a digest frame at 14.0 was not refused as an unknown kind: {refused:?}"
+        matches!(&refused, MessageError::Source { .. })
+            && format!("{refused:?}").contains("unknown variant `digest`"),
+        "a digest frame at 15.0 was not refused as an unknown kind: {refused:?}"
+    );
+}
+
+/// A frame of the `14.0` wire, the one before this change, is refused by its version. The frame still
+/// carries the `seq` and `prev` fields. A control frame of the same fields at the current version parses.
+#[test]
+fn a_frame_of_wire_version_14_0_is_refused_by_its_version() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let fields = r#""type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","ext":{}"#;
+    let old = format!(r#"{{"v":"14.0","id":"00000000-0000-0000-0000-000000000001",{fields}}}"#);
+    let refused = Message::parse(old.as_bytes()).expect_err("a 14.0 frame parses");
+    assert!(
+        matches!(&refused, MessageError::UnsupportedVersion(version) if version == "14.0"),
+        "the 14.0 frame was not refused by its version: {refused:?}"
+    );
+    let current = format!(r#"{{"v":"15.0","id":"00000000-0000-0000-0000-000000000001",{fields}}}"#);
+    assert!(
+        Message::parse(current.as_bytes()).is_ok(),
+        "the control frame of the same fields at 15.0 does not parse"
     );
 }

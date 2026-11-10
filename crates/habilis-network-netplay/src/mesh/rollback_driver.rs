@@ -205,8 +205,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                 let Some(frame) = frame_for(context, ROLLBACK_TAG, Some(to), &payload) else {
                     return false;
                 };
-                let class = self.classify(&frame.authored());
-                send(state, context, frame, class).await
+                send(state, context, frame).await
             }
             Outbound::Lobby { payload } => {
                 // Addressed to every roster member individually — never a
@@ -221,8 +220,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     let Some(frame) = frame_for(context, LOBBY_TAG, Some(peer), &payload) else {
                         continue;
                     };
-                    let class = self.classify(&frame.authored());
-                    delivered |= send(state, context, frame, class).await;
+                    delivered |= send(state, context, frame).await;
                 }
                 delivered
             }
@@ -251,11 +249,6 @@ fn frame_for(
 /// Failure is genuinely uninteresting here: this layer assumes a lossy
 /// transport and recovers by resending, so a caller could not act on the
 /// error even if it had it.
-async fn send(
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-    frame: Verified,
-    class: AppClass,
-) -> bool {
-    ops::send_app(state, context, frame, class).await.is_ok()
+async fn send(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: Verified) -> bool {
+    ops::send_app(state, context, frame).await.is_ok()
 }

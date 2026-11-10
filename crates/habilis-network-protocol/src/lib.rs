@@ -83,7 +83,7 @@ pub use crate::resolver::{JoinTarget, JoinTargetError};
 // Gate matches the definitions' (`any(test, feature)`): a narrower gate here
 // leaves them `pub` but unreachable under a plain `cargo test`.
 #[cfg(any(test, feature = "test-fixtures"))]
-pub use messages::{BuildMsgParams, ChainCtx, build_msg_bytes};
+pub use messages::{BuildMsgParams, build_msg_bytes};
 
 // Shared config for this crate's `proptest!` blocks: regression seeds land in
 // `tests/proptest-regressions` rather than at the crate root. Every block opts

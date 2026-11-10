@@ -943,8 +943,8 @@ mod tests {
     /// automerge discards one, and a peer's entry is silently erased. Pinned so
     /// that can only ever happen on purpose.
     ///
-    /// It last moved when the byte-domains dropped the product name for the
-    /// engine's, which is why `messages::VERSION` is `13.0`.
+    /// It last moved at wire version 13.0, when the byte-domains dropped the
+    /// product name for the engine's.
     #[test]
     fn genesis_bytes_are_pinned() {
         let _guard = ::habilis_network_test_tracing::init();

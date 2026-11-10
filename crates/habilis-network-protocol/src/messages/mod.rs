@@ -7,11 +7,6 @@
 //!   (de)serialization.
 
 #[cfg(any(test, feature = "test-fixtures"))]
-#[cfg(any(test, feature = "test-fixtures"))]
-mod chain_ctx;
-#[cfg(any(test, feature = "test-fixtures"))]
-pub use chain_ctx::ChainCtx;
-#[cfg(any(test, feature = "test-fixtures"))]
 mod build_msg_params;
 #[cfg(any(test, feature = "test-fixtures"))]
 pub use build_msg_params::BuildMsgParams;
