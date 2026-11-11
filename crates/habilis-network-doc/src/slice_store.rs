@@ -763,6 +763,20 @@ impl SliceStore {
         self.draft_at(own, Value::Null, now, false)
     }
 
+    /// The length in bytes of the escaped body that a write of `value` by `own` would carry.
+    ///
+    /// A caller measures a write before it sends one. The body is sealed when the store has a key.
+    /// The call spends no token and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`SliceStore::prepare_local`] that do not spend a token: [`SliceError::Malformed`],
+    /// [`SliceError::Seal`] and [`SliceError::TooLarge`].
+    pub fn body_len(&self, own: &AuthorKey, value: Value) -> Result<usize, SliceError> {
+        let (_, body) = self.draft_body(own, value)?;
+        Ok(serde_json::to_string(body.as_str()).map_or(usize::MAX, |text| text.len()))
+    }
+
     /// Keeps the signed `frame` of a draft, when the draft is for this channel and this key, its
     /// body is the draft body, and its version is still next.
     ///
@@ -959,6 +973,21 @@ impl SliceStore {
         now: Instant,
         spend: bool,
     ) -> Result<LocalDraft, SliceError> {
+        let (version, body) = self.draft_body(own, value)?;
+        if spend && !self.take_token(own, now) {
+            return Err(SliceError::RateLimited);
+        }
+        Ok(LocalDraft {
+            channel: self.channel,
+            key: *own,
+            version,
+            body,
+        })
+    }
+
+    /// Builds the next version and body of the slice of `own`, sealed when the store has a key,
+    /// and checks that the escaped body fits the frame cap.
+    fn draft_body(&self, own: &AuthorKey, value: Value) -> Result<(u64, MessageBody), SliceError> {
         let version = self.version(own).unwrap_or(0) + 1;
         let mut body_json = json!({"version": version});
         body_json["value"] = value;
@@ -976,15 +1005,7 @@ impl SliceStore {
                 limit,
             });
         }
-        if spend && !self.take_token(own, now) {
-            return Err(SliceError::RateLimited);
-        }
-        Ok(LocalDraft {
-            channel: self.channel,
-            key: *own,
-            version,
-            body,
-        })
+        Ok((version, body))
     }
 
     /// Whether `key` is in the gone set.
@@ -1329,6 +1350,45 @@ mod tests {
             view.get(&hex),
             Some(&json!({"a": 1})),
             "view must map the hex key to the value"
+        );
+    }
+
+    #[test]
+    fn body_len_is_the_escaped_length_of_the_draft_body_and_spends_no_token() {
+        let mut store = store();
+        let now = Instant::now();
+        let value = object(json!({"a": 1}));
+        let measured = store
+            .body_len(&key(1), Value::Object(value.clone()))
+            .expect("a body that fits");
+        let draft = store
+            .prepare_local(&key(1), value, now)
+            .expect("a draft that fits");
+        let escaped = serde_json::to_string(draft.body().as_str()).map_or(0, |text| text.len());
+        assert_eq!(measured, escaped, "the measured length must be the draft's");
+        for _ in 0..4 {
+            assert!(
+                store.body_len(&key(1), Value::Null).is_ok(),
+                "a measure never spends a token"
+            );
+        }
+        assert!(
+            store.prepare_local(&key(1), Map::new(), now).is_ok(),
+            "the first five writes fit the burst of 5, measures included"
+        );
+    }
+
+    #[test]
+    fn body_len_refuses_a_body_past_the_cap_with_the_typed_error() {
+        let limits = SliceLimits::new(64 + WORST_FRAME_OVERHEAD, Duration::from_secs(1), 256, 1);
+        let store = small_store(limits);
+        let blob = Value::Object(object(json!({"blob": "x".repeat(200)})));
+        assert!(
+            matches!(
+                store.body_len(&key(1), blob),
+                Err(SliceError::TooLarge { limit: 64, .. })
+            ),
+            "a body past the cap must refuse with TooLarge"
         );
     }
 
