@@ -472,7 +472,6 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R16 | `SealError` | `habilis-network-protocol/src/seal_error.rs` | holds a `dyn` field, which is not Clone |
 | R16 | `Counters` | `habilis-network-iroh-gossip-transport/src/counters.rs` | holds a field type that is not Clone |
 | R16 | `DocError` | `habilis-network-doc/src/doc_error.rs` | holds a `dyn` field, which is not Clone |
-| R16 | `MeshDoc` | `habilis-network-doc/src/mesh_doc.rs` | holds a `Box<` field, which is not Clone |
 | R16 | `Shared` | `habilis-network-iroh-gossip-transport/src/shared.rs` | holds a `Mutex` field, which is not Clone |
 | R16 | `MultihopTransport` | `habilis-network-iroh-multihop-transport/src/multihop_transport.rs` | holds a `Mutex` field, which is not Clone |
 | R16 | `Topology` | `habilis-network-iroh-multihop-transport/src/topology.rs` | holds a field type that is not Clone |

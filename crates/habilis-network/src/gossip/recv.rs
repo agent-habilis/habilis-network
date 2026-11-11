@@ -372,8 +372,7 @@ pub(crate) async fn drain_dead_receiver(
 /// the resubscribe drops that queue. The loop does not read the queue while the topic is marked
 /// closed, yet the old splitter keeps filling it until its receiver is dropped, and the gossip
 /// layer has counted each message as delivered: the queue holds the only copy. A message that
-/// arrives after this drain and before the drop is the residue; the resend repairs it (see
-/// `transport::outbox` and the nonce of the resend).
+/// arrives after this drain and before the drop is lost; no resend repairs it yet.
 pub(crate) async fn drain_queued<S>(
     receiver: &mut super::split::MeshReceiver<S>,
     state: &mut EventLoopState,

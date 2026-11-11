@@ -340,7 +340,7 @@ impl DigestEntry {
 
 /// The root of a store's digest: the hash of every entry, and the number of pages.
 ///
-/// This is the first message of the version-vector sync, which replaces the heads digest. Two
+/// This is the first message of the version-vector sync, which takes the place of the old heads digest. Two
 /// stores with equal roots need no more messages. Keep this round when the store changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -1306,7 +1306,7 @@ mod tests {
         }
     }
 
-    /// Applies `frame` on the resend path, which never spends a token.
+    /// Applies `frame` on the resend path, which never spends a token. No caller yet.
     fn apply(store: &mut SliceStore, frame: &Verified) -> SliceIngest {
         store.ingest(frame, false, Instant::now())
     }
