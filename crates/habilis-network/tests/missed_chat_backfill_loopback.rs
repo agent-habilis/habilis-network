@@ -24,6 +24,8 @@ use tokio::sync::{Notify, oneshot};
 use habilis_network::ops;
 use habilis_network::runtime::tuning;
 use tokio::time::{self, Instant};
+/// The retention of the payload cache of iroh-gossip (`PlumtreeConfig::message_cache_retention`).
+const GOSSIP_CACHE_RETENTION: Duration = Duration::from_secs(30);
 /// Bounds a slow join only: with the tick pinned away, nothing but the ask on
 /// the first link can deliver.
 const BUDGET: Duration = Duration::from_secs(15);
@@ -210,6 +212,10 @@ fn a_chat_broadcast_missed_by_a_late_joiner_is_not_delivered() {
             "early never got the frame, so it cannot hold it for late"
         );
 
+        // iroh-gossip answers a graft from its payload cache, which keeps a message for
+        // `message_cache_retention` (30 s). Until that cache lets go of the frame, a late joiner can get
+        // it through the gossip layer, and no engine path is involved. Wait past the retention first.
+        time::sleep(GOSSIP_CACHE_RETENTION + Duration::from_secs(1)).await;
         let started = Instant::now();
         let (late, late_chat, late_saw) = spawn(&topic, "late").await;
         assert!(

@@ -1063,11 +1063,13 @@ async fn auto_pong(message: &Verified, state: &EventLoopState, context: &Handler
 }
 
 /// Answer a proof request that names this node with a `joined` frame that carries the proof of
-/// this session, sent to the asker alone over a warm path. The path is checked before the answer
-/// takes a slot of the per-minute cap, so an answer that cannot go out costs no slot. No warm path
-/// means no answer, and the asker asks again by the retry rule of the proof exchange. A send that
-/// fails after the slot was taken keeps the slot and the 60 s window of the asker, so the first retry
-/// that can work is the one at 90 s: the one at 30 s is refused.
+/// this session, sent to the asker alone. The answer goes to the endpoint the asker is known by, or
+/// back on the connection of the request when that is an unlinked arrival (a dial back, to that
+/// authenticated arrival only). The path is checked before the answer takes a slot of the per-minute
+/// cap, so an answer that cannot go out costs no slot. No path means no answer, and the asker asks
+/// again by the retry rule of the proof exchange. A send that fails after the slot was taken keeps
+/// the slot and the 60 s window of the asker, so the first retry that can work is the one at 90 s:
+/// the one at 30 s is refused.
 async fn answer_proof_request(
     to: &AuthorKey,
     message: &Verified,
@@ -1075,7 +1077,7 @@ async fn answer_proof_request(
     context: &HandlerCtx<'_>,
 ) {
     let Some(eid) = return_path(state, &message.key()) else {
-        tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no warm path");
+        tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no path");
         return;
     };
     let Some(answer) = state.proof_answer(
@@ -4966,9 +4968,11 @@ mod first_contact_tests {
         });
     }
 
-    /// The control of the dial back: the same request with no unicast arrival starts no dial.
+    /// The control of the dial back: the asker has a known address that is not the arrival, and the
+    /// answer goes to that address by a plain send. The dial back is only to the authenticated
+    /// arrival, so nothing dials the known address.
     #[test]
-    fn a_proof_request_with_no_unicast_arrival_starts_no_dial_back() {
+    fn a_proof_request_is_not_dialed_back_to_an_address_that_is_not_the_arrival() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -4977,12 +4981,18 @@ mod first_contact_tests {
             let to = state.identity.author_key();
             let request = Message::new_proof_request(&node.mesh, &nick("asker"), to).sign(&asker);
             state.direct.insert(endpoint_id(82), DirectState::Direct);
+            state.direct.insert(endpoint_id(83), DirectState::Direct);
+            state.retain_refused_endpoint(
+                asker.author_key(),
+                iroh::EndpointAddr::new(endpoint_id(83)),
+            );
+            state.unicast_arrival = Some(endpoint_id(82));
 
             super::answer_proof_request(&to, &request, &mut state, &context).await;
 
             assert!(
-                !state.unicast_pool.is_dialing(endpoint_id(82)),
-                "with no unicast arrival the answer makes no dial"
+                !state.unicast_pool.is_dialing(endpoint_id(83)),
+                "the answer goes to the known address by a plain send, not by a dial back"
             );
             node.endpoint.close().await;
         });

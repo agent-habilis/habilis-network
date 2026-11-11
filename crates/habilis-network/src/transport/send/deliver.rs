@@ -165,6 +165,13 @@ pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
     !super::route::held(eid, state) || state.unicast_arrival == Some(eid)
 }
 
+/// Where an answer to the digest signed by `signer` can go
+/// point-to-point: the endpoint that key proved in its `PeerInfo`, when it is
+/// a linked gossip neighbor with a usable path. Proven, because a nickname is
+/// a label any signer can claim, and one answer is up to a whole resend budget
+/// of frames aimed at whoever holds that endpoint. Linked, because every
+/// holder that hears a digest answers it: the asker's link count bounds how
+/// many answers reach its unicast inbox. `None` means answer on gossip.
 pub(crate) fn unicast_answer_target(
     signer: &AuthorKey,
     state: &EventLoopState,
