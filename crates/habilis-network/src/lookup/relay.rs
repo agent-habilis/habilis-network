@@ -518,7 +518,9 @@ mod tests {
     };
     use crate::lookup::{TransportOpts, build_peer_endpoint, build_peer_webrtc};
     use crate::protocol::meshes::LookupOpts;
+    use iroh::RelayMode;
     use iroh_relay::server::Server;
+    use n0_future::task as n0future_task;
     use std::collections::{BTreeSet, HashSet};
     use std::net::{Ipv4Addr, TcpListener};
 
@@ -620,6 +622,51 @@ mod tests {
             ladder,
             "the relay map of the default choice is the ladder, rung 0 included"
         );
+    }
+
+    /// A dial by an address that names a relay the dialer does not hold in its map. If it
+    /// completes, two endpoints on different home relays still reach each other, so a split home
+    /// relay does not explain a failed dial.
+    #[test]
+    fn a_dial_reaches_a_peer_homed_on_a_relay_that_is_not_in_the_map_of_the_dialer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            const ALPN: &[u8] = b"habilis-network/test-dial";
+            let (relay_a, _server_a) = test_relay::spawn_plain().await.expect("a local relay");
+            let (relay_b, _server_b) = test_relay::spawn_plain().await.expect("a local relay");
+            let producer = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::custom([relay_a.clone()]))
+                .alpns(vec![ALPN.to_vec()])
+                .bind()
+                .await
+                .expect("bind the producer");
+            let consumer = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::custom([relay_b]))
+                .bind()
+                .await
+                .expect("bind the consumer");
+            producer.online().await;
+            consumer.online().await;
+            let accepting = producer.clone();
+            let accept = n0future_task::spawn(async move {
+                if let Some(incoming) = accepting.accept().await
+                    && let Ok(connection) = incoming.await
+                {
+                    connection.closed().await;
+                }
+            });
+
+            let address = iroh::EndpointAddr::new(producer.id()).with_relay_url(relay_a);
+            let dialed =
+                time::timeout(std_Duration::from_secs(15), consumer.connect(address, ALPN)).await;
+
+            consumer.close().await;
+            producer.close().await;
+            accept.abort();
+            assert!(
+                matches!(dialed, Ok(Ok(_))),
+                "the dial across 2 relays failed: {dialed:?}"
+            );
+        });
     }
 
     /// The home relay of an endpoint, once it is online.
