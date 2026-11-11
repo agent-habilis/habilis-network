@@ -27,7 +27,7 @@ function freeze<T>(value: T): T {
 export async function openMesh(open: Opener): Promise<Mesh> {
   const messages = new Fanout<Message>()
   const events = new Fanout<MeshEvent>()
-  const changes = new Fanout<Record<string, unknown>>()
+  const changes = new Fanout<Record<string, Record<string, unknown>>>()
 
   let peers: Peer[] = []
   let rosterJson = ''

@@ -144,7 +144,7 @@ export interface StateDoc {
   readonly value: Record<string, Record<string, unknown>>
   /** Apply an RFC 7386 merge patch: set present keys, delete null keys, leave the rest. */
   merge(patch: Record<string, unknown>): Promise<void>
-  changes(signal?: AbortSignal): AsyncIterable<Record<string, unknown>>
+  changes(signal?: AbortSignal): AsyncIterable<Record<string, Record<string, unknown>>>
 }
 
 export interface Mesh extends AsyncDisposable {

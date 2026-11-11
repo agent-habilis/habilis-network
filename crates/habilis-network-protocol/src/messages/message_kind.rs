@@ -75,17 +75,14 @@ pub enum MessageKind {
         /// The session whose proof is asked for, by author key.
         to: AuthorKey,
     },
-    /// A durable `state`-channel event: one Base58 automerge change
-    /// (`{"k":"change",…}`) applied to the channel's `MeshDoc`
-    /// CRDT. Carried on the gossip topic like everything else; the signed frame
-    /// is retained as the doc's re-serve store. Signed like any message; never
-    /// never surfaced via poll/fetch.
+    /// A durable `state`-channel event: one signed slice of its author, a
+    /// version and a value. Carried on the gossip topic like everything else; the
+    /// store keeps the newest slice of each author. Signed like any message, and
+    /// not surfaced through poll or fetch.
     State,
-    /// A durable event on the **meta** channel — a second shared-state channel,
-    /// identical machinery to [`State`](MessageKind::State) but with the
-    /// foreign-card forgery gate enabled (a `meta` card carries a peer's
-    /// cryptographic identity). The split is application convention (`meta` for
-    /// mesh metadata, `state` for the task).
+    /// A durable event on the **meta** channel: a second shared-state channel,
+    /// with the same frame shape as [`State`](MessageKind::State). The split is
+    /// application convention (`meta` for mesh metadata, `state` for the task).
     Meta,
     /// A multihop-routing **link-state** advertisement: the author's own measured
     /// links + underlay address (`body` is a serialized

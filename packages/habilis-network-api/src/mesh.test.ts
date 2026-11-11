@@ -231,18 +231,18 @@ describe('state', () => {
   test('a change reaches every changes() iterator', async () => {
     const { mesh, sink } = await fake()
     const changes = drain(mesh.state.changes(), 1)
-    sink.state('{"topic":"standup"}')
+    sink.state(`{"${ANA}":{"topic":"standup"}}`)
 
-    expect(await changes).toEqual([{ topic: 'standup' }])
+    expect(await changes).toEqual([{ [ANA]: { topic: 'standup' } }])
   })
 
   test('an unchanged document is not a change', async () => {
-    const { mesh, sink } = await fake({ state: '{"a":1}' })
+    const { mesh, sink } = await fake({ state: `{"${ANA}":{"a":1}}` })
     const changes = drain(mesh.state.changes(), 1)
-    sink.state('{"a":1}')
-    sink.state('{"a":2}')
+    sink.state(`{"${ANA}":{"a":1}}`)
+    sink.state(`{"${ANA}":{"a":2}}`)
 
-    expect(await changes).toEqual([{ a: 2 }])
+    expect(await changes).toEqual([{ [ANA]: { a: 2 } }])
   })
 
   test('the value is frozen all the way down', async () => {

@@ -382,15 +382,12 @@ pub enum Farewell {
 }
 
 /// The single shared-state write helper, shared by the IPC `state_merge` command
-/// and the in-process `StateMerge` request. Translates the RFC 7386 merge into one
-/// automerge change, gossips it inside a signed frame, and retains it locally so
-/// anti-entropy can serve it (gossip never echoes to self).
+/// and the in-process `StateMerge` request. Applies the RFC 7386 merge to this
+/// member's own slice, gossips the slice inside a signed frame, and keeps it locally
+/// so the backfill can serve it (gossip never echoes to self).
 ///
-/// The change is built on a fork and the frame size-gated **before** the change
-/// touches the live doc, so an oversize merge never lands in a doc it could not
-/// be gossiped for. Applying then runs through [`MeshDoc::ingest`](crate::doc::MeshDoc::ingest)'s gate, so a
-/// local write that would forge another peer's card is refused, not silently
-/// diverged.
+/// The slice is size-gated **before** it touches the live store, so an oversize
+/// merge never lands in a store it could not be gossiped from.
 ///
 /// `surface` controls whether the local write is reported to the operator/agent
 /// as a `state`/`meta` event (`you changed …`). Agent-driven merges pass
@@ -399,8 +396,8 @@ pub enum Farewell {
 /// "you changed shared state" event (nor race into a `fetch_messages` long-poll).
 ///
 /// # Errors
-/// Unrepresentable merge, oversize frame, a rejected foreign-card write, or a
-/// broadcast refusal.
+/// Unrepresentable merge, a slice too large for one frame, a write past the rate
+/// limit, or a broadcast refusal.
 ///
 /// # Examples
 ///

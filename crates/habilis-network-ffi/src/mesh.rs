@@ -145,7 +145,7 @@ impl Mesh {
     }
 
     /// Apply an RFC 7386 merge document to the shared `state` channel and gossip
-    /// the resulting automerge change.
+    /// the resulting slice.
     ///
     /// # Errors
     /// `json` is not a JSON object, the merge is unrepresentable, the resulting

@@ -1460,9 +1460,10 @@ fn maybe_push_inbound(
     if tx.receiver_count() == 0
         || !surfaceable
         || !addressed_to_us(message, &context.our_pubkey)
-        || matches!(message.kind, |MessageKind::State| MessageKind::Meta
-            | MessageKind::Ping
-            | MessageKind::Pong { .. })
+        || matches!(
+            message.kind,
+            MessageKind::State | MessageKind::Meta | MessageKind::Ping | MessageKind::Pong { .. }
+        )
     {
         return;
     }
@@ -3091,6 +3092,51 @@ mod first_contact_tests {
             assert_eq!(
                 heard, keys,
                 "the hook did not name the key of each author, in order"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A meta slice that the store refuses does not reach the hook: the hook adopts the endpoint hint of a
+    /// slice the store took, so a stale version must not run it.
+    #[test]
+    fn a_refused_meta_slice_does_not_reach_the_meta_hook() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the record
+            let record = Arc::new(Mutex::new(Vec::new()));
+            let mut app = MetaRecorder(Arc::clone(&record));
+            let twin = nick("twin");
+            let identity = Identity::generate();
+            // Version 1 applies. A second frame with version 1 is stale, so the store refuses it.
+            for version in [1, 1] {
+                let frame = Message::new_channel_event(
+                    &node.mesh,
+                    &twin,
+                    MessageBody::try_new(&format!(r#"{{"version":{version},"value":{{}}}}"#))
+                        .expect("a slice body"),
+                    Channel::Meta,
+                )
+                .sign(&identity);
+                dispatch_channel(
+                    ChannelEvent {
+                        channel: Channel::Meta,
+                        message: &frame,
+                        surfaceable: true,
+                    },
+                    &mut state,
+                    &mut app,
+                    &context,
+                );
+            }
+
+            let heard = record.lock().expect("the record lock").clone();
+            assert_eq!(
+                heard,
+                vec![identity.author_key()],
+                "the hook ran for the applied slice only, not for the stale one"
             );
             node.endpoint.close().await;
         });

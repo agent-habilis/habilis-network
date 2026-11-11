@@ -138,8 +138,8 @@ long habilis_network_msg_recv(habilis_network_mesh *handle, char *buffer, size_t
                      habilis_network_msg *out);
 
 /*
- * The shared state document — a JSON object every peer in the mesh converges on
- * (a CRDT underneath, so concurrent writers merge instead of clobbering).
+ * The shared state: one signed slice per member. Each member writes only its own slice, and every
+ * member reads every slice.
  *
  * habilis_network_mesh_state_merge() applies an RFC 7386 merge document to this member's own slice:
  * present keys are set, keys set to null are removed, everything else is left alone. It returns -1
