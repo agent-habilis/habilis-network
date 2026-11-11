@@ -149,6 +149,22 @@ pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBo
     Ok(MessageBody::try_new(&json)?)
 }
 
+/// The escaped length of the sealed body that [`encrypt_body`] makes for a plain body of `plain_len`
+/// bytes, at the longest Base58 text that the blob can take.
+///
+/// A seal draws a fresh nonce, and the Base58 text of one blob can be a byte or two shorter or longer
+/// than the text of the next blob of the same length. A caller that checks a size needs one number,
+/// so it takes this bound.
+pub(crate) fn sealed_body_len_bound(plain_len: usize) -> usize {
+    // The blob is the 12-byte nonce, the ciphertext, and the 16-byte tag. Base58 takes at most
+    // 1.3657 characters per byte, and 138 percent is the bound used here.
+    const NONCE_AND_TAG: usize = 12 + 16;
+    let blob_len = plain_len + NONCE_AND_TAG;
+    let longest_text = "1".repeat(blob_len * 138 / 100 + 1);
+    let body = serde_json::to_string(&StateOp::Enc { data: longest_text }).unwrap_or_default();
+    serde_json::to_string(&body).map_or(usize::MAX, |escaped| escaped.len())
+}
+
 /// Recover the plaintext body string. With a `key` (passworded mesh) the body
 /// **must** be a sealed `enc` envelope: it is opened, and any non-`enc` body is
 /// rejected (`None`) so cleartext can never slip past the encryption guarantee.

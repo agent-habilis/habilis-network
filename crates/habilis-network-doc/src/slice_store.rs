@@ -50,8 +50,8 @@ const MAX_NICKNAME_LEN: usize = 128;
 /// test checks that the overhead grows one byte for each byte of mesh id and nickname.
 const FRAME_BASE_OVERHEAD: usize = 338;
 
-/// The frame overhead of the worst case: the longest mesh id and the longest nickname. A store
-/// uses it until the engine sets the overhead of its session with `with_frame_overhead`.
+/// The frame overhead of the worst case: the longest mesh id and the longest nickname. Pass it to
+/// [`SliceStore::new`] only where no probe of the session is possible.
 const WORST_FRAME_OVERHEAD: usize = FRAME_BASE_OVERHEAD + MAX_MESH_ID_LEN + MAX_NICKNAME_LEN;
 
 /// The bytes of a digest page around its rows: the index, the total, the range, the hash, and the
@@ -765,16 +765,34 @@ impl SliceStore {
 
     /// The length in bytes of the escaped body that a write of `value` by `own` would carry.
     ///
-    /// A caller measures a write before it sends one. The body is sealed when the store has a key.
-    /// The call spends no token and changes nothing.
+    /// A caller measures a write before it sends one. A sealed body is measured at the longest text
+    /// its blob can take, so the measure and the cap check of [`SliceStore::prepare_local`] agree on
+    /// every seal. The call spends no token and changes nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    /// use serde_json::{Map, Value};
+    ///
+    /// let store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
+    /// let value: Map<String, Value> = serde_json::from_str(r#"{"status":"busy"}"#).expect("an object");
+    /// let len = store.body_len(&habilis_network_protocol::AuthorKey::from([1; 32]), value.clone());
+    /// assert!(len.is_ok(), "a short value fits");
+    /// ```
     ///
     /// # Errors
     ///
     /// The errors of [`SliceStore::prepare_local`] that do not spend a token: [`SliceError::Malformed`],
     /// [`SliceError::Seal`] and [`SliceError::TooLarge`].
-    pub fn body_len(&self, own: &AuthorKey, value: Value) -> Result<usize, SliceError> {
-        let (_, body) = self.draft_body(own, value)?;
-        Ok(serde_json::to_string(body.as_str()).map_or(usize::MAX, |text| text.len()))
+    pub fn body_len(
+        &self,
+        own: &AuthorKey,
+        value: Map<String, Value>,
+    ) -> Result<usize, SliceError> {
+        let (_, _, measured) = self.draft_body(own, Value::Object(value))?;
+        Ok(measured)
     }
 
     /// Keeps the signed `frame` of a draft, when the draft is for this channel and this key, its
@@ -973,7 +991,7 @@ impl SliceStore {
         now: Instant,
         spend: bool,
     ) -> Result<LocalDraft, SliceError> {
-        let (version, body) = self.draft_body(own, value)?;
+        let (version, body, _) = self.draft_body(own, value)?;
         if spend && !self.take_token(own, now) {
             return Err(SliceError::RateLimited);
         }
@@ -985,27 +1003,37 @@ impl SliceStore {
         })
     }
 
-    /// Builds the next version and body of the slice of `own`, sealed when the store has a key,
-    /// and checks that the escaped body fits the frame cap.
-    fn draft_body(&self, own: &AuthorKey, value: Value) -> Result<(u64, MessageBody), SliceError> {
+    /// Builds the next version and body of the slice of `own`, and the length that the body is
+    /// measured at. The length is the bound of a sealed body, so it does not change between seals.
+    /// The check against the frame cap uses the measured length.
+    fn draft_body(
+        &self,
+        own: &AuthorKey,
+        value: Value,
+    ) -> Result<(u64, MessageBody, usize), SliceError> {
         let version = self.version(own).unwrap_or(0) + 1;
         let mut body_json = json!({"version": version});
         body_json["value"] = value;
         let json = body_json.to_string();
         let plain = MessageBody::try_new(&json).map_err(|_| SliceError::Malformed)?;
-        let body = match self.key.as_ref() {
-            Some(key) => wire::encrypt_body(&plain, key).map_err(|_| SliceError::Seal)?,
-            None => plain,
+        let (body, measured) = if let Some(key) = self.key.as_ref() {
+            (
+                wire::encrypt_body(&plain, key).map_err(|_| SliceError::Seal)?,
+                wire::sealed_body_len_bound(plain.as_str().len()),
+            )
+        } else {
+            let escaped =
+                serde_json::to_string(plain.as_str()).map_or(usize::MAX, |text| text.len());
+            (plain, escaped)
         };
-        let escaped = serde_json::to_string(body.as_str()).map_or(usize::MAX, |text| text.len());
         let limit = self.limits.slice_bytes.saturating_sub(self.frame_overhead);
-        if escaped > limit {
+        if measured > limit {
             return Err(SliceError::TooLarge {
-                bytes: escaped,
+                bytes: measured,
                 limit,
             });
         }
-        Ok((version, body))
+        Ok((version, body, measured))
     }
 
     /// Whether `key` is in the gone set.
@@ -1359,7 +1387,7 @@ mod tests {
         let now = Instant::now();
         let value = object(json!({"a": 1}));
         let measured = store
-            .body_len(&key(1), Value::Object(value.clone()))
+            .body_len(&key(1), value.clone())
             .expect("a body that fits");
         let draft = store
             .prepare_local(&key(1), value, now)
@@ -1368,7 +1396,7 @@ mod tests {
         assert_eq!(measured, escaped, "the measured length must be the draft's");
         for _ in 0..4 {
             assert!(
-                store.body_len(&key(1), Value::Null).is_ok(),
+                store.body_len(&key(1), Map::new()).is_ok(),
                 "a measure never spends a token"
             );
         }
@@ -1382,7 +1410,7 @@ mod tests {
     fn body_len_refuses_a_body_past_the_cap_with_the_typed_error() {
         let limits = SliceLimits::new(64 + WORST_FRAME_OVERHEAD, Duration::from_secs(1), 256, 1);
         let store = small_store(limits);
-        let blob = Value::Object(object(json!({"blob": "x".repeat(200)})));
+        let blob = object(json!({"blob": "x".repeat(200)}));
         assert!(
             matches!(
                 store.body_len(&key(1), blob),
@@ -1390,6 +1418,61 @@ mod tests {
             ),
             "a body past the cap must refuse with TooLarge"
         );
+    }
+
+    /// The largest blob of `x` characters that `store` measures within its cap.
+    fn largest_fitting(store: &SliceStore) -> usize {
+        let mut fitting = 0;
+        while store
+            .body_len(&key(1), object(json!({"blob": "x".repeat(fitting + 1)})))
+            .is_ok()
+        {
+            fitting += 1;
+        }
+        fitting
+    }
+
+    #[test]
+    fn a_plain_write_at_the_limit_fits_and_one_byte_more_is_too_large() {
+        let limits = SliceLimits::new(3072, Duration::from_secs(1), 256, 5);
+        let store = small_store(limits);
+        let limit = 3072 - WORST_FRAME_OVERHEAD;
+        let edge = largest_fitting(&store);
+        let at = store
+            .body_len(&key(1), object(json!({"blob": "x".repeat(edge)})))
+            .expect("the largest write that fits");
+        assert!(at <= limit, "the largest fitting write is within the limit");
+        assert!(
+            matches!(
+                store.body_len(&key(1), object(json!({"blob": "x".repeat(edge + 1)}))),
+                Err(SliceError::TooLarge { limit: refused, .. }) if refused == limit
+            ),
+            "one byte past the largest fitting write is TooLarge at the limit"
+        );
+    }
+
+    #[test]
+    fn a_sealed_write_at_the_limit_is_ok_on_every_seal() {
+        let limits = SliceLimits::new(3072, Duration::from_secs(1), 256, 200);
+        let mut store = small_store(limits).with_key(Some(SymmetricKey::from([3u8; 32])));
+        let edge = largest_fitting(&store);
+        let limit = 3072 - WORST_FRAME_OVERHEAD;
+        assert!(
+            matches!(
+                store.body_len(&key(1), object(json!({"blob": "x".repeat(edge + 1)}))),
+                Err(SliceError::TooLarge { limit: refused, .. }) if refused == limit
+            ),
+            "one byte past the largest fitting sealed write is TooLarge"
+        );
+        let now = Instant::now();
+        for seal in 0..200 {
+            assert!(
+                store
+                    .prepare_local(&key(1), object(json!({"blob": "x".repeat(edge)})), now)
+                    .is_ok(),
+                "seal {seal}: a write at the limit must fit on every seal"
+            );
+        }
     }
 
     #[test]
