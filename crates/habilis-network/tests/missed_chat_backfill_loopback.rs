@@ -1,7 +1,8 @@
 //! A chat broadcast that a late joiner missed is not delivered to it after the late joiner meets
-//! the mesh. Chat has no backfill now: no digest, tick or resend carries it. The tick runs at one
-//! second, so a tick-driven chat resend would have time to act, and the test waits five ticks
-//! before it asserts that the frame did not arrive.
+//! the mesh. Chat has no backfill now: no digest, tick or resend carries it. The late joiner starts
+//! only after iroh-gossip's payload cache (30 s) lets go of the frame, so a graft cannot answer from
+//! that cache; the frame is stamped `AHEAD` so that it stays surfaceable for the late joiner, which
+//! makes the assertion test the engine and not the join horizon.
 
 #![cfg(feature = "host")]
 
@@ -30,9 +31,10 @@ const GOSSIP_CACHE_RETENTION: Duration = Duration::from_secs(30);
 /// the first link can deliver.
 const BUDGET: Duration = Duration::from_secs(15);
 
-/// A frame stamped this far ahead stays inside a node's window even when the
-/// node joins after it was sent, so the only way to get it is to ask.
-const AHEAD: Duration = Duration::from_secs(30);
+/// A frame stamped this far ahead stays surfaceable for the late joiner, so the assertion below
+/// reaches the engine. It must exceed the wait before the late joiner starts plus the join budget,
+/// otherwise the join horizon hides the frame and the assertion proves nothing.
+const AHEAD: Duration = Duration::from_secs(4 * 30);
 
 /// Logs every chat frame and records the surfaceable ones it receives.
 #[derive(Clone, Default)]
