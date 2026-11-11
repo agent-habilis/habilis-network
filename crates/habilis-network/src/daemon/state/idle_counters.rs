@@ -68,9 +68,6 @@ pub(crate) struct IdleCounters {
     /// Authenticated frames that the app dedup kept as first sightings. With `duplicates`, it
     /// gives the frames per interval that reached the dedup.
     pub fresh: u64,
-    /// State and meta frames that the document refused or ignored: a forged entry, a repeated
-    /// `(actor, seq)` with other content, or a body that is no change.
-    pub state_rejected: u64,
     /// The frames received in the interval, by kind and by what became of them.
     pub wire_in: WireIn,
     /// The process CPU time at the last census. It is not reset by `take`.
@@ -238,7 +235,6 @@ mod tests {
             reclaim: 3,
             duplicates: 4,
             fresh: 6,
-            state_rejected: 1,
             ..IdleCounters::default()
         };
         counters.ext.note_gossip(Some(&Ok(Event::Lagged)));
@@ -257,10 +253,6 @@ mod tests {
             "duplicates is read as it was set"
         );
         assert_eq!(reading.loop_arms.fresh, 6, "fresh is read as it was set");
-        assert_eq!(
-            reading.loop_arms.state_rejected, 1,
-            "state_rejected is read as it was set"
-        );
         assert_eq!(
             reading.loop_arms.ext.lagged, 1,
             "ext lagged is read as it was set"
@@ -283,10 +275,6 @@ mod tests {
         assert_eq!(next.loop_arms.reclaim, 0, "take resets the arms");
         assert_eq!(next.loop_arms.duplicates, 0, "take resets the duplicates");
         assert_eq!(next.loop_arms.fresh, 0, "take resets the first sightings");
-        assert_eq!(
-            next.loop_arms.state_rejected, 0,
-            "take resets the answer counter"
-        );
         assert_eq!(next.loop_arms.ext.total(), 0, "take resets the split");
         assert_eq!(
             next.loop_arms.wire_in.frames, 0,

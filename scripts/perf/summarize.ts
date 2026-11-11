@@ -18,11 +18,8 @@
 //   deltas of every census line, which is the total over the run.
 // - census_lines: the census lines of all nodes. Divide a total below by it for a mean per node
 //   and interval (10 s).
-// - cpu_ms / wakeups / dup / fresh / fr_asks / fr_retries / answers /
-//   frames_uni / frames_bc / rejected: the sums of the `cpu_ms`, `idle_wakeups`,
-//   `idle_duplicates`, `idle_fresh`, `idle_fr_asks`, `idle_fr_retries`, `idle_state_answers`,
-//   `idle_state_frames_unicast`, `idle_state_frames_broadcast` and `idle_state_rejected` deltas of
-//   every census line.
+// - cpu_ms / wakeups / dup / fresh: the sums of the `cpu_ms`, `idle_wakeups`,
+//   `idle_duplicates` and `idle_fresh` deltas of every census line.
 // - wire_in / body_in / frames_in / wire_out / body_out / frames_out: the sums of the `idle_wire_in`,
 //   `idle_body_in`, `idle_frames_in`, `idle_wire_out`, `idle_body_out` and `idle_frames_out`
 //   deltas (the `wire census` line). The wire is the frame as it goes on a socket; the body is its
@@ -89,12 +86,6 @@ const TOTALS: [string, string][] = [
   ["wakeups", "idle_wakeups"],
   ["dup", "idle_duplicates"],
   ["fresh", "idle_fresh"],
-  ["fr_asks", "idle_fr_asks"],
-  ["fr_retries", "idle_fr_retries"],
-  ["answers", "idle_state_answers"],
-  ["frames_uni", "idle_state_frames_unicast"],
-  ["frames_bc", "idle_state_frames_broadcast"],
-  ["rejected", "idle_state_rejected"],
   ["wire_in", "idle_wire_in"],
   ["body_in", "idle_body_in"],
   ["frames_in", "idle_frames_in"],
