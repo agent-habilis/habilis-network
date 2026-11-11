@@ -11,8 +11,11 @@
 export type CType =
   /** C `int`. */
   | 'i32'
-  /** C `long`. 8 bytes on every target here, so it crosses as a bigint. */
-  | 'isize'
+  /**
+   * C `habilis_network_len`: `int64_t` on Windows and `long` elsewhere. 8 bytes
+   * on every target the loaders run on, so it crosses as a bigint.
+   */
+  | 'i64'
   /** C `size_t`. Likewise a bigint. */
   | 'usize'
   /** An opaque address in or out — a handle, or a returned `char *`. */
@@ -41,17 +44,17 @@ export const ABI = {
    * 1 = a message is in `buf` and `out`, 0 = timeout, -1 = failure, -2 = `buf`
    * too small: the message stays queued and `out.len` says how big to retry.
    */
-  habilis_network_msg_recv: { args: ['ptr', 'buf', 'usize', 'i32', 'buf'], returns: 'isize' },
+  habilis_network_msg_recv: { args: ['ptr', 'buf', 'usize', 'i32', 'buf'], returns: 'i64' },
 
   habilis_network_mesh_state_merge: { args: ['ptr', 'cstr'], returns: 'i32' },
-  habilis_network_mesh_state_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },
-  habilis_network_mesh_peers_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },
+  habilis_network_mesh_state_json: { args: ['ptr', 'buf', 'usize'], returns: 'i64' },
+  habilis_network_mesh_peers_json: { args: ['ptr', 'buf', 'usize'], returns: 'i64' },
   /**
    * Bound because the header declares it, and never called: `mesh.peers` needs
    * the whole roster anyway, and this count is the roster document's own
    * `count`, self included. Calling both would read one fact twice.
    */
-  habilis_network_mesh_peer_count: { args: ['ptr'], returns: 'isize' },
+  habilis_network_mesh_peer_count: { args: ['ptr'], returns: 'i64' },
 
   habilis_network_mesh_close: { args: ['ptr'], returns: 'i32' },
 
@@ -71,7 +74,7 @@ export const ABI = {
   habilis_network_stream_close: { args: ['ptr'], returns: 'i32' },
   habilis_network_stream_open: { args: ['ptr', 'cstr'], returns: 'ptr' },
   /** > 0 = bytes, 0 = timeout, -1 = failure, -2 = end of stream. */
-  habilis_network_stream_read: { args: ['ptr', 'buf', 'usize', 'i32'], returns: 'isize' },
+  habilis_network_stream_read: { args: ['ptr', 'buf', 'usize', 'i32'], returns: 'i64' },
   habilis_network_reader_close: { args: ['ptr'], returns: 'i32' },
   habilis_network_last_error: { args: [], returns: 'ptr' },
   habilis_network_version: { args: [], returns: 'ptr' },

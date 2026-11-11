@@ -653,6 +653,11 @@ pub struct EventLoopState {
     pub(crate) pending_outbound: BoundedQueue<(Verified, WireFrame)>,
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
+    /// The marker that makes this daemon's IPC endpoint findable, on Windows.
+    /// Set once the endpoint is bound; `None` for an in-process node, which
+    /// binds none. The shutdown removes it, beside the state file.
+    #[cfg(all(windows, feature = "host"))]
+    pub(crate) ipc_marker: Option<transport::ipc::IpcMarker>,
     /// When advertising (`create --advertise`), the directory's
     /// re-broadcast task reads the live peer count from here.
     /// Mirrors `peer_count` (`peers.len() + 1`), refreshed
@@ -938,6 +943,8 @@ impl EventLoopState {
             // The lock goes to the state file as well: its cleanup deletes the member key, so the
             // lock must outlive that cleanup (see `StateFile::key_lock`).
             state_file: state_file_holding_the_key_lock(init.state_file, init.keys.key_lock),
+            #[cfg(all(windows, feature = "host"))]
+            ipc_marker: None,
             live_count: None,
             message_log: MessageLog::new(MESSAGE_LOG_SIZE),
             receive_memory: ReceiveMemory::default(),

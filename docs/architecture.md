@@ -32,7 +32,7 @@ Three unrelated consumers enforce this claim:
 
 1. **agent-gossip** — a gossip network for AI agents, in a separate repository.
    The `gossip-*` skills of Claude Code are thin shells over this CLI.
-   The CLI embeds the engine and drives it over an IPC socket.
+   The CLI embeds the engine and drives it over an IPC endpoint.
 2. **agent-share** — file sharing over the same engine.
 3. **A C host application** — links `habilis-network-ffi` as a static library.
 
@@ -40,7 +40,7 @@ Three unrelated consumers enforce this claim:
 graph LR
     subgraph "Agent machine"
         SKILLS["Claude Code skills"] --> CLI["agent-gossip CLI"]
-        CLI -->|"IPC socket"| E1["habilis-network engine"]
+        CLI -->|"IPC endpoint"| E1["habilis-network engine"]
     end
     subgraph "C host"
         APP["C host application"] --> FFI["habilis-network-ffi (C ABI)"]
@@ -136,7 +136,7 @@ Consumers reach iroh through re-exports: `habilis_network::iroh`, `habilis_netwo
 
 The default features of the engine are `host`, `mdns`, and `dht`.
 The `host` feature is the coarse "needs an OS" gate.
-It adds the control socket, the state file, process helpers, the log sink, and the multihop transport.
+It adds the IPC endpoint, the state file, process helpers, the log sink, and the multihop transport.
 The `mdns` and `dht` features each select one address-lookup mechanism, and each implies `host`.
 The `blob` feature adds a side channel for oversize payloads (section 7.3).
 A build with `--no-default-features` leaves the portable engine that runs in a browser.
@@ -336,7 +336,8 @@ Topic setup makes the first peer claim the beacon eagerly, because a topic mesh 
 ### 6.2 Driver modes
 
 `DriverMode` is the single branch between the two ways to drive a node.
-`Cli` binds the control socket and exits the process on quit.
+`Cli` binds the IPC endpoint and exits the process on quit.
+A quit comes from a signal, the owner watch, or on Windows a console event, the end of the session, a window close or the IPC `quit` command, and all of them take one path: the state file, and on Windows the marker, are removed, then `Left` goes out, then the process exits.
 `InProcess` takes typed requests over channels and returns cleanly.
 A browser node and an embedded node are always `InProcess`.
 
@@ -353,7 +354,7 @@ flowchart LR
         I["IPC commands"]
         S["session requests"]
         W["relay rung watch"]
-        Q["quit signals"]
+        Q["quit signals, and the IPC quit on Windows"]
     end
     subgraph Timers
         T1["alive / sweep"]
@@ -509,7 +510,7 @@ An ask that finds no warm path waits. A bounded map holds the waiting asks (64 a
 The ask goes when a path comes up: when the gossip link to the endpoint of the session comes up, when a frame arrives from that endpoint on a unicast connection, or at the 10 s sweep tick, which is the fallback. A session that has no gossip link and no connection of ours can still dial us: for a frame that arrives on its unicast connection, the ask goes by a dial back in the background, as for a linked neighbour, and the limits of the retry stay. A node with no waiting ask pays one comparison.
 A session is asked once for each wait (30 s, then 60 s, then 120 s, then every 10 minutes for as long as the session is visible and has no proof), whatever number of frames come. A node sends at most 8 proof requests to one endpoint for each 10 s window, and the count is made before the request is signed: a peer that makes fresh session keys cannot set off a signature and a task for each key. In all, the requests after the first of an endpoint stop when 64 requests were sent in the window. The first request to an endpoint in a window is exempt from that limit, so one peer that uses all of the 64 cannot starve the other endpoints; the first requests have a limit of their own, 256 for each window. So a window holds at most 256 first requests plus the requests after them up to the 64, whatever the number of endpoints that have a path to the node (a link, a warm connection, or the endpoint that just sent a unicast frame). A session that claims OUR nickname (another member with its own key) is asked for its proof too, on any frame that it sends (a claimant that is chatty sends no `alive`, so its `PeerInfo` and its app frames count), by the same path and under the same budgets (its requests count in the 4 open asks for a nickname and in the reserve below): its answer is the frame that tells this node that another member holds the nickname, and the start `joined` of the claimant, which a node that is not yet its neighbor misses, is sent only once. The requests for a session that claims a bound nickname (a restart of the member that holds the name, or an intruder) have a reserve of their own: 64 for each window, outside the shared 256 and the 64, and at most 4 for each nickname, while the endpoint is under its 8 requests; so they go even when an attacker has used the shared budgets and filled the table. When the table holds only live counts, such a request goes out untracked (it counts in the reserve and in the work in all), and no live count is dropped for it. The limit of the reserve: an attacker that claims 16 bound nicknames with 4 fresh sessions each uses the whole reserve in a window, and the restart of another bound nickname waits for the next window (its request comes again then; no nickname is lost). The limit of the shared budget: an attacker that keeps more than 256 endpoints with a path asking in every window delays the requests for new members under free nicknames, which wait in the map below; it costs the attacker a connection for each endpoint. The count of an endpoint is kept for its whole window: the table holds 256 endpoints, drops only a count that is outside its window, and a request from an endpoint that the full table does not track waits in the map below. An ask over the budget waits in the same map as the asks that wait for a path, and goes when the window has moved.
 A member signs its answer once for each run, and every asker gets that same frame. The member keeps it in its own log once, so a peer that holds it does not send it back to its author at each digest round, and the answers of a join wave do not spread through the mesh as new frames.
-A calm mesh carries no proof bytes beyond the `joined` frames. A host with no files (the browser) holds no member key and sends no proof.
+A calm mesh carries no proof bytes beyond the `joined` frames. A host with no files (the browser) holds no member key and sends no proof. On Windows the key files are not ported yet: each start has a new member key (`docs/windows.md`, R8).
 
 A nickname is bound to the member key that proved it, while a session of that member is in the roster, live or quiet.
 - A session that claims a bound nickname with no proof of that member is not admitted. Its presence, ping, pong and link-state frames are dropped. Its data frames are stored and relayed and change no roster entry.
@@ -768,13 +769,19 @@ Everything except `classify` and `on_app_frame` has a default body.
 `NodeSink` is the outbound event surface, one `emit` call per node event.
 The example `crates/habilis-network/examples/mesh_peer.rs` is the smallest embedding, near 40 lines of seam.
 
-### 10.3 The IPC socket
+### 10.3 The IPC endpoint
 
-With the `host` feature, a CLI-driven node binds a Unix socket, with newline-delimited JSON in both directions.
-The socket is a full control plane with no in-band authentication.
-The protection is filesystem permissions: a uid-scoped `0700` runtime directory and a `0600` socket.
-The bind happens before the node reports ready, so a client that observes readiness always connects.
-The socket module compiles out on wasm32, and a browser binds nothing.
+With the `host` feature, a CLI-driven node binds a local IPC endpoint, with newline-delimited JSON in both directions.
+On Unix the endpoint is a socket.
+On Windows it is a named pipe with a random name.
+The endpoint is a full control plane with no in-band authentication.
+On Unix the protection is filesystem permissions: a uid-scoped `0700` runtime directory and a `0600` socket.
+On Windows the protection is the DACL of the pipe, which gives access only to the user, and the client checks that the user owns the pipe before it sends a byte.
+On Unix a client finds the socket by its path in the mesh folder.
+On Windows the node writes the name of its pipe into a `<nick>.ipc` marker in the mesh folder, and a client finds the pipe through the marker.
+The bind, and the marker on Windows, come before the node reports ready, so a client that observes readiness always connects.
+The IPC module compiles out on wasm32, and a browser binds nothing.
+`docs/windows.md` (R3) gives the Windows design.
 
 ### 10.4 The C ABI
 
@@ -792,7 +799,7 @@ For this reason the release profile keeps unwinding and does not set `panic = "a
 ### 10.5 The browser build
 
 A build with `--no-default-features` keeps gossip, the CRDT documents, the protocol types, address lookup, and the whole node runtime.
-It loses the control socket, the state file, process helpers, and the log sink.
+It loses the IPC endpoint, the state file, process helpers, and the log sink.
 Portability rests on two shims: `web-time` for the clock and `n0-future` for timers and task spawn.
 A dedicated test guards the shims, because `tokio::time` compiles for wasm32 and then panics at run time.
 

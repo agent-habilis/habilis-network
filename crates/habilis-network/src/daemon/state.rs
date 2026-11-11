@@ -44,7 +44,7 @@ pub(crate) use event_loop_state::{LiveRun, PendingSuspend};
 
 pub(crate) use collection_sizes::CollectionSizes;
 pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
-#[cfg(all(unix, feature = "host"))]
+#[cfg(feature = "host")]
 pub(crate) use idle_counters::note_ppid_wake;
 pub(crate) use idle_counters::{IdleCounters, note_sampler_wake, top_requesters};
 pub(crate) use latch::Latch;

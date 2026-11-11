@@ -26,7 +26,7 @@ static PPID_WAKES: AtomicU64 = AtomicU64::new(0);
 static SAMPLER_WAKES: AtomicU64 = AtomicU64::new(0);
 
 /// Count one wake of the orphan watch.
-#[cfg(any(all(unix, feature = "host"), test))]
+#[cfg(any(feature = "host", test))]
 pub(crate) fn note_ppid_wake() {
     PPID_WAKES.fetch_add(1, Ordering::Relaxed);
 }
@@ -239,8 +239,10 @@ pub(crate) fn top_requesters(resent_by: &HashMap<Nickname, u64>) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    #[cfg(all(unix, feature = "host"))]
     use std::hint::black_box;
     use std::sync::Mutex;
+    #[cfg(all(unix, feature = "host"))]
     use std::time::{Duration, Instant};
 
     use iroh_gossip::api::Event;

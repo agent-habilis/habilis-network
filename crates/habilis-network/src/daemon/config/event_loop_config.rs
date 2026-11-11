@@ -226,7 +226,8 @@ pub(crate) struct RuntimeConfig {
     /// visible to a consumer.
     pub(crate) driver: DriverMode,
     /// The process a CLI daemon lives for, set by
-    /// [`set_owner_pid`](EventLoopConfig::set_owner_pid). `None` keeps the parent watch.
+    /// [`set_owner_pid`](EventLoopConfig::set_owner_pid). `None` keeps the parent watch on
+    /// Unix, and no watch on Windows.
     #[cfg(feature = "host")]
     pub(crate) owner: Option<Owner>,
 }
@@ -246,7 +247,8 @@ impl EventLoopConfig {
     /// in-process driver has no process to exit and ignores it.
     ///
     /// # Errors
-    /// `pid` is 0 or 1, the daemon's own pid, or no live process has it. The
+    /// `pid` is 0 or 1, the daemon's own pid, or no live process has it, or this
+    /// process cannot read it (on Windows, an owner of another account). The
     /// message is one line.
     #[cfg(feature = "host")]
     pub fn set_owner_pid(mut self, pid: u32) -> Result<Self, OwnerPidError> {

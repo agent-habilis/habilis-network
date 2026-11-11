@@ -709,9 +709,17 @@ mod tests {
         );
     }
 
-    // The warn-only resident-memory leak signal: a threshold the live process
-    // already exceeds (1 MiB) must fire exactly once and latch, never exit or
-    // mutate anything else. A `0` threshold disables it entirely.
+    // The warn-only resident-memory leak signal: where the process has a
+    // reading, a threshold it already exceeds (1 MiB) must fire exactly once
+    // and latch, never exit or mutate anything else. A `0` threshold disables
+    // it entirely.
+    //
+    // The reading exists only under the gate of `maxrss_bytes` in
+    // `habilis-network-util`: Unix with the `host` feature. Elsewhere it is
+    // `None` and the warn never fires, so this test, which asserts that it
+    // does, carries the same gate. The test of the `0` threshold needs no
+    // reading and runs everywhere.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn resident_memory_warn_fires_once_then_latches() {
         let _guard = ::habilis_network_test_tracing::init();

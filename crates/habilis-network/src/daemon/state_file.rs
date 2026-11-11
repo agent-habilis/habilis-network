@@ -40,6 +40,12 @@
 //! Writes are atomic (tempfile + rename on the same filesystem), so a
 //! reader that opens the file mid-update always sees a consistent JSON
 //! document, and each write fully replaces any existing file.
+//!
+//! On Windows a reader that opens the file without `FILE_SHARE_DELETE` (the
+//! `Get-Content` of `PowerShell`) blocks the rename and the remove while it
+//! holds the file, so both run again for a short time
+//! (`util::file_retry::retry_while_shared`). A reader that uses `std::fs` never
+//! blocks them.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -48,7 +54,7 @@ use anyhow::Result;
 
 use crate::protocol::meshes::MeshName;
 use crate::protocol::{AuthorKey, MeshId, Nickname};
-use crate::util::unix_secs;
+use crate::util::{file_retry, unix_secs};
 
 use crate::util;
 use std::io::ErrorKind;
@@ -264,38 +270,29 @@ impl StateFile {
         let mut json = serde_json::to_vec(&obj).map_err(io::Error::other)?;
         json.push(b'\n');
 
-        // No fsync: statusline is best-effort; kernel buffer-writeback
-        // is plenty. Atomic rename still gives readers a consistent view.
-        let temp = tmp_sibling(&self.path);
-        // 0o600 at create, not chmod-after: an app's discovery fields may carry
-        // a bearer token, and a create-then-chmod sequence leaves a
-        // window where the token is written at the umask-default mode (often
-        // world-readable) — a local co-tenant polling the predictable tmp
-        // path could open an fd during that window (POSIX checks perms at
-        // open, not per read). Being born at 0o600 closes the window; the
-        // uniform mode also keeps the common (no-token) case indistinguishable.
-        let mut file = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                let mut options = fs::OpenOptions::new();
-                options.write(true).create(true).truncate(true).mode(0o600);
-                options.open(&temp)?
-            }
-            #[cfg(not(unix))]
-            {
-                fs::File::create(&temp)?
-            }
-        };
-        file.write_all(&json)?;
-        fs::rename(&temp, &self.path)
+        write_private_atomic(&self.path, &json)
     }
 
     /// Delete the state file, and the member key and the run counter that live beside it. A process
     /// that leaves takes its identity with it: the next process with the same pid, which names the
-    /// same state file, starts as a new member. Safe to call on a path that does not exist.
+    /// same state file, starts as a new member. Safe to call on a path that does not exist. On
+    /// Windows the delete of the state file runs again for a short time while a reader holds the
+    /// file, and a file that still stays is logged. On Unix an error is ignored.
     pub(crate) fn remove(&self) {
+        #[cfg(not(windows))]
         let _ = fs::remove_file(&self.path);
+        #[cfg(windows)]
+        match file_retry::retry_while_shared(|| fs::remove_file(&self.path)) {
+            Err(error) if error.kind() != ErrorKind::NotFound => {
+                tracing::warn!(
+                    target: "habilis_network::lifecycle",
+                    path = %self.path.display(),
+                    %error,
+                    "state file remove failed"
+                );
+            }
+            _ => {}
+        }
         for extension in ["key", "run", "run.tmp"] {
             let _ = fs::remove_file(self.path.with_extension(extension));
         }
@@ -545,6 +542,57 @@ pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>, StateFileErro
     }))
 }
 
+/// Write `bytes` to `path` so that a reader sees the old file or the new one,
+/// never half of one: a sibling `<file>.tmp.<pid>`, then a rename over the
+/// target. The one writer of the state file and of the IPC marker.
+///
+/// On Windows the rename runs again for a short time while a reader holds the
+/// target without `FILE_SHARE_DELETE` (R8 of `docs/windows.md`). The rename of
+/// `std` already replaces a file that a reader holds with `FILE_SHARE_DELETE`.
+///
+/// The tmp name carries the pid and is opened with `create` + `truncate`, not
+/// `create_new`: a tmp file that a killed process left behind is reused, and
+/// does not make every later write fail.
+///
+/// # Errors
+/// The create, the write, or the rename fails.
+pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // No fsync: statusline is best-effort; kernel buffer-writeback
+    // is plenty. Atomic rename still gives readers a consistent view.
+    let temp = tmp_sibling(path);
+    // 0o600 at create, not chmod-after: an app's discovery fields may carry
+    // a bearer token, and a create-then-chmod sequence leaves a
+    // window where the token is written at the umask-default mode (often
+    // world-readable) — a local co-tenant polling the predictable tmp
+    // path could open an fd during that window (POSIX checks perms at
+    // open, not per read). Being born at 0o600 closes the window; the
+    // uniform mode also keeps the common (no-token) case indistinguishable.
+    let mut file = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true).mode(0o600);
+            options.open(&temp)?
+        }
+        #[cfg(not(unix))]
+        {
+            fs::File::create(&temp)?
+        }
+    };
+    file.write_all(bytes)?;
+    drop(file);
+    let renamed = file_retry::retry_while_shared(|| fs::rename(&temp, path));
+    // On Windows a failed rename removes the tmp file here, for the IPC
+    // marker. `StateFile::write` removes it on every OS after any error, as
+    // before the port.
+    #[cfg(windows)]
+    if renamed.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    renamed
+}
+
 fn tmp_sibling(path: &Path) -> PathBuf {
     let mut file_name = path
         .file_name()
@@ -562,7 +610,14 @@ mod tests {
 
     use crate::testing;
     use std::error::Error;
+    #[cfg(windows)]
+    use std::path;
+    #[cfg(unix)]
     use std::sync::Arc;
+    #[cfg(windows)]
+    use std::thread;
+    #[cfg(windows)]
+    use std::time;
     use std::{env, fs, io, process};
     /// The variants of a public error hold a boxed source, so no third-party type is named in
     /// the public API. This builds them that way.
@@ -989,6 +1044,95 @@ mod tests {
         }
     }
 
+    /// A reader that uses `std::fs` opens with `FILE_SHARE_DELETE` on Windows,
+    /// so it never blocks a write. The readers of this workspace and of
+    /// agent-gossip all use `std::fs`.
+    #[test]
+    fn a_std_reader_does_not_block_a_write() {
+        let path = unique_path("std-reader");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        );
+        state_file.write(1, false);
+        let reader = fs::File::open(&path).expect("open the state file");
+        super::write_private_atomic(&path, b"{}\n").expect("the write");
+        drop(reader);
+        assert_eq!(
+            fs::read(&path).expect("read the state file"),
+            b"{}\n",
+            "the write replaced the file"
+        );
+        state_file.remove();
+    }
+
+    /// `FILE_SHARE_READ` of Windows, with no `FILE_SHARE_DELETE`. This crate
+    /// has no `windows-sys`.
+    #[cfg(windows)]
+    const FILE_SHARE_READ: u32 = 1;
+
+    /// Open `path` as the `Get-Content` of `PowerShell` does: with no
+    /// `FILE_SHARE_DELETE`, and close it after 2 ms in a thread. The reader is
+    /// open before the call under test, so its first try always meets it, and
+    /// the short hold leaves most of the 50 ms deadline to a slow runner.
+    #[cfg(windows)]
+    fn hold_briefly(path: &path::Path) -> thread::JoinHandle<()> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let reader: fs::File = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)
+            .expect("open the state file");
+        thread::spawn(move || {
+            thread::sleep(time::Duration::from_millis(2));
+            drop(reader);
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_write_waits_for_a_reader_without_share_delete() {
+        let path = unique_path("held-write");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        );
+        state_file.write(1, false);
+        let closer = hold_briefly(&path);
+        state_file.write(2, true);
+        closer.join().expect("the reader thread ends");
+        let snapshot = super::read_snapshot(&path)
+            .expect("the snapshot reads")
+            .expect("a snapshot");
+        state_file.remove();
+        assert!(snapshot.ready, "the second write replaced the file");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_remove_waits_for_a_reader_without_share_delete() {
+        let path = unique_path("held-remove");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        );
+        state_file.write(1, false);
+        let closer = hold_briefly(&path);
+        state_file.remove();
+        closer.join().expect("the reader thread ends");
+        assert!(!path.exists(), "the remove waited for the reader");
+    }
+
     #[test]
     fn drop_removes_file() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1319,14 +1463,17 @@ mod tests {
 ///
 /// # Examples
 ///
-/// A state file that exists but cannot be read is an error, not a missing file.
+/// A state file that exists but is not JSON is an error, not a missing file.
 ///
 /// ```
-/// use std::path::Path;
+/// use std::{env, fs, process};
 ///
 /// use habilis_network::runtime::state_file::read_snapshot;
 ///
-/// assert!(read_snapshot(Path::new("/")).is_err());
+/// let path = env::temp_dir().join(format!("state-file-doc-{}.json", process::id()));
+/// fs::write(&path, b"not json").expect("write the file");
+/// assert!(read_snapshot(&path).is_err());
+/// fs::remove_file(&path).expect("remove the file");
 /// ```
 #[derive(Debug)]
 #[non_exhaustive]

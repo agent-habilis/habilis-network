@@ -6,7 +6,7 @@
 //!   (`msg` / `poll`), and incoming gossip events.
 //! - **Time-driven maintenance**: heartbeat keepalives, silence
 //!   sweeps, gossip healer.
-//! - **Shutdown**: ctrl-c / SIGTERM.
+//! - **Shutdown**: ctrl-c / SIGTERM, and the console events on Windows.
 //!
 //! `daemon` is orchestration + plumbing: the `select!` loop, IPC
 //! command application (`ipc`), shared handler context (`ctx`),

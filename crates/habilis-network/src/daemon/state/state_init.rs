@@ -38,7 +38,7 @@ pub(crate) struct RunKeys {
     /// the explicit state file, or the default path of the mesh. A caller that binds the pair to an
     /// owner reads it, because the explicit state file alone names no pair under the default path.
     #[cfg_attr(
-        not(all(unix, feature = "host")),
+        not(feature = "host"),
         expect(dead_code, reason = "only the binding of a host to its owner reads it")
     )]
     pub(crate) keys_state: Option<PathBuf>,

@@ -29,6 +29,8 @@ use crate::beacon;
 use crate::daemon::event_loop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::DirectState;
+#[cfg(all(windows, feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::daemon::state::RendezvousFlag;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::ops;
 use crate::transport;
@@ -572,6 +574,15 @@ pub enum Blocking {
     BlockUdp {
         /// Whether the block is on.
         blocked: bool,
+        /// Gets `()` when the request is done.
+        reply: oneshot::Sender<()>,
+    },
+    /// Tests only, Windows only: make this node re-select the path of its link to the
+    /// rendezvous now, as [`Blocking::BlockUdp`] does for its peers. iroh re-selects
+    /// only on path events, and a host with one address may give the link none
+    /// inside a test (#44). Nothing happens when the node holds no rendezvous link.
+    #[cfg(windows)]
+    NudgeRendezvous {
         /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
@@ -1348,6 +1359,18 @@ impl MembershipApp {
                     let peer = address.id;
                     task::spawn(async move {
                         webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
+                    });
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(windows)]
+            Blocking::NudgeRendezvous { reply } => {
+                if state.rendezvous_flags.contains(&RendezvousFlag::Linked) {
+                    let endpoint = context.endpoint.clone();
+                    let rendezvous = context.rendezvous_id;
+                    task::spawn(async move {
+                        webrtc::nudge_acceptor::nudge(&endpoint, rendezvous).await;
                     });
                 }
                 let _ = reply.send(());

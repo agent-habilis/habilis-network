@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { join, resolve, sep } from 'node:path'
 
 import { discover, libraryName, libraryPath } from './discover.ts'
 
@@ -6,6 +7,15 @@ import { discover, libraryName, libraryPath } from './discover.ts'
 function only(...paths: string[]): (path: string) => boolean {
   const present = new Set(paths)
   return (path) => present.has(path)
+}
+
+/**
+ * The path `discover` tries for `root` and `profile`, spelled as the OS spells it.
+ * It uses the same `resolve` and `join` as `discover`: on Windows `resolve('/repo')` is
+ * `C:\repo` and `join` uses `\`, so a literal POSIX string would never match.
+ */
+function candidate(root: string, profile: string): string {
+  return join(resolve(root), 'target', profile, 'libhabilis_network_ffi.dylib')
 }
 
 describe('libraryName', () => {
@@ -19,7 +29,7 @@ describe('libraryName', () => {
 
 describe('discover', () => {
   test('finds a release build next to the walk', () => {
-    const found = '/repo/target/release/libhabilis_network_ffi.dylib'
+    const found = candidate('/repo', 'release')
 
     expect(
       discover({
@@ -35,12 +45,9 @@ describe('discover', () => {
       discover({
         from: ['/repo/packages/habilis-network-ffi/src'],
         name: 'libhabilis_network_ffi.dylib',
-        exists: only(
-          '/repo/target/debug/libhabilis_network_ffi.dylib',
-          '/repo/target/release/libhabilis_network_ffi.dylib',
-        ),
+        exists: only(candidate('/repo', 'debug'), candidate('/repo', 'release')),
       }).path,
-    ).toBe('/repo/target/release/libhabilis_network_ffi.dylib')
+    ).toBe(candidate('/repo', 'release'))
   })
 
   test('takes a debug build when that is all there is', () => {
@@ -48,9 +55,9 @@ describe('discover', () => {
       discover({
         from: ['/repo/packages/habilis-network-ffi/src'],
         name: 'libhabilis_network_ffi.dylib',
-        exists: only('/repo/target/debug/libhabilis_network_ffi.dylib'),
+        exists: only(candidate('/repo', 'debug')),
       }).path,
-    ).toBe('/repo/target/debug/libhabilis_network_ffi.dylib')
+    ).toBe(candidate('/repo', 'debug'))
   })
 
   test('walks up rather than looking only beside itself', () => {
@@ -60,9 +67,9 @@ describe('discover', () => {
       exists: () => false,
     })
 
-    expect(searched).toContain('/repo/packages/habilis-network-ffi/src/target/release/libhabilis_network_ffi.dylib')
-    expect(searched).toContain('/repo/target/release/libhabilis_network_ffi.dylib')
-    expect(searched).toContain('/target/release/libhabilis_network_ffi.dylib')
+    expect(searched).toContain(candidate('/repo/packages/habilis-network-ffi/src', 'release'))
+    expect(searched).toContain(candidate('/repo', 'release'))
+    expect(searched).toContain(candidate('/', 'release'))
   })
 
   test('reports nothing found rather than guessing', () => {
@@ -93,6 +100,6 @@ describe('libraryPath', () => {
 
     expect(message).toContain('cargo build --release -p habilis-network-ffi')
     expect(message).toContain('HABILIS_NETWORK_LIB=')
-    expect(message).toContain('/repo/target/release/')
+    expect(message).toContain(join(resolve('/repo'), 'target', 'release') + sep)
   })
 })

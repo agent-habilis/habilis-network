@@ -1,5 +1,12 @@
-//! The listener side of the IPC socket: bind, serve, and answer each connection.
+//! The listener side of the IPC endpoint: bind, serve, and answer each connection.
 
+use super::bound::Bound;
+#[cfg(windows)]
+use super::engine_control::{self, EngineCommand, EngineControl};
+#[cfg(windows)]
+use super::ipc_marker::{self, IpcMarker};
+#[cfg(windows)]
+use super::ipc_name::IpcName;
 use super::json_reply;
 use crate::protocol::{MeshId, Nickname};
 use crate::transport::IpcMessage;
@@ -8,8 +15,10 @@ use crate::util::consts::MAX_IPC_COMMAND_BYTES;
 use std::time::Duration;
 
 use anyhow::Result;
+use interprocess::local_socket::ListenerOptions;
+#[cfg(unix)]
+use interprocess::local_socket::Name;
 use interprocess::local_socket::tokio::{Listener, Stream};
-use interprocess::local_socket::{ListenerOptions, Name};
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -21,11 +30,24 @@ use crate::util::line_read::{self, LineRead};
 use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO_TIMEOUT};
 use tokio::sync::oneshot;
 
-use std::{fs, path, sync};
+#[cfg(unix)]
+use std::fs;
+use std::{path, sync};
 use tokio::{io, time};
-/// Returns the IPC endpoint identifier for a specific agent on a mesh —
-/// a filesystem socket path (the project targets Unix only). Lives in the
-/// mesh's runtime folder beside its `<nick>.tracing.log` / `<nick>.state.json`.
+
+/// The start of the error text when a command line does not parse. A daemon
+/// that does not know the engine `quit` answers a quit with it.
+pub(super) const PARSE_ERROR: &str = "parse error";
+
+/// The prefix of every pipe name of the engine, before the random part.
+#[cfg(windows)]
+pub(super) const PIPE_PREFIX: &str = r"\\.\pipe\habilis-";
+
+/// Returns the IPC endpoint identifier for a specific agent on a mesh — a
+/// filesystem socket path. Lives in the mesh's runtime folder beside its
+/// `<nick>.tracing.log` / `<nick>.state.json`. Unix only: on Windows the
+/// endpoint is a pipe, which the marker names.
+#[cfg(unix)]
 pub(crate) fn socket_path(base: &path::Path, mesh: &MeshId, nickname: &Nickname) -> String {
     format!(
         "{}/{nickname}.ipc.sock",
@@ -33,6 +55,7 @@ pub(crate) fn socket_path(base: &path::Path, mesh: &MeshId, nickname: &Nickname)
     )
 }
 
+#[cfg(unix)]
 pub(super) fn to_name(path: &str) -> Result<Name<'_>> {
     use interprocess::local_socket::{GenericFilePath, PathNameType};
     use std::{borrow, ffi};
@@ -48,7 +71,8 @@ pub(super) fn to_name(path: &str) -> Result<Name<'_>> {
 ///
 /// # Errors
 /// An invalid socket name, or the OS refusing the bind.
-pub(crate) fn bind(base: &path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Listener> {
+#[cfg(unix)]
+pub(crate) fn bind(base: &path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Bound> {
     let path = socket_path(base, mesh, nickname);
 
     // The runtime base must exist and be private (0700) before the socket is
@@ -77,21 +101,98 @@ pub(crate) fn bind(base: &path::Path, mesh: &MeshId, nickname: &Nickname) -> Res
         }
     }
     tracing::info!(?path, "IPC socket listening");
-    Ok(listener)
+    Ok(Bound { listener })
 }
 
-/// Server-side accept loop over an already-[`bind`]-ed socket: forward
-/// each connection's command to the event loop. Spawned after `bind`
-/// returns, so by the time this runs the socket is already accepting.
+/// Bind the local IPC endpoint synchronously and write its marker, returning
+/// both. Done *before* the daemon marks itself ready so that "ready" can never
+/// precede an accepting endpoint: the listener exists before the marker, and
+/// both before readiness, so a reader that finds the marker can connect.
+///
+/// A failed marker write fails the whole bind: an endpoint with no marker is a
+/// daemon that no client can find.
+///
+/// # Errors
+/// The runtime folder is rejected, the OS refuses the bind, or the marker
+/// cannot be written.
+#[cfg(windows)]
+pub(crate) fn bind(base: &path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Bound> {
+    util::ensure_mesh_runtime_dir(base, mesh.as_str())
+        .map_err(|error| anyhow::anyhow!("failed to prepare runtime dir: {error}"))?;
+    let (listener, name) = listen()?;
+    let marker_at = ipc_marker::marker_path(base, mesh, nickname);
+    let marker = match IpcMarker::write(marker_at.clone(), name.clone()) {
+        Ok(marker) => marker,
+        Err(error) => {
+            drop(listener);
+            anyhow::bail!(
+                "failed to write the IPC marker {}: {error}",
+                marker_at.display()
+            );
+        }
+    };
+    tracing::info!(
+        target: "habilis_network::lifecycle",
+        name = %name,
+        marker = %marker_at.display(),
+        "IPC listening"
+    );
+    Ok(Bound { listener, marker })
+}
+
+/// Create the listener of a named pipe (R3 of `docs/windows.md`).
+///
+/// The name is `\\.\pipe\habilis-` and 128 random bits in hex. Pipe names
+/// live in one namespace for the whole machine, and any account can make a pipe
+/// with a free name: a fixed name lets another account make it first, so the
+/// bind fails and clients reach that account. A random name cannot be taken
+/// before it exists. After that it is public (any account lists pipes), so the
+/// security descriptor and the client check of the owner protect it.
+///
+/// The descriptor is `O:<user>D:P(A;;GA;;;<user>)`: the user owns the pipe, also
+/// in an elevated process, and nobody else may open it. With no descriptor, a
+/// pipe gives read access to Everyone. `interprocess` puts the descriptor on
+/// every instance, the first and each one after an accept.
+#[cfg(windows)]
+fn listen() -> Result<(Listener, IpcName)> {
+    use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    use rand::Rng as _;
+
+    let random: u128 = rand::rng().random();
+    let name = IpcName::new(format!("{PIPE_PREFIX}{random:032x}"))?;
+    let sddl = util::win_security::user_sddl()
+        .map_err(|error| anyhow::anyhow!("the security descriptor of the IPC pipe: {error}"))?;
+    let sddl = widestring::U16CStr::from_slice(&sddl)
+        .map_err(|error| anyhow::anyhow!("the security descriptor of the IPC pipe: {error}"))?;
+    let descriptor = SecurityDescriptor::deserialize(sddl)
+        .map_err(|error| anyhow::anyhow!("the security descriptor of the IPC pipe: {error}"))?;
+    let options: ListenerOptions<'_> = ListenerOptions::new()
+        .name(name.to_name()?)
+        .security_descriptor(descriptor);
+    let listener: Listener = options
+        .create_tokio()
+        .map_err(|error| anyhow::anyhow!("failed to bind IPC pipe {name}: {error}"))?;
+    Ok((listener, name))
+}
+
+/// Server-side accept loop over an already-[`bind`]-ed endpoint: forward each
+/// connection's command to the event loop, or on Windows answer an engine
+/// command with `control`. Spawned after `bind` returns, so by the time this
+/// runs the endpoint is already accepting.
 pub(crate) async fn serve<Cmd>(
     listener: Listener,
     tx: mpsc::Sender<IpcMessage<Cmd>>,
+    #[cfg(windows)] control: EngineControl,
     // trait object: the listener and its connections share the sink
     sink: sync::Arc<dyn event::NodeSink>,
 ) where
     Cmd: DeserializeOwned + Send + 'static,
 {
     use interprocess::local_socket::traits::tokio::Listener as _;
+    #[cfg(windows)]
+    // shared by every connection task, each of which may answer a quit
+    let control = sync::Arc::new(control);
     // Accept errors are retried forever: they are almost always
     // transient (fd exhaustion under load, an aborted handshake), and
     // the old `break` permanently killed msg/poll for the process
@@ -107,7 +208,14 @@ pub(crate) async fn serve<Cmd>(
                 backoff = IPC_ACCEPT_BACKOFF_MIN;
                 failing = false;
                 let tx = tx.clone();
-                tokio::spawn(handle_connection(stream, tx));
+                #[cfg(windows)]
+                let control = sync::Arc::clone(&control);
+                tokio::spawn(handle_connection(
+                    stream,
+                    tx,
+                    #[cfg(windows)]
+                    control,
+                ));
             }
             Err(error) => {
                 if !failing {
@@ -116,7 +224,15 @@ pub(crate) async fn serve<Cmd>(
                     )));
                     failing = true;
                 }
+                #[cfg(unix)]
                 tracing::warn!(
+                    %error,
+                    backoff_ms = clock::millis_saturating(backoff),
+                    "IPC: accept error; retrying"
+                );
+                #[cfg(windows)]
+                tracing::warn!(
+                    target: "habilis_network::lifecycle",
                     %error,
                     backoff_ms = clock::millis_saturating(backoff),
                     "IPC: accept error; retrying"
@@ -133,8 +249,12 @@ pub(super) fn next_accept_backoff(current: Duration) -> Duration {
     current.saturating_mul(2).min(IPC_ACCEPT_BACKOFF_MAX)
 }
 
-async fn handle_connection<Cmd>(stream: Stream, tx: mpsc::Sender<IpcMessage<Cmd>>)
-where
+async fn handle_connection<Cmd>(
+    stream: Stream,
+    tx: mpsc::Sender<IpcMessage<Cmd>>,
+    // the accept loop shares it with every connection
+    #[cfg(windows)] control: sync::Arc<EngineControl>,
+) where
     Cmd: DeserializeOwned + Send + 'static,
 {
     let (read_half, mut write_half) = io::split(stream);
@@ -162,14 +282,30 @@ where
         }
         Ok(Ok(LineRead::Eof) | _) => return,
         Err(_idle) => {
+            #[cfg(unix)]
             tracing::debug!("IPC: connection sent nothing within the read deadline; closing");
+            #[cfg(windows)]
+            tracing::debug!(
+                target: "habilis_network::lifecycle",
+                "IPC: connection sent nothing within the read deadline; closing"
+            );
             return;
         }
     };
 
+    // On Windows an engine command first. Any other line, also one that is no
+    // JSON object, goes to the app's own parse, unchanged.
+    #[cfg(windows)]
+    let engine: serde_json::Result<EngineCommand> = serde_json::from_str(line.trim());
+    #[cfg(windows)]
+    if let Ok(EngineCommand::Quit { mesh }) = engine {
+        engine_control::answer_quit(&mesh, &control, &mut write_half).await;
+        return;
+    }
+
     let parsed: serde_json::Result<Cmd> = serde_json::from_str(line.trim());
     let response = match parsed {
-        Err(error) => json_reply::json_error(&format!("parse error: {error}")),
+        Err(error) => json_reply::json_error(&format!("{PARSE_ERROR}: {error}")),
         Ok(command) => {
             let (resp_tx, resp_rx) = oneshot::channel();
             if tx.send((command, resp_tx)).await.is_err() {

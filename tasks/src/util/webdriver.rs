@@ -12,7 +12,6 @@ pub(crate) use driver::Driver;
 pub(crate) use session::Session;
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use super::Skip;
 
@@ -53,11 +52,7 @@ pub(super) fn locate(env_var: &str, binary: &str) -> Option<PathBuf> {
     {
         return Some(path);
     }
-    let found = Command::new("which").arg(binary).output().ok()?;
-    found
-        .status
-        .success()
-        .then(|| PathBuf::from(String::from_utf8_lossy(&found.stdout).trim().to_owned()))
+    which::which(binary).ok()
 }
 
 /// Every browser needs its own way of being told to stop hiding local IPs

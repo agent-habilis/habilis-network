@@ -24,15 +24,42 @@ jobs:
   # Chrome for Testing over CDP (`--only cft`), the same backend as a local
   # run: the runner downloads it into target/ on first use. A launch or
   # download failure fails the suite; it is not a skipped row.
+  #
+  # On Windows (R11 of docs/windows.md) there is no Chrome for Testing download
+  # (tasks/src/util/cdp.rs, R10), so `CHROME_FOR_TESTING` names the Chrome that
+  # windows-latest already has. The Linux leg keeps the name `e2e (stream)`.
   stream:
-    name: e2e (stream)
-    runs-on: ubuntu-latest
+    name: e2e (stream${{ matrix.os == 'windows-latest' && ', windows' || '' }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     # Each scenario bounds its own waits (open, attach, payload, exit), so a
-    # healthy run ends well inside this; a hang ends as a red check.
-    timeout-minutes: 45
+    # healthy run ends well inside this; a hang ends as a red check. The
+    # Windows leg builds `aws-lc-sys` with no cache on its first run.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 90 || 45 }}
 
     steps:
       - uses: actions/checkout@v6
+
+      # Windows only, so Linux gets neither variable: `cdp.rs` takes an empty
+      # `CHROME_FOR_TESTING` as a path. Without debug info the build fits on
+      # the disk of the runner, as in the `windows` job of ci.yml. The step
+      # fails when the Chrome of the runner is not there.
+      - name: Windows environment
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          chrome='C:\Program Files\Google\Chrome\Application\chrome.exe'
+          test -f "$chrome"
+          echo "CHROME_FOR_TESTING=$chrome" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+
+      # `aws-lc-sys` assembles with NASM, which the Windows runner does not have.
+      - if: matrix.os == 'windows-latest'
+        uses: ilammy/setup-nasm@v1
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
@@ -41,7 +68,10 @@ jobs:
       # The same rule as light-cycles (web) in ci.yml: the CLI's version is
       # read out of Cargo.lock, so the glue and the wasm cannot disagree. The
       # CLI also brings `wasm-bindgen-test-runner`, which the runner checks for.
+      # Bash on every OS: the default shell of Windows is pwsh, which has no
+      # `sed`.
       - name: Install wasm-bindgen-cli
+        shell: bash
         run: |
           version=$(cargo pkgid wasm-bindgen | sed 's/.*[@#]//')
           echo "wasm-bindgen resolved to $version"

@@ -9,6 +9,7 @@
 import { describe, expect, test } from 'bun:test'
 import { discover } from './discover.ts'
 import type { Mesh } from 'habilis-network-api'
+import { loadNative } from './dlopen/native.ts'
 import { create, join } from './index.ts'
 
 const library = discover()
@@ -32,6 +33,18 @@ describe.skipIf(library.path === null)('smoke over the built library', () => {
       await mesh.leave()
     }
   }, 30000)
+
+  // A negative return is the case that a 32-bit `long` broke on Windows: the
+  // low half of -1 read as 64 bits is 4294967295. A positive count read
+  // right by luck, so it proves nothing about the width.
+  test('a NULL handle gives -1 from a call that returns a habilis_network_len', async () => {
+    const native = await loadNative(library.path ?? '')
+    try {
+      expect(native.call('habilis_network_mesh_peer_count', null)).toBe(-1n)
+    } finally {
+      native.close()
+    }
+  })
 
   test('a reply to the key of a message reaches its author', async () => {
     const alice = await create({ nick: 'smoke-a' })

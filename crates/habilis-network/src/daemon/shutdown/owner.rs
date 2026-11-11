@@ -28,6 +28,9 @@ impl Owner {
         self.pid
     }
 
+    /// The owner exited, or its pid now names another process. On Windows
+    /// `live_start_time` gives `None` also for an owner that this process can no
+    /// longer read, which counts as lost: the watch fails closed.
     pub(super) fn lost(self) -> bool {
         process::live_start_time(self.pid) != Some(self.start)
     }
