@@ -17,7 +17,7 @@ use std::path::Path;
 use anyhow::Context;
 
 #[cfg(test)]
-use crate::util::consts::MAX_BLOB_STORE_BYTES;
+use crate::util::consts::{MAX_BLOB_OWNERS, MAX_BLOB_STORE_BYTES, MAX_BLOB_STORE_ENTRIES};
 
 pub(crate) use blob_entry::BlobEntry;
 pub(crate) use blob_store::BlobStore;
@@ -57,6 +57,7 @@ mod tests {
     use crate::blob::{BlobDigest, ContentId, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
     use rand::RngCore;
+    use std::collections::HashSet;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -77,6 +78,110 @@ mod tests {
             compare_secret: TicketSecret::from(secret),
             password: false,
         }
+    }
+
+    /// The budget may evict a blob that a ticket still holds, so the eviction must say so: the
+    /// ticket dangles from then on.
+    #[test]
+    fn a_held_blob_evicted_by_the_budget_is_logged() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
+        habilis_network_test_tracing::expect_warn("habilis_network::blob", "held blob evicted");
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"newest")?;
+
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let full = super::MAX_BLOB_STORE_ENTRIES;
+        for index in 0..full {
+            let mut bytes = [0u8; HASH_LEN];
+            bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            store.map.insert(
+                BlobDigest::from(bytes),
+                super::BlobEntry {
+                    path: store.spool_dir.join(index.to_string()),
+                    size: 0,
+                    secret: TicketSecret::from([0u8; SECRET_LEN]),
+                    ticket_secret: TicketSecret::from([0u8; SECRET_LEN]),
+                    password: false,
+                    owners: HashSet::from([ContentId::new("held-by-a-ticket")]),
+                    overflowed: false,
+                    seq: index as u64,
+                },
+            );
+        }
+        store.next_seq = full as u64;
+
+        store.snapshot(
+            &src,
+            ContentMeta {
+                sha256: BlobDigest::from([0xffu8; HASH_LEN]),
+                size: 6,
+                content_id: ContentId::new("newest"),
+            },
+            &plain_secret([3u8; SECRET_LEN]),
+        )?;
+
+        let mut oldest = [0u8; HASH_LEN];
+        oldest[..8].copy_from_slice(&0u64.to_be_bytes());
+        assert!(
+            store.get(&BlobDigest::from(oldest)).is_none(),
+            "the budget evicts the oldest blob"
+        );
+        fs::remove_dir_all(&src_dir).ok();
+        Ok(())
+    }
+
+    /// An entry that overflowed its owners is kept when the recorded owners are released, because
+    /// an owner that it could not record may still hold a ticket. The eviction of such an entry
+    /// says so as well: the flag is the reason the entry stayed, so a dangling ticket is as likely
+    /// as for an entry with an owner.
+    #[test]
+    fn an_evicted_blob_that_overflowed_its_owners_is_logged() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
+        habilis_network_test_tracing::expect_warn("habilis_network::blob", "held blob evicted");
+        let src_dir = temp_dir("src-overflowed");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"newest")?;
+
+        let mut store = BlobStore::try_new(temp_dir("spool-overflowed"))?;
+        let full = super::MAX_BLOB_STORE_ENTRIES;
+        for index in 0..full {
+            let mut bytes = [0u8; HASH_LEN];
+            bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            store.map.insert(
+                BlobDigest::from(bytes),
+                super::BlobEntry {
+                    path: store.spool_dir.join(index.to_string()),
+                    size: 0,
+                    secret: TicketSecret::from([0u8; SECRET_LEN]),
+                    ticket_secret: TicketSecret::from([0u8; SECRET_LEN]),
+                    password: false,
+                    // The recorded owners were released, and an owner past the cap was never
+                    // recorded: the flag is all that is left of it.
+                    owners: HashSet::new(),
+                    overflowed: true,
+                    seq: index as u64,
+                },
+            );
+        }
+        store.next_seq = full as u64;
+
+        store.snapshot(
+            &src,
+            ContentMeta {
+                sha256: BlobDigest::from([0xffu8; HASH_LEN]),
+                size: 6,
+                content_id: ContentId::new("newest"),
+            },
+            &plain_secret([3u8; SECRET_LEN]),
+        )?;
+
+        assert_eq!(
+            store.held_evicted, 1,
+            "the eviction of an entry that overflowed its owners is counted"
+        );
+        fs::remove_dir_all(&src_dir).ok();
+        Ok(())
     }
 
     #[test]
@@ -276,6 +381,7 @@ mod tests {
     #[test]
     fn a_claim_makes_the_blob_the_newest_under_disk_pressure() -> anyhow::Result<()> {
         let _guard = ::habilis_network_test_tracing::init();
+        habilis_network_test_tracing::expect_warn("habilis_network::blob", "held blob evicted");
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"x")?;
@@ -313,6 +419,161 @@ mod tests {
 
         assert!(store.get(&oldest).is_some(), "the claimed blob stays");
         assert!(store.get(&next_oldest).is_none(), "the next oldest goes");
+
+        fs::remove_dir_all(&src_dir).ok();
+        Ok(())
+    }
+
+    /// Blobs of a few bytes never meet the byte budget, so the entry budget
+    /// holds the map.
+    #[test]
+    fn ten_times_the_entry_cap_of_tiny_blobs_leaves_the_cap_and_drops_the_oldest()
+    -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
+        habilis_network_test_tracing::expect_warn("habilis_network::blob", "held blob evicted");
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"x")?;
+
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let group = ContentId::new("blob-test-group");
+        let digest = |index: usize| {
+            let mut bytes = [0u8; HASH_LEN];
+            bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            BlobDigest::from(bytes)
+        };
+        let total = 10 * super::MAX_BLOB_STORE_ENTRIES;
+        for index in 0..total {
+            let meta = ContentMeta {
+                sha256: digest(index),
+                size: 1,
+                content_id: group.clone(),
+            };
+            store.snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))?;
+        }
+
+        assert_eq!(
+            store.map.len(),
+            super::MAX_BLOB_STORE_ENTRIES,
+            "the store holds the entry cap and no more"
+        );
+        assert!(store.get(&digest(0)).is_none(), "the oldest blob is gone");
+        assert!(
+            store.get(&digest(total - 1)).is_some(),
+            "the newest blob stays"
+        );
+        let spooled = fs::read_dir(&store.spool_dir)?.count();
+        assert_eq!(
+            spooled,
+            super::MAX_BLOB_STORE_ENTRIES,
+            "an evicted blob loses its spool file"
+        );
+
+        fs::remove_dir_all(&src_dir).ok();
+        Ok(())
+    }
+
+    /// One file attached to many calls shares one entry. The owner set stops at the cap, a claim
+    /// past it still succeeds, and the blob stays for the calls that are not recorded: the 64
+    /// recorded owners go, and the blob must stay for the other 36.
+    #[test]
+    fn claims_past_the_owner_cap_are_not_recorded() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"x")?;
+
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let hash = BlobDigest::from([5u8; HASH_LEN]);
+        let group = |index: usize| ContentId::new(&format!("blob-test-group-{index}"));
+        let mut refusals = 0;
+        for index in 0..100 {
+            let meta = ContentMeta {
+                sha256: hash,
+                size: 1,
+                content_id: group(index),
+            };
+            if store
+                .snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
+                .is_err()
+            {
+                refusals += 1;
+            }
+        }
+        assert_eq!(refusals, 0, "a call past the owner cap is not refused");
+        let owners = store.get(&hash).expect("the blob stays").owners.len();
+        assert_eq!(
+            owners,
+            super::MAX_BLOB_OWNERS,
+            "the entry records the owner cap and no more"
+        );
+
+        for index in 0..super::MAX_BLOB_OWNERS {
+            store.evict_content(&group(index));
+        }
+
+        let entry = store
+            .get(&hash)
+            .expect("the 36 owners that are not recorded still need the blob");
+        assert!(
+            entry.path.exists(),
+            "the spool file stays for the calls past the cap"
+        );
+
+        fs::remove_dir_all(&src_dir).ok();
+        Ok(())
+    }
+
+    /// The overflowed blob that lost its recorded owners is not kept for ever: the entry budget
+    /// removes it, oldest first, like any other blob.
+    #[test]
+    fn an_overflowed_blob_without_recorded_owners_goes_with_the_entry_budget() -> anyhow::Result<()>
+    {
+        let _guard = ::habilis_network_test_tracing::init();
+        habilis_network_test_tracing::expect_warn("habilis_network::blob", "held blob evicted");
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"x")?;
+
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let hash = BlobDigest::from([5u8; HASH_LEN]);
+        let group = |name: &str, index: usize| ContentId::new(&format!("{name}-{index}"));
+        for index in 0..=super::MAX_BLOB_OWNERS {
+            let meta = ContentMeta {
+                sha256: hash,
+                size: 1,
+                content_id: group("owner", index),
+            };
+            store.snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))?;
+        }
+        for index in 0..super::MAX_BLOB_OWNERS {
+            store.evict_content(&group("owner", index));
+        }
+        assert!(
+            store.get(&hash).is_some(),
+            "the blob stays while the budget has room"
+        );
+
+        for index in 0..2 * super::MAX_BLOB_STORE_ENTRIES {
+            let mut bytes = [0u8; HASH_LEN];
+            bytes[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+            let meta = ContentMeta {
+                sha256: BlobDigest::from(bytes),
+                size: 1,
+                content_id: group("filler", index),
+            };
+            store.snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))?;
+        }
+
+        assert!(
+            store.get(&hash).is_none(),
+            "2 times the entry cap later, the oldest blob is gone"
+        );
+        assert_eq!(
+            store.map.len(),
+            super::MAX_BLOB_STORE_ENTRIES,
+            "the store holds the entry cap"
+        );
 
         fs::remove_dir_all(&src_dir).ok();
         Ok(())

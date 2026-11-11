@@ -11,14 +11,16 @@ use std::net;
 use tokio::runtime;
 mod lane_node;
 mod log_capture;
+mod wire_counter;
 
 use std::sync::Arc;
 
 use iroh::{EndpointId, SecretKey};
+use sha2::{Digest as _, Sha256};
 
-use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
+use crate::daemon::state::{EventLoopState, MeshSecrets, RunKeys, StateInit};
 use crate::protocol::identity::Identity;
-use crate::protocol::{AuthorKey, Nickname};
+use crate::protocol::{AuthorKey, Channel, Nickname};
 use crate::util::clock::Instant;
 
 use iroh::address_lookup::memory;
@@ -27,6 +29,7 @@ use iroh::address_lookup::memory;
 pub(crate) use lane_node::LaneNode;
 #[cfg(feature = "multihop")]
 pub(crate) use log_capture::LogCapture;
+pub(crate) use wire_counter::{FrameClass, WireCounter};
 /// The key of the test author `name`: its bytes, zero-padded to 32. Two names keep the order
 /// that their bytes have, and a test reads the name back in a failure message.
 ///
@@ -47,12 +50,49 @@ pub(crate) fn fresh_state() -> EventLoopState {
 
 /// [`fresh_state`] with the given address book.
 pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> EventLoopState {
+    let mut state = fresh_state_that_waits_with_book(address_book);
+    // A test that is not about the first sync writes at once: the wait ends here.
+    state.doc_mut(Channel::State).finish_sync();
+    state
+}
+
+/// [`fresh_state`] for a node with no member key: a client that proves no nickname, which answers
+/// no proof request.
+pub(crate) fn fresh_state_without_member_key() -> EventLoopState {
+    let mut state = fresh_state_that_waits_with_book_and_member(memory::MemoryLookup::new(), false);
+    // A test that is not about the first sync writes at once: the wait ends here.
+    state.doc_mut(Channel::State).finish_sync();
+    state
+}
+
+/// [`fresh_state`] as the daemon starts: the state document waits for its first sync.
+pub(crate) fn fresh_state_that_waits() -> EventLoopState {
+    fresh_state_that_waits_with_book(memory::MemoryLookup::new())
+}
+
+fn fresh_state_that_waits_with_book(address_book: memory::MemoryLookup) -> EventLoopState {
+    fresh_state_that_waits_with_book_and_member(address_book, true)
+}
+
+fn fresh_state_that_waits_with_book_and_member(
+    address_book: memory::MemoryLookup,
+    member_key: bool,
+) -> EventLoopState {
     EventLoopState::new(
         StateInit {
             #[cfg(feature = "host")]
             state_file: None,
-            // the identity is shared with the loop and its handlers, which hold clones
-            identity: Arc::new(Identity::generate()),
+            // the keys are shared with the loop and its handlers, which hold clones
+            keys: RunKeys {
+                member_new: false,
+                // shared with the loop and its handlers, which hold clones
+                session: Arc::new(Identity::generate()),
+                // shared with the loop and its handlers, which hold clones
+                member: member_key.then(|| Arc::new(Identity::generate())),
+                run: 1,
+                key_lock: None,
+                keys_state: None,
+            },
             secrets: MeshSecrets::default(),
             per_peer_gate: None,
             webrtc_admission: transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS),
@@ -67,6 +107,13 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
 /// should fail loudly at the assertion rather than be handled.
 pub(crate) fn nick(name: &str) -> Nickname {
     Nickname::try_new(name).expect("valid test nickname")
+}
+
+/// The author key that the roster fixtures give to `nickname`: the same text always gives the
+/// same key, and two texts give two keys. The key is the SHA-256 of the whole text, so a nickname
+/// of any valid length keeps its own key.
+pub(crate) fn test_key(nickname: &str) -> AuthorKey {
+    AuthorKey::from_bytes(Sha256::digest(nickname.as_bytes()).into())
 }
 
 /// A deterministic endpoint id from `seed`, so a test can name the same peer
@@ -143,5 +190,33 @@ mod log_capture_tests {
             .filter(|line| text.contains(**line))
             .count();
         assert_eq!(seen, 3, "the capture saw {seen} of 3 events: {text}");
+    }
+}
+
+/// Two valid nicknames must not share a key, or two fixture peers merge in the peer set and the
+/// name map. A nickname holds up to 32 characters, so the key is a digest of the whole text.
+#[cfg(test)]
+mod test_key_tests {
+    #[test]
+    fn a_nickname_that_repeats_another_gets_its_own_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let thirty_two = "x".repeat(32);
+        for (short, long) in [("a", "aa"), ("ab", "abab"), ("x", thirty_two.as_str())] {
+            assert_ne!(
+                super::test_key(short),
+                super::test_key(long),
+                "{short:?} and {long:?} share a key"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_nickname_always_gives_the_same_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            super::test_key("swift-cedar"),
+            super::test_key("swift-cedar"),
+            "the same text gave two keys"
+        );
     }
 }

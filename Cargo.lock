@@ -1667,6 +1667,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
+ "base64",
  "bs58",
  "bytes",
  "chacha20poly1305",
@@ -1688,6 +1689,7 @@ dependencies = [
  "iroh-mainline-address-lookup",
  "iroh-mdns-address-lookup",
  "iroh-relay",
+ "memchr",
  "n0-future",
  "parking_lot",
  "proptest",
@@ -2566,7 +2568,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.102.0"
-source = "git+https://github.com/agent-habilis/iroh-gossip?rev=4e2c14efcbda65fa1f4713b21fb0c8e09f3fcc28#4e2c14efcbda65fa1f4713b21fb0c8e09f3fcc28"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=810fc0fdd5541e7bd337fc6212a61cb6e18ac264#810fc0fdd5541e7bd337fc6212a61cb6e18ac264"
 dependencies = [
  "blake3",
  "bytes",

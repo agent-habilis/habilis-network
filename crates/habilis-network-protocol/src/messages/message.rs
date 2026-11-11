@@ -24,7 +24,7 @@ use super::{
 ///
 /// Wire format (compact JSON, one line):
 /// ```json
-/// {"v":"12.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
+/// {"v":"14.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
 /// ```
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
@@ -141,6 +141,32 @@ impl Message {
         )
     }
 
+    /// A presence message for `author` joining `mesh`, with the identity proof of its session in
+    /// the body. An empty body stays valid: a node with no member key sends `new_joined`.
+    #[must_use]
+    pub fn new_joined_with_proof(
+        mesh: &MeshId,
+        author: &Nickname,
+        proof: &identity::IdentityProof,
+    ) -> Self {
+        // A proof text is hex digits and separators, so it is always a valid body.
+        let body = MessageBody::try_new(&proof.encode()).unwrap_or_else(|_| empty_body());
+        Self::new(
+            mesh,
+            author,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Joined,
+            },
+            body,
+        )
+    }
+
+    /// The identity proof in the body of a `joined` frame. An empty, cut or bad body gives `None`.
+    #[must_use]
+    pub fn joined_proof(&self) -> Option<identity::IdentityProof> {
+        identity::IdentityProof::decode(self.body.as_str())
+    }
+
     /// A presence message for `author` leaving `mesh`. It has no body.
     #[must_use]
     pub fn new_left(mesh: &MeshId, author: &Nickname) -> Self {
@@ -167,6 +193,13 @@ impl Message {
         )
     }
 
+    /// A request for the identity proof of the session `to`, sent to that session alone. It has no
+    /// body.
+    #[must_use]
+    pub fn new_proof_request(mesh: &MeshId, author: &Nickname, to: AuthorKey) -> Self {
+        Self::new(mesh, author, MessageKind::ProofRequest { to }, empty_body())
+    }
+
     /// A liveness probe (broadcast). Receivers auto-respond with a
     /// `Pong` addressed back to `author`.
     #[must_use]
@@ -177,7 +210,7 @@ impl Message {
     /// A `Pong` response addressed to the original pinger (`to`), naming the `Ping` (`probe`) that
     /// it answers.
     #[must_use]
-    pub fn new_pong(mesh: &MeshId, author: &Nickname, to: Nickname, probe: &MessageId) -> Self {
+    pub fn new_pong(mesh: &MeshId, author: &Nickname, to: AuthorKey, probe: &MessageId) -> Self {
         let probe = probe.clone();
         Self::new(mesh, author, MessageKind::Pong { to, probe }, empty_body())
     }
@@ -272,8 +305,21 @@ impl Message {
         if data.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge);
         }
-        let wire: WireIn = serde_json::from_slice(data)
-            .map_err(MessageError::with_step("failed to parse message JSON"))?;
+        let wire: WireIn = match serde_json::from_slice(data) {
+            Ok(wire) => wire,
+            Err(error) => {
+                // A frame of another version can fail on a field that the version changed. The
+                // cause to name is the version, not the field.
+                if let Some(version) = envelope_version(data)
+                    && version != VERSION
+                {
+                    return Err(MessageError::UnsupportedVersion(version));
+                }
+                return Err(MessageError::with_step("failed to parse message JSON")(
+                    error,
+                ));
+            }
+        };
         if wire.version != VERSION {
             return Err(MessageError::UnsupportedVersion(wire.version));
         }
@@ -455,7 +501,7 @@ impl Message {
     /// ```compile_fail,E0624
     /// use habilis_network_protocol::messages::Message;
     ///
-    /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+    /// const SIGNED: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"7f640d1c198f65d7c272b7206ce3d7ed31c289eca9e09a1c8e28adf770ec02499a7a4b68d837c774a3b8d4bd9a6358e2bd67278f98dbac3ce5fe2e60e5f99006","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
     ///
     /// let message = Message::parse(SIGNED.as_bytes()).unwrap();
     /// let canonical = message.canonical_bytes();
@@ -543,4 +589,11 @@ impl Message {
             ext: serde_json::json!({}),
         }
     }
+}
+
+/// The `v` of a JSON envelope, for a frame that does not parse as a whole.
+fn envelope_version(data: &[u8]) -> Option<String> {
+    let envelope: serde_json::Value = serde_json::from_slice(data).ok()?;
+    let version = envelope.get("v")?;
+    version.as_str().map(str::to_owned)
 }

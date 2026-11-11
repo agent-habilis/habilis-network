@@ -10,7 +10,7 @@
  */
 
 import type { NativeLibrary, NativePointer } from './dlopen/native.ts'
-import { MSG_BYTES, decodeMsg } from './msg.ts'
+import { decodeMsg, encodeMsg } from './msg.ts'
 import {
   type Command,
   type FromWorker,
@@ -48,7 +48,9 @@ export function createEngine(
 ): Engine {
   let handle: NativePointer | null = null
   let payload = new Uint8Array(RECV_BYTES)
-  const meta = new Uint8Array(MSG_BYTES)
+  // The engine refuses a struct whose size field is below its own: `encodeMsg` sets it, and
+  // every receive writes it back unchanged.
+  const meta = encodeMsg({ nick: '', key: '0'.repeat(64), directed: false, len: 0 })
   let closed = false
   let lastPoll = 0
 
@@ -134,6 +136,24 @@ export function createEngine(
           }
           break
         }
+        case 'sendToKey': {
+          if (handle === null) {
+            err(command.id, 'no open mesh')
+            break
+          }
+          const code = lib.call(
+            'habilis_network_msg_send_to_key',
+            handle,
+            command.key,
+            command.text,
+          ) as number
+          if (code === 0) {
+            ok(command.id, null)
+          } else {
+            err(command.id, lastError('habilis_network_msg_send_to_key'))
+          }
+          break
+        }
         case 'stateMerge': {
           if (handle === null) {
             err(command.id, 'no open mesh')
@@ -198,6 +218,7 @@ export function createEngine(
       port.post({
         t: 'msg',
         from: msg.nick,
+        key: msg.key,
         directed: msg.directed,
         text: utf8.decode(payload.subarray(0, msg.len)),
       })

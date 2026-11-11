@@ -9,10 +9,15 @@ use std::borrow::Cow;
 
 use habilis_network_protocol::SymmetricKey;
 
-use crate::DocError;
+use habilis_network_util::consts::DOC_TOMBSTONE_PATH_BYTES_MAX;
+
+use crate::{DocError, Stamp};
 use habilis_network_protocol::messages::MessageBody;
 
 use habilis_network_protocol::seal_error;
+
+pub use crate::{ParsedChange, SeedMark};
+
 /// The tagged `State`/`Meta` message body.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "k", rename_all = "snake_case")]
@@ -28,6 +33,28 @@ enum StateOp<'merge> {
         data: String,
         #[serde(rename = "m", default, skip_serializing_if = "Option::is_none")]
         merge: Option<Cow<'merge, Value>>,
+        /// The epoch of the history this change belongs to (wire key `e`). Left out at 0, so a
+        /// body of epoch 0 is the body from before epochs.
+        #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
+        /// The mark of a state seed root (wire key `s`). Left out of every other body.
+        #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
+        seed: Option<SeedMark>,
+        /// The Lamport time of the change (wire key `t`). Only a state channel with state epochs
+        /// writes it, and every other body is the body from before the time.
+        #[serde(rename = "t", default, skip_serializing_if = "Option::is_none")]
+        time: Option<u64>,
+        /// The stamps of the leaves that a seed or a replay frame writes (wire key `o`): for each
+        /// leaf, the time and an index into the tag table `a`.
+        #[serde(rename = "o", default, skip_serializing_if = "Vec::is_empty")]
+        origins: Vec<(u64, u32)>,
+        /// The tombstones of a seed root (wire key `x`): for each deleted path, the path, the time
+        /// of the delete, and an index into the tag table `a`.
+        #[serde(rename = "x", default, skip_serializing_if = "Vec::is_empty")]
+        tombstones: Vec<(Vec<String>, u64, u32)>,
+        /// The tags of the actors that `o` names (wire key `a`), each one once.
+        #[serde(rename = "a", default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
     },
     /// The pre-automerge RFC 7386 merge shape. Retained only so a body still
     /// composes for the adversarial harness; the automerge engine ignores it (a
@@ -87,12 +114,141 @@ pub fn merge_body(merge: Value) -> Result<MessageBody, DocError> {
 /// assert_eq!(parse_change_body(body.as_str()), Some(vec![1, 2]));
 /// ```
 pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, DocError> {
+    change_body_at(change, merge, 0)
+}
+
+/// [`change_body`] for a change of `epoch`. Epoch 0 adds nothing to the body, so its bytes are
+/// those of a body from before the epoch existed.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_at(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+) -> Result<MessageBody, DocError> {
+    change_body_seed(change, merge, epoch, None)
+}
+
+/// [`change_body_at`] for the root of a state seed, which carries the `seed` mark of its chain.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_seed(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+    seed: Option<&SeedMark>,
+) -> Result<MessageBody, DocError> {
+    change_body_timed(change, merge, epoch, seed, None)
+}
+
+/// [`change_body_seed`] with the Lamport time of the change (wire key `t`). A body of a channel
+/// that has no state epochs carries none, so its bytes are those of a body from before the time.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_timed(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+    seed: Option<&SeedMark>,
+    time: Option<u64>,
+) -> Result<MessageBody, DocError> {
+    change_body_stamped(change, merge, epoch, seed, time, &[])
+}
+
+/// [`change_body_timed`] with the stamps of the writes that the change carries: a frame of a seed
+/// or a replay names, for each leaf that it writes, the stamp of the write that made its value
+/// (wire keys `o` and `a`). `origins` lists them in the order of the paths of the leaves.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_stamped(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+    seed: Option<&SeedMark>,
+    time: Option<u64>,
+    origins: &[Stamp],
+) -> Result<MessageBody, DocError> {
+    change_body_tombstoned(change, merge, epoch, seed, time, origins, &[])
+}
+
+/// [`change_body_stamped`] with the tombstones of the root frame of a state seed (wire key `x`):
+/// each one is a path that was deleted, and the stamp of the delete. The tag table `a` lists the
+/// tags of `origins` first and then those of the tombstones, each one once, in the order of first
+/// use.
+///
+/// # Errors
+/// Serialization failure or a body exceeding the size limit.
+pub fn change_body_tombstoned(
+    change: &[u8],
+    merge: Option<&Value>,
+    epoch: u64,
+    seed: Option<&SeedMark>,
+    time: Option<u64>,
+    origins: &[Stamp],
+    tombstones: &[(Vec<String>, Stamp)],
+) -> Result<MessageBody, DocError> {
+    // One body for one meaning, which is how `parse_change_full` reads it back: a stamp or a
+    // tombstone needs the time of the change, and the tombstones are paths of a seed root in the
+    // order of the paths, none twice, none empty and none over the cap. A body that breaks a rule
+    // parses on no node, so the composer refuses it here: the caller would sign a frame that the
+    // whole mesh ignores, and the writes it names would be lost.
+    if (!origins.is_empty() || !tombstones.is_empty()) && time.is_none() {
+        return Err(DocError::encode(
+            "a change with stamps or tombstones carries the time of the change",
+        ));
+    }
+    let mut above: Option<&Vec<String>> = None;
+    for (path, _) in tombstones {
+        let bytes: usize = path.iter().map(String::len).sum();
+        if path.is_empty() || bytes > DOC_TOMBSTONE_PATH_BYTES_MAX {
+            return Err(DocError::encode(
+                "a tombstone names a path that is empty or over the bytes of a path",
+            ));
+        }
+        if above.is_some_and(|held| held >= path) {
+            return Err(DocError::encode(
+                "the tombstones are not in the order of their paths, or one of them is there twice",
+            ));
+        }
+        above = Some(path);
+    }
+    let mut tags: Vec<String> = Vec::new();
+    let mut named: Vec<(u64, u32)> = Vec::with_capacity(origins.len());
+    for stamp in origins {
+        named.push((stamp.time, tag_index(&mut tags, &stamp.tag)?));
+    }
+    let mut dead: Vec<(Vec<String>, u64, u32)> = Vec::with_capacity(tombstones.len());
+    for (path, stamp) in tombstones {
+        dead.push((path.clone(), stamp.time, tag_index(&mut tags, &stamp.tag)?));
+    }
+    let tagged: Option<u64> = (epoch != 0).then_some(epoch);
+    let mark: Option<SeedMark> = seed.cloned();
     let json = serde_json::to_string(&StateOp::Change {
         data: bs58::encode(change).into_string(),
         merge: merge.map(Cow::Borrowed),
+        epoch: tagged,
+        seed: mark,
+        time,
+        origins: named,
+        tombstones: dead,
+        tags,
     })
     .map_err(DocError::encode)?;
     Ok(MessageBody::try_new(&json)?)
+}
+
+/// The place of `tag` in the table `tags`: the table gets the tag at its end when it holds none yet.
+fn tag_index(tags: &mut Vec<String>, tag: &str) -> Result<u32, DocError> {
+    let found: Option<usize> = tags.iter().position(|held| held.as_str() == tag);
+    let position = found.unwrap_or_else(|| {
+        tags.push(tag.to_owned());
+        tags.len() - 1
+    });
+    u32::try_from(position).map_err(DocError::encode)
 }
 
 /// Decode a channel-event body back to raw automerge change bytes. `None` for a
@@ -112,9 +268,84 @@ pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, 
 /// ```
 #[must_use]
 pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
+    parse_change(body).map(|(bytes, _)| bytes)
+}
+
+/// [`parse_change_body`] with the epoch of the change. A body with no epoch reads as epoch 0.
+#[must_use]
+pub fn parse_change(body: &str) -> Option<(Vec<u8>, u64)> {
+    parse_change_full(body).map(|parsed| (parsed.bytes, parsed.epoch))
+}
+
+/// [`parse_change`] with the seed mark of a seed root.
+#[must_use]
+pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
     let op: StateOp<'_> = serde_json::from_str(body).ok()?;
     match op {
-        StateOp::Change { data, .. } => bs58::decode(&data).into_vec().ok(),
+        StateOp::Change {
+            data,
+            epoch,
+            seed,
+            time,
+            origins,
+            tombstones,
+            tags,
+            ..
+        } => {
+            // One body for one meaning: a stamp or a tombstone needs the time of the change, the
+            // table names each tag once, and every tag of the table is used.
+            let named_any = !origins.is_empty() || !tombstones.is_empty();
+            let repeated: bool = tags
+                .iter()
+                .enumerate()
+                .any(|(at, tag)| tags[..at].contains(tag));
+            if (named_any && time.is_none()) || (!named_any && !tags.is_empty()) || repeated {
+                return None;
+            }
+            // The table is in the order of first use (the stamps first, then the tombstones), so
+            // the same stamps have one body: a stamp names a tag that was used before, or the
+            // next one of the table.
+            let mut next_new: usize = 0;
+            let mut resolve = |index: u32| -> Option<String> {
+                let position = usize::try_from(index).ok()?;
+                let tag = tags.get(position)?;
+                if position > next_new {
+                    return None;
+                }
+                if position == next_new {
+                    next_new += 1;
+                }
+                Some(tag.clone())
+            };
+            let mut stamps: Vec<Stamp> = Vec::with_capacity(origins.len());
+            for (at, index) in origins {
+                stamps.push(Stamp::new(at, resolve(index)?));
+            }
+            let mut dead: Vec<(Vec<String>, Stamp)> = Vec::with_capacity(tombstones.len());
+            for (path, at, index) in tombstones {
+                // One body for one meaning: a tombstone names a real path of at most the bytes
+                // that a tombstone keeps, and the list is in the order of the paths, none twice.
+                let bytes: usize = path.iter().map(String::len).sum();
+                if path.is_empty()
+                    || bytes > DOC_TOMBSTONE_PATH_BYTES_MAX
+                    || dead.last().is_some_and(|last| last.0 >= path)
+                {
+                    return None;
+                }
+                dead.push((path, Stamp::new(at, resolve(index)?)));
+            }
+            if next_new != tags.len() {
+                return None;
+            }
+            Some(ParsedChange {
+                bytes: bs58::decode(&data).into_vec().ok()?,
+                epoch: epoch.unwrap_or(0),
+                seed,
+                time,
+                origins: stamps,
+                tombstones: dead,
+            })
+        }
         StateOp::Merge { .. } | StateOp::Enc { .. } => None,
     }
 }
@@ -191,11 +422,269 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{change_body, decrypt_body, encrypt_body, merge_body, parse_change_body};
+    use super::{
+        SeedMark, Stamp, change_body, change_body_at, change_body_seed, change_body_stamped,
+        change_body_timed, change_body_tombstoned, decrypt_body, encrypt_body, merge_body,
+        parse_change, parse_change_body, parse_change_full,
+    };
+    use crate::StampedPaths;
     use habilis_network_protocol::SymmetricKey;
 
     fn key(byte: u8) -> SymmetricKey {
         SymmetricKey::from([byte; 32])
+    }
+
+    #[test]
+    fn a_seed_mark_reads_back_and_a_body_without_one_is_unchanged() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mark = SeedMark::new(565, "ab".repeat(32));
+        let body = change_body_seed(&[1, 2], None, 4, Some(&mark)).expect("a seed root body");
+        let parsed = parse_change_full(body.as_str()).expect("it parses");
+        assert_eq!(parsed.bytes, vec![1, 2], "the change bytes read back");
+        assert_eq!(parsed.epoch, 4, "the epoch reads back");
+        assert_eq!(parsed.seed, Some(mark), "the mark reads back");
+        let plain = change_body_at(&[1, 2], None, 4).expect("a body");
+        assert_eq!(
+            parse_change_full(plain.as_str()).expect("it parses").seed,
+            None,
+            "a body without a mark reads with none"
+        );
+        assert!(
+            !plain.as_str().contains("\"s\""),
+            "a body without a mark adds nothing to the wire"
+        );
+    }
+
+    #[test]
+    fn a_change_time_reads_back_and_a_body_without_one_adds_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let timed = change_body_timed(&[1, 2, 3], None, 0, None, Some(7)).expect("a body");
+        assert_eq!(
+            timed.as_str(),
+            r#"{"k":"change","c":"Ldp","t":7}"#,
+            "the time is the wire key t"
+        );
+        assert_eq!(
+            parse_change_full(timed.as_str()).expect("it parses").time,
+            Some(7),
+            "the time reads back"
+        );
+        let plain = change_body_timed(&[1, 2, 3], None, 0, None, None).expect("a body");
+        assert_eq!(
+            plain.as_str(),
+            r#"{"k":"change","c":"Ldp"}"#,
+            "a body with no time is the body from before the time"
+        );
+        assert_eq!(
+            parse_change_full(plain.as_str()).expect("it parses").time,
+            None,
+            "a body with no time reads with none"
+        );
+    }
+
+    #[test]
+    fn the_stamps_of_a_frame_read_back_and_a_body_without_them_adds_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let stamps = vec![
+            Stamp::new(5, "aa".to_owned()),
+            Stamp::new(7, "bb".to_owned()),
+            Stamp::new(5, "aa".to_owned()),
+        ];
+        let body =
+            change_body_stamped(&[1, 2, 3], None, 0, None, Some(7), &stamps).expect("a body");
+        assert_eq!(
+            body.as_str(),
+            r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0],[7,1],[5,0]],"a":["aa","bb"]}"#,
+            "the stamps are the keys o and a, with each tag once"
+        );
+        assert_eq!(
+            parse_change_full(body.as_str()).expect("it parses").origins,
+            stamps,
+            "the stamps read back in order"
+        );
+        let plain = change_body_stamped(&[1, 2, 3], None, 0, None, Some(7), &[]).expect("a body");
+        assert_eq!(
+            plain.as_str(),
+            r#"{"k":"change","c":"Ldp","t":7}"#,
+            "a body with no stamps is the body of step 2"
+        );
+        let broken = r#"{"k":"change","c":"Ldp","t":7,"o":[[5,3]],"a":["aa"]}"#;
+        assert!(
+            parse_change_full(broken).is_none(),
+            "a stamp that names a tag outside the table is no body"
+        );
+    }
+
+    #[test]
+    fn the_tombstones_of_a_seed_root_read_back_and_share_the_tag_table() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let stamps = vec![Stamp::new(5, "aa".to_owned())];
+        let shallow: Vec<String> = vec!["k".to_owned()];
+        let nested: Vec<String> = vec!["m".to_owned(), "n".to_owned()];
+        let tombstones = vec![
+            (shallow, Stamp::new(9, "bb".to_owned())),
+            (nested, Stamp::new(8, "aa".to_owned())),
+        ];
+        let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &stamps, &tombstones)
+            .expect("a body");
+        assert_eq!(
+            body.as_str(),
+            r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0]],"x":[[["k"],9,1],[["m","n"],8,0]],"a":["aa","bb"]}"#,
+            "the tombstones are the key x, and the tags of o and x share the table a"
+        );
+        let parsed = parse_change_full(body.as_str()).expect("it parses");
+        assert_eq!(parsed.origins, stamps, "the stamps read back");
+        assert_eq!(parsed.tombstones, tombstones, "the tombstones read back");
+        let unused = r#"{"k":"change","c":"Ldp","t":7,"x":[[["k"],9,0]],"a":["bb","cc"]}"#;
+        assert!(
+            parse_change_full(unused).is_none(),
+            "a tag that no stamp and no tombstone uses is no body"
+        );
+        let no_time = r#"{"k":"change","c":"Ldp","x":[[["k"],9,0]],"a":["bb"]}"#;
+        assert!(
+            parse_change_full(no_time).is_none(),
+            "tombstones with no time of the change are no body"
+        );
+    }
+
+    /// The composer refuses what no parser accepts. A body of tombstones out of order, or of stamps
+    /// with no time of the change, reads as no body on every node: a caller that gets one signs a
+    /// frame that the whole mesh ignores, and the writes it names are lost.
+    #[test]
+    fn a_change_that_no_parser_accepts_composes_into_no_body() {
+        /// One tombstone of `keys`, with the same stamp for all of them: the order of the paths is
+        /// what the cases below vary.
+        fn dead(keys: &[&str]) -> (Vec<String>, Stamp) {
+            let owned = keys.iter().map(|key| (*key).to_owned());
+            (owned.collect(), Stamp::new(9, "aa".to_owned()))
+        }
+        let _guard = ::habilis_network_test_tracing::init();
+        let over_the_cap: String = "x".repeat(super::DOC_TOMBSTONE_PATH_BYTES_MAX + 1);
+        let cases: Vec<(StampedPaths, Option<u64>, &str)> = vec![
+            (
+                vec![dead(&["b"]), dead(&["a"])],
+                Some(7),
+                "tombstones out of the order of their paths",
+            ),
+            (
+                vec![dead(&["a"]), dead(&["a"])],
+                Some(7),
+                "the same tombstone path twice",
+            ),
+            (vec![dead(&[])], Some(7), "an empty path"),
+            (
+                vec![dead(&[over_the_cap.as_str()])],
+                Some(7),
+                "a path over the cap",
+            ),
+            (
+                vec![dead(&["a"])],
+                None,
+                "tombstones with no time of the change",
+            ),
+        ];
+        for (tombstones, time, why) in cases {
+            assert!(
+                change_body_tombstoned(&[1, 2, 3], None, 0, None, time, &[], &tombstones).is_err(),
+                "the composer gave a body for {why}"
+            );
+        }
+        let stamp = Stamp::new(9, "aa".to_owned());
+        assert!(
+            change_body_stamped(&[1, 2, 3], None, 0, None, None, &[stamp]).is_err(),
+            "the composer gave a body for stamps with no time of the change"
+        );
+        let fine = vec![dead(&["a"]), dead(&["a", "b"]), dead(&["b"])];
+        let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &[], &fine)
+            .expect("the control: a canonical list composes");
+        assert!(
+            parse_change_full(body.as_str()).is_some(),
+            "the control: a canonical list parses"
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_canonical_in_its_stamps_is_no_body() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let bodies = [
+            (
+                r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0]],"a":["aa","bb"]}"#,
+                "a tag that no stamp uses",
+            ),
+            (
+                r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0],[6,1]],"a":["aa","aa"]}"#,
+                "a tag that the table names twice",
+            ),
+            (
+                r#"{"k":"change","c":"Ldp","t":7,"a":["aa"]}"#,
+                "a table with no stamps",
+            ),
+            (
+                r#"{"k":"change","c":"Ldp","o":[[5,0]],"a":["aa"]}"#,
+                "stamps with no time of the change",
+            ),
+            (
+                r#"{"k":"change","c":"Ldp","t":7,"o":[[5,1],[7,0]],"a":["bb","aa"]}"#,
+                "a table that is not in the order of first use",
+            ),
+        ];
+        for (body, why) in bodies {
+            assert!(parse_change_full(body).is_none(), "refused: {why}");
+        }
+        let canonical = r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0],[6,1]],"a":["aa","bb"]}"#;
+        assert!(
+            parse_change_full(canonical).is_some(),
+            "the control: a canonical body parses"
+        );
+    }
+
+    #[test]
+    fn a_seed_mark_with_a_cut_vector_is_no_mark() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mark = SeedMark::new(3, "ab".repeat(32));
+        let body = change_body_seed(&[1, 2], None, 4, Some(&mark)).expect("a seed root body");
+        let plain = format!(r#"{{"n":3,"l":"{}"}}"#, "ab".repeat(32));
+        assert!(
+            body.as_str().contains(&plain),
+            "the mark of a seed names its frames and its last change only: {}",
+            body.as_str()
+        );
+        let old = body.as_str().replace(
+            &plain,
+            &format!(r#"{{"n":3,"l":"{}","c":[["aa",2]]}}"#, "ab".repeat(32)),
+        );
+        assert!(
+            parse_change_full(&old).is_none(),
+            "a mark with the old cut vector key is refused"
+        );
+    }
+
+    #[test]
+    fn an_epoch_above_zero_reads_back_and_epoch_zero_adds_nothing_to_the_body() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let before_epochs = r#"{"k":"change","c":"Ldp"}"#;
+        let epoch_zero = change_body(&[1, 2, 3], None).expect("a body");
+        assert_eq!(
+            epoch_zero.as_str(),
+            before_epochs,
+            "epoch 0 is the old body"
+        );
+        let epoch_seven = change_body_at(&[1, 2, 3], None, 7).expect("a body");
+        assert_eq!(
+            parse_change(epoch_seven.as_str()),
+            Some((vec![1, 2, 3], 7)),
+            "an epoch above 0 reads back"
+        );
+        assert_eq!(
+            parse_change(before_epochs),
+            Some((vec![1, 2, 3], 0)),
+            "a body with no epoch is epoch 0"
+        );
+        assert_eq!(
+            parse_change_body(epoch_seven.as_str()),
+            Some(vec![1, 2, 3]),
+            "the epoch does not change the change bytes"
+        );
     }
 
     #[test]

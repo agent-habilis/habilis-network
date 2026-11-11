@@ -1,8 +1,8 @@
 use super::{AppClass, InboundApp};
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
-use crate::protocol::Nickname;
 use crate::protocol::messages::Authored;
+use crate::protocol::{AuthorKey, Nickname};
 
 /// The seam the engine drives for application-payload handling. The engine
 /// owns [`EventLoopState`] and hands the app the frame plus the loop context
@@ -27,10 +27,14 @@ pub trait NodeApp: Send {
     /// Classify one inbound `App` frame by tag/payload — see [`super::AppClass`].
     fn classify(&self, message: &Authored) -> AppClass;
 
-    /// Dispatch an inbound `App` frame (addressed to us, or broadcast) after
-    /// the engine's generic prefix. Returns `true` when the engine should
-    /// proceed to retain/index the frame, `false` when it must stop (plumbing
-    /// like an RPC leg, or a directed leg addressed elsewhere).
+    /// Dispatch an inbound `App` frame after the engine's generic prefix. The frame can be
+    /// addressed to us, broadcast, or directed to **another key** that this node forwards: the
+    /// engine does not filter by recipient, and a nickname is a label, so the other key of a
+    /// shared nickname is another peer. An app that acts on a directed frame must check that `to`
+    /// is `context.our_pubkey` itself, and return `false` for a frame that is not for it. Returns
+    /// `true` when the engine should proceed to retain/index the frame, `false` when it must stop
+    /// (plumbing like an RPC leg, or a directed leg addressed elsewhere). The engine keeps no
+    /// directed frame of another key, whatever this returns.
     async fn on_app_frame(
         &mut self,
         frame: InboundApp<'_>,
@@ -50,13 +54,15 @@ pub trait NodeApp: Send {
     }
 
     /// Post-apply hook for a meta-channel event: adopt the author's published
-    /// endpoint hint into the dial book, if any.
+    /// endpoint hint into the dial book, if any. `author` is the key that signed the
+    /// event, and the slot of that key is the one that changed: a nickname is a label that
+    /// two keys can share, so it does not name a slot.
     ///
     /// Defaults to a no-op — an app that publishes no per-peer endpoint hint
     /// into the meta channel has nothing to adopt.
     fn on_meta_applied(
         &mut self,
-        author: &Nickname,
+        author: &AuthorKey,
         state: &mut EventLoopState,
         context: &HandlerCtx<'_>,
     ) {
@@ -75,18 +81,28 @@ pub trait NodeApp: Send {
     }
 
     /// A peer broadcast a graceful `Left` and was removed from the roster.
-    /// Fired only for a surfaced departure — never for a relayed pre-join
-    /// `Left`, and never from the silence-timeout sweep: a quiet peer may
-    /// return, so its app-side state must survive a mere timeout.
+    /// Fired once for every key of the roster that says goodbye, whether or not
+    /// the arrival of the peer was shown, and whatever the stamp of the goodbye:
+    /// the clock of the sender can run slow. Another key that
+    /// still holds the nickname does not change that: a nickname is a label,
+    /// and the state of the key that left is not valid for its twin. `nickname`
+    /// is the one that the roster recorded for `key`; the roster has dropped it
+    /// when the hook runs, so `state.nickname_of(key)` gives `None` here. An app
+    /// that reads the whole roster (`live_nicknames`) holds state for a peer
+    /// that is not shown yet, and must release it. Never fired for the goodbye
+    /// of a key that is not in the roster, and never from the silence-timeout
+    /// sweep: a quiet peer may return, so its app-side state must survive a
+    /// mere timeout.
     ///
     /// Defaults to a no-op — an app holding no per-peer state has nothing to
     /// release.
     async fn on_peer_left(
         &mut self,
+        key: &AuthorKey,
         nickname: &Nickname,
         state: &mut EventLoopState,
         context: &HandlerCtx<'_>,
     ) {
-        let _ = (nickname, state, context);
+        let _ = (key, nickname, state, context);
     }
 }

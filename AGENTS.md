@@ -18,11 +18,19 @@ State: `linked_endpoints` in `daemon/state.rs`.
 
 ### peer
 
-Layer: membership. Keyed by nickname.
+Layer: membership. Keyed by author key.
 
-A member of the mesh other than yourself. The roster is the set of peers. The live count includes you, so it is `peers.len() + 1`.
+A member of the mesh other than yourself. One author key is one peer. A member key binds the nickname that it proved: a second member with another member key under that nickname is no peer, and it gets the join error. A nickname that no member key proved (a client with no member key) is only a label, so two live keys that use it are two peers. The roster is the set of peers. The live count includes you and each peer whose arrival was shown, so it is the number of shown peers plus one. A roster peer whose arrival was not shown is not counted.
 
 State: `peers`. Code: `lifecycle/membership.rs`.
+
+### directed send
+
+Layer: membership. Keyed by author key.
+
+A message with one recipient. The frame names the recipient by author key, in the signed `to` field. A nickname that a member key proved names one member. A nickname that no member key proved names no member, so two live keys that use it are two recipients. A caller that holds only a nickname asks `key_of`. It gives the one live key of the nickname, or the reason it cannot: no live key, or two or more. A send asks `addressee_key`, because a quiet peer that may return is a recipient too. It gives the one live key, else the one quiet key, and it fails when the nickname names no key or two or more keys. To print a line about a key, ask `known_nickname_of`: it gives the name of a live or quiet key, and nothing for a key that left. `live_keys` lists the live keys. `note_key_endpoint` binds the endpoint that a meta card names to its key, by the rule of a `PeerInfo`: a second live key of a nickname gets the endpoint kept for it and binds no hint. The engine can pass a directed frame of another key to `NodeApp::on_app_frame`, so an app acts on a directed frame only if `to` is its own key. An app hook that names a peer takes the key. `on_peer_left` gives the key and the nickname that the roster recorded, and it fires for each key that leaves. `on_meta_applied` gives the key of the author, and the meta slot of each key is the lowercase hex of that key.
+
+Code: `EventLoopState::key_of`, `EventLoopState::addressee_key`, `EventLoopState::known_nickname_of`, `EventLoopState::live_keys`, `EventLoopState::note_key_endpoint`, `Messaging::SendToKey`, `sole_addressee`, `NodeApp::on_peer_left`, `NodeApp::on_meta_applied`.
 
 ### mesh
 
@@ -98,7 +106,7 @@ Code: `protocol::identity`, `AuthorKey`.
 
 ### surfaced
 
-Layer: presentation. Keyed by nickname.
+Layer: presentation. Keyed by author key.
 
 A peer whose arrival was shown to the operator or the agent. `surfaced` is a subset of `peers`. It gates what is shown. The roster stays complete for anti-entropy.
 
@@ -106,7 +114,7 @@ State: `surfaced`.
 
 ### quiet
 
-Layer: heartbeat. Keyed by nickname.
+Layer: heartbeat. Keyed by author key.
 
 A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return.
 
@@ -170,6 +178,16 @@ Arrival and departure are surfaced once each, as `joined` and `left`, keyed by n
 
 Each lookup bootstraps a mesh and runs it with no other lookup present. An added lookup adds reliability and never a feature.
 
+## Correctness
+
+Correctness is imperative. Choose the correct design, whatever the size of the refactor.
+Do not keep a workaround, a heuristic, or a smaller change when it hides a wrong model.
+If the correct fix is large, split it into small steps. Each step compiles and passes the tests.
+
+## Compatibility
+
+Until version 1.0, we do not care about backward compatibility. Before 1.0, break compatibility when it gives a better design, better performance, or better reliability. Do not keep a shim, an alias, or a fallback only for old versions.
+
 ## Logging
 
 Developer logs use `tracing`. Message bodies are redacted by default.
@@ -208,7 +226,8 @@ Issue #29 records each decision.
 - `clippy::missing_assert_message` is on by name in `[workspace.lints]`: an `assert!` outside test code needs a message. A probe `assert!(flag)` fails with "assert without any message" (2026-10-27). Clippy does not look at test code, so about 570 message-less `assert!` calls in tests stay.
 - No `for` loop header holds a combinator chain: a `git grep` for `for … in … .iter()/.into_iter()/.chars()/.lines()/.split() .method(` finds 0 lines (2026-10-27). The reviewer keeps it that way. (P16)
 - `arc_reason` in `scripts/style-check/style-check.ts` (Z28): an `Arc<` type or an `Arc::new(` needs a one-line `//` reason on its line or the line above, saying why the handle is shared (the owners that hold it, or the trait object). `Arc::clone` is not flagged. A site without a reason fails the gate. Where a borrow works, remove the `Arc` instead of commenting it.
-- Every `unsafe fn` has a `# Safety` section: the 4 in `habilis-network-ffi/src/ffi.rs` each carry one. `unsafe_code` is denied everywhere else, and 6 `expect(unsafe_code)` sites remain. (D4)
+- Avoid `unsafe`. Use safe code if it exists, even if it costs a new line or a small loss of detail. If no safe way exists, use `unsafe` and give the reason as a `///` doc comment on the item that holds it. The doc says why no safe way exists. The `#[expect(unsafe_code, reason = "...")]` and the `// SAFETY:` comment stay as well. A new `unsafe` needs a row in the `#[expect]` table below.
+- Every `unsafe fn` has a `# Safety` section: the 4 in `habilis-network-ffi/src/ffi.rs` each carry one. `unsafe_code` is denied everywhere else, and 9 `expect(unsafe_code)` sites remain. (D4)
 - The docs follow the rustdoc rules: the `Doc links` step of `ci.yml` runs `cargo doc --workspace --no-deps --all-features` with `RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links`. (D10)
 - `clippy::doc_markdown` (in `pedantic`) refuses an identifier in a doc comment that has no backticks. `clippy.toml` extends its list of domain terms. It does not check the rest of the Markdown, so the reviewer does. (D11)
 - `clippy::new_without_default` (default group, not silenced) refuses a `pub fn new() -> Self` with no `Default` impl. A probe with `-D clippy::new_without_default` fails on the bare type and passes once `impl Default` is added (2026-10-28). A `Default` for a type with public fields is still the reviewer's call. (R17)
@@ -258,7 +277,7 @@ Issue #29 records each decision.
 
 ### Remaining `#[expect]` attributes
 
-Nine `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C ABI of the ffi crate, and libc calls that have no safe wrapper), and one that suppresses `deprecated`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
+Ten `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate, a counting allocator, and libc calls that have no safe wrapper), and one that suppresses `deprecated`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -271,6 +290,7 @@ Nine `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C 
 | `habilis-network-util/src/resident_memory.rs` (mmap) | `unsafe_code` | `libc` `mmap` and `munmap`: the pages must go back at once, which a heap allocation does not do on macOS |
 | `habilis-network-ffi/src/ffi.rs` (crate) | `unsafe_code` | this module is the C ABI: raw pointers from the foreign caller, and a boxed handle it owns |
 | `habilis-network-ffi/tests/ffi_smoke.rs` (crate) | `unsafe_code` | the surface under test is `unsafe extern "C"`; calling it is the test |
+| `habilis-network-doc/tests/replay_cost.rs` (crate) | `unsafe_code` | the test counts the bytes of a replay, and a counting allocator needs an `unsafe GlobalAlloc` impl |
 
 ### Rules of the guide that do not apply
 
@@ -411,7 +431,6 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R15 | `SplitMix64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/split_mix64.rs` | a PRNG state: a Copy would fork its stream, so it derives Clone only |
 | R15 | `Fnv1a64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/round.rs` | a hasher state: a Copy would fork its stream, so it derives Clone only |
 | R13 | `BenchError` | `habilis-network-iroh-webrtc-transport/src/bench_error.rs` | holds error sources that are not Copy, such as `endpoint::BindError` | |
-| R13 | `LobbyError` | `habilis-network-netplay/src/mesh/lobby.rs` | holds a `Nickname`, which owns a `String` | |
 | R13 | `TestRelayError` | `habilis-network/src/lookup/test_relay/test_relay_error.rs` | holds error sources that are not Copy, such as `server::SpawnError` | |
 | R16 | `ChunkError` | `habilis-network-chunks/src/chunk_error.rs` | holds a field type that is not Clone |
 | R16 | `DiskOrigin` | `habilis-network-chunks/src/fs/disk_origin.rs` | holds a `Mutex` field, which is not Clone |

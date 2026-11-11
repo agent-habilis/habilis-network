@@ -1,16 +1,25 @@
+mod chat_continuations;
+mod collection_sizes;
 mod event_loop_state;
 
+mod gossip_msgs;
 mod idle_counters;
+mod key_of_error;
 mod latch;
 mod mesh_secrets;
 mod ping_round;
+mod proof_book;
+mod proof_exchange;
+mod socket_bytes;
 mod state_init;
+mod wire_out_tally;
 
 mod beacon_note;
 mod direct_counts;
 mod direct_state;
 #[cfg(feature = "multihop")]
 mod parked_link_states;
+mod peer_info_flood;
 mod reach;
 mod rendezvous_flag;
 mod rival_flag;
@@ -31,18 +40,29 @@ use crate::util::clock;
 use crate::util::tuning;
 
 pub use event_loop_state::EventLoopState;
+pub(crate) use event_loop_state::{LiveRun, PendingSuspend};
 
-pub(crate) use idle_counters::IdleCounters;
+pub(crate) use collection_sizes::CollectionSizes;
+pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
+#[cfg(feature = "host")]
+pub(crate) use idle_counters::note_ppid_wake;
+pub(crate) use idle_counters::{IdleCounters, note_sampler_wake, top_requesters};
 pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
-pub(crate) use state_init::StateInit;
+pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
+pub(crate) use state_init::{RunKeys, StateInit};
+#[cfg(test)]
+pub(crate) use wire_out_tally::app_frame_with_tag;
+pub(crate) use wire_out_tally::{Arrival, FrameShape, WireOut, WireOutTally, by_arrival, by_class};
 
 pub(crate) use beacon_note::BeaconNote;
 pub(crate) use direct_counts::DirectCounts;
 pub(crate) use direct_state::DirectState;
+pub use key_of_error::KeyOfError;
 #[cfg(feature = "multihop")]
 pub(crate) use parked_link_states::ParkedLinkStates;
+pub(crate) use peer_info_flood::PeerInfoFlood;
 pub use reach::Reach;
 pub(crate) use rendezvous_flag::RendezvousFlag;
 pub(crate) use rival_flag::RivalFlag;
@@ -77,21 +97,620 @@ const MAX_PARKED_LINK_STATES: usize = 256;
 #[cfg(test)]
 mod tests {
     use super::{
-        DirectCounts, DirectState, Duration, EndpointId, EventLoopState, PingRound, Reach,
-        RivalFlag,
+        DirectCounts, DirectState, Duration, EndpointId, EventLoopState, KeyOfError, PingRound,
+        Reach, RivalFlag,
     };
-    use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
+    use crate::daemon::state::{BeaconNote, PeerInfoFlood, RendezvousFlag, Standing};
     use crate::protocol::{
-        AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, UnixSecs,
+        AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, Nickname,
+        UnixSecs,
     };
-    use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
+    use crate::testing::{
+        author_of, endpoint_id, fresh_state, fresh_state_with_book, fresh_state_without_member_key,
+        nick, test_key,
+    };
+
+    /// The proof of a session is signed by the member key, over the session key, the nickname and
+    /// the mesh. The session key signs frames, so a proof signed by it would prove nothing.
+    #[test]
+    fn the_proof_of_a_session_is_signed_by_the_member_key() {
+        use crate::protocol::identity;
+        let state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let proof = state
+            .own_proof(&nick("alice"), &mesh, 7)
+            .expect("a member key");
+        assert_eq!(
+            proof.identity,
+            state
+                .member_identity
+                .as_ref()
+                .expect("a member key")
+                .public(),
+            "the member key signs the proof"
+        );
+        assert!(
+            identity::verify_proof(&proof, &state.identity.author_key(), "alice", mesh.as_ref()),
+            "the proof binds the session key, the nickname and the mesh"
+        );
+    }
+
+    /// A receiver holds the proof in a `joined` frame when it verifies for the author, and holds
+    /// nothing for a proof of another nickname or for an empty body.
+    #[test]
+    fn a_joined_frame_proof_is_held_when_it_verifies() {
+        let sender = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let key = sender.identity.author_key();
+        let own: Message = Message::new_joined_with_proof(
+            &mesh,
+            &nick("alice"),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
+        );
+        receiver.note_joined_proof(&own.sign(&sender.identity), &mesh, &nick("reader"), true);
+        assert!(
+            receiver.proofs.proof_of(&key).is_some(),
+            "the proof is held"
+        );
+
+        let mut other = fresh_state();
+        let forged = Message::new_joined_with_proof(
+            &mesh,
+            &nick("bob"),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
+        );
+        other.note_joined_proof(&forged.sign(&sender.identity), &mesh, &nick("reader"), true);
+        assert!(
+            other.proofs.proof_of(&key).is_none(),
+            "a proof of another nickname is not held"
+        );
+        let thief = fresh_state();
+        let stolen = Message::new_joined_with_proof(
+            &mesh,
+            &nick("alice"),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
+        )
+        .sign(&thief.identity);
+        other.note_joined_proof(&stolen, &mesh, &nick("reader"), true);
+        assert!(
+            other
+                .proofs
+                .proof_of(&thief.identity.author_key())
+                .is_none(),
+            "a proof body of another session, replayed under a new key, is not held"
+        );
+        let empty = Message::new_joined(&mesh, &nick("alice")).sign(&sender.identity);
+        other.note_joined_proof(&empty, &mesh, &nick("reader"), true);
+        assert!(
+            other.proofs.proof_of(&key).is_none(),
+            "an empty body holds no proof"
+        );
+    }
+
+    /// A proof request for this node gets one answer with a proof that verifies. A request for
+    /// another node gets none, and the answers stop at the per-minute cap.
+    #[test]
+    fn a_proof_request_is_answered_once_in_the_cap() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let asker = AuthorKey::from([200u8; 32]);
+        let now = Instant::now();
+        assert!(
+            state
+                .proof_answer(&AuthorKey::from([7u8; 32]), &asker, &me, &mesh, now)
+                .is_none(),
+            "a request for another node gets no answer"
+        );
+        let answer: messages::Verified = state
+            .proof_answer(&state.identity.author_key(), &asker, &me, &mesh, now)
+            .expect("a request for this node gets an answer");
+        let proof = answer.joined_proof().expect("the answer holds a proof");
+        assert!(
+            protocol::identity::verify_proof(
+                &proof,
+                &state.identity.author_key(),
+                "alice",
+                mesh.as_ref()
+            ),
+            "the proof in the answer verifies"
+        );
+        let askers: Vec<AuthorKey> = (1..=100u8)
+            .map(|index| AuthorKey::from([index; 32]))
+            .collect();
+        let mut answered = 0;
+        for other in &askers {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, now)
+                .is_some()
+            {
+                answered += 1;
+            }
+        }
+        assert_eq!(answered + 1, 30, "the answers stop at the per-minute cap");
+    }
+
+    /// A node with no member key answers no proof request, and it spends no slot of the cap: a
+    /// slot spent for it would count a refusal for an answer that the node could never send.
+    #[test]
+    fn a_node_with_no_member_key_spends_no_slot_of_the_answer_cap() {
+        let mut state = fresh_state_without_member_key();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let asker = AuthorKey::from([200u8; 32]);
+        let now = Instant::now();
+        let own = state.identity.author_key();
+
+        for _ in 0..2 {
+            assert!(
+                state.proof_answer(&own, &asker, &me, &mesh, now).is_none(),
+                "a node with no member key has no answer to give"
+            );
+        }
+
+        assert_eq!(
+            state.proofs.answers_refused(),
+            0,
+            "no answer was refused, because none was ever possible"
+        );
+    }
+
+    /// An alive frame from a roster member whose session has no proof asks once. An alive frame
+    /// from a stranger asks never, and a held proof asks never.
+    #[test]
+    fn an_alive_frame_without_a_proof_asks_once() {
+        let mut state = fresh_state();
+        let peer = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let alive: messages::Verified =
+            Message::new_alive(&mesh, &nick("bob")).sign(&peer.identity);
+        assert!(
+            state.proof_request_for(&alive, &me, &mesh).is_none(),
+            "a stranger gets no request"
+        );
+        state.peers.insert(alive.key());
+        let request = state
+            .proof_request_for(&alive, &me, &mesh)
+            .expect("a roster member without a proof is asked");
+        assert_eq!(
+            request.kind,
+            protocol::MessageKind::ProofRequest {
+                to: peer.identity.author_key()
+            },
+            "the request names the member"
+        );
+        state.note_proof_request_sent(&alive.key(), None);
+        assert!(
+            state.proof_request_for(&alive, &me, &mesh).is_none(),
+            "after a send the session waits for its back-off"
+        );
+    }
+
+    /// A member that crashed never says goodbye, so its session must not stay live for ever: when
+    /// the book is full, the sessions of members that left the roster make room for new ones.
+    #[test]
+    fn crashed_members_do_not_fill_the_proof_book() {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let mut newest = None;
+        for index in 0..QUIET_CAP + 100 {
+            let member = protocol::identity::Identity::generate();
+            let session = protocol::identity::Identity::generate();
+            let name = nick(&format!("peer-{index}"));
+            let proof: protocol::identity::IdentityProof =
+                member.prove(&session.author_key(), name.as_ref(), mesh.as_ref(), 1);
+            let joined = Message::new_joined_with_proof(&mesh, &name, &proof).sign(&session);
+            receiver.note_joined_proof(&joined, &mesh, &nick("reader"), true);
+            newest = Some(session.author_key());
+        }
+        let newest: AuthorKey = newest.expect("the loop ran");
+        assert!(
+            receiver.proofs.proof_of(&newest).is_some(),
+            "the newest session verifies after more crashes than the cap"
+        );
+    }
+
+    /// A node that joins a mesh of 96 is asked by every peer in the same minute. Each asker gets
+    /// its answer: the node-wide cap grows with the roster.
+    #[test]
+    fn every_asker_of_a_mesh_of_96_is_answered() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        for index in 0..96 {
+            state.peers.insert(test_key(&format!("peer-{index}")));
+        }
+        let now = Instant::now();
+        let mut answered = 0;
+        for index in 0..96u8 {
+            let asker = AuthorKey::from([index; 32]);
+            if state
+                .proof_answer(&state.identity.author_key(), &asker, &me, &mesh, now)
+                .is_some()
+            {
+                answered += 1;
+            }
+        }
+        assert_eq!(answered, 96, "every asker of a mesh of 96 gets its answer");
+    }
+
+    /// A member restarts and its `joined` frame is lost. Its first frame is an `alive`, which the gate
+    /// refuses the roster, for the nickname is bound. The session is asked for its proof all the same,
+    /// since the proof is the way in; a stranger under a free nickname is no member of the roster and
+    /// gets no request.
+    #[test]
+    fn a_session_of_a_bound_nickname_that_missed_its_joined_frame_is_asked_for_its_proof() {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let bound = fresh_state();
+        let restarted = fresh_state();
+        let stranger = fresh_state();
+        let me = nick("reader");
+        receiver.peers.insert(bound.identity.author_key());
+        let proof = protocol::identity::Identity::generate().prove(
+            &bound.identity.author_key(),
+            "alice",
+            mesh.as_ref(),
+            1,
+        );
+        assert!(
+            receiver.proofs.accept(
+                &bound.identity.author_key(),
+                &nick("alice"),
+                &mesh,
+                proof,
+                |_| true
+            ),
+            "the nickname alice is bound to the member of the first session"
+        );
+        let alive_of = |sender: &EventLoopState, name: &str| -> messages::Verified {
+            Message::new_alive(&mesh, &nick(name)).sign(&sender.identity)
+        };
+
+        assert!(
+            receiver
+                .proof_request_for(&alive_of(&restarted, "alice"), &me, &mesh)
+                .is_some(),
+            "a session of the bound nickname with no proof is asked"
+        );
+        assert!(
+            receiver
+                .proof_request_for(&alive_of(&stranger, "carol"), &me, &mesh)
+                .is_none(),
+            "a stranger under a free nickname is not asked"
+        );
+    }
+
+    /// A restart makes a second session of one member under one nickname. The proof is keyed by the
+    /// session key, and a member holds one session, the newest: the proof of the run 2 session
+    /// replaces the proof of the run 1 session, and the caller hears of the one that went.
+    #[test]
+    fn the_session_of_a_newer_run_replaces_the_session_of_the_same_member() {
+        let first = fresh_state();
+        let second = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let shared = nick("alice");
+        let member = protocol::identity::Identity::generate();
+        let (old, new) = (first.identity.author_key(), second.identity.author_key());
+        for (sender, run) in [(&first, 1), (&second, 2)] {
+            receiver.peers.insert(sender.identity.author_key());
+            let proof = member.prove(&sender.identity.author_key(), "alice", mesh.as_ref(), run);
+            let joined =
+                Message::new_joined_with_proof(&mesh, &shared, &proof).sign(&sender.identity);
+            receiver.note_joined_proof(&joined, &mesh, &nick("reader"), true);
+        }
+
+        assert!(
+            receiver.proofs.proof_of(&old).is_none(),
+            "the old session is dropped"
+        );
+        assert!(
+            receiver.proofs.proof_of(&new).is_some(),
+            "the new session is held"
+        );
+        assert_eq!(
+            receiver.proofs.take_replaced(),
+            [old],
+            "the old session is reported"
+        );
+    }
+
+    /// A receiver binds a nickname to the member key whose proof it held first. The proof of another
+    /// member for the same nickname is not held, while the session of the first is in the roster. The
+    /// binding is the view of one receiver and not a global order: each of the two members is the
+    /// other for the other one, and both hear the join error.
+    #[test]
+    fn a_second_member_cannot_prove_a_nickname_that_a_roster_session_binds() {
+        let (first, second) = (fresh_state(), fresh_state());
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let shared = nick("alice");
+        receiver.peers.insert(first.identity.author_key());
+        receiver.peers.insert(second.identity.author_key());
+        let joined_first: messages::Verified = first.own_joined(&mesh, &shared);
+        let joined_second: messages::Verified = second.own_joined(&mesh, &shared);
+
+        receiver.note_joined_proof(&joined_first, &mesh, &nick("reader"), true);
+        receiver.note_joined_proof(&joined_second, &mesh, &nick("reader"), true);
+
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&first.identity.author_key())
+                .is_some(),
+            "the first member binds the nickname"
+        );
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&second.identity.author_key())
+                .is_none(),
+            "the second member's proof for the same nickname is not held"
+        );
+        assert_eq!(receiver.proofs.bound_refused(), 1, "the refusal is counted");
+    }
+
+    /// The nickname of this node is bound to its member key. The first proof of another member for
+    /// it is the join error of this node, told once for each session.
+    #[test]
+    fn a_proof_of_another_member_for_our_nickname_is_the_join_error_once() {
+        let mut ours = fresh_state();
+        let other = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let mine = nick("alice");
+        let joined: messages::Verified = other.own_joined(&mesh, &mine);
+
+        assert!(
+            ours.note_joined_proof(&joined, &mesh, &mine, true),
+            "the first proof of another member for our nickname is told"
+        );
+        assert!(
+            !ours.note_joined_proof(&joined, &mesh, &mine, true),
+            "the same session is told once"
+        );
+        assert!(
+            ours.proofs.proof_of(&other.identity.author_key()).is_none(),
+            "the proof is not held: our nickname is not up for binding"
+        );
+        let ours_joined: messages::Verified = ours.own_joined(&mesh, &mine);
+        assert!(
+            !ours.note_joined_proof(&ours_joined, &mesh, &mine, true),
+            "a proof of our own member key is no error"
+        );
+    }
+
+    /// The proof of a session names the nickname that it proved. A session of our own member that proved `bob`
+    /// has no proof for our nickname `alice`: its frames under `alice` are not admitted on the proof for `bob`.
+    #[test]
+    fn a_proof_for_another_nickname_does_not_admit_a_session_under_our_nickname() {
+        let mut ours = fresh_state();
+        let mut session = fresh_state();
+        session.member_identity = ours.member_identity.clone();
+        let mesh = MeshId::from("💬test");
+        let (mine, other_name) = (nick("alice"), nick("bob"));
+        let for_bob: messages::Verified = session.own_joined(&mesh, &other_name);
+        assert!(
+            !ours.note_joined_proof(&for_bob, &mesh, &mine, true),
+            "a proof of our own member for another nickname is no error"
+        );
+        assert!(
+            ours.proofs
+                .proof_of(&session.identity.author_key())
+                .is_some(),
+            "the proof for bob is held"
+        );
+        let as_alice: messages::Verified = Message::new_alive(&mesh, &mine).sign(&session.identity);
+
+        assert!(
+            !ours.admits_session(&as_alice, &mine),
+            "the session that proved bob was admitted under our nickname on the proof for bob"
+        );
+    }
+
+    /// The same for the report of a newer run of our own member: a proof for another nickname with a higher
+    /// run does not show that a newer run of this member is active under our nickname.
+    #[test]
+    fn a_proof_for_another_nickname_is_no_newer_run_under_our_nickname() {
+        let mut ours = fresh_state();
+        let session = protocol::identity::Identity::generate();
+        let member = ours
+            .member_identity
+            .clone()
+            .expect("a test state has a member key");
+        let mesh = MeshId::from("💬test");
+        let (mine, other_name) = (nick("alice"), nick("bob"));
+        let proof = member.prove(&session.author_key(), "bob", mesh.as_ref(), 6);
+        let for_bob: messages::Verified =
+            Message::new_joined_with_proof(&mesh, &other_name, &proof).sign(&session);
+        assert!(
+            !ours.note_joined_proof(&for_bob, &mesh, &mine, true),
+            "a proof of our own member for another nickname is no error"
+        );
+        let as_alice: messages::Verified = Message::new_alive(&mesh, &mine).sign(&session);
+
+        assert_eq!(
+            ours.newer_run_of_our_member(&as_alice, &mine),
+            None,
+            "a proof for bob with a higher run was taken as a newer run of our member under our nickname"
+        );
+    }
+
+    /// A nickname is a label that two live sessions can share. A request names one session, and only
+    /// that session answers it: the other one holds the same nickname and stays silent.
+    #[test]
+    fn a_request_names_one_session_when_two_live_sessions_share_a_nickname() {
+        let (first, mut second) = (fresh_state(), fresh_state());
+        let mut joiner = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let (shared, joiner_name) = (nick("alice"), nick("bob"));
+        joiner.peers.insert(first.identity.author_key());
+        joiner.peers.insert(second.identity.author_key());
+        let alive: messages::Verified = Message::new_alive(&mesh, &shared).sign(&first.identity);
+
+        let request = joiner
+            .proof_request_for(&alive, &joiner_name, &mesh)
+            .expect("the joiner asks the first session");
+        let protocol::MessageKind::ProofRequest { to } = &request.kind else {
+            panic!("the joiner sent a proof request");
+        };
+        let now = Instant::now();
+        let asker = request.key();
+
+        assert!(
+            second
+                .proof_answer(to, &asker, &shared, &mesh, now)
+                .is_none(),
+            "the second session shares the nickname and is not the one that was asked"
+        );
+    }
+
+    /// Two nodes, end to end at state level: a joiner that missed the `joined` frame of a member
+    /// sees its alive frame, asks once, gets the answer, and holds a proof that verifies. The
+    /// restart half (a new session replaces the old one) waits for the gate.
+    #[test]
+    fn a_joiner_that_missed_the_joined_frame_ends_up_with_the_proof() {
+        let mut member = fresh_state();
+        let mut joiner = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let (member_name, joiner_name) = (nick("alice"), nick("bob"));
+        joiner.peers.insert(member.identity.author_key());
+        let alive: messages::Verified =
+            Message::new_alive(&mesh, &member_name).sign(&member.identity);
+
+        let request = joiner
+            .proof_request_for(&alive, &joiner_name, &mesh)
+            .expect("the joiner asks for the proof");
+        joiner.note_proof_request_sent(&alive.key(), None);
+        let protocol::MessageKind::ProofRequest { to } = &request.kind else {
+            panic!("the joiner sent a proof request");
+        };
+        let answer: messages::Verified = member
+            .proof_answer(to, &request.key(), &member_name, &mesh, Instant::now())
+            .expect("the member answers the request for itself");
+        joiner.note_joined_proof(&answer, &mesh, &nick("reader"), true);
+
+        let held = joiner.proofs.proof_of(&member.identity.author_key());
+        assert!(
+            held.is_some(),
+            "the joiner holds the proof of the member session"
+        );
+        assert!(
+            joiner
+                .proof_request_for(&alive, &joiner_name, &mesh)
+                .is_none(),
+            "the next alive frame of the session asks for nothing"
+        );
+    }
+
+    /// A joiner starts with a small roster, so its answer cap starts at 30. The askers it refused
+    /// ask again 30 s later, when the roster has grown, and every one of the 96 is answered.
+    #[test]
+    fn askers_refused_in_the_first_seconds_are_answered_after_the_roster_grows() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let askers: Vec<AuthorKey> = (0..96u8)
+            .map(|index| AuthorKey::from([index; 32]))
+            .collect();
+        let start = Instant::now();
+        let mut answered = Vec::new();
+        for other in &askers {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, start)
+                .is_some()
+            {
+                answered.push(*other);
+            }
+        }
+        assert_eq!(
+            answered.len(),
+            30,
+            "a small roster answers 30 in the first minute"
+        );
+        for index in 0..96 {
+            state.peers.insert(test_key(&format!("peer-{index}")));
+        }
+        let retry_at = start + Duration::from_secs(30);
+        let mut refused: Vec<AuthorKey> = Vec::new();
+        for other in &askers {
+            if !answered.contains(other) {
+                refused.push(*other);
+            }
+        }
+        for other in &refused {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, retry_at)
+                .is_some()
+            {
+                answered.push(*other);
+            }
+        }
+        assert_eq!(
+            answered.len(),
+            96,
+            "the retries of the refused askers are answered"
+        );
+    }
+
+    /// The `joined` frame a node announces carries the proof of its session, and a receiver holds
+    /// it: the first join needs no request.
+    #[test]
+    fn the_joined_frame_of_a_node_carries_its_proof() {
+        let sender = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let joined: messages::Verified = sender.own_joined(&mesh, &nick("alice"));
+        receiver.note_joined_proof(&joined, &mesh, &nick("reader"), true);
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&sender.identity.author_key())
+                .is_some(),
+            "the receiver holds the proof from the first frame"
+        );
+    }
+
+    /// A node with no member key (a target with no files, such as wasm) sends an empty `joined`
+    /// body: a proof made with a key of this start would prove nothing across restarts. It answers
+    /// no proof request either.
+    #[test]
+    fn a_node_with_no_member_key_sends_an_empty_joined_body() {
+        let mut state = fresh_state();
+        state.member_identity = None;
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let joined: messages::Verified = state.own_joined(&mesh, &me);
+        assert!(joined.joined_proof().is_none(), "the joined body is empty");
+        let asker = AuthorKey::from([9u8; 32]);
+        assert!(
+            state
+                .proof_answer(
+                    &state.identity.author_key(),
+                    &asker,
+                    &me,
+                    &mesh,
+                    Instant::now()
+                )
+                .is_none(),
+            "a node with no member key answers no request"
+        );
+    }
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
 
     use crate::protocol::messages;
-    use crate::transport::PayloadPath;
     use crate::transport::probe::PathKind;
+    use crate::transport::{Lane, PayloadPath};
     use crate::util::tuning;
     use crate::{lookup, protocol};
     use iroh::address_lookup::memory;
@@ -353,7 +972,7 @@ mod tests {
             now,
         );
 
-        for state in [no_flag, unproven, ourselves] {
+        for state in [&no_flag, &unproven, &ourselves] {
             assert!(
                 !state.beacon_notes.contains(&BeaconNote::YieldToLower),
                 "a flag that does not count does not make us yield"
@@ -664,9 +1283,7 @@ mod tests {
             },
             Instant::now(),
         );
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(low));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(low));
         state.forget_peer_endpoint("bob");
         assert!(
             !state.rival_holder_known(),
@@ -698,6 +1315,794 @@ mod tests {
         );
     }
 
+    /// The address of a peer goes to the book of the endpoint and to the pool together, so the
+    /// state of a pruned endpoint drops both. A linked endpoint is a reconnect target and keeps
+    /// its entry until the link ends.
+    #[test]
+    fn a_pruned_endpoint_leaves_the_address_book_and_a_linked_one_stays() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let book = memory::MemoryLookup::new();
+        let mut state = fresh_state_with_book(book.clone());
+        let (pruned, linked) = (endpoint_id(1), endpoint_id(2));
+        for endpoint in [pruned, linked] {
+            let address = iroh::EndpointAddr::new(endpoint)
+                .with_ip_addr("192.0.2.1:4000".parse().expect("address"));
+            lookup::add_peer_addr(state.address_book(), address.clone());
+            state.unicast_pool.note_addr(&address);
+        }
+        state.linked_endpoints.insert(linked);
+
+        state.release_unbound_endpoint(pruned);
+        state.release_unbound_endpoint(linked);
+
+        assert!(
+            book.get_endpoint_info(pruned).is_none(),
+            "the book lost the entry of the pruned endpoint"
+        );
+        assert!(
+            book.get_endpoint_info(linked).is_some(),
+            "the linked endpoint is a reconnect target and keeps its entry"
+        );
+    }
+
+    /// Seat `key` in the roster under `nickname`, live or quiet.
+    fn seat(state: &mut EventLoopState, key: AuthorKey, nickname: &str, live: bool) {
+        state.names.insert(key, nick(nickname));
+        if live {
+            state.peers.insert(key);
+        } else {
+            state.quiet.insert(key);
+        }
+    }
+
+    /// A nickname maps to the one live key that uses it. It names no key when no live key uses
+    /// it, and none when two or more do: the engine never picks one of them.
+    #[test]
+    fn key_of_names_the_one_live_key_of_a_nickname_and_refuses_the_rest() {
+        let mut state = fresh_state();
+        let (alone, first, second, gone) = (
+            test_key("alone"),
+            test_key("twin#first"),
+            test_key("twin#second"),
+            test_key("gone"),
+        );
+        seat(&mut state, alone, "alone", true);
+        seat(&mut state, first, "twin", true);
+        seat(&mut state, second, "twin", true);
+        seat(&mut state, gone, "gone", false);
+
+        assert_eq!(
+            state.key_of(&nick("alone")),
+            Ok(alone),
+            "one live key uses the nickname"
+        );
+        assert_eq!(
+            state.key_of(&nick("twin")),
+            Err(KeyOfError::Ambiguous),
+            "two live keys use the nickname"
+        );
+        assert_eq!(
+            state.key_of(&nick("nobody")),
+            Err(KeyOfError::Unknown),
+            "no key uses the nickname"
+        );
+        assert_eq!(
+            state.key_of(&nick("gone")),
+            Err(KeyOfError::Unknown),
+            "a quiet key is no live key"
+        );
+    }
+
+    /// A quiet key does not make a nickname ambiguous, and the live key under it is named.
+    #[test]
+    fn a_quiet_key_of_a_nickname_does_not_hide_its_live_key_from_key_of() {
+        let mut state = fresh_state();
+        let (live, quiet) = (test_key("twin#live"), test_key("twin#quiet"));
+        seat(&mut state, live, "twin", true);
+        seat(&mut state, quiet, "twin", false);
+
+        assert_eq!(
+            state.key_of(&nick("twin")),
+            Ok(live),
+            "the quiet key is no user of the nickname"
+        );
+    }
+
+    /// A live key maps back to its nickname. A quiet key and a key we never saw map to none.
+    #[test]
+    fn nickname_of_names_a_live_key_and_no_other() {
+        let mut state = fresh_state();
+        let (live, quiet) = (test_key("live"), test_key("quiet"));
+        seat(&mut state, live, "live", true);
+        seat(&mut state, quiet, "quiet", false);
+
+        assert_eq!(
+            state.nickname_of(&live),
+            Some(nick("live")),
+            "a live key maps to its nickname"
+        );
+        assert_eq!(
+            state.nickname_of(&quiet),
+            None,
+            "a quiet key is no live key"
+        );
+        assert_eq!(
+            state.nickname_of(&test_key("stranger")),
+            None,
+            "a key we never saw has no nickname"
+        );
+    }
+
+    /// A row reads `Direct` when the address that a send to its key dials is a live link. The
+    /// second live key of a nickname owns no dial hint, and its retained endpoint is the address
+    /// of a send to it, so the row reads the link of that endpoint.
+    #[test]
+    fn the_reach_of_a_row_follows_the_address_that_a_send_to_its_key_dials() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second, lonely) = (
+            test_key("bob#first"),
+            test_key("bob#second"),
+            test_key("lonely"),
+        );
+        let (first_endpoint, second_endpoint) = (endpoint_id(1), endpoint_id(2));
+        for (key, name) in [(first, "bob"), (second, "bob"), (lonely, "lonely")] {
+            state.names.insert(key, nick(name));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+        state.retain_refused_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+        state.linked_endpoints.insert(second_endpoint);
+
+        let snapshot = state.roster_snapshot();
+        let reach_of_key = |key: AuthorKey| {
+            let row = snapshot.peers.iter().find(|entry| entry.key == key);
+            row.expect("the row of a shown live key").reach
+        };
+
+        assert_eq!(
+            reach_of_key(second),
+            Reach::Direct,
+            "the retained endpoint of the second key is linked"
+        );
+        assert_eq!(
+            reach_of_key(first),
+            Reach::Gossip,
+            "the hint of the first key is not linked"
+        );
+        assert_eq!(
+            reach_of_key(lonely),
+            Reach::Gossip,
+            "a key with no address reads gossip"
+        );
+    }
+
+    /// A directed frame waits in the buffer for the endpoint of its key. When that key leaves the
+    /// roster nothing can deliver it, and it would be requeued at every flush until the buffer
+    /// is full. It goes with the key. The frames of other keys and the broadcasts stay, in order.
+    #[test]
+    fn a_buffered_frame_to_a_key_that_left_goes_with_the_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (gone, stays) = (test_key("gone"), test_key("stays"));
+        let mesh = MeshId::from("test");
+        let identity = protocol::Identity::generate();
+        let directed = |to: AuthorKey| {
+            Message::new_pong(&mesh, &nick("us"), to, &MessageId::random()).sign(&identity)
+        };
+        let broadcast = Message::new_ping(&mesh, &nick("us")).sign(&identity);
+        let queued = [
+            directed(stays),
+            directed(gone),
+            broadcast,
+            directed(gone),
+            directed(stays),
+        ];
+        let expected_ids: Vec<_> = [&queued[0], &queued[2], &queued[4]]
+            .iter()
+            .map(|frame| frame.id.clone())
+            .collect();
+        for frame in queued {
+            let bytes = frame.serialize().expect("serialize");
+            assert!(state.pending_outbound.push((frame, bytes)), "room");
+        }
+
+        state.forget_key(gone);
+
+        let left_in_buffer = state.pending_outbound.take();
+        let kept: Vec<_> = left_in_buffer
+            .into_iter()
+            .map(|(frame, _)| frame.id.clone())
+            .collect();
+        assert_eq!(
+            kept, expected_ids,
+            "the buffer must keep the other frames, in order, and lose those of the key that left"
+        );
+    }
+
+    /// The roster keeps the name of a quiet key, because a quiet peer may return and a line about
+    /// it still prints its name. A key that left the roster has no name: `forget_key` drops it.
+    #[test]
+    fn a_quiet_key_keeps_its_known_nickname_and_a_forgotten_key_has_none() {
+        let mut state = fresh_state();
+        let (live, quiet, gone) = (test_key("live"), test_key("quiet"), test_key("gone"));
+        seat(&mut state, live, "live", true);
+        seat(&mut state, quiet, "quiet", false);
+        seat(&mut state, gone, "gone", true);
+        state.forget_key(gone);
+
+        assert_eq!(
+            state.known_nickname_of(&live),
+            Some(nick("live")),
+            "a live key has its name"
+        );
+        assert_eq!(
+            state.known_nickname_of(&quiet),
+            Some(nick("quiet")),
+            "a quiet key keeps its name"
+        );
+        assert_eq!(
+            state.known_nickname_of(&gone),
+            None,
+            "a forgotten key has no name"
+        );
+        assert_eq!(
+            state.known_nickname_of(&test_key("stranger")),
+            None,
+            "a key we never saw has no name"
+        );
+    }
+
+    /// `live_keys` lists the keys that are live peers now: not the quiet ones, and not a key that
+    /// left. Two live keys that share a nickname are two entries.
+    #[test]
+    fn live_keys_lists_only_the_live_peers() {
+        let mut state = fresh_state();
+        let (first, second, quiet, gone) = (
+            test_key("twin#first"),
+            test_key("twin#second"),
+            test_key("quiet"),
+            test_key("gone"),
+        );
+        seat(&mut state, first, "twin", true);
+        seat(&mut state, second, "twin", true);
+        seat(&mut state, quiet, "quiet", false);
+        seat(&mut state, gone, "gone", true);
+        state.forget_key(gone);
+
+        let mut listed: Vec<AuthorKey> = state.live_keys().copied().collect();
+        listed.sort();
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(
+            listed, expected,
+            "the live set must hold the two live keys only"
+        );
+    }
+
+    /// `addressee_key` is the key that a send by nickname goes to: the one live key, else the one
+    /// quiet key, because a peer that went quiet may return. A live key wins over a quiet key of
+    /// the same nickname, two keys of one rank are ambiguous, and a nickname that nobody uses is
+    /// unknown.
+    #[test]
+    fn addressee_key_takes_the_live_key_then_the_only_quiet_key() {
+        let mut state = fresh_state();
+        let (sleeper, live, quiet, first, second) = (
+            test_key("sleeper"),
+            test_key("mixed#live"),
+            test_key("mixed#quiet"),
+            test_key("snooze#first"),
+            test_key("snooze#second"),
+        );
+        seat(&mut state, sleeper, "sleeper", false);
+        seat(&mut state, live, "mixed", true);
+        seat(&mut state, quiet, "mixed", false);
+        seat(&mut state, first, "snooze", false);
+        seat(&mut state, second, "snooze", false);
+
+        assert_eq!(
+            state.addressee_key(&nick("sleeper")),
+            Ok(sleeper),
+            "the only key of the nickname is quiet, and it may return"
+        );
+        assert_eq!(
+            state.addressee_key(&nick("mixed")),
+            Ok(live),
+            "a live key wins over a quiet key of the same nickname"
+        );
+        assert_eq!(
+            state.addressee_key(&nick("snooze")),
+            Err(KeyOfError::Ambiguous),
+            "two quiet keys use the nickname"
+        );
+        assert_eq!(
+            state.addressee_key(&nick("nobody")),
+            Err(KeyOfError::Unknown),
+            "no key uses the nickname"
+        );
+    }
+
+    /// A card in the meta channel names the endpoint of its key before the `PeerInfo` of that key
+    /// comes. `note_key_endpoint` binds it as the dial hint of the key, so a send to the key is
+    /// deliverable at once, and the `PeerInfo` that follows finds the same binding.
+    #[test]
+    fn a_card_endpoint_makes_the_key_deliverable_before_its_peer_info() {
+        let mut state = fresh_state();
+        let bob = test_key("bob");
+        let endpoint = endpoint_id(61);
+        seat(&mut state, bob, "bob", true);
+        assert!(
+            state.address_of(&bob).is_none(),
+            "no address before the card"
+        );
+
+        state.note_key_endpoint(bob, iroh::EndpointAddr::new(endpoint));
+
+        assert_eq!(
+            state.address_of(&bob).map(|address| address.id),
+            Some(endpoint),
+            "a send to the key has no address after its card"
+        );
+        assert_eq!(
+            state.hint_owner.get(&nick("bob")),
+            Some(&bob),
+            "the hint belongs to the key of the card"
+        );
+        state.bind_peer_endpoint(bob, nick("bob"), iroh::EndpointAddr::new(endpoint));
+        assert_eq!(
+            state.address_of(&bob).map(|address| address.id),
+            Some(endpoint),
+            "the PeerInfo that follows moved the address"
+        );
+    }
+
+    /// Two live keys share a nickname and the first owns the dial hint. The card of the second
+    /// binds no hint: a directed send to the nickname must not reach a node that only borrowed
+    /// the label. The endpoint waits for the second key, which a send to that key dials.
+    #[test]
+    fn the_card_endpoint_of_a_second_live_key_of_a_nickname_is_refused_not_bound() {
+        let mut state = fresh_state();
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint) = (endpoint_id(62), endpoint_id(63));
+        seat(&mut state, first, "bob", true);
+        seat(&mut state, second, "bob", true);
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+
+        state.note_key_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+
+        assert_eq!(
+            state
+                .peer_endpoints
+                .get(&nick("bob"))
+                .map(|address| address.id),
+            Some(first_endpoint),
+            "the hint of the nickname moved to the second key"
+        );
+        assert_eq!(
+            state
+                .refused_endpoints
+                .get(&second)
+                .map(|address| address.id),
+            Some(second_endpoint),
+            "the endpoint of the second key was not kept"
+        );
+        assert_eq!(
+            state.address_of(&second).map(|address| address.id),
+            Some(second_endpoint),
+            "a send to the second key does not dial its own endpoint"
+        );
+        assert_eq!(
+            state.address_of(&first).map(|address| address.id),
+            Some(first_endpoint),
+            "the first key lost its endpoint"
+        );
+    }
+
+    /// The endpoints that sync code released wait for the teardown of the pool in a bounded list: fed 10 times its
+    /// cap of endpoints, it holds the cap (the first ones), and the others wait in the orphan set, where the sweep
+    /// queues them again after the drain. The orphan set has its own cap: the oldest of the waiting ones fall back to
+    /// the idle sweep of the pool.
+    #[test]
+    fn the_endpoints_that_wait_for_the_teardown_stay_inside_their_cap_at_10_times_the_cap() {
+        let mut state = fresh_state();
+        let cap = 256;
+        let endpoints: Vec<EndpointId> = (0..10 * cap)
+            .map(|index| {
+                let mut bytes = [3u8; 32];
+                bytes[..4].copy_from_slice(&u32::try_from(index).unwrap_or(0).to_le_bytes());
+                iroh::SecretKey::from_bytes(&bytes).public()
+            })
+            .collect();
+
+        for endpoint in &endpoints {
+            state.release_unbound_endpoint(*endpoint);
+        }
+
+        let waiting = state.take_teardown_pending();
+        assert_eq!(waiting.len(), cap, "the list holds its cap");
+        assert!(
+            waiting.contains(&endpoints[0]) && !waiting.contains(&endpoints[endpoints.len() - 1]),
+            "the first endpoints are queued and the last one waits"
+        );
+        assert_eq!(
+            state.orphaned_endpoints.len(),
+            super::event_loop_state::ORPHANED_ENDPOINTS_MAX,
+            "the endpoints that found the list full wait in the orphan set, up to its cap"
+        );
+        assert!(
+            state.take_teardown_pending().is_empty(),
+            "the list is empty after it was taken"
+        );
+    }
+
+    /// The orphan set is bounded: fed 10 times its cap of linked endpoints that no nickname binds, it holds the cap, and
+    /// the oldest fall back to the idle sweep of the pool.
+    #[test]
+    fn the_orphan_set_stays_inside_its_cap_at_10_times_the_cap() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoints: Vec<EndpointId> = (0..10 * cap)
+            .map(|index| {
+                let mut bytes = [5u8; 32];
+                bytes[..4].copy_from_slice(&u32::try_from(index).unwrap_or(0).to_le_bytes());
+                iroh::SecretKey::from_bytes(&bytes).public()
+            })
+            .collect();
+
+        for endpoint in &endpoints {
+            state.linked_endpoints.insert(*endpoint);
+            state.release_unbound_endpoint(*endpoint);
+        }
+
+        assert_eq!(
+            state.orphaned_endpoints.len(),
+            cap,
+            "the orphan set holds more than its cap"
+        );
+        assert!(
+            state
+                .orphaned_endpoints
+                .contains(&endpoints[endpoints.len() - 1])
+                && !state.orphaned_endpoints.contains(&endpoints[0]),
+            "the newest is kept and the oldest was dropped"
+        );
+    }
+
+    /// The orphan set drops an orphan when it is full, and the state of that orphan goes with it: its address, direct
+    /// path, proof and backoff are cleaned at the eviction, so no eviction leaves state that nothing finds again. That
+    /// holds for an orphan whose link has ended since it came in (it waits for the next sweep, and the flood evicts it
+    /// first), and for a linked one when more endpoints are linked than the set holds (`--max-peers` is not capped).
+    #[test]
+    fn the_orphan_that_a_full_set_drops_loses_its_state_with_it() {
+        use super::direct_state::DirectState;
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoint_at = |index: u32| {
+            let mut bytes = [11u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        let mut state = fresh_state();
+
+        // `cap - 1` linked orphans, and one orphan whose link ended: the only one that is not linked
+        let lost_link = endpoint_at(0);
+        state.linked_endpoints.insert(lost_link);
+        state.release_unbound_endpoint(lost_link);
+        state.direct.insert(lost_link, DirectState::Direct);
+        state.linked_endpoints.remove(&lost_link);
+        for index in 1..u32::try_from(cap).expect("a small number") {
+            let linked = endpoint_at(index);
+            state.linked_endpoints.insert(linked);
+            state.release_unbound_endpoint(linked);
+        }
+        assert_eq!(state.orphaned_endpoints.len(), cap, "the set is full");
+        // one more linked orphan: the set drops the only orphan that is not linked, the one that lost its link
+        let newcomer = endpoint_at(u32::try_from(cap).expect("a small number"));
+        state.linked_endpoints.insert(newcomer);
+        state.release_unbound_endpoint(newcomer);
+
+        assert!(
+            !state.orphaned_endpoints.contains(&lost_link),
+            "the orphan that lost its link was not the one dropped"
+        );
+        assert!(
+            !state.direct.contains_key(&lost_link),
+            "the orphan that a full set dropped kept its direct state: no sweep finds it any more"
+        );
+
+        // every orphan is linked now: the next newcomer makes the set drop a LINKED one, and that one loses its state
+        let linked_with_state: EndpointId = *state
+            .orphaned_endpoints
+            .oldest()
+            .expect("the set holds endpoints");
+        state.direct.insert(linked_with_state, DirectState::Direct);
+        let last = endpoint_at(u32::try_from(cap).expect("a small number") + 1);
+        state.linked_endpoints.insert(last);
+        state.release_unbound_endpoint(last);
+        let with_state: Vec<EndpointId> = state.direct.keys().copied().collect();
+        let dropped: Vec<EndpointId> = with_state
+            .into_iter()
+            .filter(|endpoint| !state.orphaned_endpoints.contains(endpoint))
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "an orphan that the set dropped kept its direct state: {dropped:?}"
+        );
+    }
+
+    /// The pooled connection and the dial cooldown of a dropped orphan need the async pool, which the drop cannot
+    /// call: the drop queues the teardown, as every other release of an unbound endpoint does. With no queue the
+    /// connection stays open until the idle sweep of the pool finds it, and the cooldown refuses the next dial of
+    /// an endpoint that nothing holds any more.
+    #[test]
+    fn the_orphan_that_a_full_set_drops_waits_for_the_teardown_of_the_pool() {
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoint_at = |index: u32| {
+            let mut bytes = [17u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        let mut state = fresh_state();
+        for index in 0..u32::try_from(cap).expect("a small number") {
+            let linked = endpoint_at(index);
+            state.linked_endpoints.insert(linked);
+            state.release_unbound_endpoint(linked);
+        }
+        assert!(
+            state.take_teardown_pending().is_empty(),
+            "a linked orphan queues no teardown: it keeps its pool until its link ends"
+        );
+        assert_eq!(state.orphaned_endpoints.len(), cap, "the set is full");
+
+        let newcomer = endpoint_at(u32::try_from(cap).expect("a small number"));
+        state.linked_endpoints.insert(newcomer);
+        state.release_unbound_endpoint(newcomer);
+
+        assert_eq!(
+            state.take_teardown_pending(),
+            vec![endpoint_at(0)],
+            "the oldest orphan was dropped, and its pooled connection waits for no teardown"
+        );
+    }
+
+    /// An orphan that another key bound again before the full set dropped it keeps its state: the endpoint is bound, as
+    /// the callers of `forget_endpoint_state` and the drain of the teardown check, and the nickname that binds it needs
+    /// its address, direct path and proof for a dial. The set forgets the endpoint; the state stays.
+    #[test]
+    fn an_orphan_that_another_key_bound_again_keeps_its_state_when_a_full_set_drops_it() {
+        use super::direct_state::DirectState;
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoint_at = |index: u32| {
+            let mut bytes = [13u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        let mut state = fresh_state();
+
+        // the only orphan that is not linked, and so the one that a flood drops: a hint binds it again
+        let rebound = endpoint_at(0);
+        state.linked_endpoints.insert(rebound);
+        state.release_unbound_endpoint(rebound);
+        state.direct.insert(rebound, DirectState::Direct);
+        state.linked_endpoints.remove(&rebound);
+        state
+            .peer_endpoints
+            .insert(nick("carol"), iroh::EndpointAddr::new(rebound));
+        for index in 1..u32::try_from(cap).expect("a small number") {
+            let linked = endpoint_at(index);
+            state.linked_endpoints.insert(linked);
+            state.release_unbound_endpoint(linked);
+        }
+        let newcomer = endpoint_at(u32::try_from(cap).expect("a small number"));
+        state.linked_endpoints.insert(newcomer);
+        state.release_unbound_endpoint(newcomer);
+
+        assert!(
+            !state.orphaned_endpoints.contains(&rebound),
+            "the orphan that another key bound again was not the one dropped"
+        );
+        assert!(
+            state.direct.contains_key(&rebound),
+            "the set deleted the state of an endpoint that another key bound again"
+        );
+    }
+
+    /// A full orphan set drops an orphan that is not linked, never a linked one: the state of a linked orphan (its
+    /// address, its direct path, its proof) is cleaned only when its link ends, and the set is walked for that. The
+    /// linked endpoints are far fewer than the cap, so there is always an unlinked orphan to drop.
+    #[test]
+    fn a_full_orphan_set_keeps_its_linked_orphan() {
+        let mut state = fresh_state();
+        let linked = {
+            let mut bytes = [7u8; 32];
+            bytes[..4].copy_from_slice(&0u32.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        state.linked_endpoints.insert(linked);
+        state.release_unbound_endpoint(linked);
+        assert!(
+            state.orphaned_endpoints.contains(&linked),
+            "the linked endpoint is an orphan"
+        );
+
+        // more unlinked endpoints than the queue and the orphan set hold together: the first ones fill the queue, the
+        // rest go to the orphan set, which overflows
+        let flood = super::event_loop_state::ORPHANED_ENDPOINTS_MAX + 512;
+        for index in 1..=u32::try_from(flood).expect("a small number") {
+            let mut bytes = [7u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            state.release_unbound_endpoint(iroh::SecretKey::from_bytes(&bytes).public());
+        }
+
+        assert!(
+            state.orphaned_endpoints.contains(&linked),
+            "the full orphan set dropped its linked orphan: its state is cleaned by no link loss any more"
+        );
+        assert_eq!(
+            state.orphaned_endpoints.len(),
+            super::event_loop_state::ORPHANED_ENDPOINTS_MAX,
+            "the orphan set holds its cap"
+        );
+    }
+
+    /// The retained endpoints are bounded: a flood of signed `PeerInfo` frames with fresh keys under a bound
+    /// nickname keeps the cap and no more, and the oldest key goes first.
+    #[test]
+    fn the_retained_endpoints_keep_their_cap_and_drop_the_oldest() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::REFUSED_ENDPOINTS_CAP;
+        let keys: Vec<AuthorKey> = (0..10 * cap)
+            .map(|index| test_key(&format!("flood-{index}")))
+            .collect();
+        for key in &keys {
+            state.retain_refused_endpoint(*key, iroh::EndpointAddr::new(endpoint_id(90)));
+        }
+
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "10 times the cap of fresh keys left more than the cap"
+        );
+        assert!(
+            !state.refused_endpoints.contains_key(&keys[0]),
+            "the oldest key is still retained"
+        );
+        assert!(
+            state
+                .refused_endpoints
+                .contains_key(keys.last().expect("a last key")),
+            "the newest key is not retained"
+        );
+    }
+
+    /// A key that is retained again after its endpoint was released has one place in the queue, the newest.
+    /// The stale place at the head must not make the next key at the cap release the endpoint that the key
+    /// holds now, while older keys stay.
+    #[test]
+    fn a_key_that_is_retained_again_does_not_lose_its_endpoint_to_its_stale_place() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::REFUSED_ENDPOINTS_CAP;
+        let keys: Vec<AuthorKey> = (0..=cap + 1)
+            .map(|index| test_key(&format!("again-{index}")))
+            .collect();
+        let again = keys[0];
+        let address = iroh::EndpointAddr::new(endpoint_id(91));
+        state.retain_refused_endpoint(again, address.clone());
+        state.release_refused_endpoint(&again);
+        for key in &keys[1..cap] {
+            state.retain_refused_endpoint(*key, address.clone());
+        }
+        state.retain_refused_endpoint(again, address.clone());
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "the map is at its cap before the key that pushes the oldest out"
+        );
+
+        state.retain_refused_endpoint(keys[cap], address);
+
+        assert!(
+            state.refused_endpoints.contains_key(&again),
+            "the key that was retained again lost its endpoint to its stale place in the queue"
+        );
+        assert!(
+            !state.refused_endpoints.contains_key(&keys[1]),
+            "the oldest key that is still retained was not the one to go"
+        );
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "the cap holds after the newest key"
+        );
+    }
+
+    /// A card binds nothing for a key that said goodbye, since a key never speaks again and the
+    /// card is a replay, and nothing for a key that no roster holds: no name, no hint.
+    #[test]
+    fn a_card_endpoint_binds_nothing_for_a_departed_key_or_a_stranger() {
+        let mut state = fresh_state();
+        let (departed, stranger) = (test_key("departed"), test_key("stranger"));
+        seat(&mut state, departed, "departed", true);
+        state.note_left(departed);
+
+        state.note_key_endpoint(departed, iroh::EndpointAddr::new(endpoint_id(64)));
+        state.note_key_endpoint(stranger, iroh::EndpointAddr::new(endpoint_id(65)));
+
+        assert!(
+            state.address_of(&departed).is_none() && state.address_of(&stranger).is_none(),
+            "a card bound an endpoint for a departed key or a stranger"
+        );
+        assert!(
+            state.peer_endpoints.is_empty() && state.refused_endpoints.is_empty(),
+            "a card left a hint or a retained endpoint behind"
+        );
+    }
+
+    /// The member list of the transport plane has one row for each key. Two live keys that use
+    /// one nickname are two rows, the hint of a nickname that no key uses yet is a row, and an
+    /// endpoint that two rows name is listed once.
+    #[test]
+    fn the_member_list_has_one_row_for_each_key_and_one_for_each_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint, card_endpoint) =
+            (endpoint_id(1), endpoint_id(2), endpoint_id(3));
+        seat(&mut state, first, "bob", true);
+        seat(&mut state, second, "bob", true);
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+        state.retain_refused_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("carol"), iroh::EndpointAddr::new(card_endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("dave"), iroh::EndpointAddr::new(first_endpoint));
+
+        let mut listed: Vec<EndpointId> = state
+            .member_addresses()
+            .iter()
+            .map(|address| address.id)
+            .collect();
+        listed.sort_unstable();
+        let mut want = vec![first_endpoint, second_endpoint, card_endpoint];
+        want.sort_unstable();
+
+        assert_eq!(listed, want, "the member list is not one row for each key");
+    }
+
+    /// A key that renamed keeps its hint under the old nickname until the sweep prunes it. The
+    /// member list follows `address_of`: the key is listed once, by the address that a send to it
+    /// dials, and the stale hint under the old nickname is not a second row.
+    #[test]
+    fn a_key_that_renamed_is_one_row_of_the_member_list() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("renamer");
+        let (old_endpoint, new_endpoint) = (endpoint_id(1), endpoint_id(2));
+        seat(&mut state, key, "old-name", true);
+        state.bind_peer_endpoint(key, nick("old-name"), iroh::EndpointAddr::new(old_endpoint));
+        state.names.insert(key, nick("new-name"));
+        state.bind_peer_endpoint(key, nick("new-name"), iroh::EndpointAddr::new(new_endpoint));
+
+        let listed: Vec<EndpointId> = state
+            .member_addresses()
+            .iter()
+            .map(|address| address.id)
+            .collect();
+
+        assert_eq!(
+            listed,
+            vec![new_endpoint],
+            "the key is one row, by the address that a send to it dials"
+        );
+        assert_eq!(
+            state.address_of(&key).map(|address| address.id),
+            Some(new_endpoint),
+            "the member list and the send route agree"
+        );
+    }
+
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
     #[test]
@@ -709,7 +2114,8 @@ mod tests {
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         let node = |direct: Option<DirectState>, kind: PathKind| {
             let mut node = fresh_state();
-            node.peer_endpoints.insert(nick("bob"), address.clone());
+            node.names.insert(test_key("bob"), nick("bob"));
+            node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
             node.direct.extend(direct.map(|verdict| (bob, verdict)));
             node.path_kinds.insert(bob, kind);
             node
@@ -758,7 +2164,8 @@ mod tests {
         let address = iroh::EndpointAddr::new(bob)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         let mut node = fresh_state();
-        node.peer_endpoints.insert(nick("bob"), address.clone());
+        node.names.insert(test_key("bob"), nick("bob"));
+        node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
         node.direct.insert(bob, DirectState::Direct);
         node.path_kinds.insert(bob, PathKind::Gossip);
 
@@ -1474,6 +2881,238 @@ mod tests {
         );
     }
 
+    /// A card names a nickname and no key. The hint goes to the one key that answers to the
+    /// nickname, to no key when none does, and nowhere when two live keys do: the card does not
+    /// say which of them it is.
+    #[test]
+    fn a_card_hint_goes_to_the_only_key_of_its_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let first = iroh::EndpointAddr::new(endpoint_id(1));
+        let second = iroh::EndpointAddr::new(endpoint_id(2));
+
+        state.note_peer_endpoint(nick("carol"), first.clone());
+        assert_eq!(
+            state.peer_endpoints.get("carol"),
+            Some(&first),
+            "a card before any frame of the peer binds the hint"
+        );
+        assert!(
+            !state.hint_owner.contains_key("carol"),
+            "a hint with no key has no owner"
+        );
+
+        state.peer_for_test("bob");
+        state.note_peer_endpoint(nick("bob"), first.clone());
+        assert_eq!(
+            state.hint_owner.get("bob"),
+            Some(&test_key("bob")),
+            "the one key of the nickname owns the hint"
+        );
+
+        let other = AuthorKey::from_bytes([77; 32]);
+        state.names.insert(other, nick("bob"));
+        state.peers.insert(other);
+        state.note_peer_endpoint(nick("bob"), second);
+        assert_eq!(
+            state.peer_endpoints.get("bob"),
+            Some(&first),
+            "a card moved the hint of a nickname that two live keys use"
+        );
+    }
+
+    /// A card names a nickname and no key. A live key and a quiet key can share a nickname, and
+    /// only the live one answers there: the hint goes to it, as a send by nickname does.
+    #[test]
+    fn a_card_hint_goes_to_the_live_key_when_a_quiet_key_shares_the_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let live = test_key("bob");
+        state.peer_for_test("bob");
+        let quiet = AuthorKey::from_bytes([77; 32]);
+        state.names.insert(quiet, nick("bob"));
+        state.quiet.insert(quiet);
+        let card = iroh::EndpointAddr::new(endpoint_id(1));
+
+        state.note_peer_endpoint(nick("bob"), card.clone());
+
+        assert_eq!(
+            state.peer_endpoints.get("bob"),
+            Some(&card),
+            "a quiet key made the card of a nickname that one live key uses ambiguous"
+        );
+        assert_eq!(
+            state.hint_owner.get("bob"),
+            Some(&live),
+            "the live key does not own the hint"
+        );
+    }
+
+    /// The dial hint of a nickname has one owner. The roster has a row for each live key, and only
+    /// the owner reads `Direct`.
+    #[test]
+    fn only_the_key_that_owns_the_hint_reads_direct() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let linked = endpoint_id(1);
+        state.linked_endpoints.insert(linked);
+        let (owner, other) = (test_key("bob"), AuthorKey::from_bytes([77; 32]));
+        for key in [owner, other] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(linked));
+
+        let snapshot = state.roster_snapshot();
+        let mut reaches: Vec<Reach> = snapshot.peers.iter().map(|row| row.reach).collect();
+        reaches.sort_by_key(|reach| matches!(reach, Reach::Gossip));
+        assert_eq!(
+            reaches,
+            vec![Reach::Direct, Reach::Gossip],
+            "one row reads Direct (the owner) and the other reads Gossip: {snapshot:?}"
+        );
+    }
+
+    /// Two live peers use one nickname. The roster JSON names the key of each row, in the field
+    /// `key` (64 lowercase hex digits), so a client of the roster can send to one of them by key.
+    #[test]
+    fn the_roster_json_of_two_peers_with_one_nickname_names_both_keys() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+        for key in [first, second] {
+            state.names.insert(key, nick("twin"));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+
+        let json = serde_json::to_value(state.roster_snapshot()).expect("a roster serializes");
+
+        let rows = json["peers"]
+            .as_array()
+            .expect("the roster has a peers array");
+        let key_of = |row: &serde_json::Value| row["key"].as_str().map(str::to_owned);
+        let mut keys: Vec<String> = rows.iter().filter_map(key_of).collect();
+        keys.sort();
+        let mut want = vec![first.to_string(), second.to_string()];
+        want.sort();
+        assert_eq!(
+            keys, want,
+            "the rows of the roster do not name both keys: {json}"
+        );
+    }
+
+    /// The dial hint of a nickname has one owner, and the lane of a row is the lane of that hint.
+    /// A quiet key under the same nickname owns no hint, so its row reads no lane.
+    #[test]
+    fn only_the_key_that_owns_the_hint_reads_its_lane() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let bob = endpoint_id(1);
+        let (owner, quiet) = (test_key("bob"), test_key("bob#quiet"));
+        for key in [owner, quiet] {
+            state.names.insert(key, nick("bob"));
+        }
+        state.peers.insert(owner);
+        state.surfaced.insert(owner);
+        state.quiet.insert(quiet);
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(bob));
+        state.direct.insert(bob, DirectState::Direct);
+
+        let snapshot = state.roster_snapshot();
+        let mut lanes: Vec<(bool, Lane)> = snapshot
+            .peers
+            .iter()
+            .map(|row| (row.quiet, row.transport))
+            .collect();
+        lanes.sort_by_key(|(is_quiet, _)| *is_quiet);
+
+        assert_eq!(
+            lanes,
+            vec![(false, Lane::Unicast), (true, Lane::Unreachable)],
+            "the quiet key read the lane of the hint that the live key owns: {snapshot:?}"
+        );
+    }
+
+    /// A directed send to a roster row needs a row that one live peer owns: a quiet row has a
+    /// dead endpoint, and a nickname of two live peers is refused by the engine.
+    #[test]
+    fn the_addressees_of_a_roster_are_the_live_nicknames_that_one_peer_uses() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peer_for_test("solo");
+        state.surfaced_for_test("solo");
+        for key in [test_key("twin#first"), test_key("twin#second")] {
+            state.names.insert(key, nick("twin"));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+        state.quiet_for_test("gone");
+        // One live key and one quiet key under one nickname are one member.
+        state.peer_for_test("mixed");
+        state.surfaced_for_test("mixed");
+        let quiet_twin = test_key("mixed#quiet");
+        state.names.insert(quiet_twin, nick("mixed"));
+        state.quiet.insert(quiet_twin);
+
+        let snapshot = state.roster_snapshot();
+        let mut addressed: Vec<&str> = snapshot.addressees().map(Nickname::as_str).collect();
+        addressed.sort_unstable();
+        let shared: Vec<&str> = snapshot
+            .ambiguous_nicknames()
+            .map(Nickname::as_str)
+            .collect();
+
+        assert_eq!(
+            addressed,
+            vec!["mixed", "solo"],
+            "a quiet row and a nickname of two live peers are no addressee: {snapshot:?}"
+        );
+        assert_eq!(
+            shared,
+            vec!["twin"],
+            "only the nickname of two live peers is ambiguous: {snapshot:?}"
+        );
+    }
+
+    /// A live peer that is not shown yet has no row, but a send to its nickname still counts it. A
+    /// nickname that a shown peer and an unshown live peer use is ambiguous, and no lobby packet is
+    /// sent to it.
+    #[test]
+    fn a_nickname_of_a_shown_peer_and_an_unshown_live_peer_is_no_addressee() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peer_for_test("solo");
+        state.surfaced_for_test("solo");
+        let shown = test_key("bob#shown");
+        let hidden = test_key("bob#hidden");
+        for key in [shown, hidden] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.surfaced.insert(shown);
+
+        let snapshot = state.roster_snapshot();
+        let addressed: Vec<&str> = snapshot.addressees().map(Nickname::as_str).collect();
+        let shared: Vec<&str> = snapshot
+            .ambiguous_nicknames()
+            .map(Nickname::as_str)
+            .collect();
+
+        assert_eq!(
+            addressed,
+            vec!["solo"],
+            "the engine refuses a send to bob, so the lobby must not address it: {snapshot:?}"
+        );
+        assert_eq!(
+            shared,
+            vec!["bob"],
+            "the unshown live peer counts toward the ambiguity: {snapshot:?}"
+        );
+    }
+
     #[test]
     fn roster_reach_tags_only_live_links_direct() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1481,20 +3120,27 @@ mod tests {
         let linked_ep = endpoint_id(1);
         let stale_ep = endpoint_id(2);
         // A peer whose advertised endpoint is a live link → direct.
-        state.peers.insert(nick("linked"));
-        state
-            .peer_endpoints
-            .insert(nick("linked"), iroh::EndpointAddr::new(linked_ep));
+        state.peer_for_test("linked");
+        state.surfaced_for_test("linked");
+        state.bind_peer_endpoint(
+            test_key("linked"),
+            nick("linked"),
+            iroh::EndpointAddr::new(linked_ep),
+        );
         state.linked_endpoints.insert(linked_ep);
         // Advertised, but the endpoint is not (any longer) a live link → gossip.
-        state.peers.insert(nick("unlinked"));
-        state
-            .peer_endpoints
-            .insert(nick("unlinked"), iroh::EndpointAddr::new(stale_ep));
+        state.peer_for_test("unlinked");
+        state.surfaced_for_test("unlinked");
+        state.bind_peer_endpoint(
+            test_key("unlinked"),
+            nick("unlinked"),
+            iroh::EndpointAddr::new(stale_ep),
+        );
         // No PeerInfo seen yet → no binding → gossip.
-        state.peers.insert(nick("unknown"));
+        state.peer_for_test("unknown");
+        state.surfaced_for_test("unknown");
         // Quiet evictees are never live-linked → gossip.
-        state.quiet.insert(nick("quiet"));
+        state.quiet_for_test("quiet");
 
         let snapshot = state.roster_snapshot();
         let reach = |name: &str| {
@@ -1622,10 +3268,13 @@ mod tests {
         let mut state = fresh_state();
         let rendezvous_ep = endpoint_id(7);
         state.rendezvous_id = Some(rendezvous_ep);
-        state.peers.insert(nick("beacon"));
-        state
-            .peer_endpoints
-            .insert(nick("beacon"), iroh::EndpointAddr::new(rendezvous_ep));
+        state.peer_for_test("beacon");
+        state.surfaced_for_test("beacon");
+        state.bind_peer_endpoint(
+            test_key("beacon"),
+            nick("beacon"),
+            iroh::EndpointAddr::new(rendezvous_ep),
+        );
 
         let reach = |current: &EventLoopState| {
             let roster = current.roster_snapshot();
@@ -1650,13 +3299,17 @@ mod tests {
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
         // Known endpoint while meshed → unicast (the send path would dial it).
-        state.peers.insert(nick("dialable"));
-        state
-            .peer_endpoints
-            .insert(nick("dialable"), iroh::EndpointAddr::new(endpoint_id(1)));
+        state.peer_for_test("dialable");
+        state.surfaced_for_test("dialable");
+        state.bind_peer_endpoint(
+            test_key("dialable"),
+            nick("dialable"),
+            iroh::EndpointAddr::new(endpoint_id(1)),
+        );
         state.direct.insert(endpoint_id(1), DirectState::Direct);
         // No PeerInfo yet → nothing to dial → unreachable for directed frames.
-        state.peers.insert(nick("unknown"));
+        state.peer_for_test("unknown");
+        state.surfaced_for_test("unknown");
 
         let lane = |current: &EventLoopState, name: &str| {
             let roster = current.roster_snapshot();
@@ -1697,7 +3350,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         for index in 0..(QUIET_CAP + 5) {
-            state.quiet.insert(nick(&format!("ghost-{index}")));
+            state.quiet_for_test(&format!("ghost-{index}"));
         }
         assert!(
             state.quiet.len() <= QUIET_CAP,
@@ -1718,6 +3371,239 @@ mod tests {
             "first sighting is not a duplicate"
         );
         assert!(state.mark_seen(&message), "second sighting is a duplicate");
+    }
+
+    /// A key that renamed owns a dial hint under each nickname it used. When it departs, every one
+    /// of them goes, and the call gives back the address of each.
+    #[test]
+    fn a_departed_key_takes_every_dial_hint_it_owns() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("swift-cedar");
+        let (old_endpoint, new_endpoint) = (endpoint_id(31), endpoint_id(32));
+        state.peers.insert(key);
+        state.names.insert(key, nick("swift-cedar"));
+        state.bind_peer_endpoint(
+            key,
+            nick("swift-cedar"),
+            iroh::EndpointAddr::new(old_endpoint),
+        );
+        state.names.insert(key, nick("calm-otter"));
+        state.bind_peer_endpoint(
+            key,
+            nick("calm-otter"),
+            iroh::EndpointAddr::new(new_endpoint),
+        );
+
+        let given_back = state.forget_key(key);
+        let left: Vec<&Nickname> = state.peer_endpoints.keys().collect();
+
+        assert_eq!(given_back.len(), 2, "one address for each hint that went");
+        for used in [old_endpoint, new_endpoint] {
+            assert!(
+                given_back.contains(&iroh::EndpointAddr::new(used)),
+                "the address of a hint that went was not given back"
+            );
+        }
+        assert!(
+            state.peer_endpoints.is_empty(),
+            "a hint under a previous nickname of the departed key stayed: {left:?}"
+        );
+        assert!(
+            state.hint_owner.is_empty(),
+            "the owner of a hint that went stayed"
+        );
+    }
+
+    /// A `PeerInfo` whose proof the table refuses (a replay of an older stamp, for an endpoint a
+    /// newer key holds) makes no trust, even for a key of the roster. An endpoint has one trusted
+    /// signer: the key that takes it over displaces the trust of the one before.
+    #[test]
+    fn only_an_accepted_proof_makes_a_signer_trusted_and_an_endpoint_has_one_trusted_signer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (older, newer) = (test_key("swift-cedar"), test_key("calm-otter"));
+        let endpoint = endpoint_id(34);
+        state.peers.insert(older);
+        state.peers.insert(newer);
+
+        state.note_proven_endpoint(newer, endpoint, UnixSecs::from(10));
+        state.note_proven_endpoint(older, endpoint, UnixSecs::from(3));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&older),
+            None,
+            "a refused replay made the older key trusted for the endpoint"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&newer),
+            Some(endpoint),
+            "the accepted proof of the newer key makes it trusted"
+        );
+
+        state.note_proven_endpoint(older, endpoint, UnixSecs::from(20));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&older),
+            Some(endpoint),
+            "a newer stamp takes the endpoint back"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&newer),
+            None,
+            "the key that lost the endpoint stayed trusted for it"
+        );
+    }
+
+    /// A process that restarts keeps its endpoint and makes a new key. When its clock is behind the
+    /// old one, the new `PeerInfo` carries an older stamp. The old key is quiet by then, so it
+    /// holds nothing against the new key: the new key takes the endpoint, whatever the stamp.
+    /// Assumption: the peers of a mesh are cooperative, so no guard against a replay of an old
+    /// `PeerInfo` is kept for a holder that is not live.
+    #[test]
+    fn a_restarted_process_with_a_clock_behind_takes_its_endpoint_from_the_quiet_old_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (old, new) = (test_key("bob#old"), test_key("bob#new"));
+        let endpoint = endpoint_id(61);
+        state.peers.insert(old);
+        state.note_proven_endpoint(old, endpoint, UnixSecs::from(1000));
+        assert_eq!(
+            state.proven_endpoints.trusted(&old),
+            Some(endpoint),
+            "the old key is trusted for the endpoint before the restart"
+        );
+
+        state.peers.remove(&old);
+        state.quiet.insert(old);
+        state.peers.insert(new);
+        state.note_proven_endpoint(new, endpoint, UnixSecs::from(400));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&new),
+            Some(endpoint),
+            "the new key of a restarted process stayed untrusted while its clock was behind"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&old),
+            None,
+            "the quiet old key kept the trust in the endpoint"
+        );
+    }
+
+    /// A holder that is live keeps its endpoint against a proof that is not newer than its own.
+    /// This is the rule for a live holder, and it does not change.
+    #[test]
+    fn a_live_key_keeps_its_endpoint_against_an_older_stamp_of_another_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (holder, other) = (test_key("bob#holder"), test_key("bob#other"));
+        let endpoint = endpoint_id(62);
+        state.peers.insert(holder);
+        state.peers.insert(other);
+        state.note_proven_endpoint(holder, endpoint, UnixSecs::from(1000));
+
+        state.note_proven_endpoint(other, endpoint, UnixSecs::from(400));
+        state.note_proven_endpoint(other, endpoint, UnixSecs::from(1000));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&holder),
+            Some(endpoint),
+            "a live holder lost its endpoint to a stamp that is not newer"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&other),
+            None,
+            "a key took the endpoint of a live holder with a stamp that is not newer"
+        );
+    }
+
+    /// After a takeover the stored stamp is the stamp of the new key, not the larger stamp of the
+    /// old holder. Else a second restart with a clock still behind would be refused as the first
+    /// one was.
+    #[test]
+    fn the_stamp_of_a_takeover_replaces_the_stamp_of_the_old_holder() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second, third) = (test_key("bob#1"), test_key("bob#2"), test_key("bob#3"));
+        let endpoint = endpoint_id(63);
+        state.quiet.insert(first);
+        state.peers.insert(second);
+        state.peers.insert(third);
+        state.peers.insert(first);
+        state.note_proven_endpoint(first, endpoint, UnixSecs::from(1000));
+        state.peers.remove(&first);
+
+        state.note_proven_endpoint(second, endpoint, UnixSecs::from(400));
+        state.note_proven_endpoint(third, endpoint, UnixSecs::from(450));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&third),
+            Some(endpoint),
+            "the stamp of the old holder still guarded the endpoint after the takeover"
+        );
+    }
+
+    /// A live key that renamed no longer answers to its old nickname. The hint under the old name
+    /// is no address of the key: a send to the key follows the hint of its current name, or its
+    /// proof. A key with no name on record yet has no address either.
+    #[test]
+    fn a_hint_under_the_old_nickname_of_a_live_key_that_renamed_is_no_address_of_the_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("swift-cedar");
+        state.peers.insert(key);
+        state.bind_peer_endpoint(
+            key,
+            nick("swift-cedar"),
+            iroh::EndpointAddr::new(endpoint_id(35)),
+        );
+        assert!(
+            state.address_of(&key).is_none(),
+            "the owner has no name on record yet"
+        );
+
+        state.names.insert(key, nick("swift-cedar"));
+        assert_eq!(
+            state.address_of(&key).map(|address| address.id),
+            Some(endpoint_id(35)),
+            "the owner still uses the nickname"
+        );
+
+        state.names.insert(key, nick("calm-otter"));
+        assert!(
+            state.address_of(&key).is_none(),
+            "the owner renamed, and the old nickname still has a hint"
+        );
+    }
+
+    /// A departed key makes no claim to the rendezvous any more. Another nickname can still bind
+    /// its endpoint, and then the endpoint keeps its state, so the claim of the key goes with the
+    /// key itself.
+    #[test]
+    fn a_departed_key_drops_its_rendezvous_claim_while_another_nickname_binds_its_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("swift-cedar");
+        let endpoint = endpoint_id(33);
+        state.peers.insert(key);
+        state.names.insert(key, nick("swift-cedar"));
+        state.bind_peer_endpoint(key, nick("swift-cedar"), iroh::EndpointAddr::new(endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("calm-otter"), iroh::EndpointAddr::new(endpoint));
+        state.rival_holders.insert(key, endpoint);
+
+        state.forget_key(key);
+
+        assert!(
+            state.endpoint_is_bound(endpoint),
+            "the other nickname still binds the endpoint"
+        );
+        assert!(
+            !state.rival_holders.contains_key(&key),
+            "the departed key still holds the rendezvous"
+        );
     }
 
     /// A frame still in the message log has been processed. Anti-entropy re-sends any frame a
@@ -1773,6 +3659,106 @@ mod tests {
                 now + super::UNREADABLE_DIGEST_LOG_WINDOW + Duration::from_secs(1)
             ),
             "the author is reported again after the window"
+        );
+    }
+
+    /// A chat gap longer than one answer is closed by the repeats of the asker, by unicast, at its
+    /// pace and up to its count: the cooldown of the holder lets those through and nothing else.
+    #[test]
+    fn a_unicast_continuation_is_served_inside_the_cooldown_at_the_pace_of_the_asker() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let t0 = Instant::now();
+        let pace = tuning::FAST_ROUND_MIN_INTERVAL;
+        let aa = author_of("aa");
+        assert!(state.admit_digest(aa, t0), "the first is served as always");
+
+        assert!(
+            !state.admit_chat_continuation(author_of("never-served"), t0 + pace),
+            "an author that was not served has no continuation: its digest is a first one"
+        );
+        assert!(
+            state.admit_chat_continuation(aa, t0 + pace),
+            "the first repeat, inside the cooldown, by unicast"
+        );
+        assert!(
+            !state.admit_chat_continuation(aa, t0 + pace + pace / 2),
+            "a repeat sooner than the pace of the asker is a flood"
+        );
+        let mut served = 1;
+        let mut at = t0 + pace;
+        while served < tuning::CHAT_RETRIES_MAX + 1 {
+            at += pace;
+            if !state.admit_chat_continuation(aa, at) {
+                break;
+            }
+            served += 1;
+        }
+        assert_eq!(
+            served,
+            tuning::CHAT_RETRIES_MAX,
+            "the repeats stop at the count of the asker"
+        );
+        assert!(
+            !state.admit_chat_continuation(aa, at + pace),
+            "one repeat more than the count is refused"
+        );
+
+        let later = t0 + tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_millis(1);
+        assert!(state.admit_digest(aa, later), "the cadence resumes");
+        assert!(
+            state.admit_chat_continuation(aa, later + pace),
+            "and a new run of repeats is allowed in the new window"
+        );
+    }
+
+    /// The table of the continuations has a cap: ten times the cap of authors, all served in one
+    /// window, leave exactly the cap of runs, the first authors keep theirs, and the rest meet the
+    /// cooldown as before. A window later the table is empty.
+    #[test]
+    fn the_continuations_stay_inside_their_cap_when_ten_times_the_cap_of_authors_ask() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let t0 = Instant::now();
+        let pace = tuning::FAST_ROUND_MIN_INTERVAL;
+        let cap = tuning::CHAT_CONTINUATION_AUTHORS_MAX;
+        let mut admitted = 0;
+        for index in 0..10 * cap {
+            let author = author_of(&format!("author-{index}"));
+            assert!(state.admit_digest(author, t0), "the first digest of each");
+            if state.admit_chat_continuation(author, t0 + pace) {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, cap, "only the cap of authors got a continuation");
+        assert_eq!(
+            state.chat_continuations_len(),
+            cap,
+            "the table holds the cap"
+        );
+        assert!(
+            state.admit_chat_continuation(author_of("author-0"), t0 + pace * 2),
+            "an author that holds a run goes on"
+        );
+        assert!(
+            !state
+                .admit_chat_continuation(author_of(&format!("author-{}", 10 * cap - 1)), t0 + pace),
+            "an author that came when the table was full is refused"
+        );
+
+        let later = t0 + tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_millis(1);
+        assert!(
+            state.admit_digest(author_of("fresh"), later),
+            "a new window opens for a new author"
+        );
+        assert!(
+            state.admit_chat_continuation(author_of("fresh"), later + pace),
+            "and it gets a continuation: the table has room again"
+        );
+        assert_eq!(
+            state.chat_continuations_len(),
+            1,
+            "a window later the runs of the others are gone"
         );
     }
 
@@ -1956,7 +3942,7 @@ mod tests {
         for index in 0..100u32 {
             let now = start + Duration::from_millis(u64::from(index) * 10);
             if flapping.neighbor_up_refloods_peerinfo(now) {
-                flapping.peerinfo_flooded_at = Some(now);
+                flapping.peerinfo_flood = Some(PeerInfoFlood::at(now));
                 flapping_refloods += 1;
             }
         }
@@ -1970,7 +3956,7 @@ mod tests {
         for index in 0..5u64 {
             let now = start + Duration::from_millis(index * 10);
             if state.neighbor_up_refloods_peerinfo(now) {
-                state.peerinfo_flooded_at = Some(now);
+                state.peerinfo_flood = Some(PeerInfoFlood::at(now));
                 refloods += 1;
             }
         }
@@ -1992,7 +3978,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut state = fresh_state();
-        state.peerinfo_flooded_at = Some(start);
+        state.peerinfo_flood = Some(PeerInfoFlood::at(start));
 
         assert!(
             !state.neighbor_up_refloods_peerinfo(start + Duration::from_secs(1)),
@@ -2017,7 +4003,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut state = fresh_state();
-        state.peerinfo_flooded_at = Some(start);
+        state.peerinfo_flood = Some(PeerInfoFlood::at(start));
         assert!(
             !state.take_deferred_peerinfo(start + RELINK_COOLDOWN + Duration::from_secs(1)),
             "an empty deferral yields no flood"
@@ -2035,7 +4021,7 @@ mod tests {
         for index in 0..20u64 {
             let now = start + Duration::from_millis(index * 10);
             if state.joined_refloods_peerinfo(false, now) {
-                state.peerinfo_flooded_at = Some(now);
+                state.peerinfo_flood = Some(PeerInfoFlood::at(now));
                 refloods += 1;
             }
         }
@@ -2237,9 +4223,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(
             state.forget_peer_endpoint("bob").map(|address| address.id),
@@ -2253,6 +4237,100 @@ mod tests {
         assert!(
             state.forget_peer_endpoint("bob").is_none(),
             "a second forget finds nothing"
+        );
+    }
+
+    /// Two nicknames can bind one endpoint (a node that restarted under a new name). The goodbye
+    /// of one must leave the state of the endpoint to the other.
+    #[test]
+    fn forgetting_one_of_two_nicknames_that_bind_an_endpoint_keeps_its_state() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(1);
+        state.bind_peer_endpoint(
+            test_key("old-bob"),
+            nick("old-bob"),
+            iroh::EndpointAddr::new(shared),
+        );
+        state.bind_peer_endpoint(
+            test_key("new-bob"),
+            nick("new-bob"),
+            iroh::EndpointAddr::new(shared),
+        );
+        state.direct.insert(shared, DirectState::Direct);
+
+        state.forget_peer_endpoint("old-bob");
+        assert!(
+            state.direct.contains_key(&shared) && state.endpoint_is_bound(shared),
+            "the goodbye of one nickname dropped the state of an endpoint that another binds"
+        );
+
+        state.forget_peer_endpoint("new-bob");
+        assert!(
+            state.direct.is_empty() && !state.endpoint_is_bound(shared),
+            "the last nickname that binds an endpoint left its state behind"
+        );
+    }
+
+    /// A key owns the hint of a nickname, and another key of the nickname is refused a hint for
+    /// the same endpoint (a node that restarted with a new signing key). The state of the endpoint
+    /// stays while the refused endpoint waits for its key.
+    #[test]
+    fn forgetting_a_hint_keeps_the_state_of_an_endpoint_that_a_refused_key_retains() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(1);
+        state.bind_peer_endpoint(
+            test_key("old-bob"),
+            nick("bob"),
+            iroh::EndpointAddr::new(shared),
+        );
+        state.retain_refused_endpoint(test_key("new-bob"), iroh::EndpointAddr::new(shared));
+        state.direct.insert(shared, DirectState::Direct);
+
+        state.forget_peer_endpoint("bob");
+
+        assert!(
+            state.direct.contains_key(&shared),
+            "the state of an endpoint that a retained endpoint names was dropped"
+        );
+        assert!(
+            state.endpoint_is_bound(shared),
+            "a retained endpoint is not counted as bound"
+        );
+    }
+
+    /// A refused signer that advertises a new endpoint replaces the retained one. The address of
+    /// the displaced endpoint was handed to the book and the pool, and it goes unless a hint or
+    /// another refused signer still names it.
+    #[test]
+    fn a_replaced_refused_endpoint_leaves_the_book_unless_another_signer_names_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second, shared) = (
+            iroh::EndpointAddr::new(endpoint_id(1)),
+            iroh::EndpointAddr::new(endpoint_id(2)),
+            iroh::EndpointAddr::new(endpoint_id(3)),
+        );
+        for address in [&first, &second, &shared] {
+            state.unicast_pool.note_addr(address);
+        }
+        state.retain_refused_endpoint(test_key("rival"), first.clone());
+        state.retain_refused_endpoint(test_key("other"), shared.clone());
+        state.retain_refused_endpoint(test_key("rival"), shared.clone());
+
+        assert!(
+            !state.unicast_pool.remembers_address(&first),
+            "the displaced endpoint stayed in the book"
+        );
+        state.retain_refused_endpoint(test_key("rival"), second.clone());
+        assert!(
+            state.unicast_pool.remembers_address(&shared),
+            "the displaced endpoint left the book while another signer retains it"
+        );
+        assert!(
+            state.unicast_pool.remembers_address(&second),
+            "the new retained endpoint is not in the book"
         );
     }
 
@@ -2287,9 +4365,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.path_watchers.insert(bob, Some(7));
         state.path_kinds.insert(bob, PathKind::WebRtc);
         state.forget_peer_endpoint("bob");
@@ -2397,7 +4473,7 @@ mod tests {
             let peer = peers[index as usize % peers.len()];
             // NeighborUp → PeerInfo reflood gate + (via handle_peer_info) link.
             if state.neighbor_up_refloods_peerinfo(now) {
-                state.peerinfo_flooded_at = Some(now);
+                state.peerinfo_flood = Some(PeerInfoFlood::at(now));
             }
             if !state.relink_on_cooldown(peer, now) {
                 state.note_relink(peer, now);
@@ -2673,21 +4749,26 @@ mod tests {
 
         let at = t1 + Duration::from_secs(5) + Duration::from_millis(30);
         assert!(
-            round.record_pong(nick("bob"), &second.id, at),
+            round.record_pong(test_key("bob"), nick("bob"), &second.id, at),
             "a pong from bob is recorded against the probe it names"
         );
         assert!(
-            round.record_pong(nick("carol"), &first.id, t1 + Duration::from_millis(40)),
+            round.record_pong(
+                test_key("carol"),
+                nick("carol"),
+                &first.id,
+                t1 + Duration::from_millis(40)
+            ),
             "a pong from carol is recorded against the first probe"
         );
 
         assert_eq!(
-            round.pongs[&nick("bob")],
+            round.pongs[&test_key("bob")].rtt,
             Duration::from_millis(30),
             "bob's round trip reads 30 ms from its probe"
         );
         assert_eq!(
-            round.pongs[&nick("carol")],
+            round.pongs[&test_key("carol")].rtt,
             Duration::from_millis(40),
             "carol's round trip reads 40 ms from its probe"
         );
@@ -2707,15 +4788,21 @@ mod tests {
             .probes
             .insert(second.id.clone(), t1 + Duration::from_secs(5));
 
-        round.record_pong(nick("bob"), &first.id, t1 + Duration::from_millis(10));
         round.record_pong(
+            test_key("bob"),
+            nick("bob"),
+            &first.id,
+            t1 + Duration::from_millis(10),
+        );
+        round.record_pong(
+            test_key("bob"),
             nick("bob"),
             &second.id,
             t1 + Duration::from_secs(5) + Duration::from_millis(20),
         );
 
         assert_eq!(
-            round.pongs[&nick("bob")],
+            round.pongs[&test_key("bob")].rtt,
             Duration::from_millis(10),
             "the first pong from bob is kept against a later one"
         );
@@ -2732,6 +4819,7 @@ mod tests {
 
         assert!(
             !round.record_pong(
+                test_key("bob"),
                 nick("bob"),
                 &MessageId::random(),
                 t1 + Duration::from_millis(5)
@@ -2741,6 +4829,74 @@ mod tests {
         assert!(
             round.pongs.is_empty(),
             "no pong is recorded for an unknown probe"
+        );
+    }
+
+    /// A `PeerInfo` is in no message log, so a member that missed one is repaired by no digest. A
+    /// meshed node floods its own again once the refresh period has passed since its last flood:
+    /// at least 5 min, and 5 s for each live member, spread by a factor drawn with each flood.
+    #[test]
+    fn the_peerinfo_refresh_is_due_after_the_period_of_the_roster_and_not_before() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let flooded = Instant::now();
+        let after = |wait: Duration| flooded + wait;
+        assert!(
+            !state.peerinfo_refresh_due(after(Duration::from_hours(9))),
+            "a refresh was due before the first flood"
+        );
+
+        // The spread is fixed, so that the period is the same in every run.
+        let flood = PeerInfoFlood {
+            at: flooded,
+            spread: 1.0,
+        };
+        state.peerinfo_flood = Some(flood);
+        let least = tuning::PEERINFO_REFRESH_MIN;
+        assert!(
+            !state.peerinfo_refresh_due(after(least.saturating_sub(Duration::from_secs(1)))),
+            "a refresh was due before the period"
+        );
+        assert!(
+            state.peerinfo_refresh_due(after(least)),
+            "no refresh was due at the period"
+        );
+
+        state.peerinfo_flood = Some(PeerInfoFlood {
+            spread: 1.25,
+            ..flood
+        });
+        assert!(
+            !state.peerinfo_refresh_due(after(least)),
+            "the spread of 1.25 did not delay the refresh"
+        );
+        assert!(
+            state.peerinfo_refresh_due(after(least.mul_f64(1.25))),
+            "no refresh was due at the spread period"
+        );
+
+        state.peerinfo_flood = Some(PeerInfoFlood {
+            spread: 1.0,
+            ..flood
+        });
+        for index in 0..100 {
+            state.peers.insert(test_key(&format!("member-{index}")));
+        }
+        let grown = tuning::PEERINFO_REFRESH_PER_PEER * 101;
+        assert!(
+            !state.peerinfo_refresh_due(after(least)),
+            "a roster of 101 members refreshed at the least period"
+        );
+        assert!(
+            state.peerinfo_refresh_due(after(grown)),
+            "no refresh was due at the period of 101 members"
+        );
+
+        state.standing.remove(&Standing::Meshed);
+        assert!(
+            !state.peerinfo_refresh_due(after(grown)),
+            "a node that is not meshed refreshed"
         );
     }
 }

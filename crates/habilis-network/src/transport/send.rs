@@ -9,8 +9,11 @@ mod delivered;
 pub use delivered::Delivered;
 mod deliver;
 mod route;
+pub(crate) use deliver::{
+    can_unicast, lane_for, note_held, resolve, send_best_effort, send_dialing_back,
+    unicast_answer_target, unicast_peers,
+};
 pub use deliver::{deliver, deliver_in_background};
-pub(crate) use deliver::{lane_for, note_held, resolve, send_best_effort, unicast_answer_target};
 #[cfg(test)]
 use route::{Route, route};
 mod lane;
@@ -18,24 +21,27 @@ pub use lane::Lane;
 mod pending_send;
 pub use pending_send::PendingSend;
 mod send_error;
-pub use send_error::SendError;
+pub use send_error::{SendError, StateRefusal};
 #[cfg(test)]
 #[cfg(test)]
 #[cfg(test)]
 #[cfg(test)]
 mod tests {
     use crate::daemon::state::Standing;
+    use std::iter;
     use std::sync::Arc;
 
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::UdpTransport;
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, lane_for, note_held, resolve, route};
+    use super::{Lane, Route, can_unicast, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified, WireFrame};
-    use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
+    use crate::protocol::{
+        AppTag, AuthorKey, CorrId, Identity, MeshId, Message, MessageBody, MessageId, UnixSecs,
+    };
 
     use crate::daemon::handler_ctx;
     use crate::daemon::state::DirectState;
@@ -67,17 +73,21 @@ mod tests {
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.direct.insert(bob, DirectState::Direct);
         (state, bob)
     }
 
     /// A directed frame addressed to `bob` — a `Pong` is the simplest one.
     fn directed_msg() -> Verified {
-        Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
-            .sign(&Identity::generate())
+        Message::new_pong(
+            &mesh(),
+            &nick("alice"),
+            test_key("bob"),
+            &MessageId::random(),
+        )
+        .sign(&Identity::generate())
     }
 
     fn open_broadcast() -> Verified {
@@ -103,7 +113,9 @@ mod tests {
         state.standing.insert(Standing::Meshed);
         state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
-        state.peer_endpoints.insert(
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url")),
@@ -130,6 +142,42 @@ mod tests {
         assert!(state.lane_session_wanted(bob, now), "the held frame asks");
     }
 
+    /// Two live keys use one nickname, and the second is a lane peer whose endpoint the roster
+    /// keeps by key. A frame held for the second key asks for the session of the second key: the
+    /// member list of the transport plane has one row for each key, not one for each nickname.
+    #[test]
+    fn a_frame_held_for_the_second_key_of_a_nickname_marks_its_session_wanted() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        state.local_udp_transport = UdpTransport::Present;
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint) = (endpoint_id(1), endpoint_id(2));
+        for key in [first, second] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        let lane = |id: EndpointId| {
+            iroh::EndpointAddr::new(id)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url"))
+        };
+        state.bind_peer_endpoint(first, nick("bob"), lane(first_endpoint));
+        state.retain_refused_endpoint(second, lane(second_endpoint));
+
+        let error = resolve(
+            &directed_msg_to(second),
+            directed_msg_to(second).serialize().expect("serialize"),
+            &state,
+        )
+        .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(
+            state.lane_session_wanted(second_endpoint, clock::Instant::now()),
+            "the held frame of the second key did not ask for its session"
+        );
+    }
+
     /// A peer with an IP path is held too on a lookup-only relay, but its direct path comes
     /// from the probe, so no session is wanted for it.
     #[test]
@@ -137,7 +185,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.remove(&bob);
-        state.peer_endpoints.insert(
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
@@ -167,7 +217,9 @@ mod tests {
 
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
-        state.peer_endpoints.insert(
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
@@ -294,7 +346,8 @@ mod tests {
         state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
         state.direct.insert(bob_addr.id, DirectState::Direct);
         lookup::add_peer_addr(&lookup::address_book(endpoint), bob_addr.clone());
-        state.peer_endpoints.insert(nick("bob"), bob_addr);
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob_addr);
         state
     }
 
@@ -624,7 +677,10 @@ mod tests {
                 "the refusal came before the path-select budget: {:?}",
                 started.elapsed()
             );
-            assert!(!pair.bob_read_a_frame().await, "the refused frame arrived");
+            assert!(
+                !Box::pin(pair.bob_read_a_frame()).await,
+                "the refused frame arrived"
+            );
         });
     }
 
@@ -679,7 +735,7 @@ mod tests {
             &nick("alice"),
             AppFrameParams::new(
                 AppTag::try_new("app_req").expect("a valid app tag"),
-                Some(nick("bob")),
+                Some(test_key("bob")),
                 Some(
                     CorrId::try_new("00000000-0000-0000-0000-0000000000aa")
                         .expect("a valid correlation id"),
@@ -688,8 +744,13 @@ mod tests {
             ),
         )
         .sign(&Identity::generate());
-        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
-            .sign(&Identity::generate());
+        let pong = Message::new_pong(
+            &mesh(),
+            &nick("alice"),
+            test_key("bob"),
+            &MessageId::random(),
+        )
+        .sign(&Identity::generate());
         assert_eq!(
             route(&request, &state),
             Route::Unicast(bob),
@@ -714,6 +775,162 @@ mod tests {
             route(&directed_msg(), &state),
             Route::Unicast(bob),
             "a known peer takes unicast even while unmeshed"
+        );
+    }
+
+    // ── addressee by key ──────────────────────────────────────────────
+
+    /// The frame that these tests send to a key: a `Pong`, the simplest directed kind.
+    fn directed_msg_to(key: AuthorKey) -> Verified {
+        Message::new_pong(&mesh(), &nick("alice"), key, &MessageId::random())
+            .sign(&Identity::generate())
+    }
+
+    /// Two live keys use one nickname. A frame names its recipient by key, so each key has its
+    /// own route: the first to the dial hint that it owns, the second to the endpoint that it
+    /// retained. The engine does not refuse either, and does not mix them up.
+    #[test]
+    fn a_directed_message_to_either_key_of_a_nickname_of_two_live_keys_takes_its_own_route() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint) = (endpoint_id(1), endpoint_id(2));
+        for key in [first, second] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.names.insert(first, nick("bob"));
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+        state.retain_refused_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+        state.direct.insert(first_endpoint, DirectState::Direct);
+        state.direct.insert(second_endpoint, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg_to(first), &state),
+            Route::Unicast(first_endpoint),
+            "the key that owns the hint follows the hint"
+        );
+        assert_eq!(
+            route(&directed_msg_to(second), &state),
+            Route::Unicast(second_endpoint),
+            "the other key follows the endpoint that it retained"
+        );
+        assert_eq!(
+            lane_for(&second, &state),
+            Lane::Unicast,
+            "the roster offers the lane of the retained endpoint to the second key"
+        );
+    }
+
+    /// The proof of a key is a route when no hint is its own: the second key of a nickname has
+    /// proved its endpoint, and kept no hint.
+    #[test]
+    fn a_key_with_no_hint_of_its_own_follows_the_endpoint_that_it_proved() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let proven = endpoint_id(3);
+        for key in [first, second] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.names.insert(first, nick("bob"));
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(endpoint_id(1)));
+        state.note_proven_endpoint(second, proven, UnixSecs::from(1));
+        state.direct.insert(proven, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg_to(second), &state),
+            Route::Unicast(proven),
+            "the key with no hint did not follow its proof"
+        );
+    }
+
+    /// A quiet key that shares the nickname of a live key does not change the route of the live
+    /// key, because the route is read from the key and not from the nickname.
+    #[test]
+    fn a_quiet_key_of_the_nickname_does_not_change_the_route_of_the_live_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_bob();
+        let (live, quiet) = (test_key("bob#live"), test_key("bob#quiet"));
+        for key in [live, quiet] {
+            state.names.insert(key, nick("bob"));
+        }
+        state.peers.insert(live);
+        state.quiet.insert(quiet);
+        state.names.insert(live, nick("bob"));
+        state.bind_peer_endpoint(live, nick("bob"), iroh::EndpointAddr::new(bob));
+
+        assert_eq!(
+            route(&directed_msg_to(live), &state),
+            Route::Unicast(bob),
+            "one live key and one quiet key is one member"
+        );
+    }
+
+    /// The dial hint of a nickname belongs to one key. When that key is quiet and another key is
+    /// live under the nickname, the live key does not follow the hint of the quiet one: its frame
+    /// waits for an endpoint of its own. The quiet key keeps its hint, because it may return.
+    #[test]
+    fn a_key_does_not_follow_the_hint_of_another_key_of_its_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let dead = endpoint_id(1);
+        let (owner, live) = (test_key("bob#owner"), test_key("bob#live"));
+        for key in [owner, live] {
+            state.names.insert(key, nick("bob"));
+        }
+        state.quiet.insert(owner);
+        state.peers.insert(live);
+        state.names.insert(owner, nick("bob"));
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(dead));
+        state.direct.insert(dead, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg_to(live), &state),
+            Route::Undeliverable,
+            "the live key followed the hint of a quiet key to a dead endpoint"
+        );
+        assert_eq!(
+            route(&directed_msg_to(owner), &state),
+            Route::Unicast(dead),
+            "a quiet peer that may return keeps its hint"
+        );
+    }
+
+    /// A process that restarts keeps its endpoint and mints a new author key. Until the silence
+    /// timeout the old key is still live, and its hint still names the endpoint. The new key has
+    /// proved that endpoint with a newer stamp, so the endpoint is the new key's: a send to the old
+    /// key must not reach the new process.
+    #[test]
+    fn a_send_to_the_old_key_of_a_restarted_process_does_not_reach_the_new_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let (old, new) = (test_key("bob#old"), test_key("bob#new"));
+        let endpoint = endpoint_id(7);
+        for key in [old, new] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.bind_peer_endpoint(old, nick("bob"), iroh::EndpointAddr::new(endpoint));
+        state.note_proven_endpoint(old, endpoint, UnixSecs::from(1));
+        state.note_proven_endpoint(new, endpoint, UnixSecs::from(2));
+        state.retain_refused_endpoint(new, iroh::EndpointAddr::new(endpoint));
+        state.direct.insert(endpoint, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg_to(old), &state),
+            Route::Undeliverable,
+            "the send to the old key reached the process of the new key"
+        );
+        assert_eq!(
+            route(&directed_msg_to(new), &state),
+            Route::Unicast(endpoint),
+            "the new key lost its own endpoint"
         );
     }
 
@@ -753,14 +970,55 @@ mod tests {
         let rendezvous = endpoint_id(9);
         state.rendezvous_id = Some(rendezvous);
         // bob's advertised endpoint *is* the rendezvous pseudo-node.
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(rendezvous));
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
+            nick("bob"),
+            iroh::EndpointAddr::new(rendezvous),
+        );
         assert_eq!(
             route(&directed_msg(), &state),
             Route::Undeliverable,
             "the rendezvous addressee is never a directed target"
         );
+    }
+
+    /// A reply goes back on the connection that an unicast frame came by, though no direct path is
+    /// proven for that endpoint yet: the unicast acceptor admits a connection only on a selected
+    /// path that is not the relay when the relay is lookup-only, so the arrival proves what a probe
+    /// would. The exception is for the frame at hand: outside the handling of an unicast frame, and
+    /// for any other endpoint, an unproven path is held as before.
+    #[test]
+    fn a_reply_may_go_back_on_an_admitted_direct_arrival_and_nothing_else_is_let_through() {
+        use crate::daemon::state::DirectState;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_bob();
+        let carol = endpoint_id(2);
+        state.relay_transport = PayloadPath::DirectOnly;
+        state.direct.remove(&bob);
+        assert!(
+            !can_unicast(bob, &state),
+            "the premise: no direct path is proven"
+        );
+
+        state.state_digest_serves.unicast.arrived_from = Some(bob);
+        assert!(
+            can_unicast(bob, &state),
+            "the frame at hand came by unicast from bob"
+        );
+        assert!(
+            !can_unicast(carol, &state),
+            "the arrival of bob opens no path to another endpoint"
+        );
+
+        state.state_digest_serves.unicast.arrived_from = None;
+        assert!(
+            !can_unicast(bob, &state),
+            "outside the handling of a unicast frame the path is held again"
+        );
+        state.direct.insert(bob, DirectState::Direct);
+        assert!(can_unicast(bob, &state), "a proven direct path still goes");
     }
 
     /// With the relay lookup only, a directed frame is parked until a direct
@@ -813,7 +1071,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (state, _) = state_knowing_bob();
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::Unicast,
             "a meshed known peer takes the unicast lane"
         );
@@ -825,7 +1083,7 @@ mod tests {
         let (mut state, _) = state_knowing_bob();
         state.standing.remove(&Standing::Meshed);
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::Multihop,
             "a known but unmeshed peer takes the multihop lane"
         );
@@ -842,19 +1100,19 @@ mod tests {
         state.direct.insert(bob, DirectState::RelayOnly);
         state.relay_transport = PayloadPath::RelayAllowed;
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::Unicast,
             "a peer on a lookup-only relay starts on the unicast lane"
         );
         state.relay_transport = PayloadPath::DirectOnly;
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::RelayOnly,
             "a lookup-only relay peer takes the relay-only lane"
         );
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(
-            lane_for(&nick("bob"), &state),
+            lane_for(&test_key("bob"), &state),
             Lane::Unicast,
             "a peer that proves a direct path returns to the unicast lane"
         );
@@ -865,7 +1123,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (state, _) = state_knowing_bob();
         assert_eq!(
-            lane_for(&nick("carol"), &state),
+            lane_for(&test_key("carol"), &state),
             Lane::Unreachable,
             "an unknown peer is unreachable"
         );
@@ -879,8 +1137,8 @@ mod tests {
         let bob = endpoint_id(1);
         let bob_key = "bb".repeat(32);
         let carol_key = "cc".repeat(32);
-        let bob_signer = protocol::AuthorKey::decode_hex(&bob_key).expect("a key");
-        let carol_signer = protocol::AuthorKey::decode_hex(&carol_key).expect("a key");
+        let bob_signer = AuthorKey::decode_hex(&bob_key).expect("a key");
+        let carol_signer = AuthorKey::decode_hex(&carol_key).expect("a key");
         let linked = || {
             let mut state = fresh_state();
             prove(&mut state, &bob_key, bob);
@@ -925,9 +1183,11 @@ mod tests {
     /// Record, as a verified `PeerInfo` proof would, that the signing key
     /// `pubkey` (hex) owns `endpoint`.
     fn prove(state: &mut EventLoopState, pubkey: &str, endpoint: EndpointId) {
-        let signer = protocol::AuthorKey::decode_hex(pubkey).expect("a 32-byte key");
+        let signer = AuthorKey::decode_hex(pubkey).expect("a 32-byte key");
         let linked = state.linked_endpoints.clone();
-        state.proven_endpoints.insert(signer, endpoint, &linked);
+        state
+            .proven_endpoints
+            .insert(signer, endpoint, UnixSecs::from(1), &linked, |_| true);
     }
 
     /// [`prove`] for the key of `identity`.
@@ -944,7 +1204,7 @@ mod tests {
         sender: transport::MeshSender,
         mesh: MeshId,
         identity: Identity,
-        our_pubkey: protocol::AuthorKey,
+        our_pubkey: AuthorKey,
         author: protocol::Nickname,
         sink: event::SilentSink,
     }
@@ -1129,6 +1389,81 @@ mod tests {
         });
     }
 
+    /// The closing digest of a peer ends the first-sync wait only when it came point-to-point: on
+    /// gossip it is the answer of no request of this node.
+    #[test]
+    fn a_closing_digest_ends_the_first_sync_wait_only_when_it_came_on_unicast() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::doc::MeshDoc;
+            use crate::gossip::antientropy;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_doc = MeshDoc::new_state(None);
+            let bob = Identity::generate();
+            let body = MessageBody::try_new(
+                &serde_json::json!({ "heads": [], "closing": true }).to_string(),
+            )
+            .expect("a JSON body");
+            let closing =
+                Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State)
+                    .sign(&bob);
+
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
+                .await;
+            assert!(
+                state.doc(Channel::State).is_awaiting_first_sync(),
+                "a closing digest on gossip is no answer to the request of this node"
+            );
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            state.first_asked_at = Some(clock::Instant::now());
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
+                .await;
+            assert!(
+                !state.doc(Channel::State).is_awaiting_first_sync(),
+                "on unicast, soon after this node asked, it is the answer"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// Any member can unicast a closing digest with no heads. It answers no request of this node,
+    /// so it must not end the wait for the first sync: the node would write with a clock that has
+    /// not heard of the writes before its restart.
+    #[test]
+    fn a_closing_digest_when_this_node_asked_nobody_does_not_end_the_wait() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::doc::MeshDoc;
+            use crate::gossip::antientropy;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_doc = MeshDoc::new_state(None);
+            let bob = Identity::generate();
+            let body = MessageBody::try_new(
+                &serde_json::json!({ "heads": [], "closing": true }).to_string(),
+            )
+            .expect("a JSON body");
+            let closing =
+                Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State)
+                    .sign(&bob);
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
+                .await;
+
+            assert!(
+                state.doc(Channel::State).is_awaiting_first_sync(),
+                "this node asked nobody, so the closing digest is the answer of no request"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
     /// A peer holds every change it signed, since a change's actor is its
     /// signer's key and a session key lives no longer than its document. So
     /// its own changes are never missing from it, even when it advertises
@@ -1286,6 +1621,12 @@ mod tests {
                 refused,
                 "a second unicast answer inside the window"
             );
+            assert_eq!(state.idle.state_answers, 3, "the 3 answers that went out");
+            assert_eq!(state.idle.state_frames_broadcast, 6, "2 answers on gossip");
+            assert_eq!(
+                state.idle.state_frames_unicast, 3,
+                "1 answer to the linked asker"
+            );
             bob_endpoint.close().await;
             net.endpoint.close().await;
         });
@@ -1346,6 +1687,13 @@ mod tests {
             antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &context).await;
             let first = state.fast_rounds.asked_heads(Channel::State);
             assert!(first.is_some(), "bob is ahead, so we ask him");
+            assert_eq!(state.idle.fr_asks, 1, "the ask is counted");
+            assert_eq!(state.idle.fr_retries, 0, "a digest, not the tick, made it");
+            assert_eq!(
+                state.fast_rounds.ahead_count(),
+                1,
+                "bob is remembered as ahead"
+            );
 
             apply_one(&mut state, &net.mesh, 100);
             antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &context).await;
@@ -1470,6 +1818,51 @@ mod tests {
         });
     }
 
+    /// Each peer has its share of answer batches in flight, and a batch past it is refused, so the
+    /// frames of a batch that a peer does not read are not piled up without a bound. The caller of
+    /// a refusal answers on gossip. A finished batch frees its slot.
+    #[test]
+    fn a_peer_that_holds_its_share_of_batches_is_refused_the_next_one() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (endpoint, _sender) = loopback_node().await;
+            let state = state_with_pool(&endpoint, bob_endpoint.addr());
+            let bob = bob_endpoint.id();
+            let held: Vec<_> = iter::from_fn(|| state.unicast_pool.take_batch_slot(bob)).collect();
+            let frame = || {
+                vec![
+                    Message::new_digest(
+                        &MeshId::from("test"),
+                        &nick("alice"),
+                        MessageBody::from("{}"),
+                    )
+                    .sign(&state.identity)
+                    .serialize()
+                    .expect("serialize"),
+                ]
+            };
+
+            let refused = state
+                .unicast_pool
+                .send_batch_in_background(bob, frame())
+                .await;
+
+            assert!(!held.is_empty(), "the test filled the slots of the peer");
+            assert!(
+                !refused,
+                "a peer with its share of batches in flight is refused"
+            );
+            drop(held);
+            let sent = state
+                .unicast_pool
+                .send_batch_in_background(bob, frame())
+                .await;
+            assert!(sent, "a peer whose batches are done is sent the next one");
+            bob_endpoint.close().await;
+            endpoint.close().await;
+        });
+    }
+
     /// A node sends its state and meta digests back to back, so a holder
     /// answers the same warm peer twice at once. The in-flight guard exists
     /// for a cold peer's dial; a warm connection must take both batches.
@@ -1563,6 +1956,529 @@ mod tests {
             }
             (got, bob_endpoint)
         })
+    }
+
+    /// A state digest that came by unicast is answered to its connection, even when the asker is
+    /// neither linked nor proven: the connection is the address. On gossip it would be a re-broadcast
+    /// of every frame to the whole mesh.
+    #[test]
+    fn a_state_digest_that_came_by_unicast_is_answered_to_its_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let received = read_frames(bob_endpoint, 4);
+            let asker = Identity::generate();
+            let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
+
+            let answered = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(
+                answered,
+                Answered {
+                    unicast: 3,
+                    broadcast: 0
+                },
+                "the three frames go to the connection of the digest, none on gossip"
+            );
+            let (got, returned_endpoint) =
+                tokio_time::timeout(std_Duration::from_secs(5), received)
+                    .await
+                    .expect("bob reads the answer in time")
+                    .expect("reader task");
+            let bytes_of = |frame: &WireFrame| frame.as_bytes().to_vec();
+            let expected: Vec<Vec<u8>> = frames.iter().map(bytes_of).collect();
+            assert_eq!(
+                got[..3],
+                expected[..],
+                "the frames as they were signed, in order"
+            );
+            returned_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// A member mints author keys for free, so the unicast budget cannot be keyed by the author key:
+    /// every fresh key would draw a full budget and a batch of its own. The connection that the
+    /// digests come on is the asker. Twenty fresh keys on one connection draw the budget of that
+    /// connection, not twenty budgets.
+    #[test]
+    fn many_fresh_keys_on_one_connection_draw_one_unicast_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+            use crate::util::tuning::ANTIENTROPY_SERVES_PER_WINDOW;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let context = net.context();
+
+            let mut batches = 0;
+            for _ in 0..20 {
+                let fresh = Identity::generate();
+                let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &fresh);
+                let answered =
+                    antientropy::handle_state_digest(Channel::State, &digest, &mut state, &context)
+                        .await;
+                if answered != Answered::default() {
+                    batches += 1;
+                }
+            }
+
+            assert!(
+                batches <= ANTIENTROPY_SERVES_PER_WINDOW,
+                "20 fresh keys on one connection drew {batches} answers, more than the budget of {ANTIENTROPY_SERVES_PER_WINDOW}"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// The answers that fall back to gossip count against the connection too: a member that rotates author
+    /// keys on one connection, while the unicast send cannot start, would otherwise draw a broadcast of
+    /// every frame for each key, since each key has a gossip budget of its own.
+    #[test]
+    fn answers_that_fall_back_to_gossip_count_against_the_connection_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+            use crate::util::tuning::ANTIENTROPY_SERVES_PER_WINDOW;
+
+            let silent = UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+            let bob = iroh::SecretKey::generate().public();
+            let silent_addr = iroh::EndpointAddr::from_parts(
+                bob,
+                [iroh::TransportAddr::Ip(
+                    silent.local_addr().expect("silent addr"),
+                )],
+            );
+            let (net, mut state, _frames) = holder(silent_addr, 3).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob);
+
+            let mut broadcasts = 0;
+            for round in 0..20 {
+                // Other heads each time: the same heads on one connection are answered once at a time.
+                let heads = serde_json::json!([format!("{round:064x}")]);
+                let fresh = Identity::generate();
+                let digest = digest(&net.mesh, Channel::State, &heads, &fresh);
+                let answered = antientropy::handle_state_digest(
+                    Channel::State,
+                    &digest,
+                    &mut state,
+                    &net.context(),
+                )
+                .await;
+                if answered.broadcast > 0 {
+                    broadcasts += 1;
+                }
+            }
+
+            assert!(
+                broadcasts <= ANTIENTROPY_SERVES_PER_WINDOW,
+                "20 fresh keys on one connection drew {broadcasts} broadcasts, more than the budget of {ANTIENTROPY_SERVES_PER_WINDOW}"
+            );
+            net.endpoint.close().await;
+        });
+    }
+
+    /// A state digest that came by unicast is answered to the connection it came on, also when the
+    /// signer proved another endpoint earlier: a chat answer takes the same choice.
+    #[test]
+    fn a_state_digest_is_answered_to_its_connection_not_to_an_older_proven_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            let asker = Identity::generate();
+            let older = endpoint_id(9);
+            state.linked_endpoints.insert(older);
+            state.direct.insert(older, DirectState::Direct);
+            state.note_proven_endpoint(asker.author_key(), older, UnixSecs::from(1));
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let received = read_frames(bob_endpoint, 4);
+            let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
+
+            let answered = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(
+                answered,
+                Answered {
+                    unicast: 3,
+                    broadcast: 0
+                },
+                "the frames go to the connection of the digest"
+            );
+            let (got, returned_endpoint) =
+                tokio_time::timeout(std_Duration::from_secs(5), received)
+                    .await
+                    .expect("bob reads the answer in time")
+                    .expect("reader task");
+            assert!(got.len() >= 3, "bob holds the 3 frames");
+            returned_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// A unicast digest that is ahead of us is asked back on its connection, though its signer has
+    /// proved no endpoint yet: the ask-back does not wait for the next exchange.
+    #[test]
+    fn a_unicast_digest_that_is_ahead_is_asked_back_on_its_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let asker = Identity::generate();
+            let ahead = serde_json::json!(["ab".repeat(32)]);
+            let digest = digest(&net.mesh, Channel::State, &ahead, &asker);
+
+            let _ = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(state.idle.fr_asks, 1, "one ask-back, on the connection");
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// The ask-back goes on the connection that the digest came on at once, though no direct path is
+    /// proven for it yet (the arrival proves it), and its signer proved no endpoint. A send that
+    /// comes later, outside the handling of the frame, waits for the proof of the path as before.
+    /// (The retry of an ask-back that could not start, on the connection of the digest, is reached
+    /// only when the send itself fails: a held path no longer stops the first ask-back.)
+    #[test]
+    fn the_ask_back_goes_on_the_connection_of_the_digest_at_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
+            let bob = bob_endpoint.id();
+            let asker = Identity::generate();
+            let ahead = serde_json::json!(["ab".repeat(32)]);
+            let digest = digest(&net.mesh, Channel::State, &ahead, &asker);
+            // The path of the connection is not proven when the digest arrives, but the digest came
+            // by that connection: the ask-back starts on it.
+            state.direct.remove(&bob);
+            state.state_digest_serves.unicast.arrived_from = Some(bob);
+            let _ = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+            assert_eq!(
+                state.idle.fr_asks, 1,
+                "the ask-back goes on the connection of the digest at once"
+            );
+
+            // Outside the handling of the frame the path is held again: the retry, when the round
+            // has been quiet for FAST_ROUND_RETRY, waits for the proof.
+            state.state_digest_serves.unicast.arrived_from = None;
+            tokio_time::sleep(std_Duration::from_millis(500)).await;
+            antientropy::resume_fast_rounds(&mut state, &net.context()).await;
+            assert_eq!(state.idle.fr_retries, 0, "no proof of the path, no retry");
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// The retry of an ask-back uses the connection that the digest came on, when its signer proved no
+    /// endpoint yet: the first ask-back could not start (the send failed), and the retry must not
+    /// wait for the proof of the signer. The old form of this test used a held path for the first
+    /// failure; a held path no longer stops the ask-back on an admitted arrival, so the failure of
+    /// the send is injected.
+    #[test]
+    fn the_retry_of_an_ask_back_that_could_not_start_uses_the_connection_of_the_digest() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            // A holder with nothing to answer: the first send to bob is the retry itself, and no dial of
+            // an answer is in flight when it goes.
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 0).await;
+            let bob = bob_endpoint.id();
+            let asker = Identity::generate();
+            let ahead = serde_json::json!(["ab".repeat(32)]);
+            let digest = digest(&net.mesh, Channel::State, &ahead, &asker);
+            // The first ask-back cannot start: the send fails.
+            state.fail_the_next_ask();
+            state.state_digest_serves.unicast.arrived_from = Some(bob);
+            let _ = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+            assert_eq!(state.idle.fr_asks, 0, "the first ask-back could not start");
+
+            state.state_digest_serves.unicast.arrived_from = None;
+            state.direct.insert(bob, DirectState::Direct);
+            antientropy::resume_fast_rounds(&mut state, &net.context()).await;
+
+            assert_eq!(
+                state.idle.fr_retries, 1,
+                "the retry goes on the connection of the digest"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// A digest that came by gossip is answered by a few members, as a chat digest is, when the
+    /// unicast form is on. Here the k rule leaves this holder out: it sends nothing.
+    #[test]
+    fn a_state_digest_that_came_by_gossip_is_left_to_the_answerers_when_the_form_is_on() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            let members: Vec<_> = (0..30)
+                .map(|index| test_key(&format!("member-{index}")))
+                .collect();
+            state.peers.extend(members.iter().copied());
+            let asker = Identity::generate();
+            // the key that the handler ranks: the one of its context
+            let our_key = net.our_pubkey;
+            let mut digests =
+                (0..200).map(|_| digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker));
+            let leaves_holder_out = |digest: &Verified| {
+                let exchange = antientropy::Exchange {
+                    answerer: &our_key,
+                    asker: &asker.author_key(),
+                };
+                !antientropy::answers_digest(exchange, digest.id.as_str(), members.iter())
+            };
+            let skipped = digests
+                .find(leaves_holder_out)
+                .expect("a digest id that skips the holder among 30 members");
+
+            let answered = antientropy::handle_state_digest(
+                Channel::State,
+                &skipped,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(
+                answered,
+                Answered::default(),
+                "the holder is not an answerer"
+            );
+            bob_endpoint_close(bob_endpoint).await;
+            net.endpoint.close().await;
+        });
+    }
+
+    async fn bob_endpoint_close(bob: iroh::Endpoint) {
+        bob.close().await;
+    }
+
+    /// A node with a linked peer sends its three digests to that one peer, in one unicast batch, and
+    /// broadcasts none.
+    #[test]
+    fn the_tick_sends_the_digests_to_one_linked_peer_and_broadcasts_none() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::MessageKind;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 2).await;
+            state.linked_endpoints.insert(bob_endpoint.id());
+            state.standing.insert(Standing::Meshed);
+            state.message_log.push(directed_msg());
+            let received = read_frames(bob_endpoint, 3);
+
+            antientropy::tick_digests(&mut state, &net.context()).await;
+
+            let (got, returned_endpoint) =
+                tokio_time::timeout(std_Duration::from_secs(5), received)
+                    .await
+                    .expect("bob reads the digests in time")
+                    .expect("reader task");
+            let mut kinds: Vec<String> = got
+                .iter()
+                .map(|bytes| {
+                    Message::parse(bytes)
+                        .expect("a digest parses")
+                        .kind
+                        .to_string()
+                })
+                .collect();
+            kinds.sort();
+            assert_eq!(
+                kinds,
+                [
+                    MessageKind::Digest.to_string(),
+                    MessageKind::MetaDigest.to_string(),
+                    MessageKind::StateDigest.to_string()
+                ],
+                "the chat, state and meta digests"
+            );
+            assert_eq!(state.idle.broadcasts, 0, "none is broadcast");
+            assert!(
+                state.state_digest_serves.unicast.chat_ask.is_some(),
+                "the chat ask is remembered for the retry"
+            );
+            returned_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// With no linked peer to ask, the tick broadcasts as before: a node that is linked only to the
+    /// rendezvous would otherwise never ask.
+    #[test]
+    fn with_no_linked_peer_the_tick_broadcasts_the_digests() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 2).await;
+            state.standing.insert(Standing::Meshed);
+            state.message_log.push(directed_msg());
+
+            antientropy::tick_digests(&mut state, &net.context()).await;
+
+            assert!(state.idle.broadcasts >= 1, "the digests are broadcast");
+            assert!(
+                state.state_digest_serves.unicast.chat_ask.is_none(),
+                "a digest that went by gossip leaves no pending chat ask"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// A chat ask whose answer was full (the log grew by the resend cap) is repeated to the same peer,
+    /// and it is not repeated once its own cap is reached: the retry cannot loop.
+    #[test]
+    fn the_chat_retry_repeats_a_full_answer_and_stops_at_its_cap() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::{ChatAsk, retry_chat_ask};
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
+            state.standing.insert(Standing::Meshed);
+            state.message_log.push(directed_msg());
+            let long_ago = clock::Instant::now()
+                .checked_sub(std_Duration::from_secs(60))
+                .expect("the clock is older than 60 s");
+            let full_answer = ChatAsk {
+                peer: bob_endpoint.id(),
+                accepted: 0,
+                at: long_ago,
+                retries: 0,
+            };
+            // The log holds 1 message and the cap is 64: this answer was not full.
+            state.state_digest_serves.unicast.chat_ask = Some(full_answer);
+            retry_chat_ask(&mut state, &net.context()).await;
+            assert!(
+                state.state_digest_serves.unicast.chat_ask.is_none(),
+                "a short answer ends the ask: nothing is left to ask again"
+            );
+
+            // A full answer at the cap ends the ask without a send.
+            for _ in 0..tuning::antientropy_max_resend() {
+                state.message_log.push(directed_msg());
+            }
+            state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
+                retries: tuning::CHAT_RETRIES_MAX,
+                ..full_answer
+            });
+            retry_chat_ask(&mut state, &net.context()).await;
+            assert!(
+                state.state_digest_serves.unicast.chat_ask.is_none(),
+                "at the cap the retry stops"
+            );
+
+            // A full answer below the cap is asked again, once more counted.
+            state.state_digest_serves.unicast.chat_ask = Some(full_answer);
+            retry_chat_ask(&mut state, &net.context()).await;
+            assert_eq!(
+                state
+                    .state_digest_serves
+                    .unicast
+                    .chat_ask
+                    .map(|ask| ask.retries),
+                Some(1),
+                "a full answer is asked again"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// The progress of a chat answer is the count of the messages that the log took, not its length:
+    /// a full log keeps its length while an answer replaces its entries.
+    #[test]
+    fn the_chat_retry_sees_an_answer_that_a_full_log_took_without_growing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::daemon::message_log::MessageLog;
+            use crate::gossip::antientropy::{ChatAsk, retry_chat_ask};
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
+            state.standing.insert(Standing::Meshed);
+            state.message_log = MessageLog::new(2);
+            state.message_log.push(directed_msg());
+            state.message_log.push(directed_msg());
+            let long_ago = clock::Instant::now()
+                .checked_sub(std_Duration::from_secs(60))
+                .expect("the clock is older than 60 s");
+            state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
+                peer: bob_endpoint.id(),
+                accepted: state.message_log.accepted(),
+                at: long_ago,
+                retries: 0,
+            });
+            for _ in 0..tuning::antientropy_max_resend() {
+                state.message_log.push(directed_msg());
+            }
+            assert_eq!(
+                state.message_log.len(),
+                2,
+                "the log is full and did not grow"
+            );
+
+            retry_chat_ask(&mut state, &net.context()).await;
+
+            assert_eq!(
+                state
+                    .state_digest_serves
+                    .unicast
+                    .chat_ask
+                    .map(|ask| ask.retries),
+                Some(1),
+                "a full answer into a full log is asked again"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
     }
 
     /// A point-to-point answer ends with the holder's own heads, so the asker

@@ -111,7 +111,7 @@ impl<T: Config> MeshTransport<T> {
             .and_then(|slot| *slot)
     }
 
-    /// Whether a peer's public key can be addressed yet — true once we have
+    /// Whether we have heard from the peer with this public key — true once we have
     /// received any frame from them.
     #[must_use]
     pub fn knows(&self, pubkey: &AuthorKey) -> bool {

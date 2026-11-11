@@ -52,15 +52,19 @@ pub enum NodeEvent {
     },
     /// A member went quiet.
     PeerTimeout {
-        /// The nickname of the member.
+        /// The nickname of the member. A label: two keys can use one.
         nickname: Nickname,
+        /// The key of the member.
+        key: AuthorKey,
         /// Seconds since the member was last heard from.
         last_seen_secs_ago: u64,
     },
     /// A member came back.
     PeerReturn {
-        /// The nickname of the member.
+        /// The nickname of the member. A label: two keys can use one.
         nickname: Nickname,
+        /// The key of the member.
+        key: AuthorKey,
     },
     /// A peer's arrival, departure, or announcement. `msg` is the proof of the presence
     /// frame, and for a `synthetic` presence it is the proof this node minted (its own

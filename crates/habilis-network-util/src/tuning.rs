@@ -74,6 +74,30 @@ pub fn antientropy_interval() -> Duration {
     current().antientropy_interval.max(Duration::from_secs(1))
 }
 
+/// How long a state document with epochs holds its local writes at the start, waiting for the
+/// first sync, before it writes anyway (`MeshDoc::finish_sync`). A node that restarts has a Lamport
+/// clock of 0, so a write before it heard of another write could get a time below its own earlier
+/// writes and lose to them. A lone node, or a mesh whose peers are all down, would wait for ever
+/// without this limit, so it counts from the start of the node and not from the first peer.
+pub const STATE_SYNC_WAIT: Duration = Duration::from_secs(30);
+
+/// The live value, after any override of [`STATE_SYNC_WAIT`].
+///
+/// # Examples
+///
+/// The wait is 30 seconds unless a test or a tool changes it.
+///
+/// ```
+/// use habilis_network_util::tuning::state_sync_wait;
+/// use std::time::Duration;
+///
+/// assert!(state_sync_wait() <= Duration::from_secs(30));
+/// ```
+#[must_use]
+pub fn state_sync_wait() -> Duration {
+    current().state_sync_wait
+}
+
 /// How often a node re-broadcasts its relay **link-state** vector (its own
 /// measured links) so every peer keeps a fresh routing graph. Steady-state cost
 /// is one small message per interval; churn triggers a fresh vector out-of-band
@@ -156,6 +180,45 @@ pub const RESIDENT_MEMORY_WARN_MB: u64 = 1024;
 /// Active talkers never emit one — any sent gossip message resets the
 /// timer, so chatty meshes pay zero heartbeat cost.
 pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long a link vector waits for the endpoint proof of its signer. The next vector of the
+/// signer comes one `LINKSTATE_INTERVAL` on and finds the proof or parks again, so a vector older
+/// than two of those intervals is of no use, and its slot goes to another signer.
+pub const PARKED_LINK_STATE_TTL: Duration = LINKSTATE_INTERVAL.saturating_mul(2);
+
+/// The least time between two `PeerInfo` refreshes of a node. A `PeerInfo` that a member missed is
+/// not in the message log, so no digest repairs it: only the flood of its sender does. The refresh
+/// sends it again, so a lost one is back within one period.
+pub const PEERINFO_REFRESH_MIN: Duration = Duration::from_mins(5);
+
+/// The refresh period grows with the roster by this much per live member. The caller never
+/// shortens the period, so the whole mesh sends at most 1 refresh per this span, however many
+/// members it holds.
+pub const PEERINFO_REFRESH_PER_PEER: Duration = Duration::from_secs(5);
+
+/// The time after the last `PeerInfo` flood at which a node floods it again, for a roster of
+/// `members` live members (itself included). It is the larger of two spans: the tuning value of
+/// [`PEERINFO_REFRESH_MIN`], and the tuning value of [`PEERINFO_REFRESH_PER_PEER`] times
+/// `members`. The caller lengthens the value by a random factor of 1.0 to 1.5, so that the members
+/// do not flood together.
+///
+/// # Examples
+///
+/// A small roster refreshes at the least period.
+///
+/// ```
+/// use habilis_network_util::tuning::{PEERINFO_REFRESH_MIN, peerinfo_refresh_period};
+///
+/// assert_eq!(peerinfo_refresh_period(3), PEERINFO_REFRESH_MIN);
+/// ```
+#[must_use]
+pub fn peerinfo_refresh_period(members: usize) -> Duration {
+    let tuning = current();
+    let grown = tuning
+        .peerinfo_refresh_per_peer
+        .saturating_mul(u32::try_from(members).unwrap_or(u32::MAX));
+    tuning.peerinfo_refresh_min.max(grown)
+}
 
 /// How long a peer can go unheard before the sweeper evicts it.
 /// Must exceed `ALIVE_INTERVAL` comfortably — 3x absorbs one or
@@ -323,6 +386,8 @@ pub struct Tuning {
     pub heal_interval: Duration,
     /// How often a node sends its digest to look for missing messages.
     pub antientropy_interval: Duration,
+    /// How long the state channel holds the writes of a node that has not synced yet.
+    pub state_sync_wait: Duration,
     /// How long an unmeshed joiner waits before it co-hosts the rendezvous anyway.
     pub cohost_grace: Duration,
     /// How long a ping round collects pongs before it reports.
@@ -353,6 +418,10 @@ pub struct Tuning {
     pub rendezvous_periodic_return: Duration,
     /// Whether a topic mesh looks up peers over mDNS only.
     pub topic_mdns_only: bool,
+    /// The least time between two refreshes of the `PeerInfo` of a node.
+    pub peerinfo_refresh_min: Duration,
+    /// How much a live member adds to the refresh period.
+    pub peerinfo_refresh_per_peer: Duration,
 }
 
 impl Tuning {
@@ -360,6 +429,14 @@ impl Tuning {
     #[must_use]
     pub fn antientropy_interval(mut self, antientropy_interval: Duration) -> Self {
         self.antientropy_interval = antientropy_interval;
+        self
+    }
+
+    /// Set how long the state channel holds the writes of a node that has not synced yet. Zero
+    /// ends the wait at the start, for a test that writes at once.
+    #[must_use]
+    pub fn state_sync_wait(mut self, state_sync_wait: Duration) -> Self {
+        self.state_sync_wait = state_sync_wait;
         self
     }
 
@@ -388,6 +465,27 @@ impl Tuning {
     #[must_use]
     pub fn heal_interval(mut self, heal_interval: Duration) -> Self {
         self.heal_interval = heal_interval;
+        self
+    }
+
+    /// Set how often the sweeper looks for expired peers.
+    #[must_use]
+    pub fn sweep_interval(mut self, sweep_interval: Duration) -> Self {
+        self.sweep_interval = sweep_interval;
+        self
+    }
+
+    /// Set the least time between two refreshes of the `PeerInfo` of a node.
+    #[must_use]
+    pub fn peerinfo_refresh_min(mut self, peerinfo_refresh_min: Duration) -> Self {
+        self.peerinfo_refresh_min = peerinfo_refresh_min;
+        self
+    }
+
+    /// Set how much a live member adds to the refresh period.
+    #[must_use]
+    pub fn peerinfo_refresh_per_peer(mut self, peerinfo_refresh_per_peer: Duration) -> Self {
+        self.peerinfo_refresh_per_peer = peerinfo_refresh_per_peer;
         self
     }
 
@@ -420,6 +518,7 @@ impl Tuning {
         sweep_interval: SWEEP_INTERVAL,
         heal_interval: HEAL_INTERVAL,
         antientropy_interval: ANTIENTROPY_INTERVAL,
+        state_sync_wait: STATE_SYNC_WAIT,
         cohost_grace: BEACON_COHOST_GRACE,
         ping_window: PING_WINDOW,
         ppid_watch_interval: PPID_WATCH_INTERVAL,
@@ -435,6 +534,8 @@ impl Tuning {
         rival_recheck_alone: RIVAL_RECHECK_ALONE,
         rendezvous_periodic_return: RENDEZVOUS_PERIODIC_RETURN,
         topic_mdns_only: false,
+        peerinfo_refresh_min: PEERINFO_REFRESH_MIN,
+        peerinfo_refresh_per_peer: PEERINFO_REFRESH_PER_PEER,
     };
 }
 
@@ -680,6 +781,12 @@ pub const NO_RUNG_REPEAT: Duration = Duration::from_mins(5);
 /// only a missed `peer_return` surface — acceptable. Generously above any
 /// realistic live roster.
 pub const QUIET_CAP: usize = 1024;
+
+/// Max protocol versions that the loop has named in an error line. A frame that names another
+/// version does not parse, so the key of its sender is not proven: the line is once for each
+/// version. The set takes no version past the cap, and one line says that many are unknown, so a
+/// sender that makes up versions gets neither memory nor a line for each frame.
+pub const UNSUPPORTED_VERSION_CAP: usize = 16;
 
 /// Minimum gap between our own re-dial + `PeerInfo` re-flood of the *same*
 /// peer learned via `PeerInfo` (`gossip::recv::handle_peer_info`). Caps the
@@ -1067,6 +1174,18 @@ pub const FAST_ROUND_ACTIVE: Duration = Duration::from_secs(1);
 /// ahead again: a lost request, a lost answer, or a refusal costs this, not an
 /// anti-entropy tick. The reclaim timer drives the check, so this matches it.
 pub const FAST_ROUND_RETRY: Duration = Duration::from_millis(400);
+
+/// The retries of a chat digest that a full answer calls for, at most, after one tick's ask: the
+/// ask is repeated while each answer is full (the log grew by the resend cap), so a long gap does
+/// not wait one tick per cap, and it stops after this many.
+pub const CHAT_RETRIES_MAX: u32 = 16;
+
+/// How many authors a holder serves chat continuations to at once, inside the cooldown window of their
+/// digest (see `ChatContinuations`). 64 is four times the members of the largest mesh that was
+/// measured (16): a mesh where every member is catching up at once has room, and the table is a few
+/// bytes for each author for one window of 5 s. When it is full, the continuation of a new author is
+/// refused and meets the cooldown as before.
+pub const CHAT_CONTINUATION_AUTHORS_MAX: usize = 64;
 
 /// How many peers a node remembers as ahead of it, per channel.
 pub const FAST_ROUND_AHEAD_MAX: usize = 16;

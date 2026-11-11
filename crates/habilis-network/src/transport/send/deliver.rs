@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 
 use super::route::Route;
 use crate::daemon::state::EventLoopState;
-use crate::protocol::Nickname;
+use crate::protocol::AuthorKey;
 use crate::protocol::messages::{Verified, WireFrame, sole_addressee};
 use crate::transport::outbox::Resend;
 use crate::transport::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
@@ -18,7 +18,7 @@ use crate::util::clock;
 
 use crate::transport::{Delivered, Lane, SendError};
 
-use crate::{protocol, transport};
+use crate::transport;
 use n0_future::task;
 /// Route one already-signed, already-serialized message. `bytes` MUST be
 /// `msg.serialize()` — the same wire form gossip uses.
@@ -87,11 +87,11 @@ pub(crate) fn resolve(
         Route::Held(eid) => Err(SendError::Held { eid }),
         Route::Undeliverable => {
             let addressee = sole_addressee(&message.kind);
-            let name = addressee.map_or("<none>", Nickname::as_str);
+            let name = addressee.map_or_else(|| "<none>".to_owned(), ToString::to_string);
             // Two distinct causes hide behind one route: waiting on PeerInfo
             // is retryable, an addressee advertising the rendezvous is not.
             let via_rendezvous = addressee
-                .and_then(|nick| state.peer_endpoints.get(nick))
+                .and_then(|key| state.address_of(key))
                 .is_some_and(|address| state.rendezvous_id == Some(address.id));
             let cause = if via_rendezvous {
                 "its advertised endpoint is the rendezvous pseudo-node, never a directed target"
@@ -165,8 +165,28 @@ pub async fn deliver_in_background(
 /// of frames aimed at whoever holds that endpoint. Linked, because every
 /// holder that hears a digest answers it: the asker's link count bounds how
 /// many answers reach its unicast inbox. `None` means answer on gossip.
+/// The linked neighbors that a digest can go to by unicast: not the rendezvous pseudo-node, and not
+/// a pair whose payload path is held for a direct path.
+pub(crate) fn unicast_peers(state: &EventLoopState) -> impl Iterator<Item = EndpointId> + '_ {
+    state
+        .linked_endpoints
+        .iter()
+        .copied()
+        .filter(|eid| state.rendezvous_id != Some(*eid) && !super::route::held(*eid, state))
+}
+
+/// Whether a frame can be sent to `eid` by unicast now: its payload path is not held, or the frame
+/// being handled came by unicast from `eid`. The unicast acceptor admits a connection only on a
+/// selected path that is not the relay when the relay is lookup-only, so that arrival proves what a
+/// probe would, before the probe of the node reads it, and the reply goes back on it. The exception
+/// is for the frame at hand: `arrived_from` is set only while an unicast frame is handled, so a
+/// send outside a reply, and any other endpoint, keep the check of the path as before.
+pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
+    !super::route::held(eid, state) || state.state_digest_serves.unicast.arrived_from == Some(eid)
+}
+
 pub(crate) fn unicast_answer_target(
-    signer: &protocol::AuthorKey,
+    signer: &AuthorKey,
     state: &EventLoopState,
 ) -> Option<EndpointId> {
     let eid = state
@@ -184,13 +204,9 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
     let SendError::Held { eid } = error else {
         return;
     };
-    let needs_lane = state
-        .peer_endpoints
-        .values()
-        .find(|address| address.id == *eid)
-        .is_some_and(|address| {
-            webrtc::session_policy::pair_needs_lane(address, state.local_udp_transport)
-        });
+    let needs_lane = state.member_address_of(*eid).is_some_and(|address| {
+        webrtc::session_policy::pair_needs_lane(&address, state.local_udp_transport)
+    });
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.
     let reads_as_relay = state.pair_path_kind(*eid) == Some(PathKind::Relay);
@@ -203,25 +219,25 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
 /// unicast connect; we label it `unicast` when a *direct* path is expected (the
 /// peer is in our gossip mesh) and `multihop` otherwise — a best-effort hint,
 /// since the actual path is chosen by iroh at connect time.
-pub(crate) fn lane_for(nick: &Nickname, state: &EventLoopState) -> Lane {
-    let Some(eid) = super::route::directed_endpoint(nick, state) else {
+pub(crate) fn lane_for(key: &AuthorKey, state: &EventLoopState) -> Lane {
+    let Some(eid) = super::route::directed_endpoint(key, state) else {
         return Lane::Unreachable;
     };
     if super::route::held(eid, state) {
         return Lane::RelayOnly;
     }
-    if directly_meshed(nick, state) {
+    if directly_meshed(key, state) {
         Lane::Unicast
     } else {
         Lane::Multihop
     }
 }
 
-/// Whether `nick` is a known peer in our live gossip mesh — the signal that a
+/// Whether `key` is a known peer in our live gossip mesh — the signal that a
 /// *direct* unicast path is expected rather than a multihop one.
-fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
+fn directly_meshed(key: &AuthorKey, state: &EventLoopState) -> bool {
     state.standing.contains(&Standing::Meshed)
-        && super::route::directed_endpoint(nick, state).is_some()
+        && super::route::directed_endpoint(key, state).is_some()
 }
 
 /// Warm pooled connection first (steady state, no dial — an optimistic
@@ -302,6 +318,26 @@ pub(crate) async fn send_best_effort(
     bytes: WireFrame,
     state: &EventLoopState,
 ) -> bool {
+    send_courtesy(eid, bytes, state, false).await
+}
+
+/// [`send_best_effort`] for an endpoint that just sent an authenticated unicast frame: it gets the dial in the
+/// background that a linked neighbour gets. The endpoint id of that connection is checked by the transport, so
+/// the endpoint is as proven as a link would prove it. The caller keeps its own limits on how often it sends.
+pub(crate) async fn send_dialing_back(
+    eid: EndpointId,
+    bytes: WireFrame,
+    state: &EventLoopState,
+) -> bool {
+    send_courtesy(eid, bytes, state, true).await
+}
+
+async fn send_courtesy(
+    eid: EndpointId,
+    bytes: WireFrame,
+    state: &EventLoopState,
+    dial_back: bool,
+) -> bool {
     // Never dial inline: that would let anyone who can be pinged back choose
     // how long this daemon stops answering, once per identity. A linked
     // neighbor still gets a dial, off the loop — its address is proven by the
@@ -313,7 +349,7 @@ pub(crate) async fn send_best_effort(
         .await
     {
         WarmSend::Sent => true,
-        WarmSend::Cold if state.linked_endpoints.contains(&eid) => {
+        WarmSend::Cold if dial_back || state.linked_endpoints.contains(&eid) => {
             state
                 .unicast_pool
                 .dial_and_send_in_background(eid, bytes.into_bytes())

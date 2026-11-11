@@ -8,10 +8,11 @@
 //!
 //! Every change is carried inside a signed [`Message`](habilis_network_protocol::Message),
 //! and every change is authorized before it touches the live doc. A channel
-//! configured with a [`SelfWriteGate`] holds a per-peer map keyed by nickname in
-//! which one field belongs to the peer it names: [`MeshDoc::ingest`] applies the
-//! change to a throwaway fork first and rejects it if it would alter any *other*
-//! peer's field. That field carries the peer's cryptographic identity, so a
+//! configured with a [`SelfWriteGate`] holds a per-peer map keyed by author key (the
+//! lowercase hex; a nickname is a label that two keys can share) in
+//! which one field belongs to the key that names its slot: [`MeshDoc::ingest`] applies the
+//! change to a throwaway fork first and rejects it if it would alter the gated field of any *other*
+//! peer's slot. The other fields of a slot are not gated. That field carries the peer's cryptographic identity, so a
 //! forgery must converge nowhere — and because every honest member runs the same
 //! gate before applying, it does.
 //!
@@ -39,8 +40,37 @@ pub mod wire;
 
 mod doc_error;
 
+mod parsed_change;
+
+mod seed_mark;
+
+mod stamp;
+
+mod left_out;
+
+mod split;
+
 pub use doc_error::DocError;
+
+pub use parsed_change::ParsedChange;
+
+pub use seed_mark::SeedMark;
+
+pub use stamp::Stamp;
+
+pub use split::{pack_entry, split_entry};
+
+mod limits;
+
+pub use limits::{Axis, Limits};
+
+mod time_source;
+
+pub use time_source::TimeSource;
 
 mod mesh_doc;
 
-pub use mesh_doc::{Ingested, MeshDoc, SelfWriteGate};
+pub use mesh_doc::{
+    DocCensus, EpochSwitch, Ingested, MeshDoc, ReplayMerges, Restores, SeedChain, SeedPlan,
+    SelfWriteGate, StampedPaths,
+};

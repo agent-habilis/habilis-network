@@ -120,6 +120,7 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 parking_lot = "0.12"
+memchr = "2"
 anyhow.workspace = true
 bytes.workspace = true
 tracing.workspace = true
@@ -152,6 +153,7 @@ habilis-network-protocol = { path = "../habilis-network-protocol", default-featu
 habilis-network-doc = { path = "../habilis-network-doc", default-features = false }
 habilis-network-logging = { path = "../habilis-network-logging", default-features = false }
 bs58.workspace = true
+base64.workspace = true
 sha2.workspace = true
 rand.workspace = true
 # mDNS + mainline-DHT address-lookup providers were extracted from iroh core

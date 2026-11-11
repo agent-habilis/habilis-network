@@ -13,18 +13,27 @@
 
 use std::time::Duration;
 
-use habilis_network::embed::SilentSink;
-use habilis_network::protocol::{AuthorKey, LookupOpts, Nickname};
+use habilis_network::embed::{
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
+};
+use habilis_network::ops;
+use habilis_network::protocol::messages::Authored;
+use habilis_network::protocol::{
+    AppFrameParams, AppTag, AuthorKey, LookupOpts, MessageBody, Nickname,
+};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+    EventLoopConfig, Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with,
+    setup_mesh,
 };
 use serde::{Deserialize, Serialize};
 
 use habilis_network_netplay::{
-    Config, Event, Lobby, MeshTransport, P2PSession, Request, RollbackDriver, RollbackError,
-    SessionState, Tick,
+    Body, Config, Event, Lobby, MeshTransport, Outbound, P2PSession, ROLLBACK_TAG, Request,
+    RollbackDriver, RollbackError, SessionState, Tick, Transport,
 };
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{process, thread};
 use tokio::time;
 use tokio::time::Instant;
@@ -59,7 +68,8 @@ struct Player {
     desynced: bool,
 }
 
-async fn spawn(topic: &str, nick: &str) -> Player {
+/// The config of one loopback node that joins the mesh of `topic` as `nick`.
+async fn node_config(topic: &str, nick: &str) -> EventLoopConfig {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
     let author = Nickname::try_new(nick).expect("valid nickname");
@@ -67,12 +77,17 @@ async fn spawn(topic: &str, nick: &str) -> Player {
         mesh,
         topic_string: topic.to_owned(),
     };
-    let config = setup_mesh(
+    setup_mesh(
         kind,
-        SetupParams::new(author.clone(), SilentSink::default()).max_peers(16),
+        SetupParams::new(author, SilentSink::default()).max_peers(16),
     )
     .await
-    .expect("setup_mesh on a loopback mesh must not touch the network");
+    .expect("setup_mesh on a loopback mesh must not touch the network")
+}
+
+async fn spawn(topic: &str, nick: &str) -> Player {
+    let author = Nickname::try_new(nick).expect("valid nickname");
+    let config = node_config(topic, nick).await;
 
     let (driver, pending): (RollbackDriver<Game>, _) = RollbackDriver::new();
     let node: Node<RollbackDriver<Game>> = Node::spawn(config, driver, None, SignalHandling::Leave);
@@ -307,6 +322,280 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
             // `iroh-gossip`'s actor loop `expect`s on its `JoinSet`, so a task
             // cancelled by runtime shutdown panics ("connection task panicked")
             // and fails an otherwise passing test.
+            for player in players {
+                player.node.leave().await.expect("leave the mesh cleanly");
+            }
+        },
+    );
+}
+
+/// Folds the `SyncRequest` tokens that each bob received into `tokens`. Player 0 is alice, so the
+/// bob of slot `n` is player `n + 1`.
+fn collect_tokens(players: &[Player], tokens: &mut [Vec<u32>; 2]) {
+    let slots = tokens.iter_mut().enumerate();
+    for (slot, got) in slots {
+        let mut inbox = players[slot + 1]
+            .transport
+            .clone()
+            .expect("a bob has his transport");
+        for (_, message) in inbox.receive_all() {
+            if let Body::SyncRequest { token } = message.body {
+                got.push(token);
+            }
+        }
+    }
+}
+
+/// A rollback packet is addressed to a key, so the key it names gets it and the other key does
+/// not.
+#[test]
+fn a_packet_to_one_key_reaches_that_key_only() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(
+        guard,
+        thread::available_parallelism().map_or(1, usize::from),
+        async {
+            let topic = format!("habilis-network-netplay-keys-{}", process::id());
+            let mut players = vec![
+                spawn(&topic, "alice").await,
+                spawn(&topic, "bob").await,
+                spawn(&topic, "carol").await,
+            ];
+
+            let members_of = |group: &[Player]| -> Vec<AuthorKey> {
+                let transport = group[0]
+                    .transport
+                    .as_ref()
+                    .expect("alice has her transport");
+                let peers = transport.known_peers();
+                peers
+                    .filter(|(_, nickname)| matches!(nickname.as_str(), "bob" | "carol"))
+                    .map(|(pubkey, _)| pubkey)
+                    .collect()
+            };
+            let heard: bool = drive(&mut players, Duration::from_secs(30), |players| {
+                members_of(players).len() >= 2
+            })
+            .await;
+            assert!(heard, "alice never heard from both peers");
+
+            // The token names the key that the packet is for: 1 for bob, 2 for carol.
+            // Alice heard from both keys, but the PeerInfo of one can still be on its way. The
+            // engine then refuses the send, and the rollback layer resends a lost packet. So this
+            // test resends too, until each key has its packet.
+            let send_token = |group: &[Player], bob: usize, token: u32| {
+                let to = group[bob]
+                    .transport
+                    .as_ref()
+                    .and_then(MeshTransport::local_pubkey)
+                    .expect("a bob that alice heard from has a key");
+                let payload =
+                    format!(r#"{{"magic":7,"body":{{"SyncRequest":{{"token":{token}}}}}}}"#);
+                group[0]
+                    .node
+                    .sender()
+                    .try_send(Outbound::Rollback { to, payload })
+                    .expect("the outbound queue has room");
+            };
+            let mut tokens: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+            let mut passes = 0_u32;
+            let delivered: bool = drive(&mut players, Duration::from_secs(20), |players| {
+                if passes.is_multiple_of(25) {
+                    let slots = tokens.iter().enumerate();
+                    for (slot, got) in slots {
+                        if got.is_empty() {
+                            send_token(players, slot + 1, u32::try_from(slot + 1).expect("small"));
+                        }
+                    }
+                }
+                passes += 1;
+                collect_tokens(players, &mut tokens);
+                tokens.iter().all(|got| !got.is_empty())
+            })
+            .await;
+            assert!(delivered, "a key got no packet: {tokens:?}");
+
+            // A packet for the wrong key would arrive late, so keep listening before the check.
+            drive(&mut players, Duration::from_secs(2), |players| {
+                collect_tokens(players, &mut tokens);
+                false
+            })
+            .await;
+            let slots = tokens.iter().enumerate();
+            for (slot, got) in slots {
+                let own = u32::try_from(slot + 1).expect("small");
+                assert!(
+                    got.iter().all(|token| *token == own),
+                    "each key must get only the packet that names it: {tokens:?}"
+                );
+            }
+
+            for player in players {
+                player.node.leave().await.expect("leave the mesh cleanly");
+            }
+        },
+    );
+}
+
+/// A driver that, on the first frame the engine gives it, also gives its inner driver two frames
+/// that it builds itself: a rollback frame for another key, and one for our own key. The engine
+/// builds the `HandlerCtx`, so a frame of the real mesh is the trigger.
+struct Probe {
+    inner: RollbackDriver<Game>,
+    // the test reads the flag while the node task sets it
+    injected: Arc<AtomicBool>,
+}
+
+#[habilis_network::async_trait]
+impl NodeApp for Probe {
+    fn classify(&self, message: &Authored) -> AppClass {
+        self.inner.classify(message)
+    }
+
+    async fn on_app_frame(
+        &mut self,
+        frame: InboundApp<'_>,
+        state: &mut EventLoopState,
+        context: &HandlerCtx<'_>,
+    ) -> bool {
+        if !self.injected.load(Ordering::SeqCst) {
+            // A nickname is a label, so another key can use the nickname of this node.
+            let twin = AuthorKey::from([9; 32]);
+            for (to, token) in [(twin, 1_u32), (context.our_pubkey, 2)] {
+                let tag = AppTag::try_new(ROLLBACK_TAG).expect("a valid tag");
+                let payload =
+                    format!(r#"{{"magic":7,"body":{{"SyncRequest":{{"token":{token}}}}}}}"#);
+                let body = MessageBody::try_new(&payload).expect("a valid body");
+                let params = AppFrameParams::new(tag, Some(to), None, body);
+                let sent = ops::app_frame(context, params).authored();
+                let mut copy = frame.clone();
+                copy.message = &sent;
+                self.inner.on_app_frame(copy, state, context).await;
+            }
+            self.injected.store(true, Ordering::SeqCst);
+        }
+        self.inner.on_app_frame(frame, state, context).await
+    }
+}
+
+#[habilis_network::async_trait]
+impl NodeDriver for Probe {
+    type Session = Outbound;
+    type Http = ();
+    type Ipc = serde_json::Value;
+
+    async fn on_startup(&mut self, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+        self.inner.on_startup(state, context).await;
+    }
+
+    async fn handle_session(
+        &mut self,
+        request: Outbound,
+        state: &mut EventLoopState,
+        context: &HandlerCtx<'_>,
+    ) -> bool {
+        self.inner.handle_session(request, state, context).await
+    }
+}
+
+/// The engine gives the app a directed frame that is for another key, because a relay forwards
+/// it and does not filter by recipient. A nickname is a label, so that other key can be a twin of this node. The driver
+/// must act only on a frame for its own key: a packet for the twin must not reach our session.
+#[test]
+fn a_rollback_frame_for_another_key_does_not_reach_our_session() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(
+        guard,
+        thread::available_parallelism().map_or(1, usize::from),
+        async {
+            let topic = format!("habilis-network-netplay-recipient-{}", process::id());
+            let mut players = vec![spawn(&topic, "alice").await];
+
+            let (inner, pending): (RollbackDriver<Game>, _) = RollbackDriver::new();
+            // the test and the node task share the flag
+            let injected = Arc::new(AtomicBool::new(false));
+            let probe = Probe {
+                inner,
+                injected: Arc::clone(&injected),
+            };
+            let config = node_config(&topic, "bob").await;
+            let node = Node::spawn(config, probe, None, SignalHandling::Leave);
+            let mut inbox = pending.connect(node.sender());
+
+            // Alice sends her presence to each peer she knows, so a frame reaches bob.
+            let met: bool = drive(&mut players, Duration::from_secs(30), |_| {
+                injected.load(Ordering::SeqCst)
+            })
+            .await;
+            assert!(met, "bob never got a frame from alice");
+
+            let mut tokens: Vec<u32> = Vec::new();
+            for (_, message) in inbox.receive_all() {
+                if let Body::SyncRequest { token } = message.body {
+                    tokens.push(token);
+                }
+            }
+            assert_eq!(
+                tokens,
+                [2],
+                "only the frame for our own key reaches the session"
+            );
+
+            node.leave().await.expect("leave the mesh cleanly");
+            for player in players {
+                player.node.leave().await.expect("leave the mesh cleanly");
+            }
+        },
+    );
+}
+
+/// The directory that maps a key to a nickname grows with each key that the node hears from, and a
+/// peer that restarts brings a new key. A key that leaves the mesh must leave the directory.
+#[test]
+fn a_peer_that_leaves_is_dropped_from_the_known_peers() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(
+        guard,
+        thread::available_parallelism().map_or(1, usize::from),
+        async {
+            let topic = format!("habilis-network-netplay-leaver-{}", process::id());
+            let mut players = vec![
+                spawn(&topic, "alice").await,
+                spawn(&topic, "bob").await,
+                spawn(&topic, "carol").await,
+            ];
+
+            let known = |group: &[Player]| -> Vec<String> {
+                let transport = group[0]
+                    .transport
+                    .as_ref()
+                    .expect("alice has her transport");
+                let peers = transport.known_peers();
+                let mut names: Vec<String> = peers
+                    .map(|(_, nickname)| nickname.as_str().to_owned())
+                    .collect();
+                names.sort();
+                names
+            };
+            let heard: bool = drive(&mut players, Duration::from_secs(30), |players| {
+                known(players).len() >= 2
+            })
+            .await;
+            assert!(heard, "alice never heard from bob and carol");
+
+            let bob = players.remove(1);
+            bob.node.leave().await.expect("leave the mesh cleanly");
+
+            let dropped: bool = drive(&mut players, Duration::from_secs(20), |players| {
+                known(players) == ["carol"]
+            })
+            .await;
+            assert!(
+                dropped,
+                "alice still knows a peer that left: {:?}",
+                known(&players)
+            );
+
             for player in players {
                 player.node.leave().await.expect("leave the mesh cleanly");
             }

@@ -1,6 +1,7 @@
 //! The key of the author of a message.
 
 use iroh_base::PublicKey;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::identity;
 use std::fmt;
@@ -76,6 +77,22 @@ impl AuthorKey {
     #[must_use]
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+}
+
+// The wire form is the hex text, as in `pubkey`. A string that is not 64 lowercase hex digits is
+// no key, so it is a parse error.
+impl Serialize for AuthorKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthorKey {
+    fn deserialize<Source: Deserializer<'de>>(deserializer: Source) -> Result<Self, Source::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::decode_hex(&text)
+            .ok_or_else(|| de::Error::custom("an author key is 64 lowercase hex digits"))
     }
 }
 

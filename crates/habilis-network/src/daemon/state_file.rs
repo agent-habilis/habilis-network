@@ -24,7 +24,9 @@
 //! including self. `last_updated` is a unix timestamp the daemon
 //! refreshes on a fixed heartbeat (see `tuning::STATE_REFRESH`)
 //! even when membership is unchanged, so a reader can treat a fresh
-//! value as a liveness signal. `pid` is the daemon's own process id —
+//! value as a liveness signal. `pubkey` is the author key of the daemon
+//! (64 lowercase hex digits), which is the identity of the member on the wire; the
+//! nickname is a label. `pid` is the daemon's own process id —
 //! what lets a consumer's `leave`/`session` map a state file back to a
 //! running daemon (and, via its ancestry, to the agent session that
 //! spawned it).
@@ -32,7 +34,7 @@
 //! File shape (keys are serialized in sorted order — `serde_json::Map` is a
 //! `BTreeMap` here, no `preserve_order` feature):
 //! ```json
-//! {"last_updated":1776720604,"name":"cool-team","nickname":"treat-empire","peer_count":3,"pid":34299,"ready":true,"gossip":"..."}
+//! {"last_updated":1776720604,"name":"cool-team","nickname":"treat-empire","peer_count":3,"pid":34299,"pubkey":"ab…ab","ready":true,"gossip":"..."}
 //! ```
 //!
 //! Writes are atomic (tempfile + rename on the same filesystem), so a
@@ -51,7 +53,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::protocol::meshes::MeshName;
-use crate::protocol::{MeshId, Nickname};
+use crate::protocol::{AuthorKey, MeshId, Nickname};
 use crate::util::{file_retry, unix_secs};
 
 use crate::util;
@@ -85,6 +87,8 @@ pub struct StateFile {
     mesh: String,
     name: String,
     nickname: String,
+    /// The author key of the daemon, as 64 lowercase hex digits.
+    pubkey: String,
     topic: Option<String>,
     owner_pid: Option<u32>,
     /// Extra fields the application publishes for its local clients to discover
@@ -92,10 +96,37 @@ pub struct StateFile {
     /// write is 0o600: an app may put a bearer token in here.
     discovery: sync::Mutex<serde_json::Map<String, serde_json::Value>>,
     write_failing: atomic::AtomicBool,
+    /// The lock on the member key of this start. The cleanup of this file deletes the member key
+    /// and the run counter that live beside it, so the lock belongs to the value that does the
+    /// cleanup: a replacement that waits for the lock gets it after the files are gone, and its own
+    /// key and run counter cannot be deleted under it. Held, never read.
+    // shared with the loop state, which holds the same lock for as long as this node runs
+    key_lock: Option<sync::Arc<fs::File>>,
 }
 
+/// The keys of the state file that the daemon owns. A discovery field of the application never
+/// replaces one of them.
+const ENGINE_KEYS: [&str; 10] = [
+    "gossip",
+    "name",
+    "nickname",
+    "pubkey",
+    "topic",
+    "pid",
+    "owner_pid",
+    "ready",
+    "peer_count",
+    "last_updated",
+];
+
 impl StateFile {
-    pub(crate) fn new(path: PathBuf, mesh: &MeshId, nickname: &Nickname, name: &MeshName) -> Self {
+    pub(crate) fn new(
+        path: PathBuf,
+        mesh: &MeshId,
+        nickname: &Nickname,
+        name: &MeshName,
+        pubkey: &AuthorKey,
+    ) -> Self {
         let mesh = mesh.as_str().to_string();
         let name = name.as_str().to_string();
         let nickname = nickname.as_str().to_string();
@@ -105,8 +136,10 @@ impl StateFile {
             mesh,
             name,
             nickname,
+            pubkey: pubkey.to_string(),
             topic: None,
             owner_pid: None,
+            key_lock: None,
             discovery: sync::Mutex::new(serde_json::Map::new()),
             write_failing: atomic::AtomicBool::new(false),
         }
@@ -131,6 +164,13 @@ impl StateFile {
 
     /// Attach the pid of the process the daemon lives for, so every write
     /// publishes it as `owner_pid`. A no-op `None`, as for [`Self::topic`].
+    /// Hold the lock on the member key until this file is cleaned up (see the field of the same
+    /// name).
+    pub(crate) fn key_lock(mut self, key_lock: Option<sync::Arc<fs::File>>) -> Self {
+        self.key_lock = key_lock;
+        self
+    }
+
     pub(crate) fn owner_pid(mut self, owner_pid: Option<u32>) -> Self {
         self.owner_pid = owner_pid;
         self
@@ -143,7 +183,10 @@ impl StateFile {
     /// The engine never interprets these. It does not know that a consumer
     /// writes its own port/token keys here, only that whatever an app puts in
     /// may be secret, which is why the file is born 0o600. Keys are merged, not
-    /// replaced, so repeated calls accumulate.
+    /// replaced, so repeated calls accumulate. The keys of the daemon itself (`gossip`, `name`,
+    /// `nickname`, `pubkey`, `topic`, `pid`, `owner_pid`, `ready`, `peer_count`, `last_updated`)
+    /// cannot be replaced: the daemon writes its own value after the fields of the application,
+    /// and drops a field of the application under a key that it does not write.
     ///
     /// # Panics
     /// Panics if an internal invariant is violated.
@@ -196,10 +239,21 @@ impl StateFile {
         // `--state-file <base>/sessions/...`), and just creates
         // the parent for an override that points elsewhere.
         util::ensure_parent_private(self.base.as_deref(), &self.path)?;
-        let mut obj = serde_json::Map::new();
+        // The fields of the application go in first, and the fields of the daemon replace them:
+        // a discovery key can shadow no key of the daemon, and a key that the daemon does not
+        // write (no topic, no owner) is not the application's to write either.
+        let mut obj = self
+            .discovery
+            .lock()
+            .expect("state-file discovery mutex not poisoned")
+            .clone();
+        for key in ENGINE_KEYS {
+            obj.remove(key);
+        }
         obj.insert("gossip".into(), self.mesh.clone().into());
         obj.insert("name".into(), self.name.clone().into());
         obj.insert("nickname".into(), self.nickname.clone().into());
+        obj.insert("pubkey".into(), self.pubkey.clone().into());
         if let Some(topic) = &self.topic {
             obj.insert("topic".into(), topic.clone().into());
         }
@@ -209,14 +263,6 @@ impl StateFile {
         }
         obj.insert("ready".into(), ready.into());
         obj.insert("peer_count".into(), peer_count.into());
-        for (key, value) in self
-            .discovery
-            .lock()
-            .expect("state-file discovery mutex not poisoned")
-            .iter()
-        {
-            obj.insert(key.clone(), value.clone());
-        }
         obj.insert(
             "last_updated".into(),
             unix_secs::UnixSecs::now().as_secs().into(),
@@ -227,9 +273,11 @@ impl StateFile {
         write_private_atomic(&self.path, &json)
     }
 
-    /// Delete the state file. Safe to call on a path that does not exist. On
-    /// Windows it runs again for a short time while a reader holds the file,
-    /// and a file that still stays is logged. On Unix an error is ignored.
+    /// Delete the state file, and the member key and the run counter that live beside it. A process
+    /// that leaves takes its identity with it: the next process with the same pid, which names the
+    /// same state file, starts as a new member. Safe to call on a path that does not exist. On
+    /// Windows the delete of the state file runs again for a short time while a reader holds the
+    /// file, and a file that still stays is logged. On Unix an error is ignored.
     pub(crate) fn remove(&self) {
         #[cfg(not(windows))]
         let _ = fs::remove_file(&self.path);
@@ -244,6 +292,9 @@ impl StateFile {
                 );
             }
             _ => {}
+        }
+        for extension in ["key", "run", "run.tmp"] {
+            let _ = fs::remove_file(self.path.with_extension(extension));
         }
     }
 }
@@ -306,6 +357,8 @@ pub struct SessionIdentity {
     pub name: Option<String>,
     /// The nickname of the member.
     pub nickname: Option<String>,
+    /// The author key of the member, as 64 lowercase hex digits.
+    pub pubkey: Option<String>,
     /// The raw topic string; present only for a topic gossip.
     pub topic: Option<String>,
 }
@@ -340,6 +393,7 @@ pub fn read_identity(path: &Path) -> SessionIdentity {
         mesh: parsed.as_ref().and_then(mesh_field),
         name: field("name"),
         nickname: field("nickname"),
+        pubkey: field("pubkey"),
         topic: field("topic"),
     }
 }
@@ -558,6 +612,8 @@ mod tests {
     use std::error::Error;
     #[cfg(windows)]
     use std::path;
+    #[cfg(unix)]
+    use std::sync::Arc;
     #[cfg(windows)]
     use std::thread;
     #[cfg(windows)]
@@ -590,6 +646,11 @@ mod tests {
     }
 
     use super::{MeshId, MeshName, Nickname, StateFile};
+    use crate::protocol::AuthorKey;
+
+    fn author() -> AuthorKey {
+        AuthorKey::from([0xab; 32])
+    }
     use crate::util::clock;
 
     fn name(value: &str) -> MeshName {
@@ -617,6 +678,7 @@ mod tests {
             &MeshId::from("abcd"),
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         let (logs, guard) = testing::LogCapture::start(tracing::Level::INFO);
         state_file.write(1, true);
@@ -648,6 +710,7 @@ mod tests {
             &MeshId::from("abcd"),
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(1, true);
         let unowned = super::read_session_entry(&path).expect("entry");
@@ -668,6 +731,110 @@ mod tests {
     }
 
     #[test]
+    fn the_state_file_carries_the_author_key_of_the_daemon() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("pubkey");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("abcd"),
+            &Nickname::from("treat-empire"),
+            &name("cool-team"),
+            &author(),
+        );
+        state_file.write(1, true);
+        let hex = "ab".repeat(32);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("the state file can be read"))
+                .expect("the state file the test wrote is json");
+        assert_eq!(
+            parsed["pubkey"], hex,
+            "the file names the author key as 64 lowercase hex digits"
+        );
+        assert_eq!(
+            super::read_identity(&path).pubkey.as_deref(),
+            Some(hex.as_str()),
+            "the identity reads the author key back"
+        );
+        state_file.remove();
+    }
+
+    #[test]
+    fn the_fields_of_the_daemon_win_over_the_discovery_fields() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("shadow");
+        let mesh = MeshId::from("abcd");
+        let state_file = StateFile::new(
+            path.clone(),
+            &mesh,
+            &Nickname::from("treat-empire"),
+            &name("cool-team"),
+            &author(),
+        );
+        let mut fields = serde_json::Map::new();
+        for key in [
+            "gossip",
+            "name",
+            "nickname",
+            "pubkey",
+            "topic",
+            "pid",
+            "owner_pid",
+            "ready",
+            "peer_count",
+            "last_updated",
+        ] {
+            fields.insert(key.into(), serde_json::json!("from the app"));
+        }
+        fields.insert("extra".into(), serde_json::json!(7));
+        state_file.set_discovery(fields);
+        state_file.write(3, true);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("the state file can be read"))
+                .expect("the state file the test wrote is json");
+        assert_eq!(
+            parsed["gossip"],
+            mesh.as_str(),
+            "a discovery field replaced the gossip"
+        );
+        assert_eq!(
+            parsed["name"], "cool-team",
+            "a discovery field replaced the name"
+        );
+        assert_eq!(
+            parsed["nickname"], "treat-empire",
+            "a discovery field replaced the nickname"
+        );
+        assert_eq!(
+            parsed["pubkey"],
+            "ab".repeat(32),
+            "a discovery field replaced the author key"
+        );
+        assert_eq!(
+            parsed["pid"],
+            process::id(),
+            "a discovery field replaced the pid"
+        );
+        assert_eq!(
+            parsed["ready"], true,
+            "a discovery field replaced the ready flag"
+        );
+        assert_eq!(
+            parsed["peer_count"], 3,
+            "a discovery field replaced the peer count"
+        );
+        assert!(
+            parsed["last_updated"].is_number(),
+            "a discovery field replaced the update time"
+        );
+        assert!(
+            parsed.get("topic").is_none() && parsed.get("owner_pid").is_none(),
+            "a discovery field stood in for a key that the daemon does not write"
+        );
+        assert_eq!(parsed["extra"], 7, "a field of the application was lost");
+        state_file.remove();
+    }
+
+    #[test]
     fn writes_expected_shape() {
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("shape");
@@ -677,6 +844,7 @@ mod tests {
             &mesh,
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(3, true);
         let contents = fs::read_to_string(&path).expect("the written state file can be read");
@@ -728,6 +896,7 @@ mod tests {
             &MeshId::from("topic"),
             &Nickname::from("treat-empire"),
             &name("www.youtube.com/watch"),
+            &author(),
         )
         .topic(Some(raw));
         state_file.write(1, true);
@@ -761,6 +930,7 @@ mod tests {
             &MeshId::from("xyzw"),
             &Nickname::from("swift-cedar"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(0, false);
         state_file.write(1, true);
@@ -776,6 +946,58 @@ mod tests {
         state_file.remove();
     }
 
+    /// The file holds the lock on the member key, so the key and the run counter are gone before a
+    /// replacement can take the lock: a replacement that took it first would have its own key
+    /// deleted by this cleanup. The order follows from the lock being a field of this value, which
+    /// Rust drops after the body of `Drop`.
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_of_the_member_key_is_held_while_the_key_and_the_run_counter_go() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("key-lock");
+        let lock_path = path.with_extension("key.lock");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        let held: fs::File = options.open(&lock_path).expect("the lock file opens");
+        held.try_lock().expect("the lock is free");
+        fs::write(path.with_extension("key"), b"key").expect("a member key file");
+        fs::write(path.with_extension("run"), b"7").expect("a run counter file");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        )
+        // shared with the loop state in production; here the file is the only holder
+        .key_lock(Some(Arc::new(held)));
+        let mut rival_options = fs::OpenOptions::new();
+        rival_options.write(true);
+        let rival: fs::File = rival_options
+            .open(&lock_path)
+            .expect("a second handle on the lock file");
+        assert!(
+            rival.try_lock().is_err(),
+            "the premise: the state file holds the lock of the member key"
+        );
+
+        drop(state_file);
+
+        assert!(
+            !path.with_extension("key").exists(),
+            "the cleanup deletes the member key"
+        );
+        assert!(
+            !path.with_extension("run").exists(),
+            "and the run counter beside it"
+        );
+        assert!(
+            rival.try_lock().is_ok(),
+            "the lock is free once the files are gone, so a replacement starts with its own key"
+        );
+        let _ = fs::remove_file(&lock_path);
+    }
+
     #[test]
     fn remove_clears_file() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -785,11 +1007,41 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("n"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(0, false);
         assert!(path.exists(), "the file exists before remove is called");
         state_file.remove();
         assert!(!path.exists(), "remove deletes the file");
+    }
+
+    /// The member key and the run counter live beside the state file, named for it. A process that
+    /// leaves must not leave them for the next process with the same pid: that process would take the
+    /// member identity and the run count of the one that left.
+    #[test]
+    fn remove_clears_the_member_key_and_the_run_counter() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("remove-keys");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        );
+        state_file.write(0, false);
+        let beside: Vec<PathBuf> = ["key", "run", "run.tmp"]
+            .map(|extension| path.with_extension(extension))
+            .into();
+        for file in &beside {
+            fs::write(file, b"x").expect("a file beside the state file");
+        }
+
+        state_file.remove();
+
+        for file in &beside {
+            assert!(!file.exists(), "remove deletes {}", file.display());
+        }
     }
 
     /// A reader that uses `std::fs` opens with `FILE_SHARE_DELETE` on Windows,
@@ -803,6 +1055,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("n"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(1, false);
         let reader = fs::File::open(&path).expect("open the state file");
@@ -849,6 +1102,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("n"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(1, false);
         let closer = hold_briefly(&path);
@@ -870,6 +1124,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("n"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(1, false);
         let closer = hold_briefly(&path);
@@ -888,6 +1143,7 @@ mod tests {
                 &MeshId::from("test"),
                 &Nickname::from("n"),
                 &name("cool-team"),
+                &author(),
             );
             state_file.write(0, false);
             assert!(path.exists(), "the file exists before drop");
@@ -911,6 +1167,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("n"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(2, true);
         assert!(
@@ -937,6 +1194,7 @@ mod tests {
             &mesh,
             &Nickname::from("swift-cedar"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(3, true);
         let parsed: serde_json::Value =
@@ -983,6 +1241,7 @@ mod tests {
             &MeshId::from("round"),
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         // Missing file → None (the caller polls and retries).
         assert!(
@@ -1020,6 +1279,7 @@ mod tests {
             &mesh,
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(2, true);
         let identity = super::read_identity(&path);
@@ -1051,6 +1311,7 @@ mod tests {
             &mesh,
             &Nickname::from("treat-empire"),
             &name("cool-team"),
+            &author(),
         );
         state_file.write(2, true);
         let entry = super::read_session_entry(&path).expect("present");

@@ -97,6 +97,162 @@ The marginal memory of one session is (the delta with the leg on minus the delta
 leg off) divided by the mean number of underlay sessions per node. Each run takes about
 6 min, so the two cells take about 36 min.
 
+## Oracle file
+
+The oracle file is the record of the user data that the runner sent. It is the only
+source of the data bytes in the ratio. The engine counters do not name data.
+
+The file is `oracle.jsonl` in the run folder. It has one JSON line per user payload that
+the runner sends. Each line has these keys, and no other key. The keys `to` and
+`payload_id` are present only on a payload for named recipients (`msg`, `task_brief`,
+`task_status`, `task_artifact`):
+
+| Key | Type | Meaning |
+| -- | -- | -- |
+| `sender` | string | the nickname of the sending daemon |
+| `kind` | string | `broadcast`, `msg`, `task_brief`, `task_status` or `task_artifact` |
+| `receivers` | integer | how many daemons must receive the payload: 63 for a broadcast in a mesh of 64, 1 for a `msg` |
+| `bytes` | integer | the length of the user text that the runner sent, in bytes of UTF-8 |
+| `seq` | integer | the number of the line, from 0, one count for the whole run |
+| `ts` | integer | the send time, in milliseconds since the epoch |
+| `to` | array of strings | the nicknames of the recipients, for example `["bench02"]` |
+| `payload_id` | string | the id that the text of the payload carries. A listener finds it in a received message |
+
+The runner writes the line when the send command returns without an error. A payload
+that failed to send has no line.
+
+### Receipt file
+
+The file is `receipts.jsonl` in the run folder. The listener loop of the runner writes one
+JSON line for each payload that a recipient receives. Each line has these keys:
+
+| Key | Type | Meaning |
+| -- | -- | -- |
+| `to` | string | the nickname of the recipient |
+| `payload_id` | string | the id of the payload, as in `oracle.jsonl` |
+| `ts` | integer | the time at which the poll served the payload, in milliseconds since the epoch |
+
+The poll follows the bell, so `ts` is near the arrival time. A payload that a listener
+receives twice has two lines. The summary uses the earliest line.
+
+The summary of an older run has no `receipts.jsonl`. Then the summary uses the send time
+`ts` of the oracle line.
+
+### Phase of a payload
+
+A census line counts in the phase that holds its time stamp. A census interval that
+crosses a phase edge counts whole in one phase.
+
+An oracle line with `to` counts for each recipient. The summary takes the receipt time of
+the recipient, or the send time if there is no receipt. It then takes the first census of
+that recipient at or after that time. The data bytes count in the phase of that census.
+If no census follows, the phase of the time itself is used.
+
+The two sides of the ratio can still land in two phases. The receipt time is the time at
+which the poll served the payload, and the daemon counts the wire bytes of that payload
+when it reads the frame, which is earlier. A census between the two counts the wire bytes
+in the earlier phase and the data bytes in the later one. A poll that is late serves
+several payloads at once, and several censuses can fall in that gap, so the error is not
+bounded to one payload or to one interval. It needs an arrival inside such a gap: the
+poll follows the bell, so the gap is short while the host keeps up.
+
+An oracle line with no `to` counts in the phase that holds its send time.
+
+A payload can land after the last loaded census. Then its data bytes count in `idle2`.
+
+### Rules for the ratio
+
+- Data is the exact user text that the runner sent. The envelope of a frame is not data:
+  the header, the signature, the ids and the nonce are metadata.
+- Delivered data bytes are the sum of `bytes` times `receivers` over all lines.
+- A duplicate copy of a data frame counts as metadata. The first copy that a receiver
+  gets is data.
+- Metadata bytes are the wire bytes minus the delivered data bytes.
+- The runner plays the worker of each task. Each task makes one `task_brief`, one or more
+  `task_status`, and one `task_artifact`. Each of them has a line.
+
+### Two layers
+
+- Frame layer: the wire bytes of the frames, from the `idle_wire_*` census fields. The
+  summary asserts this layer. It fails if the metadata bytes are negative.
+- UDP layer: the bytes of the iroh socket, from the `idle_net_*` census fields. The
+  summary reports this layer and asserts nothing, because QUIC adds its own framing.
+
+### Two phases
+
+- Idle phase (no workload): the result is `<phase>_meta_bps_per_daemon`, the metadata
+  bytes per second per daemon. It is an absolute number. The summary takes the data bytes
+  of the phase out of the wire bytes first, so a late payload in `idle2` does not count as
+  metadata. There is no ratio.
+- Loaded phase (workload): the result is the metadata bytes per delivered data byte. The
+  window of the phase comes from `result.json`. The fields are `delivered_data_bytes`,
+  `frame_meta_per_data` and `udp_meta_per_data`. They are for the first phase with data.
+  If a later phase also holds data, it has the same three fields with its name as a prefix,
+  for example `idle2_delivered_data_bytes`. No field is written twice.
+
+### Example
+
+A mesh of 2 daemons. The runner sends one broadcast of 200 bytes and one `msg` of
+200 bytes. Then `receivers` is 1 for both lines, and the delivered data bytes are
+200 + 200 = 400. If the wire bytes are 1000, the metadata bytes are 600, and the ratio
+is 1.5.
+
+### Memory by N
+
+`summarize.ts` also reads `host.jsonl` of the run folder, which the runner writes every 10 s. The sample with
+the largest RSS sum gives `rss_n` (the daemon count), `rss_mean_mb_per_daemon`, `rss_max_mb` (the largest
+daemon in the run) and `rss_sum_mb`. A run of 16 daemons that gives 52.6 MB per daemon and a run of 8 that
+gives 29.7 MB show how the RSS per daemon grows with N.
+
+## Load gates
+
+`gate.ts` holds the numbers, from the idle meshes on nyc-macmini1 (8 cores, 8 GiB). `b4.ts` applies them.
+
+- Start gate: load1 is at most 2.0 now, and at most 2.5 in the 3 min before. (First values 1.5 and 2.0: the host idles at 1.5 to 1.76 with no daemon of ours, so that gate never opened.) The driver waits up to 20 min.
+- Phase gate: the median load1 of a phase is at most 4.0, and the max is at most 6.0. A run with a phase over
+  the gate is void and runs again, twice at most.
+- Fairness gate: the two arms of a pair start from the same host state. The load1 of the 3 min before each arm
+  started (the start window) must pass the start gate, and the medians of the two windows are within 35 percent. The
+  load that an arm makes is not an input. A pair that fails runs once more. A void run or a failed pair stays on disk,
+  and its folder name starts with `void-`.
+
+### Change of the pair gate, 2026-11-07
+
+The pair gate was changed after it failed. The first version, the A/B gate, compared the median load1 of the idle1
+phase of the two arms (limit 35 percent). It was made for two equal arms. On 2026-11-07 the main run compared
+B-prime with HEAD, and HEAD makes less load. Pair 1 failed the A/B gate twice (ratios 1.59 and 1.92), so the driver
+stopped and the four runs were void. The idle1 load1 medians were 2.25 and 2.45 for B-prime, and 1.41 and 1.28 for
+HEAD. The two attempts agree with each other, so the difference came from the arms and not from the host. A gate that
+wants equal load cannot pass a real improvement. The fairness gate asks for equal host state before the arms start
+and does not look at the load that the arms make. The phase gates did not change. The four void runs stay on disk
+and are reported as repeats that no gate checked, next to the result of the new gate.
+
+`b4.ts` runs pairs of arm a (the plain baseline, for CPU) and arm b (the baseline with counters, for bytes and
+the ratio), in turn, with the order swapped in every second pair. Both arms have the same warm-up (300 s of
+settle). Arm a has no loaded phase: it has no wire counters, so it gives no ratio. Run it after `ulimit -n 10240`.
+
+To compare two builds that both have the wire counters, give arm a a loaded phase with `--plain-loaded 300`. Both
+arms then give a ratio, and the step measure of the unicast digests used it: arm a was the build before the change and
+arm b the build with it, 3 pairs at N = 16.
+
+To compare two settings of one build, give each arm its own cap on direct links with `--plain-max-peers` and
+`--counters-max-peers`. `bench.ts` passes `--max-peers` to `create` and `join`, and writes it to `result.json`.
+`--join-time 1` polls the rosters in the settle phase and writes `join_ms`: the time from the end of the last join
+until every daemon lists the other N-1 members.
+
+## Ratio test
+
+`ratio.test.ts` holds the goal: at N = 16 the frame-layer metadata bytes per delivered data byte are at most half of
+the baseline (`baseline-ratio.json`: 78.9, from pairs 2 and 3 of B4 on nyc-macmini1). A second test is the regression
+budget: at most the `head_value` of that file plus 10 percent. Both tests run `bench.ts` for about 20 min on the
+binary in `RATIO_BIN` (a build with the wire counters), so run them on a quiet host:
+
+```bash
+RATIO_BIN=<binary> bun test scripts/perf/ratio.test.ts
+```
+
+A host with too little memory for N = 16 fails the host tests and prints `SKIPPED`. `RATIO_ALLOW_SKIP=1` lets it skip.
+
 ## What it does not do
 
 - The nodes are native processes. A browser costs more.
@@ -104,3 +260,13 @@ leg off) divided by the mean number of underlay sessions per node. Each run take
   log the uptime beside the timings (`series.ts` does).
 - `peak_resident_memory_mb` in the census is a peak: it includes the burst at join time.
   Use `rss_mb` for growth.
+
+## Ratio test
+
+`ratio.test.ts` is a benchmark, not a unit test. It runs `bench.ts` for about 20 min and needs a quiet host, so CI skips it: `bun run test` ignores the file (`package.json`), and a bare `bun test` skips its two host tests when `RATIO_BIN` is not set. The test takes two of the load gates of `b4.ts`. It waits for the start gate before the run, for at most 20 min, and it fails a run whose phase breaks the phase gate. It has no A/B fairness gate: that gate compares a pair of arms, and it stays in `b4.ts`. `bench.ts` aborts a run of its own when the load passes `MAX_LOAD_PER_CORE` x cores. Run the test by hand:
+
+```bash
+RATIO_BIN=<binary> bun test scripts/perf/ratio.test.ts
+```
+
+Set `RATIO_ALLOW_SKIP=1` on a host with too little memory to skip the two host tests.

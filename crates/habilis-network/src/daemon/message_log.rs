@@ -5,10 +5,10 @@ mod digest_window;
 mod missing_query;
 mod window_range;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use crate::protocol::messages::{Verified, sole_addressee};
-use crate::protocol::{AuthorKey, DedupKey, MessageKind, Nickname, PresenceSubtype, UnixSecs};
+use crate::protocol::{AuthorKey, DedupKey, MessageKind, PresenceSubtype, UnixSecs};
 
 pub(crate) use bound::Bound;
 pub(crate) use digest_window::DigestWindow;
@@ -52,8 +52,22 @@ pub struct MessageLog {
     /// and both mutation sites are in [`Self::push`], so it cannot drift. Every held message is
     /// a [`Verified`], so it has an author key: there is no unsigned entry to special-case.
     per_author: HashMap<AuthorKey, usize>,
-    /// The dedup key of every held message, so a frame that is pushed twice is held once.
-    keys: HashSet<DedupKey>,
+    /// The dedup key of every held message, so a frame that is pushed twice is held once, with the
+    /// wire length of the frame, so that an eviction takes its bytes off the sum with no serialization.
+    lens: HashMap<DedupKey, usize>,
+    /// The wire bytes of every held frame, kept as a running sum so that the census gauge costs no
+    /// walk. The log holds whole signed frames, so this is what it keeps, not the text of the
+    /// bodies: a presence frame has no body.
+    frame_bytes: usize,
+    /// How many messages the log has taken since it was made: it grows when the log is full and
+    /// each take evicts one, so it tells progress where the length does not. A `u64` counter, no
+    /// collection.
+    accepted: u64,
+}
+
+/// The bytes of a frame on the wire, 0 for a frame that does not serialize.
+fn wire_len(frame: &Verified) -> usize {
+    frame.serialize().map_or(0, |wire| wire.as_bytes().len())
 }
 
 impl MessageLog {
@@ -62,8 +76,16 @@ impl MessageLog {
             capacity,
             messages: VecDeque::with_capacity(capacity),
             per_author: HashMap::new(),
-            keys: HashSet::new(),
+            lens: HashMap::new(),
+            frame_bytes: 0,
+            accepted: 0,
         }
+    }
+
+    /// The count of the messages that the log took since it was made.
+    #[must_use]
+    pub(crate) fn accepted(&self) -> u64 {
+        self.accepted
     }
 
     /// Add a message to the log, keeping arrival order. If that overflows
@@ -79,10 +101,23 @@ impl MessageLog {
     pub fn push(&mut self, message: Verified) -> Option<Verified> {
         // A frame that is already held is held once: two paths that retain the same frame
         // (an author that logs its own send and a consumer that pushes it too) cost a lookup.
-        if !self.keys.insert(message.dedup_key()) {
+        if self.lens.contains_key(&message.dedup_key()) {
             return None;
         }
+        let len = wire_len(&message);
+        self.push_sized(message, len)
+    }
+
+    /// [`Self::push`] for a frame whose wire length the caller holds, as the receive path does:
+    /// the frame came in as bytes, so the message is not serialized again to count them.
+    pub fn push_sized(&mut self, message: Verified, wire_len: usize) -> Option<Verified> {
+        if self.lens.contains_key(&message.dedup_key()) {
+            return None;
+        }
+        self.lens.insert(message.dedup_key(), wire_len);
+        self.accepted = self.accepted.saturating_add(1);
         *self.per_author.entry(message.key()).or_default() += 1;
+        self.frame_bytes += wire_len;
         self.messages.push_back(message);
         if self.messages.len() <= self.capacity {
             return None;
@@ -90,7 +125,8 @@ impl MessageLog {
         let victim = self.eviction_index();
         let evicted = self.messages.remove(victim);
         if let Some(gone) = &evicted {
-            self.keys.remove(&gone.dedup_key());
+            let held = self.lens.remove(&gone.dedup_key()).unwrap_or(0);
+            self.frame_bytes = self.frame_bytes.saturating_sub(held);
         }
         if let Some(gone) = &evicted
             && let Some(held) = self.per_author.get_mut(&gone.key())
@@ -145,7 +181,7 @@ impl MessageLog {
     }
 
     pub(crate) fn contains(&self, key: &DedupKey) -> bool {
-        self.keys.contains(key)
+        self.lens.contains_key(key)
     }
 
     /// Drop the presence frames of `author` and return them, so the caller can prune the indexes
@@ -174,7 +210,8 @@ impl MessageLog {
             }
         });
         for gone in &dropped {
-            self.keys.remove(&gone.dedup_key());
+            let held = self.lens.remove(&gone.dedup_key()).unwrap_or(0);
+            self.frame_bytes = self.frame_bytes.saturating_sub(held);
         }
         match self.per_author.get_mut(author) {
             Some(held) if *held > dropped.len() => *held -= dropped.len(),
@@ -186,6 +223,12 @@ impl MessageLog {
         dropped
     }
 
+    /// The messages held, and the wire bytes of their frames.
+    pub(crate) fn size(&self) -> (usize, usize) {
+        (self.messages.len(), self.frame_bytes)
+    }
+
+    /// How many messages the log holds.
     #[cfg(any(test, feature = "iroh-test-utils"))]
     pub(crate) fn len(&self) -> usize {
         self.messages.len()
@@ -392,7 +435,7 @@ impl MessageLog {
 /// does **not** filter: a directed frame the addressee holds must keep
 /// appearing in its digest ids, or the author would see it as perpetually
 /// missing and re-send it every round forever.
-fn resendable_to(message: &Verified, requester: &Nickname) -> bool {
+fn resendable_to(message: &Verified, requester: &AuthorKey) -> bool {
     sole_addressee(&message.kind).is_none_or(|to| to == requester)
 }
 
@@ -419,10 +462,9 @@ fn eviction_key(message: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) 
 mod tests {
     use std::collections::HashSet;
 
-    use super::{
-        AuthorKey, DedupKey, MessageLog, MissingQuery, Nickname, UnixSecs, Verified, WindowRange,
-    };
-    use crate::protocol::Message;
+    use super::{AuthorKey, DedupKey, MessageLog, MissingQuery, UnixSecs, Verified, WindowRange};
+    use crate::protocol::{Message, Nickname};
+    use crate::testing;
 
     use crate::protocol;
     /// A whole-log gap query for `requester` with nothing already held — the
@@ -430,7 +472,7 @@ mod tests {
     fn all_missing_for<'a>(
         have: &'a HashSet<DedupKey>,
         max: usize,
-        requester: &'a Nickname,
+        requester: &'a AuthorKey,
     ) -> MissingQuery<'a> {
         MissingQuery {
             range: super::seconds(UnixSecs::ZERO, UnixSecs::MAX),
@@ -438,6 +480,48 @@ mod tests {
             max,
             requester,
         }
+    }
+
+    /// The bytes of a plain fixture frame on the wire, counted by hand from its JSON: 417 bytes of
+    /// fixed text (the keys, the quotes, the commas, a 36 byte id, a 62 byte mesh id, a 10 digit
+    /// timestamp, a 64 byte hex key and a 128 byte hex signature), then the 6 bytes of the author
+    /// `author`, then the body. The fixture bodies hold no quote.
+    fn hand_counted_wire_len(frame: &Verified) -> usize {
+        417 + 6 + frame.body.as_str().len()
+    }
+
+    /// The gauge counts the frames that the log holds, not the text of their bodies: a presence
+    /// frame has no body and still takes its 400 bytes or more.
+    #[test]
+    fn the_gauge_counts_the_frame_bytes_the_log_holds() {
+        let mut log = MessageLog::new(2);
+        assert_eq!(log.size(), (0, 0), "an empty log holds nothing");
+
+        let second = message("m22");
+        log.push(message("m1"));
+        log.push(second.clone());
+        assert_eq!(
+            log.size(),
+            (2, 425 + 426),
+            "two frames of 425 and 426 bytes"
+        );
+
+        log.push(second);
+        assert_eq!(
+            log.size(),
+            (2, 425 + 426),
+            "a frame that is held twice counts once"
+        );
+
+        log.push(message("m333"));
+        let held: usize = log.messages.iter().map(hand_counted_wire_len).sum();
+        assert_eq!(log.size(), (2, held), "the evicted frame leaves the count");
+        // The frames share author and timestamp, and the id is random, so any of the three can be
+        // the victim: the one that just came in is as likely as the others.
+        assert!(
+            (425 + 426..=426 + 427).contains(&held),
+            "two of the three frames stay: {held}"
+        );
     }
 
     fn message(id: &str) -> Verified {
@@ -627,7 +711,7 @@ mod tests {
             &Nickname::from("author"),
             protocol::AppFrameParams::new(
                 protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                Some(Nickname::from(to)),
+                Some(key(to)),
                 None,
                 protocol::MessageBody::from(body),
             ),
@@ -636,8 +720,8 @@ mod tests {
         message
     }
 
-    fn nick(name: &str) -> Nickname {
-        Nickname::from(name)
+    fn key(name: &str) -> AuthorKey {
+        testing::test_key(name)
     }
 
     /// Everything, for a requester with no directed frames in play.
@@ -714,7 +798,7 @@ mod tests {
             },
             have: &have,
             max: 10,
-            requester: &nick(ANYONE),
+            requester: &key(ANYONE),
         });
         let bodies: Vec<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(
@@ -766,7 +850,7 @@ mod tests {
             range: super::seconds(UnixSecs::from(20), UnixSecs::from(40)),
             have: &have,
             max: 10,
-            requester: &nick(ANYONE),
+            requester: &key(ANYONE),
         });
         let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         // ts 20 and 40 are in-window and missing; 30 is in `have`; 10 and 50
@@ -786,7 +870,7 @@ mod tests {
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
-        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &nick("carol")));
+        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &key("carol")));
         let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(
             bodies,
@@ -804,7 +888,7 @@ mod tests {
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
-        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &nick("bob")));
+        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &key("bob")));
         let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(
             bodies,
@@ -823,7 +907,7 @@ mod tests {
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob")); // newest → seen first
-        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 1, &nick("carol")));
+        let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 1, &key("carol")));
         let bodies: Vec<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(bodies, vec!["public"], "the budget went to a usable frame");
     }
@@ -883,7 +967,7 @@ mod tests {
             },
             have: &have,
             max: 100,
-            requester: &nick(ANYONE),
+            requester: &key(ANYONE),
         });
         let mut offered: HashSet<String> = HashSet::new();
         for message in &missing {

@@ -55,7 +55,7 @@ web-time.workspace = true
 # the macOS calls that rustix does not wrap.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true, optional = true }
-rustix = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true, features = ["time"] }
 
 # Only the features that the code calls: `Win32_Foundation` for `HANDLE`,
 # `FILETIME`, `STILL_ACTIVE`, `LocalFree`, the generic rights, and the two

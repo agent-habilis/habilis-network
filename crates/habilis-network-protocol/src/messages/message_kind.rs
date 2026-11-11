@@ -5,7 +5,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{AppTag, CorrId, MessageId, PresenceSubtype};
-use crate::nickname_error::Nickname;
+use crate::AuthorKey;
 
 /// Message kind — the frame's routing discriminator. The engine owns the
 /// infrastructure kinds (presence, peer-info, digests, ping/pong, channel
@@ -41,7 +41,7 @@ pub enum MessageKind {
         tag: AppTag,
         /// The recipient, when the message is directed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        to: Option<Nickname>,
+        to: Option<AuthorKey>,
         /// The correlation id of a request or reply.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         corr: Option<CorrId>,
@@ -69,10 +69,17 @@ pub enum MessageKind {
     /// pinger reads the RTT from the probe that the pong names, and drops a pong
     /// that names none of its own. Same plumbing treatment as `Ping`.
     Pong {
-        /// The member that sent the probe.
-        to: Nickname,
+        /// The member that sent the probe, by author key.
+        to: AuthorKey,
         /// The probe that this pong answers.
         probe: MessageId,
+    },
+    /// Sent to `to` alone by a member that holds no proof for the current session of `to`; it asks
+    /// `to` for that proof. Never gossiped, empty body. Addressed by author key, like `Pong`: a
+    /// nickname is a label that two live sessions can share, and only the asked session answers.
+    ProofRequest {
+        /// The session whose proof is asked for, by author key.
+        to: AuthorKey,
     },
     /// A durable `state`-channel event: one Base58 automerge change
     /// (`{"k":"change",…}`) applied to the channel's `MeshDoc`
@@ -116,6 +123,7 @@ impl fmt::Display for MessageKind {
             MessageKind::Digest => write!(f, "digest"),
             MessageKind::Ping => write!(f, "ping"),
             MessageKind::Pong { .. } => write!(f, "pong"),
+            MessageKind::ProofRequest { .. } => write!(f, "proof_request"),
             MessageKind::State => write!(f, "state"),
             MessageKind::StateDigest => write!(f, "state_digest"),
             MessageKind::Meta => write!(f, "meta"),
@@ -138,6 +146,7 @@ impl MessageKind {
             | MessageKind::Digest
             | MessageKind::Ping
             | MessageKind::Pong { .. }
+            | MessageKind::ProofRequest { .. }
             | MessageKind::State
             | MessageKind::StateDigest
             | MessageKind::Meta
@@ -176,7 +185,7 @@ impl MessageKind {
     /// `tag` is not a valid [`AppTag`]. A fixture names a fixed literal.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
-    pub fn app_to(tag: &str, to: Nickname, corr: Option<CorrId>) -> Self {
+    pub fn app_to(tag: &str, to: AuthorKey, corr: Option<CorrId>) -> Self {
         MessageKind::App {
             tag: AppTag::try_new(tag).expect("a valid app tag"),
             to: Some(to),

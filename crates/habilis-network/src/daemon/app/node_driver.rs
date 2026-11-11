@@ -136,7 +136,10 @@ pub trait NodeDriver: NodeApp {
     fn close_poll_waiters(&mut self) {}
 
     /// Dispatch one typed in-process session request. Returns `true` when it
-    /// broadcast (so the loop refreshes the heartbeat-suppression clock).
+    /// broadcast a frame of a live kind (an app message, an `alive`, a `joined`, a ping or a pong),
+    /// so the loop refreshes the heartbeat-suppression clock: a peer that hears that frame knows
+    /// that this node is alive. Returns `false` for a durable write (a state or meta change): it
+    /// proves life only within one alive timeout, so it must not hold back the `alive`.
     ///
     /// Defaults to ignoring the request and returning `false` — an app whose
     /// [`Self::Session`] is a trivial type takes no session requests.

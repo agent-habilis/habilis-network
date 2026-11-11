@@ -133,6 +133,12 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
     let guard = habilis_network_test_tracing::init_capturing(
         "habilis_network=info,habilis_network::transport=debug",
     );
+    // The mesh of 18 `WebRTC` members forms in more than the 30 s of the first-sync wait on a slow
+    // host: a joiner that met no one in 30 s warns once, by design.
+    guard.allow_warn(
+        "habilis_network::gossip",
+        "no peer answered the digest of the state channel within the time limit",
+    );
     habilis_network_test_tracing::run_multi_thread(guard, 8, async {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
@@ -172,6 +178,18 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
 fn a_joiner_after_a_crash_still_gets_the_full_roster() {
     let guard = habilis_network_test_tracing::init_capturing(
         "habilis_network=info,habilis_network::transport=debug",
+    );
+    // Iroh drops a transmit to a relay address that its map no longer holds, when a member closes
+    // its endpoint. It is a lost datagram, and this test checks the roster, not iroh.
+    guard.allow_error(
+        "iroh::socket::transports",
+        "unknown RelayMappedAddr, dropped transmit",
+    );
+    // The mesh of 18 `WebRTC` members forms in more than the 30 s of the first-sync wait on a slow
+    // host: a joiner that met no one in 30 s warns once, by design.
+    guard.allow_warn(
+        "habilis_network::gossip",
+        "no peer answered the digest of the state channel within the time limit",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 8, async {
         let _serial = serial().lock().await;
@@ -215,7 +233,8 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
             assert!(
                 started.elapsed() < Duration::from_mins(3),
                 "{visits} members came back to the rendezvous after the crash and {holders} still \
-             hold it\n{}",
+             hold it\n{}\n{}",
+                holder_report(&logs()),
                 come_back_trace()
             );
             time::sleep(Duration::from_secs(1)).await;
@@ -264,6 +283,11 @@ fn rendezvous_visits() -> usize {
 /// and only the first logs a release. A member that held the link before the crash and logs no
 /// event after it is none of these: it did not come back.
 fn rendezvous_holders(log: &str) -> usize {
+    holder_names(log).len()
+}
+
+/// The members that [`rendezvous_holders`] counts, by name, in name order.
+fn holder_names(log: &str) -> Vec<&str> {
     let after_the_crash = log.split("member crashed").nth(1).unwrap_or_default();
     let mut last_is_up = HashMap::new();
     for line in after_the_crash.lines() {
@@ -280,7 +304,77 @@ fn rendezvous_holders(log: &str) -> usize {
         };
         last_is_up.insert(local, up);
     }
-    last_is_up.values().filter(|up| **up).count()
+    // The host serves the rendezvous and never releases it, so its own link events after the
+    // crash say nothing about a return.
+    let host = current_beacon_host(log);
+    let mut names: Vec<&str> = Vec::new();
+    for (local, up) in last_is_up {
+        if up && Some(local) != host {
+            names.push(local);
+        }
+    }
+    names.sort_unstable();
+    names
+}
+
+/// The node that serves the rendezvous at the end of the log: the last one that logs "beacon role
+/// active". A node that held the role before and lost it is a member like any other.
+fn current_beacon_host(log: &str) -> Option<&str> {
+    let line: &str = log
+        .lines()
+        .rev()
+        .find(|line| line.contains("beacon role active"))?;
+    let rest = line.split("node=").nth(1)?;
+    rest.split_whitespace().next()
+}
+
+/// For each member that still holds the rendezvous, its events about the rendezvous after the
+/// crash, in log order: when it came back and every release since.
+fn holder_report(log: &str) -> String {
+    let after_the_crash = log.split("member crashed").nth(1).unwrap_or_default();
+    let mut report: Vec<String> = Vec::new();
+    for local in holder_names(log) {
+        let mark = format!("local={local} ");
+        report.push(format!(
+            "{local} holds the rendezvous; its events after the crash:"
+        ));
+        for line in after_the_crash.lines() {
+            let about =
+                line.contains("is_rendezvous=true") || line.contains("released the rendezvous");
+            if about && line.contains(&mark) {
+                report.push(line.to_owned());
+            }
+        }
+    }
+    report.join("\n")
+}
+
+#[test]
+fn the_report_names_each_holder_with_its_rendezvous_events() {
+    let rendezvous = "endpoint_id=aa is_rendezvous=true";
+    let log: String = [
+        format!("gossip neighbor up local=before {rendezvous}"),
+        "member crashed".to_owned(),
+        format!("gossip neighbor up local=one {rendezvous}"),
+        format!("gossip neighbor up local=two {rendezvous}"),
+        "enough links to members: released the rendezvous local=two links=3".to_owned(),
+        format!("gossip neighbor down local=two {rendezvous}"),
+    ]
+    .join("\n");
+    let report = holder_report(&log);
+    assert!(report.starts_with("one holds the rendezvous"), "{report}");
+    assert!(
+        report.contains(&format!("gossip neighbor up local=one {rendezvous}")),
+        "{report}"
+    );
+    assert!(
+        !report.contains("two"),
+        "a member that let go is no holder: {report}"
+    );
+    assert!(
+        !report.contains("before"),
+        "a member that did not come back is no holder: {report}"
+    );
 }
 
 /// A member that the beacon dropped is gone from the rendezvous, though it logged no release: it
@@ -307,6 +401,47 @@ fn a_member_that_the_beacon_dropped_holds_no_link() {
         rendezvous_holders(&log),
         2,
         "one and the returned three, not the member that stayed"
+    );
+}
+
+/// The beacon host serves the rendezvous and never releases it, so its link events after the
+/// crash, a down and an up, make it no holder.
+#[test]
+fn the_beacon_host_is_no_holder_when_its_own_link_flaps_after_the_crash() {
+    let rendezvous = "endpoint_id=aa is_rendezvous=true";
+    let log: String = [
+        "beacon role active: serving the rendezvous node=host".to_owned(),
+        format!("gossip neighbor up local=host {rendezvous}"),
+        "member crashed".to_owned(),
+        format!("gossip neighbor down local=host {rendezvous}"),
+        format!("gossip neighbor up local=host {rendezvous}"),
+        format!("gossip neighbor up local=one {rendezvous}"),
+    ]
+    .join("\n");
+    assert_eq!(
+        holder_names(&log),
+        vec!["one"],
+        "only the member that came back holds the link"
+    );
+}
+
+/// The beacon role can move. A node that held it before the crash and lost it is a member like
+/// any other, and its link to the rendezvous after the crash is a return that must end.
+#[test]
+fn a_node_that_lost_the_beacon_role_is_a_holder_again() {
+    let rendezvous = "endpoint_id=aa is_rendezvous=true";
+    let log: String = [
+        "beacon role active: serving the rendezvous node=old".to_owned(),
+        "member crashed".to_owned(),
+        "beacon role active: serving the rendezvous node=new".to_owned(),
+        format!("gossip neighbor up local=old {rendezvous}"),
+        format!("gossip neighbor up local=new {rendezvous}"),
+    ]
+    .join("\n");
+    assert_eq!(
+        holder_names(&log),
+        vec!["old"],
+        "the host at the end is no holder, and the node that lost the role is one"
     );
 }
 

@@ -104,6 +104,21 @@ impl Mesh {
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
+    /// Send one message to the member that holds the author key `to`, in 64 lowercase hex
+    /// digits.
+    ///
+    /// # Errors
+    /// `to` is not a key, the message does not fit one frame, the event loop has stopped, or the
+    /// engine refused the frame.
+    pub(crate) fn send_to_key(&self, to: &str, text: &str) -> Result<()> {
+        let to = membership::parse_key(to)?;
+        let body = membership::msg_body(text)?;
+        let (reply, answer) = oneshot::channel();
+        self.dispatch(Request::Messaging(Messaging::SendToKey { to, body, reply }))?;
+        self.await_reply(answer)?
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
     /// Take the next inbound message, waiting at most `timeout`. `Ok(None)` on
     /// timeout.
     ///
@@ -164,7 +179,7 @@ impl Mesh {
         self.await_reply(answer)
     }
 
-    /// How many peers other than us are in the mesh right now — the cheap
+    /// How many members are in the mesh right now, us included — the cheap
     /// question a caller waiting for company actually has, without a JSON
     /// round-trip through [`Mesh::peers_json`].
     ///

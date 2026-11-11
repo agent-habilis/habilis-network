@@ -51,9 +51,9 @@ pub(crate) fn ensure_watchers(
     if state.webrtc.is_none() || state.local_udp_transport == UdpTransport::Absent {
         return;
     }
-    let peers: Vec<EndpointId> = state
-        .peer_endpoints
-        .values()
+    let members = state.member_addresses();
+    let peers: Vec<EndpointId> = members
+        .iter()
         // The rendezvous serves no unicast, so it has no pooled connection
         // to watch; `retry_candidates` skips it for the same reason.
         .filter(|address| {
@@ -167,9 +167,9 @@ pub(crate) fn nudge_climbing_pairs(
     context: &HandlerCtx<'_>,
     only_changed: bool,
 ) {
-    let pairs: Vec<PairToClimb> = state
-        .peer_endpoints
-        .values()
+    let members = state.member_addresses();
+    let pairs: Vec<PairToClimb> = members
+        .iter()
         .filter(|address| address.id != context.rendezvous_id)
         .filter_map(|address| {
             let kind = kinds::pair_kind(
@@ -326,13 +326,7 @@ pub(crate) async fn on_path_change(
                     webrtc::nudge_acceptor::nudge_with(&endpoint, peer, &addrs).await;
                 });
             }
-            if !has_session
-                && let Some(address) = state
-                    .peer_endpoints
-                    .values()
-                    .find(|address| address.id == peer)
-                    .cloned()
-            {
+            if !has_session && let Some(address) = state.member_address_of(peer) {
                 webrtc::negotiate_session::negotiate_session(state, context, peer, address);
             }
         }
@@ -384,9 +378,9 @@ pub(crate) fn proven_by_route(
 /// Mark the pairs that [`proven_by_route`] returns, and flush what waited for them. Runs on the
 /// sweep tick.
 pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    let peers: Vec<EndpointId> = state
-        .peer_endpoints
-        .values()
+    let members = state.member_addresses();
+    let peers: Vec<EndpointId> = members
+        .iter()
         .map(|address| address.id)
         .filter(|id| *id != context.rendezvous_id)
         .collect();
@@ -405,13 +399,7 @@ pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, context: &Han
             .webrtc
             .as_ref()
             .is_some_and(|handle| handle.has_session(&peer));
-        if !has_session
-            && let Some(address) = state
-                .peer_endpoints
-                .values()
-                .find(|address| address.id == peer)
-                .cloned()
-        {
+        if !has_session && let Some(address) = state.member_address_of(peer) {
             webrtc::negotiate_session::negotiate_session(state, context, peer, address);
         }
     }

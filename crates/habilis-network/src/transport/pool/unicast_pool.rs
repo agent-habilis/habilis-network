@@ -1,9 +1,11 @@
 //! The dial side of the unicast plane: the per-peer connection pool.
 
+use super::batch_slots::BatchSlots;
 use super::in_flight_dial::InFlightDial;
 use super::registration::Registration;
 use super::timeouts::{
     BUSY_AFTER_FINISH, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT, PATH_SELECT_TIMEOUT,
+    SEND_TIMED_OUT, SEND_TIMEOUT,
 };
 use super::warm_send::WarmSend;
 use crate::transport::admission::{BusyGuard, SignalAdmission};
@@ -28,6 +30,7 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 
+use crate::daemon::state::WireOutTally;
 use crate::protocol::messages;
 
 use n0_future::{task, time};
@@ -74,6 +77,10 @@ pub(in crate::transport::pool) struct PoolInner {
     /// operation is inert, so a directed send simply errors instead of dialing.
     pub(in crate::transport::pool) endpoint: Option<Endpoint>,
     pub(in crate::transport::pool) conns: Mutex<HashMap<EndpointId, Pooled>>,
+    /// The bytes of every frame written to a pooled connection, so a test can count what a node
+    /// puts on the wire beside gossip.
+    #[cfg(test)]
+    pub(in crate::transport::pool) tap: std_Mutex<Vec<Vec<u8>>>,
     /// How long a pooled connection may go unused before it is closed. The
     /// peer's acceptor closes an unused connection on its own side too, so a
     /// link that nobody sends on does not hold its two ends open for ever.
@@ -87,6 +94,9 @@ pub(in crate::transport::pool) struct PoolInner {
     /// [`DIAL_FAILURE_COOLDOWN`] gate. An entry clears on a successful dial or
     /// a graceful `Left`; expired ones are pruned on the next `note`.
     pub(in crate::transport::pool) dial_failures: Mutex<Cooldown<EndpointId>>,
+    /// The answer batches in flight: a peer cannot draw more of them than its share, however many
+    /// author keys it signs its digests with.
+    pub(in crate::transport::pool) batch_slots: BatchSlots,
     /// Times the inline-dial path was entered. Counted on entry rather than at
     /// the dial itself, because the question a caller on the event loop needs
     /// answered is whether it *could* have waited here — a detached pool bails
@@ -117,6 +127,9 @@ pub(in crate::transport::pool) struct PoolInner {
     /// The table whose ceiling the connections of this pool count against. Set once the
     /// table exists, which is after the pool.
     pub(in crate::transport::pool) admission: std_OnceLock<SignalAdmission>,
+    /// Where the frames of this pool are counted: the tally of the loop that owns it. Set once, like
+    /// the table. A pool that no loop owns counts nothing.
+    pub(in crate::transport::pool) tally: std_OnceLock<WireOutTally>,
 }
 
 /// What the dialer of a peer publishes to the callers that wait on its dial: nothing while the dial
@@ -148,10 +161,13 @@ impl UnicastPool {
             inner: Arc::new(PoolInner {
                 endpoint: Some(endpoint),
                 conns: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                tap: std_Mutex::default(),
                 idle,
                 probe_hold,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
+                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -159,6 +175,7 @@ impl UnicastPool {
                 dial_gate: std_Mutex::new(None),
                 relay_transport,
                 admission: std_OnceLock::new(),
+                tally: std_OnceLock::new(),
             }),
         }
     }
@@ -169,6 +186,11 @@ impl UnicastPool {
         let _ = self.inner.admission.set(admission);
     }
 
+    /// Count the frames of this pool into `tally`, the tally of the loop that owns it.
+    pub(crate) fn set_tally(&self, tally: WireOutTally) {
+        let _ = self.inner.tally.set(tally);
+    }
+
     /// [`send_one`], marked busy in the ledger for as long as it runs.
     async fn send_marked(
         &self,
@@ -177,7 +199,23 @@ impl UnicastPool {
         bytes: &[u8],
     ) -> Result<()> {
         let busy = self.inner.admission.get().map(|table| table.busy(eid));
-        send_one(connection, bytes, busy).await
+        send_one(connection, bytes, busy, self.inner.tally.get()).await?;
+        // The tap holds only the frames that were written, or a redial counts a frame twice.
+        #[cfg(test)]
+        if let Ok(mut tap) = self.inner.tap.lock() {
+            tap.push(bytes.to_vec());
+        }
+        Ok(())
+    }
+
+    /// The frames written to pooled connections so far, as they went on the wire.
+    #[cfg(test)]
+    pub(crate) fn sent_frames(&self) -> Vec<Vec<u8>> {
+        self.inner
+            .tap
+            .lock()
+            .map(|tap| tap.clone())
+            .unwrap_or_default()
     }
 
     /// A detached pool with no endpoint — every operation is a no-op. The
@@ -190,10 +228,13 @@ impl UnicastPool {
             inner: Arc::new(PoolInner {
                 endpoint: None,
                 conns: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                tap: std_Mutex::default(),
                 idle: DIRECT_IDLE_BACKSTOP,
                 probe_hold: PROBE_HOLD,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
+                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -201,6 +242,7 @@ impl UnicastPool {
                 dial_gate: std_Mutex::new(None),
                 relay_transport: false,
                 admission: OnceLock::new(),
+                tally: std_OnceLock::new(),
             }),
         }
     }
@@ -229,7 +271,7 @@ impl UnicastPool {
                 return;
             };
             tracing::debug!(target: LOG_TARGET, %error, "unicast send failed; dropping connection and redialing");
-            pool.inner.conns.lock().await.remove(&eid);
+            pool.evict_if_same(eid, &connection).await;
             if let Err(redial_error) = pool.dial_and_send(eid, bytes).await {
                 tracing::debug!(target: LOG_TARGET, %redial_error, "redial after a failed warm send also failed; frame dropped");
             }
@@ -255,6 +297,39 @@ impl UnicastPool {
         if let Ok(mut addrs) = self.inner.addrs.lock() {
             addrs.insert(address.id, address.clone());
         }
+    }
+
+    /// Whether `address` is the dial address remembered for its endpoint. Only `note_addr` writes
+    /// it, next to the address book, so a dial hint that names the address does not count.
+    pub(crate) fn remembers_address(&self, address: &EndpointAddr) -> bool {
+        self.inner
+            .addrs
+            .lock()
+            .is_ok_and(|addrs| addrs.get(&address.id) == Some(address))
+    }
+
+    /// The dial address remembered for `eid`, if any.
+    #[cfg(test)]
+    pub(crate) fn remembered_address(&self, eid: EndpointId) -> Option<EndpointAddr> {
+        let addrs = self.inner.addrs.lock().ok()?;
+        addrs.get(&eid).cloned()
+    }
+
+    /// Drop the remembered dial address of `eid`. The pooled connection stays open: the caller
+    /// uses this when only the address has no owner left.
+    pub(crate) fn forget_addr(&self, eid: EndpointId) {
+        if let Ok(mut addrs) = self.inner.addrs.lock() {
+            addrs.remove(&eid);
+        }
+    }
+
+    /// Whether a dial address of `eid` is remembered.
+    #[cfg(test)]
+    pub(crate) fn has_addr(&self, eid: EndpointId) -> bool {
+        self.inner
+            .addrs
+            .lock()
+            .is_ok_and(|addrs| addrs.contains_key(&eid))
     }
 
     /// The open pooled connection to `eid`, whoever opened it. A contended lock
@@ -294,6 +369,19 @@ impl UnicastPool {
         })
     }
 
+    /// Whether a connection to `eid` is open and can carry a payload. It does not count as a use of
+    /// it. The payload check is the one of [`Self::send_if_warm`]: an open connection that the
+    /// relay selected, on a mesh whose relay is lookup only, refuses every payload
+    /// ([`RELAY_REFUSED`]), so a caller that reads it as a path pays for the frame it builds and
+    /// loses it at the send.
+    pub(crate) async fn has_warm(&self, eid: EndpointId) -> bool {
+        let conns = self.inner.conns.lock().await;
+        conns.get(&eid).is_some_and(|pooled| {
+            pooled.connection.close_reason().is_none()
+                && payload_allowed_on(&pooled.connection, self.inner.relay_transport)
+        })
+    }
+
     /// The pooled connection to `eid`, if one is open. Taking it counts as
     /// using it: every caller is about to send or probe on it.
     pub(in crate::transport::pool) async fn warm(&self, eid: EndpointId) -> Option<Connection> {
@@ -303,6 +391,23 @@ impl UnicastPool {
         pooled.last_used = PoolInstant::now();
         pooled.hold = Hold::Used;
         Some(pooled.connection.clone())
+    }
+
+    /// Drop the pooled connection of `eid`, but only if it is still `connection`. A write that
+    /// fails takes up to [`SEND_TIMEOUT`], and another send can dial a replacement in that time: an
+    /// eviction by endpoint id alone throws the replacement away, and every send that follows pays
+    /// for a cold dial.
+    pub(in crate::transport::pool) async fn evict_if_same(
+        &self,
+        eid: EndpointId,
+        connection: &Connection,
+    ) {
+        let mut conns = self.inner.conns.lock().await;
+        let pooled_id: Option<usize> = conns.get(&eid).map(|pooled| pooled.connection.stable_id());
+        let same = pooled_id == Some(connection.stable_id());
+        if same {
+            conns.remove(&eid);
+        }
     }
 
     /// Close the connections nothing has used for [`PoolInner::idle`], and the
@@ -420,6 +525,11 @@ impl UnicastPool {
         eid: EndpointId,
         frames: Vec<messages::WireFrame>,
     ) -> bool {
+        // A batch holds its frames until the last one is written, and a peer that does not read keeps
+        // them there: a peer has its share of batches in flight, and the table has its total.
+        let Some(slot) = self.inner.batch_slots.take(eid) else {
+            return false;
+        };
         let frames: Vec<Bytes> = frames
             .into_iter()
             .map(messages::WireFrame::into_bytes)
@@ -430,6 +540,7 @@ impl UnicastPool {
             }
             let pool = self.clone();
             task::spawn(async move {
+                let _slot = slot;
                 pool.send_batch(eid, &connection, &frames).await;
             });
             return true;
@@ -447,6 +558,7 @@ impl UnicastPool {
             return false;
         };
         task::spawn(async move {
+            let _slot = slot;
             let pool = &in_flight.pool;
             let connection = match pool.warm_or_dial(eid).await {
                 Ok(connection) => connection,
@@ -471,14 +583,25 @@ impl UnicastPool {
 
     /// Write `frames` to `conn` one stream at a time, in order, stopping and
     /// dropping the connection at the first write error.
-    async fn send_batch(&self, eid: EndpointId, connection: &Connection, frames: &[Bytes]) {
+    pub(in crate::transport::pool) async fn send_batch(
+        &self,
+        eid: EndpointId,
+        connection: &Connection,
+        frames: &[Bytes],
+    ) {
         for bytes in frames {
             if let Err(error) = self.send_marked(eid, connection, bytes).await {
                 tracing::debug!(target: LOG_TARGET, %eid, %error, "batch cut short; dropping the connection");
-                self.inner.conns.lock().await.remove(&eid);
+                self.evict_if_same(eid, connection).await;
                 return;
             }
         }
+    }
+
+    /// A slot of the answer batches to `eid`, held by a test to fill them.
+    #[cfg(test)]
+    pub(crate) fn take_batch_slot(&self, eid: EndpointId) -> Option<super::batch_slots::Slot> {
+        self.inner.batch_slots.take(eid)
     }
 
     /// Put `eid` on the dial-failure cooldown, as a failed dial does.
@@ -513,7 +636,7 @@ impl UnicastPool {
             bail!("{RELAY_REFUSED}");
         }
         if let Err(error) = self.send_marked(eid, &connection, &bytes).await {
-            self.inner.conns.lock().await.remove(&eid);
+            self.evict_if_same(eid, &connection).await;
             return Err(error);
         }
         Ok(())
@@ -752,10 +875,33 @@ async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> 
 /// after it is dropped because the connection stays pooled, so the sender does not
 /// await `stopped()` (which would block the event loop on the inline
 /// unicast-only path). Only the busy mark waits for it, in a task of its own.
-async fn send_one(connection: &Connection, bytes: &[u8], busy: Option<BusyGuard>) -> Result<()> {
-    let mut stream = connection.open_uni().await?;
-    stream.write_all(bytes).await?;
+pub(super) async fn send_one(
+    connection: &Connection,
+    bytes: &[u8],
+    busy: Option<BusyGuard>,
+    tally: Option<&WireOutTally>,
+) -> Result<()> {
+    // The open and the write share one deadline: a peer that reads nothing fills its limit of streams, and the
+    // open of the next stream then waits for room that never comes. The send sits in a task of its own, so a
+    // wait without a bound grows the tasks of this node.
+    let deadline = PoolInstant::now() + SEND_TIMEOUT;
+    let mut stream = match time::timeout(SEND_TIMEOUT, connection.open_uni()).await {
+        Ok(opened) => opened?,
+        Err(_) => bail!("{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: no stream was opened"),
+    };
+    let left: Duration = deadline.saturating_duration_since(PoolInstant::now());
+    if let Ok(written) = time::timeout(left, stream.write_all(bytes)).await {
+        written?;
+    } else {
+        // The frame is cut short, so the stream is reset and not finished: dropping it finishes it, and the peer
+        // would read the prefix as a whole frame. A reset also drops what is still buffered here.
+        let _ = stream.reset(0u32.into());
+        bail!("{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: the peer read nothing");
+    }
     stream.finish()?;
+    if let Some(tally) = tally {
+        tally.note(bytes);
+    }
     // `finish()` returns while the frame is still in flight. The busy mark moves to a task that waits
     // until the peer has read the stream (at most `BUSY_AFTER_FINISH`), so that the ledger does not
     // evict the connection under a slow reader. The sender does not wait: it would block the event

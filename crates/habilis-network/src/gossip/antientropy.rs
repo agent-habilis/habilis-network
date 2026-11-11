@@ -3,7 +3,7 @@
 //!
 //! The digest advertises a **window** of the message log: an inclusive
 //! `[lo, hi]` timestamp range plus the compact dedup keys the sender holds in
-//! it (`DedupKey`, 16 bytes each, Base58-packed, so ~10× more fit one gossip
+//! it (`DedupKey`, 16 bytes each, Base64-packed, so ~10× more fit one gossip
 //! message than the old 36-char ids). A log larger than one window is swept
 //! across rounds via a rolling cursor; the `[lo, hi]` bounds let a receiver
 //! re-send only **in-window** gaps, so advertising a sub-window never makes
@@ -27,21 +27,27 @@ mod digest_trigger;
 mod fast_rounds;
 mod plane;
 mod serve_budget;
+mod unicast_digests;
+
+use iroh::EndpointId;
 
 use std::collections::HashSet;
 use std::hash::{Hash as _, Hasher as _};
 
 use crate::transport::{MeshSender, Resend};
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
+use crate::daemon::seed_job;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::messages::{Verified, WireFrame};
 use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
-    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, antientropy_max_resend,
+    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, CHAT_RETRIES_MAX, FAST_ROUND_ACTIVE,
+    FAST_ROUND_MIN_INTERVAL, antientropy_max_resend,
 };
 
 use std::collections::hash_map;
@@ -50,11 +56,13 @@ pub(crate) use answered::Answered;
 pub(crate) use digest_trigger::DigestTrigger;
 pub(crate) use fast_rounds::FastRounds;
 pub(crate) use plane::Plane;
-pub(crate) use serve_budget::ServeBudget;
+pub(crate) use serve_budget::{Asker, ServeBudget};
+pub(crate) use unicast_digests::{ChatAsk, UnicastDigests};
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
 /// open-ended), each a timestamp and the id key of the message at that edge, plus
-/// its dedup keys packed as 16 bytes each, Base58-encoded. The key is what lets an
-/// edge fall inside a second that holds more messages than a window lists.
+/// its dedup keys packed as 16 bytes each, Base64-encoded. The edge keys (`lo_key`,
+/// `hi_key`) stay Base58. The key is what lets an edge fall inside a second that holds
+/// more messages than a window lists.
 #[derive(Serialize, Deserialize)]
 struct WireWindow {
     lo: i64,
@@ -75,6 +83,7 @@ fn decode_key(text: &str) -> Option<DedupKey> {
 
 impl WireWindow {
     fn encode(window: &DigestWindow) -> Self {
+        use base64::Engine as _;
         let mut packed = Vec::with_capacity(window.ids.len() * 16);
         for id in &window.ids {
             packed.extend_from_slice(id.as_bytes());
@@ -84,7 +93,7 @@ impl WireWindow {
             lo_key: encode_key(&window.lo.1),
             hi: window.hi.0.as_secs(),
             hi_key: encode_key(&window.hi.1),
-            ids: bs58::encode(packed).into_string(),
+            ids: STANDARD.encode(packed),
         }
     }
 
@@ -96,11 +105,15 @@ impl WireWindow {
         })
     }
 
-    /// Decode the packed ids into a set, or `None` if the Base58 / length
-    /// is malformed.
+    /// Decode the packed ids into a set, or `None` if the Base64 / length
+    /// is malformed or the window holds more ids than a full one.
     fn decode_ids(&self) -> Option<HashSet<DedupKey>> {
-        let raw = bs58::decode(&self.ids).into_vec().ok()?;
-        if raw.len() % 16 != 0 {
+        use base64::Engine as _;
+        if self.ids.len() > WINDOW_IDS_TEXT_MAX {
+            return None;
+        }
+        let raw = STANDARD.decode(&self.ids).ok()?;
+        if raw.len() % 16 != 0 || raw.len() > ANTIENTROPY_DIGEST_WINDOW_IDS * 16 {
             return None;
         }
         Some(
@@ -115,6 +128,9 @@ impl WireWindow {
     }
 }
 
+/// The Base64 length of a full window's ids: 70 ids x 16 bytes, padded.
+const WINDOW_IDS_TEXT_MAX: usize = (ANTIENTROPY_DIGEST_WINDOW_IDS * 16).div_ceil(3) * 4;
+
 /// The on-the-wire digest body: up to two windows (open-ended newest +
 /// rolling closed older).
 #[derive(Serialize, Deserialize)]
@@ -128,13 +144,18 @@ struct DigestBody {
 /// windowing. Replaces the windowed [`DigestBody`] for these two channels.
 ///
 /// `closing` marks the heads that end a point-to-point answer: information on
-/// how far the holder is, not a request. Left out when false, so a request's
-/// bytes and its heads key are what they always were.
+/// how far the holder is, not a request. `first` marks a request of a node that
+/// waits for its first sync: a holder with nothing missing answers it with a
+/// closing digest alone, so the node knows that a holder had the chance to send.
+/// Both are left out when false, so a plain request keeps its bytes and its
+/// heads key. An old node ignores `first`, and its asker waits for its deadline.
 #[derive(Serialize, Deserialize)]
 struct HeadsBody {
     heads: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     closing: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    first: bool,
 }
 
 /// Broadcast an anti-entropy digest: an **open-ended newest** window (so
@@ -149,25 +170,25 @@ pub(crate) async fn broadcast_digest(
     mesh: &MeshId,
     author: &Nickname,
 ) {
+    let Some(digest) = chat_digest(state, mesh, author) else {
+        return;
+    };
+    state.idle.broadcasts += 1;
+    super::broadcast_msg(sender, &digest).await;
+}
+
+/// The signed chat digest, or `None` before any real peer has linked and for an empty log.
+fn chat_digest(state: &mut EventLoopState, mesh: &MeshId, author: &Nickname) -> Option<Verified> {
     // No real peer has ever linked — a digest would broadcast into the
     // void (mirrors `tick_heal`/`tick_alive` no-peer guards).
     if !state.standing.contains(&Standing::Meshed) {
-        return;
+        return None;
     }
-    let Some(windows) = digest_windows(state) else {
-        return; // empty log
-    };
+    let windows = digest_windows(state)?; // empty log: none
     let total_ids: usize = windows.iter().map(|window| window.ids.len()).sum();
-    let Some(body) = super::json_body(&DigestBody { windows }) else {
-        return;
-    };
-    tracing::trace!(ids = total_ids, "anti-entropy digest broadcast");
-    state.idle.broadcasts += 1;
-    super::broadcast_msg(
-        sender,
-        &Message::new_digest(mesh, author, body).sign(&state.identity),
-    )
-    .await;
+    let body = super::json_body(&DigestBody { windows })?;
+    tracing::trace!(ids = total_ids, "anti-entropy digest");
+    Some(Message::new_digest(mesh, author, body).sign(&state.identity))
 }
 
 /// The windows a digest advertises: the newest, plus the next slice of the
@@ -240,22 +261,33 @@ fn report_unreadable_digest(message: &Verified, state: &mut EventLoopState) {
 /// so a per-window `have` would re-send a message the sender holds but listed
 /// under the *other* window — wasting the shared resend budget on messages the
 /// peer already has and starving the genuinely-missing tail.
-pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: &Nickname) {
+pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, our_key: &AuthorKey) {
     let decoded: serde_json::Result<DigestBody> = serde_json::from_str(message.body.as_str());
     let Ok(body) = decoded else {
         report_unreadable_digest(message, state);
         return;
     };
-    // Only a few members answer one digest (see `answers_digest`).
-    let members = state.peers.iter().chain(iter::once(me));
-    if !answers_digest(me, &message.author, message.id.as_str(), members) {
+    // Only a few members answer one digest (see `answers_digest`). The rank is by author key, so
+    // two live keys of one nickname are two members. A digest that came to this node alone, by
+    // unicast, is for it to answer.
+    let asked_alone = state.state_digest_serves.unicast.arrived_from.is_some();
+    let members = state.peers.iter().chain(iter::once(our_key));
+    let exchange = Exchange {
+        answerer: our_key,
+        asker: &message.key(),
+    };
+    if !asked_alone && !answers_digest(exchange, message.id.as_str(), members) {
         return;
     }
     // One serve per author per window. Answering costs up to
     // `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts, so ungated this turns one
     // small frame into that much flooding from every member that hears it —
     // the cost scaling with the mesh rather than with the sender.
-    if !state.admit_digest(message.key(), Instant::now()) {
+    // A repeat of a chat ask by unicast, at the pace of the asker, is a continuation of the answer:
+    // it is served inside the cooldown, up to the count of the asker (see `ChatContinuations`).
+    let now = Instant::now();
+    let continued = asked_alone && state.admit_chat_continuation(message.key(), now);
+    if !continued && !state.admit_digest(message.key(), now) {
         tracing::debug!(
             target: "habilis_network::gossip",
             author = %message.author,
@@ -264,14 +296,20 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
         return;
     }
     let mut have: HashSet<DedupKey> = HashSet::new();
+    let mut readable: Vec<&WireWindow> = Vec::new();
     for window in &body.windows {
-        if let Some(ids) = window.decode_ids() {
-            have.extend(ids);
+        match window.decode_ids() {
+            Some(ids) => {
+                have.extend(ids);
+                readable.push(window);
+            }
+            None => report_unreadable_digest(message, state),
         }
     }
+    let reply_to = unicast_reply_to(&message.key(), state);
     let mut budget = antientropy_max_resend();
     let mut resent = 0usize;
-    for window in &body.windows {
+    for window in readable {
         if budget == 0 {
             break;
         }
@@ -279,13 +317,14 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
             report_unreadable_digest(message, state);
             continue;
         };
+        let requester = message.key();
         for missing in state.message_log.missing_in_window(MissingQuery {
             range,
             have: &have,
             max: budget,
-            requester: &message.author,
+            requester: &requester,
         }) {
-            if !resend_one(&missing, state) {
+            if !resend_one_to(&missing, state, reply_to, Some(&message.author)) {
                 continue;
             }
             // Mark it sent so the next (overlapping) window doesn't re-send it
@@ -306,7 +345,22 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
 /// drains the outbox. Never waits. Returns whether it was attempted at all —
 /// `false` only for the unserializable frame we somehow hold, which must not be
 /// charged to the round's budget.
+///
+/// With `reply_to` (the unicast form of the digests) a resend that would be broadcast goes to the asker
+/// alone, as it was signed: the nonce is only there to get past the gossip layer, which a unicast
+/// stream does not cross.
+#[cfg(test)]
 fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
+    resend_one_to(message, state, None, None)
+}
+
+/// What the test helper `resend_one` does, with the asker that the unicast form answers to.
+fn resend_one_to(
+    message: &Verified,
+    state: &mut EventLoopState,
+    reply_to: Option<EndpointId>,
+    requester: Option<&Nickname>,
+) -> bool {
     let Ok(bytes) = message.serialize() else {
         return false;
     };
@@ -314,14 +368,20 @@ fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
         Ok(resend) => {
             // The gossip layer drops a payload it has seen for 90 s, whether the app read it or
             // not. A broadcast resend therefore carries a new nonce, and so a new name.
-            let resend = match resend {
-                Resend::Broadcast(frame) => {
+            let resend = match (resend, reply_to) {
+                (Resend::Broadcast(frame), Some(asker)) => Resend::Unicast(asker, frame),
+                (Resend::Broadcast(frame), None) => {
                     Resend::Broadcast(frame.copy_with_resend_nonce(rand::random()))
                 }
-                unicast @ Resend::Unicast(..) => unicast,
+                (unicast @ Resend::Unicast(..), _) => unicast,
             };
             if state.resend_outbox.offer(resend) {
                 state.idle.resent += 1;
+                // Only a resend that the outbox took is counted for the requester, so the census
+                // names the same resends as `idle_resent`.
+                if let Some(requester) = requester {
+                    state.idle.note_resend_for(requester);
+                }
             } else {
                 state.idle.resend_dropped += 1;
             }
@@ -335,43 +395,53 @@ fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
 
 /// A member's place in the line for one digest: lower answers first.
 ///
-/// A hash of the digest id and the member, so it is the same on every member
+/// A hash of the digest id and the member key, so it is the same on every member
 /// that knows both, with no message to agree on it, and it changes with each
 /// digest. SHA-256 and not `DefaultHasher`, whose output may differ between
-/// builds: members on different builds would then pick different answerers.
-fn answer_rank(digest_id: &str, member: &Nickname) -> (u64, String) {
+/// builds: members on different builds would then pick different answerers. The key and not the
+/// nickname: a nickname is a label, so two live keys of one nickname would tie and both answer.
+fn answer_rank(digest_id: &str, member: &AuthorKey) -> (u64, AuthorKey) {
     use sha2::{Digest as _, Sha256};
 
     let hasher: Sha256 = Sha256::new()
         .chain_update(digest_id.as_bytes())
         .chain_update([0]);
-    let member_bytes = member.as_str().as_bytes();
-    let hash = hasher.chain_update(member_bytes).finalize();
+    let hash = hasher.chain_update(member.as_bytes()).finalize();
     let mut head = [0u8; 8];
     head.copy_from_slice(&hash[..8]);
-    // The name breaks a tie, so the order is total.
-    (u64::from_be_bytes(head), member.as_str().to_owned())
+    // The key breaks a tie, so the order is total.
+    (u64::from_be_bytes(head), *member)
 }
 
-/// Whether `me` is one of the [`ANTIENTROPY_ANSWERERS`] members that answer this
+/// The two keys of one digest: the member that may answer it and the member that asked. Both are
+/// author keys, so named fields keep a swap from compiling.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Exchange<'key> {
+    /// The member that decides whether it is among the answerers.
+    pub(crate) answerer: &'key AuthorKey,
+    /// The member that sent the digest. It never answers its own digest.
+    pub(crate) asker: &'key AuthorKey,
+}
+
+/// Whether `exchange.answerer` is one of the [`ANTIENTROPY_ANSWERERS`] members that answer this
 /// digest: the first of the members in the order of [`answer_rank`], the asker
 /// left out.
 ///
 /// Every member that holds what the asker lacks used to answer, and all but the
 /// first copy of each message were waste. A uniform rule that needs no talk
-/// between members: each one hashes the digest id with every member name and
+/// between members: each one hashes the digest id with every member key and
 /// answers when it is among the lowest. Members that know slightly different
 /// rosters can pick slightly different sets, and that costs a duplicate or a
 /// missing answer, which the next digest repairs: a new digest id picks again.
 pub(crate) fn answers_digest<'a>(
-    me: &Nickname,
-    asker: &Nickname,
+    exchange: Exchange<'_>,
     digest_id: &str,
-    members: impl Iterator<Item = &'a Nickname>,
+    members: impl Iterator<Item = &'a AuthorKey>,
 ) -> bool {
-    let mine = answer_rank(digest_id, me);
+    let Exchange { answerer, asker } = exchange;
+    let mine = answer_rank(digest_id, answerer);
     let ahead = members
-        .filter(|member| *member != asker && *member != me)
+        .filter(|member| *member != asker && *member != answerer)
         .filter(|member| answer_rank(digest_id, member) < mine)
         .count();
     ahead < ANTIENTROPY_ANSWERERS
@@ -419,6 +489,7 @@ async fn broadcast_state_digest(
         return;
     };
     state.idle.broadcasts += 1;
+    note_first_ask(state, channel);
     tracing::debug!(me = %origin.author, ?channel, heads = heads_key(&digest), ?trigger, "broadcast a state digest on gossip");
     super::broadcast_msg(sender, &digest).await;
 }
@@ -450,7 +521,12 @@ fn heads_digest(
         return None;
     }
     let heads: Vec<_> = state.doc(channel).heads().collect();
-    let body = super::json_body(&HeadsBody { heads, closing })?;
+    let first = !closing && state.doc(channel).is_awaiting_first_sync();
+    let body = super::json_body(&HeadsBody {
+        heads,
+        closing,
+        first,
+    })?;
     Some(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
             .sign(&state.identity),
@@ -478,6 +554,10 @@ async fn ask_back(
     state
         .fast_rounds
         .note_ahead(channel, key, digest.author.clone(), body.heads, now);
+    let arrival = state.state_digest_serves.unicast.arrived_from;
+    if let Some(via) = arrival {
+        state.fast_rounds.note_arrival(channel, &key, via);
+    }
     if state.fast_rounds.may_ask(
         &key,
         channel,
@@ -485,7 +565,8 @@ async fn ask_back(
         state.doc(channel).change_count(),
         now,
     ) {
-        ask(channel, &key, &digest.author, state, context).await;
+        let via = state.state_digest_serves.unicast.arrived_from;
+        ask(channel, (&key, &digest.author), via, state, context).await;
     } else {
         tracing::debug!(me = %context.author, peer = %digest.author, ?channel, "a peer is ahead, but a fast round waits");
     }
@@ -498,6 +579,7 @@ fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
     let heads = HeadsBody {
         heads: heads_list,
         closing: false,
+        first: state.doc(channel).is_awaiting_first_sync(),
     };
     let mut hasher = hash_map::DefaultHasher::new();
     serde_json::to_string(&heads)
@@ -510,16 +592,25 @@ fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
 /// peer refused us. Runs on a short timer; asks one peer that is still ahead
 /// and reachable now, once nothing was asked for a retry interval.
 pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    retry_chat_ask(state, context).await;
     for channel in [Channel::State, Channel::Meta] {
         let now = Instant::now();
         let ahead = state.fast_rounds.ahead(channel);
         let doc = state.doc(channel);
         let held_peers = ahead.iter().filter(|peer| doc.holds_heads(&peer.heads));
         let held: Vec<&[String]> = held_peers.map(|peer| peer.heads.as_slice()).collect();
-        let answerable = ahead
+        let proven = |peer: &fast_rounds::Waiting| {
+            transport::unicast_answer_target(&peer.key, state).is_some()
+        };
+        let via_usable = |peer: &fast_rounds::Waiting| {
+            peer.via
+                .is_some_and(|eid| transport::can_unicast(eid, state))
+        };
+        let reachable: Vec<AuthorKey> = ahead
             .iter()
-            .filter(|peer| transport::unicast_answer_target(&peer.key, state).is_some());
-        let reachable: Vec<AuthorKey> = answerable.map(|peer| peer.key).collect();
+            .filter(|peer| proven(peer) || via_usable(peer))
+            .map(|peer| peer.key)
+            .collect();
         let ours = heads_key_of(state, channel);
         let target = state.fast_rounds.retry_target(
             channel,
@@ -531,23 +622,32 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &Han
         let Some((key, author)) = target else {
             continue;
         };
-        if ask(channel, &key, &author, state, context).await {
+        let waiting = state.fast_rounds.ahead(channel);
+        let via: Option<EndpointId> = waiting
+            .iter()
+            .find(|peer| peer.key == key)
+            .and_then(|peer| peer.via);
+        if ask(channel, (&key, &author), via, state, context).await {
+            state.idle.fr_retries += 1;
             tracing::debug!(me = %context.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
         }
     }
 }
 
-/// Send our digest for `channel` to `author` point-to-point, if it is a linked
-/// neighbor with a usable path. The caller decides whether the round allows
-/// it. Returns whether it went out.
+/// Send our digest for `channel` to `author` point-to-point: on `via`, the connection that its
+/// digest came on, where a unicast can start, else to its proven endpoint. The caller decides
+/// whether the round allows it. Returns whether it went out.
 async fn ask(
     channel: Channel,
-    key: &AuthorKey,
-    author: &Nickname,
+    (key, author): (&AuthorKey, &Nickname),
+    via: Option<EndpointId>,
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) -> bool {
-    let Some(eid) = transport::unicast_answer_target(key, state) else {
+    let target = via
+        .filter(|eid| transport::can_unicast(*eid, state))
+        .or_else(|| transport::unicast_answer_target(key, state));
+    let Some(eid) = target else {
         return false;
     };
     let origin = DigestOrigin {
@@ -562,6 +662,11 @@ async fn ask(
     let Ok(bytes) = ours.serialize() else {
         return false;
     };
+    // A test makes the send fail to start, as a connection that cannot be opened does.
+    #[cfg(test)]
+    if state.take_injected_ask_failure() {
+        return false;
+    }
     if !state
         .unicast_pool
         .send_batch_in_background(eid, vec![bytes])
@@ -569,16 +674,35 @@ async fn ask(
     {
         return false;
     }
+    note_first_ask(state, channel);
     let changes = state.doc(channel).change_count();
     state
         .fast_rounds
         .note_asked(*key, channel, ours_key, changes, now);
+    state.idle.fr_asks += 1;
     tracing::debug!(me = %context.author, peer = %author, ?channel, heads = ours_key, "asked a peer that is ahead for state directly (fast round)");
     true
 }
 
+/// Remember when a request went out. For the state channel, while its document waits for the first
+/// sync, the request carries the flag `first` and the closing digest of its answer ends the wait
+/// (see `seed_job::closing_digest_seen`). For the meta channel, while its document awaits a far
+/// root, the first request opens the window in which a far root is taken from a point-to-point
+/// frame (see `seed_job::far_jump_allowed`).
+fn note_first_ask(state: &mut EventLoopState, channel: Channel) {
+    let now = Instant::now();
+    if channel == Channel::State && state.doc(channel).is_awaiting_first_sync() {
+        state.first_asked_at = Some(now);
+        state.first_request_at.get_or_insert(now);
+    } else if channel == Channel::Meta && state.doc(channel).is_awaiting_far_root() {
+        state.meta_first_request_at.get_or_insert(now);
+    }
+}
+
 /// A digest's heads as the serve budget keys them: its body is the heads. The
-/// same heads in another order hash differently and get one more answer.
+/// same heads in another order hash differently and get one more answer, and so
+/// does a `first` request, whose body differs from a plain request with the
+/// same heads by the flag: it has its own key, and at most one more answer.
 fn heads_key(digest: &Message) -> u64 {
     let mut hasher = hash_map::DefaultHasher::new();
     digest.body.as_str().hash(&mut hasher);
@@ -603,21 +727,46 @@ pub(crate) async fn handle_state_digest(
 ) -> Answered {
     ask_back(channel, message, state, context).await;
     let decoded: serde_json::Result<HeadsBody> = serde_json::from_str(message.body.as_str());
-    if decoded.is_ok_and(|body| body.closing) {
+    let Ok(body) = decoded else {
+        return Answered::default();
+    };
+    if body.closing {
+        let on_unicast = state.state_digest_serves.unicast.arrived_from.is_some();
+        seed_job::closing_digest_seen(state, channel, &body.heads, on_unicast);
         return Answered::default();
     }
     let now = Instant::now();
     let heads = heads_key(message);
     let author = message.key();
-    let serve = |plane| (author, channel, plane);
-    let target = transport::unicast_answer_target(&author, state);
+    // The connection is the asker of a unicast answer, and the author key of a gossip answer.
+    let serve = |plane, target: Option<EndpointId>| match (plane, target) {
+        (Plane::Unicast, Some(eid)) => (Asker::Connection(eid), channel, plane),
+        _ => (Asker::Key(author), channel, plane),
+    };
+    // The unicast form: a digest that came by gossip is answered by a few members, as a chat digest is,
+    // and every answer goes to the connection that the asker's digest came on, or to its proven endpoint.
+    let arrived_from = state.state_digest_serves.unicast.arrived_from;
+    if arrived_from.is_none() {
+        let members = state.peers.iter().chain(iter::once(&context.our_pubkey));
+        let exchange = Exchange {
+            answerer: &context.our_pubkey,
+            asker: &author,
+        };
+        if !answers_digest(exchange, message.id.as_str(), members) {
+            return Answered::default();
+        }
+    }
+    let target = unicast_reply_to(&author, state);
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
         Plane::Gossip
     };
     // Before the query: a refused digest costs no `changes_since`.
-    if !state.state_digest_serves.admits(&serve(plane), heads, now) {
+    if !state
+        .state_digest_serves
+        .admits(&serve(plane, target), heads, now)
+    {
         tracing::debug!(me = %context.author, author = %message.author, ?channel, ?plane, heads, "state digest ignored: this asker was served within the window");
         return Answered::default();
     }
@@ -626,6 +775,13 @@ pub(crate) async fn handle_state_digest(
     let frames: Vec<WireFrame> = missing.iter().filter_map(serialize).collect();
     let mut answered = Answered::default();
     if frames.is_empty() {
+        // The serve is noted only for an answer that went out: the asker repeats its digest while
+        // it waits, and a refused repeat would hold it to its first-sync deadline.
+        if body.first && answer_first_request(state, context, channel, target).await {
+            state
+                .state_digest_serves
+                .note(serve(plane, target), heads, now);
+        }
         return answered;
     }
     let count = frames.len();
@@ -656,7 +812,7 @@ pub(crate) async fn handle_state_digest(
         if plane == Plane::Unicast
             && !state
                 .state_digest_serves
-                .admits(&serve(Plane::Gossip), heads, now)
+                .admits(&serve(Plane::Gossip, target), heads, now)
         {
             tracing::debug!(me = %context.author, author = %message.author, ?channel, heads, "state digest ignored: the unicast send could not start and the gossip answers are used up for this window");
             return answered;
@@ -667,15 +823,25 @@ pub(crate) async fn handle_state_digest(
             let _ = context.sender.broadcast(answer).await;
         }
         answered.broadcast = count;
-        state
-            .state_digest_serves
-            .note(serve(Plane::Gossip), heads, now);
+        // A unicast answer that fell back to gossip still counts against the connection: a member that
+        // rotates author keys on one connection has a gossip budget for each key, and without this the
+        // eight answers of the connection would never run out.
+        let connection = (plane == Plane::Unicast).then(|| serve(Plane::Unicast, target));
+        state.state_digest_serves.note_fallback(
+            serve(Plane::Gossip, target),
+            connection,
+            heads,
+            now,
+        );
     } else {
         answered.unicast = count;
         state
             .state_digest_serves
-            .note(serve(Plane::Unicast), heads, now);
+            .note(serve(Plane::Unicast, target), heads, now);
     }
+    state.idle.state_answers += 1;
+    state.idle.state_frames_unicast += u64::try_from(answered.unicast).unwrap_or(u64::MAX);
+    state.idle.state_frames_broadcast += u64::try_from(answered.broadcast).unwrap_or(u64::MAX);
     tracing::debug!(
         me = %context.author,
         asker = %message.author,
@@ -683,10 +849,44 @@ pub(crate) async fn handle_state_digest(
         heads,
         unicast = answered.unicast,
         broadcast = answered.broadcast,
+        arrived_unicast = arrived_from.is_some(),
         on_gossip_because = fallback.unwrap_or("-"),
         "state anti-entropy: resent frames a peer lacked"
     );
     answered
+}
+
+/// A request of a node that waits for its first sync found nothing missing: answer it with one
+/// closing digest, point-to-point. On gossip it would read as the answer of every node that sees
+/// it, so with no unicast path there is no answer, and the asker waits for its deadline. Returns
+/// whether the answer went to the pool of the connection, which the caller reads to charge the
+/// serve.
+async fn answer_first_request(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    channel: Channel,
+    target: Option<EndpointId>,
+) -> bool {
+    let Some(eid) = target else {
+        tracing::debug!(target: "habilis_network::gossip", me = %context.author, ?channel, "state anti-entropy: no unicast path for the empty answer to a first request, so the asker waits for its deadline");
+        return false;
+    };
+    let origin = DigestOrigin {
+        mesh: context.mesh,
+        author: context.author,
+    };
+    let closing = heads_digest(state, origin, channel, true).and_then(|ours| ours.serialize().ok());
+    let sent = match closing {
+        Some(frame) => {
+            state
+                .unicast_pool
+                .send_batch_in_background(eid, vec![frame])
+                .await
+        }
+        None => false,
+    };
+    tracing::debug!(target: "habilis_network::gossip", me = %context.author, ?channel, sent, "state anti-entropy: answered a first request with nothing to send");
+    sent
 }
 
 /// The signed change frames the author of `digest` lacks on `channel`, up to
@@ -704,12 +904,137 @@ fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -
         .collect()
 }
 
+/// Where an answer in the unicast form goes: the connection that the digest at hand came on, or the
+/// proven endpoint of its signer, where a unicast can start. `None` when no such path exists: the
+/// answer then goes as it always did.
+fn unicast_reply_to(signer: &AuthorKey, state: &EventLoopState) -> Option<EndpointId> {
+    state
+        .state_digest_serves
+        .unicast
+        .arrived_from
+        .filter(|eid| transport::can_unicast(*eid, state))
+        .or_else(|| transport::unicast_answer_target(signer, state))
+}
+
+/// The anti-entropy tick: the chat digest and both channel digests. They go to one
+/// random linked peer; with no such peer, or when the send cannot start, they are broadcast as before.
+pub(crate) async fn tick_digests(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    if digests_to_one_peer(state, context).await {
+        return;
+    }
+    broadcast_digest(state, context.sender, context.mesh, context.author).await;
+    broadcast_state_digests(
+        state,
+        context.sender,
+        context.mesh,
+        context.author,
+        DigestTrigger::Tick,
+    )
+    .await;
+}
+
+async fn digests_to_one_peer(state: &mut EventLoopState, context: &HandlerCtx<'_>) -> bool {
+    use rand::seq::IndexedRandom as _;
+
+    let peers: Vec<EndpointId> = transport::unicast_peers(state).collect();
+    let Some(peer) = peers.choose(&mut rand::rng()).copied() else {
+        return false;
+    };
+    send_digests(state, context, peer, DigestSet::All).await
+}
+
+/// Which digests a unicast carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DigestSet {
+    All,
+    ChatOnly,
+}
+
+/// Send our digests to `peer` as one unicast batch. Returns whether the batch went out, or whether
+/// there was nothing to send (no digest exists then, so a broadcast would send none either).
+async fn send_digests(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    peer: EndpointId,
+    set: DigestSet,
+) -> bool {
+    let origin = DigestOrigin {
+        mesh: context.mesh,
+        author: context.author,
+    };
+    let chat = chat_digest(state, context.mesh, context.author);
+    let asks_for_chat = chat.is_some();
+    let serialize = |digest: &Verified| digest.serialize().ok();
+    let mut frames: Vec<WireFrame> = chat.iter().filter_map(serialize).collect();
+    if set == DigestSet::All {
+        for channel in [Channel::State, Channel::Meta] {
+            let digest = state_digest(state, origin, channel);
+            frames.extend(digest.iter().filter_map(serialize));
+        }
+    }
+    if frames.is_empty() {
+        return true;
+    }
+    if !state
+        .unicast_pool
+        .send_batch_in_background(peer, frames)
+        .await
+    {
+        return false;
+    }
+    if set == DigestSet::All {
+        note_first_ask(state, Channel::State);
+        note_first_ask(state, Channel::Meta);
+    }
+    if asks_for_chat {
+        state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
+            peer,
+            accepted: state.message_log.accepted(),
+            at: Instant::now(),
+            retries: 0,
+        });
+    }
+    true
+}
+
+/// Ask the peer of the last chat digest again while its answers are full, because a gap longer than one
+/// answer would wait one tick per answer. It stops when an answer is not full (the log took fewer
+/// messages than the resend cap) and after `CHAT_RETRIES_MAX` repeats, so it cannot become a loop.
+pub(crate) async fn retry_chat_ask(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let Some(ask) = state.state_digest_serves.unicast.chat_ask else {
+        return;
+    };
+    let now = Instant::now();
+    let took = state.message_log.accepted().saturating_sub(ask.accepted);
+    let full = usize::try_from(took).unwrap_or(usize::MAX) >= antientropy_max_resend();
+    if !full {
+        if now.duration_since(ask.at) >= FAST_ROUND_ACTIVE {
+            state.state_digest_serves.unicast.chat_ask = None;
+        }
+        return;
+    }
+    if ask.retries >= CHAT_RETRIES_MAX {
+        state.state_digest_serves.unicast.chat_ask = None;
+        return;
+    }
+    if now.duration_since(ask.at) < FAST_ROUND_MIN_INTERVAL {
+        return;
+    }
+    if send_digests(state, context, ask.peer, DigestSet::ChatOnly).await {
+        if let Some(next) = state.state_digest_serves.unicast.chat_ask.as_mut() {
+            next.retries = ask.retries + 1;
+        }
+    } else {
+        state.state_digest_serves.unicast.chat_ask = None;
+    }
+}
+
 #[cfg(test)]
 mod budget_tests {
     use crate::daemon::state::Standing;
     use std::time::Duration;
 
-    use super::{FastRounds, Plane, ServeBudget};
+    use super::{Asker, FastRounds, Plane, ServeBudget};
     use crate::protocol::{AuthorKey, Channel};
     use crate::testing::{author_of, nick};
     use crate::util::clock::Instant;
@@ -720,8 +1045,12 @@ mod budget_tests {
     use crate::{protocol, testing, transport};
     use iroh::endpoint::presets;
     use iroh_gossip::{net, proto};
-    fn key() -> (AuthorKey, Channel, Plane) {
-        (author_of("asker"), Channel::State, Plane::Unicast)
+    fn key() -> (Asker, Channel, Plane) {
+        (
+            Asker::Key(author_of("asker")),
+            Channel::State,
+            Plane::Unicast,
+        )
     }
 
     #[test]
@@ -729,7 +1058,11 @@ mod budget_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let now = Instant::now();
         let mut budget = ServeBudget::default();
-        let gossip = (author_of("asker"), Channel::State, Plane::Gossip);
+        let gossip = (
+            Asker::Key(author_of("asker")),
+            Channel::State,
+            Plane::Gossip,
+        );
         budget.note(gossip, 1, now);
         assert!(
             !budget.admits(&gossip, 2, now),
@@ -1095,11 +1428,14 @@ mod budget_tests {
 #[cfg(test)]
 mod tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     use std::collections::HashSet;
+    use std::iter;
 
     use super::{
-        ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, HeadsBody, WireWindow,
-        digest_windows, encode_key, missing_frames, state_digest,
+        ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, Exchange, HeadsBody, WireWindow,
+        digest_windows, encode_key, missing_frames, note_first_ask, state_digest,
     };
     use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
     use crate::daemon::state::EventLoopState;
@@ -1108,16 +1444,178 @@ mod tests {
     use crate::protocol::{
         AuthorKey, Channel, DedupKey, Identity, MeshId, Message, MessageBody, Nickname, UnixSecs,
     };
-    use crate::testing::{fresh_state, nick};
+    use crate::testing::{self, endpoint_id, fresh_state, nick, test_key};
+    use crate::util::clock::Instant;
 
     use crate::protocol::messages;
     use crate::transport::Resend;
     use crate::util::{consts, tuning};
     use crate::{gossip, protocol, transport};
-    fn members(count: usize) -> Vec<Nickname> {
+    use tokio::sync::mpsc;
+    /// A first request whose empty answer cannot go out uses no serve. The asker repeats its
+    /// digest while it waits, and a repeat that this node refuses would leave the asker waiting
+    /// for its first-sync deadline, which is the wait that the answer is there to end.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_first_request_whose_empty_answer_cannot_go_out_uses_no_serve() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = testing::LaneNode::start().await;
+                let mut state = node.state();
+                state.standing.insert(Standing::Meshed);
+                let context = node.context();
+                // The asker is no linked neighbor with a direct path, so the answer has no unicast
+                // path and cannot go out.
+                let asker = Identity::generate();
+                let body = gossip::json_body(&HeadsBody {
+                    heads: Vec::new(),
+                    closing: false,
+                    first: true,
+                })
+                .expect("a body of a first request");
+                let digest =
+                    Message::new_channel_digest(&node.mesh, &nick("bob"), body, Channel::State)
+                        .sign(&asker);
+
+                let answered =
+                    super::handle_state_digest(Channel::State, &digest, &mut state, &context).await;
+
+                assert_eq!(
+                    answered.unicast + answered.broadcast,
+                    0,
+                    "the premise: no frame of an answer went out"
+                );
+                let key = (
+                    super::Asker::Key(digest.key()),
+                    Channel::State,
+                    super::Plane::Gossip,
+                );
+                assert!(
+                    state.state_digest_serves.admits(
+                        &key,
+                        super::heads_key(&digest),
+                        Instant::now()
+                    ),
+                    "an answer that did not go out leaves the serve of the window unused"
+                );
+                node.endpoint.close().await;
+            },
+        );
+    }
+
+    /// A fresh node asks for the meta channel too: the first meta ask is noted once, and the
+    /// window of the far jump of the meta root opens at it and does not renew.
+    #[test]
+    fn the_first_meta_ask_is_noted_once_while_the_meta_document_awaits_a_far_root() {
+        let mut state = fresh_state();
+        assert!(
+            state.doc(Channel::Meta).is_awaiting_far_root(),
+            "the premise: a new node awaits a far meta root"
+        );
+
+        note_first_ask(&mut state, Channel::Meta);
+        let first = state.meta_first_request_at;
+        note_first_ask(&mut state, Channel::Meta);
+
+        assert!(first.is_some(), "the first meta ask is noted");
+        assert_eq!(
+            state.meta_first_request_at, first,
+            "a later ask does not renew it"
+        );
+        assert_eq!(
+            state.first_request_at, None,
+            "the state window is not opened by a meta ask"
+        );
+    }
+
+    fn members(count: usize) -> Vec<AuthorKey> {
         (0..count)
-            .map(|index| nick(&format!("member-{index:02}")))
+            .map(|index| test_key(&format!("member-{index:02}")))
             .collect()
+    }
+
+    /// Every digest is answered by exactly `ANTIENTROPY_ANSWERERS` members, also when two live
+    /// keys hold one nickname. The rank used to be by nickname: the two keys tied and both
+    /// answered, so 4 of the first 200 digests of this fleet had one answerer too many.
+    #[test]
+    fn two_live_keys_of_one_nickname_are_two_members_in_the_rank() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut fleet = members(48);
+        // The second live key of the nickname `member-01`.
+        fleet[47] = test_key("member-01#second-run");
+        let asker = fleet[0];
+        let mut wrong = Vec::new();
+        for round in 0..200 {
+            let id = format!("digest-{round}");
+            let others = fleet.iter().skip(1);
+            let answering: usize = others
+                .filter(|me| {
+                    super::answers_digest(
+                        Exchange {
+                            answerer: me,
+                            asker: &asker,
+                        },
+                        &id,
+                        fleet.iter(),
+                    )
+                })
+                .count();
+            if answering != tuning::ANTIENTROPY_ANSWERERS {
+                wrong.push((round, answering));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "digests with a wrong answerer count (round, count): {wrong:?}"
+        );
+    }
+
+    /// `handle_digest` answers when `answers_digest` says so over the keys of the roster and this
+    /// node, with the signer of the digest as the asker. A digest that is answered and one that
+    /// is not both occur, so the check is not vacuous.
+    #[test]
+    fn handle_digest_ranks_the_roster_by_author_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let roster = members(47);
+        let our_key = test_key("holder");
+        let (mut answered, mut held_back) = (0, 0);
+        for _ in 0..100 {
+            let digest = digest_of_an_empty_log(&nick("asker"));
+            let members = roster.iter().chain(iter::once(&our_key));
+            let expected = super::answers_digest(
+                Exchange {
+                    answerer: &our_key,
+                    asker: &digest.key(),
+                },
+                digest.id.as_str(),
+                members,
+            );
+            let mut state = fresh_state();
+            state.peers.extend(roster.iter().copied());
+            state.message_log.push(chat_at("kept", 1_700_000_000));
+            let (outbox, _undrained) = transport::ResendOutbox::new(4);
+            state.resend_outbox = outbox;
+
+            super::handle_digest(&digest, &mut state, &our_key);
+
+            assert_eq!(
+                state.resend_outbox.queued() > 0,
+                expected,
+                "the digest {} is answered when the key rank says so",
+                digest.id.as_str()
+            );
+            if expected {
+                answered += 1;
+            } else {
+                held_back += 1;
+            }
+        }
+        assert!(
+            answered > 0 && held_back > 0,
+            "both outcomes occur: answered {answered}, held back {held_back}"
+        );
     }
 
     /// One digest is answered by `ANTIENTROPY_ANSWERERS` members, not by every
@@ -1129,7 +1627,16 @@ mod tests {
         let asker = &members[0];
         let others = members.iter().filter(|me| *me != asker);
         let answering: usize = others
-            .filter(|me| super::answers_digest(me, asker, "digest-1", members.iter()))
+            .filter(|me| {
+                super::answers_digest(
+                    Exchange {
+                        answerer: me,
+                        asker,
+                    },
+                    "digest-1",
+                    members.iter(),
+                )
+            })
             .count();
         assert_eq!(
             answering,
@@ -1152,8 +1659,15 @@ mod tests {
                 if me == asker {
                     continue;
                 }
-                if super::answers_digest(me, asker, &id, members.iter()) {
-                    had_a_turn.insert(me.clone());
+                if super::answers_digest(
+                    Exchange {
+                        answerer: me,
+                        asker,
+                    },
+                    &id,
+                    members.iter(),
+                ) {
+                    had_a_turn.insert(*me);
                 }
             }
         }
@@ -1171,7 +1685,14 @@ mod tests {
                 continue;
             }
             assert!(
-                super::answers_digest(me, asker, "digest-1", members.iter()),
+                super::answers_digest(
+                    Exchange {
+                        answerer: me,
+                        asker
+                    },
+                    "digest-1",
+                    members.iter()
+                ),
                 "a small mesh answers the digest from every member"
             );
         }
@@ -1193,6 +1714,61 @@ mod tests {
         Message::new_digest(&MeshId::from("test"), asker, body).sign(&Identity::generate())
     }
 
+    /// A window of a peer that still writes Base58 ids does not decode, so the answer
+    /// skips it. Answering it used to resend every message of the window, because the
+    /// ids the window lists were not known to be held.
+    #[test]
+    fn an_unreadable_window_is_not_answered() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::gossip",
+            "digest from this peer could not be read",
+        );
+        let (me, asker) = (test_key("holder"), nick("asker"));
+        let mut state = fresh_state();
+        state.peer_for_test(asker.as_str());
+        for index in 0..3 {
+            state
+                .message_log
+                .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
+        }
+        let (outbox, mut resends) = transport::ResendOutbox::new(256);
+        state.resend_outbox = outbox;
+        let base58_window = WireWindow {
+            lo: 0,
+            lo_key: encode_key(&DedupKey::MIN),
+            hi: i64::MAX,
+            hi_key: encode_key(&DedupKey::MAX),
+            ids: "1111111111111111".to_string(),
+        };
+        let body = gossip::json_body(&DigestBody {
+            windows: vec![base58_window],
+        })
+        .expect("a digest serializes");
+        let digest =
+            Message::new_digest(&MeshId::from("test"), &asker, body).sign(&Identity::generate());
+
+        super::handle_digest(&digest, &mut state, &me);
+
+        assert!(
+            drained(&mut resends).is_empty(),
+            "a window that does not decode is not answered"
+        );
+    }
+
+    /// The Base58 body of the wire before this change decodes to no ids.
+    #[test]
+    fn a_base58_window_decodes_to_no_ids() {
+        let window = WireWindow {
+            lo: 1_700_000_100,
+            lo_key: encode_key(&DedupKey::from([0x03; 16])),
+            hi: i64::MAX,
+            hi_key: encode_key(&DedupKey::MAX),
+            ids: "29d2S7vB453rNYFdR5YcwtA5PDEwQncRjCnc4eNvMtWM".to_string(),
+        };
+        assert!(window.decode_ids().is_none(), "Base58 ids are refused");
+    }
+
     /// The event loop answers a digest without waiting on anything: the resends
     /// go to a bounded outbox, and what does not fit is dropped and counted. The
     /// next digest asks again. An answer used to broadcast up to 64 messages from
@@ -1201,9 +1777,9 @@ mod tests {
     #[test]
     fn a_digest_answer_does_not_wait_for_a_full_outbox() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (me, asker) = (nick("holder"), nick("asker"));
+        let (me, asker) = (test_key("holder"), nick("asker"));
         let mut state = fresh_state();
-        state.peers.insert(asker.clone());
+        state.peer_for_test(asker.as_str());
         for index in 0..100 {
             state
                 .message_log
@@ -1220,6 +1796,230 @@ mod tests {
             state.resend_outbox.dropped(),
             tuning::ANTIENTROPY_MAX_RESEND as u64 - 4,
             "the rest of the answer is dropped, and counted"
+        );
+    }
+
+    /// The census names the requesters that were answered, and the resends that it counts for them
+    /// are the ones that the outbox took: a resend that the full outbox dropped is no answer. The two
+    /// counts of one line must agree.
+    #[test]
+    fn the_requester_count_is_the_count_of_the_resends_that_the_outbox_took() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, asker) = (test_key("holder"), nick("asker"));
+        let mut state = fresh_state();
+        state.peer_for_test(asker.as_str());
+        for index in 0..100 {
+            state
+                .message_log
+                .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
+        }
+        let (outbox, _undrained) = transport::ResendOutbox::new(4);
+        state.resend_outbox = outbox;
+
+        super::handle_digest(&digest_of_an_empty_log(&asker), &mut state, &me);
+
+        assert_eq!(state.idle.resent, 4, "the outbox took 4 resends");
+        assert_eq!(
+            state.idle.resent_by.get(&asker).copied(),
+            Some(4),
+            "the requester is counted for the 4 resends that were queued, not for the ones dropped"
+        );
+    }
+
+    fn empty_digest_body() -> MessageBody {
+        let window = DigestWindow {
+            lo: (UnixSecs::ZERO, DedupKey::MIN),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
+            ids: Vec::new(),
+            from_start: true,
+        };
+        gossip::json_body(&DigestBody {
+            windows: vec![WireWindow::encode(&window)],
+        })
+        .expect("a digest serializes")
+    }
+
+    /// A state with a log of `count` messages, a peer `asker` known by its key and proven at
+    /// `asker_endpoint`, linked, and a drained outbox.
+    fn holder_for_unicast(
+        count: i64,
+        asker: &Identity,
+        asker_endpoint: iroh::EndpointId,
+    ) -> (EventLoopState, mpsc::Receiver<Resend>) {
+        let mut state = fresh_state();
+        state.relay_transport = transport::PayloadPath::RelayAllowed;
+        state.peers.insert(asker.author_key());
+        for index in 0..count {
+            state
+                .message_log
+                .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
+        }
+        let (outbox, resends) = transport::ResendOutbox::new(256);
+        state.resend_outbox = outbox;
+        state.linked_endpoints.insert(asker_endpoint);
+        state.note_proven_endpoint(asker.author_key(), asker_endpoint, UnixSecs::from(1));
+        (state, resends)
+    }
+
+    /// Everything that is in the outbox now.
+    fn drained(resends: &mut mpsc::Receiver<Resend>) -> Vec<Resend> {
+        let mut all = Vec::new();
+        while let Ok(resend) = resends.try_recv() {
+            all.push(resend);
+        }
+        all
+    }
+
+    /// A digest that came to this node by unicast is answered to the connection it came on, with the
+    /// frames as they were signed: no nonce, no broadcast.
+    #[test]
+    fn a_chat_digest_that_came_by_unicast_is_answered_to_the_asker_alone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let asker_identity = Identity::generate();
+        let asker_endpoint = endpoint_id(7);
+        let (mut state, mut resends) = holder_for_unicast(3, &asker_identity, asker_endpoint);
+        state.state_digest_serves.unicast.arrived_from = Some(asker_endpoint);
+        let digest =
+            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                .sign(&asker_identity);
+
+        super::handle_digest(&digest, &mut state, &test_key("holder"));
+
+        let answers = drained(&mut resends);
+        assert_eq!(answers.len(), 3, "the 3 messages of the log are sent");
+        for answer in &answers {
+            let Resend::Unicast(to, frame) = answer else {
+                panic!("a unicast digest is answered by unicast: {answer:?}");
+            };
+            assert_eq!(*to, asker_endpoint, "to the connection of the digest");
+            let (_parsed, nonce) = Message::parse_wire(frame.as_bytes()).expect("a frame parses");
+            assert_eq!(nonce, None, "the frame goes as it was signed");
+        }
+    }
+
+    /// An asker whose chat gap is longer than one answer repeats its digest by unicast (see
+    /// `retry_chat_ask`): the holder answers the repeats inside the cooldown of the author, at the
+    /// pace of the asker. A repeat that comes sooner than that pace, and a repeat on gossip, still
+    /// meet the cooldown.
+    #[test]
+    fn a_unicast_chat_digest_that_repeats_inside_the_cooldown_is_answered_at_the_pace_of_the_asker()
+    {
+        use std::thread;
+        use std::time::Duration;
+        let _guard = ::habilis_network_test_tracing::init();
+        let asker_identity = Identity::generate();
+        let asker_endpoint = endpoint_id(7);
+        let (mut state, mut resends) = holder_for_unicast(3, &asker_identity, asker_endpoint);
+        let digest = || {
+            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                .sign(&asker_identity)
+        };
+        state.state_digest_serves.unicast.arrived_from = Some(asker_endpoint);
+        super::handle_digest(&digest(), &mut state, &test_key("holder"));
+        assert_eq!(
+            drained(&mut resends).len(),
+            3,
+            "the first digest is answered"
+        );
+
+        super::handle_digest(&digest(), &mut state, &test_key("holder"));
+        assert!(
+            drained(&mut resends).is_empty(),
+            "a repeat at once is a flood, inside the pace of the asker"
+        );
+
+        thread::sleep(super::FAST_ROUND_MIN_INTERVAL + Duration::from_millis(50));
+        super::handle_digest(&digest(), &mut state, &test_key("holder"));
+        assert_eq!(
+            drained(&mut resends).len(),
+            3,
+            "the repeat at the pace of the asker is a continuation, and is answered"
+        );
+
+        state.state_digest_serves.unicast.arrived_from = None;
+        thread::sleep(super::FAST_ROUND_MIN_INTERVAL + Duration::from_millis(50));
+        super::handle_digest(&digest(), &mut state, &test_key("holder"));
+        assert!(
+            drained(&mut resends).is_empty(),
+            "a repeat that comes on gossip meets the cooldown as before"
+        );
+    }
+
+    /// The rule that a few members answer one digest (`answers_digest`) is for a digest that all of
+    /// them hear. A unicast digest has one recipient, who must answer it.
+    #[test]
+    fn a_unicast_digest_is_answered_by_its_recipient_though_the_k_rule_would_skip_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let asker_identity = Identity::generate();
+        let asker_endpoint = endpoint_id(7);
+        let me = test_key("holder");
+        // A digest that the rule leaves to other members: 30 members, and a digest id that ranks
+        // this node last.
+        let members: Vec<_> = (0..30)
+            .map(|index| test_key(&format!("member-{index}")))
+            .collect();
+        let mut digests = (0..200).map(|_| {
+            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                .sign(&asker_identity)
+        });
+        let leaves_me_out = |digest: &Verified| {
+            let exchange = Exchange {
+                answerer: &me,
+                asker: &asker_identity.author_key(),
+            };
+            !super::answers_digest(exchange, digest.id.as_str(), members.iter())
+        };
+        let skipped = digests
+            .find(leaves_me_out)
+            .expect("a digest id that skips this node among 30 members");
+        for (unicast, answered) in [(true, true), (false, false)] {
+            let (mut state, mut resends) = holder_for_unicast(2, &asker_identity, asker_endpoint);
+            state.peers.extend(members.iter().copied());
+            if unicast {
+                state.state_digest_serves.unicast.arrived_from = Some(asker_endpoint);
+            }
+            super::handle_digest(&skipped, &mut state, &me);
+            assert_eq!(
+                !drained(&mut resends).is_empty(),
+                answered,
+                "unicast arrival: {unicast}"
+            );
+        }
+    }
+
+    /// A broadcast digest (an older peer) is answered by unicast to its signer where a unicast path
+    /// exists, and as before where none does: a gap is never left without an answer.
+    #[test]
+    fn a_broadcast_digest_is_answered_by_unicast_where_a_path_exists_and_on_gossip_where_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let asker_identity = Identity::generate();
+        let asker_endpoint = endpoint_id(7);
+        let digest =
+            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                .sign(&asker_identity);
+
+        let (mut state, mut resends) = holder_for_unicast(2, &asker_identity, asker_endpoint);
+        super::handle_digest(&digest, &mut state, &test_key("holder"));
+        let answers = drained(&mut resends);
+        assert!(
+            answers
+                .iter()
+                .all(|answer| matches!(answer, Resend::Unicast(to, _) if *to == asker_endpoint)),
+            "a proven linked asker is answered by unicast: {answers:?}"
+        );
+        assert_eq!(answers.len(), 2, "2 frames are resent");
+
+        let (mut unlinked, mut unlinked_resends) =
+            holder_for_unicast(2, &asker_identity, asker_endpoint);
+        unlinked.linked_endpoints.clear();
+        super::handle_digest(&digest, &mut unlinked, &test_key("holder"));
+        let gossiped = drained(&mut unlinked_resends);
+        assert_eq!(gossiped.len(), 2, "the gap is still answered");
+        assert!(
+            gossiped
+                .iter()
+                .all(|answer| matches!(answer, Resend::Broadcast(_))),
+            "with no unicast path the answer is the broadcast of before: {gossiped:?}"
         );
     }
 
@@ -1516,30 +2316,58 @@ mod tests {
         );
     }
 
+    /// The window ids are the packed ids in Base64, so a peer that reads them
+    /// as Base58 gets none back.
+    #[test]
+    fn window_ids_are_base64_of_the_packed_ids() {
+        let packed = [[1u8; 16], [2u8; 16]].concat();
+        let window = WireWindow {
+            lo: 0,
+            lo_key: String::new(),
+            hi: 0,
+            hi_key: String::new(),
+            ids: STANDARD.encode(&packed),
+        };
+        let ids = window.decode_ids().expect("base64 window ids decode");
+        assert_eq!(ids.len(), 2, "two distinct ids");
+    }
+
     /// A malformed digest body must decode to `None` (so `handle_digest`
     /// skips it) rather than panic or yield garbage ids.
     #[test]
     fn decode_ids_rejects_malformed() {
-        // Not valid Base58 (`0`, `O`, `I`, `l`, space are outside the alphabet).
+        // Not valid Base64 (`*` is outside the alphabet).
         let _guard = ::habilis_network_test_tracing::init();
         let bad_alphabet = WireWindow {
             lo: 0,
             lo_key: String::new(),
             hi: 0,
             hi_key: String::new(),
-            ids: "0OIl not base58".to_string(),
+            ids: "AAAA*AAA".to_string(),
         };
-        assert!(bad_alphabet.decode_ids().is_none(), "bad Base58 ⇒ None");
+        assert!(bad_alphabet.decode_ids().is_none(), "bad Base64 ⇒ None");
 
-        // Valid Base58 but not a whole number of 16-byte ids (5 bytes).
+        // Valid Base64 but not a whole number of 16-byte ids (5 bytes).
         let odd_length = WireWindow {
             lo: 0,
             lo_key: String::new(),
             hi: 0,
             hi_key: String::new(),
-            ids: bs58::encode([1u8; 5]).into_string(),
+            ids: STANDARD.encode([1u8; 5]),
         };
         assert!(odd_length.decode_ids().is_none(), "non-16-multiple ⇒ None");
+
+        let over_window = WireWindow {
+            lo: 0,
+            lo_key: String::new(),
+            hi: 0,
+            hi_key: String::new(),
+            ids: STANDARD.encode(vec![0u8; (ANTIENTROPY_DIGEST_WINDOW_IDS + 1) * 16]),
+        };
+        assert!(
+            over_window.decode_ids().is_none(),
+            "more ids than a window ⇒ None"
+        );
 
         // Empty is well-formed: zero ids.
         let empty = WireWindow {
@@ -1560,6 +2388,33 @@ mod tests {
     /// a bounded frontier (a handful of 32-byte hashes), so unlike the windowed
     /// chat digest there is no overflow risk as the doc's history grows.
     #[test]
+    fn a_plain_request_keeps_its_bytes_and_a_first_request_adds_one_flag() {
+        let heads = vec!["h1".to_owned()];
+        let plain = serde_json::to_string(&HeadsBody {
+            heads: heads.clone(),
+            closing: false,
+            first: false,
+        })
+        .expect("serialize");
+        assert_eq!(plain, r#"{"heads":["h1"]}"#, "a plain request is as it was");
+        let first = serde_json::to_string(&HeadsBody {
+            heads,
+            closing: false,
+            first: true,
+        })
+        .expect("serialize");
+        assert_eq!(
+            first, r#"{"heads":["h1"],"first":true}"#,
+            "a first request adds one flag"
+        );
+        let old: HeadsBody = serde_json::from_str(r#"{"heads":[]}"#).expect("an old body parses");
+        assert!(
+            !old.first && !old.closing,
+            "a body without flags is a plain request"
+        );
+    }
+
+    #[test]
     fn state_heads_digest_round_trips_and_is_small() {
         let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from(
@@ -1572,6 +2427,7 @@ mod tests {
         let json = serde_json::to_string(&HeadsBody {
             heads: heads.clone(),
             closing: false,
+            first: false,
         })
         .expect("serialize heads body");
         let back: HeadsBody = serde_json::from_str(&json).expect("round-trip");
@@ -1626,7 +2482,7 @@ mod tests {
                     range: window.range().expect("our own encoding"),
                     have: &have,
                     max: 100,
-                    requester: &nick("node"),
+                    requester: &test_key("node"),
                 })
             })
             .map(|message| message.body.as_str().to_string())
@@ -1698,7 +2554,7 @@ mod tests {
                 range: window.range().expect("our own encoding"),
                 have: &have,
                 max: budget,
-                requester: &nick("node"),
+                requester: &test_key("node"),
             }) {
                 have.insert(message.dedup_key());
                 sent.push(message);
@@ -2006,7 +2862,7 @@ mod tests {
                     lo_key: encode_key(&DedupKey::from([3; 16])),
                     hi: i64::MAX,
                     hi_key: encode_key(&DedupKey::MAX),
-                    ids: bs58::encode([7u8; 16]).into_string(),
+                    ids: STANDARD.encode([7u8; 16]),
                 },
                 WireWindow {
                     lo: 10,
@@ -2018,7 +2874,7 @@ mod tests {
                     ids: {
                         let mut raw = [0u8; 32];
                         raw[16..].fill(1);
-                        bs58::encode(raw).into_string()
+                        STANDARD.encode(raw)
                     },
                 },
             ],
@@ -2052,7 +2908,7 @@ mod tests {
 
     /// Golden: the whole digest body for a fixed pair of windows, as the wire carries it. The
     /// newest window is open-ended (`i64::MAX` and the all-ones key), the older one is closed.
-    /// The literal was captured at the base commit.
+    /// The literal was captured after the window ids moved from Base58 to Base64 (part T2a).
     #[test]
     fn a_digest_body_keeps_its_wire_form() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -2075,10 +2931,10 @@ mod tests {
         let wire = concat!(
             r#"{"windows":[{"lo":1700000100,"lo_key":"Na6EczbX5yvuS59hRb3JJ","#,
             r#""hi":9223372036854775807,"hi_key":"YcVfxkQb6JRzqk5kF2tNLv","#,
-            r#""ids":"29d2S7vB453rNYFdR5YcwtA5PDEwQncRjCnc4eNvMtWM"},"#,
+            r#""ids":"ERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiI="},"#,
             r#"{"lo":1700000000,"lo_key":"1111111111111111","#,
             r#""hi":1700000099,"hi_key":"Vm7ypzTh7eEsaRsGET44j","#,
-            r#""ids":"7KhXzYt7pTgoNMDYrCyg4z"}]}"#,
+            r#""ids":"MzMzMzMzMzMzMzMzMzMzMw=="}]}"#,
         );
         assert_eq!(body.as_str(), wire, "the digest body keeps its wire form");
 
