@@ -477,14 +477,6 @@ A receiver compares the window with its own log and re-sends what the sender mis
 The CRDT channels repair differently: their digests carry automerge heads.
 A receiver computes the missing changes and re-broadcasts the original frames with the original signatures intact.
 A cold joiner pulls the whole document history over successive rounds.
-The body of a state digest is `{"heads": [...]}`, with two optional flags that are left out when false.
-`closing` marks the heads that end a point-to-point answer: information on how far the holder is, not a request.
-`first` marks a request of a node that waits for its first sync of the state channel.
-A holder with nothing missing answers a `first` request with one `closing` digest alone, point-to-point.
-The waiting node ends its wait on a `closing` digest that came point-to-point and whose heads it holds.
-A digest on gossip never ends the wait.
-Every node of the mesh reads `first`: `Message::parse` refuses a frame whose wire version is not its own, so one mesh runs one version of this field.
-The 30 s deadline covers a request that no `closing` digest answers: no holder is there, the answer is lost, or the holder has changes the node misses and sends those frames instead.
 
 ### 7.6 Multipart bodies
 
@@ -544,42 +536,6 @@ The gate matters because a `meta` card carries the cryptographic identity of a p
 Ingest applies each foreign change to a throwaway fork first.
 If the change touches the field of any other peer, the gate rejects it.
 Changes that arrive before their causal dependencies wait in a pending buffer and drain through the same gate.
-
-### 8.1 The bound of the state channel
-
-The `state` channel must run for a year, so it has a bound. The engine measures the document and cuts it into a new epoch when it grows.
-
-**Time.**
-Each state change carries a time `t`. It is the wall clock in milliseconds. A node writes `max(clock + 1, now)`.
-A node refuses a change whose `t` is more than 1 hour above its own clock. A frame of a seed gets 2 hours, because it copies the times of its cutter.
-A write that finds the clock ahead waits up to 50 ms. Then it gets the refusal `ClockAhead`.
-The stamp of a leaf is the time and the actor of the change that holds its value.
-
-**Size lines.**
-- At about 3 MiB or about 20000 operations the members cut a new epoch.
-- At about 3.4 MiB or about 22700 operations a write that adds a value is refused. A delete is not.
-- At the memory line (4 MiB, 26667 paths) every write is refused, a delete too, until the next cut.
-- A write nests 12 levels at most. A leaf that no frame of a seed can carry is refused when it is written.
-- A remote frame over the remote line is refused once and remembered. The set of refused frames holds 4096 at most. The value comes back with the seed of a holder.
-
-**The cut.**
-- Each live member has a rank from 0 up. The roster and the epoch fix the ranks. Rank 0 cuts at once. Rank 1 cuts after 2 ticks. A failed cut backs off before the next one.
-- The seed is a chain of frames with no history. It carries the live values with their stamps, and at most 1024 tombstones.
-- The build runs on a blocking thread, so the event loop keeps its timers.
-- A node adopts a seed only when the whole chain is held, after a wait of 5 ticks. A chain that is not whole is dropped and its keys are forgotten.
-- When two whole seeds of one epoch meet, the lowest key wins. A leaf that no seed frame can carry is left out of the seed. The cut counts it and warns with its path.
-- A browser never cuts.
-
-**The replay rule.**
-A write that the seed lacks is written again after the switch. The author writes it at once. A holder that is not the author waits 1 to 3 ticks. A restore never overwrites a newer write or a newer delete.
-
-**The first sync.**
-A joiner holds its state writes until a peer answers its first request (section 7.5). The wait ends at 30 s at the latest, and the node warns. The creator of a mesh never waits.
-A node that awaits its first sync takes a seed root that is more than 131072 epochs ahead only as the point-to-point answer of that request, within 5 s of it. The window opens once and a later ask does not renew it. A node that does not await refuses such a root.
-
-**Limits of the design.**
-- A member that sends whole seeds with a low key can win every cut. Nothing closes this while a member key is free to make. The effect is bounded: the state grows to the add line, and then a write that adds a value is refused until the member stops.
-- A clock that is wrong by more than 1 hour is not supported.
 
 ## 9. Transports
 

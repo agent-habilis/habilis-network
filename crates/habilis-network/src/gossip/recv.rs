@@ -4939,6 +4939,54 @@ mod first_contact_tests {
             node.endpoint.close().await;
         });
     }
+
+    /// A proof request that came on a cold unlinked arrival is answered by a dial back: the answer
+    /// goes to the endpoint of that arrival, and the pool starts the dial to it at once.
+    #[test]
+    fn a_proof_request_from_a_cold_unlinked_arrival_is_answered_by_a_dial_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let asker = Identity::generate();
+            let to = state.identity.author_key();
+            let request = Message::new_proof_request(&node.mesh, &nick("asker"), to).sign(&asker);
+            state.direct.insert(endpoint_id(82), DirectState::Direct);
+            state.unicast_arrival = Some(endpoint_id(82));
+            let gate = state.unicast_pool.hold_next_dial();
+
+            super::answer_proof_request(&to, &request, &mut state, &context).await;
+
+            assert!(
+                state.unicast_pool.is_dialing(endpoint_id(82)),
+                "the answer went back by a dial to the cold arrival"
+            );
+            gate.notify_one();
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The control of the dial back: the same request with no unicast arrival starts no dial.
+    #[test]
+    fn a_proof_request_with_no_unicast_arrival_starts_no_dial_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let asker = Identity::generate();
+            let to = state.identity.author_key();
+            let request = Message::new_proof_request(&node.mesh, &nick("asker"), to).sign(&asker);
+            state.direct.insert(endpoint_id(82), DirectState::Direct);
+
+            super::answer_proof_request(&to, &request, &mut state, &context).await;
+
+            assert!(
+                !state.unicast_pool.is_dialing(endpoint_id(82)),
+                "with no unicast arrival the answer makes no dial"
+            );
+            node.endpoint.close().await;
+        });
+    }
 }
 
 #[cfg(all(test, feature = "host"))]

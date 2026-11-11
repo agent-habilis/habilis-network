@@ -308,6 +308,12 @@ impl UnicastPool {
             .is_ok_and(|addrs| addrs.get(&address.id) == Some(address))
     }
 
+    /// Tests only: whether a dial to `eid` is in flight.
+    #[cfg(test)]
+    pub(crate) fn is_dialing(&self, eid: EndpointId) -> bool {
+        self.inner.dialing.lock().contains_key(&eid)
+    }
+
     /// The dial address remembered for `eid`, if any.
     #[cfg(test)]
     pub(crate) fn remembered_address(&self, eid: EndpointId) -> Option<EndpointAddr> {
