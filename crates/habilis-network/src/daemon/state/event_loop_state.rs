@@ -488,14 +488,14 @@ pub struct EventLoopState {
     /// joiner's only link to it is that pseudo-node link (kept out of
     /// `linked_endpoints` by design). `None` until the loop learns it.
     pub(crate) rendezvous_id: Option<EndpointId>,
+    /// The newcomers that wait for this node's own slices, with the time each one was owed them.
+    pub(crate) owed_backfill: HashMap<AuthorKey, Instant>,
     /// Heartbeat layer: peers we've evicted as quiet (silent
     /// past `ALIVE_TIMEOUT`) but who may still reappear. Any
     /// message from a nickname in this set triggers a symmetric
     /// `peer_return` event and re-inclusion in `peers`. Bounded FIFO
     /// (cap `QUIET_CAP`): drained on return, so without the cap a churn /
     /// sybil stream of one-shot nicknames would grow it without bound.
-    /// The newcomers that wait for this node's own slices, with the time each one was owed them.
-    pub(crate) owed_backfill: HashMap<AuthorKey, Instant>,
     pub(crate) quiet: BoundedFifoSet<AuthorKey>,
     /// Recency companion to `quiet`: author key -> the `last_seen` instant a
     /// quiet peer had when it was evicted, so `roster_snapshot` can still

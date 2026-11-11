@@ -471,8 +471,7 @@ pub async fn broadcast_state_merge(
     }
 
     // 4. Surface our own change, and gossip it (or buffer while no gossip path
-    //    exists — the change is safe in the local doc for heads-based
-    //    anti-entropy).
+    //    exists — the change is kept in the local slice, and its frame is sent once a path exists).
     if surface {
         // Surface our own change from a plaintext-bodied view so the `m` delta
         // renders even when the wire body we signed is sealed.
@@ -492,10 +491,8 @@ pub async fn broadcast_state_merge(
             .await
             .map_err(|error| transport::SendError::internal(anyhow::anyhow!("{error}")))?;
     } else {
-        // No gossip path yet: buffer until we mesh. (The change is already in
-        // the local doc, so heads anti-entropy still reconciles it if the
-        // buffer is full. That holds only until mechanism B is replaced, in a
-        // later phase.)
+        // No gossip path yet: buffer until we mesh. The frame is also the slice of this node, so a
+        // newcomer that meets us gets it from the backfill.
         state.pending_outbound.push((signed, bytes));
     }
     Ok(())

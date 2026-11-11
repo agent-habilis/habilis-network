@@ -41,13 +41,6 @@ impl Channel {
         }
     }
 
-    pub(crate) fn digest_kind(self) -> MessageKind {
-        match self {
-            Channel::State => MessageKind::StateDigest,
-            Channel::Meta => MessageKind::MetaDigest,
-        }
-    }
-
     /// The event name surfaced on the `--output json` stream (`state` / `meta`).
     #[must_use]
     pub fn label(self) -> &'static str {

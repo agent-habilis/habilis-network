@@ -50,6 +50,8 @@ pub(crate) async fn settle(state: &mut EventLoopState, now: Instant) {
         };
         if send_to(state, eid, false).await {
             state.owed_backfill.remove(&newcomer);
+        } else {
+            tracing::debug!(target: "habilis_network::gossip", %newcomer, "backfill still owed: no path yet");
         }
     }
 }

@@ -182,24 +182,10 @@ pub const MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 #[cfg(feature = "host")]
 pub const MAX_BLOB_STORE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
-/// Entry budget of the same store. The byte budget counts size, so blobs of a
-/// few bytes would grow the map without a limit. 4096 entries leave 1 `MiB` per
-/// blob inside `MAX_BLOB_STORE_BYTES`, so a normal blob never meets this cap,
-/// and the map holds at most about 4 `MiB`. The oldest blob goes first, the same
-/// as under the byte budget.
-#[cfg(feature = "host")]
-/// Content groups that one blob entry records as owners. The same file offloaded for many calls
-/// shares one entry, so its owner set would grow with each group. A group past the cap is not
-/// recorded and marks the entry overflowed: the blob then stays when the recorded owners are
-/// released, for the calls that are not recorded, and the store budget (`MAX_BLOB_STORE_ENTRIES`
-/// and `MAX_BLOB_STORE_BYTES`) removes it later, oldest first. The budget can also remove a blob
-/// that still has live owners when the store is full; a fetch of it then fails cleanly. 64 owners
-/// of about 60 bytes each hold about 4 `KiB` per entry.
-#[cfg(feature = "host")]
 /// Capacity of the unicast inbound channel — frames the `UNICAST_ALPN` acceptor
 /// forwards to the event loop for `gossip::ingest`. Bounded so a peer flooding a
 /// unicast stream can't back-pressure the loop; over the cap a frame is dropped
-/// (non-blocking `try_send`) and recovered via anti-entropy.
+/// (non-blocking `try_send`).
 pub const UNICAST_INBOX_CAP: usize = 256;
 
 /// Max bytes for one IPC command line: a full logical body in a JSON envelope

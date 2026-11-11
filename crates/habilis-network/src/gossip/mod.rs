@@ -2,8 +2,8 @@
 //! send plane is `broadcast` (broadcast/buffer, presence/`PeerInfo`,
 //! the broadcast stdin path); the inbound plane is [`recv`] (the
 //! gossip-event pump, neighbor up/down bookkeeping, the per-message
-//! router); anti-entropy and the healer are [`antientropy`] / [`heal`].
-//! This module holds the shared `json_body` helper, and
+//! router); the healer is [`heal`], and the backfill of a newcomer is [`backfill`].
+//! This module holds the `json_body` helper of the multihop link state, and
 //! re-exports the subsystem's public API. Membership/presentation lives
 //! in `lifecycle`; this layer never touches the peer roster
 //! directly — it calls into `lifecycle::observe` and dispatches by kind.
@@ -19,6 +19,7 @@ mod merge_ctx;
 mod recv;
 pub(crate) mod split;
 
+#[cfg(feature = "multihop")]
 mod json_body;
 mod path_summary;
 

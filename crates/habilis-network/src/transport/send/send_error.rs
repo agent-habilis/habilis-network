@@ -39,8 +39,8 @@ pub enum SendError {
     Stopped,
     /// The event loop of the node ended with an error, so a leave failed.
     EventLoop(EventLoopError),
-    /// The shared state refused a write of this node, with the typed reason: a write past the rate
-    /// limit is retried by the engine, a value too large for a frame is refused.
+    /// The shared state refused a write of this node, with the typed reason. A write past the rate
+    /// limit is not retried: the caller sends it again later. A value too large for a frame is refused.
     State(habilis_network_doc::SliceError),
     /// A cause no caller acts on. It keeps its text and its chain.
     Internal(Box<dyn error::Error + Send + Sync>),

@@ -740,7 +740,7 @@ impl SliceStore {
                 limit: self.limits.max_authors,
             });
         }
-        if live && is_new && !self.take_token(&key, now) {
+        if live && is_new && !self.take_token(&key, now, self.receive_burst()) {
             return SliceIngest::Refused(SliceError::RateLimited);
         }
         let incoming = Slice {
@@ -1015,7 +1015,7 @@ impl SliceStore {
         spend: bool,
     ) -> Result<LocalDraft, SliceError> {
         let (version, body, _) = self.draft_body(own, value)?;
-        if spend && !self.take_token(own, now) {
+        if spend && !self.take_token(own, now, self.limits.burst) {
             return Err(SliceError::RateLimited);
         }
         Ok(LocalDraft {
@@ -1080,9 +1080,15 @@ impl SliceStore {
         }
     }
 
-    /// Takes one write token of `own` at `now`, after the tokens it earned since its last write.
-    fn take_token(&mut self, own: &AuthorKey, now: Instant) -> bool {
-        let burst = self.limits.burst;
+    /// The burst of the arrivals of one author. It is twice the send burst, so that the jitter of a
+    /// network does not make an honest version `RateLimited`.
+    fn receive_burst(&self) -> u32 {
+        self.limits.burst.saturating_mul(2)
+    }
+
+    /// Takes one write token of `own` at `now`, after the tokens it earned since its last write. The
+    /// bucket holds at most `burst` tokens.
+    fn take_token(&mut self, own: &AuthorKey, now: Instant, burst: u32) -> bool {
         let interval = self.limits.write_interval;
         let bucket = self.buckets.entry(*own).or_insert(Bucket {
             tokens: burst,
@@ -1505,7 +1511,7 @@ mod tests {
         let mut store = store();
         let now = Instant::now();
         let mut refused = Vec::new();
-        for version in 1..=6 {
+        for version in 1..=11 {
             let body = format!(r#"{{"version":{version},"value":{{}}}}"#);
             let frame = frame_with_body(key(9), &body);
             if let SliceIngest::Refused(error) = store.ingest(&frame, true, now) {
@@ -1513,8 +1519,38 @@ mod tests {
             }
         }
         assert!(
-            matches!(refused.as_slice(), [(6, SliceError::RateLimited)]),
-            "only the sixth new version of a key with a burst of 5 is refused: {refused:?}"
+            matches!(refused.as_slice(), [(11, SliceError::RateLimited)]),
+            "only the eleventh new version of a key with a receive burst of 10 is refused: {refused:?}"
+        );
+    }
+
+    /// Five arrivals of one author come 300 ms late, and its sixth version comes half an interval after
+    /// the fifth. The arrivals are jittered, so the sixth is inside the send burst's interval, and it is
+    /// still applied: the receive bucket is twice the send burst.
+    #[test]
+    fn a_jittered_sixth_version_is_applied_inside_the_receive_burst() {
+        let limits = SliceLimits::new(3072, Duration::from_secs(1), 256, 5);
+        let mut store = small_store(limits);
+        let start = Instant::now();
+        let late = Duration::from_millis(300);
+        for version in 1..=5 {
+            let body = format!(r#"{{"version":{version},"value":{{}}}}"#);
+            let frame = frame_with_body(key(9), &body);
+            assert!(
+                matches!(
+                    store.ingest(&frame, true, start + late),
+                    SliceIngest::Applied
+                ),
+                "version {version} of the burst is applied"
+            );
+        }
+        let sixth = frame_with_body(key(9), r#"{"version":6,"value":{}}"#);
+        assert!(
+            matches!(
+                store.ingest(&sixth, true, start + late + Duration::from_millis(500)),
+                SliceIngest::Applied
+            ),
+            "the sixth version, half an interval after the fifth, is applied"
         );
     }
 
@@ -1903,20 +1939,20 @@ mod tests {
     }
 
     #[test]
-    fn ingest_live_refuses_the_sixth_new_version_inside_the_burst() {
+    fn ingest_live_refuses_the_eleventh_new_version_inside_the_receive_burst() {
         let mut store = store();
         let now = Instant::now();
-        for version in 1..=5 {
+        for version in 1..=10 {
             assert_eq!(
                 store.ingest(&frame(key(1), version, json!({})), true, now),
                 SliceIngest::Applied,
-                "the first five live versions fit the burst of 5"
+                "the first ten live versions fit the receive burst of 10"
             );
         }
         assert_eq!(
-            store.ingest(&frame(key(1), 6, json!({})), true, now),
+            store.ingest(&frame(key(1), 11, json!({})), true, now),
             SliceIngest::Refused(SliceError::RateLimited),
-            "the sixth live new version inside the burst must be rate limited"
+            "the eleventh live new version inside the receive burst must be rate limited"
         );
     }
 

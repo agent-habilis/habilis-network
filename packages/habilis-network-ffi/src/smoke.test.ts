@@ -24,7 +24,9 @@ describe.skipIf(library.path === null)('smoke over the built library', () => {
       expect(mesh.peers).toEqual([])
 
       await mesh.state.merge({ lunch: 'yes' })
-      expect(mesh.state.value['lunch']).toBe('yes')
+      // This loopback mesh holds only this member, so its one slice is its own.
+      const [ownSlice] = Object.values(mesh.state.value)
+      expect(ownSlice?.['lunch']).toBe('yes')
 
       // A broadcast into an empty mesh must not error.
       await mesh.send('anyone?')

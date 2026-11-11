@@ -81,21 +81,12 @@ pub enum MessageKind {
     /// is retained as the doc's re-serve store. Signed like any message; never
     /// never surfaced via poll/fetch.
     State,
-    /// Anti-entropy digest for the **state** channel. Body is the doc's automerge heads; a
-    /// receiver computes the changes the sender lacks (`changes_since`) and
-    /// re-broadcasts their frames, so a cold/late joiner (advertising an empty or
-    /// genesis-only frontier) pulls the whole history over successive rounds.
-    ///
-    StateDigest,
     /// A durable event on the **meta** channel — a second shared-state channel,
     /// identical machinery to [`State`](MessageKind::State) but with the
     /// foreign-card forgery gate enabled (a `meta` card carries a peer's
     /// cryptographic identity). The split is application convention (`meta` for
     /// mesh metadata, `state` for the task).
     Meta,
-    /// Anti-entropy digest for the **meta** channel — the meta-channel counterpart
-    /// to [`StateDigest`](MessageKind::StateDigest).
-    MetaDigest,
     /// A multihop-routing **link-state** advertisement: the author's own measured
     /// links + underlay address (`body` is a serialized
     /// `habilis_network_iroh_multihop_transport::LinkVector`). Broadcast
@@ -117,9 +108,7 @@ impl fmt::Display for MessageKind {
             MessageKind::Pong { .. } => write!(f, "pong"),
             MessageKind::ProofRequest { .. } => write!(f, "proof_request"),
             MessageKind::State => write!(f, "state"),
-            MessageKind::StateDigest => write!(f, "state_digest"),
             MessageKind::Meta => write!(f, "meta"),
-            MessageKind::MetaDigest => write!(f, "meta_digest"),
             MessageKind::LinkState => write!(f, "linkstate"),
         }
     }
@@ -139,9 +128,7 @@ impl MessageKind {
             | MessageKind::Pong { .. }
             | MessageKind::ProofRequest { .. }
             | MessageKind::State
-            | MessageKind::StateDigest
             | MessageKind::Meta
-            | MessageKind::MetaDigest
             | MessageKind::LinkState => None,
         }
     }

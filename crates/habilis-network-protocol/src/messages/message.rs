@@ -234,25 +234,6 @@ impl Message {
         Self::new(mesh, author, channel.event_kind(), body)
     }
 
-    /// An anti-entropy digest for the given channel.
-    #[must_use]
-    pub fn new_channel_digest(
-        mesh: &MeshId,
-        author: &Nickname,
-        body: MessageBody,
-        channel: Channel,
-    ) -> Self {
-        Self::new(mesh, author, channel.digest_kind(), body)
-    }
-
-    /// A state anti-entropy digest whose `body` is the sender's automerge heads.
-    /// Test-only; production uses [`new_channel_digest`](Self::new_channel_digest).
-    #[cfg(any(test, feature = "test-fixtures"))]
-    #[must_use]
-    pub fn new_state_digest(mesh: &MeshId, author: &Nickname, body: MessageBody) -> Self {
-        Self::new(mesh, author, MessageKind::StateDigest, body)
-    }
-
     /// Serialize to compact JSON bytes for the gossip wire. Outside this crate only a [`Verified`]
     /// serializes, through [`Verified::serialize`]: an unverified or an authored view has no wire form.
     /// # Errors

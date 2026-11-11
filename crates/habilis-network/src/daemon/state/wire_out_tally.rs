@@ -33,8 +33,6 @@ pub(crate) enum FrameClass {
     PeerInfo,
     /// The anti-entropy digest of the chat log.
     Digest,
-    StateDigest,
-    MetaDigest,
     /// A change of the `state` channel.
     State,
     /// A change of the `meta` channel.
@@ -47,7 +45,7 @@ pub(crate) enum FrameClass {
     Other,
 }
 
-pub(crate) const CLASS_COUNT: usize = 12;
+pub(crate) const CLASS_COUNT: usize = 10;
 
 impl FrameClass {
     const ALL: [Self; CLASS_COUNT] = [
@@ -55,8 +53,6 @@ impl FrameClass {
         Self::Presence,
         Self::PeerInfo,
         Self::Digest,
-        Self::StateDigest,
-        Self::MetaDigest,
         Self::State,
         Self::Meta,
         Self::LinkState,
@@ -72,8 +68,6 @@ impl FrameClass {
             Self::Presence => "presence",
             Self::PeerInfo => "peerinfo",
             Self::Digest => "digest",
-            Self::StateDigest => "statedigest",
-            Self::MetaDigest => "metadigest",
             Self::State => "state",
             Self::Meta => "meta",
             Self::LinkState => "linkstate",
@@ -94,8 +88,6 @@ impl FrameClass {
             b"presence" => Self::Presence,
             b"peerinfo" => Self::PeerInfo,
             b"digest" => Self::Digest,
-            b"statedigest" => Self::StateDigest,
-            b"metadigest" => Self::MetaDigest,
             b"state" => Self::State,
             b"meta" => Self::Meta,
             b"linkstate" => Self::LinkState,
@@ -481,8 +473,6 @@ mod tests {
             ("presence", FrameClass::Presence),
             ("peerinfo", FrameClass::PeerInfo),
             ("digest", FrameClass::Digest),
-            ("statedigest", FrameClass::StateDigest),
-            ("metadigest", FrameClass::MetaDigest),
             ("meta", FrameClass::Meta),
             ("linkstate", FrameClass::LinkState),
             ("ping", FrameClass::PingPong),

@@ -40,10 +40,7 @@ impl FrameClass {
                 subtype: PresenceSubtype::Left,
             }
             | MessageKind::LinkState => Self::Membership,
-            MessageKind::State
-            | MessageKind::Meta
-            | MessageKind::StateDigest
-            | MessageKind::MetaDigest => Self::Document,
+            MessageKind::State | MessageKind::Meta => Self::Document,
             MessageKind::Ping | MessageKind::Pong { .. } | MessageKind::ProofRequest { .. } | _ => {
                 Self::Other
             }
@@ -180,12 +177,7 @@ mod tests {
             FrameClass::Other,
             "a ping counted as document traffic"
         );
-        for kind in [
-            MessageKind::State,
-            MessageKind::Meta,
-            MessageKind::StateDigest,
-            MessageKind::MetaDigest,
-        ] {
+        for kind in [MessageKind::State, MessageKind::Meta] {
             assert_eq!(FrameClass::of(&kind), FrameClass::Document, "{kind:?}");
         }
     }

@@ -675,9 +675,7 @@ pub(crate) async fn ingest_from(
         | MessageKind::Pong { .. }
         | MessageKind::ProofRequest { .. }
         | MessageKind::State
-        | MessageKind::StateDigest
         | MessageKind::Meta
-        | MessageKind::MetaDigest
         | MessageKind::LinkState => {
             let _ = dispatch_infra(
                 &verified,
@@ -769,7 +767,6 @@ async fn dispatch_infra(
             );
             return ControlFlow::Break(());
         }
-        MessageKind::StateDigest | MessageKind::MetaDigest => return ControlFlow::Break(()),
         MessageKind::LinkState => {
             if handle_link_state(message, state) {
                 probe::nudge_climbing_pairs(state, context, true);
@@ -1209,8 +1206,8 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
-    ingest_channel_event(event, &mut state.docs, Instant::now(), context);
-    if channel == Channel::Meta {
+    let applied = ingest_channel_event(event, &mut state.docs, Instant::now(), context);
+    if applied && channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
         app.on_meta_applied(&message.key(), state, context);
@@ -1228,17 +1225,16 @@ fn surface_view(frame: &Verified, plain: Option<MessageBody>) -> Authored {
     }
 }
 
-/// Ingest a durable channel event (`State`/`Meta`) into its `log`: dedup-insert,
-/// then surface a `StateChanged` for `channel` only when the derived doc changed
-/// and we're past the join horizon (a backfilling joiner updates its doc silently
-/// instead of reacting to replayed intermediate states). A received event is
-/// never our own (`is_self = false`). Both channels share this path verbatim.
+/// Ingest a durable channel event (`State`/`Meta`) into its slice store, and say whether the store took
+/// it. A `StateChanged` is surfaced for `channel` only when the store took the frame and we're past the
+/// join horizon (a backfilling joiner updates its slice silently). A received event is never our own
+/// (`is_self = false`). Both channels share this path verbatim.
 fn ingest_channel_event(
     event: ChannelEvent<'_>,
     docs: &mut ChannelDocs,
     now: Instant,
     context: &HandlerCtx<'_>,
-) {
+) -> bool {
     let ChannelEvent {
         channel,
         message,
@@ -1246,9 +1242,11 @@ fn ingest_channel_event(
     } = event;
     // Every arrival is live: a frame the node did not ask for is charged a token, a replay from the
     // gossip cache included.
-    if let SliceIngest::Applied = docs.ingest(channel, message, true, now)
-        && surfaceable
-    {
+    let applied = matches!(
+        docs.ingest(channel, message, true, now),
+        SliceIngest::Applied
+    );
+    if applied && surfaceable {
         let surfaced = surface_view(message, docs.plain_body(channel, &message.key()));
         context.sink.emit(NodeEvent::StateChanged {
             channel,
@@ -1257,6 +1255,7 @@ fn ingest_channel_event(
             is_self: false,
         });
     }
+    applied
 }
 
 /// A directed leg (a directed `app_msg` or a `Task`) is surfaced **only by
@@ -1439,9 +1438,7 @@ fn addressed_to_us(message: &Message, us: &AuthorKey) -> bool {
         | MessageKind::Ping
         | MessageKind::Pong { .. }
         | MessageKind::State
-        | MessageKind::StateDigest
         | MessageKind::Meta
-        | MessageKind::MetaDigest
         | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
         | _ => true,
@@ -1463,15 +1460,9 @@ fn maybe_push_inbound(
     if tx.receiver_count() == 0
         || !surfaceable
         || !addressed_to_us(message, &context.our_pubkey)
-        || matches!(
-            message.kind,
-            MessageKind::StateDigest
-                | MessageKind::MetaDigest
-                | MessageKind::State
-                | MessageKind::Meta
-                | MessageKind::Ping
-                | MessageKind::Pong { .. }
-        )
+        || matches!(message.kind, |MessageKind::State| MessageKind::Meta
+            | MessageKind::Ping
+            | MessageKind::Pong { .. })
     {
         return;
     }
@@ -1489,10 +1480,10 @@ fn maybe_push_inbound(
     }
 }
 
-/// Our heads and our address go out on the first frame from any new peer, not
-/// only on its `joined`: a digest is how a newcomer gets backfilled, a
-/// newcomer behind the rendezvous learns our address only from this flood,
-/// and which frame a peer sends first depends on its version and its links.
+/// Our address goes out on the first frame from any new peer, not only on its
+/// `joined`: a newcomer behind the rendezvous learns our address only from this
+/// flood, and which frame a peer sends first depends on its version and its links.
+/// The backfill of the newcomer is owed here too (see [`super::backfill`]).
 /// If the newcomer has the lower endpoint id we wait for it to dial. A first
 /// frame that is its `joined` floods our address in `handle_presence` instead.
 async fn greet_new_peer(message: &Verified, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
@@ -3075,10 +3066,11 @@ mod first_contact_tests {
             let twin = nick("twin");
             let identities = [Identity::generate(), Identity::generate()];
             for identity in &identities {
+                // A slice that the store takes: the hook runs only on an applied slice.
                 let frame = Message::new_channel_event(
                     &node.mesh,
                     &twin,
-                    MessageBody::from("{}"),
+                    MessageBody::from(r#"{"version":1,"value":{}}"#),
                     Channel::Meta,
                 )
                 .sign(identity);
@@ -4381,22 +4373,27 @@ mod first_contact_tests {
             let mut app = Inert;
             let newcomer = Identity::generate();
             let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
-            let heads = || MessageBody::try_new(r#"{"heads":[]}"#).expect("a JSON body");
 
-            let mut digest_first = fresh_state();
-            let digest =
-                Message::new_channel_digest(&node.mesh, &nick("late"), heads(), Channel::State)
-                    .sign(&newcomer);
-            ingest(wire(&digest), &mut digest_first, &mut app, &context).await;
+            let mut peer_info_first = fresh_state();
+            let json = protocol::peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(
+                endpoint_id(7),
+            ));
+            let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+            let first = Message::new_peer_info(&node.mesh, &nick("late"), body).sign(&newcomer);
+            ingest(wire(&first), &mut peer_info_first, &mut app, &context).await;
             assert!(
-                digest_first.peerinfo_flood.is_some(),
-                "a newcomer's digest arrived first, and we never told it our address"
+                peer_info_first.peerinfo_flood.is_some(),
+                "a newcomer's PeerInfo arrived first, and we never told it our address"
             );
 
             let mut change_first = fresh_state();
-            let change =
-                Message::new_channel_event(&node.mesh, &nick("late"), heads(), Channel::State)
-                    .sign(&newcomer);
+            let change = Message::new_channel_event(
+                &node.mesh,
+                &nick("late"),
+                MessageBody::try_new(r#"{"version":1,"value":{}}"#).expect("a JSON body"),
+                Channel::State,
+            )
+            .sign(&newcomer);
             ingest(wire(&change), &mut change_first, &mut app, &context).await;
             assert!(
                 change_first.peerinfo_flood.is_none(),

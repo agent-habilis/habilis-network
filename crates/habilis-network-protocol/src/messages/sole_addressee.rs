@@ -32,9 +32,7 @@ pub fn sole_addressee(kind: &MessageKind) -> Option<&AuthorKey> {
         | MessageKind::PeerInfo
         | MessageKind::Ping
         | MessageKind::State
-        | MessageKind::StateDigest
         | MessageKind::Meta
-        | MessageKind::MetaDigest
         | MessageKind::LinkState => None,
     }
 }

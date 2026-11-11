@@ -462,26 +462,6 @@ mod churn_red {
         channel_event(mesh, who, by, at, Channel::Meta)
     }
 
-    fn channel_digest(
-        mesh: &MeshId,
-        who: &Nickname,
-        by: &Identity,
-        at: UnixSecs,
-        channel: Channel,
-    ) -> Verified {
-        let mut message = Message::new_channel_digest(mesh, who, MessageBody::from("{}"), channel);
-        message.timestamp = at;
-        message.sign(by)
-    }
-
-    fn state_digest(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
-        channel_digest(mesh, who, by, at, Channel::State)
-    }
-
-    fn meta_digest(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
-        channel_digest(mesh, who, by, at, Channel::Meta)
-    }
-
     /// The stamp of every frame that a peer sent before it died: far enough back that the dead
     /// peer had been silent for a full alive timeout when the sweep evicted it.
     fn long_ago() -> UnixSecs {
@@ -588,20 +568,6 @@ mod churn_red {
     fn h1_a_replayed_meta_change_revives_a_sigkilled_peer() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             a_replayed_frame_must_not_revive_a_sigkilled_peer(meta_change).await;
-        });
-    }
-
-    #[test]
-    fn h1_a_replayed_state_digest_revives_a_sigkilled_peer() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            a_replayed_frame_must_not_revive_a_sigkilled_peer(state_digest).await;
-        });
-    }
-
-    #[test]
-    fn h1_a_replayed_meta_digest_revives_a_sigkilled_peer() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            a_replayed_frame_must_not_revive_a_sigkilled_peer(meta_digest).await;
         });
     }
 
@@ -946,7 +912,7 @@ mod churn_red {
             let mut state = fresh_state();
             state.joined_at = UnixSecs::now() - Duration::from_hours(3);
             let old = UnixSecs::now() - Duration::from_hours(2);
-            for make in [peer_info, state_digest, meta_digest, state_change] {
+            for make in [peer_info, state_change] {
                 let replay = make(&rig.mesh, &who, &peer, old);
                 assert!(
                     receive(&replay, &mut state, &context),

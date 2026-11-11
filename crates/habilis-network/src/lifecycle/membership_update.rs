@@ -66,8 +66,6 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
         | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::Meta
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
         | MessageKind::LinkState
         | _ => timestamp > now - tuning::alive_timeout(),
     }
@@ -90,8 +88,6 @@ pub(crate) fn is_live_kind(kind: &MessageKind) -> bool {
         | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::Meta
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
         | MessageKind::LinkState
         | _ => false,
     }
@@ -208,8 +204,6 @@ fn compute_proving(
         | MessageKind::PeerInfo
         | MessageKind::Ping
         | MessageKind::Pong { .. }
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
         | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
         | _ => !known,
@@ -646,8 +640,6 @@ mod tests {
             MessageKind::PeerInfo,
             MessageKind::State,
             MessageKind::Meta,
-            MessageKind::StateDigest,
-            MessageKind::MetaDigest,
         ] {
             let back = compute(&kind, test_key(who.as_str()), now, &state);
             assert!(
@@ -698,19 +690,14 @@ mod tests {
         let state = fresh_state();
         let who = nick("swift-cedar");
         let old = UnixSecs::now() - Duration::from_hours(2);
-        for kind in [
-            MessageKind::PeerInfo,
-            MessageKind::StateDigest,
-            MessageKind::MetaDigest,
-        ] {
-            let stale_copy = compute(&kind, test_key(who.as_str()), old, &state);
-            assert!(
-                !stale_copy.joined_new,
-                "{kind:?} stamped 2 h ago made an arrival"
-            );
-            let fresh = compute(&kind, test_key(who.as_str()), UnixSecs::now(), &state);
-            assert!(fresh.joined_new, "{kind:?} stamped now is an arrival");
-        }
+        let kind = MessageKind::PeerInfo;
+        let stale_copy = compute(&kind, test_key(who.as_str()), old, &state);
+        assert!(
+            !stale_copy.joined_new,
+            "{kind:?} stamped 2 h ago made an arrival"
+        );
+        let fresh = compute(&kind, test_key(who.as_str()), UnixSecs::now(), &state);
+        assert!(fresh.joined_new, "{kind:?} stamped now is an arrival");
     }
 
     /// The clocks of two nodes differ, and the difference changes nothing: a replay is stale and a

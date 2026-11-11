@@ -137,8 +137,11 @@ export type MeshEvent =
   | { kind: 'closed'; reason: string }
 
 export interface StateDoc {
-  /** The converged document. A CRDT underneath, so concurrent writers merge. */
-  readonly value: Record<string, unknown>
+  /**
+   * The shared state: one slice per member, keyed by the lowercase hex of the member's key (64
+   * digits). Each member writes only its own slice, and every member reads every slice.
+   */
+  readonly value: Record<string, Record<string, unknown>>
   /** Apply an RFC 7386 merge patch: set present keys, delete null keys, leave the rest. */
   merge(patch: Record<string, unknown>): Promise<void>
   changes(signal?: AbortSignal): AsyncIterable<Record<string, unknown>>
