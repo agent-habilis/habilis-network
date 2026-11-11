@@ -97,6 +97,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     let is_beacon = secret_key.is_some() && transports.is_empty() && !transports.underlay;
     let underlay = transports.underlay;
     let network = lookups.network_label();
+    let mut homing = None;
     let mut builder = if lookups.is_loopback() {
         debug_assert!(
             !lookups.mdns && !lookups.dht && lookups.relay_lookup == RelayChoice::Disabled,
@@ -133,8 +134,9 @@ pub(crate) async fn build_endpoint_keeping_mdns(
         // rustls crypto provider. The mDNS / DHT address-lookups are
         // wired **after** bind (below) — in iroh 1.0 they live in
         // companion crates and need the bound endpoint's id.
-        Endpoint::builder(presets::Minimal)
-            .relay_mode(super::relay::relay_mode(&lookups.relay_lookup))
+        let (mode, followed) = super::relay::peer_relay_mode(&lookups.relay_lookup).await;
+        homing = followed;
+        Endpoint::builder(presets::Minimal).relay_mode(mode)
     };
 
     #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
@@ -211,6 +213,9 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     // when another member already holds the deterministic port — the
     // caller treats that as "someone else is the beacon" and retries.
     let endpoint = builder.bind().await.context("failed to bind endpoint")?;
+    if let Some(homing) = homing {
+        homing.follow(endpoint.clone());
+    }
     // Post-bind address-lookup wiring: in iroh 1.0 the mDNS / mainline-DHT
     // providers are companion crates built from the bound endpoint's id and
     // added to its lookup services. Loopback-only meshes wire none (asserted

@@ -17,11 +17,11 @@ mod rung_refresh;
 mod stoppable_task;
 
 use std::future::Future;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use iroh::endpoint::{default_relay_mode, presets};
-use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl};
+use iroh::endpoint::presets;
+use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher as _};
 use tokio::sync::watch;
 
 pub(crate) use rung_refresh::RungRefresh;
@@ -32,7 +32,7 @@ use crate::util::tuning::{
     RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_LIVENESS_INTERVAL, RELAY_REPROBE_BACKOFF_MAX,
     RELAY_REPROBE_BACKOFF_MIN, RELAY_RUNG_PROBE,
 };
-use n0_future::time as n0future_time;
+use n0_future::{task as n0future_task, time as n0future_time};
 
 /// The default relay **ladder** — n0's prod relay set, in fixed
 /// preference order. The beacon homes on the first reachable rung
@@ -84,8 +84,8 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 });
 
 /// Resolve a [`RelayChoice`] into the ordered relay **ladder**:
-/// `Disabled` ⇒ empty (no relay), `Pinned` ⇒ the default n0 prod
-/// ladder, `Custom` ⇒ the operator ladder (`--relay a,b,c`, order
+/// `Disabled` ⇒ empty (no relay), `Pinned` ⇒ the default ladder (our
+/// rung 0, then the n0 prod rungs), `Custom` ⇒ the operator ladder (`--relay a,b,c`, order
 /// preserved). The beacon homes on, and the joiner pre-registers at, the
 /// first reachable rung (`select_bootstrap_rung`) — the beacon leg of
 /// `relay_mode` and `daemon::setup::register_rendezvous` must agree or
@@ -127,12 +127,11 @@ fn rung_config(url: &RelayUrl) -> RelayConfig {
 ///   joiners pre-register. The caller encodes that by passing a
 ///   one-element `Custom([rung])` (the rung `select_bootstrap_rung`
 ///   chose), so the beacon never reaches the multi-relay `Pinned` arm.
-/// - **Peer** on `Pinned` uses iroh's resilient multi-relay
-///   `default_relay_mode()` (the n0 prod set): pinning a peer to
-///   one relay made `bind()` block on that relay's handshake and dropped
-///   iroh's relay fallback — a `Default` peer still reaches the
-///   beacon at its rung and skips relays entirely same-LAN via mDNS. A
-///   `Custom` ladder pins the peer to that whole set.
+/// - **Peer** on `Pinned` maps to the whole default ladder, our own
+///   rung 0 first, never to the n0 relays alone. A peer endpoint does not
+///   build on this map: [`peer_relay_mode`] narrows it to the first
+///   reachable rung, and falls back to the whole map only when no rung
+///   answers. A `Custom` ladder maps to that whole set.
 ///
 /// So `Custom(ladder)` covers both: a 1-rung beacon and a multi-rung
 /// peer alike map to `RelayMode::Custom`.
@@ -147,10 +146,84 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
             RelayMode::Custom(ladder.iter().map(rung_config).collect())
         }
         RelayChoice::Pinned => {
-            tracing::debug!("peer on iroh resilient multi-relay default");
-            default_relay_mode()
+            tracing::debug!("peer on the default relay ladder");
+            RelayMode::Custom(
+                RENDEZVOUS_RELAY_LADDER_URLS
+                    .iter()
+                    .map(rung_config)
+                    .collect(),
+            )
         }
         _ => RelayMode::Disabled,
+    }
+}
+
+/// The relay mode of a peer endpoint, and the ladder it must follow when the rung it homes on dies.
+///
+/// iroh homes on the relay with the lowest latency and ignores the order of the map, so a map
+/// that holds the whole ladder does not make rung 0 the home. A peer homes the way the beacon
+/// does: on the first reachable rung, alone in its map. A one-rung ladder has no choice to make,
+/// and neither has a ladder that is empty or has no reachable rung: those keep [`relay_mode`].
+pub(super) async fn peer_relay_mode(choice: &RelayChoice) -> (RelayMode, Option<Homing>) {
+    let ladder: Vec<RelayUrl> = relay_ladder(choice).collect();
+    if ladder.len() < 2 {
+        return (relay_mode(choice), None);
+    }
+    match select_bootstrap_rung(&ladder, RELAY_RUNG_PROBE, None).await {
+        Some(rung) => (
+            relay_mode(&RelayChoice::Custom(vec![rung.clone()])),
+            Some(Homing { ladder, rung }),
+        ),
+        None => (relay_mode(choice), None),
+    }
+}
+
+/// The ladder of a peer endpoint, and the rung that it homes on.
+#[derive(Debug)]
+pub(super) struct Homing {
+    ladder: Vec<RelayUrl>,
+    rung: RelayUrl,
+}
+
+impl Homing {
+    /// Move the endpoint to the first reachable rung each time its rung dies, until the endpoint
+    /// closes. The endpoint swaps its own relay map in place, because a peer endpoint cannot be
+    /// rebuilt under its owner.
+    ///
+    /// The beacon monitor is not used here: it asks `online()`, which stays true while the
+    /// connection of the home relay is dead. The net report of iroh is the signal that
+    /// drops: its preferred relay is `None` once no relay of the map answers its probe.
+    pub(super) fn follow(self, endpoint: Endpoint) {
+        let Self { ladder, mut rung } = self;
+        n0future_task::spawn(async move {
+            let mut fails: u32 = 0;
+            loop {
+                tokio::select! {
+                    () = n0future_time::sleep(RELAY_LIVENESS_INTERVAL) => {}
+                    _closed = endpoint.closed() => return,
+                }
+                let answering = endpoint
+                    .net_report()
+                    .get()
+                    .is_none_or(|report| report.preferred_relay.is_some());
+                fails = if answering { 0 } else { fails + 1 };
+                if !should_evict_rung(fails) {
+                    continue;
+                }
+                fails = 0;
+                let selected = select_bootstrap_rung(&ladder, RELAY_RUNG_PROBE, None).await;
+                let Some(next) = selected.filter(|next| *next != rung) else {
+                    continue;
+                };
+                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, "peer endpoint moves to the next relay rung");
+                // iroh takes the config of a relay as an `Arc`.
+                endpoint
+                    .insert_relay(next.clone(), Arc::new(rung_config(&next)))
+                    .await;
+                endpoint.remove_relay(&rung).await;
+                rung = next;
+            }
+        });
     }
 }
 
@@ -443,7 +516,11 @@ mod tests {
         RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder, select_bootstrap_rung,
         select_first_reachable, should_evict_rung,
     };
-    use std::collections::HashSet;
+    use crate::lookup::{TransportOpts, build_peer_endpoint, build_peer_webrtc};
+    use crate::protocol::meshes::LookupOpts;
+    use iroh_relay::server::Server;
+    use std::collections::{BTreeSet, HashSet};
+    use std::net::{Ipv4Addr, TcpListener};
 
     use crate::lookup::test_relay;
     use crate::util::tuning;
@@ -523,6 +600,171 @@ mod tests {
             ladder, custom,
             "a pinned ladder resolves to the given rungs"
         );
+    }
+
+    // --- the home rung of a peer endpoint -----------------------------
+    //
+    // A WAN test showed a mesh endpoint homed on `use1-1.relay.n0.iroh.link`: iroh picks its home
+    // relay by latency and ignores the order of the map, so a peer can home on a rung that is
+    // not the first one. A peer endpoint homes on the first reachable rung of its ladder.
+
+    /// When no rung answers, the map still holds the whole ladder, so the endpoint can find a
+    /// rung that comes back. The default choice never maps to the n0 relays alone.
+    #[test]
+    fn the_default_relay_choice_maps_to_the_whole_ladder() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let urls: Vec<RelayUrl> = super::relay_mode(&RelayChoice::Pinned).relay_map().urls();
+        let ladder: BTreeSet<RelayUrl> = RENDEZVOUS_RELAY_LADDER_URLS.iter().cloned().collect();
+        assert_eq!(
+            urls.into_iter().collect::<BTreeSet<_>>(),
+            ladder,
+            "the relay map of the default choice is the ladder, rung 0 included"
+        );
+    }
+
+    /// The home relay of an endpoint, once it is online.
+    async fn home_of(endpoint: &iroh::Endpoint) -> Vec<RelayUrl> {
+        time::timeout(std_Duration::from_secs(15), endpoint.online())
+            .await
+            .expect("the endpoint is online within 15 s");
+        endpoint.addr().relay_urls().cloned().collect()
+    }
+
+    /// How many HTTP connections a relay accepted. An endpoint that holds a relay in its map
+    /// connects to it to measure the latency, even when it does not home on it.
+    fn http_connections(server: &Server) -> u64 {
+        server.metrics().server.http_connections.get()
+    }
+
+    /// A relay URL on a local port that refuses connections.
+    fn refused_rung() -> RelayUrl {
+        let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free loopback port");
+        let port = socket.local_addr().expect("the bound address").port();
+        drop(socket);
+        format!("http://127.0.0.1:{port}/")
+            .parse()
+            .expect("a literal http URL parses")
+    }
+
+    fn lookups_on(ladder: Vec<RelayUrl>) -> LookupOpts {
+        let mut lookups = LookupOpts::loopback();
+        lookups.relay_lookup = RelayChoice::Custom(ladder);
+        lookups
+    }
+
+    #[test]
+    fn a_peer_endpoint_homes_on_rung_0_when_rung_0_is_up() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (second, second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let endpoint = build_peer_endpoint(&lookups_on(vec![first.clone(), second]))
+                .await
+                .expect("a peer endpoint");
+
+            assert_eq!(home_of(&endpoint).await, vec![first], "the home relay");
+            assert_eq!(
+                http_connections(&second_server),
+                0,
+                "a later rung never sees the endpoint"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    #[test]
+    #[ignore = "10 s: waits for the probe budget of the dead rung"]
+    fn a_peer_endpoint_homes_on_the_next_rung_when_rung_0_is_down() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // Rung 0 refuses connections on purpose, so the probe of its latency fails.
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::net_report::reportgen",
+                "probe failed",
+            );
+            let (next, _next_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (last, last_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let endpoint =
+                build_peer_endpoint(&lookups_on(vec![refused_rung(), next.clone(), last]))
+                    .await
+                    .expect("a peer endpoint");
+
+            assert_eq!(home_of(&endpoint).await, vec![next], "the home relay");
+            assert_eq!(
+                http_connections(&last_server),
+                0,
+                "a rung after the first reachable one never sees the endpoint"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    #[test]
+    #[ignore = "60 s: waits for the relay monitor to judge the rung dead and walk the ladder"]
+    fn a_peer_endpoint_moves_to_the_next_rung_when_its_rung_dies() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // Killing the home rung is the point of the test, so its probes and sockets fail.
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::net_report::reportgen",
+                "probe failed",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh_relay::server::http_server",
+                "error accepting upgraded connection",
+            );
+            let (first, first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let endpoint = build_peer_endpoint(&lookups_on(vec![first.clone(), second.clone()]))
+                .await
+                .expect("a peer endpoint");
+            assert_eq!(
+                home_of(&endpoint).await,
+                vec![first],
+                "the first home relay"
+            );
+
+            drop(first_server);
+
+            let moved = time::timeout(std_Duration::from_secs(120), async {
+                loop {
+                    let home: Vec<RelayUrl> = endpoint.addr().relay_urls().cloned().collect();
+                    if home == [second.clone()] {
+                        return;
+                    }
+                    time::sleep(std_Duration::from_millis(500)).await;
+                }
+            })
+            .await;
+            endpoint.close().await;
+            assert!(moved.is_ok(), "the endpoint never moved to the next rung");
+        });
+    }
+
+    #[test]
+    fn the_member_and_the_blob_endpoint_share_one_home_rung() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (second, second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let lookups = lookups_on(vec![first.clone(), second]);
+            let blob = build_peer_endpoint(&lookups)
+                .await
+                .expect("a blob endpoint");
+            let (member, _handle) = build_peer_webrtc(&lookups, TransportOpts::default())
+                .await
+                .expect("a member endpoint");
+
+            assert_eq!(
+                home_of(&blob).await,
+                vec![first.clone()],
+                "the blob endpoint"
+            );
+            assert_eq!(home_of(&member).await, vec![first], "the member endpoint");
+            assert_eq!(
+                http_connections(&second_server),
+                0,
+                "a later rung sees neither endpoint"
+            );
+            blob.close().await;
+            member.close().await;
+        });
     }
 
     #[test]
