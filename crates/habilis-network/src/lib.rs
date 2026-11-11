@@ -41,7 +41,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod lookup;
 
 // Extracted leaf crates. Each owns one dependency the engine would otherwise
-// carry unconditionally — automerge, tracing-subscriber — and each depends only
+// carry unconditionally, such as tracing-subscriber, and each depends only
 // on `habilis-network-protocol`/`-util`, never back on this crate. Aliased so
 // engine code keeps its `crate::doc::…` paths.
 pub(crate) use habilis_network_doc as doc;

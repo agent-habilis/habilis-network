@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors = ["Caio Gondim <me@caiogondim.com>"]
-description = "shared-state CRDT channels for habilis-network (automerge)"
+description = "shared-state slice store for the habilis-network state and meta channels"
 license = "MIT"
 readme = "README.md"
 publish = false
@@ -29,10 +29,6 @@ path = "src/lib.rs"
 [dependencies]
 habilis-network-protocol = { path = "../habilis-network-protocol", default-features = false }
 habilis-network-util = { path = "../habilis-network-util", default-features = false }
-# The only crate in the workspace that names automerge. Swapping the CRDT for
-# something cheaper (an LWW map is enough for a two-scalar transport doc) is a
-# change to this crate alone.
-automerge.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

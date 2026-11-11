@@ -1,11 +1,10 @@
-//! The `state`/`meta` channel wire body: the tagged envelope that carries one
-//! automerge change (or, from an old binary, a legacy RFC 7386 merge the
-//! automerge engine treats as a no-op). The convergent document itself — merge,
-//! authorization, and reconciliation — lives in the parent module.
+//! The sealed channel body: the encrypted form of a `state` or `meta` slice body.
+//!
+//! A sealed body is the tagged envelope `{"k":"enc","d":"<base58>"}`. Its `d` is the Base58 of
+//! `seal_symmetric(channel_key, plaintext)`, so a relay or a captured frame sees only opaque bytes.
+//! A passwordless mesh passes a plain body through; a passworded mesh refuses one.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::borrow::Cow;
 
 use habilis_network_protocol::SymmetricKey;
 
@@ -13,122 +12,27 @@ use crate::DocError;
 use habilis_network_protocol::messages::MessageBody;
 
 use habilis_network_protocol::seal_error;
-/// The tagged `State`/`Meta` message body.
+
+/// The tagged envelope of a sealed channel body.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "k", rename_all = "snake_case")]
-enum StateOp<'merge> {
-    /// The live wire form: one automerge change, Base58-encoded so the body stays
-    /// `MessageBody`-safe (wire key `c`), plus an optional `m` carrying the
-    /// RFC 7386 merge the author applied — the human-readable delta the
-    /// `state`/`meta` output event surfaces (the change bytes themselves are
-    /// opaque). Omitted for internal writes that are never surfaced (the card
-    /// publish), so those stay lean.
-    Change {
-        #[serde(rename = "c")]
-        data: String,
-        #[serde(rename = "m", default, skip_serializing_if = "Option::is_none")]
-        merge: Option<Cow<'merge, Value>>,
-    },
-    /// The pre-automerge RFC 7386 merge shape. Retained only so a body still
-    /// composes for the adversarial harness; the automerge engine ignores it (a
-    /// no-op), which is the forward-compat behavior an old binary now hits.
-    Merge { merge: Value },
+enum SealedBody {
     /// An encrypted channel body (password-protected mesh only): `d` is Base58
-    /// of `seal_symmetric(channel_key, plaintext)`, where `plaintext` is the
-    /// UTF-8 bytes of a plaintext `change` body — so neither the automerge
-    /// change nor the human-readable `m` delta is exposed on the wire. A relay
-    /// or a captured frame (no key) sees only opaque bytes; every mesh member
-    /// holds the key and decrypts. See [`encrypt_body`]/[`decrypt_body`].
+    /// of `seal_symmetric(channel_key, plaintext)`.
     Enc {
         #[serde(rename = "d")]
         data: String,
     },
 }
 
-/// Compose a legacy RFC 7386 merge body. Only the adversarial harness and tests
-/// emit this now (the live path uses [`change_body`]); a receiver treats it as a
-/// no-op.
+/// Seal a plain body under `key`, and wrap the Base58 of the sealed bytes in the `enc` envelope.
 ///
 /// # Errors
-/// Serialization failure or a body exceeding the size limit.
+/// The envelope does not encode, or the sealed body exceeds the size limit.
 ///
 /// # Examples
 ///
-/// A merge body is not a change, so it carries no change bytes.
-///
-/// ```
-/// use habilis_network_doc::wire::{merge_body, parse_change_body};
-///
-/// let body = merge_body(serde_json::json!({"title": "hi"})).expect("a merge body");
-/// assert!(parse_change_body(body.as_str()).is_none());
-/// ```
-#[cfg(any(test, feature = "adversarial"))]
-pub fn merge_body(merge: Value) -> Result<MessageBody, DocError> {
-    let json = serde_json::to_string(&StateOp::Merge { merge }).map_err(DocError::encode)?;
-    Ok(MessageBody::try_new(&json)?)
-}
-
-/// Wrap one automerge change's raw bytes as a channel-event body. `merge` is the
-/// RFC 7386 delta the author applied, carried for the output event's
-/// human-readable `merge` field; pass `None` for an internal write that is never
-/// surfaced (keeps the body lean — no delta duplicated alongside the change).
-///
-/// # Errors
-/// Serialization failure or a body exceeding the size limit.
-///
-/// # Examples
-///
-/// A change body carries its change bytes, and they read back unchanged.
-///
-/// ```
-/// use habilis_network_doc::wire::{change_body, parse_change_body};
-///
-/// let body = change_body(&[1, 2], None).expect("a change body");
-/// assert_eq!(parse_change_body(body.as_str()), Some(vec![1, 2]));
-/// ```
-pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, DocError> {
-    let json = serde_json::to_string(&StateOp::Change {
-        data: bs58::encode(change).into_string(),
-        merge: merge.map(Cow::Borrowed),
-    })
-    .map_err(DocError::encode)?;
-    Ok(MessageBody::try_new(&json)?)
-}
-
-/// Decode a channel-event body back to raw automerge change bytes. `None` for a
-/// non-`change` body (a legacy `merge`, an `enc` envelope, or anything that
-/// doesn't parse) — such a body is a no-op on the automerge doc. Call
-/// [`decrypt_body`] first for a passworded mesh's `enc` bodies.
-///
-/// # Examples
-///
-/// A change body reads back to the change bytes it carries.
-///
-/// ```
-/// use habilis_network_doc::wire::{change_body, parse_change_body};
-///
-/// let body = change_body(&[1, 2], None).expect("a change body");
-/// assert_eq!(parse_change_body(body.as_str()), Some(vec![1, 2]));
-/// ```
-#[must_use]
-pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
-    let op: StateOp<'_> = serde_json::from_str(body).ok()?;
-    match op {
-        StateOp::Change { data, .. } => bs58::decode(&data).into_vec().ok(),
-        StateOp::Merge { .. } | StateOp::Enc { .. } => None,
-    }
-}
-
-/// Encrypt a plaintext body under `key`, producing an `enc` envelope. Seals the
-/// whole plaintext body — used for the `state`/`meta` change bodies (both the
-/// automerge change and the `m` delta) and for broadcast chat (broadcast chat) bodies.
-///
-/// # Errors
-/// Serialization or `MessageBody` validation of the envelope fails.
-///
-/// # Examples
-///
-/// An encrypted body opens with its key, and only with its key.
+/// A sealed body does not open without its key.
 ///
 /// ```
 /// use habilis_network_doc::wire::{decrypt_body, encrypt_body};
@@ -142,7 +46,7 @@ pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
 /// ```
 pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBody, DocError> {
     let blob = seal_error::seal_symmetric(key, plain.as_str().as_bytes());
-    let json = serde_json::to_string(&StateOp::Enc {
+    let json = serde_json::to_string(&SealedBody::Enc {
         data: bs58::encode(blob).into_string(),
     })
     .map_err(DocError::encode)?;
@@ -161,16 +65,16 @@ pub(crate) fn sealed_body_len_bound(plain_len: usize) -> usize {
     const NONCE_AND_TAG: usize = 12 + 16;
     let blob_len = plain_len + NONCE_AND_TAG;
     let longest_text = "1".repeat(blob_len * 138 / 100 + 1);
-    let body = serde_json::to_string(&StateOp::Enc { data: longest_text }).unwrap_or_default();
+    let body = serde_json::to_string(&SealedBody::Enc { data: longest_text }).unwrap_or_default();
     serde_json::to_string(&body).map_or(usize::MAX, |escaped| escaped.len())
 }
 
 /// Recover the plaintext body string. With a `key` (passworded mesh) the body
-/// **must** be a sealed `enc` envelope: it is opened, and any non-`enc` body is
+/// **must** be a sealed `enc` envelope: it is opened, and any other body is
 /// rejected (`None`) so cleartext can never slip past the encryption guarantee.
 /// Without a key (passwordless) a body is returned unchanged. `None` also when
 /// an `enc` body can't be opened (wrong key / malformed) — the caller treats a
-/// `None` as an opaque no-op (state/meta) or a drop (chat).
+/// `None` as an opaque no-op.
 ///
 /// # Examples
 ///
@@ -188,15 +92,15 @@ pub(crate) fn sealed_body_len_bound(plain_len: usize) -> usize {
 /// ```
 #[must_use]
 pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
-    let op: Result<StateOp<'_>, _> = serde_json::from_str(body);
+    let op: Result<SealedBody, _> = serde_json::from_str(body);
     match op {
-        Ok(StateOp::Enc { data }) => {
+        Ok(SealedBody::Enc { data }) => {
             let key = key?;
             let blob = bs58::decode(&data).into_vec().ok()?;
             let plain = seal_error::open_symmetric(key, &blob).ok()?;
             String::from_utf8(plain).ok()
         }
-        // A non-`enc` body: passthrough on a passwordless mesh (no key), but
+        // A body that is not sealed: passthrough on a passwordless mesh (no key), but
         // rejected on a passworded one — encryption is enforced, not optional.
         _ => match key {
             Some(_) => None,
@@ -207,19 +111,23 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{change_body, decrypt_body, encrypt_body, merge_body, parse_change_body};
-    use habilis_network_protocol::SymmetricKey;
+    use super::{decrypt_body, encrypt_body};
+    use habilis_network_protocol::{MessageBody, SymmetricKey};
 
     fn key(byte: u8) -> SymmetricKey {
         SymmetricKey::from([byte; 32])
     }
 
+    /// A plain slice body, as the store writes it.
+    fn plain_body() -> MessageBody {
+        MessageBody::try_new(r#"{"version":1,"value":{"board":"x"}}"#).expect("a slice body")
+    }
+
     #[test]
-    fn enc_body_round_trips_and_hides_the_delta() {
+    fn enc_body_round_trips_and_hides_the_value() {
         let _guard = ::habilis_network_test_tracing::init();
         let key = key(3);
-        let plain =
-            change_body(&[1, 2, 3, 4], Some(&serde_json::json!({"board": "x"}))).expect("compose");
+        let plain = plain_body();
         let enc = encrypt_body(&plain, &key).expect("encrypt");
         assert_ne!(
             enc.as_str(),
@@ -228,96 +136,43 @@ mod tests {
         );
         assert!(
             !enc.as_str().contains("board"),
-            "the merge delta must not leak into the ciphertext body"
+            "the value must not leak into the ciphertext body"
         );
-        // decrypt_body recovers the exact plaintext body, which then parses.
         let recovered = decrypt_body(enc.as_str(), Some(&key)).expect("decrypt");
         assert_eq!(
             recovered,
             plain.as_str(),
             "an enc body round trips to the recovered plaintext"
         );
-        assert_eq!(
-            parse_change_body(&recovered),
-            Some(vec![1u8, 2, 3, 4]),
-            "an enc body parses back to the plain change"
-        );
     }
 
     #[test]
     fn enc_body_needs_the_right_key() {
         let _guard = ::habilis_network_test_tracing::init();
-        let enc = encrypt_body(
-            &change_body(&[9, 9], None).expect("a two-byte change is a valid body"),
-            &key(1),
-        )
-        .expect("the body encrypts under a fresh key");
+        let enc =
+            encrypt_body(&plain_body(), &key(1)).expect("the body encrypts under a fresh key");
         assert!(
             decrypt_body(enc.as_str(), Some(&key(2))).is_none(),
             "wrong key"
         );
         assert!(decrypt_body(enc.as_str(), None).is_none(), "no key");
-        // An `enc` body is not itself a change (must be decrypted first).
-        assert_eq!(
-            parse_change_body(enc.as_str()),
-            None,
-            "an enc body needs the right key"
-        );
     }
 
     #[test]
     fn decrypt_enforces_encryption_only_when_keyed() {
         let _guard = ::habilis_network_test_tracing::init();
-        let plain = change_body(&[5], None).expect("compose");
-        // Passwordless (no key): a non-`enc` body is returned verbatim.
+        let plain = plain_body();
+        // Passwordless (no key): a body that is not sealed is returned verbatim.
         assert_eq!(
             decrypt_body(plain.as_str(), None).as_deref(),
             Some(plain.as_str()),
             "decrypt enforces encryption only when keyed"
         );
-        // Passworded (key set): a non-`enc` body is rejected — cleartext can't
+        // Passworded (key set): a body that is not sealed is rejected — cleartext can't
         // slip past the encryption guarantee.
         assert!(
             decrypt_body(plain.as_str(), Some(&key(7))).is_none(),
             "a plain body is refused when keyed"
-        );
-    }
-
-    #[test]
-    fn change_body_round_trips() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let change = vec![1u8, 2, 3, 250, 0, 42];
-        // The optional `m` delta does not affect change decoding either way.
-        let with_merge =
-            change_body(&change, Some(&serde_json::json!({"k": "v"}))).expect("compose");
-        assert_eq!(
-            parse_change_body(with_merge.as_str()),
-            Some(change.clone()),
-            "a change body round trips with a merge"
-        );
-        let lean = change_body(&change, None).expect("compose");
-        assert_eq!(
-            parse_change_body(lean.as_str()),
-            Some(change),
-            "a lean change body round trips"
-        );
-    }
-
-    #[test]
-    fn legacy_merge_body_is_a_no_op_change() {
-        let _guard = ::habilis_network_test_tracing::init();
-        // A legacy `merge` body (or any non-`change` body) decodes to no change,
-        // so the automerge engine ignores it — forward-compat with old binaries.
-        let body = merge_body(serde_json::json!({"turn": "a"})).expect("compose");
-        assert_eq!(
-            parse_change_body(body.as_str()),
-            None,
-            "a legacy merge body is a no-op change"
-        );
-        assert_eq!(
-            parse_change_body("not json"),
-            None,
-            "a non-json body is not a change"
         );
     }
 }

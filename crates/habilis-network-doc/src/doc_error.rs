@@ -1,36 +1,36 @@
-//! The error of building or wrapping a shared-state change for the wire.
+//! The error of sealing a channel body for the wire.
 
 use std::fmt;
 
 use habilis_network_protocol::messages::BodyError;
 
 use std::error;
-/// Why a shared-state change could not be built or wrapped for the wire.
+/// Why a channel body could not be sealed or wrapped for the wire.
 ///
 /// # Examples
 ///
-/// A document body that is not a JSON object returns this error.
+/// A body that the envelope cannot hold returns the body error.
 ///
 /// ```
 /// use habilis_network_doc::DocError;
 ///
-/// let error = DocError::NotAnObject;
-/// assert!(matches!(error, DocError::NotAnObject));
+/// let body = habilis_network_protocol::MessageBody::try_new("bell\u{7}");
+/// assert!(body.is_err(), "a control character is refused");
+/// let error = DocError::from(body.expect_err("a control character"));
+/// assert!(matches!(error, DocError::Body(_)));
 /// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
 pub enum DocError {
-    /// The merge is not a JSON object: the automerge document root is a map.
-    NotAnObject,
     /// The body failed `MessageBody` validation.
     Body(BodyError),
-    /// Automerge refused the change, or the envelope did not encode.
+    /// The envelope did not encode.
     Encode(Box<dyn error::Error + Send + Sync + 'static>),
 }
 
 impl DocError {
-    /// Wrap a failure of automerge or of the envelope encoding.
+    /// Wrap a failure of the envelope encoding.
     pub(crate) fn encode(error: impl Into<Box<dyn error::Error + Send + Sync + 'static>>) -> Self {
         Self::Encode(error.into())
     }
@@ -44,11 +44,8 @@ impl DocError {
 impl fmt::Display for DocError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::NotAnObject => {
-                "merge must be a JSON object (the automerge document root is a map)"
-            }
-            Self::Body(_) => "the change body is not a valid message body",
-            Self::Encode(_) => "the change could not be encoded",
+            Self::Body(_) => "the body is not a valid message body",
+            Self::Encode(_) => "the body could not be encoded",
         })
     }
 }
@@ -56,7 +53,6 @@ impl fmt::Display for DocError {
 impl error::Error for DocError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Self::NotAnObject => None,
             Self::Body(error) => Some(error),
             Self::Encode(error) => Some(&**error),
         }

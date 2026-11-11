@@ -1,37 +1,17 @@
-//! The shared-document engine backing the `state` and `meta` channels.
+//! The shared-state store backing the `state` and `meta` channels.
 //!
-//! Each channel is an [`automerge`] CRDT. A local write is expressed as an
-//! RFC 7386-style JSON merge (the unchanged `state|meta merge` surface),
-//! translated into one automerge change; peers exchange those changes and
-//! automerge merges them conflict-free — so we no longer own an ordered-log
-//! fold. Convergence is automerge's job; ours is authenticity.
+//! Each channel holds one signed slice per author key. An author writes only its own slice, and a
+//! frame takes effect only as the slice of the key that signed it. The store keeps each slice at
+//! its newest version, and it refuses a slice of a key that said goodbye.
 //!
-//! Every change is carried inside a signed [`Message`](habilis_network_protocol::Message),
-//! and every change is authorized before it touches the live doc. A channel
-//! configured with a [`SelfWriteGate`] holds a per-peer map keyed by author key (the
-//! lowercase hex; a nickname is a label that two keys can share) in
-//! which one field belongs to the key that names its slot: [`MeshDoc::ingest`] applies the
-//! change to a throwaway fork first and rejects it if it would alter the gated field of any *other*
-//! peer's slot. The other fields of a slot are not gated. That field carries the peer's cryptographic identity, so a
-//! forgery must converge nowhere — and because every honest member runs the same
-//! gate before applying, it does.
-//!
-//! The engine needs the gate's *shape* and *rule*, never its meaning: it plants a
-//! byte-identical genesis change so every replica agrees on the map's object
-//! identity, and it compares before/after. What the guarded field represents is
-//! the application's business.
-//!
-//! Changes arriving before their causal dependencies (out-of-order backfill) are
-//! held in `pending` and drained — through the same gate — once their deps land,
-//! so the gate is never bypassed by dependency buffering.
-
 //! # Example
 //!
 //! ```
-//! use habilis_network_doc::MeshDoc;
+//! use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+//! use habilis_network_protocol::Channel;
 //!
-//! let doc = MeshDoc::new_ungated();
-//! assert!(doc.to_json().is_object());
+//! let store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
+//! assert!(store.view().is_empty());
 //! ```
 
 #![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
@@ -41,10 +21,6 @@ pub mod wire;
 mod doc_error;
 
 pub use doc_error::DocError;
-
-mod mesh_doc;
-
-pub use mesh_doc::{Ingested, MeshDoc, SelfWriteGate};
 
 mod pending_slices;
 

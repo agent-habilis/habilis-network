@@ -717,6 +717,22 @@ impl SliceStore {
     ///
     /// Returns the error of [`SliceStore::ingest`] for a frame it would refuse as malformed, too
     /// large or on another channel, and `GoneKey` for a key that said goodbye.
+    /// A frame of a key outside the roster waits in the pending set, and the view does not show it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::{Channel, Identity, MeshId, Message, MessageBody, Nickname};
+    /// use habilis_network_util::clock::Instant;
+    ///
+    /// let mut store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
+    /// let identity = Identity::generate();
+    /// let body = MessageBody::try_new(r#"{"version":1,"value":{}}"#).expect("a slice body");
+    /// let frame = Message::new_channel_event(&MeshId::from("demo"), &Nickname::from("peer"), body, Channel::Meta).sign(&identity);
+    /// store.hold(&frame, Instant::now()).expect("a well-formed frame is held");
+    /// assert!(store.view().is_empty());
+    /// ```
     pub fn hold(&mut self, frame: &Verified, now: Instant) -> Result<(), SliceError> {
         let body = self.read(frame)?;
         let key = frame.key();
@@ -728,6 +744,18 @@ impl SliceStore {
     }
 
     /// Takes the held frame of `key` out of the pending set, unless its TTL ended at `now`.
+    /// Takes the held frame of `key` out of the pending set. A frame that has waited past its TTL is gone.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::{AuthorKey, Channel};
+    /// use habilis_network_util::clock::Instant;
+    ///
+    /// let mut store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
+    /// assert!(store.take_pending(&AuthorKey::from([1u8; 32]), Instant::now()).is_none());
+    /// ```
     pub fn take_pending(&mut self, key: &AuthorKey, now: Instant) -> Option<Verified> {
         self.pending.expire(now);
         self.pending.take(key)
@@ -892,6 +920,19 @@ impl SliceStore {
 
     /// Moves each tombstone that has lasted its TTL to the gone set, drops each gone key that has
     /// lasted the gone TTL, and drops each held frame that has waited for the alive timeout.
+    /// Expires the tombstones, the gone keys and the held frames whose time has come at `now`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    /// use habilis_network_util::clock::Instant;
+    ///
+    /// let mut store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
+    /// store.expire(Instant::now());
+    /// assert!(store.view().is_empty());
+    /// ```
     pub fn expire(&mut self, now: Instant) {
         let ttl = self.limits.tombstone_ttl;
         let expired: Vec<AuthorKey> = self
@@ -930,18 +971,54 @@ impl SliceStore {
     }
 
     /// Drops the slice and the bucket of `key`, and keeps no gone entry and no pending frame.
+    /// Drops the slice of `key` with no gone entry, so the key can write again.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::{AuthorKey, Channel};
+    ///
+    /// let mut store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
+    /// store.release(&AuthorKey::from([1u8; 32]));
+    /// assert_eq!(store.held_keys().count(), 0);
+    /// ```
     pub fn release(&mut self, key: &AuthorKey) {
         self.slices.remove(key);
         self.buckets.remove(key);
     }
 
     /// Returns the keys that hold a slice in this store, tombstones included.
+    /// The keys that hold a slice in this store, tombstones included.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    ///
+    /// let store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
+    /// assert_eq!(store.held_keys().count(), 0);
+    /// ```
     pub fn held_keys(&self) -> impl Iterator<Item = AuthorKey> + '_ {
         self.slices.keys().copied()
     }
 
     /// Moves the slice of `key` into the pending set, for a key that lost its nickname and can return.
     /// The slice comes back on `take_pending` when the key rejoins, and it expires with the pending TTL.
+    /// Moves the slice of `key` into the pending set, for a key that lost its nickname and can return.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::{AuthorKey, Channel};
+    /// use habilis_network_util::clock::Instant;
+    ///
+    /// let mut store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
+    /// store.park(&AuthorKey::from([1u8; 32]), Instant::now());
+    /// assert!(store.view().is_empty());
+    /// ```
     pub fn park(&mut self, key: &AuthorKey, now: Instant) {
         if let Some(slice) = self.slices.remove(key) {
             self.pending.hold(&slice.frame, slice.version, now);

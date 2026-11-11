@@ -1,18 +1,17 @@
 # habilis-network-doc
 
-The shared-document engine behind the `state` and `meta` channels.
+The shared-state store behind the `state` and `meta` channels.
 
-Each channel is an [automerge](https://automerge.org) CRDT. A local write
-is an RFC 7386 JSON merge, translated into one automerge change. Peers
-exchange changes and automerge merges them without conflicts.
+Each channel holds one signed slice per author key. Only the author
+writes its own slice. A slice is a JSON object with a version and a
+value, and the store keeps each slice at its newest version.
 
-- Every change travels inside a signed message and is authorized before
-  it touches the live document.
-- `SelfWriteGate` applies each change to a throwaway fork first and
-  rejects it if it would alter the gated field of another peer's slot.
-  The other fields of a slot are not gated.
-- Changes that arrive before their causal dependencies wait in a pending
-  buffer and drain through the same gate.
+- Every slice travels inside a signed message. The store takes a slice
+  only from the key that signed it.
+- A slice of a key that said goodbye is refused. A key that lost its
+  nickname keeps its slice in a pending set until it returns.
+- A slice of a key outside the roster waits in a pending set, bounded in
+  count and in time, until the key joins.
 
-See `src/lib.rs` for the API: `MeshDoc`, `SelfWriteGate`, and the body
-codec functions.
+See `src/lib.rs` for the API: `SliceStore`, `SliceLimits`, and the
+sealed-body functions in `wire`.

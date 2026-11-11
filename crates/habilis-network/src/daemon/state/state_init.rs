@@ -10,8 +10,8 @@ use crate::protocol::identity::Identity;
 use iroh::address_lookup::memory;
 
 use crate::transport;
-/// The two keys of one run. The session key is made fresh each run: it signs every frame, it is the
-/// automerge actor, and it is the seal key. The member key lives in a file and survives a restart: it
+/// The two keys of one run. The session key is made fresh each run: it signs every frame, and it is the
+/// seal key. The member key lives in a file and survives a restart: it
 /// signs only the proof that the session speaks as the member.
 #[derive(Debug, Clone)]
 pub(crate) struct RunKeys {
