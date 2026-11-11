@@ -3198,7 +3198,7 @@ mod tests {
         };
         let before = write(
             &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
-            1,
+            5,
         );
         let after = write(
             &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart"),

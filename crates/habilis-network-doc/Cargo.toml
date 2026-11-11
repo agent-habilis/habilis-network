@@ -16,8 +16,6 @@ default = ["host"]
 # `libc`, unix sockets, signals, processes and the filesystem have no wasm32
 # equivalent. A wasm consumer builds the whole graph `--no-default-features`.
 host = ["habilis-network-protocol/host", "habilis-network-util/host"]
-# Exposes constructors the engine's adversarial suite injects with.
-adversarial = []
 
 [lints]
 workspace = true
@@ -31,7 +29,6 @@ habilis-network-protocol = { path = "../habilis-network-protocol", default-featu
 habilis-network-util = { path = "../habilis-network-util", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
 tracing.workspace = true
 bs58.workspace = true
 chacha20poly1305 = "0.10"

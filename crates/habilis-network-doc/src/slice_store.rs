@@ -717,7 +717,6 @@ impl SliceStore {
     ///
     /// Returns the error of [`SliceStore::ingest`] for a frame it would refuse as malformed, too
     /// large or on another channel, and `GoneKey` for a key that said goodbye.
-    /// A frame of a key outside the roster waits in the pending set, and the view does not show it.
     ///
     /// # Examples
     ///
@@ -744,7 +743,6 @@ impl SliceStore {
     }
 
     /// Takes the held frame of `key` out of the pending set, unless its TTL ended at `now`.
-    /// Takes the held frame of `key` out of the pending set. A frame that has waited past its TTL is gone.
     ///
     /// # Examples
     ///
@@ -971,7 +969,6 @@ impl SliceStore {
     }
 
     /// Drops the slice and the bucket of `key`, and keeps no gone entry and no pending frame.
-    /// Drops the slice of `key` with no gone entry, so the key can write again.
     ///
     /// # Examples
     ///
@@ -989,7 +986,6 @@ impl SliceStore {
     }
 
     /// Returns the keys that hold a slice in this store, tombstones included.
-    /// The keys that hold a slice in this store, tombstones included.
     ///
     /// # Examples
     ///
@@ -1006,7 +1002,6 @@ impl SliceStore {
 
     /// Moves the slice of `key` into the pending set, for a key that lost its nickname and can return.
     /// The slice comes back on `take_pending` when the key rejoins, and it expires with the pending TTL.
-    /// Moves the slice of `key` into the pending set, for a key that lost its nickname and can return.
     ///
     /// # Examples
     ///
