@@ -156,7 +156,7 @@ Code: `habilis-network/src/blob`.
 
 Layer: state. Two channels per mesh: `state` and `meta`.
 
-A JSON object that each member writes in part. A member writes only its own slice, a signed value with a version. A member reads the slice of every author. The view of a channel maps the lowercase hex of each author key to the value of its slice. A frame with a higher version replaces the slice of its author. A slice and its frame fit the wire limit, a channel holds 256 authors, and an author has a burst of 5 versions for a write.
+A JSON object that each member writes in part. A member writes only its own slice, a signed value with a version. A member reads the slice of every author. The view of a channel maps the lowercase hex of each author key to the value of its slice. A frame with a higher version replaces the slice of its author. On a tie of versions, the lower content hash wins. A slice and its frame fit the wire limit, a channel holds 256 authors, and an author has a burst of 5 versions for a write.
 
 Code: `habilis-network-doc` (`SliceStore`), `protocol::Channel`.
 
@@ -172,7 +172,7 @@ Code: `habilis-network/src/gossip/backfill.rs`.
 
 Layer: state. Keyed by author key.
 
-The place where a slice of a key that is not in the roster waits, 256 at most for each channel. A pending slice expires after 90 s. It is applied when its key joins the roster or returns to it. A pending slice is in no view and in no backfill.
+The place where a slice of a key that is not in the roster waits, as many keys as the author cap of the channel (256 by default). When the set is full, the key that arrived first goes. A pending slice expires after 90 s, and a newer version of its key restarts the wait. It is applied when its key joins the roster or returns to it. A pending slice is in no view and in no backfill.
 
 Code: `PendingSlices` in `crates/habilis-network-doc/src/pending_slices.rs`.
 

@@ -481,7 +481,7 @@ One frame goes for each channel that the member wrote.
 A member owes the backfill to a peer that joins and to a peer that returns from quiet.
 A send that finds no path keeps the peer owed.
 The retry tick sends again.
-An entry expires after 90 s.
+A peer stays owed for 90 s at most.
 A proof answer to the newcomer opens a path, so the slices go at once, with a dial back.
 A node does not re-send a frame that another node missed, except the shard repair of section 7.6.
 
@@ -553,12 +553,15 @@ The store has three caps:
 ### 8.1 The roster gate
 
 A slice of a key that is in the roster enters the store at once.
+The own key is never a stranger: its slice always enters.
 The roster is the live peers, the quiet peers and the lapsed peers.
 A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return.
 A slice of a key that is not in the roster waits in the **pending set**.
-The pending set holds the newest slice of each key, 256 at most for each channel.
-When the set is full, the oldest slice goes.
-A pending slice expires after 90 s, the alive timeout.
+The pending set holds the newest slice of each key.
+It holds as many keys as the author cap of the channel, 256 by default.
+When the set is full, the key that arrived first goes.
+A pending slice expires after 90 s, the alive timeout. A newer version of the same key restarts the wait.
+The sweep tick expires the pending slices.
 When the key joins the roster or returns to it, the engine applies the pending slice, and the rate limit charges it then.
 So 256 fresh keys that are not in the roster cannot fill the store.
 A pending slice is in no view and in no backfill.
@@ -572,7 +575,8 @@ The default of the gone TTL is 2 hours.
 It must stay above the quiet TTL (1 hour) plus the alive timeout, so a peer that missed the goodbye cannot bring back the old slice.
 A new run of a member replaces the older session of that member after the proof of the new run binds, so the view holds one slice for each member.
 A session that lost its nickname to another member can return.
-The engine moves its slice to the pending set, and it does not add the key to the gone set.
+The engine parks its slice in the pending set, and it does not add the key to the gone set.
+The pending TTL applies to that slice.
 A lapsed key keeps its slice.
 The slice goes only when the key leaves the roster.
 
