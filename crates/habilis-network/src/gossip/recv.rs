@@ -3110,8 +3110,8 @@ mod first_contact_tests {
             let mut app = MetaRecorder(Arc::clone(&record));
             let twin = nick("twin");
             let identity = Identity::generate();
-            // Version 1 applies. A second frame with version 1 is stale, so the store refuses it.
-            for version in [1, 1] {
+            // Version 1 applies. A second frame with version 0 is stale, so the store refuses it.
+            for version in [1, 0] {
                 let frame = Message::new_channel_event(
                     &node.mesh,
                     &twin,
