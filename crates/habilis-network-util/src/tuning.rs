@@ -1032,22 +1032,6 @@ pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
 /// and yields — a tie-break, not a delay knob, so no flag.
 pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
 
-/// How long after a direct fast-round digest a node holds back its own
-/// broadcast digests for that channel.
-pub const FAST_ROUND_ACTIVE: Duration = Duration::from_secs(1);
-
-/// How long a stalled fast round waits before it asks a peer that is still
-/// ahead again: a lost request, a lost answer, or a refusal costs this, not an
-/// anti-entropy tick. The reclaim timer drives the check, so this matches it.
-pub const FAST_ROUND_RETRY: Duration = Duration::from_millis(400);
-
-/// How many peers a node remembers as ahead of it, per channel.
-pub const FAST_ROUND_AHEAD_MAX: usize = 16;
-
-/// How long a peer stays remembered as ahead after its heads last showed it:
-/// a peer whose heads we can never hold must not hold a place for ever.
-pub const FAST_ROUND_AHEAD_TTL: Duration = Duration::from_mins(1);
-
 /// `HyParView` **active view** capacity (G): the number of direct gossip
 /// neighbors (open QUIC links) each member keeps per topic. A mesh of G + 1
 /// members or fewer forms a **full mesh** with nothing to shuffle, so it has

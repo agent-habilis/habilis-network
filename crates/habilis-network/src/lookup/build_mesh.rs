@@ -11,10 +11,11 @@ use iroh_gossip::proto::HyparviewConfig;
 use crate::transport::PayloadPath;
 
 use crate::transport;
-/// How many events of a topic the gossip keeps for a task that is not scheduled yet: sixteen backfill
-/// answers of 64 frames each. A late joiner meets the answers of its peers in one burst, and every
-/// change is a message of the topic. The default of 256 overflowed on a loaded host (the reader got
-/// `Lagged`, and the node logged "gossip event stream lagged").
+/// How many events of a topic the gossip keeps for a task that is not scheduled yet. The value keeps
+/// the old size, which held the burst of the digest era. A join wave now brings fewer frames
+/// (presence, proof and two slices per peer), so size it again in C2.3. The default of 256
+/// overflowed on a loaded host (the reader got `Lagged`, and the node logged "gossip event stream
+/// lagged").
 const TOPIC_EVENT_CAPACITY: usize = 1024;
 
 /// Build an iroh-gossip instance and a Router that accepts incoming gossip connections.
