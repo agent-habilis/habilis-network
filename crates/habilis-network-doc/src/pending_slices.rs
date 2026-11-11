@@ -137,7 +137,7 @@ mod tests {
     }
 
     fn pending() -> PendingSlices {
-        PendingSlices::new(256, Duration::from_secs(90))
+        PendingSlices::new(1024, Duration::from_secs(90))
     }
 
     #[test]

@@ -547,8 +547,14 @@ Authenticity is the job of the engine.
 
 The store has three caps:
 - A slice and its frame must fit the wire limit, `MAX_MESSAGE_SIZE` (3840 bytes). The cap of a body is that limit minus the frame overhead of the session, which holds the envelope, the mesh id and the nickname. A larger write is refused with the error `TooLarge`.
-- A channel holds 256 authors at most.
+- A channel holds 1024 authors at most. This is the cap of the live roster.
 - An author has a burst of 5 versions, and then 1 version for each write interval (1 s). An arrival has a burst of 10, so the jitter of a network does not refuse an honest version. A write or an arrival past the rate limit is refused with the error `RateLimited`. Every arrival of a key in the roster is charged, a replay from the gossip cache too. A key outside the roster is charged when its slice is applied (section 8.1).
+
+The caps bound the memory.
+In the worst case, a slice takes 3840 bytes.
+A full store of 1024 authors takes 3.75 MiB for each channel, so 7.5 MiB for the two channels.
+The pending set can hold the same, so the worst case is 15 MiB in all.
+A normal slice is about 300 bytes, so a normal full store takes about 600 KiB.
 
 ### 8.1 The roster gate
 
@@ -558,12 +564,12 @@ The roster is the live peers, the quiet peers and the lapsed peers.
 A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return.
 A slice of a key that is not in the roster waits in the **pending set**.
 The pending set holds the newest slice of each key.
-It holds as many keys as the author cap of the channel, 256 by default.
+It holds as many keys as the author cap of the channel, 1024 by default.
 When the set is full, the key that arrived first goes.
 A pending slice expires after 90 s, the alive timeout. A newer version of the same key restarts the wait.
 The sweep tick expires the pending slices.
 When the key joins the roster or returns to it, the engine applies the pending slice, and the rate limit charges it then.
-So 256 fresh keys that are not in the roster cannot fill the store.
+So a flood of fresh keys that are not in the roster cannot fill the store.
 A pending slice is in no view and in no backfill.
 A key that said goodbye is not held: the engine drops its slices.
 

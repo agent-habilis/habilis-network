@@ -188,7 +188,8 @@ pub struct SliceLimits {
     pub slice_bytes: usize,
     /// The least time between two writes of one author, after the burst.
     pub write_interval: Duration,
-    /// The most authors one store holds.
+    /// The most authors one store holds. The default is 1024, the cap of the live roster. The
+    /// pending set holds as many keys.
     pub max_authors: usize,
     /// The writes one author can make at once.
     pub burst: u32,
@@ -244,7 +245,7 @@ impl SliceLimits {
 
 impl Default for SliceLimits {
     fn default() -> Self {
-        Self::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5)
+        Self::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 1024, 5)
     }
 }
 
@@ -255,8 +256,8 @@ impl Default for SliceLimits {
 /// ```
 /// use habilis_network_doc::SliceError;
 ///
-/// let error = SliceError::TooManyAuthors { limit: 256 };
-/// assert_eq!(error.to_string(), "the store holds 256 authors already");
+/// let error = SliceError::TooManyAuthors { limit: 1024 };
+/// assert_eq!(error.to_string(), "the store holds 1024 authors already");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -385,7 +386,7 @@ impl LocalDraft {
 /// use habilis_network_protocol::Channel;
 ///
 /// let store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
-/// assert_eq!(store.limits().max_authors, 256);
+/// assert_eq!(store.limits().max_authors, 1024);
 /// ```
 #[derive(Debug)]
 pub struct SliceStore {
@@ -803,6 +804,7 @@ impl SliceStore {
     pub fn release(&mut self, key: &AuthorKey) {
         self.slices.remove(key);
         self.buckets.remove(key);
+        self.pending.take(key);
     }
 
     /// Returns the keys that hold a slice in this store, tombstones included.
@@ -1743,6 +1745,43 @@ mod tests {
             apply(&mut store, &frame(key(1), 2, json!({}))),
             SliceIngest::Refused(SliceError::GoneKey),
             "a forgotten key must be refused"
+        );
+    }
+
+    #[test]
+    fn a_released_key_has_no_pending_frame() {
+        let mut store = store();
+        let now = Instant::now();
+        store
+            .hold(&frame(key(1), 1, json!({})), now)
+            .expect("a stranger frame must be held");
+        store.release(&key(1));
+        assert!(
+            store.take_pending(&key(1), now).is_none(),
+            "release must clear the pending frame too"
+        );
+    }
+
+    #[test]
+    fn the_default_store_holds_1024_authors() {
+        let mut store = store();
+        let now = Instant::now();
+        for index in 0..1024 {
+            assert_eq!(
+                store.ingest(&frame(many_key(index), 1, json!({})), true, now),
+                SliceIngest::Applied,
+                "author {index} must be accepted by the default store"
+            );
+        }
+        assert_eq!(
+            store.authors(),
+            1024,
+            "the default store must hold 1024 authors"
+        );
+        assert_eq!(
+            apply(&mut store, &frame(many_key(1024), 1, json!({}))),
+            SliceIngest::Refused(SliceError::TooManyAuthors { limit: 1024 }),
+            "the 1025th author must be refused"
         );
     }
 
