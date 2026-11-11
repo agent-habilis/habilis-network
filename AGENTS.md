@@ -108,7 +108,7 @@ Code: `protocol::identity`, `AuthorKey`.
 
 Layer: presentation. Keyed by author key.
 
-A peer whose arrival was shown to the operator or the agent. `surfaced` is a subset of `peers`. It gates what is shown. The roster stays complete for anti-entropy.
+A peer whose arrival was shown to the operator or the agent. `surfaced` is a subset of `peers`. It gates what is shown. The roster stays complete: the roster gate of the shared state reads it.
 
 State: `surfaced`.
 
@@ -156,9 +156,29 @@ Code: `habilis-network/src/blob`.
 
 Layer: state. Two channels per mesh: `state` and `meta`.
 
-A JSON document that the whole mesh shares. It is an automerge replica on each member. Members exchange signed changes. The same set of changes gives the same document on every member.
+A JSON object that each member writes in part. A member writes only its own slice, a signed value with a version. A member reads the slice of every author. The view of a channel maps the lowercase hex of each author key to the value of its slice. A frame with a higher version replaces the slice of its author. A slice and its frame fit the wire limit, a channel holds 256 authors, and an author has a burst of 5 versions for a write.
 
-Code: `habilis-network-doc`, `protocol::Channel`.
+Code: `habilis-network-doc` (`SliceStore`), `protocol::Channel`.
+
+### backfill
+
+Layer: state. Keyed by author key.
+
+A member sends its own slice of each channel to a newcomer, and to a peer that returned from quiet. The frame is the original signed frame, so the newcomer checks the signature of the author. A peer that has no path yet stays owed until a path exists. An entry expires after 90 s.
+
+Code: `habilis-network/src/gossip/backfill.rs`.
+
+### pending set
+
+Layer: state. Keyed by author key.
+
+The place where a slice of a key that is not in the roster waits, 256 at most for each channel. A pending slice expires after 90 s. It is applied when its key joins the roster or returns to it. A pending slice is in no view and in no backfill.
+
+### gone set
+
+Layer: state. Keyed by author key.
+
+The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. The store refuses a slice of a gone key until the gone TTL ends. The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed quiet key is not gone, because it can return.
 
 ## Layering
 
@@ -168,7 +188,7 @@ Keep three layers apart. The rendezvous and the beacon bootstrap a mesh that you
 
 ### Join horizon
 
-A message is surfaced if and only if its timestamp is not before `joined_at`. One cutoff is computed once, in `lifecycle::observe`, and it applies to every surfaced event. A node still relays and logs older traffic for anti-entropy. It never shows it.
+A message is surfaced if and only if its timestamp is not before `joined_at`. One cutoff is computed once, in `lifecycle::observe`, and it applies to every surfaced event. A node still relays older traffic. It never shows it.
 
 ### Lifecycle is one vocabulary
 
@@ -387,7 +407,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `Seed` | `habilis-network-protocol/src/crypto.rs` | The wire seed of a mesh id and the salts of derivations. |
 | `SymmetricKey` | `habilis-network-protocol/src/crypto.rs` | A key that encrypts, wraps, or derives. Wiped on drop. |
 | `TicketSecret` | `habilis-network-protocol/src/crypto.rs` | The bearer secret of a ticket, and the token that a consumer presents. Wiped on drop. |
-| `DedupKey` | `habilis-network-protocol/src/dedup_key.rs` | The 16-byte dedup and anti-entropy key of a message. |
+| `DedupKey` | `habilis-network-protocol/src/dedup_key.rs` | The 16-byte dedup key of a message. |
 | `AuthorKey` | `habilis-network-protocol/src/author_key.rs` | The public key of the author of a message. |
 | `Signer` | `habilis-network-protocol/src/message/mod.rs` | The pair of an `AuthorKey` and its signature. A message holds both or neither (`Message::signer`). |
 | `ContentHash` | `habilis-network-protocol/src/content_hash.rs` | The SHA-256 of the canonical bytes of a message, used by the slice store. |
@@ -576,7 +596,7 @@ Runtime events drive these transitions, so their state is not known at compile t
 | Type | File | Holds |
 |---|---|---|
 | `LockedMesh` / `Mesh` | `habilis-network-protocol/src/mesh/mod.rs` | A decoded mesh with no secret. `unlock` turns it into a `Mesh`, or returns an `UnlockError` that says why not. Only `Mesh` derives a topic, a rendezvous or a port, and `Mesh::new` refuses a config that carries a secret. |
-| `Verified` / `Authored` | `habilis-network-protocol/src/message/verified.rs` | `Verified` is a message whose signature is checked, with its key. It is what the wire and the log take. `Authored` is a message whose author is proven: a read-only view with no `Serialize` of its own. `Deref` is a read door: `Message` has no public `Serialize`, so `&*authored` does not serialize, and only `Verified::serialize` makes a `WireFrame`, which every sender takes. Both share the message behind an `Arc`. `Proof` is the sealed trait both implement, so the gate and the app surface are generic over either. |
+| `Verified` / `Authored` | `habilis-network-protocol/src/message/verified.rs` | `Verified` is a message whose signature is checked, with its key. It is what the wire and the slice store take. `Authored` is a message whose author is proven: a read-only view with no `Serialize` of its own. `Deref` is a read door: `Message` has no public `Serialize`, so `&*authored` does not serialize, and only `Verified::serialize` makes a `WireFrame`, which every sender takes. Both share the message behind an `Arc`. `Proof` is the sealed trait both implement, so the gate and the app surface are generic over either. |
 | `WireFrame` | `habilis-network-protocol/src/message/wire.rs` | The bytes of one signed message as they go on a socket. Only `Verified::serialize` makes one, and its field is private, so the senders take a `WireFrame` and cannot be handed an unsigned frame. |
 | `InjectedEndpoint` | `habilis-network/src/daemon/setup/injected_endpoint.rs` | An endpoint that `InjectedEndpoint::bind` binds. `bind` checks the keys of the handles before it binds, and makes the admission table the hook reports to. The fields are private, so no other path builds one. |
 | `PendingOffer` / `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/jsep.rs` (and `web/jsep.rs`) | A JSEP offer or answer that waits for the remote side. `complete` consumes it. |
