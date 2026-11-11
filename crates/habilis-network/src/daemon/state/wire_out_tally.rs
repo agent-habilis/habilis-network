@@ -31,8 +31,6 @@ pub(crate) enum FrameClass {
     App,
     Presence,
     PeerInfo,
-    /// A digest frame, kept for the census label. No digest is sent any more.
-    Digest,
     /// A change of the `state` channel.
     State,
     /// A change of the `meta` channel.
@@ -45,14 +43,13 @@ pub(crate) enum FrameClass {
     Other,
 }
 
-pub(crate) const CLASS_COUNT: usize = 10;
+pub(crate) const CLASS_COUNT: usize = 9;
 
 impl FrameClass {
     const ALL: [Self; CLASS_COUNT] = [
         Self::App,
         Self::Presence,
         Self::PeerInfo,
-        Self::Digest,
         Self::State,
         Self::Meta,
         Self::LinkState,
@@ -67,7 +64,6 @@ impl FrameClass {
             Self::App => "app",
             Self::Presence => "presence",
             Self::PeerInfo => "peerinfo",
-            Self::Digest => "digest",
             Self::State => "state",
             Self::Meta => "meta",
             Self::LinkState => "linkstate",
@@ -87,7 +83,6 @@ impl FrameClass {
             b"app" => Self::App,
             b"presence" => Self::Presence,
             b"peerinfo" => Self::PeerInfo,
-            b"digest" => Self::Digest,
             b"state" => Self::State,
             b"meta" => Self::Meta,
             b"linkstate" => Self::LinkState,
@@ -472,7 +467,7 @@ mod tests {
         for (wire_type, class) in [
             ("presence", FrameClass::Presence),
             ("peerinfo", FrameClass::PeerInfo),
-            ("digest", FrameClass::Digest),
+            ("digest", FrameClass::Other),
             ("meta", FrameClass::Meta),
             ("linkstate", FrameClass::LinkState),
             ("ping", FrameClass::PingPong),

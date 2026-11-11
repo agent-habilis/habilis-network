@@ -1394,7 +1394,7 @@ fn a_digest_frame_is_not_a_message_kind_any_more() {
     assert!(
         matches!(&refused, MessageError::Source { .. })
             && format!("{refused:?}").contains("unknown variant `digest`"),
-        "a digest frame at 15.0 was not refused as an unknown kind: {refused:?}"
+        "a digest frame at 17.0 was not refused as an unknown kind: {refused:?}"
     );
 }
 
