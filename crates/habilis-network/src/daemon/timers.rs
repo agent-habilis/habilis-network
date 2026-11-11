@@ -149,11 +149,6 @@ pub(crate) async fn tick_state_refresh(
         cpu_ms = millis_saturating(cpu),
         idle_duplicates = idle.duplicates,
         idle_fresh = idle.fresh,
-        idle_fr_asks = idle.fr_asks,
-        idle_fr_retries = idle.fr_retries,
-        idle_state_answers = idle.state_answers,
-        idle_state_frames_unicast = idle.state_frames_unicast,
-        idle_state_frames_broadcast = idle.state_frames_broadcast,
         idle_state_rejected = idle.state_rejected,
         idle_broadcasts = idle.broadcasts,
         // A total since the process started, unlike the idle fields above, which are per interval.

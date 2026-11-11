@@ -68,16 +68,6 @@ pub(crate) struct IdleCounters {
     /// Authenticated frames that the app dedup kept as first sightings. With `duplicates`, it
     /// gives the frames per interval that reached the dedup.
     pub fresh: u64,
-    /// Digests of ours that a fast round sent to one peer (`ask`), the retries included.
-    pub fr_asks: u64,
-    /// The asks that the reclaim tick sent without a digest arriving (`resume_fast_rounds`).
-    pub fr_retries: u64,
-    /// State and meta digest answers that went out, on either plane.
-    pub state_answers: u64,
-    /// The frames of those answers that went to one peer.
-    pub state_frames_unicast: u64,
-    /// The frames of those answers that went out on gossip.
-    pub state_frames_broadcast: u64,
     /// State and meta frames that the document refused or ignored: a forged entry, a repeated
     /// `(actor, seq)` with other content, or a body that is no change.
     pub state_rejected: u64,
@@ -248,11 +238,6 @@ mod tests {
             reclaim: 3,
             duplicates: 4,
             fresh: 6,
-            fr_asks: 7,
-            fr_retries: 2,
-            state_answers: 3,
-            state_frames_unicast: 5,
-            state_frames_broadcast: 9,
             state_rejected: 1,
             ..IdleCounters::default()
         };
@@ -272,26 +257,6 @@ mod tests {
             "duplicates is read as it was set"
         );
         assert_eq!(reading.loop_arms.fresh, 6, "fresh is read as it was set");
-        assert_eq!(
-            reading.loop_arms.fr_asks, 7,
-            "fr_asks is read as it was set"
-        );
-        assert_eq!(
-            reading.loop_arms.fr_retries, 2,
-            "fr_retries is read as it was set"
-        );
-        assert_eq!(
-            reading.loop_arms.state_answers, 3,
-            "state_answers is read as it was set"
-        );
-        assert_eq!(
-            reading.loop_arms.state_frames_unicast, 5,
-            "state_frames_unicast is read as it was set"
-        );
-        assert_eq!(
-            reading.loop_arms.state_frames_broadcast, 9,
-            "state_frames_broadcast is read as it was set"
-        );
         assert_eq!(
             reading.loop_arms.state_rejected, 1,
             "state_rejected is read as it was set"
@@ -319,14 +284,8 @@ mod tests {
         assert_eq!(next.loop_arms.duplicates, 0, "take resets the duplicates");
         assert_eq!(next.loop_arms.fresh, 0, "take resets the first sightings");
         assert_eq!(
-            next.loop_arms.fr_asks
-                + next.loop_arms.fr_retries
-                + next.loop_arms.state_answers
-                + next.loop_arms.state_frames_unicast
-                + next.loop_arms.state_frames_broadcast
-                + next.loop_arms.state_rejected,
-            0,
-            "take resets the fast-round and answer counters"
+            next.loop_arms.state_rejected, 0,
+            "take resets the answer counter"
         );
         assert_eq!(next.loop_arms.ext.total(), 0, "take resets the split");
         assert_eq!(
