@@ -1234,6 +1234,7 @@ fn member_key(state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identit
 )]
 // the key is shared with the loop and its handlers, which hold clones
 fn member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identity>>> {
+    // shared with the loop and its handlers, which hold clones
     Ok(Some(sync::Arc::new(identity::Identity::generate())))
 }
 
