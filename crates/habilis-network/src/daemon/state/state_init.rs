@@ -9,7 +9,7 @@ use crate::protocol::identity::Identity;
 
 use iroh::address_lookup::memory;
 
-use crate::{doc, transport};
+use crate::transport;
 /// The two keys of one run. The session key is made fresh each run: it signs every frame, it is the
 /// automerge actor, and it is the seal key. The member key lives in a file and survives a restart: it
 /// signs only the proof that the session speaks as the member.
@@ -53,9 +53,10 @@ pub(crate) struct StateInit {
     pub(crate) state_file: Option<StateFile>,
     // the keys are shared with the loop and its handlers, which hold clones
     pub(crate) keys: RunKeys,
+    /// The frame overhead of this session, with its mesh id and nickname: it sets the body cap of the
+    /// shared-state slices.
+    pub(crate) frame_overhead: usize,
     pub secrets: MeshSecrets,
-    /// The `meta` channel's per-peer write gate; `None` leaves it free-form.
-    pub per_peer_gate: Option<doc::SelfWriteGate>,
     /// The negotiation-slot table the Router's signal acceptor was built with.
     ///
     /// Taken at construction rather than assigned afterwards, because the cap

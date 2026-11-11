@@ -4,7 +4,6 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
-mod batch_slots;
 mod in_flight_dial;
 mod registration;
 mod timeouts;
@@ -279,8 +278,10 @@ mod tests {
             );
             dead.close(0u32.into(), b"dead");
 
-            pool.send_batch(server, &dead, &[bytes::Bytes::from_static(b"frame")])
-                .await;
+            assert!(
+                pool.send_marked(server, &dead, b"frame").await.is_err(),
+                "the write on the closed connection fails"
+            );
 
             assert_eq!(
                 pool.connection(server).map(|pooled| pooled.stable_id()),

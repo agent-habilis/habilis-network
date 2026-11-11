@@ -39,7 +39,6 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
-use crate::doc::SelfWriteGate;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::{Mesh, MeshName};
 use crate::protocol::messages::Authored;
@@ -156,9 +155,9 @@ async fn run_checked<Driver: NodeDriver>(
         },
         mesh.mint_mesh.take(),
         &transports,
-        runtime.per_peer_gate.take(),
         started,
         state_file,
+        habilis_network_doc::frame_overhead(mesh.mesh.as_str(), mesh.author.as_str()),
     );
     let owned = OwnedEndpoints {
         router: endpoints.router,
@@ -403,9 +402,9 @@ fn initial_state(
     secrets: MeshSecrets,
     mint_mesh: Option<Mesh>,
     transports: &TransportSet,
-    per_peer_gate: Option<SelfWriteGate>,
     started: Instant,
     state_file: StateFileSeed,
+    frame_overhead: usize,
 ) -> EventLoopState {
     #[cfg(not(feature = "host"))]
     drop(state_file);
@@ -415,7 +414,7 @@ fn initial_state(
             state_file,
             keys,
             secrets,
-            per_peer_gate,
+            frame_overhead,
             // The *same* table the Router's signal acceptor holds, not a fresh
             // one: the cap only counts if both roles count against it together.
             webrtc_admission: transports.webrtc_admission.clone(),
@@ -619,27 +618,16 @@ async fn alive_arm(
     }
 }
 
-/// The anti-entropy tick: note the gap, then advertise both channel digests, so peers can
-/// request anything we hold that they miss.
-async fn antientropy_arm(
-    anchors: &mut TickAnchors,
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-) {
+/// The anti-entropy tick: note the gap, then send the backfill that a newcomer is still owed. Loss
+/// repair is gone until C2.3, so the tick sends no digest.
+async fn antientropy_arm(anchors: &mut TickAnchors, state: &mut EventLoopState) {
     timers::note_tick_gap(
         "antientropy",
         &mut anchors.antientropy,
         &mut anchors.antientropy_wall,
         antientropy_interval(),
     );
-    gossip::antientropy::broadcast_state_digests(
-        state,
-        context.sender,
-        context.mesh,
-        context.author,
-        gossip::antientropy::DigestTrigger::Tick,
-    )
-    .await;
+    gossip::backfill::settle(state, Instant::now()).await;
 }
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
@@ -1428,13 +1416,11 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         probe::regraft_due(&mut self.state, &context).await;
         probe::refill_isolated(&mut self.state, &context).await;
         webrtc::session_policy::detach_sessions_under_udp(&mut self.state, &context);
-        gossip::antientropy::resume_fast_rounds(&mut self.state, &context).await;
     }
 
     async fn antientropy(&mut self) {
         self.state.idle.antientropy += 1;
-        let context = self.parts.handler_ctx(&self.sender);
-        antientropy_arm(&mut self.anchors, &mut self.state, &context).await;
+        antientropy_arm(&mut self.anchors, &mut self.state).await;
     }
 
     // Counted before the census reads them, so the tick that reports an

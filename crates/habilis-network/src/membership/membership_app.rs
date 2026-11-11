@@ -328,8 +328,9 @@ pub enum Messaging {
     StateMerge {
         /// The RFC 7386 merge to apply.
         merge: serde_json::Value,
-        /// Gets `Ok` when the request is done, or the error text.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Gets `Ok` when the request is done, or the typed error: a write past the rate limit is
+        /// told apart from a value too large for a frame.
+        reply: oneshot::Sender<Result<(), transport::SendError>>,
     },
 }
 
@@ -920,8 +921,7 @@ impl MembershipApp {
                     StateMergeParams::new(context.into(), Channel::State, merge),
                 )
                 .await;
-                let outcome = merged.map_err(|error| error.to_string());
-                let _ = reply.send(outcome);
+                let _ = reply.send(merged);
                 // A durable write is not a live frame: it proves life only within one alive
                 // timeout of the clock of the reader, so it must not hold back the `alive`.
                 false
@@ -1883,9 +1883,8 @@ mod tests {
 
             let live = app.handle_session(request, &mut state, &context).await;
 
-            assert_eq!(
-                answer.await.expect("the request is answered"),
-                Ok(()),
+            assert!(
+                answer.await.expect("the request is answered").is_ok(),
                 "the merge was made and broadcast"
             );
             assert!(

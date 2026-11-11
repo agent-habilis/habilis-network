@@ -29,7 +29,7 @@ use crate::protocol::crypto;
 use crate::transport::underlay_webrtc;
 use iroh::address_lookup::memory;
 
-use crate::{doc, lookup, protocol, transport};
+use crate::{lookup, protocol, transport};
 use iroh_gossip::net;
 use std::{fmt, sync};
 /// Configuration for the event loop, shared by `create` and `join`.
@@ -207,10 +207,6 @@ pub(crate) struct RuntimeConfig {
     pub(crate) runtime_base: Option<PathBuf>,
     /// When set, the daemon writes peer count changes to this file.
     pub(crate) state_file: Option<PathBuf>,
-    /// The `meta` channel's per-peer write gate, when the application keeps a
-    /// per-peer map there (see [`crate::doc::SelfWriteGate`]). `None` leaves the
-    /// channel free-form.
-    pub(crate) per_peer_gate: Option<doc::SelfWriteGate>,
     /// When advertising (`create --advertise`), the shared counter the
     /// directory re-broadcast task reads the live peer count from. Supplied
     /// up front through `SetupParams::live_count`, so the config is complete

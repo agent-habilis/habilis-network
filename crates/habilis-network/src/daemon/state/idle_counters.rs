@@ -211,7 +211,7 @@ mod tests {
     fn two_loops_take_only_the_frames_that_their_own_senders_sent() {
         let _one_at_a_time = TAKES.lock().expect("another census test panicked");
         let (mut first, mut second) = (IdleCounters::default(), IdleCounters::default());
-        let frame = br#"{"v":"16.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{}}"#;
+        let frame = br#"{"v":"17.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{}}"#;
         let handle_of_first = first.wire_out.clone();
 
         handle_of_first.note(frame);

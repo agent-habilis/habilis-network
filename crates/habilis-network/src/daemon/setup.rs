@@ -1481,7 +1481,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         endpoint: injected,
         protocols,
         transports,
-        per_peer_gate,
     } = params;
     // The member key is taken first, before an endpoint is bound or a topic joined: a start that another
     // daemon holds the key of fails with nothing left behind.
@@ -1612,7 +1611,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             max_peers,
             runtime_base,
             state_file,
-            per_peer_gate,
             live_count,
             // Default to the CLI driver; the in-process sessions
             // overwrite `cfg.runtime.driver` before handing it to `daemon::run`.

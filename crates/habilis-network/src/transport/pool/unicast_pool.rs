@@ -1,6 +1,5 @@
 //! The dial side of the unicast plane: the per-peer connection pool.
 
-use super::batch_slots::BatchSlots;
 use super::in_flight_dial::InFlightDial;
 use super::registration::Registration;
 use super::timeouts::{
@@ -31,7 +30,6 @@ use crate::util::cooldown::Cooldown;
 use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 
 use crate::daemon::state::WireOutTally;
-use crate::protocol::messages;
 
 use n0_future::{task, time};
 use std::sync::{Mutex as std_Mutex, OnceLock, OnceLock as std_OnceLock};
@@ -95,8 +93,6 @@ pub(in crate::transport::pool) struct PoolInner {
     /// a graceful `Left`; expired ones are pruned on the next `note`.
     pub(in crate::transport::pool) dial_failures: Mutex<Cooldown<EndpointId>>,
     /// The answer batches in flight: a peer cannot draw more of them than its share, however many
-    /// author keys it signs its digests with.
-    pub(in crate::transport::pool) batch_slots: BatchSlots,
     /// Times the inline-dial path was entered. Counted on entry rather than at
     /// the dial itself, because the question a caller on the event loop needs
     /// answered is whether it *could* have waited here — a detached pool bails
@@ -167,7 +163,6 @@ impl UnicastPool {
                 probe_hold,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
-                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -192,7 +187,7 @@ impl UnicastPool {
     }
 
     /// [`send_one`], marked busy in the ledger for as long as it runs.
-    async fn send_marked(
+    pub(in crate::transport::pool) async fn send_marked(
         &self,
         eid: EndpointId,
         connection: &Connection,
@@ -234,7 +229,6 @@ impl UnicastPool {
                 probe_hold: PROBE_HOLD,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
-                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -511,97 +505,6 @@ impl UnicastPool {
             .lock()
             .await
             .on_cooldown(&eid, Instant::now())
-    }
-
-    /// Send `frames` to `eid` in order, from one spawned task: one stream per
-    /// frame, in sequence. [`Self::dial_and_send_in_background`] takes one
-    /// frame, and while its dial is in flight every further call for the same
-    /// peer is refused, so a batch sent that way loses all but its first frame
-    /// to a cold peer. A warm connection takes a batch at once, even with
-    /// another batch to the same peer still going: a node sends its state and
-    /// meta digests back to back, so a holder answers it twice at once. A cold
-    /// peer is dialed first, and only one dial to it runs at a time. Returns
-    /// `false`, sending nothing, when the warm connection's path may not carry
-    /// payload, or `eid` is cold and on the dial-failure cooldown or already
-    /// being dialed. `true` means handed off, not delivered: a dial, path or
-    /// write failure after it is only logged, and a write can succeed into a
-    /// connection that died silently.
-    pub(crate) async fn send_batch_in_background(
-        &self,
-        eid: EndpointId,
-        frames: Vec<messages::WireFrame>,
-    ) -> bool {
-        // A batch holds its frames until the last one is written, and a peer that does not read keeps
-        // them there: a peer has its share of batches in flight, and the table has its total.
-        let Some(slot) = self.inner.batch_slots.take(eid) else {
-            return false;
-        };
-        let frames: Vec<Bytes> = frames
-            .into_iter()
-            .map(messages::WireFrame::into_bytes)
-            .collect();
-        if let Some(connection) = self.warm(eid).await {
-            if !payload_allowed_on(&connection, self.inner.relay_transport) {
-                return false;
-            }
-            let pool = self.clone();
-            task::spawn(async move {
-                let _slot = slot;
-                pool.send_batch(eid, &connection, &frames).await;
-            });
-            return true;
-        }
-        if self
-            .inner
-            .dial_failures
-            .lock()
-            .await
-            .on_cooldown(&eid, Instant::now())
-        {
-            return false;
-        }
-        let Registration::Dialer(in_flight) = self.register_dial(eid) else {
-            return false;
-        };
-        task::spawn(async move {
-            let _slot = slot;
-            let pool = &in_flight.pool;
-            let connection = match pool.warm_or_dial(eid).await {
-                Ok(connection) => connection,
-                Err(error) => {
-                    in_flight.publish(Err(error.to_string()));
-                    tracing::debug!(target: LOG_TARGET, %eid, %error, "batch not delivered: no connection");
-                    return;
-                }
-            };
-            if !pool.inner.relay_transport
-                && !payload_path::wait_direct(&connection, PATH_SELECT_TIMEOUT).await
-            {
-                in_flight.publish(Err(RELAY_REFUSED.to_owned()));
-                tracing::debug!(target: LOG_TARGET, %eid, "batch not delivered: {RELAY_REFUSED}");
-                return;
-            }
-            in_flight.publish(Ok(()));
-            pool.send_batch(eid, &connection, &frames).await;
-        });
-        true
-    }
-
-    /// Write `frames` to `conn` one stream at a time, in order, stopping and
-    /// dropping the connection at the first write error.
-    pub(in crate::transport::pool) async fn send_batch(
-        &self,
-        eid: EndpointId,
-        connection: &Connection,
-        frames: &[Bytes],
-    ) {
-        for bytes in frames {
-            if let Err(error) = self.send_marked(eid, connection, bytes).await {
-                tracing::debug!(target: LOG_TARGET, %eid, %error, "batch cut short; dropping the connection");
-                self.evict_if_same(eid, connection).await;
-                return;
-            }
-        }
     }
 
     /// Put `eid` on the dial-failure cooldown, as a failed dial does.

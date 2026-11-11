@@ -1,5 +1,6 @@
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
+use crate::gossip::backfill;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::identity::Identity;
 use crate::protocol::messages::Verified;
@@ -124,6 +125,7 @@ pub(crate) fn observe(
         }
     }
     if update.returned || update.joined_new {
+        backfill::owe(state, key, Instant::now());
         // A key that enters the roster under a nickname whose dial hint was made by a key that is
         // not live (quiet, lapsed or pruned) does not inherit the hint: a directed send would
         // reach the old node.
@@ -279,7 +281,6 @@ mod churn_red {
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::setup::LiveCount;
     use crate::daemon::state::{EventLoopState, LiveRun};
-    use crate::gossip::antientropy;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::{NodeEvent, NodeSink};
     use crate::lifecycle::heartbeat::{tick_alive, tick_sweep};
@@ -3291,115 +3292,5 @@ mod churn_red {
             !update.stale && update.joined_new,
             "the first frame of a new key in the second of the old goodbye is stale: {update:?}"
         );
-    }
-
-    /// H1, route A, in one process. A late joiner sends a meta digest with no heads. A node that
-    /// holds the signed change of a dead peer answers it with that frame (the answer is
-    /// `handle_state_digest`, which serves the frames of any author). The frame reaches a live
-    /// node that has the dead peer in `quiet` and whose seen set forgot the frame. The live node
-    /// must not report the dead peer as back.
-    #[test]
-    fn h1_route_a_a_late_joiners_digest_revives_a_sigkilled_peer() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let rig = Rig::new().await;
-            let context = rig.context();
-            let dead = nick("swift-cedar");
-
-            // The dead peer wrote one meta change, signed with its key.
-            let writer = fresh_state();
-            let seed = *writer.identity.public().as_bytes();
-            let merged = writer
-                .docs
-                .build_change(
-                    Channel::Meta,
-                    &serde_json::json!({ "status": "busy" }),
-                    &seed,
-                )
-                .expect("a JSON object merges");
-            let change = merged.expect("a non-empty merge yields a change");
-            let (wire, _plain) = writer
-                .docs
-                .compose_wire_body(Channel::Meta, &change, None)
-                .expect("compose the wire body");
-            let mut change_frame =
-                Message::new_channel_event(&rig.mesh, &dead, wire, Channel::Meta);
-            change_frame.timestamp = long_ago();
-            let change_frame = change_frame.sign(&writer.identity);
-
-            // The live node saw the peer alive and its change, then the peer was killed by `SIGKILL`.
-            let mut live = fresh_state();
-            live.joined_at = long_ago() - Duration::from_secs(10);
-            let hello = chat(&rig.mesh, &dead, &writer.identity, long_ago());
-            assert!(
-                receive(&hello, &mut live, &context),
-                "the frame is new to the seen set"
-            );
-            assert!(
-                receive(&change_frame, &mut live, &context),
-                "the frame is new to the seen set"
-            );
-            let silent = Instant::now()
-                .checked_sub(alive_timeout() + Duration::from_secs(10))
-                .expect("the monotonic clock has run past the alive timeout since boot");
-            live.last_seen_for_test(dead.as_str(), silent);
-            tick_sweep(&mut live, &rig.sink);
-            assert!(
-                live.quiet.contains(&live.key_named(dead.as_str())),
-                "the peer is quiet"
-            );
-            let talker = Identity::generate();
-            for _ in 0..SEEN_IDS_CAP {
-                live.mark_seen(&alive(
-                    &rig.mesh,
-                    &nick("busy-room"),
-                    &talker,
-                    UnixSecs::now(),
-                ));
-            }
-
-            // Another node holds the change of the dead peer and gets a digest from a late joiner.
-            let mut holder = fresh_state();
-            let _ = holder.docs.ingest(Channel::Meta, &change_frame);
-            assert!(
-                holder
-                    .docs
-                    .changes_since_not_by(Channel::Meta, &[], None, 10)
-                    .any(|frame| frame.key() == victim_key(&writer)),
-                "precondition: the holder has the change of the dead peer"
-            );
-            let joiner = Identity::generate();
-            let digest = Message::new_channel_digest(
-                &rig.mesh,
-                &nick("late-joiner"),
-                MessageBody::from(r#"{"heads":[]}"#),
-                Channel::Meta,
-            )
-            .sign(&joiner);
-            let answered =
-                antientropy::handle_state_digest(Channel::Meta, &digest, &mut holder, &context)
-                    .await;
-            assert!(
-                answered.broadcast + answered.unicast > 0,
-                "precondition: the holder answers the digest with the frame of the dead peer"
-            );
-
-            // The answer reaches the live node.
-            for frame in holder
-                .docs
-                .changes_since_not_by(Channel::Meta, &[], None, 10)
-            {
-                receive(&frame, &mut live, &context);
-            }
-            let lines = rig.sink.lines();
-            assert!(
-                !lines.iter().any(|line| line == "return swift-cedar"),
-                "a late joiner digest made a live node report the dead peer as back: {lines:?}"
-            );
-            rig.endpoint.close().await;
-        });
-    }
-
-    fn victim_key(writer: &EventLoopState) -> AuthorKey {
-        writer.identity.author_key()
     }
 }

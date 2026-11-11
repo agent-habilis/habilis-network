@@ -10,8 +10,8 @@
 
 use habilis_network_util::consts;
 use iroh_gossip::proto;
-pub(crate) mod antientropy;
 pub(crate) mod app;
+pub(crate) mod backfill;
 pub(crate) mod event;
 pub(crate) mod heal;
 pub(crate) mod lan;
@@ -38,6 +38,7 @@ const _: () = assert!(
     "MAX_MESSAGE_SIZE leaves too little headroom under iroh-gossip's DEFAULT_MAX_MESSAGE_SIZE"
 );
 
+#[cfg(feature = "multihop")]
 pub(crate) use json_body::json_body;
 pub use merge_ctx::{
     Farewell, MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge,

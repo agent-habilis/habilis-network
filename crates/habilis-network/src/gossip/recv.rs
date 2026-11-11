@@ -20,12 +20,13 @@ use crate::protocol::messages::{Authored, MessageBody, MessageError, Proof, Veri
 use crate::protocol::{AuthorKey, Channel, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
 use crate::{lifecycle, lookup};
+use habilis_network_doc::SliceIngest;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
 use n0_future::time::Instant as TokioInstant;
 
-use super::antientropy;
 use super::app::{AppClass, InboundApp, NodeApp};
+use super::backfill;
 use super::merge_ctx::{announce_arrival, broadcast_peer_info};
 use crate::net;
 
@@ -53,20 +54,6 @@ async fn mesh_on_first_link(
     state.standing.insert(Standing::Meshed);
     state.standing.remove(&Standing::Degraded);
     flush_pending(state, context, "first real-peer link up").await;
-    // Our first digests may have gone out over the rendezvous
-    // alone, and their answers re-send frames every hop there
-    // already saw: iroh-gossip drops a message id it has seen,
-    // so none of it reaches us. Ask again over a link that can
-    // carry the answer.
-    tracing::debug!(target: "habilis_network::gossip", "asked for state again on the first real-peer link");
-    antientropy::broadcast_state_digests(
-        state,
-        context.sender,
-        context.mesh,
-        context.author,
-        antientropy::DigestTrigger::Event,
-    )
-    .await;
     // Re-publish anything whose value depends on being meshed
     // (the app's card dial hint); see `NodeApp::on_meshed`.
     app.on_meshed(state, context).await;
@@ -769,10 +756,6 @@ async fn dispatch_infra(
             );
             return ControlFlow::Break(());
         }
-        MessageKind::StateDigest => {
-            antientropy::handle_state_digest(Channel::State, message, state, context).await;
-            return ControlFlow::Break(());
-        }
         MessageKind::Meta => {
             dispatch_channel(
                 ChannelEvent {
@@ -786,10 +769,7 @@ async fn dispatch_infra(
             );
             return ControlFlow::Break(());
         }
-        MessageKind::MetaDigest => {
-            antientropy::handle_state_digest(Channel::Meta, message, state, context).await;
-            return ControlFlow::Break(());
-        }
+        MessageKind::StateDigest | MessageKind::MetaDigest => return ControlFlow::Break(()),
         MessageKind::LinkState => {
             if handle_link_state(message, state) {
                 probe::nudge_climbing_pairs(state, context, true);
@@ -1102,6 +1082,12 @@ async fn answer_proof_request(
     if !sent {
         tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: the send failed");
     }
+    // The proof exchange opens the path to the asker, so the own slices go out now, not on the tick.
+    let asker = message.key();
+    backfill::owe(state, asker, Instant::now());
+    if backfill::send_to(state, eid, came_on_it).await {
+        state.owed_backfill.remove(&asker);
+    }
 }
 
 /// The endpoint that the answer to a proof request from `asker` goes to.
@@ -1223,14 +1209,7 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
-    let changes = state.docs.change_count(channel);
-    ingest_channel_event(event, &mut state.docs, context);
-    if state.docs.change_count(channel) > changes {
-        state.fast_rounds.note_change(channel, Instant::now());
-    }
-    for key in state.docs.take_dropped(channel) {
-        state.seen.remove(&key);
-    }
+    ingest_channel_event(event, &mut state.docs, Instant::now(), context);
     if channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
@@ -1242,10 +1221,8 @@ fn dispatch_channel(
 /// the wire body (a decrypted `enc` body), a clone with the body replaced; else
 /// the original borrowed unchanged. The output helpers read `event.body` for the
 /// `m` delta, so they must see plaintext.
-fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
-    let changed = plain.filter(|text| text != frame.body.as_str());
-    let body = changed.and_then(|text| MessageBody::try_new(&text).ok());
-    match body {
+fn surface_view(frame: &Verified, plain: Option<MessageBody>) -> Authored {
+    match plain {
         Some(body) => frame.copy_with_body(body),
         None => frame.authored(),
     }
@@ -1256,39 +1233,27 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
-fn ingest_channel_event(event: ChannelEvent<'_>, docs: &mut ChannelDocs, context: &HandlerCtx<'_>) {
-    use crate::doc::Ingested;
-
+fn ingest_channel_event(
+    event: ChannelEvent<'_>,
+    docs: &mut ChannelDocs,
+    now: Instant,
+    context: &HandlerCtx<'_>,
+) {
     let ChannelEvent {
         channel,
         message,
         surfaceable,
     } = event;
-    // The doc dedups by change hash, buffers out-of-order changes until their
-    // deps land, retains the signed frame for re-serve, and gates card forgery
-    // (the card carries the peer's cryptographic identity) — every recipient
-    // applies the same gate, so a forgery converges nowhere.
-    let ingested = docs.ingest(channel, message);
-    if matches!(ingested, Ingested::Rejected) {
-        tracing::warn!(target: "habilis_network::gossip",
-            author = %message.author,
-            "dropping a {} change that forges another peer's agent card",
-            channel.label()
-        );
-    } else if let Ingested::Applied {
-        changed: true,
-        doc: after,
-    } = ingested
+    // Every arrival is live: a frame the node did not ask for is charged a token, a replay from the
+    // gossip cache included.
+    if let SliceIngest::Applied = docs.ingest(channel, message, true, now)
         && surfaceable
     {
-        // On a passworded mesh the received body is ciphertext; surface a
-        // plaintext-bodied view so the human/JSON `m` delta still renders.
-        // The frame retained for re-serve (inside `ingest`) stays ciphertext.
-        let surfaced = surface_view(message, docs.surface_body(channel, message));
+        let surfaced = surface_view(message, docs.plain_body(channel, &message.key()));
         context.sink.emit(NodeEvent::StateChanged {
             channel,
             event: Box::new(surfaced),
-            document: after,
+            document: docs.to_json(channel),
             is_self: false,
         });
     }
@@ -1531,14 +1496,9 @@ fn maybe_push_inbound(
 /// If the newcomer has the lower endpoint id we wait for it to dial. A first
 /// frame that is its `joined` floods our address in `handle_presence` instead.
 async fn greet_new_peer(message: &Verified, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    antientropy::broadcast_state_digests(
-        state,
-        context.sender,
-        context.mesh,
-        context.author,
-        antientropy::DigestTrigger::Event,
-    )
-    .await;
+    let now = Instant::now();
+    backfill::owe(state, message.key(), now);
+    backfill::settle(state, now).await;
     if !matches!(
         message.kind,
         MessageKind::Presence {
@@ -1903,183 +1863,6 @@ mod arms_reclaim_tests {
             super::arms_reclaim(false, 2, true),
             "a node below the release count arms the reclaim for the beacon"
         );
-    }
-}
-
-/// A change the channel doc evicts from its orphan buffer is recovered when
-/// anti-entropy re-serves it. The re-served frame is the original signed one,
-/// so it carries the dedup key the receive path recorded on first arrival.
-#[cfg(test)]
-mod evicted_orphan_tests {
-    use iroh::endpoint::presets;
-    use iroh_gossip::net::Gossip;
-    use serde_json::json;
-
-    use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::EventLoopState;
-    use crate::doc::Ingested;
-    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::SilentSink;
-    use crate::protocol::identity::Identity;
-    use crate::protocol::messages::{Authored, Verified};
-    use crate::protocol::{Channel, MeshId, Message, Nickname};
-    use crate::testing::{endpoint_id, fresh_state, nick};
-    use crate::transport::MeshSender;
-    use habilis_network_util::consts::DOC_PENDING_AUTHOR_MAX;
-
-    use iroh_gossip::proto;
-    /// State frames never reach the app, so it only has to exist.
-    struct Inert;
-
-    #[async_trait::async_trait]
-    impl NodeApp for Inert {
-        fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass::BEAT.union(AppClass::VALID)
-        }
-
-        async fn on_app_frame(
-            &mut self,
-            _frame: InboundApp<'_>,
-            _state: &mut EventLoopState,
-            _ctx: &HandlerCtx<'_>,
-        ) -> bool {
-            false
-        }
-    }
-
-    /// `count` state changes by one author, each depending on the one before.
-    fn chain(
-        writer: &mut EventLoopState,
-        mesh: &MeshId,
-        author: &Nickname,
-        count: usize,
-    ) -> Vec<Verified> {
-        let seed = *writer.identity.public().as_bytes();
-        (0..count)
-            .map(|step| {
-                let change = writer
-                    .docs
-                    .build_change(Channel::State, &json!({ format!("k{step}"): step }), &seed)
-                    .expect("a JSON object merges")
-                    .expect("a non-empty merge yields a change");
-                let (wire, _plain) = writer
-                    .docs
-                    .compose_wire_body(Channel::State, &change, None)
-                    .expect("compose the wire body");
-                let frame = Message::new_channel_event(mesh, author, wire, Channel::State)
-                    .sign(&writer.identity);
-                assert!(
-                    matches!(
-                        writer.docs.ingest(Channel::State, &frame),
-                        Ingested::Applied { .. }
-                    ),
-                    "the state document applies the frame"
-                );
-                frame
-            })
-            .collect()
-    }
-
-    fn holds(state: &EventLoopState, step: usize) -> bool {
-        state
-            .docs
-            .to_json(Channel::State)
-            .get(format!("k{step}"))
-            .is_some()
-    }
-
-    #[test]
-    fn an_evicted_orphan_is_recovered_when_its_frame_is_re_served() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            ::habilis_network_test_tracing::expect_warn(
-                "habilis_network::gossip",
-                "channel orphan buffer full for this author",
-            );
-            let mesh = MeshId::from("test");
-            let mut writer = fresh_state();
-            let frames = chain(
-                &mut writer,
-                &mesh,
-                &nick("writer"),
-                DOC_PENDING_AUTHOR_MAX + 32,
-            );
-
-            let endpoint = iroh::Endpoint::builder(presets::Minimal)
-                .bind()
-                .await
-                .expect("bind a local endpoint");
-            let gossip = Gossip::builder().spawn(endpoint.clone());
-            let topic = gossip
-                .subscribe(proto::TopicId::from_bytes([3u8; 32]), vec![])
-                .await
-                .expect("subscribe to a peerless topic");
-            let (gossip_sender, _receiver) = topic.split();
-            let sender = MeshSender::new(gossip_sender);
-            let identity = Identity::generate();
-            let our_pubkey = identity.author_key();
-            let reader_nick = nick("reader");
-            let sink = SilentSink;
-            let context = HandlerCtx {
-                sender: &sender,
-                endpoint: &endpoint,
-                mesh: &mesh,
-                author: &reader_nick,
-                identity: &identity,
-                our_pubkey,
-                max_peers: 16,
-                rendezvous_id: endpoint_id(9),
-                external_msg_tx: None,
-                sink: &sink,
-            };
-            let mut reader = fresh_state();
-            let mut app = Inert;
-            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
-
-            // Newest first: every frame but the root arrives as an orphan, so the
-            // per-author ceiling evicts the stalest of them before the root lands.
-            let newest_first: Vec<&Verified> = frames.iter().rev().collect();
-            for frame in newest_first {
-                super::ingest(wire(frame), &mut reader, &mut app, &context).await;
-            }
-            let missing: Vec<&Verified> = (0..frames.len())
-                .filter(|&step| !holds(&reader, step))
-                .map(|step| &frames[step])
-                .collect();
-            assert!(
-                !missing.is_empty(),
-                "nothing was evicted, so this test proves nothing"
-            );
-            let missing_refs = missing.iter();
-            let fresh = missing_refs.filter(|frame| reader.seen.contains(&frame.dedup_key()));
-            let already_seen: usize = fresh.count();
-            assert_eq!(
-                already_seen,
-                0,
-                "{already_seen} of the {} dropped frames are still in the seen set, so \
-                 their re-send will be discarded as a repeat",
-                missing.len()
-            );
-
-            // What anti-entropy does for a peer whose heads show the gap: re-serve
-            // the author's original signed frames.
-            for frame in &missing {
-                super::ingest(wire(frame), &mut reader, &mut app, &context).await;
-            }
-
-            let held = (0..frames.len())
-                .filter(|&step| holds(&reader, step))
-                .count();
-            assert_eq!(
-                held,
-                frames.len(),
-                "the reader holds {held} of {} changes after the {} evicted ones were \
-                 re-served; {already_seen} of those were already in the seen set, so \
-                 the receive path dropped them as duplicates",
-                frames.len(),
-                missing.len()
-            );
-            endpoint.close().await;
-        });
     }
 }
 
@@ -2894,7 +2677,7 @@ mod first_contact_tests {
             let text = frame.serialize().expect("serialize").into_bytes();
             let old = String::from_utf8(text.to_vec())
                 .expect("a frame is text")
-                .replacen(r#""v":"16.0""#, r#""v":"12.0""#, 1);
+                .replacen(r#""v":"17.0""#, r#""v":"12.0""#, 1);
             assert!(old.contains("12.0"), "the test frame names version 12.0");
 
             ingest(Bytes::from(old.clone()), &mut state, &mut app, &context).await;
@@ -3121,7 +2904,7 @@ mod first_contact_tests {
             let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
             let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
             let version = format!(r"\u0007\u001b[31m{}", "x".repeat(500));
-            let hostile = text.replacen(r#""v":"16.0""#, &format!(r#""v":"{version}""#), 1);
+            let hostile = text.replacen(r#""v":"17.0""#, &format!(r#""v":"{version}""#), 1);
 
             ingest(Bytes::from(hostile), &mut state, &mut app, &context).await;
 
@@ -3178,7 +2961,7 @@ mod first_contact_tests {
 
             // Two passes over `cap + 1` versions: an evicting set names every frame of both.
             for version in (0..=cap).chain(0..=cap) {
-                let other = text.replacen(r#""v":"16.0""#, &format!(r#""v":"v{version}""#), 1);
+                let other = text.replacen(r#""v":"17.0""#, &format!(r#""v":"v{version}""#), 1);
                 ingest(Bytes::from(other), &mut state, &mut app, &context).await;
             }
 
@@ -4583,52 +4366,6 @@ mod first_contact_tests {
         });
     }
 
-    /// A node whose first digests went out over the rendezvous alone can have
-    /// every answer dropped on the way: each hop already saw those frames, and
-    /// iroh-gossip drops a message id it has seen. So it asks again on its
-    /// first real-peer link, and on no other link.
-    /// `idle.broadcasts` counts digest broadcasts and nothing else a link-up
-    /// sends; the test sender cannot record frames, so the count stands in for
-    /// the three digests.
-    #[test]
-    fn only_the_first_real_peer_link_asks_for_state_again() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let node = Node::spawn().await;
-            let context = node.context();
-            let mut state = fresh_state();
-            let mut app = Inert;
-
-            let mut digests_on_link_up = async |peer| {
-                let before = state.idle.broadcasts;
-                handle_gossip_event(
-                    Some(Ok(Event::NeighborUp(peer))),
-                    &mut state,
-                    &mut app,
-                    &context,
-                )
-                .await;
-                state.idle.broadcasts - before
-            };
-
-            assert_eq!(
-                digests_on_link_up(context.rendezvous_id).await,
-                0,
-                "the rendezvous link"
-            );
-            assert_eq!(
-                digests_on_link_up(endpoint_id(1)).await,
-                2,
-                "the first real-peer link: one state and one meta digest"
-            );
-            assert_eq!(
-                digests_on_link_up(endpoint_id(2)).await,
-                0,
-                "a second real-peer link"
-            );
-            node.endpoint.close().await;
-        });
-    }
-
     /// A newcomer behind the rendezvous learns our address only from our
     /// `PeerInfo` flood, and the lower endpoint id is the one that dials. Its
     /// first frame to reach us is not always its `joined`: under load its
@@ -5862,7 +5599,6 @@ mod dedup_counter_tests {
 
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
-    use crate::gossip::antientropy::Plane;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
     use crate::lifecycle;
@@ -5894,14 +5630,14 @@ mod dedup_counter_tests {
     }
 
     /// [`reader_after_on`] for a reader that starts as `initial`.
-    fn reader_with(initial: EventLoopState, arrivals: Vec<(Plane, Bytes)>) -> EventLoopState {
+    fn reader_with(initial: EventLoopState, arrivals: Vec<Bytes>) -> EventLoopState {
         reader_with_sink(initial, arrivals, &SilentSink)
     }
 
     /// [`reader_with`] with the sink that receives the events of the arrivals.
     fn reader_with_sink(
         initial: EventLoopState,
-        arrivals: Vec<(Plane, Bytes)>,
+        arrivals: Vec<Bytes>,
         sink: &dyn NodeSink,
     ) -> EventLoopState {
         reader_full(initial, arrivals, sink, None)
@@ -5911,7 +5647,7 @@ mod dedup_counter_tests {
     /// from it is taken to have arrived on a unicast connection, so the asks that waited for a path are tried.
     fn reader_full(
         initial: EventLoopState,
-        arrivals: Vec<(Plane, Bytes)>,
+        arrivals: Vec<Bytes>,
         sink: &dyn NodeSink,
         path_up: Option<lifecycle::PathSign>,
     ) -> EventLoopState {
@@ -5921,7 +5657,7 @@ mod dedup_counter_tests {
     /// [`reader_with_sink`] for a test whose subject is a WARN: each `(target, text)` is expected from the run.
     fn reader_expecting(
         initial: EventLoopState,
-        arrivals: Vec<(Plane, Bytes)>,
+        arrivals: Vec<Bytes>,
         sink: &dyn NodeSink,
         expected: &[(&str, &str)],
     ) -> EventLoopState {
@@ -5930,7 +5666,7 @@ mod dedup_counter_tests {
 
     fn reader_run(
         initial: EventLoopState,
-        arrivals: Vec<(Plane, Bytes)>,
+        arrivals: Vec<Bytes>,
         sink: &dyn NodeSink,
         path_up: Option<lifecycle::PathSign>,
         expected: &[(&str, &str)],
@@ -5967,7 +5703,7 @@ mod dedup_counter_tests {
             };
             let mut reader = initial;
             let mut app = Inert;
-            for (_plane, bytes) in arrivals {
+            for bytes in arrivals {
                 super::ingest_from(bytes, &mut reader, &mut app, &context).await;
             }
             if let Some(sign) = path_up {
@@ -5997,13 +5733,10 @@ mod dedup_counter_tests {
         }
     }
 
-    /// An alive frame of a session, as the bytes that arrive on the gossip plane.
-    fn alive_of(session: &Identity, nickname: &str) -> (Plane, Bytes) {
+    /// An alive frame of a session, as the bytes that arrive.
+    fn alive_of(session: &Identity, nickname: &str) -> Bytes {
         let frame = Message::new_alive(&MeshId::from("test"), &nick(nickname)).sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// A state that holds the proof of the live session `bound`, which a member key made for
@@ -6056,10 +5789,7 @@ mod dedup_counter_tests {
         initial.peers.insert(leaver.author_key());
         initial.names.insert(leaver.author_key(), nick("carol"));
         let left = Message::new_left(&MeshId::from("test"), &nick("alice")).sign(&leaver);
-        let frame = (
-            Plane::Gossip,
-            left.serialize().expect("serialize").into_bytes(),
-        );
+        let frame = left.serialize().expect("serialize").into_bytes();
 
         let reader = reader_with(initial, vec![frame]);
 
@@ -6089,10 +5819,7 @@ mod dedup_counter_tests {
         let body = MessageBody::try_new(&json.to_string()).expect("an address body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("test"), &nick("alice"), body).sign(&intruder);
-        let frame = (
-            Plane::Gossip,
-            peer_info.serialize().expect("serialize").into_bytes(),
-        );
+        let frame = peer_info.serialize().expect("serialize").into_bytes();
 
         let reader = reader_with(initial, vec![frame]);
 
@@ -6127,10 +5854,7 @@ mod dedup_counter_tests {
         let body = MessageBody::try_new(&json.to_string()).expect("an address body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("test"), &nick("carol"), body).sign(&session);
-        let info = (
-            Plane::Gossip,
-            peer_info.serialize().expect("serialize").into_bytes(),
-        );
+        let info = peer_info.serialize().expect("serialize").into_bytes();
 
         let reader = reader_with(initial, vec![alive_of(&session, "carol"), info]);
 
@@ -6143,12 +5867,7 @@ mod dedup_counter_tests {
 
     /// A joined frame of a session, as the bytes that arrive on the gossip plane, with the proof of
     /// `member` for its `run`.
-    fn joined_of(
-        session: &Identity,
-        member: &Identity,
-        nickname: &str,
-        run: u64,
-    ) -> (Plane, Bytes) {
+    fn joined_of(session: &Identity, member: &Identity, nickname: &str, run: u64) -> Bytes {
         let proof = member.prove(
             &session.author_key(),
             nickname,
@@ -6157,10 +5876,7 @@ mod dedup_counter_tests {
         );
         let frame = Message::new_joined_with_proof(&MeshId::from("test"), &nick(nickname), &proof)
             .sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// A member restarts: the `joined` frame of its new session, with a higher run, replaces the old
@@ -6179,8 +5895,8 @@ mod dedup_counter_tests {
             .proofs
             .accept(&old.author_key(), &nick("alice"), &mesh, first, |_| true);
         assert!(held, "the proof of the old session is held");
-        let (_, second) = joined_of(&new, &member, "alice", 2);
-        let reader = reader_with(initial, vec![(Plane::Gossip, second)]);
+        let second = joined_of(&new, &member, "alice", 2);
+        let reader = reader_with(initial, vec![second]);
 
         assert!(
             reader.peers.contains(&new.author_key()),
@@ -6206,10 +5922,7 @@ mod dedup_counter_tests {
         old_run.member_identity = reader_state.member_identity.clone();
         let mesh = MeshId::from("test");
         let proved: Verified = old_run.own_joined(&mesh, &nick("reader"));
-        let joined = (
-            Plane::Gossip,
-            proved.serialize().expect("serialize").into_bytes(),
-        );
+        let joined = proved.serialize().expect("serialize").into_bytes();
 
         let reader = reader_with(reader_state, vec![alive_of(&intruder, "reader"), joined]);
 
@@ -6268,7 +5981,7 @@ mod dedup_counter_tests {
             for second in (0..4).filter(|index| *index != first) {
                 for third in (0..4).filter(|index| *index != first && *index != second) {
                     let fourth = 6 - first - second - third;
-                    let arrivals: Vec<(Plane, Bytes)> = [first, second, third, fourth]
+                    let arrivals: Vec<Bytes> = [first, second, third, fourth]
                         .iter()
                         .map(|index| frames[*index].clone())
                         .collect();
@@ -6323,7 +6036,7 @@ mod dedup_counter_tests {
         member: &Identity,
         nickname: &str,
         age_secs: i64,
-    ) -> (Plane, Bytes) {
+    ) -> Bytes {
         use crate::protocol::UnixSecs;
         let proof = member.prove(
             &session.author_key(),
@@ -6335,19 +6048,11 @@ mod dedup_counter_tests {
             Message::new_joined_with_proof(&MeshId::from("test"), &nick(nickname), &proof);
         message.timestamp = UnixSecs::from(UnixSecs::now().as_secs() - age_secs);
         let frame = message.sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// A `joined` frame of `member` for `run`, stamped `age_secs` seconds ago.
-    fn old_joined_run_of(
-        session: &Identity,
-        member: &Identity,
-        run: u64,
-        age_secs: i64,
-    ) -> (Plane, Bytes) {
+    fn old_joined_run_of(session: &Identity, member: &Identity, run: u64, age_secs: i64) -> Bytes {
         use crate::protocol::UnixSecs;
         let proof = member.prove(
             &session.author_key(),
@@ -6359,10 +6064,7 @@ mod dedup_counter_tests {
             Message::new_joined_with_proof(&MeshId::from("test"), &nick("alice"), &proof);
         message.timestamp = UnixSecs::from(UnixSecs::now().as_secs() - age_secs);
         let frame = message.sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// The end that waits for a claimant stays until a frame of that claimant under the PROVED nickname comes. A
@@ -6495,10 +6197,7 @@ mod dedup_counter_tests {
         let mut old = Message::new_joined_with_proof(&mesh, &nick("reader"), &proof);
         old.timestamp = UnixSecs::from(UnixSecs::now().as_secs() - 3 * 86_400);
         let signed: Verified = old.sign(&newer);
-        let old_answer = (
-            Plane::Gossip,
-            signed.serialize().expect("serialize").into_bytes(),
-        );
+        let old_answer = signed.serialize().expect("serialize").into_bytes();
         let alive = alive_of(&newer, "reader");
 
         let shown = reader_expecting(
@@ -6617,10 +6316,7 @@ mod dedup_counter_tests {
             let mut alive = Message::new_alive(&MeshId::from("test"), &nick("alice"));
             alive.timestamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 20);
             let signed: Verified = alive.sign(&session);
-            let frame = (
-                Plane::Gossip,
-                signed.serialize().expect("serialize").into_bytes(),
-            );
+            let frame = signed.serialize().expect("serialize").into_bytes();
             state = reader_with(state, vec![frame]);
             // the next frame comes one alive interval later on our clock
             if let Some(run) = state.clock_evidence.step_back.get_mut(&key) {
@@ -7074,12 +6770,9 @@ mod dedup_counter_tests {
     }
 
     /// A `left` frame of a session, as the bytes that arrive on the gossip plane.
-    fn left_of(session: &Identity, nickname: &str) -> (Plane, Bytes) {
+    fn left_of(session: &Identity, nickname: &str) -> Bytes {
         let frame = Message::new_left(&MeshId::from("test"), &nick(nickname)).sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// The goodbye of a key that is not in the roster ends the endpoint that was retained for it, with the state
@@ -7217,7 +6910,7 @@ mod dedup_counter_tests {
             &nick("alice"),
             iroh::EndpointAddr::new(endpoint_id(7)),
         );
-        let frames: Vec<(Plane, Bytes)> = (0..50).map(|_| alive_of(&session, "alice")).collect();
+        let frames: Vec<Bytes> = (0..50).map(|_| alive_of(&session, "alice")).collect();
 
         let reader = reader_with(initial, frames);
 
@@ -7426,10 +7119,7 @@ mod dedup_counter_tests {
         let body = MessageBody::try_new(&json.to_string()).expect("an address body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("test"), &nick("alice"), body).sign(&session);
-        let info = (
-            Plane::Gossip,
-            peer_info.serialize().expect("serialize").into_bytes(),
-        );
+        let info = peer_info.serialize().expect("serialize").into_bytes();
         let frames = || vec![info.clone(), alive_of(&session, "alice")];
 
         let before = reader_full(
@@ -7469,7 +7159,7 @@ mod dedup_counter_tests {
         let mut initial = fresh_state();
         initial.linked_endpoints.insert(flooder);
         initial.linked_endpoints.insert(calm);
-        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        let mut arrivals: Vec<Bytes> = Vec::new();
         for (count, endpoint, prefix) in [(20, flooder, "flood"), (3, calm, "calm")] {
             for index in 0..count {
                 let session = Identity::generate();
@@ -7507,7 +7197,7 @@ mod dedup_counter_tests {
     #[test]
     fn twenty_endpoints_with_eight_fresh_sessions_each_sign_the_budget_in_all_and_each_first_ask() {
         let mut initial = fresh_state();
-        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        let mut arrivals: Vec<Bytes> = Vec::new();
         for endpoint_index in 0..20u8 {
             let endpoint = endpoint_id(100 + endpoint_index);
             initial.linked_endpoints.insert(endpoint);
@@ -7541,7 +7231,7 @@ mod dedup_counter_tests {
     #[test]
     fn eighty_endpoints_with_one_fresh_session_each_are_all_asked() {
         let mut initial = fresh_state();
-        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        let mut arrivals: Vec<Bytes> = Vec::new();
         for index in 0..80u8 {
             let (session, endpoint) = (Identity::generate(), endpoint_id(100 + index));
             let name = format!("spread-{index}");
@@ -7577,7 +7267,7 @@ mod dedup_counter_tests {
     #[test]
     fn an_honest_session_is_asked_while_one_attacker_with_eight_endpoints_uses_the_budget_in_all() {
         let mut initial = fresh_state();
-        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        let mut arrivals: Vec<Bytes> = Vec::new();
         for endpoint_index in 0..8u8 {
             let endpoint = endpoint_id(110 + endpoint_index);
             initial.linked_endpoints.insert(endpoint);
@@ -7615,11 +7305,7 @@ mod dedup_counter_tests {
     }
 
     /// A `joined` frame whose proof is refused for a held nickname, as the verified frame and its bytes.
-    fn proof_frame_of(
-        session: &Identity,
-        member: &Identity,
-        forged: bool,
-    ) -> (Verified, (Plane, Bytes)) {
+    fn proof_frame_of(session: &Identity, member: &Identity, forged: bool) -> (Verified, Bytes) {
         let mesh = MeshId::from("test");
         let mut proof = member.prove(&session.author_key(), "alice", mesh.as_ref(), 1);
         if forged {
@@ -7627,10 +7313,7 @@ mod dedup_counter_tests {
             proof.run += 1;
         }
         let frame = Message::new_joined_with_proof(&mesh, &nick("alice"), &proof).sign(session);
-        let bytes = (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        );
+        let bytes = frame.serialize().expect("serialize").into_bytes();
         (frame, bytes)
     }
 

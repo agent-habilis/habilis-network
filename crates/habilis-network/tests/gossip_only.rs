@@ -151,6 +151,7 @@ impl Member {
             .request(|reply| Request::Messaging(Messaging::StateMerge { merge, reply }))
             .await
             .expect("the loop answers")
+            .map_err(|error| error.to_string())
     }
 
     async fn state_json(&self) -> String {

@@ -165,24 +165,6 @@ pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
     !super::route::held(eid, state) || state.unicast_arrival == Some(eid)
 }
 
-/// Where an answer to the digest signed by `signer` can go
-/// point-to-point: the endpoint that key proved in its `PeerInfo`, when it is
-/// a linked gossip neighbor with a usable path. Proven, because a nickname is
-/// a label any signer can claim, and one answer is up to a whole resend budget
-/// of frames aimed at whoever holds that endpoint. Linked, because every
-/// holder that hears a digest answers it: the asker's link count bounds how
-/// many answers reach its unicast inbox. `None` means answer on gossip.
-pub(crate) fn unicast_answer_target(
-    signer: &AuthorKey,
-    state: &EventLoopState,
-) -> Option<EndpointId> {
-    let eid = state
-        .proven_endpoints
-        .get(signer)
-        .filter(|eid| state.rendezvous_id != Some(*eid))?;
-    (state.linked_endpoints.contains(&eid) && !super::route::held(eid, state)).then_some(eid)
-}
-
 /// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
 /// a send could not dial it without one. So is a frame held for a pair that lost its direct path
 /// and reads as the relay. Call this when a send failed with [`SendError::Held`]; any other error,

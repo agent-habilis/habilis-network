@@ -10,11 +10,9 @@ use super::{
     Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
 };
 use crate::daemon::cohost_arm;
-use crate::daemon::doc::MeshDoc;
 use crate::daemon::probe_backoff::ProbeBackoff;
 use crate::daemon::reassembly::{ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
-use crate::doc;
 
 use crate::transport::UdpTransport;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -30,7 +28,6 @@ use iroh::{EndpointAddr, EndpointId};
 use super::proof_exchange::ProofExchange;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
-use crate::doc::{DocError, Ingested};
 use crate::protocol::identity::{Identity, IdentityProof, verify_proof};
 use crate::protocol::meshes::Mesh;
 use crate::protocol::messages::{Authored, Message, Verified, WireFrame};
@@ -39,13 +36,14 @@ use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
+use habilis_network_doc::{SliceIngest, SliceLimits, SliceStore};
 
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, LANE_WANTED, PENDING_OUTBOUND_CAP, QUIET_CAP, REASSEMBLED_GROUPS_CAP,
     RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED, UNSUPPORTED_VERSION_CAP,
 };
 
-use crate::gossip::{antientropy, lan};
+use crate::gossip::lan;
 use crate::protocol::crypto;
 #[cfg(test)]
 use crate::testing;
@@ -114,99 +112,100 @@ impl Default for Goodbyes {
     }
 }
 
-/// The documents of the two shared-state channels, behind one type so that a change of store
-/// touches this type alone.
+/// The slice stores of the two shared-state channels, behind one type so that the store is changed
+/// in one place. Each author writes its own slice; a slice is a signed frame.
 #[derive(Debug)]
 pub(crate) struct ChannelDocs {
-    state: MeshDoc,
-    meta: MeshDoc,
+    state: SliceStore,
+    meta: SliceStore,
 }
 
 impl ChannelDocs {
-    fn get(&self, channel: protocol::Channel) -> &MeshDoc {
+    fn get(&self, channel: protocol::Channel) -> &SliceStore {
         match channel {
             protocol::Channel::State => &self.state,
             protocol::Channel::Meta => &self.meta,
-            _ => unreachable!("a channel added later needs its own document"),
+            _ => unreachable!("a channel added later needs its own store"),
         }
     }
 
-    fn get_mut(&mut self, channel: protocol::Channel) -> &mut MeshDoc {
+    fn get_mut(&mut self, channel: protocol::Channel) -> &mut SliceStore {
         match channel {
             protocol::Channel::State => &mut self.state,
             protocol::Channel::Meta => &mut self.meta,
-            _ => unreachable!("a channel added later needs its own document"),
+            _ => unreachable!("a channel added later needs its own store"),
         }
     }
 
-    /// The automerge heads of `channel`.
-    pub(crate) fn heads(&self, channel: protocol::Channel) -> impl Iterator<Item = String> + '_ {
-        self.get(channel).heads()
-    }
-
-    /// Whether `channel` holds every change of `heads`.
-    pub(crate) fn holds_heads(&self, channel: protocol::Channel, heads: &[String]) -> bool {
-        self.get(channel).holds_heads(heads)
-    }
-
-    /// How many changes `channel` has applied.
-    pub(crate) fn change_count(&self, channel: protocol::Channel) -> usize {
-        self.get(channel).change_count()
-    }
-
-    /// The JSON view of `channel`.
+    /// The JSON view of `channel`: each author's slice under the lowercase hex of its key.
     pub(crate) fn to_json(&self, channel: protocol::Channel) -> serde_json::Value {
-        self.get(channel).to_json()
+        serde_json::Value::Object(self.get(channel).view())
     }
 
-    /// Applies a signed change frame to `channel`.
-    pub(crate) fn ingest(&mut self, channel: protocol::Channel, frame: &Verified) -> Ingested {
-        self.get_mut(channel).ingest(frame)
-    }
-
-    /// The change that `merge` builds on `channel`, or `None` for a no-op merge.
-    pub(crate) fn build_change(
+    /// The value of the slice that `key` holds on `channel`, or an empty object.
+    pub(crate) fn own_value(
         &self,
         channel: protocol::Channel,
-        merge: &serde_json::Value,
-        actor_seed: &[u8],
-    ) -> Result<Option<Vec<u8>>, DocError> {
-        self.get(channel).build_change(merge, actor_seed)
+        key: &AuthorKey,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        match self.get(channel).value(key) {
+            Some(serde_json::Value::Object(map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        }
     }
 
-    /// The signed body of `change` on `channel`, sealed on a passworded mesh.
-    pub(crate) fn compose_wire_body(
+    /// Makes the draft of the next write of the own slice `own` on `channel`.
+    pub(crate) fn prepare_local(
+        &mut self,
+        channel: protocol::Channel,
+        own: &AuthorKey,
+        value: serde_json::Map<String, serde_json::Value>,
+        now: Instant,
+    ) -> Result<habilis_network_doc::LocalDraft, habilis_network_doc::SliceError> {
+        self.get_mut(channel).prepare_local(own, value, now)
+    }
+
+    /// Keeps the signed frame of `draft` on `channel`, once the frame is built from the draft body.
+    pub(crate) fn commit_local(
+        &mut self,
+        channel: protocol::Channel,
+        draft: habilis_network_doc::LocalDraft,
+        frame: &Verified,
+        now: Instant,
+    ) -> Result<(), habilis_network_doc::SliceError> {
+        self.get_mut(channel).commit_local(draft, frame, now)
+    }
+
+    /// The signed frame of the slice that `key` holds on `channel`, as a wire frame.
+    pub(crate) fn own_frame(
         &self,
         channel: protocol::Channel,
-        change: &[u8],
-        merge: Option<&serde_json::Value>,
-    ) -> Result<(protocol::MessageBody, protocol::MessageBody), DocError> {
-        self.get(channel).compose_wire_body(change, merge)
+        key: &AuthorKey,
+    ) -> Option<WireFrame> {
+        self.get(channel).frame(key)?.serialize().ok()
     }
 
-    /// The changes of `channel` that a peer holding `have` lacks, except those by `author`.
-    pub(crate) fn changes_since_not_by<'a>(
-        &'a self,
-        channel: protocol::Channel,
-        have: &'a [String],
-        author: Option<&'a AuthorKey>,
-        max: usize,
-    ) -> impl Iterator<Item = Verified> + 'a {
-        self.get(channel).changes_since_not_by(have, author, max)
-    }
-
-    /// The plaintext of a sealed `frame` on `channel`, when the channel holds its key.
-    pub(crate) fn surface_body(
+    /// The plaintext body of the slice that `key` holds on `channel`, in the shape of a frame body.
+    pub(crate) fn plain_body(
         &self,
         channel: protocol::Channel,
-        frame: &Message,
-    ) -> Option<String> {
-        self.get(channel).surface_body(frame)
+        key: &AuthorKey,
+    ) -> Option<protocol::MessageBody> {
+        let store = self.get(channel);
+        let body =
+            serde_json::json!({ "version": store.version(key)?, "value": store.value(key)? });
+        protocol::MessageBody::try_new(&body.to_string()).ok()
     }
 
-    /// The keys that `channel` dropped since the last call.
-    pub(crate) fn take_dropped(&mut self, channel: protocol::Channel) -> Vec<DedupKey> {
-        self.get_mut(channel).take_dropped().collect()
+    /// Takes a signed slice frame of `channel` into the store.
+    pub(crate) fn ingest(
+        &mut self,
+        channel: protocol::Channel,
+        frame: &Verified,
+        live: bool,
+        now: Instant,
+    ) -> SliceIngest {
+        self.get_mut(channel).ingest(frame, live, now)
     }
 }
 
@@ -437,14 +436,6 @@ pub struct EventLoopState {
     /// Tests only: how many frames the hook dropped.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) test_drops_fired: u32,
-    /// When each asker's state or meta digest was last served, per plane. A
-    /// new node sends a digest pair for every peer it sees, all with the same
-    /// heads, and every holder hears each one; the plane is in the key so the
-    /// asker's re-ask at its first real-peer link, answered point-to-point,
-    /// is not refused by the gossip answer before it.
-    pub(crate) state_digest_serves: antientropy::ServeBudget,
-    /// This node's own fast rounds of state digests while it backfills.
-    pub(crate) fast_rounds: antientropy::FastRounds,
     /// Membership layer: the peer roster. Set of the author keys of
     /// other peers, feeding the state file's `peer_count`
     /// (`peers.len() + 1`). Excludes self. Driven by
@@ -503,6 +494,8 @@ pub struct EventLoopState {
     /// `peer_return` event and re-inclusion in `peers`. Bounded FIFO
     /// (cap `QUIET_CAP`): drained on return, so without the cap a churn /
     /// sybil stream of one-shot nicknames would grow it without bound.
+    /// The newcomers that wait for this node's own slices, with the time each one was owed them.
+    pub(crate) owed_backfill: HashMap<AuthorKey, Instant>,
     pub(crate) quiet: BoundedFifoSet<AuthorKey>,
     /// Recency companion to `quiet`: author key -> the `last_seen` instant a
     /// quiet peer had when it was evicted, so `roster_snapshot` can still
@@ -838,12 +831,11 @@ impl EventLoopState {
             test_drop: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drops_fired: 0,
-            state_digest_serves: antientropy::ServeBudget::default(),
-            fast_rounds: antientropy::FastRounds::default(),
             peers: HashSet::new(),
             last_seen: HashMap::new(),
             peer_endpoints: HashMap::new(),
             rendezvous_id: None,
+            owed_backfill: HashMap::new(),
             quiet: BoundedFifoSet::new(QUIET_CAP),
             quiet_since: HashMap::new(),
             names: HashMap::new(),
@@ -903,8 +895,18 @@ impl EventLoopState {
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
             docs: ChannelDocs {
-                state: MeshDoc::new_ungated().key(state_key),
-                meta: Self::meta_channel(init.per_peer_gate, meta_key),
+                state: SliceStore::new(
+                    protocol::Channel::State,
+                    SliceLimits::default(),
+                    init.frame_overhead,
+                )
+                .with_key(state_key),
+                meta: SliceStore::new(
+                    protocol::Channel::Meta,
+                    SliceLimits::default(),
+                    init.frame_overhead,
+                )
+                .with_key(meta_key),
             },
             identity: init.keys.session,
             unicast_arrival: None,
@@ -933,18 +935,6 @@ impl EventLoopState {
     fn channel_keys(mesh_key: Option<&SymmetricKey>) -> [Option<SymmetricKey>; 3] {
         [b"state-doc".as_slice(), b"meta-doc", b"broadcast"]
             .map(|label| mesh_key.map(|key| key.derive(label)))
-    }
-
-    /// The `meta` channel: gated by the application's per-peer map when it keeps one, free-form otherwise.
-    fn meta_channel(
-        per_peer_gate: Option<doc::SelfWriteGate>,
-        key: Option<SymmetricKey>,
-    ) -> MeshDoc {
-        match per_peer_gate {
-            Some(gate) => MeshDoc::new_gated(gate),
-            None => MeshDoc::new_ungated(),
-        }
-        .key(key)
     }
 
     /// The number of members of the mesh as this node counts them: the peers whose arrival was
@@ -2895,5 +2885,56 @@ impl EventLoopState {
         self.proofs.admits(&key, &message.author, |session| {
             peers.contains(session) || quiet.contains(session)
         })
+    }
+}
+
+#[cfg(test)]
+mod slice_surface_tests {
+    use super::ChannelDocs;
+    use crate::protocol::{Channel, Identity, MeshId, Message, Nickname, SymmetricKey};
+    use crate::util::clock::Instant;
+    use habilis_network_doc::{SliceLimits, SliceStore, frame_overhead};
+
+    fn keyed_store(channel: Channel) -> SliceStore {
+        SliceStore::new(
+            channel,
+            SliceLimits::default(),
+            frame_overhead("test", "alice"),
+        )
+        .with_key(Some(SymmetricKey::from([3u8; 32])))
+    }
+
+    /// A sealed meta write is stored sealed, and its plain body is the value that was written.
+    #[test]
+    fn a_sealed_slice_reads_back_as_plain_text() {
+        let mut docs = ChannelDocs {
+            state: keyed_store(Channel::State),
+            meta: keyed_store(Channel::Meta),
+        };
+        let identity = Identity::generate();
+        let mesh = MeshId::from("test");
+        let alice = Nickname::try_new("alice").expect("a valid nickname");
+        let own = identity.author_key();
+        let now = Instant::now();
+        let value = serde_json::json!({"status": "busy"})
+            .as_object()
+            .cloned()
+            .expect("an object");
+        let draft = docs
+            .prepare_local(Channel::Meta, &own, value, now)
+            .expect("a draft that fits");
+        let frame = Message::new_channel_event(&mesh, &alice, draft.body().clone(), Channel::Meta)
+            .sign(&identity);
+        docs.commit_local(Channel::Meta, draft, &frame, now)
+            .expect("the sealed slice is committed");
+
+        let plain = docs
+            .plain_body(Channel::Meta, &own)
+            .expect("the slice has a plain body");
+        assert!(
+            plain.as_str().contains(r#""status":"busy""#),
+            "the surfaced body is the plain value, not the ciphertext: {}",
+            plain.as_str()
+        );
     }
 }

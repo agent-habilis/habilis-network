@@ -49,5 +49,6 @@ pub use mesh_doc::{Ingested, MeshDoc, SelfWriteGate};
 mod slice_store;
 
 pub use slice_store::{
-    LocalDraft, SliceError, SliceIngest, SliceLimits, SliceStore, worst_frame_overhead,
+    LocalDraft, SliceError, SliceIngest, SliceLimits, SliceStore, frame_overhead,
+    worst_frame_overhead,
 };

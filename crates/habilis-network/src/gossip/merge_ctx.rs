@@ -418,8 +418,6 @@ pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
 ) -> Result<(), transport::SendError> {
-    use crate::doc::Ingested;
-
     let StateMergeParams {
         context:
             MergeCtx {
@@ -434,56 +432,37 @@ pub async fn broadcast_state_merge(
         farewell,
     } = params;
 
-    // 1. Build the change on a fork (no live mutation yet); a no-op merge is a
+    // 1. The own slice with the merge patch applied (RFC 7386). A merge that changes nothing is a
     //    silent success.
-    // The actor seed is the session's signing key, not the nickname: a
-    // rejoined session under a nickname-derived actor would collide seq
-    // numbers with its predecessor's history (see `doc::actor_for`).
-    let actor_seed = *state.identity.public().as_bytes();
-    let built = state
-        .docs
-        .build_change(channel, &merge, &actor_seed)
-        .map_err(|error| transport::SendError::Internal(error.into()))?;
-    let Some(change_bytes) = built else {
-        return Ok(());
+    let own = state.identity.author_key();
+    let now = clock::Instant::now();
+    let mut value = serde_json::Value::Object(state.docs.own_value(channel, &own));
+    json_merge_patch(&mut value, &merge);
+    let serde_json::Value::Object(next) = value else {
+        return Err(transport::SendError::internal(anyhow::anyhow!(
+            "the merge must be a JSON object"
+        )));
     };
+    if next == state.docs.own_value(channel, &own) {
+        return Ok(());
+    }
 
-    // 2. Compose + sign + size-gate before the change touches the live doc.
-    //    Carry the input merge as the surfaced delta only for agent-visible
-    //    writes; the internal card publish stays lean (no delta on the wire).
-    //    On a passworded mesh the wire body is sealed under the channel key;
-    //    `plain_body` keeps the plaintext for our own surfacing below.
-    let composed = state
+    // 2. The draft of the next version, the signed frame of its body, and the commit of the frame.
+    //    The engine refuses a write past the rate limit; the caller gets the typed error.
+    let draft = state
         .docs
-        .compose_wire_body(channel, &change_bytes, surface.then_some(&merge));
-    let (wire_body, plain_body) =
-        composed.map_err(|error| transport::SendError::Internal(error.into()))?;
-    let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
+        .prepare_local(channel, &own, next.clone(), now)
+        .map_err(transport::SendError::State)?;
+    let signed = Message::new_channel_event(mesh, author, draft.body().clone(), channel)
+        .sign(&state.identity);
     let bytes = signed
         .serialize()
         .map_err(|error| transport::SendError::Internal(error.into()))?;
     messages::log_out(&signed);
-
-    // 3. Apply the signed frame to the live doc through the authorization gate.
-    //    Ingest retains the frame as the re-serve store (replacing `StateLog`),
-    //    so anti-entropy can forward it with its original signature.
-    let ingested = state.docs.ingest(channel, &signed);
-    let after = match ingested {
-        Ingested::Applied { doc, .. } => doc,
-        Ingested::Duplicate => return Ok(()),
-        Ingested::Rejected => {
-            return Err(transport::SendError::internal(anyhow::anyhow!(
-                "write rejected: a member may only write the gated field of the slot that its own key names"
-            )));
-        }
-        Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
-        Ingested::Ignored => unreachable!("a locally-built change body always decodes"),
-        _ => {
-            return Err(transport::SendError::internal(anyhow::anyhow!(
-                "the document did not take the change"
-            )));
-        }
-    };
+    state
+        .docs
+        .commit_local(channel, draft, &signed, now)
+        .map_err(transport::SendError::State)?;
 
     // A departure is mirrored before gossip takes the frame: once gossip has it, the frame is
     // no longer ours to copy, and a leaver can exit before the overlay carries it.
@@ -497,10 +476,13 @@ pub async fn broadcast_state_merge(
     if surface {
         // Surface our own change from a plaintext-bodied view so the `m` delta
         // renders even when the wire body we signed is sealed.
+        let plain_body = state.docs.plain_body(channel, &own).ok_or_else(|| {
+            transport::SendError::internal(anyhow::anyhow!("the own slice is not in the store"))
+        })?;
         sink.emit(NodeEvent::StateChanged {
             channel,
             event: Box::new(signed.copy_with_body(plain_body)),
-            document: after,
+            document: state.docs.to_json(channel),
             is_self: true,
         });
     }
@@ -664,6 +646,30 @@ fn offer_for_held(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &
     };
     if state.lane_session_wanted(address.id, clock::Instant::now()) {
         webrtc::negotiate_session::negotiate_session(state, context, address.id, address);
+    }
+}
+
+/// Applies the RFC 7386 JSON merge patch `patch` to `target`, in place.
+fn json_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    let serde_json::Value::Object(patch_map) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let serde_json::Value::Object(target_map) = target else {
+        return;
+    };
+    for (name, value) in patch_map {
+        if value.is_null() {
+            target_map.remove(name);
+        } else {
+            let entry = target_map
+                .entry(name.clone())
+                .or_insert(serde_json::Value::Null);
+            json_merge_patch(entry, value);
+        }
     }
 }
 

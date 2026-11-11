@@ -24,12 +24,13 @@ use tokio::sync::{Notify, oneshot};
 
 use habilis_network::runtime::tuning;
 use tokio::time::{self, Instant};
-/// The agent-gossip late-joiner test's log size: two and a half answers.
-const WRITES: usize = 160;
-/// Changes one digest answer carries (the default `ANTIENTROPY_MAX_RESEND`).
-const ONE_ANSWER: usize = 64;
-/// How long a test waits for the first answer. With the tick pinned away it
-/// can only be the immediate pull, so this only bounds a slow join.
+/// The keys of the log. One slice carries the whole log, so it must fit one frame.
+const WRITES: usize = 80;
+/// The retention of the message ids of iroh-gossip. A joiner that meets an author within it can get the
+/// author's frame from the gossip cache, which is no backfill. Each test waits past it before a joiner starts.
+const GOSSIP_MESSAGE_RETENTION: Duration = Duration::from_secs(90);
+/// How long a test waits for the slice of an author. With the tick pinned away it can only be the
+/// backfill on meeting the author, so this only bounds a slow join.
 const BUDGET: Duration = Duration::from_secs(15);
 
 enum Request {
@@ -158,19 +159,16 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
     )
 }
 
-/// More changes than one digest answer carries, so the backfill takes several
-/// rounds and the first one is visible on its own.
+/// The whole log is one merge, so it is one slice of the writer.
 async fn write_log(node: &Node<Store>, writes: usize) {
-    for index in 0..writes {
-        let (done_tx, done_rx) = oneshot::channel();
-        node.send(Request::Write(
-            serde_json::json!({ format!("k{index}"): index }),
-            done_tx,
-        ))
+    let merge: serde_json::Map<String, serde_json::Value> = (0..writes)
+        .map(|index| (format!("k{index}"), serde_json::json!(index)))
+        .collect();
+    let (done_tx, done_rx) = oneshot::channel();
+    node.send(Request::Write(serde_json::Value::Object(merge), done_tx))
         .await
         .expect("the write reaches the loop");
-        done_rx.await.expect("the write is applied");
-    }
+    done_rx.await.expect("the write is applied");
 }
 
 async fn read(node: &Node<Store>) -> serde_json::Value {
@@ -181,53 +179,29 @@ async fn read(node: &Node<Store>) -> serde_json::Value {
     rx.await.expect("the loop answers")
 }
 
+/// The log keys in every author's slice of the state document.
 fn key_count(document: &serde_json::Value) -> usize {
-    document.as_object().map_or(0, |fields| {
-        fields.keys().filter(|key| key.starts_with('k')).count()
-    })
+    let mut count = 0;
+    if let Some(authors) = document.as_object() {
+        for slice in authors.values() {
+            if let Some(fields) = slice.as_object() {
+                count += fields.keys().filter(|key| key.starts_with('k')).count();
+            }
+        }
+    }
+    count
 }
 
-/// How many of the log's changes `node` holds once it has a full answer, or
-/// when [`BUDGET`] runs out.
-async fn held_after_first_answer(node: &Node<Store>) -> usize {
+/// How many of the log's keys `node` holds once it has the whole slice, or when [`BUDGET`] runs out.
+async fn held_after_backfill(node: &Node<Store>) -> usize {
     let started = Instant::now();
     loop {
         let held = key_count(&read(node).await);
-        if held >= ONE_ANSWER || started.elapsed() > BUDGET {
+        if held >= WRITES || started.elapsed() > BUDGET {
             return held;
         }
         time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-#[test]
-fn a_late_joiner_backfills_on_meeting_its_only_peer() {
-    let guard = habilis_network_test_tracing::init();
-    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        pin_antientropy_tick();
-        let nonce: u64 = rand::random();
-        let topic = format!("late-joiner-pair-{nonce}");
-        let (alice, _) = spawn(&topic, "alice").await;
-        write_log(&alice, WRITES).await;
-
-        let (bob, bob_saw) = spawn(&topic, "bob").await;
-        assert!(
-            bob_saw
-                .wait_for(&nick("alice"), Duration::from_secs(45))
-                .await,
-            "bob never saw alice join"
-        );
-
-        let held = held_after_first_answer(&bob).await;
-        assert!(
-            held >= ONE_ANSWER,
-            "bob held {held} of alice's {WRITES} changes {BUDGET:?} after seeing her join; \
-         the first digest answer carries {ONE_ANSWER}"
-        );
-
-        alice.leave().await.expect("alice leaves");
-        bob.leave().await.expect("bob leaves");
-    });
 }
 
 /// The agent-gossip shape: the late joiner meets two peers that already hold
@@ -253,6 +227,7 @@ fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
 
         let (alice, _) = spawn(&topic, "alice").await;
         write_log(&alice, WRITES).await;
+        time::sleep(GOSSIP_MESSAGE_RETENTION + Duration::from_secs(1)).await;
         let (early, early_saw) = spawn(&topic, "early").await;
         assert!(
             early_saw
@@ -271,76 +246,10 @@ fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
             );
         }
 
-        let held = held_after_first_answer(&late).await;
-        assert!(
-            held >= ONE_ANSWER,
-            "late held {held} of alice's {WRITES} changes {BUDGET:?} after meeting the pair; \
-         the first digest answer carries {ONE_ANSWER}"
-        );
-
-        alice.leave().await.expect("alice leaves");
-        early.leave().await.expect("early leaves");
-        late.leave().await.expect("late leaves");
-    });
-}
-
-/// A long history reaches a late joiner in rounds of one answer budget each.
-/// With the anti-entropy tick pinned far away, only the joiner's own fast
-/// rounds can pull more than the first answer: it asks again, point-to-point,
-/// each time it applied a full answer or still holds orphans.
-#[test]
-fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
-    let guard = habilis_network_test_tracing::init();
-    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        const LONG: usize = 300;
-        const FAST: Duration = Duration::from_secs(5);
-        pin_antientropy_tick();
-        let nonce: u64 = rand::random();
-        let topic = format!("late-joiner-long-{nonce}");
-
-        let (alice, _) = spawn(&topic, "alice").await;
-        write_log(&alice, LONG).await;
-        let (early, early_saw) = spawn(&topic, "early").await;
-        assert!(
-            early_saw
-                .wait_for(&nick("alice"), Duration::from_secs(45))
-                .await,
-            "early never saw alice join"
-        );
-        let (late, late_saw) = spawn(&topic, "late").await;
-        for peer in ["alice", "early"] {
-            assert!(
-                late_saw
-                    .wait_for(&nick(peer), Duration::from_secs(45))
-                    .await,
-                "late never saw {peer} join"
-            );
-        }
-
-        // FAST is the time that the fast rounds take on a quiet host, and it is reported. The claim is
-        // that they pull the whole history, and a shared runner can be ten times slower and still be
-        // right: the test fails only when the history is not held after BUDGET, as its siblings do.
-        let started = Instant::now();
-        let mut held = 0;
-        let mut held_at_fast = None;
-        while started.elapsed() < BUDGET {
-            held = key_count(&read(&late).await);
-            if held_at_fast.is_none() && started.elapsed() >= FAST {
-                held_at_fast = Some(held);
-            }
-            if held >= LONG {
-                break;
-            }
-            time::sleep(Duration::from_millis(100)).await;
-        }
-        eprintln!(
-            "late held {} of alice's {LONG} changes {FAST:?} after meeting the pair, {held} after {:?}",
-            held_at_fast.unwrap_or(held),
-            started.elapsed()
-        );
+        let held = held_after_backfill(&late).await;
         assert_eq!(
-            held, LONG,
-            "late held {held} of alice's {LONG} changes {BUDGET:?} after meeting the pair"
+            held, WRITES,
+            "late holds {held} of alice's {WRITES} keys {BUDGET:?} after meeting the pair"
         );
 
         alice.leave().await.expect("alice leaves");

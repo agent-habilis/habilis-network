@@ -155,8 +155,6 @@ pub(crate) async fn tick_state_refresh(
         idle_state_frames_unicast = idle.state_frames_unicast,
         idle_state_frames_broadcast = idle.state_frames_broadcast,
         idle_state_rejected = idle.state_rejected,
-        // A gauge, not a delta: the peers that a fast round still counts as ahead of us.
-        idle_ahead_peers = state.fast_rounds.ahead_count(),
         idle_broadcasts = idle.broadcasts,
         // A total since the process started, unlike the idle fields above, which are per interval.
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),

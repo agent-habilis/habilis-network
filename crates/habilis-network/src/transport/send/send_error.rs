@@ -39,6 +39,9 @@ pub enum SendError {
     Stopped,
     /// The event loop of the node ended with an error, so a leave failed.
     EventLoop(EventLoopError),
+    /// The shared state refused a write of this node, with the typed reason: a write past the rate
+    /// limit is retried by the engine, a value too large for a frame is refused.
+    State(habilis_network_doc::SliceError),
     /// A cause no caller acts on. It keeps its text and its chain.
     Internal(Box<dyn error::Error + Send + Sync>),
 }
@@ -62,6 +65,7 @@ impl fmt::Display for SendError {
             | Self::InvalidAddressee(message) => f.write_str(message),
             Self::Stopped => f.write_str("mesh event loop has stopped"),
             Self::EventLoop(_) => f.write_str("the mesh event loop failed"),
+            Self::State(error) => fmt::Display::fmt(error, f),
             Self::Internal(error) => fmt::Display::fmt(error.as_ref(), f),
         }
     }
@@ -71,6 +75,7 @@ impl error::Error for SendError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::EventLoop(error) => Some(error),
+            Self::State(error) => Some(error),
             Self::Internal(error) => error.source(),
             Self::Held { .. }
             | Self::Undeliverable(_)

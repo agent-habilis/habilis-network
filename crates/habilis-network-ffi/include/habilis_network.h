@@ -141,12 +141,14 @@ long habilis_network_msg_recv(habilis_network_mesh *handle, char *buffer, size_t
  * The shared state document — a JSON object every peer in the mesh converges on
  * (a CRDT underneath, so concurrent writers merge instead of clobbering).
  *
- * habilis_network_mesh_state_merge() applies an RFC 7386 merge document: present keys are set,
- * keys set to null are removed, everything else is left alone.
+ * habilis_network_mesh_state_merge() applies an RFC 7386 merge document to this member's own slice:
+ * present keys are set, keys set to null are removed, everything else is left alone. It returns -1
+ * when the write is past the rate limit of this member, or when the slice is too large for a frame.
  *
- * habilis_network_mesh_state_json() writes the merged document into `buffer` and returns the length
- * it needs, excluding the NUL. When that does not fit in `cap`, nothing is
- * written — retry with a bigger buffer. -1 on failure.
+ * habilis_network_mesh_state_json() writes the state into `buffer`: a JSON object keyed by the lowercase
+ * hex of each member's key, whose value is that member's slice. It returns the length it needs,
+ * excluding the NUL. When that does not fit in `cap`, nothing is written — retry with a bigger buffer.
+ * -1 on failure.
  */
 int habilis_network_mesh_state_merge(habilis_network_mesh *handle, const char *json);
 long habilis_network_mesh_state_json(habilis_network_mesh *handle, char *buffer, size_t cap);

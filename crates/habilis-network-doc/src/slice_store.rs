@@ -18,7 +18,9 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use habilis_network_util::clock::Instant;
 
 use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, Channel, ContentHash, MessageBody, SymmetricKey};
@@ -79,6 +81,21 @@ const SEAL_GROWTH_PERCENT: usize = 138;
 #[must_use]
 pub fn worst_frame_overhead() -> usize {
     WORST_FRAME_OVERHEAD
+}
+
+/// The frame overhead of a session with this mesh id and this nickname: the envelope of a signed frame
+/// around the body, with the mesh id and the nickname in it.
+///
+/// # Examples
+///
+/// ```
+/// use habilis_network_doc::{frame_overhead, worst_frame_overhead};
+///
+/// assert!(frame_overhead("mesh", "nick") < worst_frame_overhead());
+/// ```
+#[must_use]
+pub fn frame_overhead(mesh_id: &str, nickname: &str) -> usize {
+    FRAME_BASE_OVERHEAD + mesh_id.len() + nickname.len()
 }
 
 /// The caps that bound a [`SliceStore`].
@@ -635,6 +652,12 @@ impl SliceStore {
     #[must_use]
     pub fn version(&self, key: &AuthorKey) -> Option<u64> {
         self.slices.get(key).map(|slice| slice.version)
+    }
+
+    /// The value of the slice of `key`, when the store holds one.
+    #[must_use]
+    pub fn value(&self, key: &AuthorKey) -> Option<&Value> {
+        self.slices.get(key).map(|slice| &slice.value)
     }
 
     /// Returns the signed frame held for `key`, which a resend or the digest sends.
@@ -1392,7 +1415,8 @@ mod tests {
         let draft = store
             .prepare_local(&key(1), value, now)
             .expect("a draft that fits");
-        let escaped = serde_json::to_string(draft.body().as_str()).map_or(0, |text| text.len());
+        let escaped: usize =
+            serde_json::to_string(draft.body().as_str()).map_or(0, |text| text.len());
         assert_eq!(measured, escaped, "the measured length must be the draft's");
         for _ in 0..4 {
             assert!(
@@ -1454,7 +1478,8 @@ mod tests {
     #[test]
     fn a_sealed_write_at_the_limit_is_ok_on_every_seal() {
         let limits = SliceLimits::new(3072, Duration::from_secs(1), 256, 200);
-        let mut store = small_store(limits).with_key(Some(SymmetricKey::from([3u8; 32])));
+        let mut store: SliceStore =
+            small_store(limits).with_key(Some(SymmetricKey::from([3u8; 32])));
         let edge = largest_fitting(&store);
         let limit = 3072 - WORST_FRAME_OVERHEAD;
         assert!(
@@ -1473,6 +1498,73 @@ mod tests {
                 "seal {seal}: a write at the limit must fit on every seal"
             );
         }
+    }
+
+    #[test]
+    fn a_new_version_from_a_key_outside_the_roster_spends_a_token() {
+        let mut store = store();
+        let now = Instant::now();
+        let mut refused = Vec::new();
+        for version in 1..=6 {
+            let body = format!(r#"{{"version":{version},"value":{{}}}}"#);
+            let frame = frame_with_body(key(9), &body);
+            if let SliceIngest::Refused(error) = store.ingest(&frame, true, now) {
+                refused.push((version, error));
+            }
+        }
+        assert!(
+            matches!(refused.as_slice(), [(6, SliceError::RateLimited)]),
+            "only the sixth new version of a key with a burst of 5 is refused: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_first_slice_of_a_new_key_applies_with_a_full_bucket() {
+        let mut store = store();
+        let frame = frame_with_body(key(9), r#"{"version":1,"value":{"k":1}}"#);
+        assert!(
+            matches!(
+                store.ingest(&frame, true, Instant::now()),
+                SliceIngest::Applied
+            ),
+            "the first slice of a key that is not yet in the store applies"
+        );
+    }
+
+    #[test]
+    fn a_realistic_sealed_card_fits_a_typical_session_and_not_the_worst_case() {
+        let sealed = |overhead: usize| {
+            SliceStore::new(Channel::Meta, SliceLimits::default(), overhead)
+                .with_key(Some(SymmetricKey::from([3u8; 32])))
+        };
+        let card = object(json!({"card": "x".repeat(2300)}));
+        let typical = super::frame_overhead(&"m".repeat(100), &"n".repeat(36));
+        assert!(
+            sealed(typical).body_len(&key(1), card.clone()).is_ok(),
+            "a card of about 2.3 KB fits the frame of a session with a typical mesh id and nickname"
+        );
+        assert!(
+            matches!(
+                sealed(WORST_FRAME_OVERHEAD).body_len(&key(1), card),
+                Err(SliceError::TooLarge { .. })
+            ),
+            "the same card is TooLarge under the worst-case overhead"
+        );
+    }
+
+    #[test]
+    fn a_sealed_card_sized_meta_entry_is_too_large_for_one_slice() {
+        let store: SliceStore =
+            SliceStore::new(Channel::Meta, SliceLimits::default(), WORST_FRAME_OVERHEAD)
+                .with_key(Some(SymmetricKey::from([3u8; 32])));
+        let card = object(json!({"card": "x".repeat(2400)}));
+        assert!(
+            matches!(
+                store.body_len(&key(1), card),
+                Err(SliceError::TooLarge { .. })
+            ),
+            "a sealed entry of about 2.4 KB does not fit one slice of the default limits"
+        );
     }
 
     #[test]
