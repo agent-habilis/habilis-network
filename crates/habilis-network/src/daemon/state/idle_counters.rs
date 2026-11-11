@@ -50,7 +50,7 @@ pub(crate) struct IdleCounters {
     pub sweep: u64,
     pub heal: u64,
     pub reclaim: u64,
-    pub antientropy: u64,
+    pub backfill: u64,
     pub state_refresh: u64,
     pub linkstate: u64,
     /// The arm of a build of a seed that ended. It is no timer and no inbound frame: the tick of a

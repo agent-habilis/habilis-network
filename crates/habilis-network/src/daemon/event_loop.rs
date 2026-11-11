@@ -49,7 +49,7 @@ use crate::util::clock::{Instant, millis_saturating};
 // `tokio::time::Instant`). Aliased rather than path-qualified, matching
 // `daemon::state` / `daemon::app`.
 use crate::util::tuning::{
-    ALIVE_INTERVAL, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH, antientropy_interval,
+    ALIVE_INTERVAL, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH, backfill_interval,
     heal_interval, sweep_interval,
 };
 use n0_future::time::Instant as TokioInstant;
@@ -620,12 +620,12 @@ async fn alive_arm(
 
 /// The anti-entropy tick: note the gap, then send the backfill that a newcomer is still owed. Loss
 /// repair is gone until C2.3, so the tick sends no digest.
-async fn antientropy_arm(anchors: &mut TickAnchors, state: &mut EventLoopState) {
+async fn backfill_arm(anchors: &mut TickAnchors, state: &mut EventLoopState) {
     timers::note_tick_gap(
-        "antientropy",
-        &mut anchors.antientropy,
-        &mut anchors.antientropy_wall,
-        antientropy_interval(),
+        "backfill",
+        &mut anchors.backfill,
+        &mut anchors.backfill_wall,
+        backfill_interval(),
     );
     gossip::backfill::settle(state, Instant::now()).await;
 }
@@ -1418,9 +1418,9 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         webrtc::session_policy::detach_sessions_under_udp(&mut self.state, &context);
     }
 
-    async fn antientropy(&mut self) {
-        self.state.idle.antientropy += 1;
-        antientropy_arm(&mut self.anchors, &mut self.state).await;
+    async fn backfill(&mut self) {
+        self.state.idle.backfill += 1;
+        backfill_arm(&mut self.anchors, &mut self.state).await;
     }
 
     // Counted before the census reads them, so the tick that reports an
@@ -1679,7 +1679,7 @@ async fn run_loop<Driver: NodeDriver>(
             Some(report) = lp.rung_reports.recv() => { lp.rung_report(report).await; },
             () = closed_opt(&mut lp.state.beacon_closing) => { lp.beacon_closed().await; },
             _ = lp.intervals.reclaim.tick() => { lp.reclaim().await; },
-            _ = lp.intervals.antientropy.tick() => { lp.antientropy().await; },
+            _ = lp.intervals.backfill.tick() => { lp.backfill().await; },
             _ = lp.intervals.state_refresh.tick() => { lp.state_refresh().await; },
             _ = lp.intervals.linkstate.tick() => { lp.linkstate().await; },
             _ = recv_opt(&mut lp.external_quit_rx) => {
@@ -1851,11 +1851,11 @@ struct TickAnchors {
     alive: Instant,
     sweep: Instant,
     heal: Instant,
-    antientropy: Instant,
+    backfill: Instant,
     alive_wall: UnixSecs,
     sweep_wall: UnixSecs,
     heal_wall: UnixSecs,
-    antientropy_wall: UnixSecs,
+    backfill_wall: UnixSecs,
 }
 
 impl TickAnchors {
@@ -1866,11 +1866,11 @@ impl TickAnchors {
             alive: mono,
             sweep: mono,
             heal: mono,
-            antientropy: mono,
+            backfill: mono,
             alive_wall: wall,
             sweep_wall: wall,
             heal_wall: wall,
-            antientropy_wall: wall,
+            backfill_wall: wall,
         }
     }
 }
@@ -1886,7 +1886,7 @@ struct MaintenanceIntervals {
     reclaim: time::Interval,
     /// Periodic anti-entropy digest broadcast (recover messages missed
     /// while partitioned/asleep).
-    antientropy: time::Interval,
+    backfill: time::Interval,
     state_refresh: time::Interval,
     /// Periodic relay link-state re-broadcast (our own measured links), so peers
     /// keep a fresh routing graph.
@@ -1920,9 +1920,9 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
     let mut reclaim = time::interval(RECLAIM_INTERVAL);
     reclaim.set_missed_tick_behavior(Skip);
     reclaim.tick().await;
-    let mut antientropy = time::interval(antientropy_interval());
-    antientropy.set_missed_tick_behavior(Skip);
-    antientropy.tick().await;
+    let mut backfill = time::interval(backfill_interval());
+    backfill.set_missed_tick_behavior(Skip);
+    backfill.tick().await;
     let mut state_refresh = time::interval(STATE_REFRESH);
     state_refresh.set_missed_tick_behavior(Skip);
     state_refresh.tick().await;
@@ -1935,7 +1935,7 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
         sweep,
         heal,
         reclaim,
-        antientropy,
+        backfill,
         state_refresh,
         linkstate,
     }

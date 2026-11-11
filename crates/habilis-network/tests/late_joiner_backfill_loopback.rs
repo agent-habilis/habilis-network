@@ -130,8 +130,8 @@ impl Joined {
 /// Only the immediate pull on meeting the mesh can backfill inside a test, so
 /// a slow join cannot let a tick pass it instead. Per process, and every test
 /// here wants the same value.
-fn pin_antientropy_tick() {
-    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_hours(1)));
+fn pin_backfill_tick() {
+    tuning::init(tuning::Tuning::DEFAULTS.backfill_interval(Duration::from_hours(1)));
 }
 
 fn nick(name: &str) -> Nickname {
@@ -211,7 +211,7 @@ async fn held_after_backfill(node: &Node<Store>) -> usize {
 fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        pin_antientropy_tick();
+        pin_backfill_tick();
         let nonce: u64 = rand::random();
         let topic = format!("late-joiner-trio-{nonce}");
 

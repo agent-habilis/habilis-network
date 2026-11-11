@@ -157,8 +157,8 @@ impl Joined {
     }
 }
 
-fn pin_antientropy_tick() {
-    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_secs(1)));
+fn pin_backfill_tick() {
+    tuning::init(tuning::Tuning::DEFAULTS.backfill_interval(Duration::from_secs(1)));
 }
 
 fn nick(name: &str) -> Nickname {
@@ -192,7 +192,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
 fn a_chat_broadcast_missed_by_a_late_joiner_is_not_delivered() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        pin_antientropy_tick();
+        pin_backfill_tick();
         let nonce: u64 = rand::random();
         let topic = format!("missed-chat-{nonce}");
 

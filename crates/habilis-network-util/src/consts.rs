@@ -103,9 +103,7 @@ pub const REASSEMBLY_STALE: Duration = Duration::from_mins(5);
 /// [`MAX_MESSAGE_SIZE`] already bounds one frame, so a count *is* a byte
 /// bound and states the limit in the unit the attack is measured in.
 ///
-/// Generous against honest backfill: a holder answers one anti-entropy digest
-/// with at most [`crate::tuning::ANTIENTROPY_MAX_RESEND`] frames, and those are spread across
-/// whichever authors wrote them.
+/// Generous against honest backfill, which can carry many changes of one author at once.
 pub const DOC_PENDING_AUTHOR_MAX: usize = 128;
 
 /// Global backstop across all authors — pubkeys are free (Sybil), so the

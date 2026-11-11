@@ -120,7 +120,7 @@ pub(crate) async fn tick_state_refresh(
         idle_sweep = idle.sweep,
         idle_heal = idle.heal,
         idle_reclaim = idle.reclaim,
-        idle_antientropy = idle.antientropy,
+        idle_backfill = idle.backfill,
         idle_state_refresh = idle.state_refresh,
         idle_linkstate = idle.linkstate,
         idle_seed_built = idle.seed_built,

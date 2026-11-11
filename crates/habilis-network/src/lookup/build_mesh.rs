@@ -1,5 +1,4 @@
 use crate::transport::webrtc;
-use crate::util::tuning;
 // Only the `host` loopback bind names a socket address; a browser has no IP
 // stack to bind one on.
 
@@ -12,11 +11,11 @@ use iroh_gossip::proto::HyparviewConfig;
 use crate::transport::PayloadPath;
 
 use crate::transport;
-/// How many events of a topic the gossip keeps for a task that is not scheduled yet: sixteen full
-/// answers to an anti-entropy digest. A late joiner meets the answers of its peers in one burst,
-/// and every change is a message of the topic. The default of 256 overflowed on a loaded host
-/// (the reader got `Lagged`, and the node logged "gossip event stream lagged").
-const TOPIC_EVENT_CAPACITY: usize = 16 * tuning::ANTIENTROPY_MAX_RESEND;
+/// How many events of a topic the gossip keeps for a task that is not scheduled yet: sixteen backfill
+/// answers of 64 frames each. A late joiner meets the answers of its peers in one burst, and every
+/// change is a message of the topic. The default of 256 overflowed on a loaded host (the reader got
+/// `Lagged`, and the node logged "gossip event stream lagged").
+const TOPIC_EVENT_CAPACITY: usize = 1024;
 
 /// Build an iroh-gossip instance and a Router that accepts incoming gossip connections.
 ///
