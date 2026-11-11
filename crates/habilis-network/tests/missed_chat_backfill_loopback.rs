@@ -27,14 +27,14 @@ use habilis_network::runtime::tuning;
 use tokio::time::{self, Instant};
 /// The retention of the payload cache of iroh-gossip (`PlumtreeConfig::message_cache_retention`).
 const GOSSIP_CACHE_RETENTION: Duration = Duration::from_secs(30);
-/// Bounds a slow join only: with the tick pinned away, nothing but the ask on
-/// the first link can deliver.
+/// Bounds a slow join: the late joiner must mesh with `early` within this time.
 const BUDGET: Duration = Duration::from_secs(15);
 
 /// A frame stamped this far ahead stays surfaceable for the late joiner, so the assertion below
-/// reaches the engine. It must exceed the wait before the late joiner starts plus the join budget,
-/// otherwise the join horizon hides the frame and the assertion proves nothing.
-const AHEAD: Duration = Duration::from_secs(4 * 30);
+/// reaches the engine. It must exceed the wait before the late joiner starts (31 s) plus the join
+/// budget (15 s) plus the 5 s read, which is 51 s: 120 s leaves room. Less than that and the join
+/// horizon hides the frame, and the assertion proves nothing.
+const AHEAD: Duration = GOSSIP_CACHE_RETENTION.saturating_mul(4);
 
 /// Logs every chat frame and records the surfaceable ones it receives.
 #[derive(Clone, Default)]
@@ -214,9 +214,10 @@ fn a_chat_broadcast_missed_by_a_late_joiner_is_not_delivered() {
             "early never got the frame, so it cannot hold it for late"
         );
 
-        // iroh-gossip answers a graft from its payload cache, which keeps a message for
-        // `message_cache_retention` (30 s). Until that cache lets go of the frame, a late joiner can get
-        // it through the gossip layer, and no engine path is involved. Wait past the retention first.
+        // Cheap insurance: iroh-gossip answers a graft from its payload cache, which keeps a message
+        // for `message_cache_retention` (30 s). It was observed once in a failing run log with AHEAD =
+        // 30 s (8 Graft messages, then a Gossip message), and not in 5 runs without this wait at
+        // AHEAD = 120 s. Wait past the retention so that the cache cannot be the path.
         time::sleep(GOSSIP_CACHE_RETENTION + Duration::from_secs(1)).await;
         let started = Instant::now();
         let (late, late_chat, late_saw) = spawn(&topic, "late").await;
