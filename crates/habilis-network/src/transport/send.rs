@@ -703,7 +703,10 @@ mod tests {
                 transport::RELAY_REFUSED,
                 "the bare refusal"
             );
-            assert!(!pair.bob_read_a_frame().await, "the refused frame arrived");
+            assert!(
+                !Box::pin(pair.bob_read_a_frame()).await,
+                "the refused frame arrived"
+            );
         });
     }
 
