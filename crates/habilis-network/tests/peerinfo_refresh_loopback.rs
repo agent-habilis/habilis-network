@@ -1,6 +1,6 @@
 //! A `PeerInfo` that a member missed comes again by the periodic refresh.
 //!
-//! A `PeerInfo` is in no message log, so no digest repairs a lost one. Its sender floods it again
+//! No frame repairs a lost `PeerInfo`; only the flood of its sender does. Its sender floods it again
 //! on a few events (a new neighbor, a changed address, a new `joined`), and in a quiet mesh none
 //! of them comes. Without the endpoint proof that the `PeerInfo` carries, the node answers no ping
 //! of its sender and drops its link-state vectors.

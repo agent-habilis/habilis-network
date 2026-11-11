@@ -36,8 +36,9 @@ fn chat(author: &str, by: &Identity, at: UnixSecs) -> Verified {
     message.sign(by)
 }
 
-/// H5. A new joiner receives the message log of the mesh. A frame in it that is older than the
-/// join of this node, from a peer that left before, must not count as a member: this node would
+/// H5. A late joiner gets frames that are older than its join: the iroh-gossip cache delivers them,
+/// and a peer with a slow clock stamps them so. Such a frame of a peer that left before must not
+/// count as a member: this node would
 /// show a count that is too high until the sweep evicts the ghost, and the ghost never surfaced.
 #[test]
 fn h5_a_pre_join_backlog_frame_adds_no_ghost_to_the_count() {

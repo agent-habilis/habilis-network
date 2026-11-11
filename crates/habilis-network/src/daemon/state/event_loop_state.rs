@@ -747,9 +747,8 @@ pub struct EventLoopState {
     /// byte-budgeted, decoupled from the seen set so its eviction can never
     /// break reassembly. Swept for stale groups on the prune tick.
     pub(crate) reassembly: ReassemblyStore,
-    /// Serialized frames of our recent big (unlogged) outbound shard groups —
-    /// the re-serve source for peers' `shard/repair` requests (big groups
-    /// skip the message log, so no repair can heal them).
+    /// Serialized frames of our recent big outbound shard groups —
+    /// the only re-serve source for peers' `shard/repair` requests.
     pub(crate) shard_cache: ShardCache,
     /// The shared documents of the `state` and `meta` channels.
     pub(crate) docs: ChannelDocs,
@@ -1313,9 +1312,8 @@ impl EventLoopState {
     /// Whether our `PeerInfo` is due for a refresh at `now`. It is due for a meshed node that has
     /// flooded before, when the refresh period has passed since the last flood, whatever caused
     /// that flood. The period is [`tuning::peerinfo_refresh_period`] for the live members,
-    /// lengthened by the spread that the last flood drew. A `PeerInfo` is not in the message log,
-    /// so no digest repairs one that a member missed, and the flood of its sender is the only
-    /// repair.
+    /// lengthened by the spread that the last flood drew. No frame repairs a missed `PeerInfo`;
+    /// only the flood of its sender does.
     pub(crate) fn peerinfo_refresh_due(&self, now: Instant) -> bool {
         if !self.standing.contains(&Standing::Meshed) {
             return false;
@@ -2098,9 +2096,8 @@ impl EventLoopState {
     /// strict answer (a real-peer link), but it is stricter than the overlay:
     /// a node whose only neighbor is the rendezvous relay already exchanges
     /// presence over that link, and a peer behind the same relay (a browser
-    /// tab, say) may never form a direct link at all. Document plumbing —
-    /// heads digests, change frames — is small and reconciled by the backfill,
-    /// so it rides the relay link too. User content keeps waiting on `meshed`.
+    /// tab, say) may never form a direct link at all. The slice frames of the shared state
+    /// are small and sent by the backfill, so they ride the relay link too. User content keeps waiting on `meshed`.
     /// A degraded node is excluded: its overlay is suspected dead, and the
     /// relay link alone is no proof it recovered.
     pub(crate) fn overlay_reachable(&self) -> bool {

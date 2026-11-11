@@ -115,8 +115,8 @@ pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// than two of those intervals is of no use, and its slot goes to another signer.
 pub const PARKED_LINK_STATE_TTL: Duration = LINKSTATE_INTERVAL.saturating_mul(2);
 
-/// The least time between two `PeerInfo` refreshes of a node. A `PeerInfo` that a member missed is
-/// not in the message log, so no later frame repairs it: only the flood of its sender does. The refresh
+/// The least time between two `PeerInfo` refreshes of a node. No frame repairs a
+/// `PeerInfo` that a member missed; only the flood of its sender does. The refresh
 /// sends it again, so a lost one is back within one period.
 pub const PEERINFO_REFRESH_MIN: Duration = Duration::from_mins(5);
 

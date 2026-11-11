@@ -8,7 +8,7 @@ use super::{AppTag, CorrId, MessageId, PresenceSubtype};
 use crate::AuthorKey;
 
 /// Message kind — the frame's routing discriminator. The engine owns the
-/// infrastructure kinds (presence, peer-info, digests, ping/pong, channel
+/// infrastructure kinds (presence, peer-info, ping/pong, channel
 /// events, link-state); all application payloads ride the single generic
 /// [`App`](MessageKind::App) variant, distinguished by its opaque `tag`.
 /// - `App`: an application payload — the body is a whole serialized app object

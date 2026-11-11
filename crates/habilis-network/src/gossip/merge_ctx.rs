@@ -571,9 +571,8 @@ pub(crate) fn peer_info_json(
 }
 
 /// Broadcast a `PeerInfo` carrying our endpoint address so peers can
-/// dial us directly. Unlike `joined`, `PeerInfo` never enters the
-/// message log (`handle_peer_info` returns before the log push), so
-/// re-sending it is invisible to `poll`/`fetch_messages` consumers —
+/// dial us directly. Unlike `joined`, `PeerInfo` is never
+/// surfaced to the app, so re-sending it is invisible to `poll`/`fetch_messages` consumers —
 /// safe to repeat on every new neighbor. Stamps `peerinfo_flood`, the
 /// window the `joined` re-flood gate and the periodic refresh read, and draws the spread of the
 /// next refresh period.

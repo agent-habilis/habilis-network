@@ -663,7 +663,7 @@ impl SliceStore {
         self.slices.get(key).map(|slice| &slice.value)
     }
 
-    /// Returns the signed frame held for `key`, which a resend or the digest sends.
+    /// Returns the signed frame held for `key`, which a resend sends. No caller yet.
     #[must_use]
     pub fn frame(&self, key: &AuthorKey) -> Option<&Verified> {
         self.slices.get(key).map(|slice| &slice.frame)
@@ -763,11 +763,11 @@ impl SliceStore {
     ///
     /// The key is the frame's author, so a frame only ever writes its own slice. A `live` frame
     /// that carries a new version spends one token of its author. A resend, with `live` false,
-    /// never spends one.
+    /// never spends one. No caller sends a resend yet.
     pub fn ingest(
         &mut self,
         frame: &Verified,
-        // True for a live broadcast, false for a digest resend.
+        // True for a live broadcast, false for a resend (no caller yet).
         live: bool,
         now: Instant,
     ) -> SliceIngest {

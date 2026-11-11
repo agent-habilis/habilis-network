@@ -1,5 +1,5 @@
 //! A chat broadcast that a late joiner missed is not delivered to it after the late joiner meets
-//! the mesh. Chat has no backfill now: no digest, tick or resend carries it. The late joiner starts
+//! the mesh. Chat has no backfill now: no tick or resend carries it. The late joiner starts
 //! only after iroh-gossip's payload cache (30 s) lets go of the frame, so a graft cannot answer from
 //! that cache; the frame is stamped `AHEAD` so that it stays surfaceable for the late joiner, which
 //! makes the assertion test the engine and not the join horizon.

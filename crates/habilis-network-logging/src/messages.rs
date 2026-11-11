@@ -1,7 +1,7 @@
 //! One line per mesh message (sent/received) on the
 //! `habilis_network::messages` tracing target, pinned always-on in
 //! the default filter (`src/main.rs`). Logging only, no control flow.
-//! Msg + presence joined/left at `info`; Alive/PeerInfo/Digest at
+//! Msg + presence joined/left at `info`; Alive/PeerInfo at
 //! `trace`.
 //!
 //! **Body redaction.** By default the `Msg` body is replaced with

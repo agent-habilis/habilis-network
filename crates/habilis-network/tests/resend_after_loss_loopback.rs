@@ -20,7 +20,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
 use tokio::time;
-/// One heal tick (15 s) to resubscribe, the re-graft, and a backfill cycle, with margin.
+/// One heal tick (15 s) to resubscribe and the re-graft, with margin.
 /// Less than the 90 s dedup of the gossip layer: a message that waits for the dedup is a failure.
 const RECOVERY: Duration = Duration::from_secs(75);
 const FORMATION: Duration = Duration::from_mins(1);

@@ -1157,7 +1157,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         {
             gossip::flush_pending(&mut self.state, &context, "silence sweep").await;
         }
-        // A `PeerInfo` that a member missed is repaired by no digest: send it again by period.
+        // A `PeerInfo` that a member missed is repaired by no frame, only by the flood of its sender: send it again by period.
         if self.state.peerinfo_refresh_due(Instant::now()) {
             gossip::broadcast_peer_info(&mut self.state, &context).await;
             self.state.last_sent_at = Instant::now();

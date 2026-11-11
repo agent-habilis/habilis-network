@@ -417,9 +417,9 @@ fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
 /// State is a topic broadcast: a change that alice writes reaches carol through the mesh, and
 /// the gossip rung carries none of it. This is the row for state in the gossip-only list. It
 /// shows that state still converges while the pair has only the rung, and it does not claim
-/// that the rung carried the change. Backfill (the unicast answer to a digest) goes only to a
+/// that the rung carried the change. Backfill (the unicast send of the own slices) goes only to a
 /// linked neighbor, and a gossip-only pair cannot keep a link, so the unit tests in
-/// `transport/send.rs` own it: a proven asker that is not linked is answered on the topic.
+/// `transport/send.rs` own it: a proven peer that is not linked is sent the frame on the topic.
 #[test]
 #[ignore = "run by cargo task matrix"]
 fn state_written_by_alice_reaches_carol_while_the_pair_has_only_the_gossip_rung() {

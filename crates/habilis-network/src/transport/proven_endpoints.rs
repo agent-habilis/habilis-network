@@ -4,8 +4,8 @@
 //! any signer can put on it, and a `PeerInfo`'s endpoint id is a claim. So a
 //! `PeerInfo` also carries a proof, a signature by the endpoint's own key over
 //! the mesh and the frame's signing key. Only the holder of both keys can make
-//! it, so a point-to-point answer to a digest goes to the endpoint proven for
-//! the digest's signer, and a signer that proved none is answered on gossip.
+//! it, so a point-to-point backfill goes to the endpoint proven for
+//! the key of its receiver, and a key that proved none is sent the frame on gossip.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 

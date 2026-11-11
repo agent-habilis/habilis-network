@@ -2,8 +2,8 @@
 
 use super::MessageKind;
 
-/// Which shared-state channel an event/digest belongs to. The two channels share
-/// all machinery; this selects the wire kind, the log, and the surfaced name.
+/// Which shared-state channel a slice event belongs to. The two channels share
+/// all machinery; this selects the wire kind and the surfaced name.
 ///
 /// # Examples
 ///

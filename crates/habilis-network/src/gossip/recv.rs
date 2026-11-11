@@ -1,7 +1,7 @@
 //! Gossip **inbound plane**: the gossip-event pump (`Received` /
 //! `NeighborUp` / `NeighborDown` / `Lagged` / stream end), neighbor
 //! up/down bookkeeping, the per-message router (parse → self-echo drop →
-//! rate-check → lifecycle observe → dispatch by kind → message-log), and
+//! rate-check → lifecycle observe → dispatch by kind), and
 //! `PeerInfo` linking. Outbound/send lives in `super::broadcast`; this
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
@@ -691,7 +691,7 @@ pub(crate) async fn ingest_from(
     }
 }
 
-/// The engine's own message kinds: presence, peer info, digests, ping/pong,
+/// The engine's own message kinds: presence, peer info, ping/pong,
 /// channel events, link state.
 ///
 /// [`ControlFlow::Break`] means the kind is fully handled here and must not
@@ -929,7 +929,7 @@ async fn end_displaced_sessions(
 /// Whether a frame of this kind changes the roster or the routes of a peer. The gate refuses these
 /// from a session that claims a nickname that another member holds. A `PeerInfo` is not one of
 /// them: it only gives an address, and a session that asks for a proof needs one. The frames that
-/// carry data (app, state, meta, digests) are never refused here; they are stored and relayed, and
+/// carry data (app, state, meta) are never refused here; they are stored and relayed, and
 /// they change no roster entry.
 fn is_membership_kind(kind: &MessageKind) -> bool {
     matches!(
@@ -945,7 +945,7 @@ fn is_membership_kind(kind: &MessageKind) -> bool {
 /// author's own measured links + underlay address (`body` = a serialized
 /// `LinkVector`) supersede the last vector we held for that origin. Dropped
 /// silently when the multihop transport is off or the body is malformed —
-/// plumbing like the digests, never logged or surfaced. Returns whether the topology changed.
+/// plumbing like presence, never surfaced. Returns whether the topology changed.
 fn handle_link_state(message: &Verified, state: &mut EventLoopState) -> bool {
     #[cfg(not(feature = "multihop"))]
     {
@@ -1657,7 +1657,7 @@ async fn handle_peer_info(
     if peer_id == context.rendezvous_id {
         return;
     }
-    // The only binding a digest's answer may follow: this signer proved it
+    // The only binding a backfill answer may follow: this signer proved it
     // owns `peer_id`. A `PeerInfo` arrives many times, so a pair that the roster trusts is not
     // checked again. A proof that the table holds for a signer not yet in the roster is checked
     // again, so the trust follows the roster.
@@ -4997,7 +4997,7 @@ mod first_contact_tests {
     /// A newcomer behind the rendezvous learns our address only from our
     /// `PeerInfo` flood, and the lower endpoint id is the one that dials. Its
     /// first frame to reach us is not always its `joined`: under load its
-    /// digest can overtake it. So the flood follows the first frame from a
+    /// `State` frame can overtake it. So the flood follows the first frame from a
     /// new peer, whatever its kind. A `State` frame does not mark a peer
     /// present, so it floods nothing. A `joined` first frame floods in
     /// `handle_presence`, which this test does not cover.
