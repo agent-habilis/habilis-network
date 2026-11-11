@@ -842,6 +842,9 @@ async fn roster_gate(
             context.sink.emit(NodeEvent::Error(line));
         }
         let observed = lifecycle::observe(verified, state, context);
+        if observed.update.returned || observed.update.joined_new {
+            promote_pending(verified.key(), Instant::now(), state, app, context);
+        }
         // The check before `observe` is pure. A quiet peer whose clock stepped back returns when `observe` completes
         // its run of rising frames, and that check read the last frame of the run as stale: the peer is in the
         // roster now with its proof still pending, so it is activated here (one frame late).
@@ -1206,11 +1209,41 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
+    if !state.keeps_slice(&message.key()) {
+        // The slice waits until its author joins or returns, so a stranger cannot fill the store.
+        if let Err(error) = state.docs.hold(channel, message, Instant::now()) {
+            tracing::debug!(target: "habilis_network::gossip", %error, "a slice of an author outside the roster is refused");
+        }
+        return;
+    }
     let applied = ingest_channel_event(event, &mut state.docs, Instant::now(), context);
     if applied && channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
         app.on_meta_applied(&message.key(), state, context);
+    }
+}
+
+/// Applies the held slices of `key` on both channels, once `key` joined or returned. Each one runs
+/// through [`dispatch_channel`], so it takes its token now and reaches the app as an arrival.
+fn promote_pending(
+    key: AuthorKey,
+    now: Instant,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) {
+    for channel in [Channel::State, Channel::Meta] {
+        if let Some(frame) = state.docs.take_pending(channel, &key, now) {
+            // The join horizon judges a held frame by its own timestamp, as it judges an arrival.
+            let surfaceable = frame.timestamp >= state.joined_at;
+            let event = ChannelEvent {
+                channel,
+                message: &frame,
+                surfaceable,
+            };
+            dispatch_channel(event, state, app, context);
+        }
     }
 }
 
@@ -1870,6 +1903,7 @@ mod first_contact_tests {
 
     use super::{
         ChannelEvent, dispatch_channel, dispatch_infra, handle_gossip_event, ingest, pong_for,
+        promote_pending,
     };
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::{EventLoopState, PingRound};
@@ -3067,6 +3101,9 @@ mod first_contact_tests {
             let twin = nick("twin");
             let identities = [Identity::generate(), Identity::generate()];
             for identity in &identities {
+                state.peers.insert(identity.author_key());
+            }
+            for identity in &identities {
                 // A slice that the store takes: the hook runs only on an applied slice.
                 let frame = Message::new_channel_event(
                     &node.mesh,
@@ -3110,6 +3147,7 @@ mod first_contact_tests {
             let mut app = MetaRecorder(Arc::clone(&record));
             let twin = nick("twin");
             let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
             // Version 1 applies. A second frame with version 0 is stale, so the store refuses it.
             for version in [1, 0] {
                 let frame = Message::new_channel_event(
@@ -3137,6 +3175,406 @@ mod first_contact_tests {
                 heard,
                 vec![identity.author_key()],
                 "the hook ran for the applied slice only, not for the stale one"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A signed meta slice of `identity` at `version`, for the tests of the roster gate.
+    fn gate_slice(mesh: &MeshId, identity: &Identity, version: u64) -> Verified {
+        Message::new_channel_event(
+            mesh,
+            &nick("slice"),
+            MessageBody::try_new(&format!(r#"{{"version":{version},"value":{{}}}}"#))
+                .expect("a slice body"),
+            Channel::Meta,
+        )
+        .sign(identity)
+    }
+
+    /// A meta app with an empty record, for the tests of the roster gate.
+    fn meta_app() -> MetaRecorder {
+        // The app and the test share the record, so the record is behind an Arc.
+        MetaRecorder(Arc::new(Mutex::new(Vec::new())))
+    }
+
+    /// The meta slot of `key` in the view of `state`, or `None` when the view has no slot of it.
+    fn meta_slot(state: &EventLoopState, key: &AuthorKey) -> Option<serde_json::Value> {
+        let hex = String::from_utf8_lossy(&key.hex()).into_owned();
+        state.docs.to_json(Channel::Meta).get(&hex).cloned()
+    }
+
+    #[test]
+    fn fresh_keys_outside_the_roster_do_not_block_a_roster_author() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            for _ in 0..256 {
+                let stranger = Identity::generate();
+                let frame = gate_slice(&node.mesh, &stranger, 1);
+                let event = ChannelEvent {
+                    channel: Channel::Meta,
+                    message: &frame,
+                    surfaceable: true,
+                };
+                dispatch_channel(event, &mut state, &mut app, &context);
+            }
+            let member = Identity::generate();
+            state.peers.insert(member.author_key());
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &member.author_key()).is_some(),
+                "a roster author writes its slice while 256 strangers wait"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_slice_of_a_key_outside_the_roster_waits_for_its_joined() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the record
+            let record = Arc::new(Mutex::new(Vec::new()));
+            let mut app = MetaRecorder(Arc::clone(&record));
+            let stranger = Identity::generate();
+            let key = stranger.author_key();
+            let frame = gate_slice(&node.mesh, &stranger, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a slice of a key outside the roster is not in the view"
+            );
+            state.peers.insert(key);
+            promote_pending(key, clock::Instant::now(), &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_some(),
+                "the held slice reaches the view when its key joins"
+            );
+            let heard = record.lock().expect("the record lock").clone();
+            assert_eq!(
+                heard,
+                vec![key],
+                "the meta hook runs for the promoted slice"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_pending_slice_expires_after_the_alive_timeout() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let stranger = Identity::generate();
+            let key = stranger.author_key();
+            let frame = gate_slice(&node.mesh, &stranger, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a slice of a key outside the roster is held, not applied"
+            );
+            state.peers.insert(key);
+            let joined = clock::Instant::now() + Duration::from_secs(91);
+            promote_pending(key, joined, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a slice held past the alive timeout is gone when its key joins"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_peer_that_leaves_loses_its_slice_from_the_view() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_some(),
+                "the peer's slice is in the view"
+            );
+            let nickname = nick("member");
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Replaced(&nickname),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "the slice of a peer that left is out of the view"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn an_own_frame_is_not_held() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let own = Arc::clone(&state.identity);
+            let frame = gate_slice(&node.mesh, &own, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &own.author_key()).is_some(),
+                "an echo of an own frame is applied, not held as a stranger"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn the_sweep_expires_a_gone_key_after_the_gone_ttl() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let gone_ttl = habilis_network_doc::SliceLimits::default().gone_ttl;
+            let left_at = clock::Instant::now()
+                .checked_sub(gone_ttl + Duration::from_secs(1))
+                .expect("an instant past the gone TTL");
+            state.docs.forget(&key, left_at);
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a gone key is refused before the sweep expires it"
+            );
+            heartbeat::tick_sweep(&mut state, &SilentSink);
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_some(),
+                "the sweep drops the gone key after the gone TTL, and its slice applies again"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_lapsed_key_keeps_its_slice_and_a_dropped_key_loses_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let lapsed = Identity::generate();
+            let dropped = Identity::generate();
+            state.peers.insert(lapsed.author_key());
+            state.peers.insert(dropped.author_key());
+            for member in [&lapsed, &dropped] {
+                let frame = gate_slice(&node.mesh, member, 1);
+                let event = ChannelEvent {
+                    channel: Channel::Meta,
+                    message: &frame,
+                    surfaceable: true,
+                };
+                dispatch_channel(event, &mut state, &mut app, &context);
+            }
+            state.peers.remove(&lapsed.author_key());
+            state
+                .clock_evidence
+                .lapsed_quiet
+                .insert(lapsed.author_key());
+            state.peers.remove(&dropped.author_key());
+            heartbeat::tick_sweep(&mut state, &SilentSink);
+            assert!(
+                meta_slot(&state, &lapsed.author_key()).is_some(),
+                "a lapsed key keeps its slice while it can return"
+            );
+            assert!(
+                meta_slot(&state, &dropped.author_key()).is_none(),
+                "a key that left the roster loses its slice"
+            );
+            let body =
+                MessageBody::try_new(r#"{"version":2,"value":{"n":2}}"#).expect("a slice body");
+            let returned =
+                Message::new_channel_event(&node.mesh, &nick("slice"), body, Channel::Meta)
+                    .sign(&lapsed);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &returned,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert_eq!(
+                meta_slot(&state, &lapsed.author_key()).and_then(|slot| slot["n"].as_u64()),
+                Some(2),
+                "a lapsed key that returns writes its new slice, not a gone refusal"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_new_run_of_a_member_leaves_one_slice_in_the_view() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let older = Identity::generate();
+            let newer = Identity::generate();
+            state.peers.insert(older.author_key());
+            state.peers.insert(newer.author_key());
+            for member in [&older, &newer] {
+                let frame = gate_slice(&node.mesh, member, 1);
+                let event = ChannelEvent {
+                    channel: Channel::Meta,
+                    message: &frame,
+                    surfaceable: true,
+                };
+                dispatch_channel(event, &mut state, &mut app, &context);
+            }
+            let nickname = nick("member");
+            lifecycle::end_session(
+                older.author_key(),
+                lifecycle::Goodbye::Replaced(&nickname),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            let view = state.docs.to_json(Channel::Meta);
+            assert_eq!(
+                view.as_object().map(serde_json::Map::len),
+                Some(1),
+                "a new run of a member leaves one slice in the view"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_slice_of_a_key_that_said_goodbye_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let first = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &first,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            let nickname = nick("member");
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Replaced(&nickname),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            let later = gate_slice(&node.mesh, &member, 2);
+            let later_event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &later,
+                surfaceable: true,
+            };
+            dispatch_channel(later_event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a newer slice of a key that said goodbye does not come back"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_key_that_loses_its_nickname_keeps_its_slice_pending() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            let nickname = nick("member");
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Refused(&nickname),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a key that lost its nickname is out of the view"
+            );
+            assert!(
+                state
+                    .docs
+                    .take_pending(Channel::Meta, &key, clock::Instant::now())
+                    .is_some(),
+                "its slice waits in the pending set, because the key can return"
             );
             node.endpoint.close().await;
         });

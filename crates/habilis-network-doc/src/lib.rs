@@ -46,6 +46,8 @@ mod mesh_doc;
 
 pub use mesh_doc::{Ingested, MeshDoc, SelfWriteGate};
 
+mod pending_slices;
+
 mod slice_store;
 
 pub use slice_store::{

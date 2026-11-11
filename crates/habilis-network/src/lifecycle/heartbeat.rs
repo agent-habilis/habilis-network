@@ -225,6 +225,8 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         state.clock_evidence.lapsed_quiet.remove(&key);
         state.clock_evidence.lapsed_quiet.insert(key);
     }
+    state.release_strangers();
+    state.docs.expire(Instant::now());
     // Keep `quiet_since` bounded to current `quiet` membership: peers that
     // returned (drained from `quiet`) or fell off the bounded `quiet` FIFO
     // drop their stale recency here.
@@ -1763,6 +1765,50 @@ mod tests {
         assert_eq!(
             state.peers, expected_peers,
             "a sweep preserves the other peers"
+        );
+    }
+
+    #[test]
+    fn a_sweep_keeps_the_own_slice() {
+        use crate::protocol::{Channel, MeshId, Message};
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let own = state.identity.author_key();
+        let value = serde_json::json!({"status": "busy"})
+            .as_object()
+            .cloned()
+            .expect("an object");
+        let draft = state
+            .docs
+            .prepare_local(Channel::State, &own, value, Instant::now())
+            .expect("a draft that fits");
+        let frame = Message::new_channel_event(
+            &MeshId::from("test"),
+            &nick("me"),
+            draft.body().clone(),
+            Channel::State,
+        )
+        .sign(&state.identity);
+        state
+            .docs
+            .commit_local(Channel::State, draft, &frame, Instant::now())
+            .expect("the own slice is committed");
+        tick_sweep(&mut state, &SilentSink);
+        let hex = String::from_utf8_lossy(&own.hex()).into_owned();
+        assert!(
+            state.docs.to_json(Channel::State).get(&hex).is_some(),
+            "a sweep keeps the own slice: the own key is never a stranger"
+        );
+    }
+
+    #[test]
+    fn the_gone_ttl_outlasts_the_quiet_ttl_and_the_alive_timeout() {
+        use crate::util::tuning;
+        let gone_ttl = habilis_network_doc::SliceLimits::default().gone_ttl;
+        let floor = QUIET_TTL + tuning::ALIVE_TIMEOUT;
+        assert!(
+            gone_ttl >= floor,
+            "gone_ttl {gone_ttl:?} must cover QUIET_TTL plus ALIVE_TIMEOUT {floor:?}"
         );
     }
 }

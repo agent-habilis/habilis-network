@@ -36,7 +36,7 @@ use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
-use habilis_network_doc::{SliceIngest, SliceLimits, SliceStore};
+use habilis_network_doc::{SliceError, SliceIngest, SliceLimits, SliceStore};
 
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, LANE_WANTED, PENDING_OUTBOUND_CAP, QUIET_CAP, REASSEMBLED_GROUPS_CAP,
@@ -161,7 +161,7 @@ impl ChannelDocs {
         own: &AuthorKey,
         value: serde_json::Map<String, serde_json::Value>,
         now: Instant,
-    ) -> Result<habilis_network_doc::LocalDraft, habilis_network_doc::SliceError> {
+    ) -> Result<habilis_network_doc::LocalDraft, SliceError> {
         self.get_mut(channel).prepare_local(own, value, now)
     }
 
@@ -172,7 +172,7 @@ impl ChannelDocs {
         draft: habilis_network_doc::LocalDraft,
         frame: &Verified,
         now: Instant,
-    ) -> Result<(), habilis_network_doc::SliceError> {
+    ) -> Result<(), SliceError> {
         self.get_mut(channel).commit_local(draft, frame, now)
     }
 
@@ -206,6 +206,58 @@ impl ChannelDocs {
         now: Instant,
     ) -> SliceIngest {
         self.get_mut(channel).ingest(frame, live, now)
+    }
+
+    /// Holds a signed slice frame of `channel` for an author that is not in the roster yet.
+    pub(crate) fn hold(
+        &mut self,
+        channel: protocol::Channel,
+        frame: &Verified,
+        now: Instant,
+    ) -> Result<(), SliceError> {
+        self.get_mut(channel).hold(frame, now)
+    }
+
+    /// Drops the slice of `key` on both channels, and puts the key in the gone set.
+    pub(crate) fn forget(&mut self, key: &AuthorKey, now: Instant) {
+        self.state.forget(key, now);
+        self.meta.forget(key, now);
+    }
+
+    /// Moves the slice of `key` on both channels into the pending set.
+    pub(crate) fn park(&mut self, key: &AuthorKey, now: Instant) {
+        self.state.park(key, now);
+        self.meta.park(key, now);
+    }
+
+    /// Drops the slice of `key` on both channels. Unlike `forget`, the key is not gone.
+    pub(crate) fn release(&mut self, key: &AuthorKey) {
+        self.state.release(key);
+        self.meta.release(key);
+    }
+
+    /// The keys that hold a slice on either channel.
+    pub(crate) fn held_keys(&self) -> Vec<AuthorKey> {
+        self.state
+            .held_keys()
+            .chain(self.meta.held_keys())
+            .collect()
+    }
+
+    /// Expires the tombstones, the gone keys and the held frames of both channels at `now`.
+    pub(crate) fn expire(&mut self, now: Instant) {
+        self.state.expire(now);
+        self.meta.expire(now);
+    }
+
+    /// Takes the held frame of `key` on `channel` out of the pending set.
+    pub(crate) fn take_pending(
+        &mut self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+        now: Instant,
+    ) -> Option<Verified> {
+        self.get_mut(channel).take_pending(key, now)
     }
 }
 
@@ -1652,6 +1704,31 @@ impl EventLoopState {
 
     pub(crate) fn key_said_goodbye(&self, key: AuthorKey) -> bool {
         self.left_keys.peers.contains(&key) || self.left_keys.strangers.contains(&key)
+    }
+
+    /// Whether `key` is in the roster: a live peer, a quiet peer, or a key that lapsed quiet and may
+    /// return.
+    pub(crate) fn in_roster(&self, key: &AuthorKey) -> bool {
+        self.peers.contains(key)
+            || self.quiet.contains(key)
+            || self.clock_evidence.lapsed_quiet.contains(key)
+    }
+
+    /// Whether the store keeps the slice of `key`: the own key, and every key in the roster.
+    pub(crate) fn keeps_slice(&self, key: &AuthorKey) -> bool {
+        *key == self.identity.author_key() || self.in_roster(key)
+    }
+
+    /// Drops the slices of every key that is out of the roster. A key that leaves the roster keeps no slice.
+    pub(crate) fn release_strangers(&mut self) {
+        let held = self.docs.held_keys();
+        let strangers: Vec<AuthorKey> = held
+            .into_iter()
+            .filter(|key| !self.keeps_slice(key))
+            .collect();
+        for key in &strangers {
+            self.docs.release(key);
+        }
     }
 
     /// A `NeighborDown` for `peer`: the gossip link is gone, the path verdict

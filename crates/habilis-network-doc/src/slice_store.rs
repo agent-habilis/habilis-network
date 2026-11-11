@@ -10,9 +10,6 @@
 //! mesh the body is sealed with the channel key, and the store opens it before it reads the
 //! slice. The store takes the key from the frame and never from the body, so no frame writes
 //! another author's slice.
-//!
-//! The version-vector sync (the digest round, `missing_for`) reads the held versions to find
-//! what a peer lacks. Do not remove it when the store changes.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
@@ -21,6 +18,7 @@ use std::fmt;
 use std::time::Duration;
 
 use habilis_network_util::clock::Instant;
+use habilis_network_util::tuning;
 
 use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, Channel, ContentHash, MessageBody, SymmetricKey};
@@ -28,17 +26,18 @@ use habilis_network_util::consts::MAX_MESSAGE_SIZE;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::pending_slices::PendingSlices;
 use crate::wire;
 
 /// The most gone keys one store holds. It matches the author cap, so the set holds a key for each
-/// author the store can hold. An overflow evicts the oldest key early. That is harmless only when
-/// the engine roster gate refuses an author that is not in the roster. The gate is a requirement of
-/// the wiring commit, it does not exist yet.
+/// author the store can hold. An overflow evicts the oldest gone key. The engine holds a slice of a
+/// key outside the roster as pending, and does not apply it, so an evicted key is not applied
+/// either until it joins.
 const GONE_CAP: usize = 256;
 
-/// The default time a key stays gone. The engine forgets a quiet author after `QUIET_TTL`, one hour,
-/// so this is that time plus a margin: a forgotten key stays refused past the forget. The wiring
-/// commit must assert `gone_ttl >= QUIET_TTL` (1 hour, `heartbeat.rs`) in an engine test.
+/// The default time a key stays gone, after a signed goodbye or a replaced run. It must cover
+/// `QUIET_TTL` plus `ALIVE_TIMEOUT`: a peer that missed the goodbye keeps the old slice until it
+/// drops the key. The engine test `the_gone_ttl_outlasts_the_quiet_ttl_and_the_alive_timeout` pins it.
 const DEFAULT_GONE_TTL: Duration = Duration::from_hours(2);
 
 /// The longest mesh id text, in bytes. It is `MeshId`'s own limit.
@@ -589,6 +588,8 @@ pub struct SliceStore {
     buckets: HashMap<AuthorKey, Bucket>,
     /// The gone keys, oldest first, with the time each one left.
     gone: VecDeque<(AuthorKey, Instant)>,
+    /// The frames of authors that are not in the roster yet. They wait for [`SliceStore::take_pending`].
+    pending: PendingSlices,
 }
 
 /// One held slice: its signed frame, its version, the hash of the frame, its value, and the
@@ -624,6 +625,7 @@ impl SliceStore {
     /// quotes of the empty JSON string. Use [`worst_frame_overhead`] only without a probe.
     #[must_use]
     pub fn new(channel: Channel, limits: SliceLimits, frame_overhead: usize) -> Self {
+        let pending = PendingSlices::new(limits.max_authors, tuning::alive_timeout());
         Self {
             channel,
             key: None,
@@ -632,6 +634,7 @@ impl SliceStore {
             slices: HashMap::new(),
             buckets: HashMap::new(),
             gone: VecDeque::new(),
+            pending,
         }
     }
 
@@ -686,6 +689,50 @@ impl SliceStore {
             .collect()
     }
 
+    /// Checks a frame the way [`SliceStore::ingest`] does, and returns its slice body.
+    fn read(&self, frame: &Verified) -> Result<SliceBody, SliceError> {
+        if frame.kind != self.channel.event_kind() {
+            return Err(SliceError::WrongChannel);
+        }
+        let signed = frame.serialize().map_err(|_| SliceError::Malformed)?;
+        if signed.len() > self.limits.slice_bytes {
+            return Err(SliceError::TooLarge {
+                bytes: signed.len(),
+                limit: self.limits.slice_bytes,
+            });
+        }
+        let plain = wire::decrypt_body(frame.body.as_str(), self.key.as_ref())
+            .ok_or(SliceError::Malformed)?;
+        let body: SliceBody = serde_json::from_str(&plain).map_err(|_| SliceError::Malformed)?;
+        if !(body.value.is_object() || body.value.is_null()) {
+            return Err(SliceError::Malformed);
+        }
+        Ok(body)
+    }
+
+    /// Holds a frame of an author that is not in the roster yet, until [`SliceStore::take_pending`]
+    /// returns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of [`SliceStore::ingest`] for a frame it would refuse as malformed, too
+    /// large or on another channel, and `GoneKey` for a key that said goodbye.
+    pub fn hold(&mut self, frame: &Verified, now: Instant) -> Result<(), SliceError> {
+        let body = self.read(frame)?;
+        let key = frame.key();
+        if self.is_gone(&key) {
+            return Err(SliceError::GoneKey);
+        }
+        self.pending.hold(frame, body.version, now);
+        Ok(())
+    }
+
+    /// Takes the held frame of `key` out of the pending set, unless its TTL ended at `now`.
+    pub fn take_pending(&mut self, key: &AuthorKey, now: Instant) -> Option<Verified> {
+        self.pending.expire(now);
+        self.pending.take(key)
+    }
+
     /// Takes a verified slice frame into the slice of its author, and says what it did.
     ///
     /// The key is the frame's author, so a frame only ever writes its own slice. A `live` frame
@@ -698,28 +745,10 @@ impl SliceStore {
         live: bool,
         now: Instant,
     ) -> SliceIngest {
-        if frame.kind != self.channel.event_kind() {
-            return SliceIngest::Refused(SliceError::WrongChannel);
-        }
-        let Ok(signed) = frame.serialize() else {
-            return SliceIngest::Refused(SliceError::Malformed);
+        let body = match self.read(frame) {
+            Ok(body) => body,
+            Err(error) => return SliceIngest::Refused(error),
         };
-        if signed.len() > self.limits.slice_bytes {
-            return SliceIngest::Refused(SliceError::TooLarge {
-                bytes: signed.len(),
-                limit: self.limits.slice_bytes,
-            });
-        }
-        let Some(plain) = wire::decrypt_body(frame.body.as_str(), self.key.as_ref()) else {
-            return SliceIngest::Refused(SliceError::Malformed);
-        };
-        let parsed: Result<SliceBody, _> = serde_json::from_str(&plain);
-        let Ok(body) = parsed else {
-            return SliceIngest::Refused(SliceError::Malformed);
-        };
-        if !(body.value.is_object() || body.value.is_null()) {
-            return SliceIngest::Refused(SliceError::Malformed);
-        }
         let key = frame.key();
         if self.is_gone(&key) {
             return SliceIngest::Refused(SliceError::GoneKey);
@@ -861,9 +890,9 @@ impl SliceStore {
         }
     }
 
-    /// Moves each tombstone that has lasted its TTL to the gone set, and drops each gone key
-    /// that has lasted the gone TTL.
-    pub fn expire_tombstones(&mut self, now: Instant) {
+    /// Moves each tombstone that has lasted its TTL to the gone set, drops each gone key that has
+    /// lasted the gone TTL, and drops each held frame that has waited for the alive timeout.
+    pub fn expire(&mut self, now: Instant) {
         let ttl = self.limits.tombstone_ttl;
         let expired: Vec<AuthorKey> = self
             .slices
@@ -886,16 +915,37 @@ impl SliceStore {
         {
             self.gone.pop_front();
         }
+        self.pending.expire(now);
     }
 
     /// Drops the slice and the bucket of `key`, and puts the key in the gone set.
     ///
-    /// The engine calls it for an author that is in neither the live nor the quiet roster after
-    /// `QUIET_TTL`, so a crashed author or a missed tombstone does not stay in the store.
+    /// The engine calls it for a signed goodbye and for a replaced run, never for a key that lapses
+    /// quiet: that key can return, and it keeps its slice.
     pub fn forget(&mut self, key: &AuthorKey, now: Instant) {
         self.slices.remove(key);
         self.buckets.remove(key);
+        self.pending.take(key);
         self.keep_gone(*key, now);
+    }
+
+    /// Drops the slice and the bucket of `key`, and keeps no gone entry and no pending frame.
+    pub fn release(&mut self, key: &AuthorKey) {
+        self.slices.remove(key);
+        self.buckets.remove(key);
+    }
+
+    /// Returns the keys that hold a slice in this store, tombstones included.
+    pub fn held_keys(&self) -> impl Iterator<Item = AuthorKey> + '_ {
+        self.slices.keys().copied()
+    }
+
+    /// Moves the slice of `key` into the pending set, for a key that lost its nickname and can return.
+    /// The slice comes back on `take_pending` when the key rejoins, and it expires with the pending TTL.
+    pub fn park(&mut self, key: &AuthorKey, now: Instant) {
+        if let Some(slice) = self.slices.remove(key) {
+            self.pending.hold(&slice.frame, slice.version, now);
+        }
     }
 
     /// The rows of one digest page, derived from the frame overhead, so a page fits one message.
@@ -1703,7 +1753,7 @@ mod tests {
         store.ingest(&frame(key(1), 1, json!({})), false, start);
         store.ingest(&frame(key(2), 1, json!({})), false, start);
         store.ingest(&frame(key(2), 2, Value::Null), false, start);
-        store.expire_tombstones(start);
+        store.expire(start);
         assert_eq!(
             store.ingest(&frame(key(3), 1, json!({})), false, start),
             SliceIngest::Applied,
@@ -1742,13 +1792,13 @@ mod tests {
         let mut store = store();
         let start = Instant::now();
         store.forget(&key(1), start);
-        store.expire_tombstones(start + Duration::from_mins(119));
+        store.expire(start + Duration::from_mins(119));
         assert_eq!(
             apply(&mut store, &frame(key(1), 1, json!({}))),
             SliceIngest::Refused(SliceError::GoneKey),
             "a forgotten key must stay refused before the gone TTL ends"
         );
-        store.expire_tombstones(start + Duration::from_hours(2));
+        store.expire(start + Duration::from_hours(2));
         assert_eq!(
             apply(&mut store, &frame(key(1), 1, json!({}))),
             SliceIngest::Applied,
@@ -1880,18 +1930,18 @@ mod tests {
     }
 
     #[test]
-    fn expire_tombstones_frees_the_author_slot_after_the_ttl() {
+    fn expire_frees_the_author_slot_after_the_ttl() {
         let mut store = store();
         let start = Instant::now();
         store.ingest(&frame(key(1), 1, json!({"a": 1})), false, start);
         store.ingest(&frame(key(1), 2, Value::Null), false, start);
-        store.expire_tombstones(start + Duration::from_mins(9));
+        store.expire(start + Duration::from_mins(9));
         assert_eq!(
             store.authors(),
             1,
             "a tombstone must keep its slot before the TTL"
         );
-        store.expire_tombstones(start + Duration::from_mins(10));
+        store.expire(start + Duration::from_mins(10));
         assert_eq!(
             store.authors(),
             0,
@@ -1905,7 +1955,7 @@ mod tests {
         let start = Instant::now();
         store.ingest(&frame(key(1), 1, json!({"a": 1})), false, start);
         store.ingest(&frame(key(1), 2, Value::Null), false, start);
-        store.expire_tombstones(start + Duration::from_mins(10));
+        store.expire(start + Duration::from_mins(10));
         assert_eq!(
             apply(&mut store, &frame(key(1), 3, json!({"a": 3}))),
             SliceIngest::Refused(SliceError::GoneKey),
@@ -1924,7 +1974,7 @@ mod tests {
             let at = start + Duration::from_millis(u64::try_from(index).unwrap_or(0));
             store.ingest(&frame(many_key(index), 1, json!({})), false, at);
             store.ingest(&frame(many_key(index), 2, Value::Null), false, at);
-            store.expire_tombstones(at);
+            store.expire(at);
         }
         assert_eq!(
             apply(&mut store, &frame(many_key(1), 3, json!({"a": 3}))),
@@ -2719,6 +2769,45 @@ mod tests {
         assert!(
             parsed.is_err(),
             "a page whose hash does not match its entries must be refused"
+        );
+    }
+    #[test]
+    fn a_malformed_frame_is_not_held() {
+        let mut store = store();
+        let bad = frame_with_body(key(1), "not json");
+        assert!(
+            matches!(store.hold(&bad, Instant::now()), Err(SliceError::Malformed)),
+            "a malformed frame is refused by hold"
+        );
+        assert!(
+            store.take_pending(&key(1), Instant::now()).is_none(),
+            "a refused frame is not held"
+        );
+    }
+
+    #[test]
+    fn a_held_frame_is_taken_once_and_expires_after_its_ttl() {
+        let mut store = store();
+        let t0 = Instant::now();
+        store
+            .hold(&frame(key(1), 1, json!({})), t0)
+            .expect("the frame is well formed");
+        assert!(
+            store
+                .take_pending(&key(1), t0 + Duration::from_secs(91))
+                .is_none(),
+            "the held frame is gone after its TTL"
+        );
+        store
+            .hold(&frame(key(1), 2, json!({})), t0)
+            .expect("the frame is well formed");
+        assert!(
+            store.take_pending(&key(1), t0).is_some(),
+            "a held frame is taken once"
+        );
+        assert!(
+            store.take_pending(&key(1), t0).is_none(),
+            "a taken frame is not held again"
         );
     }
 }

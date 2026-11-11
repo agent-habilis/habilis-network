@@ -171,6 +171,12 @@ pub(crate) async fn end_session(
     // down, unless a nickname still binds it. `forget_key` drops the trust, so read it first.
     let proved = state.proven_endpoints.trusted(&key);
     let left_hints = state.forget_key(key);
+    // The slices of the key leave with it. A key that lost its nickname can return, so its slices wait.
+    if matches!(goodbye, Goodbye::Refused(_)) {
+        state.docs.park(&key, Instant::now());
+    } else {
+        state.docs.forget(&key, Instant::now());
+    }
     let hinted = left_hints.iter().map(|hint| hint.id);
     let left_endpoints: Vec<_> = hinted.chain(proved).collect();
     end_unbound_endpoints(state, left_endpoints).await;
