@@ -144,7 +144,7 @@ pub(crate) fn observe(
     // joined is never *surfaced* to the operator/agent. Computed here
     // (not just before the inbound push) because the arrival-surfacing
     // decisions below need it too.
-    let surfaceable = message.timestamp >= state.joined_at;
+    let surfaceable = state.is_surfaceable(message.timestamp);
     // The arrival of a peer is a fact about the peer, not about the content of one frame. A peer
     // with a slow clock stamps its frames before our join, and it is shown once a second live
     // frame proves that it sends now. A message is still shown only when its own stamp is past

@@ -138,9 +138,7 @@ pub(crate) async fn end_session(
     // the goodbye of a key that is not in the roster removes nothing. It is kept apart from
     // the goodbyes of peers, so a flood of them cannot evict those. A key that outlived the
     // quiet TTL is still in the roster: it keeps its name and its dial hint.
-    let was_peer = state.peers.contains(&key)
-        || state.quiet.contains(&key)
-        || state.clock_evidence.lapsed_quiet.contains(&key);
+    let was_peer = state.in_roster(&key);
     if !was_peer {
         state.note_stranger_left(key);
         // A `PeerInfo` can bind a hint before the roster admits its key, and the hint of a

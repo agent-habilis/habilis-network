@@ -42,7 +42,9 @@ impl PendingSlices {
 
     /// Holds `frame` at `version` unless a version at least as new is already held.
     ///
-    /// A full set evicts its oldest key to make room. Returns `true` when the frame is held.
+    /// A full set evicts its oldest key to make room, and logs the eviction. A newer version
+    /// restarts the wait of its key, so the cap bounds the number of keys, not how long each one
+    /// waits. Returns `true` when the frame is held.
     pub(crate) fn hold(&mut self, frame: &Verified, version: u64, now: Instant) -> bool {
         let key = frame.key();
         if let Some(held) = self.held.get_mut(&key) {
@@ -58,6 +60,7 @@ impl PendingSlices {
             && let Some(oldest) = self.order.pop_front()
         {
             self.held.remove(&oldest);
+            tracing::debug!(target: "habilis_network::gossip", "a held slice was evicted at the pending cap");
         }
         self.held.insert(
             key,

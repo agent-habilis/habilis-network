@@ -1209,6 +1209,11 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
+    if state.key_said_goodbye(message.key()) {
+        // A key that said goodbye does not rejoin, so its frame would wait in the pending set for nothing.
+        tracing::debug!(target: "habilis_network::gossip", "a slice of a key that said goodbye is dropped");
+        return;
+    }
     if !state.keeps_slice(&message.key()) {
         // The slice waits until its author joins or returns, so a stranger cannot fill the store.
         if let Err(error) = state.docs.hold(channel, message, Instant::now()) {
@@ -1236,7 +1241,7 @@ fn promote_pending(
     for channel in [Channel::State, Channel::Meta] {
         if let Some(frame) = state.docs.take_pending(channel, &key, now) {
             // The join horizon judges a held frame by its own timestamp, as it judges an arrival.
-            let surfaceable = frame.timestamp >= state.joined_at;
+            let surfaceable = state.is_surfaceable(frame.timestamp);
             let event = ChannelEvent {
                 channel,
                 message: &frame,
@@ -3192,6 +3197,24 @@ mod first_contact_tests {
         .sign(identity)
     }
 
+    /// A sink that counts the state changes it is told of.
+    #[derive(Default)]
+    struct StateChanges(atomic::AtomicUsize);
+
+    impl StateChanges {
+        fn count(&self) -> usize {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    impl NodeSink for StateChanges {
+        fn emit(&self, event: NodeEvent) {
+            if matches!(event, NodeEvent::StateChanged { .. }) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// A meta app with an empty record, for the tests of the roster gate.
     fn meta_app() -> MetaRecorder {
         // The app and the test share the record, so the record is behind an Arc.
@@ -3497,7 +3520,6 @@ mod first_contact_tests {
             node.endpoint.close().await;
         });
     }
-
     #[test]
     fn a_slice_of_a_key_that_said_goodbye_is_refused() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -3524,16 +3546,146 @@ mod first_contact_tests {
                 &context,
             )
             .await;
+            // The store alone answers: the gate would drop the frame before the store sees it.
             let later = gate_slice(&node.mesh, &member, 2);
-            let later_event = ChannelEvent {
+            let answer = state
+                .docs
+                .ingest(Channel::Meta, &later, true, clock::Instant::now());
+            assert!(
+                matches!(
+                    answer,
+                    habilis_network_doc::SliceIngest::Refused(
+                        habilis_network_doc::SliceError::GoneKey
+                    )
+                ),
+                "a replaced run's key is in the gone set, so its later slice is refused"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_slice_of_a_key_that_signed_goodbye_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let nickname = nick("member");
+            let goodbye = Message::new_left(&node.mesh, &nickname).sign(&member);
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Signed(&goodbye),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            let later = gate_slice(&node.mesh, &member, 2);
+            let answer = state
+                .docs
+                .ingest(Channel::Meta, &later, true, clock::Instant::now());
+            assert!(
+                matches!(
+                    answer,
+                    habilis_network_doc::SliceIngest::Refused(
+                        habilis_network_doc::SliceError::GoneKey
+                    )
+                ),
+                "a signed goodbye puts the key in the gone set, so its later slice is refused"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_frame_of_a_stranger_that_said_goodbye_is_dropped_not_held() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let stranger = Identity::generate();
+            let key = stranger.author_key();
+            let nickname = nick("stranger");
+            let goodbye = Message::new_left(&node.mesh, &nickname).sign(&stranger);
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Signed(&goodbye),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            let frame = gate_slice(&node.mesh, &stranger, 1);
+            let event = ChannelEvent {
                 channel: Channel::Meta,
-                message: &later,
+                message: &frame,
                 surfaceable: true,
             };
-            dispatch_channel(later_event, &mut state, &mut app, &context);
+            dispatch_channel(event, &mut state, &mut app, &context);
             assert!(
-                meta_slot(&state, &key).is_none(),
-                "a newer slice of a key that said goodbye does not come back"
+                state
+                    .docs
+                    .take_pending(Channel::Meta, &key, clock::Instant::now())
+                    .is_none(),
+                "a frame of a key that said goodbye waits nowhere, not even in the pending set"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_held_frame_older_than_the_join_is_promoted_without_a_surface() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let mut state = fresh_state();
+            // The frame is older than the join, so the join horizon hides it.
+            state.joined_at = UnixSecs::from(4_000_000_000_i64);
+            // the app and the test share the record
+            let record = Arc::new(Mutex::new(Vec::new()));
+            let mut app = MetaRecorder(Arc::clone(&record));
+            let member = Identity::generate();
+            let key = member.author_key();
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let sink = StateChanges::default();
+            let context = HandlerCtx {
+                sender: &node.sender,
+                endpoint: &node.endpoint,
+                mesh: &node.mesh,
+                author: &node.author,
+                identity: &node.identity,
+                our_pubkey: node.our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            state.peers.insert(key);
+            promote_pending(key, clock::Instant::now(), &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_some(),
+                "the held slice reaches the view when its key joins"
+            );
+            let heard = record.lock().expect("the record lock").clone();
+            assert_eq!(
+                heard,
+                vec![key],
+                "the meta hook runs for the promoted slice"
+            );
+            assert_eq!(
+                sink.count(),
+                0,
+                "a promoted frame older than the join is not surfaced"
             );
             node.endpoint.close().await;
         });

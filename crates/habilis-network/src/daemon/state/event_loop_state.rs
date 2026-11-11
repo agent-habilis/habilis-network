@@ -1714,6 +1714,11 @@ impl EventLoopState {
             || self.clock_evidence.lapsed_quiet.contains(key)
     }
 
+    /// Whether a frame at `at` is past the join horizon, so the app shows it.
+    pub(crate) fn is_surfaceable(&self, at: UnixSecs) -> bool {
+        at >= self.joined_at
+    }
+
     /// Whether the store keeps the slice of `key`: the own key, and every key in the roster.
     pub(crate) fn keeps_slice(&self, key: &AuthorKey) -> bool {
         *key == self.identity.author_key() || self.in_roster(key)
