@@ -20,10 +20,13 @@ use std::time::Duration;
 use habilis_network_util::clock::Instant;
 use habilis_network_util::tuning;
 
+use habilis_network_protocol::digest::{
+    DigestEntry, DigestPage, DigestRoot, PAGE_ROW, PAGE_WRAPPER, page_hash,
+};
 use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, Channel, ContentHash, MessageBody, SymmetricKey};
 use habilis_network_util::consts::MAX_MESSAGE_SIZE;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::pending_slices::PendingSlices;
@@ -54,14 +57,6 @@ const FRAME_BASE_OVERHEAD: usize = 338;
 /// The frame overhead of the worst case: the longest mesh id and the longest nickname. Pass it to
 /// [`SliceStore::new`] only where no probe of the session is possible.
 const WORST_FRAME_OVERHEAD: usize = FRAME_BASE_OVERHEAD + MAX_MESH_ID_LEN + MAX_NICKNAME_LEN;
-
-/// The bytes of a digest page around its rows: the index, the total, the range, the hash, and the
-/// JSON around them.
-const PAGE_WRAPPER: usize = 320;
-
-/// The bytes of one page row at the longest version, `["<key hex>",18446744073709551615,"<hash
-/// hex>"],`.
-const PAGE_ROW: usize = 160;
 
 /// The size of a sealed body relative to its plain JSON, in percent: base58 of the ciphertext is
 /// about 1.37 times its bytes.
@@ -301,270 +296,6 @@ impl LocalDraft {
     pub fn body(&self) -> &MessageBody {
         &self.body
     }
-}
-
-/// One author in a digest page: its key, its version, and the hash of its signed frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct DigestEntry {
-    key: AuthorKey,
-    version: u64,
-    hash: ContentHash,
-}
-
-impl DigestEntry {
-    /// Makes the entry of `key` at `version`, whose signed frame hashes to `hash`.
-    #[must_use]
-    pub fn new(key: AuthorKey, version: u64, hash: ContentHash) -> Self {
-        Self { key, version, hash }
-    }
-
-    /// The author key of the entry.
-    #[must_use]
-    pub fn key(&self) -> AuthorKey {
-        self.key
-    }
-
-    /// The version of the entry.
-    #[must_use]
-    pub fn version(&self) -> u64 {
-        self.version
-    }
-
-    /// The hash of the signed frame of the entry.
-    #[must_use]
-    pub fn hash(&self) -> ContentHash {
-        self.hash
-    }
-}
-
-/// The root of a store's digest: the hash of every entry, and the number of pages.
-///
-/// This is the first message of the version-vector sync, which takes the place of the old heads digest. Two
-/// stores with equal roots need no more messages. Keep this round when the store changes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-#[serde(try_from = "RootWire", into = "RootWire")]
-pub struct DigestRoot {
-    /// The hash of all entries, sorted by key.
-    pub root: ContentHash,
-    /// The number of pages, at least one.
-    pub total: usize,
-}
-
-/// One page of a store's digest. A page covers the keys from `first_key` up to `end_key`, not
-/// included. A key of that range that the page does not list is absent at the sender.
-///
-/// The sync is pull-first. A peer reads the pages, pulls the keys it wants, and pushes the frames
-/// that the other side lacks with `missing_for`, once per page.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-#[serde(try_from = "PageWire", into = "PageWire")]
-pub struct DigestPage {
-    index: usize,
-    total: usize,
-    first_key: AuthorKey,
-    end_key: Option<AuthorKey>,
-    entries: Vec<DigestEntry>,
-    hash: ContentHash,
-}
-
-impl DigestPage {
-    /// The index of the page, from zero.
-    #[must_use]
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
-    /// The number of pages of the digest.
-    #[must_use]
-    pub fn total(&self) -> usize {
-        self.total
-    }
-
-    /// The first key of the range. The first page starts at the zero key.
-    #[must_use]
-    pub fn first_key(&self) -> AuthorKey {
-        self.first_key
-    }
-
-    /// The first key after the range, or `None` for the last page.
-    #[must_use]
-    pub fn end_key(&self) -> Option<AuthorKey> {
-        self.end_key
-    }
-
-    /// The listed entries, sorted by key.
-    #[must_use]
-    pub fn entries(&self) -> &[DigestEntry] {
-        &self.entries
-    }
-
-    /// The hash of the listed entries.
-    #[must_use]
-    pub fn hash(&self) -> ContentHash {
-        self.hash
-    }
-}
-
-/// The wire form of a [`DigestRoot`].
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RootWire {
-    root: String,
-    total: usize,
-}
-
-impl From<DigestRoot> for RootWire {
-    fn from(root: DigestRoot) -> Self {
-        Self {
-            root: String::from_utf8_lossy(&root.root.hex()).into_owned(),
-            total: root.total,
-        }
-    }
-}
-
-impl TryFrom<RootWire> for DigestRoot {
-    type Error = String;
-
-    fn try_from(wire: RootWire) -> Result<Self, Self::Error> {
-        let root = ContentHash::decode_hex(&wire.root).ok_or("the root is not a hash")?;
-        if wire.total == 0 {
-            return Err("a digest has at least one page".to_owned());
-        }
-        Ok(Self {
-            root,
-            total: wire.total,
-        })
-    }
-}
-
-/// The wire form of a [`DigestPage`]. A row is `[key, version, hash]` in hex.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PageWire {
-    index: usize,
-    total: usize,
-    first_key: String,
-    end_key: Option<String>,
-    entries: Vec<(String, u64, String)>,
-    hash: String,
-}
-
-impl From<DigestPage> for PageWire {
-    fn from(page: DigestPage) -> Self {
-        let entries = page.entries.iter().map(row_wire).collect();
-        Self {
-            index: page.index,
-            total: page.total,
-            first_key: hex_text(&page.first_key.hex()),
-            end_key: page.end_key.map(|key| hex_text(&key.hex())),
-            entries,
-            hash: hex_text(&page.hash.hex()),
-        }
-    }
-}
-
-/// One digest row in its wire form.
-fn row_wire(entry: &DigestEntry) -> (String, u64, String) {
-    (
-        hex_text(&entry.key.hex()),
-        entry.version,
-        hex_text(&entry.hash.hex()),
-    )
-}
-
-/// The text of a hex array.
-fn hex_text(bytes: &[u8; 64]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-impl TryFrom<PageWire> for DigestPage {
-    type Error = String;
-
-    fn try_from(wire: PageWire) -> Result<Self, Self::Error> {
-        let first_key =
-            AuthorKey::decode_hex(&wire.first_key).ok_or("the first key is not a key")?;
-        let end_key = match wire.end_key {
-            Some(text) => Some(AuthorKey::decode_hex(&text).ok_or("the end key is not a key")?),
-            None => None,
-        };
-        let mut entries = Vec::with_capacity(wire.entries.len());
-        for (key, version, hash) in wire.entries {
-            let key = AuthorKey::decode_hex(&key).ok_or("an entry key is not a key")?;
-            let hash = ContentHash::decode_hex(&hash).ok_or("an entry hash is not a hash")?;
-            entries.push(DigestEntry::new(key, version, hash));
-        }
-        let hash = ContentHash::decode_hex(&wire.hash).ok_or("the page hash is not a hash")?;
-        if page_hash(&entries) != hash {
-            return Err("the page hash does not match its entries".to_owned());
-        }
-        if wire.index >= wire.total {
-            return Err("the index is past the total".to_owned());
-        }
-        if entries
-            .windows(2)
-            .any(|pair| pair[0].key.as_bytes() >= pair[1].key.as_bytes())
-        {
-            return Err("the entries are not sorted and unique".to_owned());
-        }
-        let page = DigestPage {
-            index: wire.index,
-            total: wire.total,
-            first_key,
-            end_key,
-            entries,
-            hash,
-        };
-        if !page.entries.iter().all(|entry| in_range(&page, &entry.key)) {
-            return Err("an entry is outside the page range".to_owned());
-        }
-        Ok(page)
-    }
-}
-
-/// The hash of digest entries in the order given: each entry is its key, its version and its hash.
-fn page_hash(entries: &[DigestEntry]) -> ContentHash {
-    let mut bytes = Vec::with_capacity(entries.len() * 72);
-    for entry in entries {
-        bytes.extend_from_slice(entry.key.as_bytes());
-        bytes.extend_from_slice(&entry.version.to_be_bytes());
-        bytes.extend_from_slice(entry.hash.as_bytes());
-    }
-    ContentHash::of(&bytes)
-}
-
-/// Builds page `index` of `total` from the sorted entries of a store, `rows` to a page.
-fn build_page(sorted: &[DigestEntry], rows: usize, index: usize, total: usize) -> DigestPage {
-    let start = index * rows;
-    let window = sorted.iter().skip(start).take(rows);
-    let entries: Vec<DigestEntry> = window.cloned().collect();
-    let first_key = if index == 0 {
-        AuthorKey::from([0; 32])
-    } else {
-        entries
-            .first()
-            .map_or(AuthorKey::from([0; 32]), |first| first.key)
-    };
-    let end_key = sorted.get(start + rows).map(|next| next.key);
-    let hash = page_hash(&entries);
-    DigestPage {
-        index,
-        total,
-        first_key,
-        end_key,
-        entries,
-        hash,
-    }
-}
-
-/// Whether `key` is in the range of `page`.
-fn in_range(page: &DigestPage, key: &AuthorKey) -> bool {
-    let after_first = key.as_bytes() >= page.first_key.as_bytes();
-    let before_end = page
-        .end_key
-        .is_none_or(|end| key.as_bytes() < end.as_bytes());
-    after_first && before_end
 }
 
 /// The slices of one channel, keyed by author key.
@@ -1037,18 +768,23 @@ impl SliceStore {
             .iter()
             .map(|(key, slice)| DigestEntry::new(*key, slice.version, slice.hash))
             .collect();
-        entries.sort_by(|left, right| left.key.as_bytes().cmp(right.key.as_bytes()));
+        entries.sort_by(|left, right| {
+            let (left, right) = (left.key(), right.key());
+            left.as_bytes().cmp(right.as_bytes())
+        });
         entries
     }
 
     /// Returns the root of the version digest: the hash and the number of pages.
+    ///
+    /// # Panics
+    ///
+    /// Never: the number of pages is at least one.
     #[must_use]
     pub fn digest(&self) -> DigestRoot {
         let sorted = self.sorted_entries();
-        DigestRoot {
-            root: page_hash(&sorted),
-            total: sorted.len().div_ceil(self.page_rows()).max(1),
-        }
+        let total: usize = sorted.len().div_ceil(self.page_rows()).max(1);
+        DigestRoot::new(page_hash(&sorted), total).expect("a digest has at least one page")
     }
 
     /// Returns page `index` of the version digest, or `None` past the last page. Each call reads
@@ -1066,7 +802,7 @@ impl SliceStore {
         let sorted = self.sorted_entries();
         let rows = self.page_rows();
         let total = sorted.len().div_ceil(rows).max(1);
-        (0..total).map(move |index| build_page(&sorted, rows, index, total))
+        (0..total).map(move |index| DigestPage::build(&sorted, rows, index, total))
     }
 
     /// Whether the root of this store is `root`, so two peers with equal stores need one message.
@@ -1081,13 +817,13 @@ impl SliceStore {
     pub fn missing_for<'a>(&'a self, page: &'a DigestPage) -> impl Iterator<Item = Verified> + 'a {
         self.slices
             .iter()
-            .filter(move |(key, _)| in_range(page, key))
+            .filter(move |(key, _)| page.covers(key))
             .filter(move |(key, slice)| {
-                match page.entries.iter().find(|listed| listed.key == **key) {
+                match page.entries().iter().find(|listed| listed.key() == **key) {
                     None => true,
                     Some(entry) => {
-                        slice.version > entry.version
-                            || (slice.version == entry.version && slice.hash < entry.hash)
+                        slice.version > entry.version()
+                            || (slice.version == entry.version() && slice.hash < entry.hash())
                     }
                 }
             })
@@ -1098,19 +834,17 @@ impl SliceStore {
     /// version, or at the same version with a lower hash. A gone key is never wanted. This is the
     /// pull of the asker.
     pub fn wanted_from<'a>(&'a self, page: &'a DigestPage) -> impl Iterator<Item = AuthorKey> + 'a {
-        let unknown = page
-            .entries
-            .iter()
-            .filter(move |entry| !self.is_gone(&entry.key));
+        let listed = page.entries().iter();
+        let unknown = listed.filter(move |entry| !self.is_gone(&entry.key()));
         unknown
-            .filter(move |entry| match self.slices.get(&entry.key) {
+            .filter(move |entry| match self.slices.get(&entry.key()) {
                 None => true,
                 Some(held) => {
-                    entry.version > held.version
-                        || (entry.version == held.version && entry.hash < held.hash)
+                    entry.version() > held.version
+                        || (entry.version() == held.version && entry.hash() < held.hash)
                 }
             })
-            .map(|entry| entry.key)
+            .map(DigestEntry::key)
     }
 
     /// The frames of the held keys among `keys`, the answer to a pull. It answers at most one
@@ -1237,13 +971,13 @@ impl SliceStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        DigestEntry, DigestPage, DigestRoot, FRAME_BASE_OVERHEAD, LocalDraft, MAX_MESH_ID_LEN,
-        MAX_NICKNAME_LEN, PAGE_ROW, PAGE_WRAPPER, SliceError, SliceIngest, SliceLimits, SliceStore,
-        WORST_FRAME_OVERHEAD, in_range, page_hash, row_wire, wire,
+        FRAME_BASE_OVERHEAD, LocalDraft, MAX_MESH_ID_LEN, MAX_NICKNAME_LEN, SliceError,
+        SliceIngest, SliceLimits, SliceStore, WORST_FRAME_OVERHEAD, wire,
     };
+    use habilis_network_protocol::digest::DigestPage;
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
-        AuthorKey, Channel, ContentHash, MeshId, Message, MessageBody, Nickname, SymmetricKey,
+        AuthorKey, Channel, MeshId, Message, MessageBody, Nickname, SymmetricKey,
     };
     use habilis_network_util::consts::MAX_MESSAGE_SIZE;
     use serde_json::{Map, Value, json};
@@ -2132,22 +1866,22 @@ mod tests {
         apply(&mut second_store, &two.clone());
         apply(&mut second_store, &one.clone());
         assert_eq!(
-            first_store.digest().root,
-            second_store.digest().root,
+            first_store.digest().root(),
+            second_store.digest().root(),
             "equal stores must have one root"
         );
         assert!(
-            second_store.matches(&first_store.digest().root),
+            second_store.matches(&first_store.digest().root()),
             "equal stores must match each other's root"
         );
         apply(&mut first_store, &frame(key(1), 2, json!({"a": 3})));
         assert_ne!(
-            first_store.digest().root,
-            second_store.digest().root,
+            first_store.digest().root(),
+            second_store.digest().root(),
             "a new version must change the root"
         );
         assert!(
-            !second_store.matches(&first_store.digest().root),
+            !second_store.matches(&first_store.digest().root()),
             "a changed store must not match the old root"
         );
     }
@@ -2192,27 +1926,6 @@ mod tests {
     }
 
     #[test]
-    fn the_page_estimates_cover_the_measured_wrapper_and_row() {
-        let empty = store().page(0).expect("a page");
-        let wrapper = serde_json::to_string(&empty)
-            .expect("a page must serialize")
-            .len();
-        assert!(
-            PAGE_WRAPPER >= wrapper,
-            "PAGE_WRAPPER must cover the measured {wrapper} bytes"
-        );
-        let entry = DigestEntry::new(key(1), u64::MAX, ContentHash::of(b"row"));
-        let row = serde_json::to_string(&row_wire(&entry))
-            .expect("a row must serialize")
-            .len()
-            + 1;
-        assert!(
-            PAGE_ROW >= row,
-            "PAGE_ROW must cover the measured {row} bytes"
-        );
-    }
-
-    #[test]
     fn a_body_past_three_kib_drafts_under_the_wire_limit() {
         let mut store = SliceStore::new(Channel::Meta, SliceLimits::default(), 404);
         assert!(
@@ -2228,40 +1941,6 @@ mod tests {
     }
 
     #[test]
-    fn a_digest_page_with_unsorted_entries_is_refused() {
-        let mut first = store();
-        apply(&mut first, &frame(key(1), 1, json!({"a": 1})));
-        apply(&mut first, &frame(key(2), 1, json!({"b": 2})));
-        let first_page = first.pages().next().expect("a page");
-        let mut rows = first_page.entries().to_vec();
-        rows.reverse();
-        let hash = page_hash(&rows);
-        let page = DigestPage {
-            index: 0,
-            total: 1,
-            first_key: AuthorKey::from([0; 32]),
-            end_key: None,
-            entries: rows,
-            hash,
-        };
-        let text = serde_json::to_string(&page).expect("a page must serialize");
-        let parsed: Result<DigestPage, _> = serde_json::from_str(&text);
-        assert!(parsed.is_err(), "entries out of key order must be refused");
-    }
-
-    #[test]
-    fn a_digest_page_past_its_total_is_refused() {
-        let mut store = store();
-        apply(&mut store, &frame(key(1), 1, json!({"a": 1})));
-        let page = store.page(0).expect("a page");
-        let text = serde_json::to_string(&page).expect("a page must serialize");
-        let mut value: Value = serde_json::from_str(&text).expect("a value");
-        value["index"] = json!(5);
-        let parsed: Result<DigestPage, _> = serde_json::from_value(value);
-        assert!(parsed.is_err(), "an index past the total must be refused");
-    }
-
-    #[test]
     fn pages_come_from_one_snapshot_and_match_page() {
         let mut store = small_store(SliceLimits::default());
         for index in 0..40 {
@@ -2273,7 +1952,7 @@ mod tests {
         let pages: Vec<DigestPage> = store.pages().collect();
         assert_eq!(
             pages.len(),
-            store.digest().total,
+            store.digest().total(),
             "pages must match the digest total"
         );
         let numbered = pages.iter().enumerate();
@@ -2315,7 +1994,7 @@ mod tests {
                 &frame(author_key(index), 1, json!({"n": index})),
             );
         }
-        let total = store.digest().total;
+        let total = store.digest().total();
         assert!(total > 1, "40 authors must not fit one page");
         let pages: Vec<DigestPage> = (0..total).filter_map(|index| store.page(index)).collect();
         assert_eq!(
@@ -2335,13 +2014,11 @@ mod tests {
         for page in &pages {
             for entry in page.entries() {
                 assert!(
-                    in_range(page, &entry.key()),
+                    page.covers(&entry.key()),
                     "a listed key must be in its page range"
                 );
-                let holders: usize = pages
-                    .iter()
-                    .filter(|other| in_range(other, &entry.key()))
-                    .count();
+                let key = entry.key();
+                let holders: usize = pages.iter().filter(|other| other.covers(&key)).count();
                 assert_eq!(holders, 1, "a key must be in exactly one page range");
             }
         }
@@ -2455,7 +2132,7 @@ mod tests {
             "a forgotten key must not be wanted"
         );
         assert_eq!(
-            store.digest().total,
+            store.digest().total(),
             1,
             "the digest of a store with no key is one empty page"
         );
@@ -2494,34 +2171,6 @@ mod tests {
             key(1),
             "the served frame must be the held author's"
         );
-    }
-
-    #[test]
-    fn a_digest_page_round_trips_through_its_wire_form() {
-        let mut store = store();
-        apply(&mut store, &frame(key(1), 1, json!({"a": 1})));
-        let page = store.page(0).expect("a page");
-        let text = serde_json::to_string(&page).expect("a page must serialize");
-        let back: DigestPage = serde_json::from_str(&text).expect("a page must parse");
-        assert_eq!(back, page, "a page must come back equal from its wire form");
-        let unknown = text.replacen('{', "{\"extra\":1,", 1);
-        assert!(
-            {
-                let parsed: Result<DigestPage, _> = serde_json::from_str(&unknown);
-                parsed.is_err()
-            },
-            "an unknown field must be refused"
-        );
-    }
-
-    #[test]
-    fn a_digest_root_round_trips_through_its_wire_form() {
-        let mut store = store();
-        apply(&mut store, &frame(key(1), 1, json!({"a": 1})));
-        let root = store.digest();
-        let text = serde_json::to_string(&root).expect("a root must serialize");
-        let back: DigestRoot = serde_json::from_str(&text).expect("a root must parse");
-        assert_eq!(back, root, "a root must come back equal from its wire form");
     }
 
     #[test]
@@ -2725,7 +2374,7 @@ mod tests {
                 "a gone author must not return on {index}"
             );
             for other in &nodes {
-                let other_total = other.digest().total;
+                let other_total = other.digest().total();
                 for page_index in 0..other_total {
                     let page = other.page(page_index).expect("a page");
                     assert_eq!(
@@ -2786,62 +2435,6 @@ mod tests {
                 }
             }
         }
-    }
-    #[test]
-    fn a_digest_root_has_the_golden_wire_form() {
-        let zeros = "0".repeat(64);
-        let root = DigestRoot {
-            root: ContentHash::decode_hex(&zeros).expect("a hash"),
-            total: 2,
-        };
-        let text = serde_json::to_string(&root).expect("a root must serialize");
-        assert_eq!(
-            text,
-            format!(r#"{{"root":"{zeros}","total":2}}"#),
-            "the root wire form changed"
-        );
-    }
-
-    #[test]
-    fn a_digest_page_has_the_golden_wire_form() {
-        let zeros = "0".repeat(64);
-        let entries = vec![DigestEntry::new(
-            key(1),
-            1,
-            ContentHash::decode_hex(&zeros).expect("a hash"),
-        )];
-        let hash = page_hash(&entries);
-        let page = DigestPage {
-            index: 0,
-            total: 1,
-            first_key: AuthorKey::from([0; 32]),
-            end_key: None,
-            entries,
-            hash,
-        };
-        let key_hex = String::from_utf8_lossy(&key(1).hex()).into_owned();
-        let hash_hex = String::from_utf8_lossy(&hash.hex()).into_owned();
-        let golden = format!(
-            r#"{{"index":0,"total":1,"first_key":"{zeros}","end_key":null,"entries":[["{key_hex}",1,"{zeros}"]],"hash":"{hash_hex}"}}"#
-        );
-        let text = serde_json::to_string(&page).expect("a page must serialize");
-        assert_eq!(text, golden, "the page wire form changed");
-        let back: DigestPage = serde_json::from_str(&golden).expect("the golden page must parse");
-        assert_eq!(back, page, "the golden page must parse back equal");
-    }
-
-    #[test]
-    fn a_page_with_a_wrong_hash_is_refused() {
-        let mut store = store();
-        apply(&mut store, &frame(key(1), 1, json!({"a": 1})));
-        let text = serde_json::to_string(&store.page(0).expect("a page")).expect("a page");
-        let mut value: Value = serde_json::from_str(&text).expect("a value");
-        value["hash"] = json!("0".repeat(64));
-        let parsed: Result<DigestPage, _> = serde_json::from_value(value);
-        assert!(
-            parsed.is_err(),
-            "a page whose hash does not match its entries must be refused"
-        );
     }
     #[test]
     fn a_malformed_frame_is_not_held() {

@@ -16,6 +16,8 @@ pub use base58_error as base58check;
 mod content_hash;
 pub mod crypto;
 mod dedup_key;
+/// The digest of a store: the root and the pages of the author slices, as they go on the wire.
+pub mod digest;
 pub mod directory;
 mod identifier;
 mod newtype;
