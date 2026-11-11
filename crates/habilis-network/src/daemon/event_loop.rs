@@ -2,7 +2,7 @@
 //!
 //! [`run`] sets up per-session state then drives [`event_loop`], which
 //! multiplexes external inputs (stdin / IPC / gossip), time-driven
-//! maintenance (heartbeat, sweep, heal, anti-entropy, reclaim), and
+//! maintenance (heartbeat, sweep, heal, backfill, reclaim), and
 //! shutdown. The orchestration lives here; the behavioral subsystems are
 //! crate-root siblings (`crate::{gossip,lifecycle,beacon,lookup}`), and
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
@@ -565,7 +565,7 @@ async fn start_rendezvous(
 }
 
 /// Joins the gossip topic and starts the tasks that carry its frames: the split of the receiver,
-/// and the drain of the digest answers, so that the loop never waits for the gossip actor.
+/// and the drain of the topic frames, so that the loop never waits for the gossip actor.
 fn join_gossip(
     state: &mut EventLoopState,
     topic: GossipTopic,
@@ -618,8 +618,8 @@ async fn alive_arm(
     }
 }
 
-/// The anti-entropy tick: note the gap, then send the backfill that a newcomer is still owed. Loss
-/// repair is gone until C2.3, so the tick sends no digest.
+/// The backfill tick: note the gap, then send the backfill that a newcomer is still owed. Loss
+/// repair is not back yet, so the tick does not repair a lost frame.
 async fn backfill_arm(anchors: &mut TickAnchors, state: &mut EventLoopState) {
     timers::note_tick_gap(
         "backfill",
@@ -1884,7 +1884,7 @@ struct MaintenanceIntervals {
     /// Fast event-driven failover burst; only does work while
     /// `state.reclaim_until` is open (armed on `NeighborDown`).
     reclaim: time::Interval,
-    /// Periodic anti-entropy digest broadcast (recover messages missed
+    /// Periodic backfill check (recover slices missed
     /// while partitioned/asleep).
     backfill: time::Interval,
     state_refresh: time::Interval,
@@ -1898,7 +1898,7 @@ struct MaintenanceIntervals {
 ///
 /// Every ticker uses `MissedTickBehavior::Skip`: after the monotonic clock
 /// jumps (an App Nap throttle, a SIGSTOP freeze), a default `Burst` ticker
-/// fires a catch-up salvo — several anti-entropy digests back-to-back, a
+/// fires a catch-up salvo — several backfill checks back-to-back, a
 /// heal immediately after the hard re-bootstrap it just ran, a prune replaying
 /// its backlog — and poisons the tick-gap telemetry (the burst ticks report a
 /// ~0 gap). Each tick here means "do the maintenance now", so a skipped tick is

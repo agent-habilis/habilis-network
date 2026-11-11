@@ -84,7 +84,7 @@ impl UnicastAcceptor {
         match result {
             Ok(bytes) => {
                 // Bounded, non-blocking: a flooding peer can't back-pressure
-                // the event loop, and a dropped frame heals via anti-entropy.
+                // the event loop, and a dropped frame is not repaired until the loss repair lands.
                 let frame = UnicastFrame {
                     from,
                     bytes: Bytes::from(bytes),

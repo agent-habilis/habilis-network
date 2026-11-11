@@ -13,7 +13,7 @@ use crate::transport::PayloadPath;
 use crate::transport;
 /// How many events of a topic the gossip keeps for a task that is not scheduled yet. The value keeps
 /// the old size, which held the burst of the digest era. A join wave now brings fewer frames
-/// (presence, proof and two slices per peer), so size it again in C2.3. The default of 256
+/// (presence, proof and two slices per peer), so size it again when the loss repair lands. The default of 256
 /// overflowed on a loaded host (the reader got `Lagged`, and the node logged "gossip event stream
 /// lagged").
 const TOPIC_EVENT_CAPACITY: usize = 1024;

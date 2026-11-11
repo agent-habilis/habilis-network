@@ -250,8 +250,7 @@ impl UnicastPool {
     /// a half-dead pooled connection evicts it and redials-and-resends once in
     /// the background, so the detectable failure mode recovers instead of
     /// silently losing the frame; a path that dies *after* buffering remains
-    /// at-most-once (an app-level concern: waiter timeouts, and anti-entropy,
-    /// which re-sends a directed frame point-to-point to its addressee).
+    /// at-most-once (an app-level concern: waiter timeouts, and the app's own retry).
     pub(crate) async fn send_if_warm(&self, eid: EndpointId, bytes: Bytes) -> WarmSend {
         let Some(connection) = self.warm(eid).await else {
             return WarmSend::Cold;

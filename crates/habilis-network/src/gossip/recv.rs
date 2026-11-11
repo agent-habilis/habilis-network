@@ -329,7 +329,7 @@ fn arms_reclaim(
 /// Drain the message payloads a dead subscription buffered before its
 /// stream ended, so they reach the app instead of vanishing. The gossip
 /// actor already counts them as delivered — its overlay dedup will
-/// *not* re-push them, and anti-entropy resends of them are likewise
+/// *not* re-push them, and repeats of them are likewise
 /// dropped below the app — so the buffer is the only copy this node
 /// will ever see. Only `Received` payloads are processed: neighbor
 /// up/down from a dead subscription is stale link state the fresh
@@ -540,7 +540,7 @@ pub(crate) async fn ingest_from(
     // Authenticity gate, **before** the self-echo drop, dedup, and every other step: every inbound
     // message must carry a valid signature over its canonical bytes. Verifying before `mark_seen`
     // stops a forged/unsigned message from poisoning the dedup window with a replayed id and
-    // suppressing the genuine signed copy. Relayed and anti-entropy copies keep their original
+    // suppressing the genuine signed copy. Relayed copies keep their original
     // author's signature, so they verify here too.
     let verified = match message.verify() {
         Ok(checked) => checked,
@@ -1139,8 +1139,8 @@ struct InboundFrame<'message> {
     surfaceable: bool,
 }
 
-/// One shard of a split body: retain it for anti-entropy (so a missing shard
-/// heals like any message) and, when its group completes, gate the
+/// One shard of a split body: retain it (so a missing shard
+/// is kept like any message) and, when its group completes, gate the
 /// reassembled logical message through the application boundary and surface it once —
 /// pushed and dispatched exactly like an ordinary inbound message.
 async fn handle_shard(
@@ -4576,7 +4576,7 @@ mod first_contact_tests {
 
     /// A crash restart keeps the key of the endpoint and makes a new signing key. A `PeerInfo` of
     /// the old key, replayed after the new key proved the endpoint, must not take the proof back:
-    /// the digests of the peer would be answered on gossip until its next `PeerInfo`.
+    /// the backfill requests of the peer would be answered on gossip until its next `PeerInfo`.
     #[test]
     fn a_replayed_old_peer_info_does_not_take_the_proof_of_the_new_signer() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -6663,7 +6663,7 @@ mod dedup_counter_tests {
     }
 
     /// A `joined` frame with the proof of `member`, stamped `age_secs` seconds ago: a stored copy that a relay
-    /// or an anti-entropy answer hands out long after its author spoke.
+    /// or a backfill answer hands out long after its author spoke.
     fn old_joined_of(
         session: &Identity,
         member: &Identity,

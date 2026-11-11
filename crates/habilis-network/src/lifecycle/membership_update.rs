@@ -43,7 +43,7 @@ pub(crate) fn is_far_ahead(timestamp: UnixSecs) -> bool {
 /// peer, so a relay can re-send its last frame as if it were news, and that frame is older than
 /// the TTL. The bound is wide on purpose: a new peer with a slow clock still arrives on its first
 /// live frame. A frame of any other kind (peer info, the durable state and meta changes, the
-/// digests) does only when it was stamped within one alive timeout: a relay or an anti-entropy
+/// digests) does only when it was stamped within one alive timeout: a relay or a backfill
 /// answer re-sends stored frames of any author, a dead one too, and those are old. A frame
 /// stamped within the timeout says that its author was alive within the timeout, which is all
 /// that the timeout asks.
@@ -112,7 +112,7 @@ pub(crate) const STEP_BACK_FRAMES: u8 = 3;
 
 /// A frame of a quiet peer counts toward a step back only if it arrives this long after the last
 /// one that counted, on our clock. A live peer sends a frame every alive interval, so half of it
-/// is met in a second or two; a relay that answers an anti-entropy digest sends its frames in one
+/// is met in a second or two; a relay that answers a backfill request sends its frames in one
 /// burst, so only the first counts.
 pub(crate) fn step_back_spacing() -> Duration {
     ALIVE_INTERVAL / 2
@@ -189,7 +189,7 @@ fn compute_proving(
     let known = state.peers.contains(&key);
     let unseen = match kind {
         // A `Left` is explicit departure; durable state events never mark a
-        // peer present either — anti-entropy backfill replays historical state
+        // peer present either — the backfill replays historical state
         // whose author may have long since left, and resurrecting them would
         // forge membership.
         MessageKind::Presence {
@@ -899,7 +899,7 @@ mod tests {
 
     /// What does not return a quiet peer whose newest stamp is ahead: one old frame, the same frame
     /// again and again, and a burst of different frames in one second (what a relay sends when it
-    /// answers an anti-entropy digest). Only frames that rise and arrive one alive interval apart
+    /// answers a backfill request). Only frames that rise and arrive one alive interval apart
     /// count.
     #[test]
     fn a_replay_does_not_pass_for_a_step_back() {

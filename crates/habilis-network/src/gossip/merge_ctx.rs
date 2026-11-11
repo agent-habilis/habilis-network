@@ -369,7 +369,7 @@ impl<'mesh> StateMergeParams<'mesh> {
 /// Whether a merged frame also goes to each peer over the unicast plane.
 ///
 /// A frame that announces a departure must not die with the leaver. Gossip alone can lose it in
-/// a silently linkless overlay, and anti-entropy cannot heal a frame that no live replica holds.
+/// a silently linkless overlay, and no repair can heal a frame that no live replica holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Farewell {
@@ -502,7 +502,7 @@ pub async fn broadcast_state_merge(
 /// nickname whose hint another key owns. The gossip
 /// overlay can be silently linkless (a post-join flap heals in seconds, but a
 /// leaver exits first), and a farewell that dies with the leaver can never be
-/// healed by anti-entropy — no live replica holds it. Receiver-side dedup
+/// repaired by no mechanism until the loss repair lands — no live replica holds it. Receiver-side dedup
 /// makes the double delivery a no-op; the unicast acceptor feeds the same
 /// `ingest` path as gossip. Spawned dials that outlive the shutdown window
 /// die with the endpoint — still best-effort, just no longer single-path.
@@ -749,7 +749,7 @@ mod tests {
 
     /// A departure written with a farewell reaches each peer by unicast at once. The overlay is
     /// not meshed, so gossip carries nothing: only the unicast mirror can deliver the frame, and
-    /// no anti-entropy round is needed.
+    /// no backfill round is needed.
     #[test]
     fn a_farewell_merge_reaches_each_peer_by_unicast() {
         ::habilis_network_test_tracing::run_multi_thread(
@@ -827,7 +827,7 @@ mod tests {
                 let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
                 assert!(
                     matches!(delivered, Ok(Some(ref frame)) if !frame.bytes.is_empty()),
-                    "a farewell reaches the peer by unicast, without waiting for anti-entropy"
+                    "a farewell reaches the peer by unicast, without waiting for a backfill"
                 );
                 router.shutdown().await.expect("shutdown");
                 node.close().await;

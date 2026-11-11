@@ -20,8 +20,7 @@ use crate::util::tuning::{alive_timeout, starvation_threshold};
 
 use std::sync::atomic::Ordering;
 
-/// A chat frame of `author`, stamped `at`. An app frame is what anti-entropy replays from the
-/// message log to a new joiner.
+/// A chat frame of `author`, stamped `at`, as a test fixture.
 fn chat(author: &str, by: &Identity, at: UnixSecs) -> Verified {
     let mut message = Message::new_app(
         &MeshId::from("test"),

@@ -19,7 +19,7 @@ use super::{
 /// A protocol frame — serialized as JSON on the wire. The transport
 /// envelope beneath the app layer: for an app frame (e.g. chat, `app_msg`),
 /// `body` carries a whole serialized app payload opaque to this layer;
-/// plumbing kinds (presence, state digests, ping/pong, state/meta) carry their own
+/// plumbing kinds (presence, peer info, ping/pong, state/meta) carry their own
 /// opaque bodies.
 ///
 /// Wire format (compact JSON, one line):

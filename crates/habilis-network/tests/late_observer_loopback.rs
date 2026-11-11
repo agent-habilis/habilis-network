@@ -72,7 +72,7 @@ fn a_late_observer_holds_one_holder_of_a_shared_nickname_within_seconds() {
     );
     guard.allow_warn(
         "habilis_network::gossip",
-        "no peer answered the digest of the state channel within the time limit",
+        "no peer answered the state channel within the time limit",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
@@ -133,7 +133,7 @@ fn an_observer_that_joins_with_the_two_members_holds_one_holder_ten_seconds_late
     );
     guard.allow_warn(
         "habilis_network::gossip",
-        "no peer answered the digest of the state channel within the time limit",
+        "no peer answered the state channel within the time limit",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");

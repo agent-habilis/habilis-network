@@ -445,7 +445,7 @@ pub struct EventLoopState {
     /// Bounded FIFO (cap `KNOWN_ENDPOINTS_CAP`) so it can't grow without limit.
     pub(crate) known_endpoints: BoundedFifoSet<EndpointId>,
     /// The endpoint each signing key proved in its `PeerInfo`: the only
-    /// point-to-point target an anti-entropy answer may take, since a
+    /// point-to-point target a backfill answer may take, since a
     /// nickname is a label any signer can claim.
     pub(crate) proven_endpoints: proven_endpoints::ProvenEndpoints,
     /// Our own `PeerInfo` proof, made once: it is the same for the session.
@@ -572,7 +572,7 @@ pub struct EventLoopState {
     /// `peer_return`). Gates departure surfacing so a peer whose
     /// join we never showed never produces a `went quiet` / `has left`
     /// line — keeps the join-horizon view symmetric. The roster (`peers`)
-    /// stays complete for anti-entropy/membership; `surfaced ⊆ peers`
+    /// stays complete for the backfill and membership; `surfaced ⊆ peers`
     /// governs what the operator/agent is shown: the rows of the roster
     /// snapshot hold the peers in `surfaced` and the quiet peers, and
     /// `member_count` counts only the peers in `surfaced`.
@@ -582,7 +582,7 @@ pub struct EventLoopState {
     pub(crate) last_sent_at: Instant,
     /// Wall-clock unix seconds when this daemon started — its join
     /// instant. The node still receives & relays older messages
-    /// (anti-entropy keeps the mesh's set uniform), but messages
+    /// (the backfill keeps the mesh's set uniform), but messages
     /// stamped before this are never *surfaced* (printed / `poll` /
     /// `fetch` / library API): the operator/agent view starts at join.
     pub(crate) joined_at: UnixSecs,
@@ -749,7 +749,7 @@ pub struct EventLoopState {
     pub(crate) reassembly: ReassemblyStore,
     /// Serialized frames of our recent big (unlogged) outbound shard groups —
     /// the re-serve source for peers' `shard/repair` requests (big groups
-    /// skip the message log, so anti-entropy can't heal them).
+    /// skip the message log, so no repair can heal them).
     pub(crate) shard_cache: ShardCache,
     /// The shared documents of the `state` and `meta` channels.
     pub(crate) docs: ChannelDocs,
@@ -991,7 +991,7 @@ impl EventLoopState {
 
     /// The number of members of the mesh as this node counts them: the peers whose arrival was
     /// shown, and this node. A peer known only from a frame older than our join is in the roster
-    /// for anti-entropy, but it is not counted: it can be a ghost that never surfaced. Every
+    /// for the backfill, but it is not counted: it can be a ghost that never surfaced. Every
     /// surface that shows a count (the state file, the live counter, the roster snapshot) reads it
     /// here.
     #[must_use]
@@ -2099,7 +2099,7 @@ impl EventLoopState {
     /// a node whose only neighbor is the rendezvous relay already exchanges
     /// presence over that link, and a peer behind the same relay (a browser
     /// tab, say) may never form a direct link at all. Document plumbing —
-    /// heads digests, change frames — is small and reconciled by anti-entropy,
+    /// heads digests, change frames — is small and reconciled by the backfill,
     /// so it rides the relay link too. User content keeps waiting on `meshed`.
     /// A degraded node is excluded: its overlay is suspected dead, and the
     /// relay link alone is no proof it recovered.
@@ -2554,7 +2554,7 @@ impl EventLoopState {
     }
 
     /// Tests only: forget the proof that `peer` signs for its endpoint (the `PeerInfo` proof of
-    /// `transport::proven_endpoints`). A state digest of an asker whose endpoint is not proven is
+    /// `transport::proven_endpoints`). A backfill request of an asker whose endpoint is not proven is
     /// answered on gossip, as it is for a late joiner before its `PeerInfo` arrives.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub fn forget_endpoint_proof(&mut self, peer: &Nickname) {

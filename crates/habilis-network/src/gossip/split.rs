@@ -3,8 +3,8 @@
 //! The mesh topic carries two kinds of message: the signed mesh messages that the event loop
 //! handles, and the frames of the gossip transport (first byte `FRAME_KIND`). One task owns the
 //! topic receiver and reads it all the time. A frame goes to the transport handle and never
-//! further: it does not reach `Message::parse`, `note_inbound`, `mark_seen`, the log, the digests
-//! or anti-entropy. Everything else goes to the event loop on a queue that does not drop, so that
+//! further: it does not reach `Message::parse`, `note_inbound`, `mark_seen`, the log.
+//! Everything else goes to the event loop on a queue that does not drop, so that
 //! the work of the loop cannot make the topic lag.
 
 use std::sync::Arc;
@@ -232,7 +232,7 @@ mod tests {
     }
 
     /// A frame goes to the handle and no further. A mesh message goes to the loop and not to the
-    /// handle: the seen set, the log and the digests never see a frame, because `ingest` is not
+    /// handle: the seen set and the log never see a frame, because `ingest` is not
     /// called for it.
     #[test]
     fn a_frame_goes_to_the_handle_and_a_mesh_message_to_the_loop() {

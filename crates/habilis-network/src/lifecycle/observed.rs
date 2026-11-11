@@ -63,7 +63,7 @@ pub(crate) fn observe(
             }
         );
         // A frame that is not newer than the newest one that set the nickname is a stored copy (a
-        // relay, an anti-entropy answer): it carries the nickname the key had then, and it must
+        // relay, a backfill answer): it carries the nickname the key had then, and it must
         // not give a nickname back that the key left. The watermark is the one of the nickname
         // alone, since a frame that proves no presence moves no `peer_stamp`.
         let unnamed = !state.names.contains_key(&key);
@@ -139,7 +139,7 @@ pub(crate) fn observe(
     }
     membership_update::apply(&update, key, state);
 
-    // Join horizon: the node still relays/logs everything (anti-entropy
+    // Join horizon: the node still relays everything (the backfill
     // keeps the mesh's set uniform), but a message stamped before we
     // joined is never *surfaced* to the operator/agent. Computed here
     // (not just before the inbound push) because the arrival-surfacing
@@ -478,7 +478,7 @@ mod churn_red {
     }
 
     /// H1. A peer is killed by `SIGKILL`: it never sends `left`, so no guard of #34 covers its key. A frame
-    /// that it sent while alive and that is not in the message log (a keepalive, a `PeerInfo`)
+    /// that it sent while alive and that no one replays (a keepalive, a `PeerInfo`)
     /// dedups only through the `seen` set. When a busy room pushes it out of that set, a copy that
     /// a relay still holds is new again, and it revives the dead peer.
     async fn a_replayed_frame_must_not_revive_a_sigkilled_peer(
@@ -797,7 +797,7 @@ mod churn_red {
         });
     }
 
-    /// A replay of an old durable frame (a relay or an anti-entropy answer re-sends it) does not
+    /// A replay of an old durable frame (a relay or a backfill answer re-sends it) does not
     /// move the last-heard mark of a peer, so it cannot keep a dead peer from its eviction.
     #[test]
     fn a_replayed_old_frame_does_not_keep_a_dead_peer_alive() {
@@ -2859,7 +2859,7 @@ mod churn_red {
         });
     }
 
-    /// A relay or an anti-entropy answer re-sends a stored frame of a key. The frame carries the
+    /// A relay or a backfill answer re-sends a stored frame of a key. The frame carries the
     /// nickname the key had when it made the frame, so an older frame must not give the key back a
     /// nickname that it left.
     #[test]

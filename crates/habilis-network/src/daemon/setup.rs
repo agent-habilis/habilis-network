@@ -206,7 +206,7 @@ pub(crate) fn register_rendezvous(
 /// The unicast inbound channel + its Router acceptor. The acceptor forwards
 /// received `UNICAST_ALPN` frames to the returned receiver, which the event
 /// loop drains into `gossip::ingest`. Bounded so a flooding peer can't
-/// back-pressure the loop (a dropped frame heals via anti-entropy).
+/// back-pressure the loop (a dropped frame is not repaired until the loss repair lands).
 fn unicast_inbox(
     relay_transport: transport::PayloadPath,
 ) -> (

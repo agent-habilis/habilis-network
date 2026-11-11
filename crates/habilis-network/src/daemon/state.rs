@@ -4391,7 +4391,7 @@ mod tests {
         );
     }
 
-    /// A `PeerInfo` is in no message log, so a member that missed one is repaired by no digest. A
+    /// A `PeerInfo` is in no message log, so no later frame repairs a member that missed one. A
     /// meshed node floods its own again once the refresh period has passed since its last flood:
     /// at least 5 min, and 5 s for each live member, spread by a factor drawn with each flood.
     #[test]

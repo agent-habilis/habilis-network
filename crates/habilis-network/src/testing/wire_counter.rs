@@ -19,9 +19,9 @@ pub(crate) enum FrameClass {
     Alive,
     /// A `left` presence or a link-state vector.
     Membership,
-    /// A change or a digest of the shared state or meta document.
+    /// A change of the shared state or meta document.
     Document,
-    /// Anything else: the digest of the message log, probes and unknown kinds.
+    /// Anything else: probes and unknown kinds.
     Other,
 }
 

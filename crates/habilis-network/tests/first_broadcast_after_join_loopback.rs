@@ -3,8 +3,8 @@
 //!
 //! Three members on a local relay: the creator C and two joiners J1 and J2. Each joiner sends a
 //! broadcast as soon as `join` returns. A frame sent before the node is meshed is parked and
-//! flushed on its first non-rendezvous link (`gossip::recv::flush_pending`). The chat log and its
-//! resends are removed, so the race measures only that flush.
+//! flushed on its first non-rendezvous link (`gossip::recv::flush_pending`). Nothing else
+//! is sent by the test, so the race measures only that flush.
 //!
 //! The tests record WHEN each broadcast reaches two observers, the creator and the other joiner,
 //! up to `OBSERVE`, and fail if the creator gets one later than the bound of the race (`EXPECTED`,

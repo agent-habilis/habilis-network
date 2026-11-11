@@ -31,7 +31,7 @@ pub(crate) enum FrameClass {
     App,
     Presence,
     PeerInfo,
-    /// The anti-entropy digest of the chat log.
+    /// A digest frame, kept for the census label. No digest is sent any more.
     Digest,
     /// A change of the `state` channel.
     State,
@@ -235,7 +235,7 @@ pub(crate) fn by_class(bytes: &[u64; CLASS_COUNT]) -> String {
 }
 
 /// How a frame reached `ingest`: on which plane, and whether it carries a resend nonce, so it is
-/// the copy of an anti-entropy answer. The overlay keeps each gossip message id it has seen for
+/// the copy of a backfill answer. The overlay keeps each gossip message id it has seen for
 /// 90 s (`message_id_retention` of the pinned fork), per subscription, and drops a repeat in that
 /// time. So on the gossip plane a plain repeat gets here only after the 90 s, or after a resubscribe,
 /// when `drain_dead_receiver` and `drain_queued` replay frames. A resend, or a frame on the other

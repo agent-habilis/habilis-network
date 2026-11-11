@@ -143,7 +143,7 @@ fn age_by_suspends_since(state: &mut EventLoopState, key: AuthorKey, heard: Inst
 /// timeout. Each eviction removes them from `last_seen`/`peers`
 /// and rewrites the statusline. A peer whose arrival we
 /// *surfaced* is also inserted into `quiet` and emits `peer_timeout`;
-/// a ghost known only through pre-join anti-entropy backlog is evicted
+/// a ghost known only through a pre-join backlog is evicted
 /// silently (never surfaced as arriving, so never surfaced as
 /// leaving) — keeps the join-horizon view symmetric.
 pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
