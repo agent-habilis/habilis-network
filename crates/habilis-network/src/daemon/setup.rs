@@ -1216,7 +1216,7 @@ fn next_run(_state: Option<&Path>, _member_known: bool, _cancel: &AtomicBool) ->
 }
 
 /// The member key of this node, kept in the state file. A target with no files (wasm, or a build
-/// without `host`) has none: a key made at each start would prove nothing across restarts.
+/// without `host`) has none. Windows with `host` has a key for each start (below).
 #[cfg(all(unix, feature = "host"))]
 // the key is shared with the loop and its handlers, which hold clones
 fn member_key(state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identity>>> {
@@ -1224,8 +1224,21 @@ fn member_key(state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identit
     Ok(Some(sync::Arc::new(load_or_create_identity(state)?)))
 }
 
+/// The member key of this node on Windows: a new key at each start, as on a Unix start with no state
+/// file. The key file and its run counter are not ported yet, so a restart is a new member. Within a run
+/// the key proves the nickname, so two sessions that claim one nickname are told apart.
+#[cfg(all(windows, feature = "host"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the version for a target with files"
+)]
+// the key is shared with the loop and its handlers, which hold clones
+fn member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<identity::Identity>>> {
+    Ok(Some(sync::Arc::new(identity::Identity::generate())))
+}
+
 /// A target with no files has no member key.
-#[cfg(not(all(unix, feature = "host")))]
+#[cfg(not(all(any(unix, windows), feature = "host")))]
 #[expect(
     clippy::unnecessary_wraps,
     reason = "the same signature as the version for a target with files"
@@ -2350,7 +2363,7 @@ mod tests {
     /// A target with no files keeps no member key, no run count and no lock: each start is run 1, whatever
     /// the state path, and the start takes no lock. This is the coverage of the fallback that the tests of the
     /// key files, which need a file system, give up on such a target.
-    #[cfg(not(all(unix, feature = "host")))]
+    #[cfg(not(all(any(unix, windows), feature = "host")))]
     #[test]
     fn a_target_with_no_files_has_no_member_key_and_starts_at_run_1() {
         let dir = TempDir::new("habilis-no-files");
@@ -2374,6 +2387,46 @@ mod tests {
                 .expect("no lock")
                 .is_none(),
             "a target with no files takes no lock"
+        );
+    }
+
+    /// On Windows each start makes a member key of its own and keeps it in no file: a second start on the
+    /// same state path has another key, each start is run 1, and the start takes no lock.
+    #[cfg(all(windows, feature = "host"))]
+    #[test]
+    fn on_windows_each_start_has_a_new_member_key_and_starts_at_run_1() {
+        let dir = TempDir::new("habilis-windows-member");
+        let state = dir.path().join("session.json");
+        assert_eq!(
+            super::next_run(Some(&state), false, &super::NEVER_CANCELLED).expect("run"),
+            1,
+            "the first start is run 1"
+        );
+        assert_eq!(
+            super::next_run(Some(&state), false, &super::NEVER_CANCELLED).expect("run"),
+            1,
+            "with no counter file the second start is run 1 as well"
+        );
+        let first = super::member_key(Some(&state))
+            .expect("keys")
+            .expect("a member key for the first start");
+        let second = super::member_key(Some(&state))
+            .expect("keys")
+            .expect("a member key for the second start");
+        assert_ne!(
+            first.author_key(),
+            second.author_key(),
+            "a second start on the same state path has a new member key"
+        );
+        assert!(
+            !state.with_extension("key").exists(),
+            "the member key is kept in no file"
+        );
+        assert!(
+            super::hold_member_key_once(Some(&state))
+                .expect("no lock")
+                .is_none(),
+            "the start takes no lock"
         );
     }
 

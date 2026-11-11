@@ -230,6 +230,7 @@ With a retry every 1 ms for up to 100 ms, no rename and no remove failed. The wo
 - A reader that holds the file for longer than the deadline, such as an editor, makes the write fail. The daemon logs the failure once, and the next write tries again.
 - Every reader in this repository and in agent-gossip uses `std::fs`, which opens with `FILE_SHARE_DELETE`, so none of them blocks a write. A reader in PowerShell, such as a statusline, should open the file with `[IO.File]::Open($path, 'Open', 'Read', 'ReadWrite,Delete')`, not with `Get-Content`.
 - Under the runtime base of R2 (`<LocalAppData>\<product>\run`) the file is private through the inherited profile ACL. A `--state-file` outside the base gets the ACL of the folder that it names.
+- The member key of #51 and its run counter live beside the state file on Unix (`<state>.key`, `<state>.run`). They are not ported. On Windows `member_key` (`daemon/setup.rs`) makes a new key at each start, as a Unix start with no state file does, and each start is run 1. Within a run the key proves the nickname, so two sessions that claim one nickname are told apart. A restart is a new member. After a clean stop the nickname is free. After a stop with no `left` frame, the peers hold the nickname for the old session while it is live or quiet (`QUIET_TTL`, 1 h), and the new start gets the join error until then. The port of the key files removes that wait.
 
 ### R9. FFI
 
