@@ -116,7 +116,7 @@ State: `surfaced`.
 
 Layer: heartbeat. Keyed by author key.
 
-A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return.
+A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return. A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return.
 
 State: `quiet`. Code: `lifecycle/heartbeat.rs`.
 
@@ -164,7 +164,7 @@ Code: `habilis-network-doc` (`SliceStore`), `protocol::Channel`.
 
 Layer: state. Keyed by author key.
 
-A member sends its own slice of each channel to a newcomer, and to a peer that returned from quiet. The frame is the original signed frame, so the newcomer checks the signature of the author. A peer that has no path yet stays owed until a path exists. An entry expires after 90 s.
+A member sends its own slice of each channel to a newcomer, and to a peer that returned from quiet. The frame is the original signed frame, so the newcomer checks the signature of the author. A peer that has no path yet stays owed, for 90 s at most.
 
 Code: `habilis-network/src/gossip/backfill.rs`.
 
@@ -174,11 +174,15 @@ Layer: state. Keyed by author key.
 
 The place where a slice of a key that is not in the roster waits, 256 at most for each channel. A pending slice expires after 90 s. It is applied when its key joins the roster or returns to it. A pending slice is in no view and in no backfill.
 
+Code: `PendingSlices` in `crates/habilis-network-doc/src/pending_slices.rs`.
+
 ### gone set
 
 Layer: state. Keyed by author key.
 
-The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. The store refuses a slice of a gone key until the gone TTL ends. The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed quiet key is not gone, because it can return.
+The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. The store refuses a slice of a gone key until the gone TTL ends. The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed key is not gone, because it can return.
+
+Code: `SliceStore::forget` in `crates/habilis-network-doc/src/slice_store.rs`.
 
 ## Layering
 
@@ -297,7 +301,7 @@ Issue #29 records each decision.
 
 ### Remaining `#[expect]` attributes
 
-Ten `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate, a counting allocator, and libc calls that have no safe wrapper), and one that suppresses `deprecated`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
+Sixteen `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C ABI of the ffi crate and its test, and libc calls that have no safe wrapper), one that suppresses `deprecated`, six that suppress a `clippy` lint, and one that suppresses `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -311,7 +315,12 @@ Ten `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C AB
 | `habilis-network/src/daemon/state/event_loop_state.rs` (constructor `EventLoopState::new`) | `clippy::too_many_lines` | the proof and the member-key lock are four fields over the limit; the constructor is split later |
 | `habilis-network-ffi/src/ffi.rs` (crate) | `unsafe_code` | this module is the C ABI: raw pointers from the foreign caller, and a boxed handle it owns |
 | `habilis-network-ffi/tests/ffi_smoke.rs` (crate) | `unsafe_code` | the surface under test is `unsafe extern "C"`; calling it is the test |
-| `habilis-network-doc/tests/replay_cost.rs` (crate) | `unsafe_code` | the test counts the bytes of a replay, and a counting allocator needs an `unsafe GlobalAlloc` impl |
+| `habilis-network/src/daemon/setup.rs` (`hold_member_key`) | `clippy::unused_async` | the same signature as the version for a target with files |
+| `habilis-network/src/daemon/setup.rs` (`hold_member_key_once`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
+| `habilis-network/src/daemon/setup.rs` (`next_run`) | `clippy::unnecessary_wraps` | the same signature as the file-backed version, so the caller is one call |
+| `habilis-network/src/daemon/setup.rs` (`member_key`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
+| `habilis-network/src/daemon/setup.rs` (`setup_mesh_inner`) | `clippy::too_many_lines` | the setup is one assembly of the mesh, in the order that its parts need |
+| `habilis-network/src/daemon/state/event_loop_state.rs` (field `key_lock`) | `dead_code` | the field is held for the lock it carries, and it is never read |
 
 ### Rules of the guide that do not apply
 
@@ -560,7 +569,7 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R16 | `Membership` | `habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs` | holds a `broadcast::Receiver`, which is not Clone |
 | R22 | `EventLoopConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `MeshSpec`, a `RendezvousConfig` and a `RuntimeConfig`, which hold channels, trait objects and task handles with no default |
 | R22 | `RendezvousConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a watch receiver and a `StoppableTask`, which have no default |
-| R22 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn NodeSink` and a `SelfWriteGate`, which have no default |
+| R22 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn NodeSink` and a `DriverMode`, which have no default |
 | R12 | `CtxParts`, `RuntimeConfig`, `Victims` | `habilis-network/src/daemon/event_loop/ctx_parts.rs`, `.../config/event_loop_config.rs`, `habilis-network/src/transport/admission/victims.rs` | hold a `dyn` trait object, so Debug prints the name only (`finish_non_exhaustive`) |
 R1 (trait impls early) is review only. For this repository, 'early' means: a library crate (`habilis-network-protocol`, `habilis-network-util`, the transport crates, `habilis-network-chunks`, `habilis-network-stream`) adds the standard impls (Debug, Clone, Copy where it applies, PartialEq, Default for an options type) when the type is written. An application crate (the CLIs, the examples, `habilis-network-tasks`) adds an impl only when a caller in the crate needs it.
 

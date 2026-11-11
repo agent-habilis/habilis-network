@@ -477,13 +477,13 @@ Signature verification, the mesh gate, and dedup are identical on both planes be
 
 A member sends its own slice of each channel to a newcomer.
 The frame is the original signed frame of the member, so the newcomer checks the signature of the author.
-One frame goes for each channel.
+One frame goes for each channel that the member wrote.
 A member owes the backfill to a peer that joins and to a peer that returns from quiet.
 A send that finds no path keeps the peer owed.
 The retry tick sends again.
 An entry expires after 90 s.
 A proof answer to the newcomer opens a path, so the slices go at once, with a dial back.
-A node does not re-send a frame that another node missed.
+A node does not re-send a frame that another node missed, except the shard repair of section 7.6.
 
 ### 7.6 Multipart bodies
 
@@ -522,7 +522,7 @@ A nickname is bound to the member key that proved it, while a session of that me
 - A proof that is refused because another member holds the name, and whose signature is valid, does not mark its frame as seen: when the holder has left and the same frame comes again, it is read again. A proof whose signature is not valid keeps its mark, so its copies are dropped as duplicates.
 - A second session of a bound nickname is gone at an observer at most one sweep tick (10 s) after a path to it comes up, and at once when the gossip link comes up.
 
-A member holds one session, the newest. A proof with a higher run replaces the older sessions of the member, in the proof book and in the roster, as a goodbye does, when its sender is live (in the roster after the frame). A proof of a sender that is not live, such as an old copy of a frame that a relay hands out, or the proof of a quiet session, is kept PENDING: valid (its signature was checked, and a forged one is never kept) and inactive. A pending proof binds no nickname, replaces no session and ends none, and it counts only for the admission of its own session (in the gate of our own nickname too, where it also lets a newer run of our own member be reported as superseding this node): when that session is admitted and live, the proof is activated and does what a proof of a live sender does. A quiet peer whose clock stepped back returns after a run of rising frames, and its proof is activated right after the frame that completes the run. The pending proofs have two classes of 32 at most, the oldest dropped when a class is full: the proofs of a member that already holds the nickname, with a run above every run of that member in the book (the sender can only be a restart of that member, and nobody else can sign its proofs: a replay of the logged frame of a past run is not above, and goes to the other class), and all the others. In the class of the holders each member has 4 proofs at most and keeps its highest runs, so one member cannot push out the restart proof of another, however many valid proofs it signs for its own nickname; a full class drops the lowest run of the member that has the most. The limit of that isolation: the class holds 32 proofs, so when 32 different members that hold a name have one pending proof each, a proof of one more member takes the place of one of them (they tie, so the victim is any of them) and that member waits for its fresh `joined` frame. An attacker would need 32 members that hold names in the mesh, each with a valid proof, to do it. The limit of that rule: when a member already has 4 pending proofs, a new proof with a run not above the lowest of them is refused. A proof of a lower run cannot be told from the replay of a logged frame of a past run, since both are valid signatures of the member, and accepting it would let a replay push out the real newest run. A member that restored an older run counter and has 4 higher pending proofs relies on the fresh `joined` frame that its new session sends at its start: that frame takes the live path, which does not use the pending proofs. So a flood of proofs that an attacker signs for its own nicknames cannot push out the proof of a restart. A dropped proof comes again with a valid `joined` frame of its session (the answer to our request, its arrival, or its re-announce): an `alive` frame carries no proof, and a request that finds no path waits for one. A duplicate `joined` frame gives a proof back to a session that lost it, when the proof passes the acceptance checks: an ACTIVE proof for a live session, and a PENDING proof for any other session (a quiet one, or one that the nickname gate refused). A session that said goodbye gets nothing. A proof with a run that is not higher than a session of the member in the roster is a late copy: the active proof book does not hold it. If its sender is not live it can stay pending, and it admits its session.
+A member holds one session, the newest. A proof with a higher run replaces the older sessions of the member, in the proof book and in the roster, as a goodbye does, when its sender is live (in the roster after the frame). A proof of a sender that is not live, such as an old copy of a frame that a relay hands out, or the proof of a quiet session, is kept PENDING: valid (its signature was checked, and a forged one is never kept) and inactive. A pending proof binds no nickname, replaces no session and ends none, and it counts only for the admission of its own session (in the gate of our own nickname too, where it also lets a newer run of our own member be reported as superseding this node): when that session is admitted and live, the proof is activated and does what a proof of a live sender does. A quiet peer whose clock stepped back returns after a run of rising frames, and its proof is activated right after the frame that completes the run. The pending proofs have two classes of 32 at most, the oldest dropped when a class is full: the proofs of a member that already holds the nickname, with a run above every run of that member in the book (the sender can only be a restart of that member, and nobody else can sign its proofs: an old copy of the frame of a past run is not above, and goes to the other class), and all the others. In the class of the holders each member has 4 proofs at most and keeps its highest runs, so one member cannot push out the restart proof of another, however many valid proofs it signs for its own nickname; a full class drops the lowest run of the member that has the most. The limit of that isolation: the class holds 32 proofs, so when 32 different members that hold a name have one pending proof each, a proof of one more member takes the place of one of them (they tie, so the victim is any of them) and that member waits for its fresh `joined` frame. An attacker would need 32 members that hold names in the mesh, each with a valid proof, to do it. The limit of that rule: when a member already has 4 pending proofs, a new proof with a run not above the lowest of them is refused. A proof of a lower run cannot be told from an old copy of the frame of a past run, since both are valid signatures of the member, and accepting it would let a replay push out the real newest run. A member that restored an older run counter and has 4 higher pending proofs relies on the fresh `joined` frame that its new session sends at its start: that frame takes the live path, which does not use the pending proofs. So a flood of proofs that an attacker signs for its own nicknames cannot push out the proof of a restart. A dropped proof comes again with a valid `joined` frame of its session (the answer to our request, its arrival, or its re-announce): an `alive` frame carries no proof, and a request that finds no path waits for one. A duplicate `joined` frame gives a proof back to a session that lost it, when the proof passes the acceptance checks: an ACTIVE proof for a live session, and a PENDING proof for any other session (a quiet one, or one that the nickname gate refused). A session that said goodbye gets nothing. A proof with a run that is not higher than a session of the member in the roster is a late copy: the active proof book does not hold it. If its sender is not live it can stay pending, and it admits its session.
 The proof book holds 1024 sessions at most. When it is full, the oldest session that is not in the roster goes first, and a book of sessions in the roster refuses the new proof.
 
 ## 8. Shared state: one signed slice for each author
@@ -539,19 +539,22 @@ A local write is an RFC 7386 JSON merge.
 The engine applies the merge to the own value, raises the version by 1, signs the frame, and broadcasts it.
 The store takes the key from the frame and never from the body, so no frame writes the slice of another author.
 A frame with a higher version replaces the slice.
-A frame with a version that is not higher is stale, and the store drops it.
+A frame with a lower version is stale, and the store drops it.
+Two frames can have the same version and other content.
+The frame with the lower content hash wins.
 On a passworded mesh the body is sealed with the channel key, and the store opens it before it reads the slice.
 Authenticity is the job of the engine.
 
 The store has three caps:
 - A slice and its frame must fit the wire limit, `MAX_MESSAGE_SIZE` (3840 bytes). The cap of a body is that limit minus the frame overhead of the session, which holds the envelope, the mesh id and the nickname. A larger write is refused with the error `TooLarge`.
 - A channel holds 256 authors at most.
-- An author has a burst of 5 versions, and then 1 version for each write interval (1 s). An arrival has a burst of 10, so the jitter of a network does not refuse an honest version. A write or an arrival past the rate limit is refused with the error `RateLimited`. Every arrival is charged, a replay from the gossip cache too.
+- An author has a burst of 5 versions, and then 1 version for each write interval (1 s). An arrival has a burst of 10, so the jitter of a network does not refuse an honest version. A write or an arrival past the rate limit is refused with the error `RateLimited`. Every arrival of a key in the roster is charged, a replay from the gossip cache too. A key outside the roster is charged when its slice is applied (section 8.1).
 
 ### 8.1 The roster gate
 
 A slice of a key that is in the roster enters the store at once.
-The roster is the live peers, the quiet peers and the lapsed quiet peers.
+The roster is the live peers, the quiet peers and the lapsed peers.
+A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return.
 A slice of a key that is not in the roster waits in the **pending set**.
 The pending set holds the newest slice of each key, 256 at most for each channel.
 When the set is full, the oldest slice goes.
@@ -567,10 +570,10 @@ A key that said a signed goodbye, or whose run a newer run replaced, goes to the
 The engine removes its slice, and the store refuses a slice of that key until the gone TTL ends.
 The default of the gone TTL is 2 hours.
 It must stay above the quiet TTL (1 hour) plus the alive timeout, so a peer that missed the goodbye cannot bring back the old slice.
-A new run of a member replaces the older session of that member, so the view holds one slice for each member.
+A new run of a member replaces the older session of that member after the proof of the new run binds, so the view holds one slice for each member.
 A session that lost its nickname to another member can return.
 The engine moves its slice to the pending set, and it does not add the key to the gone set.
-A lapsed quiet key keeps its slice.
+A lapsed key keeps its slice.
 The slice goes only when the key leaves the roster.
 
 ## 9. Transports
