@@ -120,11 +120,11 @@ impl DigestRound {
             let Some(difference) = self.differences.get(&(holder, channel)).copied() else {
                 continue;
             };
-            if matches(channel, &difference.root) {
-                self.differences.remove(&(holder, channel));
+            if self.reading.contains_key(&channel) {
                 continue;
             }
-            if self.reading.contains_key(&channel) {
+            if matches(channel, &difference.root) {
+                self.differences.remove(&(holder, channel));
                 continue;
             }
             self.differences.remove(&(holder, channel));
@@ -206,16 +206,11 @@ impl DigestRound {
         state: &EventLoopState,
         channel: Channel,
         page: &DigestPage,
-        rows: usize,
-    ) -> Vec<Vec<AuthorKey>> {
+    ) -> Vec<AuthorKey> {
         let listed: Vec<AuthorKey> = state.docs.wanted(channel, page);
-        let wanted: Vec<AuthorKey> = listed
+        listed
             .into_iter()
             .filter(|key| state.keeps_slice(key))
-            .collect();
-        wanted
-            .chunks(rows.max(1))
-            .map(<[AuthorKey]>::to_vec)
             .collect()
     }
 }
@@ -333,21 +328,18 @@ pub(crate) async fn on_page(
     }
     let rows = state.docs.pull_rows(channel);
     let cap = DIGEST_SERVES_PER_WINDOW * rows;
-    for keys in DigestRound::pull_plan(state, channel, page, rows) {
-        let mut accepted = Vec::new();
-        for key in keys {
-            if state
-                .outstanding_pulls
-                .register(endpoint, channel, key, now, cap)
-            {
-                accepted.push(key);
-            } else {
-                tracing::debug!(target: "habilis_network::gossip", "a pull over the holder's open cap is not sent");
-            }
+    let mut accepted = Vec::new();
+    for key in DigestRound::pull_plan(state, channel, page) {
+        if state
+            .outstanding_pulls
+            .register(endpoint, channel, key, now, cap)
+        {
+            accepted.push(key);
+        } else {
+            tracing::debug!(target: "habilis_network::gossip", "a pull over the holder's open cap is not sent");
         }
-        if accepted.is_empty() {
-            continue;
-        }
+    }
+    if !accepted.is_empty() {
         let pull = MessageKind::SlicePull {
             to: holder,
             channel,
@@ -605,6 +597,25 @@ mod tests {
         );
     }
 
+    /// A page is pulled in one pull, with all its wanted keys, whatever the row count of the asker.
+    #[test]
+    fn a_page_is_pulled_in_one_pull() {
+        let mut state = testing::fresh_state();
+        let mut rows = Vec::new();
+        for seed in 1..=19u8 {
+            let member = AuthorKey::from([seed; 32]);
+            state.peers.insert(member);
+            rows.push(entry(seed));
+        }
+        let page = DigestPage::build(&rows, 19, 0, 1).expect("a page of nineteen rows");
+        let keys = DigestRound::pull_plan(&state, Channel::State, &page);
+        assert_eq!(
+            keys.len(),
+            19,
+            "every wanted key of the page is in its one pull"
+        );
+    }
+
     /// A lapsed key keeps no slice, so the round does not pull it.
     #[test]
     fn a_lapsed_key_is_not_pulled() {
@@ -618,10 +629,7 @@ mod tests {
             1,
         )
         .expect("a page of one row");
-        let planned: Vec<AuthorKey> = DigestRound::pull_plan(&state, Channel::State, &page, 18)
-            .into_iter()
-            .flatten()
-            .collect();
+        let planned: Vec<AuthorKey> = DigestRound::pull_plan(&state, Channel::State, &page);
         assert!(!planned.contains(&lapsed), "a lapsed key is not pulled");
     }
 
@@ -634,10 +642,7 @@ mod tests {
         state.peers.insert(member);
         let page =
             DigestPage::build(&[entry(1), entry(2)], 2, 0, 1).expect("a page of two sorted rows");
-        let planned: Vec<AuthorKey> = DigestRound::pull_plan(&state, Channel::State, &page, 18)
-            .into_iter()
-            .flatten()
-            .collect();
+        let planned: Vec<AuthorKey> = DigestRound::pull_plan(&state, Channel::State, &page);
         assert_eq!(planned, vec![member], "only the roster key is pulled");
         assert!(!planned.contains(&stranger), "a stranger is not pulled");
     }
