@@ -348,7 +348,8 @@ pub(crate) fn nudge_known(peer: EndpointId, addrs: &NudgeAddrs) -> Vec<iroh::Tra
 /// route, and nothing else reads that. A peer is returned when it is not proven, has no watcher,
 /// and its selected path is multihop (not gossip: the recursion rule closes gossip links on that
 /// rung, so it proves nothing). A peer that is watched is left to its watcher, which also
-/// revokes; here nothing is revoked.
+/// revokes; here nothing is revoked. Nothing revokes the proof of an unwatched peer except the paths
+/// that remove its entry when a session ends.
 pub(crate) fn proven_by_route(
     peers: impl IntoIterator<Item = EndpointId>,
     direct: &HashMap<EndpointId, DirectState>,
@@ -367,7 +368,8 @@ pub(crate) fn proven_by_route(
     proven
 }
 
-/// Mark the pairs that [`proven_by_route`] returns among `peers`, and give them back.
+/// Mark the pairs that [`proven_by_route`] returns among `peers`, and give them back. It runs on the
+/// sweep tick and at a send, so the log line below is an event of either.
 pub(crate) fn prove_by_route(
     state: &mut EventLoopState,
     peers: impl IntoIterator<Item = EndpointId>,

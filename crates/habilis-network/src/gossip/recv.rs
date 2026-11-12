@@ -2355,6 +2355,10 @@ mod first_contact_tests {
                     Some(&DirectState::Direct),
                     "the send did not prove the pair by its route"
                 );
+                assert!(
+                    state.lane_session_wanted(eid, clock::Instant::now()),
+                    "the proof at the send did not ask for the lane session"
+                );
                 node.endpoint.close().await;
             },
         );

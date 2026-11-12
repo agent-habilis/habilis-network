@@ -23,6 +23,9 @@ use n0_future::task;
 /// `msg.serialize()` — the same wire form gossip uses.
 ///
 /// It returns at once: it never waits on a dial, on the wait for a direct path, or on a write.
+/// It takes the state by shared reference, so it cannot prove the addressee by its multihop route.
+/// Only `send_app` does that before it calls here. A caller of this function can see a send held for
+/// up to one sweep (10 s) to an unwatched peer on a multihop route.
 /// A broadcast, a frame held for a direct path, a refused frame, and a send to a warm connection
 /// give their verdict here. A directed message to a cold peer, or to a warm peer whose connection
 /// reads relay, is sent by a task, and the verdict comes through [`Delivered::Pending`].
@@ -120,6 +123,9 @@ pub(crate) fn resolve(
 /// - the gossip broadcast failed.
 ///
 /// A `false` send is not queued: the caller tries again later.
+///
+/// Like [`deliver`], it cannot prove the addressee by its multihop route. Only `send_app` does,
+/// so a send to an unwatched peer on a multihop route can be held for up to one sweep (10 s).
 ///
 /// `true` does not prove delivery: a background dial or write can still fail,
 /// and is only logged. A warm connection whose selected path reads relay gives
