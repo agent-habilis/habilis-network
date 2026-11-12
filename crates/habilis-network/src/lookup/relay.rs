@@ -227,17 +227,18 @@ impl Homing {
             } else {
                 RELAY_LIVENESS_FAILS_TO_EVICT
             };
+            // The first walk of a rung that never connected does not probe it again: the probe
+            // would wait out its time. A later walk probes the whole ladder, because a net report
+            // under load can drop the preferred relay of a live rung, and the walk must be able
+            // to stay on it.
+            let mut skip_rung = !connected_at_start;
             loop {
                 if should_evict_rung(fails) {
                     fails = 0;
-                    // The rung that failed is not probed again: the probe would wait out its time.
-                    let others: Vec<RelayUrl> = ladder
-                        .iter()
-                        .filter(|other| **other != rung)
-                        .cloned()
-                        .collect();
-                    if let Some(next) = select_bootstrap_rung(&others, RELAY_RUNG_PROBE, None).await
-                    {
+                    let walk = rungs_to_walk(&ladder, &rung, skip_rung);
+                    skip_rung = false;
+                    let selected = select_bootstrap_rung(&walk, RELAY_RUNG_PROBE, None).await;
+                    if let Some(next) = selected.filter(|next| *next != rung) {
                         tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, "peer endpoint moves to the next relay rung");
                         // The relay actor of iroh shares the config of a relay.
                         let config = Arc::new(rung_config(&next));
@@ -260,6 +261,15 @@ impl Homing {
     }
 }
 
+/// The rungs that a walk probes: the whole ladder, or without `rung` when it never connected.
+fn rungs_to_walk(ladder: &[RelayUrl], rung: &RelayUrl, skip_rung: bool) -> Vec<RelayUrl> {
+    ladder
+        .iter()
+        .filter(|other| !skip_rung || *other != rung)
+        .cloned()
+        .collect()
+}
+
 /// Whether the last net report of the endpoint has a preferred relay, or none has run yet.
 #[cfg(not(target_arch = "wasm32"))]
 fn probes_answer(endpoint: &Endpoint) -> bool {
@@ -269,7 +279,8 @@ fn probes_answer(endpoint: &Endpoint) -> bool {
         .is_none_or(|report| report.preferred_relay.is_some())
 }
 
-/// A browser has no net report: the status of the home relay decides alone.
+/// A browser has no net report: the status of the home relay decides alone. A relay that dies keeps
+/// its connection in the status for minutes, so a browser peer stays on a dead rung for that long.
 #[cfg(target_arch = "wasm32")]
 fn probes_answer(_endpoint: &Endpoint) -> bool {
     true
@@ -857,10 +868,10 @@ mod tests {
     /// endpoint.**
     ///
     /// The relay in front of a real one forwards until the flag turns on. Then it cuts the open
-    /// connections, answers a plain request with 204 and refuses the relay upgrade with 403. This
-    /// test does not tell the two liveness signals apart: on a plain HTTP rung the net report also
-    /// drops its preferred relay, so the case where only the status of the home relay sees the
-    /// failure is not built here.
+    /// connections, still forwards a plain request, and refuses the relay upgrade with 403. The
+    /// probe of the net report gets a real answer. The net report still drops its preferred relay
+    /// in the end: the mutation that ignores the status of the home relay passes this test too,
+    /// about 20 s later (51 s against 31 s). So the test pins the behavior, not the signal.
     #[test]
     #[ignore = "60 s: waits for the endpoint to judge the rung dead and walk the ladder"]
     fn a_peer_endpoint_leaves_a_rung_that_refuses_the_relay_connection() {
@@ -905,7 +916,7 @@ mod tests {
     }
 
     /// A relay URL in front of `real`. While the flag is off, it forwards every connection. When
-    /// the flag turns on, it cuts the open connections, answers a plain request with 204 and
+    /// the flag turns on, it cuts the open connections, still forwards a plain request, and
     /// refuses the relay upgrade with 403.
     async fn spawn_switchable_relay(real: &RelayUrl) -> (RelayUrl, Arc<AtomicBool>) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, copy_bidirectional};
@@ -947,15 +958,17 @@ mod tests {
                     let upgrade = request[..request_len]
                         .windows(7)
                         .any(|window| window.eq_ignore_ascii_case(b"upgrade"));
-                    let status = if upgrade {
-                        "403 Forbidden"
-                    } else {
-                        "204 No Content"
+                    if upgrade {
+                        let reply = "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                        drop(stream.write_all(reply.as_bytes()).await);
+                        return;
+                    }
+                    // A plain request, like the probe of the net report, gets the real answer.
+                    let Ok(mut onward) = TcpStream::connect(&upstream).await else {
+                        return;
                     };
-                    let reply = format!(
-                        "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                    );
-                    drop(stream.write_all(reply.as_bytes()).await);
+                    drop(onward.write_all(&request[..request_len]).await);
+                    drop(copy_bidirectional(&mut stream, &mut onward).await);
                 });
             }
         });
@@ -963,6 +976,31 @@ mod tests {
             .parse()
             .expect("a literal http URL parses");
         (url, half_open)
+    }
+
+    /// **A walk after a false failure of a live rung can stay on it.**
+    ///
+    /// Under load the net report drops the preferred relay of a live rung for two intervals. The
+    /// walk that follows must probe that rung too: if it answers, the endpoint stays. A walk that
+    /// skips it makes every false failure a move, for good. Only the first walk of a rung that
+    /// never connected leaves it out, to save the wait of a probe that cannot answer.
+    #[test]
+    fn a_walk_after_a_false_failure_probes_the_current_rung_too() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let first = rung("first.example");
+        let second = rung("second.example");
+        let ladder = vec![first.clone(), second.clone()];
+
+        assert_eq!(
+            super::rungs_to_walk(&ladder, &first, false),
+            ladder,
+            "the walk of a rung that connected probes the whole ladder"
+        );
+        assert_eq!(
+            super::rungs_to_walk(&ladder, &first, true),
+            vec![second],
+            "the first walk of a rung that never connected leaves it out"
+        );
     }
 
     /// Wait until the home relay of the endpoint is `rung`.
