@@ -1301,7 +1301,7 @@ fn a_17_0_frame_is_refused() {
 
 /// The four slice-repair kinds, with their goldens. Each one is unicast and carries a signed `to`.
 mod slice_repair_kinds {
-    use super::{Message, MessageKind, key_of_seed};
+    use super::{Message, MessageError, MessageKind, key_of_seed};
     use crate::digest::{DigestEntry, DigestPage, DigestRoot};
     use crate::identity::Identity;
     use crate::{Channel, ContentHash};
@@ -1398,7 +1398,7 @@ mod slice_repair_kinds {
             );
             let refused = Message::parse(renamed.as_bytes());
             assert!(
-                matches!(refused, Err(crate::messages::MessageError::Source { .. })),
+                matches!(refused, Err(MessageError::Source { .. })),
                 "a {display} frame to a nickname is not refused as a source error: {refused:?}"
             );
         }
