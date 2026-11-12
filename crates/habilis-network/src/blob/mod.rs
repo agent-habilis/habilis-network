@@ -39,7 +39,7 @@ mod ticket;
 pub use blob_digest::BlobDigest;
 pub(crate) use consts::{BAD_SECRET, BLOB_ALPN, DONE, RELAY_REFUSED_CODE, UNKNOWN_BLOB};
 pub use consts::{HASH_LEN, SECRET_LEN};
-pub use consume::{fetch, fetch_with_endpoint};
+pub use consume::{fetch, fetch_hedged, fetch_with_endpoint};
 pub use content_id::ContentId;
 pub use error::BlobError;
 pub use offload_request::{OffloadRequest, offload};
@@ -49,7 +49,7 @@ pub use ticket::BlobTicket;
 
 #[cfg(test)]
 mod tests {
-    use super::{BlobError, BlobServer, ContentId, fetch};
+    use super::{BlobError, BlobServer, BlobTicket, ContentId, fetch};
     use crate::protocol::meshes::LookupOpts;
     use crate::transport::PayloadPath;
     use rand::RngCore;
@@ -378,8 +378,7 @@ mod tests {
                     PayloadPath::DirectOnly,
                     "a relay lookup-only ticket keeps the direct payload path"
                 );
-                let decoded =
-                    super::BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
+                let decoded = BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
                 assert_eq!(
                     decoded.relay_transport,
                     PayloadPath::DirectOnly,
@@ -535,8 +534,7 @@ mod tests {
                 // Raw bytes, so no base64/UTF-8 detour: the payload cycles 0..=255,
                 // which a frame body would reject outright.
                 let wire = ticket.encode();
-                let decoded =
-                    super::BlobTicket::decode(&wire).expect("ticket round-trips as a string");
+                let decoded = BlobTicket::decode(&wire).expect("ticket round-trips as a string");
 
                 let mut out = Vec::new();
                 fetch(&decoded, &mut out, None).await.expect("fetch");
@@ -927,6 +925,7 @@ mod tests {
                         &mut out,
                         &ticket.secret,
                         &[Duration::from_secs(5); 3],
+                        None,
                         build,
                     ),
                 )
@@ -998,7 +997,14 @@ mod tests {
                 let mut out = Vec::new();
                 let fetched = time::timeout(
                     Duration::from_secs(30),
-                    super::consume::fetch_building(&ticket, &mut out, &ticket.secret, &caps, build),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &caps,
+                        None,
+                        build,
+                    ),
                 )
                 .await;
                 assert!(
@@ -1073,6 +1079,351 @@ mod tests {
                     "the caller endpoint stays open for the caller to close"
                 );
                 endpoint.close().await;
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// Builds loopback peer endpoints and keeps a clone of each, so that a test sees what a fetch
+    /// binds.
+    #[derive(Clone, Default)]
+    struct Bound(Arc<Mutex<Vec<iroh::Endpoint>>>);
+
+    impl Bound {
+        async fn build(&self) -> Result<iroh::Endpoint, lookup::EndpointError> {
+            let endpoint = lookup::build_peer_endpoint(&LookupOpts::loopback()).await?;
+            self.0.lock().expect("lock").push(endpoint.clone());
+            Ok(endpoint)
+        }
+
+        fn count(&self) -> usize {
+            self.0.lock().expect("lock").len()
+        }
+
+        /// Whether every endpoint built so far is closed within 6 s. A close that waits for a dial
+        /// with no reply takes about 3 s.
+        async fn all_closed(&self) -> bool {
+            for _ in 0..60 {
+                let open = self
+                    .0
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .filter(|endpoint| !endpoint.is_closed())
+                    .count();
+                if open == 0 {
+                    return true;
+                }
+                time::sleep(Duration::from_millis(100)).await;
+            }
+            false
+        }
+    }
+
+    /// A producer behind `lossy_proxy`, and a ticket that dials the proxy.
+    async fn ticket_behind_proxy(
+        content: &str,
+        bytes: &[u8],
+        drop_first_socket: bool,
+    ) -> (BlobServer, BlobTicket, PathBuf) {
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("start producer");
+        let src = temp_file(bytes);
+        let mut ticket = server
+            .register(&src, ContentId::new(content))
+            .await
+            .expect("register");
+        let upstream = ticket
+            .address
+            .ip_addrs()
+            .next()
+            .copied()
+            .expect("a loopback ticket carries one IP address");
+        let proxy = lossy_proxy(upstream, drop_first_socket, Duration::ZERO).await;
+        ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+        (server, ticket, src)
+    }
+
+    /// **A dial that gets no reply is hedged from a new endpoint at once, not after its cap.**
+    ///
+    /// The reply flight of the producer to one consumer socket is lost for 30 s or more, while a
+    /// new socket gets through at once. Here the first socket gets no reply, and every attempt may
+    /// wait 30 s. The fetch must start a second dial from a new endpoint after the hedge delay and
+    /// complete through it, and it must close both endpoints.
+    #[test]
+    fn a_stalled_first_dial_is_hedged_from_a_new_endpoint() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, ticket, src) = ticket_behind_proxy(
+                    "blob-test-hedged-dial",
+                    b"bytes behind a stalled flow",
+                    true,
+                )
+                .await;
+                let bound = Bound::default();
+                let build = || async { Ok::<_, anyhow::Error>(bound.build().await?) };
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(15),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(30); 3],
+                        Some(Duration::from_millis(300)),
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes through the hedge within 15 s, long before the 30 s cap: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a stalled flow",
+                    "the fetch returns the registered bytes"
+                );
+                assert_eq!(
+                    bound.count(),
+                    2,
+                    "the first attempt binds one endpoint and the hedge binds one"
+                );
+                assert!(
+                    bound.all_closed().await,
+                    "both endpoints are closed within 6 s"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A handshake that completes in time starts no hedge.**
+    ///
+    /// The hedge costs nothing in the good case: a second endpoint is bound only for a dial that
+    /// has no reply after the hedge delay.
+    #[test]
+    fn a_fast_handshake_starts_no_hedge() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, ticket, src) =
+                    ticket_behind_proxy("blob-test-no-hedge", b"bytes behind a good path", false)
+                        .await;
+                let bound = Bound::default();
+                let build = || async { Ok::<_, anyhow::Error>(bound.build().await?) };
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(15),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(30); 3],
+                        Some(Duration::from_secs(5)),
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes within 15 s: {fetched:?}"
+                );
+                assert_eq!(
+                    bound.count(),
+                    1,
+                    "a handshake that completes before the hedge delay binds no second endpoint"
+                );
+                assert!(
+                    bound.all_closed().await,
+                    "the endpoint is closed within 6 s"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A caller endpoint that stalls is hedged from a new endpoint, and stays open.**
+    ///
+    /// `fetch_hedged` dials first from the endpoint of the caller. When that dial has no reply
+    /// after the hedge delay, it binds one more endpoint with the builder of the caller and dials
+    /// from it. The fetch completes, the hedge endpoint is closed, and the caller endpoint is not.
+    #[test]
+    fn a_stalled_caller_endpoint_is_hedged_and_stays_open() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, ticket, src) = ticket_behind_proxy(
+                    "blob-test-hedged-caller",
+                    b"bytes behind a stalled caller",
+                    true,
+                )
+                .await;
+                let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                let bound = Bound::default();
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(15),
+                    super::consume::fetch_hedged_caps(
+                        &caller,
+                        || bound.build(),
+                        &ticket,
+                        &mut out,
+                        None,
+                        &[Duration::from_secs(30); 3],
+                        Some(Duration::from_millis(300)),
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes through the hedge within 15 s: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a stalled caller",
+                    "the fetch returns the registered bytes"
+                );
+                assert_eq!(bound.count(), 1, "the hedge binds one endpoint");
+                assert!(
+                    bound.all_closed().await,
+                    "the hedge endpoint is closed within 6 s"
+                );
+                assert!(
+                    !caller.is_closed(),
+                    "the caller endpoint stays open for the caller to close"
+                );
+                caller.close().await;
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A hedge that loses closes its endpoint.**
+    ///
+    /// Every datagram takes 600 ms in each direction, so the handshake needs more than the hedge
+    /// delay and the hedge starts. The first dial began earlier and wins. The endpoint of the hedge
+    /// has no connection to carry, so it must close, and no connection is left half open.
+    #[test]
+    fn a_hedge_that_loses_closes_its_endpoint() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes behind a slow flow");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-losing-hedge"))
+                    .await
+                    .expect("register");
+                let upstream = ticket
+                    .address
+                    .ip_addrs()
+                    .next()
+                    .copied()
+                    .expect("a loopback ticket carries one IP address");
+                let proxy = lossy_proxy(upstream, false, Duration::from_millis(600)).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let bound = Bound::default();
+                let build = || async { Ok::<_, anyhow::Error>(bound.build().await?) };
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(30),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(20); 3],
+                        Some(Duration::from_millis(300)),
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes within 30 s: {fetched:?}"
+                );
+                assert_eq!(
+                    bound.count(),
+                    2,
+                    "the handshake is slower than the hedge delay, so the hedge binds an endpoint"
+                );
+                assert!(
+                    bound.all_closed().await,
+                    "both endpoints are closed within 6 s, the loser too"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A hedged fetch that the caller drops closes both endpoints.**
+    ///
+    /// Both dials get no reply (a socket that nobody reads), and the caller gives up while they
+    /// wait. The endpoint of the first attempt and the endpoint of the hedge must both close.
+    #[test]
+    fn a_dropped_hedged_fetch_closes_both_endpoints() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, mut ticket, src) =
+                    ticket_behind_proxy("blob-test-dropped-hedge", b"bytes never fetched", false)
+                        .await;
+                // A socket that nobody reads: no reply ever comes.
+                let silent = UdpSocket::bind("127.0.0.1:0").await.expect("bind silent");
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id)
+                    .with_ip_addr(silent.local_addr().expect("silent address"));
+                let bound = Bound::default();
+                let build = || async { Ok::<_, anyhow::Error>(bound.build().await?) };
+                let mut out = Vec::new();
+                let cancelled = time::timeout(
+                    Duration::from_millis(2500),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(30); 3],
+                        Some(Duration::from_millis(300)),
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    cancelled.is_err(),
+                    "the fetch still waits when the caller drops it"
+                );
+                assert_eq!(
+                    bound.count(),
+                    2,
+                    "the first attempt and the hedge each bound an endpoint"
+                );
+                assert!(
+                    bound.all_closed().await,
+                    "both endpoints are closed within 6 s of the drop"
+                );
                 fs::remove_file(&src).ok();
                 server.shutdown().await;
             },

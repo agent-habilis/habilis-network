@@ -31,6 +31,12 @@ use tokio::time;
 /// propagates through the lookups (mirrors the application's bridge ticket).
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(90);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
+/// How long a dial waits alone for the handshake before a second dial starts from a new endpoint.
+/// A handshake takes milliseconds, so a dial with no reply after 2 s is already abnormal. On a LAN
+/// the reply flight of the producer to one consumer socket is sometimes dropped for 30 s or more,
+/// while a new socket gets through at once. The second dial costs nothing in the good case: it is
+/// bound only after this delay.
+pub(super) const HEDGE_DELAY: Duration = Duration::from_secs(2);
 /// How long each dial attempt waits for the handshake. A handshake takes milliseconds. On a LAN
 /// with two interfaces, the reply flight of the producer to one endpoint is sometimes lost for
 /// good, and iroh waits 30 s before it gives up on the attempt. A slow link needs more than 5 s,
@@ -137,6 +143,83 @@ where
     fetch_with_endpoint_caps(endpoint, ticket, out, password, &DIAL_CAPS).await
 }
 
+/// [`fetch_with_endpoint`] that does not wait out a dial the producer cannot answer. A dial
+/// with no handshake after [`HEDGE_DELAY`] is hedged: `build` binds one more endpoint, the fetch
+/// dials from it too, and the first dial to connect wins. The loser is cancelled, and the
+/// endpoint that `build` bound is closed. A handshake that completes in time binds nothing.
+///
+/// The endpoint of the caller is only dialed from and never closed. If every attempt stalls, this
+/// returns [`BlobError::HandshakeStalled`], as [`fetch_with_endpoint`] does, and the caller builds
+/// a new endpoint.
+///
+/// # Errors
+/// The same as [`fetch_with_endpoint`]. An error of `build` is an error of the fetch.
+///
+/// # Examples
+///
+/// It fetches a blob over the endpoint of the caller, and binds a second one for a stalled dial.
+/// The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::Endpoint;
+/// use habilis_network::net::build_peer_endpoint;
+/// use habilis_network::ops::blob::{BlobTicket, fetch_hedged};
+/// use tokio::io::AsyncWrite;
+///
+/// # async fn demo<Writer: AsyncWrite + Unpin>(endpoint: &Endpoint, ticket: &BlobTicket, out: &mut Writer) {
+/// let build = || build_peer_endpoint(&ticket.lookups);
+/// let _ = fetch_hedged(endpoint, build, ticket, out, None).await;
+/// # }
+/// ```
+pub async fn fetch_hedged<Writer, Build, Built, BuildError>(
+    endpoint: &Endpoint,
+    build: Build,
+    ticket: &BlobTicket,
+    out: &mut Writer,
+    password: Option<Password>,
+) -> Result<(), BlobError>
+where
+    Writer: AsyncWrite + Unpin,
+    Build: Fn() -> Built,
+    Built: Future<Output = Result<Endpoint, BuildError>>,
+    BuildError: Error + Send + Sync + 'static,
+{
+    fetch_hedged_caps(
+        endpoint,
+        build,
+        ticket,
+        out,
+        password,
+        &DIAL_CAPS,
+        Some(HEDGE_DELAY),
+    )
+    .await
+}
+
+/// [`fetch_hedged`] with the caps and the hedge delay as parameters, so that a test does not wait
+/// for the real ones.
+pub(super) async fn fetch_hedged_caps<Writer, Build, Built, BuildError>(
+    endpoint: &Endpoint,
+    build: Build,
+    ticket: &BlobTicket,
+    out: &mut Writer,
+    password: Option<Password>,
+    caps: &Caps,
+    hedge: Option<Duration>,
+) -> Result<(), BlobError>
+where
+    Writer: AsyncWrite + Unpin,
+    Build: Fn() -> Built,
+    Built: Future<Output = Result<Endpoint, BuildError>>,
+    BuildError: Error + Send + Sync + 'static,
+{
+    let token = auth_token(ticket, password.as_ref())?;
+    let build = || async { Ok(build().await?) };
+    fetch_over(endpoint, ticket, &token, out, caps, hedge, &build)
+        .await
+        .map_err(blob_error)
+}
+
 /// [`fetch_with_endpoint`] with the caps of the dial attempts as a parameter, so that a test does
 /// not wait for the real ones.
 pub(super) async fn fetch_with_endpoint_caps<Writer>(
@@ -150,9 +233,22 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let token = auth_token(ticket, password.as_ref())?;
-    fetch_over(endpoint, ticket, &token, out, caps)
-        .await
-        .map_err(blob_error)
+    fetch_over(
+        endpoint,
+        ticket,
+        &token,
+        out,
+        caps,
+        None,
+        &no_endpoint_to_build,
+    )
+    .await
+    .map_err(blob_error)
+}
+
+/// The builder of a fetch that never hedges.
+async fn no_endpoint_to_build() -> Result<Endpoint> {
+    bail!("this fetch has no builder for a second endpoint")
 }
 
 /// A stalled handshake is a cause the caller acts on, so it keeps its own variant.
@@ -173,7 +269,7 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let build = || async { Ok(build_peer_endpoint(&ticket.lookups).await?) };
-    fetch_building(ticket, out, token, &DIAL_CAPS, build).await
+    fetch_building(ticket, out, token, &DIAL_CAPS, Some(HEDGE_DELAY), build).await
 }
 
 /// An endpoint that closes itself when the fetch future is dropped before it closes the
@@ -219,6 +315,7 @@ pub(super) async fn fetch_building<Writer, Build, Built>(
     out: &mut Writer,
     token: &TicketSecret,
     caps: &Caps,
+    hedge: Option<Duration>,
     build: Build,
 ) -> Result<()>
 where
@@ -228,11 +325,19 @@ where
 {
     let started = Instant::now();
     let mut attempt = 0;
-    let (endpoint, connection) = loop {
+    let (endpoint, dialed) = loop {
         let endpoint = CloseOnDrop::new(build().await?);
         add_peer_addr(&address_book(&endpoint.endpoint), ticket.address.clone());
-        match dial_once(&endpoint.endpoint, ticket, cap_of(caps, attempt)).await {
-            Ok(connection) => break (endpoint, connection),
+        match dial_once(
+            &endpoint.endpoint,
+            ticket,
+            cap_of(caps, attempt),
+            hedge,
+            &build,
+        )
+        .await
+        {
+            Ok(dialed) => break (endpoint, dialed),
             Err(error) => {
                 endpoint.close().await;
                 if started.elapsed() >= DISCOVERY_DEADLINE {
@@ -249,23 +354,30 @@ where
             }
         }
     };
-    let result = transfer(&connection, ticket, token, out).await;
+    let result = transfer(&dialed.connection, ticket, token, out).await;
+    dialed.close().await;
     endpoint.close().await;
     result
 }
 
-async fn fetch_over<Writer>(
+async fn fetch_over<Writer, Build, Built>(
     endpoint: &Endpoint,
     ticket: &BlobTicket,
     token: &TicketSecret,
     out: &mut Writer,
     caps: &Caps,
+    hedge: Option<Duration>,
+    build: &Build,
 ) -> Result<()>
 where
     Writer: AsyncWrite + Unpin,
+    Build: Fn() -> Built,
+    Built: Future<Output = Result<Endpoint>>,
 {
-    let connection = dial(endpoint, ticket, caps).await?;
-    transfer(&connection, ticket, token, out).await
+    let dialed = dial(endpoint, ticket, caps, hedge, build).await?;
+    let result = transfer(&dialed.connection, ticket, token, out).await;
+    dialed.close().await;
+    result
 }
 
 async fn transfer<Writer>(
@@ -353,13 +465,23 @@ fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<Ticket
 /// endpoint that stalled can stall again, and the caller owns the endpoint: after one attempt of
 /// each cap, all stalled, this returns the stall and the caller decides. A stall does not check the
 /// deadline: after it, at most 2 more attempts run, 20 s each.
-async fn dial(endpoint: &Endpoint, ticket: &BlobTicket, caps: &Caps) -> Result<Connection> {
+async fn dial<Build, Built>(
+    endpoint: &Endpoint,
+    ticket: &BlobTicket,
+    caps: &Caps,
+    hedge: Option<Duration>,
+    build: &Build,
+) -> Result<Dialed>
+where
+    Build: Fn() -> Built,
+    Built: Future<Output = Result<Endpoint>>,
+{
     let started = Instant::now();
     let mut attempt = 0;
     let mut stalls = 0;
     loop {
-        match dial_once(endpoint, ticket, cap_of(caps, attempt)).await {
-            Ok(connection) => return Ok(connection),
+        match dial_once(endpoint, ticket, cap_of(caps, attempt), hedge, build).await {
+            Ok(dialed) => return Ok(dialed),
             Err(error) if error.is::<Stalled>() => {
                 stalls += 1;
                 if stalls >= caps.len() {
@@ -379,12 +501,88 @@ async fn dial(endpoint: &Endpoint, ticket: &BlobTicket, caps: &Caps) -> Result<C
     }
 }
 
-/// One dial attempt, cut off after `cap`.
-async fn dial_once(endpoint: &Endpoint, ticket: &BlobTicket, cap: Duration) -> Result<Connection> {
-    let attempt = endpoint.connect(ticket.address.clone(), BLOB_ALPN);
-    match time::timeout(cap, attempt).await {
-        Ok(connected) => Ok(connected?),
-        Err(_) => Err(Stalled(cap).into()),
+/// A connection, and the endpoint of the hedge when the hedge won. The connection lives on that
+/// endpoint, so it stays open until the transfer ends.
+struct Dialed {
+    connection: Connection,
+    hedge: Option<CloseOnDrop>,
+}
+
+impl Dialed {
+    /// Close the endpoint of the hedge, if the hedge won.
+    async fn close(self) {
+        if let Some(hedge) = self.hedge {
+            hedge.close().await;
+        }
+    }
+}
+
+async fn connect(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
+    Ok(endpoint.connect(ticket.address.clone(), BLOB_ALPN).await?)
+}
+
+/// One dial attempt, cut off after `cap`. With `hedge`, a dial with no handshake after that delay
+/// binds a new endpoint with `build` and dials from it too. The first dial to connect wins, and
+/// the other is dropped: a dropped `CloseOnDrop` closes its endpoint.
+async fn dial_once<Build, Built>(
+    endpoint: &Endpoint,
+    ticket: &BlobTicket,
+    cap: Duration,
+    hedge: Option<Duration>,
+    build: &Build,
+) -> Result<Dialed>
+where
+    Build: Fn() -> Built,
+    Built: Future<Output = Result<Endpoint>>,
+{
+    let deadline = time::sleep(cap);
+    tokio::pin!(deadline);
+    let first = connect(endpoint, ticket);
+    tokio::pin!(first);
+    let Some(delay) = hedge.filter(|delay| *delay < cap) else {
+        return tokio::select! {
+            biased;
+            connected = &mut first => Ok(Dialed { connection: connected?, hedge: None }),
+            () = &mut deadline => Err(Stalled(cap).into()),
+        };
+    };
+    tokio::select! {
+        biased;
+        connected = &mut first => return Ok(Dialed { connection: connected?, hedge: None }),
+        () = &mut deadline => return Err(Stalled(cap).into()),
+        () = time::sleep(delay) => {}
+    }
+    tracing::debug!(target: "habilis_network::blob", after = ?delay, "hedge started: no handshake yet, dialing from a new endpoint");
+    let second = tokio::select! {
+        biased;
+        connected = &mut first => return Ok(Dialed { connection: connected?, hedge: None }),
+        bound = build() => CloseOnDrop::new(bound?),
+    };
+    add_peer_addr(&address_book(&second.endpoint), ticket.address.clone());
+    // The dial borrows the endpoint of the hedge, so it ends before the endpoint moves.
+    let winner = {
+        let second_dial = connect(&second.endpoint, ticket);
+        tokio::pin!(second_dial);
+        tokio::select! {
+            biased;
+            connected = &mut first => Some(("first", connected)),
+            connected = &mut second_dial => Some(("hedge", connected)),
+            () = &mut deadline => None,
+        }
+    };
+    match winner {
+        Some(("hedge", connected)) => {
+            tracing::debug!(target: "habilis_network::blob", "the hedge connected first");
+            Ok(Dialed {
+                connection: connected?,
+                hedge: Some(second),
+            })
+        }
+        Some((_, connected)) => Ok(Dialed {
+            connection: connected?,
+            hedge: None,
+        }),
+        None => Err(Stalled(cap).into()),
     }
 }
 

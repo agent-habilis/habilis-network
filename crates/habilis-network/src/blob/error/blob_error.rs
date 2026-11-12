@@ -26,8 +26,8 @@ pub enum BlobError {
     /// The ticket has no password, and one was given.
     PasswordNotNeeded,
     /// The producer never completed the handshake, on each of the attempts, each longer than the
-    /// last. A fetch over an endpoint of the caller (`fetch_with_endpoint`) returns this. A retry
-    /// from the same endpoint can stall again: close it and build a new one.
+    /// last. A fetch over an endpoint of the caller (`fetch_with_endpoint`, `fetch_hedged`) returns
+    /// this. A retry from the same endpoint can stall again: close it and build a new one.
     HandshakeStalled,
     /// A cause no caller acts on. It keeps its text and its chain.
     Internal(Box<dyn Error + Send + Sync>),
