@@ -341,6 +341,8 @@ pub(crate) async fn on_page(
                 .register(endpoint, channel, key, now, cap)
             {
                 accepted.push(key);
+            } else {
+                tracing::debug!(target: "habilis_network::gossip", "a pull over the holder's open cap is not sent");
             }
         }
         if accepted.is_empty() {
@@ -526,14 +528,17 @@ mod tests {
         round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
         round.page_read(Channel::State, now + DIGEST_SETTLE);
         let quarter = DIGEST_SERVE_WINDOW / 4;
-        let soon = round.advance(
-            now + DIGEST_SETTLE + quarter - Duration::from_millis(10),
-            |_| true,
-            |_, _| false,
-        );
+        let just_before = quarter
+            .checked_sub(Duration::from_millis(10))
+            .expect("a quarter window is longer than 10 ms");
+        let soon = round.advance(now + DIGEST_SETTLE + just_before, |_| true, |_, _| false);
         assert!(soon.is_empty(), "the next page waits a quarter window");
         let due = round.advance(now + DIGEST_SETTLE + quarter, |_| true, |_, _| false);
-        assert_eq!(due.len(), 1, "the next page is asked after a quarter window");
+        assert_eq!(
+            due.len(),
+            1,
+            "the next page is asked after a quarter window"
+        );
         assert_eq!(due[0].index, 1, "and it is page 1");
     }
 
@@ -544,7 +549,10 @@ mod tests {
         let mut round = DigestRound::default();
         note(&mut round, holder(1), 81, Channel::State, now, 1);
         let due = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| true);
-        assert!(due.is_empty(), "a store that agrees at the due time asks for nothing");
+        assert!(
+            due.is_empty(),
+            "a store that agrees at the due time asks for nothing"
+        );
     }
 
     /// A holder that leaves the roster loses its difference and its reading, so nothing is asked of it.
@@ -555,10 +563,21 @@ mod tests {
         note(&mut round, holder(1), 81, Channel::State, now, 1);
         note(&mut round, holder(2), 82, Channel::Meta, now, 1);
         round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
-        assert_eq!(round.reading_count(), 2, "both holders are read, one per channel");
+        assert_eq!(
+            round.reading_count(),
+            2,
+            "both holders are read, one per channel"
+        );
         let asked = round.advance(now + DIGEST_SETTLE, |key| *key != holder(1), |_, _| false);
-        assert!(asked.iter().all(|request| request.holder != holder(1)), "a holder that left is not asked");
-        assert_eq!(round.reading_count(), 1, "the reading of the holder that left is dropped");
+        assert!(
+            asked.iter().all(|request| request.holder != holder(1)),
+            "a holder that left is not asked"
+        );
+        assert_eq!(
+            round.reading_count(),
+            1,
+            "the reading of the holder that left is dropped"
+        );
     }
 
     /// While one holder is read on a channel, a second holder that is due does not replace its reading.
@@ -570,9 +589,18 @@ mod tests {
         round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
         note(&mut round, holder(2), 82, Channel::State, now, 3);
         let during = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
-        assert!(during.is_empty(), "the second holder waits while the first is read");
         assert!(
-            round.accepts(holder(1), testing::endpoint_id(81), Channel::State, 0, now + DIGEST_SETTLE),
+            during.is_empty(),
+            "the second holder waits while the first is read"
+        );
+        assert!(
+            round.accepts(
+                holder(1),
+                testing::endpoint_id(81),
+                Channel::State,
+                0,
+                now + DIGEST_SETTLE
+            ),
             "the reading of the first holder is kept"
         );
     }

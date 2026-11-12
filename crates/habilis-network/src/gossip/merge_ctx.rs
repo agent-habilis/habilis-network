@@ -452,7 +452,7 @@ pub async fn broadcast_state_merge(
         .map_err(transport::SendError::State)?;
     let signed = Message::new_channel_event(mesh, author, draft.body().clone(), channel)
         .sign(&state.identity);
-    // The token that prepare_local spent is not refunded if this serialize fails. The page-free probe keeps
+    // The token that prepare_local spent is not refunded if this serialize fails. The frame_overhead probe keeps
     // a draft at the cap within one frame, so the failure cannot happen for a draft the store took.
     let bytes = signed
         .serialize()

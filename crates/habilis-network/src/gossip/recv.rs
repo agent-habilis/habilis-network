@@ -611,6 +611,7 @@ pub(crate) async fn ingest_from(
         restore_lost_proof(&verified, state, app, context).await;
         return;
     }
+    #[cfg(feature = "iroh-test-utils")]
     if state.drop_slices_from == Some(verified.key())
         && matches!(verified.kind, MessageKind::State | MessageKind::Meta)
     {
@@ -811,11 +812,11 @@ fn page_request_answer(
     state: &mut EventLoopState,
     now: Instant,
 ) -> Option<Verified> {
+    let page = state.docs.page(channel, index)?;
     if !state.serve_budget.admit(asker.endpoint, channel, now) {
         tracing::debug!(target: "habilis_network::gossip", "a page request over the serve budget gets no answer");
         return None;
     }
-    let page = state.docs.page(channel, index)?;
     let kind = MessageKind::SlicePage {
         to: asker.key,
         channel,
@@ -3587,6 +3588,48 @@ mod first_contact_tests {
         });
     }
 
+    /// A page request for a page that this node does not hold gets no answer, so it spends no answer of the budget.
+    #[test]
+    fn a_page_request_for_a_missing_page_spends_no_answer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let request: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePageRequest {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    index: 99,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed page request serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(request, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers, DIGEST_SERVES_PER_WINDOW,
+                "a request for a missing page spends no answer of the budget"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// A pull addressed to another key is not this node's to answer, so it spends no answer of the budget.
     #[test]
     fn a_pull_to_another_key_leaves_the_budget_full() {
@@ -3681,7 +3724,7 @@ mod first_contact_tests {
             let mut state = fresh_state();
             let mut app = Inert;
             let asker = Identity::generate();
-            let pull: Bytes = Message::new_frame(
+            let request: Bytes = Message::new_frame(
                 &node.mesh,
                 &nick("alice"),
                 MessageKind::SlicePageRequest {
@@ -3693,10 +3736,10 @@ mod first_contact_tests {
             )
             .sign(&asker)
             .serialize()
-            .expect("a signed pull serializes")
+            .expect("a signed page request serializes")
             .into_bytes();
             state.unicast_arrival = Some(endpoint_id(81));
-            ingest_from(pull, &mut state, &mut app, &context).await;
+            ingest_from(request, &mut state, &mut app, &context).await;
             state.unicast_arrival = None;
             let now = clock::Instant::now();
             let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
@@ -6185,7 +6228,8 @@ mod first_contact_tests {
             let mut app = Inert;
             let alice = Identity::generate();
             state.peers.insert(alice.author_key());
-            let elsewhere = DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
             let root: Bytes = Message::new_frame(
                 &node.mesh,
                 &nick("alice"),
@@ -6224,7 +6268,8 @@ mod first_contact_tests {
             state.peers.insert(alice.author_key());
             state.peers.insert(carol.author_key());
             let now = clock::Instant::now();
-            let elsewhere = DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
             state.digest_round.note_root(
                 alice.author_key(),
                 endpoint_id(81),
@@ -6235,7 +6280,11 @@ mod first_contact_tests {
             );
             state.digest_round.advance(now, |_| true, |_, _| false);
             let page = DigestPage::build(
-                &[DigestEntry::new(carol.author_key(), 1, ContentHash::of(b"row"))],
+                &[DigestEntry::new(
+                    carol.author_key(),
+                    1,
+                    ContentHash::of(b"row"),
+                )],
                 1,
                 0,
                 1,
@@ -6260,9 +6309,12 @@ mod first_contact_tests {
             state.unicast_arrival = None;
             ingest_from(frame, &mut state, &mut app, &context).await;
             assert!(
-                !state
-                    .outstanding_pulls
-                    .take(endpoint_id(81), Channel::State, carol.author_key(), now),
+                !state.outstanding_pulls.take(
+                    endpoint_id(81),
+                    Channel::State,
+                    carol.author_key(),
+                    now
+                ),
                 "a page that arrived by broadcast registers no pull"
             );
             node.endpoint.close().await;

@@ -28,8 +28,9 @@ use tokio::time::{self, Instant};
 /// The keys of Alice's log. One slice carries the whole log, so it must fit one frame.
 const WRITES: usize = 80;
 
-/// The bound of the repair: the backfill tick, the settle delay with its jitter, and a margin of 5 s.
-const REPAIR_BOUND: Duration = Duration::from_millis(21_500);
+/// The bound of the repair: the backfill tick (10 s), the settle delay (1 s) with its jitter (0.5 s), and a margin
+/// of 5 s. The sum is 16.5 s.
+const REPAIR_BOUND: Duration = Duration::from_millis(16_500);
 
 enum Request {
     Write(serde_json::Value, oneshot::Sender<()>),

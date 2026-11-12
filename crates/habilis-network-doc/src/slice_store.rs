@@ -62,6 +62,10 @@ const PAGE_OVERHEAD_UNPROBED: usize = 406;
 ///
 /// A page of this session fits one frame with the rows that its overhead leaves room for.
 ///
+/// The probe signs a one-row page frame and a two-row page frame. A row costs their difference, so the overhead
+/// is the one-row frame less one row. If a frame does not serialize, the result is `usize::MAX`, and the probe
+/// logs an error.
+///
 /// ```
 /// use habilis_network_doc::page_frame_overhead;
 /// use habilis_network_protocol::{MeshId, Nickname};
@@ -75,6 +79,9 @@ const PAGE_OVERHEAD_UNPROBED: usize = 406;
 pub fn page_frame_overhead(mesh: &MeshId, nickname: &Nickname) -> usize {
     let one = page_frame_len(mesh, nickname, 1);
     let two = page_frame_len(mesh, nickname, 2);
+    if one == usize::MAX {
+        tracing::error!(target: "habilis_network::gossip", "the page frame overhead probe did not serialize its frame");
+    }
     one.saturating_sub(two.saturating_sub(one))
 }
 
@@ -109,7 +116,7 @@ fn page_frame_len(mesh: &MeshId, nickname: &Nickname, rows: usize) -> usize {
         .map_or(usize::MAX, |frame| frame.into_bytes().len())
 }
 
-/// The frame overhead of the worst case: a State event with the longest mesh id (512 bytes) and the longest
+/// The frame overhead of the worst case: a State event with the longest mesh id (511 bytes) and the longest
 /// nickname (32 emoji). A test pins it against the probe. Pass it to [`SliceStore::new`] only where no probe
 /// of the session is possible.
 const WORST_FRAME_OVERHEAD: usize = 979;
@@ -153,12 +160,14 @@ pub fn frame_overhead(channel: Channel, mesh: &MeshId, nickname: &Nickname) -> u
     let Ok(body) = MessageBody::try_new("") else {
         return usize::MAX;
     };
-    Message::new_channel_event(mesh, nickname, body, channel)
+    let Ok(frame) = Message::new_channel_event(mesh, nickname, body, channel)
         .sign(&Identity::generate())
         .serialize()
-        .map_or(usize::MAX, |frame| {
-            frame.into_bytes().len() - EMPTY_BODY_ESCAPED
-        })
+    else {
+        tracing::error!(target: "habilis_network::gossip", "the frame overhead probe did not serialize its frame");
+        return usize::MAX;
+    };
+    frame.into_bytes().len() - EMPTY_BODY_ESCAPED
 }
 
 /// The caps that bound a [`SliceStore`].
@@ -2137,9 +2146,9 @@ mod tests {
             let signed =
                 Message::new_frame(&mesh, &nickname, kind, body).sign(&Identity::generate());
             let frame = signed.serialize().expect("a worst-shape page serializes");
-            let state = frame.into_bytes().len();
+            let frame_len = frame.into_bytes().len();
             assert_eq!(
-                state,
+                frame_len,
                 overhead + rows * ROW_WITH_COMMA,
                 "a {rows}-row page of the worst shape is the probe plus its rows, exactly"
             );
