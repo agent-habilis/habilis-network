@@ -175,9 +175,9 @@ impl DigestRound {
         })
     }
 
-    /// Notes that the page of `channel` that was asked for has been read. The next page may be asked for after
-    /// [`DIGEST_SERVE_WINDOW`], so the holder's serve budget refills between pages. After the last page the
-    /// reading ends.
+    /// Notes that the page of `channel` that was asked for has been read. The next page may be asked for after a
+    /// quarter of [`DIGEST_SERVE_WINDOW`]: a page costs the holder two answers, so four pages fill one window's
+    /// budget. After the last page the reading ends.
     pub(crate) fn page_read(&mut self, channel: Channel, now: Instant) {
         let Some(reading) = self.reading.get_mut(&channel) else {
             return;
@@ -189,7 +189,7 @@ impl DigestRound {
         }
         reading.index = next;
         reading.asked = None;
-        reading.next_at = now + DIGEST_SERVE_WINDOW;
+        reading.next_at = now + DIGEST_SERVE_WINDOW / 4;
     }
 
     /// The number of channels that a holder is read on, for the tests.
@@ -364,6 +364,7 @@ mod tests {
     use habilis_network_protocol::{AuthorKey, Channel, ContentHash};
     use habilis_network_util::clock::Instant;
     use habilis_network_util::tuning::{DIGEST_PULL_TTL, DIGEST_SERVE_WINDOW, DIGEST_SETTLE};
+    use std::time::Duration;
 
     fn entry(seed: u8) -> DigestEntry {
         DigestEntry::new(AuthorKey::from([seed; 32]), 1, ContentHash::of(&[seed]))
@@ -516,26 +517,23 @@ mod tests {
         );
     }
 
-    /// After a page, the next one waits one serve window, so the holder's serve budget refills between pages.
+    /// After a page, the next one waits a quarter window: four pages of two answers each fill one window's budget.
     #[test]
-    fn the_next_page_is_paced_to_the_serve_window() {
+    fn the_next_page_is_paced_to_a_quarter_window() {
         let now = Instant::now();
         let mut round = DigestRound::default();
         note(&mut round, holder(1), 81, Channel::State, now, 6);
         round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
         round.page_read(Channel::State, now + DIGEST_SETTLE);
+        let quarter = DIGEST_SERVE_WINDOW / 4;
         let soon = round.advance(
-            now + DIGEST_SETTLE + DIGEST_SERVE_WINDOW / 2,
+            now + DIGEST_SETTLE + quarter - Duration::from_millis(10),
             |_| true,
             |_, _| false,
         );
-        assert!(soon.is_empty(), "the next page waits");
-        let due = round.advance(
-            now + DIGEST_SETTLE + DIGEST_SERVE_WINDOW,
-            |_| true,
-            |_, _| false,
-        );
-        assert_eq!(due.len(), 1, "the next page is asked after the window");
+        assert!(soon.is_empty(), "the next page waits a quarter window");
+        let due = round.advance(now + DIGEST_SETTLE + quarter, |_| true, |_, _| false);
+        assert_eq!(due.len(), 1, "the next page is asked after a quarter window");
         assert_eq!(due[0].index, 1, "and it is page 1");
     }
 
