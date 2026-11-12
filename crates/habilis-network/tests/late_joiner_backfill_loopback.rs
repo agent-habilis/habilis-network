@@ -36,6 +36,8 @@ const BUDGET: Duration = Duration::from_secs(15);
 enum Request {
     Write(serde_json::Value, oneshot::Sender<()>),
     Read(oneshot::Sender<serde_json::Value>),
+    WriteMeta(serde_json::Value, oneshot::Sender<()>),
+    ReadMeta(oneshot::Sender<serde_json::Value>),
 }
 
 /// Presence alone forms the mesh; sessions write and read the state document.
@@ -82,6 +84,20 @@ impl NodeDriver for Store {
             }
             Request::Read(response) => {
                 let _ = response.send(state.view(Channel::State));
+                false
+            }
+            Request::WriteMeta(merge, done) => {
+                broadcast_state_merge(
+                    state,
+                    StateMergeParams::new(context.into(), Channel::Meta, merge).surface(false),
+                )
+                .await
+                .expect("a small merge is accepted");
+                let _ = done.send(());
+                true
+            }
+            Request::ReadMeta(response) => {
+                let _ = response.send(state.view(Channel::Meta));
                 false
             }
         }
@@ -179,6 +195,42 @@ async fn read(node: &Node<Store>) -> serde_json::Value {
     rx.await.expect("the loop answers")
 }
 
+/// The whole meta log is one merge too, so it is one meta slice of the writer.
+async fn write_meta_log(node: &Node<Store>, writes: usize) {
+    let merge: serde_json::Map<String, serde_json::Value> = (0..writes)
+        .map(|index| (format!("m{index}"), serde_json::json!(index)))
+        .collect();
+    let (done_tx, done_rx) = oneshot::channel();
+    node.send(Request::WriteMeta(
+        serde_json::Value::Object(merge),
+        done_tx,
+    ))
+    .await
+    .expect("the meta write reaches the loop");
+    done_rx.await.expect("the meta write is applied");
+}
+
+async fn read_meta(node: &Node<Store>) -> serde_json::Value {
+    let (tx, rx) = oneshot::channel();
+    node.send(Request::ReadMeta(tx))
+        .await
+        .expect("the meta read reaches the loop");
+    rx.await.expect("the loop answers")
+}
+
+/// The meta log keys in every author's slice of the meta document.
+fn meta_key_count(document: &serde_json::Value) -> usize {
+    let mut count = 0;
+    if let Some(authors) = document.as_object() {
+        for slice in authors.values() {
+            if let Some(fields) = slice.as_object() {
+                count += fields.keys().filter(|key| key.starts_with('m')).count();
+            }
+        }
+    }
+    count
+}
+
 /// The log keys in every author's slice of the state document.
 fn key_count(document: &serde_json::Value) -> usize {
     let mut count = 0;
@@ -192,13 +244,15 @@ fn key_count(document: &serde_json::Value) -> usize {
     count
 }
 
-/// How many of the log's keys `node` holds once it has the whole slice, or when [`BUDGET`] runs out.
-async fn held_after_backfill(node: &Node<Store>) -> usize {
+/// How many of the log keys of each document `node` holds, state first, once it has both whole slices, or when
+/// [`BUDGET`] runs out.
+async fn held_after_backfill(node: &Node<Store>) -> (usize, usize) {
     let started = Instant::now();
     loop {
         let held = key_count(&read(node).await);
-        if held >= WRITES || started.elapsed() > BUDGET {
-            return held;
+        let held_meta = meta_key_count(&read_meta(node).await);
+        if (held >= WRITES && held_meta >= WRITES) || started.elapsed() > BUDGET {
+            return (held, held_meta);
         }
         time::sleep(Duration::from_millis(100)).await;
     }
@@ -217,6 +271,7 @@ fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
 
         let (alice, _) = spawn(&topic, "alice").await;
         write_log(&alice, WRITES).await;
+        write_meta_log(&alice, WRITES).await;
         time::sleep(GOSSIP_CACHE_RETENTION + Duration::from_secs(1)).await;
         let (early, early_saw) = spawn(&topic, "early").await;
         assert!(
@@ -236,10 +291,11 @@ fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
             );
         }
 
-        let held = held_after_backfill(&late).await;
+        let (held, held_meta) = held_after_backfill(&late).await;
         assert_eq!(
-            held, WRITES,
-            "late holds {held} of alice's {WRITES} keys {BUDGET:?} after meeting the pair"
+            (held, held_meta),
+            (WRITES, WRITES),
+            "late holds {held} state keys and {held_meta} meta keys of alice's {WRITES} of each {BUDGET:?} after meeting the pair"
         );
 
         alice.leave().await.expect("alice leaves");
