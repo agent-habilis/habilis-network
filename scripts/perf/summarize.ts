@@ -55,7 +55,7 @@
 // - dup_share: the bytes of the frames that the dedup dropped as repeats, over all frames of the
 //   kinds that reached it. env_in / env_out: 1 - body / wire, the share of the envelope.
 // - bin_fresh / bin_dup / bin_cdup / bout: `kind:bytes` sums, by kind of frame (app, presence, peerinfo,
-//   state, meta, linkstate, pingpong, shard, other), largest first.
+//   state, meta, linkstate, pingpong, shard, repair, other), largest first.
 //   tags_in / tags_out: the same for the tags of the app frames.
 // - dup_by_path: the repeats of bin_dup as `arrival.kind:bytes`. The arrival is gossip or unicast: the plane. The overlay keeps a gossip message id
 //   for 90 s (message_id_retention) per subscription and drops a repeat in that time, so a plain repeat on the

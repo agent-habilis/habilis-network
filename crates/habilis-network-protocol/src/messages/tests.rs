@@ -1303,7 +1303,9 @@ fn a_17_0_frame_is_refused() {
 mod slice_repair_kinds {
     use super::{Message, MessageKind, key_of_seed};
     use crate::digest::{DigestEntry, DigestPage, DigestRoot};
+    use crate::identity::Identity;
     use crate::{Channel, ContentHash};
+    use habilis_network_util::consts::MAX_MESSAGE_SIZE;
 
     fn zero_hash() -> ContentHash {
         ContentHash::decode_hex(&"0".repeat(64)).expect("a hash")
@@ -1315,6 +1317,116 @@ mod slice_repair_kinds {
             .serialize()
             .expect("the fixture message is well formed, so it serializes");
         String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON")
+    }
+
+    /// One message of each slice kind, each addressed to the key `4`.
+    fn each_kind() -> Vec<MessageKind> {
+        let state = DigestRoot::new(zero_hash(), 1).expect("one page");
+        let meta = DigestRoot::new(ContentHash::of(b"meta"), 2).expect("two pages");
+        let entries = vec![DigestEntry::new(key_of_seed(1), 1, zero_hash())];
+        let page = DigestPage::build(&entries, 1, 0, 1).expect("a page of one row");
+        vec![
+            MessageKind::SliceRoot {
+                to: key_of_seed(4),
+                state,
+                meta,
+            },
+            MessageKind::SlicePull {
+                to: key_of_seed(4),
+                channel: Channel::State,
+                keys: vec![key_of_seed(1), key_of_seed(2)],
+            },
+            MessageKind::SlicePageRequest {
+                to: key_of_seed(4),
+                channel: Channel::Meta,
+                index: 3,
+            },
+            MessageKind::SlicePage {
+                to: key_of_seed(4),
+                channel: Channel::State,
+                page,
+            },
+        ]
+    }
+
+    /// Each kind parses back from its signed frame, and the signature verifies. The type in the
+    /// frame is the same text that the display of the kind prints.
+    #[test]
+    fn each_kind_parses_back_and_verifies() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for kind in each_kind() {
+            let display = kind.to_string();
+            let signed = Message::fixture(kind, "{}").sign(&Identity::fixed_secret([7; 32]));
+            let bytes = signed
+                .serialize()
+                .expect("a signed slice frame serializes")
+                .into_bytes();
+            let wire: serde_json::Value = serde_json::from_slice(&bytes).expect("a frame is JSON");
+            assert_eq!(
+                wire["type"], display,
+                "the wire type of the frame differs from the display of the kind"
+            );
+            let parsed = Message::parse(&bytes).expect("a slice frame parses back");
+            let verified = parsed
+                .verify()
+                .expect("the signature of a slice frame verifies");
+            assert_eq!(
+                verified.serialize().expect("serialize").into_bytes(),
+                bytes,
+                "the parsed frame does not serialize to the same bytes"
+            );
+        }
+    }
+
+    /// A page with the most rows that one pull carries stays inside one frame.
+    #[test]
+    fn a_full_slice_page_fits_one_frame() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut entries: Vec<DigestEntry> = (1..=18)
+            .map(|seed| DigestEntry::new(key_of_seed(seed), 1, zero_hash()))
+            .collect();
+        entries.sort_by(|left, right| left.key().as_bytes().cmp(right.key().as_bytes()));
+        let page = DigestPage::build(&entries, 18, 0, 1).expect("a page of 18 rows");
+        let kind = MessageKind::SlicePage {
+            to: key_of_seed(4),
+            channel: Channel::State,
+            page,
+        };
+        let size = Message::fixture(kind, "{}")
+            .sign(&Identity::fixed_secret([7; 32]))
+            .serialize()
+            .expect("a signed slice frame serializes")
+            .into_bytes()
+            .len();
+        assert!(
+            size <= MAX_MESSAGE_SIZE,
+            "a full page is {size} bytes, past the {MAX_MESSAGE_SIZE} of one frame"
+        );
+    }
+
+    /// A slice kind names its addressee as an author key. A nickname in that place is a parse error.
+    #[test]
+    fn a_nickname_in_the_addressee_of_a_slice_kind_is_refused_at_parse() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for kind in each_kind() {
+            let display = kind.to_string();
+            let frame = Message::fixture(kind, "{}")
+                .sign(&Identity::fixed_secret([7; 32]))
+                .serialize()
+                .expect("a signed slice frame serializes")
+                .into_bytes();
+            let addressee = key_of_seed(4).to_string();
+            let text = String::from_utf8(frame.to_vec()).expect("a frame is text");
+            let renamed = text.replacen(&format!(r#""to":"{addressee}""#), r#""to":"bob""#, 1);
+            assert_ne!(
+                renamed, text,
+                "the {display} frame names its addressee in the form it expects"
+            );
+            assert!(
+                Message::parse(renamed.as_bytes()).is_err(),
+                "a {display} frame to a nickname parses"
+            );
+        }
     }
 
     #[test]

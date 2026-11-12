@@ -146,10 +146,10 @@ impl fmt::Display for MessageKind {
             MessageKind::State => write!(f, "state"),
             MessageKind::Meta => write!(f, "meta"),
             MessageKind::LinkState => write!(f, "linkstate"),
-            MessageKind::SliceRoot { .. } => write!(f, "slice_root"),
-            MessageKind::SlicePull { .. } => write!(f, "slice_pull"),
-            MessageKind::SlicePageRequest { .. } => write!(f, "slice_page_request"),
-            MessageKind::SlicePage { .. } => write!(f, "slice_page"),
+            MessageKind::SliceRoot { .. } => write!(f, "sliceroot"),
+            MessageKind::SlicePull { .. } => write!(f, "slicepull"),
+            MessageKind::SlicePageRequest { .. } => write!(f, "slicepagerequest"),
+            MessageKind::SlicePage { .. } => write!(f, "slicepage"),
         }
     }
 }

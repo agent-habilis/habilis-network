@@ -3,7 +3,9 @@
 /// Protocol version embedded in every message, `18.0`. A `Joined` body can carry an identity proof,
 /// and the `ProofRequest` kind asks for one (see below).
 ///
-/// The version is `18.0` since the slice repair: the digest kinds `SliceRoot`, `SlicePull`, `SlicePageRequest` and `SlicePage` join the envelope, and the resend trailer is removed. A `17.0` peer carries no digest kinds, and it is refused by its version.
+/// The version is `18.0` since the slice repair: the digest kinds `SliceRoot`, `SlicePull`,
+/// `SlicePageRequest` and `SlicePage` join the envelope, and the resend trailer is removed. A `17.0`
+/// peer carries no digest kinds, and it is refused by its version.
 ///
 /// The version is `17.0` since the shared state is one signed slice per author. A `state` or `meta`
 /// frame carries the whole slice of its author, a version and a value, and no automerge change. The

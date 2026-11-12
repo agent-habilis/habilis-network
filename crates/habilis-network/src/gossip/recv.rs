@@ -1475,7 +1475,11 @@ fn decrypt_directed<F: ops::Deref<Target = Message>>(
 
 fn addressed_to_us(message: &Message, us: &AuthorKey) -> bool {
     match &message.kind {
-        MessageKind::App { to: Some(to), .. } => to == us,
+        MessageKind::App { to: Some(to), .. }
+        | MessageKind::SliceRoot { to, .. }
+        | MessageKind::SlicePull { to, .. }
+        | MessageKind::SlicePageRequest { to, .. }
+        | MessageKind::SlicePage { to, .. } => to == us,
         // Broadcast app frames (chat) and infra kinds are delivered to everyone.
         MessageKind::App { to: None, .. }
         | MessageKind::Presence { .. }
@@ -1486,10 +1490,6 @@ fn addressed_to_us(message: &Message, us: &AuthorKey) -> bool {
         | MessageKind::Meta
         | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
-        | MessageKind::SliceRoot { .. }
-        | MessageKind::SlicePull { .. }
-        | MessageKind::SlicePageRequest { .. }
-        | MessageKind::SlicePage { .. }
         | _ => true,
     }
 }
@@ -1929,10 +1929,13 @@ mod first_contact_tests {
     use crate::ops;
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
-    use crate::protocol::{AuthorKey, Channel, MeshId, Message, MessageKind, Nickname};
+    use crate::protocol::{
+        AuthorKey, Channel, ContentHash, MeshId, Message, MessageKind, Nickname,
+    };
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::MeshSender;
     use bytes::Bytes;
+    use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
 
     use crate::daemon::state::DirectState;
     #[cfg(feature = "multihop")]
@@ -3063,6 +3066,56 @@ mod first_contact_tests {
                 record.push(*author);
             }
         }
+    }
+
+    /// The four slice kinds name one addressee, so a node that is not the addressee does not take them.
+    #[test]
+    fn a_slice_kind_is_for_its_addressee_only() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let addressee = Identity::generate().author_key();
+            let other = Identity::generate().author_key();
+            let kinds_to = |to: AuthorKey| {
+                let root = || DigestRoot::new(ContentHash::of(b"root"), 1).expect("one page");
+                let entries = vec![DigestEntry::new(to, 1, ContentHash::of(b"row"))];
+                vec![
+                    MessageKind::SliceRoot {
+                        to,
+                        state: root(),
+                        meta: root(),
+                    },
+                    MessageKind::SlicePull {
+                        to,
+                        channel: Channel::State,
+                        keys: vec![],
+                    },
+                    MessageKind::SlicePageRequest {
+                        to,
+                        channel: Channel::Meta,
+                        index: 0,
+                    },
+                    MessageKind::SlicePage {
+                        to,
+                        channel: Channel::State,
+                        page: DigestPage::build(&entries, 1, 0, 1).expect("a page of one row"),
+                    },
+                ]
+            };
+            for kind in kinds_to(addressee) {
+                let display = kind.to_string();
+                let message =
+                    Message::new_frame(&node.mesh, &nick("alice"), kind, MessageBody::from("{}"));
+                assert!(
+                    super::addressed_to_us(&message, &addressee),
+                    "the addressee does not take a {display}"
+                );
+                assert!(
+                    !super::addressed_to_us(&message, &other),
+                    "a key that is not the addressee takes a {display}"
+                );
+            }
+            node.endpoint.close().await;
+        });
     }
 
     /// Two keys can use one nickname, and the meta slot of each is its own. The hook that tells
