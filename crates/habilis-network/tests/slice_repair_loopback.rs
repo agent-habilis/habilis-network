@@ -37,6 +37,7 @@ enum Request {
     Read(oneshot::Sender<serde_json::Value>),
     Key(oneshot::Sender<AuthorKey>),
     DropFrom(Option<AuthorKey>, oneshot::Sender<()>),
+    DropLeft(Option<AuthorKey>, oneshot::Sender<()>),
 }
 
 /// Presence alone forms the mesh; members write and read the state document, and drop frames on request.
@@ -91,6 +92,11 @@ impl NodeDriver for Store {
             }
             Request::DropFrom(author, done) => {
                 state.drop_slices_from(author);
+                let _ = done.send(());
+                false
+            }
+            Request::DropLeft(author, done) => {
+                state.drop_left_from(author);
                 let _ = done.send(());
                 false
             }
@@ -197,6 +203,14 @@ async fn drop_frames_from(node: &Node<Store>, author: Option<AuthorKey>) {
     rx.await.expect("the loop answers");
 }
 
+async fn drop_left_from(node: &Node<Store>, author: Option<AuthorKey>) {
+    let (tx, rx) = oneshot::channel();
+    node.send(Request::DropLeft(author, tx))
+        .await
+        .expect("the drop request reaches the loop");
+    rx.await.expect("the loop answers");
+}
+
 /// The log keys in every author's slice of the state document.
 fn key_count(document: &serde_json::Value) -> usize {
     let mut count = 0;
@@ -259,6 +273,85 @@ fn a_member_that_missed_a_write_pulls_it_from_a_neighbor() {
         );
 
         alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+        carol.leave().await.expect("carol leaves");
+    });
+}
+
+/// The bound of a farewell: the tombstone of a leaving member reaches a peer within this time.
+const FAREWELL_BOUND: Duration = Duration::from_secs(2);
+
+/// The keys of an author that a peer still holds, once they are gone or the bound runs out.
+async fn kept_within(node: &Node<Store>, bound: Duration) -> usize {
+    let started = Instant::now();
+    loop {
+        let kept = key_count(&read(node).await);
+        if kept == 0 || started.elapsed() > bound {
+            return kept;
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The keys that a peer holds after the wait: a control reads what remains with no farewell to act on.
+async fn kept_after(node: &Node<Store>, wait: Duration) -> usize {
+    time::sleep(wait).await;
+    key_count(&read(node).await)
+}
+
+/// Bob misses alice's Left, and her tombstone still drops her slice from his view within the farewell bound.
+/// Carol misses both the Left and the tombstone, so she keeps the slice: the control.
+#[test]
+fn a_member_that_misses_the_left_drops_the_slice_by_the_tombstone() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let nonce: u64 = rand::random();
+        let topic = format!("slice-tombstone-{nonce}");
+
+        let (alice, _) = spawn(&topic, "alice").await;
+        let (bob, bob_saw) = spawn(&topic, "bob").await;
+        let (carol, carol_saw) = spawn(&topic, "carol").await;
+        assert!(
+            bob_saw
+                .wait_for(&nick("alice"), Duration::from_secs(45))
+                .await,
+            "bob never saw alice join"
+        );
+        assert!(
+            carol_saw
+                .wait_for(&nick("alice"), Duration::from_secs(45))
+                .await,
+            "carol never saw alice join"
+        );
+
+        let alice_key = key_of(&alice).await;
+        drop_left_from(&bob, Some(alice_key)).await;
+        write_log(&alice, WRITES).await;
+        let bob_held = held_within(&bob, REPAIR_BOUND).await;
+        assert!(
+            bob_held >= WRITES,
+            "bob holds {bob_held} of alice's {WRITES} keys before she leaves"
+        );
+        let carol_held = held_within(&carol, REPAIR_BOUND).await;
+        assert!(
+            carol_held >= WRITES,
+            "carol holds {carol_held} of alice's {WRITES} keys before she leaves"
+        );
+        drop_left_from(&carol, Some(alice_key)).await;
+        drop_frames_from(&carol, Some(alice_key)).await;
+
+        alice.leave().await.expect("alice leaves");
+        let bob_kept = kept_within(&bob, FAREWELL_BOUND).await;
+        assert_eq!(
+            bob_kept, 0,
+            "bob still holds {bob_kept} of alice's keys {FAREWELL_BOUND:?} after she left"
+        );
+        let carol_kept = kept_after(&carol, FAREWELL_BOUND).await;
+        assert_eq!(
+            carol_kept, WRITES,
+            "control: carol misses the Left and the tombstone, so she keeps alice's log"
+        );
+
         bob.leave().await.expect("bob leaves");
         carol.leave().await.expect("carol leaves");
     });

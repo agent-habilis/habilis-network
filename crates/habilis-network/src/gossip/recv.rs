@@ -542,6 +542,25 @@ fn take_pulled_answer(verified: &Verified, state: &mut EventLoopState, now: Inst
 }
 
 /// [`ingest`] for a frame that came on a unicast connection: the census counts a repeat by it.
+/// The test door of the loss tests: a State or Meta frame of the author of `drop_slices_from`, and a Left of the
+/// author of `drop_left_from`, are dropped after the dedup gate.
+#[cfg(feature = "iroh-test-utils")]
+fn test_hook_drops(state: &EventLoopState, verified: &Verified) -> bool {
+    let slice = state.drop_slices_from == Some(verified.key())
+        && matches!(verified.kind, MessageKind::State | MessageKind::Meta);
+    let left = state.drop_left_from == Some(verified.key())
+        && matches!(
+            verified.kind,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Left,
+            }
+        );
+    if slice || left {
+        tracing::debug!(target: "habilis_network::gossip", "test hook: dropped a frame after the dedup gate");
+    }
+    slice || left
+}
+
 pub(crate) async fn ingest_from(
     frame: Bytes,
     state: &mut EventLoopState,
@@ -612,22 +631,7 @@ pub(crate) async fn ingest_from(
         return;
     }
     #[cfg(feature = "iroh-test-utils")]
-    if state.drop_slices_from == Some(verified.key())
-        && matches!(verified.kind, MessageKind::State | MessageKind::Meta)
-    {
-        tracing::debug!(target: "habilis_network::gossip", "test hook: dropped a slice after the dedup gate");
-        return;
-    }
-    #[cfg(feature = "iroh-test-utils")]
-    if state.drop_left_from == Some(verified.key())
-        && matches!(
-            verified.kind,
-            MessageKind::Presence {
-                subtype: PresenceSubtype::Left,
-            }
-        )
-    {
-        tracing::debug!(target: "habilis_network::gossip", "test hook: dropped a left after the dedup gate");
+    if test_hook_drops(state, &verified) {
         return;
     }
     // A shard of a group already surfaced is a repeat, and it is not a sighting of its author. A repeat

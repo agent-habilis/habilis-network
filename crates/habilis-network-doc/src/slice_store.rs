@@ -649,7 +649,7 @@ impl SliceStore {
         self.draft_at(own, Value::Object(value), now, true)
     }
 
-    /// Makes the draft of the own tombstone of `own`. No caller yet: a graceful leave does not send it.
+    /// Makes the draft of the own tombstone of `own`, the farewell of a leaving member.
     ///
     /// # Errors
     ///

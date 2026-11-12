@@ -449,7 +449,7 @@ pub async fn broadcast_state_merge(
 
 /// Commits a local draft, then sends its signed frame. A frame that announces a departure also goes to each live
 /// peer by unicast before gossip takes it. With no gossip path yet, the frame waits in the outbound buffer.
-async fn commit_and_send(
+pub(crate) async fn commit_and_send(
     state: &mut EventLoopState,
     context: &MergeCtx<'_>,
     channel: Channel,

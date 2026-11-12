@@ -170,6 +170,16 @@ impl ChannelDocs {
         self.get_mut(channel).prepare_local(own, value, now)
     }
 
+    /// Makes the draft of the farewell of `own` on `channel`: a tombstone, which spends no token.
+    pub(crate) fn prepare_leave(
+        &mut self,
+        channel: protocol::Channel,
+        own: &AuthorKey,
+        now: Instant,
+    ) -> Result<habilis_network_doc::LocalDraft, SliceError> {
+        self.get_mut(channel).prepare_leave(own, now)
+    }
+
     /// Keeps the signed frame of `draft` on `channel`, once the frame is built from the draft body.
     pub(crate) fn commit_local(
         &mut self,
