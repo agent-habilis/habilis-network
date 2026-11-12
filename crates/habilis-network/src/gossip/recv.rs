@@ -611,6 +611,12 @@ pub(crate) async fn ingest_from(
         restore_lost_proof(&verified, state, app, context).await;
         return;
     }
+    if state.drop_slices_from == Some(verified.key())
+        && matches!(verified.kind, MessageKind::State | MessageKind::Meta)
+    {
+        tracing::debug!(target: "habilis_network::gossip", "test hook: dropped a slice after the dedup gate");
+        return;
+    }
     // A shard of a group already surfaced is a repeat, and it is not a sighting of its author. A repeat
     // of a partial shard still counts as a sighting and reaches the lifecycle. That is accepted, because
     // a partial group lives at most one reassembly TTL.

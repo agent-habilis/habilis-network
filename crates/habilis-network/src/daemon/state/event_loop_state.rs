@@ -799,6 +799,8 @@ pub struct EventLoopState {
     pub(crate) outstanding_pulls: OutstandingPulls,
     /// The digests that differ from ours, until their pages are read.
     pub(crate) digest_round: DigestRound,
+    /// The author whose State and Meta frames this node drops after the dedup gate, for the loss tests.
+    pub(crate) drop_slices_from: Option<AuthorKey>,
     /// The answers that this node gives to slice pulls and page requests, per window.
     pub(crate) serve_budget: ServeBudget,
     /// The released endpoints that wait for the teardown of the pool: `TEARDOWN_PENDING_MAX` at most.
@@ -1006,6 +1008,7 @@ impl EventLoopState {
             unicast_arrival: None,
             outstanding_pulls: OutstandingPulls::default(),
             digest_round: DigestRound::default(),
+            drop_slices_from: None,
             serve_budget: ServeBudget::default(),
             teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             proofs: ProofExchange::with_cap(QUIET_CAP),
@@ -1568,6 +1571,13 @@ impl EventLoopState {
     /// roster has none. An endpoint that another key proved is not an address of `key`: a process
     /// that restarts keeps its endpoint and makes a new key, and until the old key times out, its
     /// hint still names the endpoint of the new process.
+    /// Sets the author whose State and Meta frames this node drops after the dedup gate, or none. A test of
+    /// the repair of a lost frame sets it, so that the frame is seen by the dedup gate and then lost.
+    #[cfg(feature = "iroh-test-utils")]
+    pub fn drop_slices_from(&mut self, author: Option<AuthorKey>) {
+        self.drop_slices_from = author;
+    }
+
     pub(crate) fn address_of(&self, key: &AuthorKey) -> Option<EndpointAddr> {
         let hint = self.names.get(key).and_then(|nickname| {
             let owned = self.hint_owner.get(nickname) == Some(key);
