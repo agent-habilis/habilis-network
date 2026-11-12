@@ -1377,7 +1377,6 @@ mod slice_repair_kinds {
         }
     }
 
-    /// A page with the most rows that one pull carries stays inside one frame.
     /// A slice kind names its addressee as an author key. A nickname in that place is a parse error.
     #[test]
     fn a_nickname_in_the_addressee_of_a_slice_kind_is_refused_at_parse() {

@@ -5,7 +5,7 @@ use crate::{AuthorKey, ContentHash};
 
 /// The bytes of a digest page around its rows: the index, the total, the range, the hash, and the
 /// JSON around them.
-pub const PAGE_WRAPPER: usize = 320;
+pub const PAGE_WRAPPER: usize = 328;
 
 /// The bytes of one page row at the longest version, `["<key hex>",18446744073709551615,"<hash
 /// hex>"],`.

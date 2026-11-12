@@ -975,7 +975,7 @@ mod tests {
         SliceIngest, SliceLimits, SliceStore, WORST_FRAME_OVERHEAD, wire,
     };
     use habilis_network_protocol::digest::DigestPage;
-    use habilis_network_protocol::messages::Verified;
+    use habilis_network_protocol::messages::{MessageError, Verified};
     use habilis_network_protocol::{
         AuthorKey, Channel, Lookup, Mesh, MeshConfig, MeshId, MeshName, Message, MessageBody,
         Nickname, RelayLadder, Seed, SymmetricKey,
@@ -1961,24 +1961,7 @@ mod tests {
         Nickname::from(&*"\u{1F600}".repeat(MAX_NICKNAME_LEN / 4))
     }
 
-    /// A signed-looking `SlicePage` frame of `page`, on `mesh` and `nickname`, as the wire carries it.
-    fn slice_page_frame_size(page: DigestPage, mesh: &MeshId, nickname: &Nickname) -> usize {
-        let kind = habilis_network_protocol::MessageKind::SlicePage {
-            to: key(9),
-            channel: Channel::Meta,
-            page,
-        };
-        let mut message = Message::fixture(kind, "");
-        message.mesh = mesh.clone();
-        message.author = nickname.clone();
-        Verified::fixture_unchecked(message, key(9))
-            .serialize()
-            .expect("a slice page frame serializes")
-            .into_bytes()
-            .len()
-    }
-
-    /// Every page of a full store at the longest mesh id and nickname is one frame that fits.
+    /// The control at the longest real mesh id: every page of both channels, at the longest nickname.
     #[test]
     fn every_page_at_the_longest_mesh_id_fits_one_frame() {
         let mesh = longest_mesh_id();
@@ -1989,51 +1972,95 @@ mod tests {
         );
         let overhead = super::frame_overhead(mesh.as_str(), nickname.as_str());
         let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
-        let mut store = SliceStore::new(Channel::Meta, limits, overhead);
-        for index in 0..256 {
-            let body = json!({"version": u64::MAX, "value": {"n": index}});
-            apply(
-                &mut store,
-                &frame_with_body(many_key(index), &body.to_string()),
-            );
-        }
-        let mut pages = 0;
-        for page in store.pages() {
-            pages += 1;
-            let size = slice_page_frame_size(page, &mesh, &nickname);
-            assert!(
-                size <= MAX_MESSAGE_SIZE,
-                "a page at the longest mesh id is {size} bytes, past {MAX_MESSAGE_SIZE}"
-            );
-        }
-        assert!(pages > 0, "a full store has pages");
-    }
-
-    /// At every overhead from the fixture to the worst case, a page of the rows that the store takes
-    /// fits one frame at the fixture mesh id and nickname, plus the extra overhead.
-    #[test]
-    fn a_page_fits_at_every_overhead_up_to_the_worst() {
-        let mesh = MeshId::from("test");
-        let nickname = longest_nickname();
-        let fixture = probe_overhead(&mesh, &nickname);
-        let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
-        for overhead in fixture..=WORST_FRAME_OVERHEAD {
-            let mut store = SliceStore::new(Channel::Meta, limits, overhead);
+        for channel in [Channel::Meta, Channel::State] {
+            let mut store = SliceStore::new(channel, limits, overhead);
             for index in 0..256 {
                 let body = json!({"version": u64::MAX, "value": {"n": index}});
                 apply(
                     &mut store,
-                    &frame_with_body(many_key(index), &body.to_string()),
+                    &frame_on(many_key(index), &body.to_string(), channel),
                 );
             }
-            let Some(page) = store.pages().next() else {
-                panic!("a full store has a page at overhead {overhead}");
+            let mut pages = 0;
+            for page in store.pages() {
+                pages += 1;
+                let size = slice_page_frame(page, channel, &mesh, &nickname);
+                assert!(
+                    size.as_ref().is_ok_and(|size| *size <= MAX_MESSAGE_SIZE),
+                    "a page on {channel:?} at the longest mesh id is refused: {size:?}"
+                );
+            }
+            assert!(pages > 0, "a full store has pages");
+        }
+    }
+
+    /// At every overhead from the fixture to the worst case, a page of the rows that the store takes
+    /// fits one frame at the fixture mesh id and nickname, plus the extra overhead.
+    /// A nickname of exactly `bytes` bytes, from 1- to 4-byte characters, within the 32-character limit.
+    fn nickname_of_bytes(bytes: usize) -> Nickname {
+        let mut text = String::new();
+        let mut left = bytes;
+        while left > 0 {
+            let size = left.min(4);
+            let ch = match size {
+                4 => '\u{1F600}',
+                3 => '\u{4E2D}',
+                2 => '\u{00E9}',
+                _ => 'n',
             };
-            let size = slice_page_frame_size(page, &mesh, &nickname) + (overhead - fixture);
-            assert!(
-                size <= MAX_MESSAGE_SIZE,
-                "a page at overhead {overhead} is {size} bytes, past {MAX_MESSAGE_SIZE}"
-            );
+            text.push(ch);
+            left -= ch.len_utf8();
+        }
+        Nickname::try_new(&text).expect("a nickname of 1 to 32 characters")
+    }
+
+    /// The bytes of the signed `SlicePage` frame of `page` on `channel`, at `mesh` and `nickname`.
+    fn slice_page_frame(
+        page: DigestPage,
+        channel: Channel,
+        mesh: &MeshId,
+        nickname: &Nickname,
+    ) -> Result<usize, MessageError> {
+        let kind = habilis_network_protocol::MessageKind::SlicePage {
+            to: key(9),
+            channel,
+            page,
+        };
+        let mut message = Message::fixture(kind, "");
+        message.mesh = mesh.clone();
+        message.author = nickname.clone();
+        Verified::fixture_unchecked(message, key(9))
+            .serialize()
+            .map(|frame| frame.into_bytes().len())
+    }
+
+    /// Every page of both channels fits one frame at every nickname length from 1 to 128 bytes, at the
+    /// 62-byte fixture mesh id and at the 511-byte longest mesh id. The store holds 256 authors, so its
+    /// pages reach two index digits.
+    #[test]
+    fn every_page_on_both_channels_fits_at_every_nickname_length() {
+        let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
+        let meshes = [MeshId::from("test"), longest_mesh_id()];
+        for mesh in &meshes {
+            for bytes in 1..=MAX_NICKNAME_LEN {
+                let nickname = nickname_of_bytes(bytes);
+                let overhead = super::frame_overhead(mesh.as_str(), nickname.as_str());
+                for channel in [Channel::Meta, Channel::State] {
+                    let mut store = SliceStore::new(channel, limits, overhead);
+                    for index in 0..256 {
+                        let body = json!({"version": u64::MAX, "value": {"n": index}});
+                        let frame = frame_on(many_key(index), &body.to_string(), channel);
+                        apply(&mut store, &frame);
+                    }
+                    for page in store.pages() {
+                        let size = slice_page_frame(page, channel, mesh, &nickname);
+                        assert!(
+                            size.as_ref().is_ok_and(|size| *size <= MAX_MESSAGE_SIZE),
+                            "a page on {channel:?} at a {bytes} B nickname and overhead {overhead} is refused: {size:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 
