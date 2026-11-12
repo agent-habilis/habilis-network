@@ -108,17 +108,23 @@ fn undeliverable(addressee: Option<&AuthorKey>, state: &EventLoopState) -> SendE
 
 /// Send a frame that this node signed, unchanged, by unicast to `to` alone. Its use is the repair
 /// of an own frame for 1 peer: a broadcast shard that the peer missed goes to the peer that asks,
-/// and no other member receives it again. The bytes MUST be `message.serialize()`.
+/// and no other member receives it again. It serializes `message` itself, so the frame that the
+/// checks read is the frame that goes out.
 ///
 /// It checks, in this order, that the frame is one this node signed ([`SendError::ForeignFrame`]),
-/// that the frame is a broadcast or is directed to `to` ([`SendError::OtherAddressee`]), and that
-/// `to` has an endpoint to go to, by the directed rules of [`deliver`] ([`SendError::Undeliverable`]
-/// or [`SendError::Held`]). The payload path check applies as it does for [`deliver`], and the
-/// send waits on nothing: a cold peer is dialed by a task, and the verdict comes through
+/// that the frame is not directed to another key ([`SendError::OtherAddressee`]), and that `to` has
+/// an endpoint to go to, by the directed rules of [`deliver`] ([`SendError::Undeliverable`] or
+/// [`SendError::Held`]). The payload path check applies as it does for [`deliver`], and the send
+/// waits on nothing: a cold peer is dialed by a task, and the verdict comes through
 /// [`Delivered::Pending`].
 ///
+/// A frame held for a direct path comes back as [`SendError::Held`], and nothing asks for a lane
+/// session, as `send_app` does for a held frame. The caller retries the repair later, and a peer
+/// that has no IP path needs its session from another send.
+///
 /// # Errors
-/// One of the refusals above, or the failure of a send to a warm connection.
+/// One of the refusals above, a frame that does not serialize, or the failure of a send to a warm
+/// connection.
 ///
 /// # Examples
 ///
@@ -127,52 +133,54 @@ fn undeliverable(addressee: Option<&AuthorKey>, state: &EventLoopState) -> SendE
 /// ```no_run
 /// use habilis_network::embed::EventLoopState;
 /// use habilis_network::ops::{Delivered, deliver_to};
-/// use habilis_network::protocol::{AuthorKey, Verified, messages::WireFrame};
+/// use habilis_network::protocol::{AuthorKey, Verified};
 /// use habilis_network::runtime::SendError;
 ///
-/// # async fn demo(to: &AuthorKey, message: &Verified, bytes: WireFrame, state: &EventLoopState) -> Result<Delivered, SendError> {
-/// deliver_to(to, message, bytes, state).await
+/// # async fn demo(to: &AuthorKey, message: &Verified, state: &EventLoopState) -> Result<Delivered, SendError> {
+/// deliver_to(to, message, state).await
 /// # }
 /// ```
 pub async fn deliver_to(
     to: &AuthorKey,
     message: &Verified,
-    bytes: WireFrame,
     state: &EventLoopState,
 ) -> Result<Delivered, SendError> {
-    let Resend::Unicast(eid, bytes) = resolve_to(to, message, bytes, state)? else {
-        unreachable!("a route to one key is never a broadcast");
-    };
+    let (eid, bytes) = resolve_to(to, message, state)?;
     send_unicast(eid, bytes, &state.unicast_pool)
         .await
         .map_err(SendError::internal)
 }
 
-/// The decision of [`deliver_to`], without the send.
+/// The decision of [`deliver_to`], without the send: the endpoint that carries the frame, and the
+/// frame as it goes out.
 ///
 /// # Errors
 /// The same as [`deliver_to`] for a frame that is refused or has no path now.
 pub(crate) fn resolve_to(
     to: &AuthorKey,
     message: &Verified,
-    bytes: WireFrame,
     state: &EventLoopState,
-) -> Result<Resend, SendError> {
+) -> Result<(EndpointId, WireFrame), SendError> {
     if message.key() != state.identity.author_key() {
         return Err(SendError::ForeignFrame);
     }
     if sole_addressee(&message.kind).is_some_and(|addressee| addressee != to) {
         return Err(SendError::OtherAddressee);
     }
-    match super::route::route_to_key(to, state) {
-        Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
-        Route::Held(eid) => Err(SendError::Held { eid }),
-        Route::Undeliverable | Route::Broadcast => Err(undeliverable(Some(to), state)),
-    }
+    let eid = match super::route::route_to_key(to, state) {
+        Route::Unicast(eid) => eid,
+        Route::Held(eid) => return Err(SendError::Held { eid }),
+        Route::Undeliverable | Route::Broadcast => return Err(undeliverable(Some(to), state)),
+    };
+    let bytes = message
+        .serialize()
+        .map_err(|error| SendError::internal(error.into()))?;
+    Ok((eid, bytes))
 }
 
 /// [`deliver_to`] for a caller on the event loop: it returns whether the send was accepted, as
-/// [`deliver_in_background`] does, and it never waits on a dial or a write.
+/// [`deliver_in_background`] does, and it never waits on a dial or a write. A refusal is logged at
+/// debug level, so that a repair that never goes out leaves a trace.
 ///
 /// # Examples
 ///
@@ -181,19 +189,24 @@ pub(crate) fn resolve_to(
 /// ```no_run
 /// use habilis_network::embed::EventLoopState;
 /// use habilis_network::ops::deliver_to_in_background;
-/// use habilis_network::protocol::{AuthorKey, Verified, messages::WireFrame};
+/// use habilis_network::protocol::{AuthorKey, Verified};
 ///
-/// # async fn demo(to: &AuthorKey, message: &Verified, bytes: WireFrame, state: &EventLoopState) -> bool {
-/// deliver_to_in_background(to, message, bytes, state).await
+/// # async fn demo(to: &AuthorKey, message: &Verified, state: &EventLoopState) -> bool {
+/// deliver_to_in_background(to, message, state).await
 /// # }
 /// ```
 pub async fn deliver_to_in_background(
     to: &AuthorKey,
     message: &Verified,
-    bytes: WireFrame,
     state: &EventLoopState,
 ) -> bool {
-    deliver_to(to, message, bytes, state).await.is_ok()
+    match deliver_to(to, message, state).await {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::debug!(target: "habilis_network::gossip", %to, %error, "frame for one key not sent");
+            false
+        }
+    }
 }
 
 /// Route like [`deliver`], but never wait on a dial or a stream write: for a

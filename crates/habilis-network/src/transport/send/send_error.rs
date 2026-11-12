@@ -36,8 +36,8 @@ pub enum SendError {
     /// A send to one key of a frame that another key signed. A node sends only the frames it
     /// signed, so it is not a unicast relay for any frame it has seen.
     ForeignFrame,
-    /// A send to one key of a frame that is not for that key: a directed frame to another key,
-    /// or a frame of a kind that has no sole recipient.
+    /// A send to one key of a frame that is directed to another key. Its body is sealed to that
+    /// key, and the first key cannot open it.
     OtherAddressee,
     /// The addressee is not a valid nickname.
     InvalidAddressee(String),
@@ -70,11 +70,11 @@ impl fmt::Display for SendError {
             Self::Undeliverable(message)
             | Self::Oversize(message)
             | Self::InvalidAddressee(message) => f.write_str(message),
-            Self::ForeignFrame => f.write_str("send to one key refused: a node sends to one key only a frame that it signed"),
+            Self::ForeignFrame => f.write_str(
+                "send to one key refused: a node sends to one key only a frame that it signed",
+            ),
             Self::OtherAddressee => {
-                f.write_str(
-                    "send to one key refused: the frame is directed to another key, or it has no sole recipient",
-                )
+                f.write_str("send to one key refused: the frame is directed to another key")
             }
             Self::Stopped => f.write_str("mesh event loop has stopped"),
             Self::EventLoop(_) => f.write_str("the mesh event loop failed"),

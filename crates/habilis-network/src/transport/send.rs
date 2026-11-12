@@ -44,7 +44,6 @@ mod tests {
     use crate::protocol::{
         AppTag, AuthorKey, CorrId, Identity, MeshId, Message, MessageBody, MessageId, UnixSecs,
     };
-    use crate::transport::outbox::Resend;
 
     use super::Delivered;
     use crate::daemon::state::DirectState;
@@ -1318,13 +1317,8 @@ mod tests {
         to: &AuthorKey,
         message: &Verified,
         state: &EventLoopState,
-    ) -> Result<Resend, SendError> {
-        deliver::resolve_to(
-            to,
-            message,
-            message.serialize().expect("a frame serializes"),
-            state,
-        )
+    ) -> Result<(EndpointId, WireFrame), SendError> {
+        deliver::resolve_to(to, message, state)
     }
 
     #[test]
@@ -1333,11 +1327,29 @@ mod tests {
         let (state, bob) = state_knowing_bob();
         let message = own_broadcast(&state);
 
-        let route = resolved_to(&test_key("bob"), &message, &state).expect("a route to bob");
+        let (eid, _) = resolved_to(&test_key("bob"), &message, &state).expect("a route to bob");
 
-        assert!(
-            matches!(route, Resend::Unicast(eid, _) if eid == bob),
-            "an own broadcast frame goes to bob's endpoint, not to gossip: {route:?}"
+        assert_eq!(
+            eid, bob,
+            "an own broadcast frame goes to bob's endpoint, not to gossip"
+        );
+    }
+
+    #[test]
+    fn the_frame_that_goes_out_is_the_serialization_of_the_message_that_was_checked() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, _) = state_knowing_bob();
+        let message = own_broadcast(&state);
+
+        let (_, bytes) = resolved_to(&test_key("bob"), &message, &state).expect("a route to bob");
+
+        assert_eq!(
+            bytes.into_bytes(),
+            message
+                .serialize()
+                .expect("a frame serializes")
+                .into_bytes(),
+            "the caller passes no bytes, so none can differ from the checked frame"
         );
     }
 
@@ -1347,12 +1359,9 @@ mod tests {
         let (state, bob) = state_knowing_bob();
         let message = own_directed(&state, test_key("bob"));
 
-        let route = resolved_to(&test_key("bob"), &message, &state).expect("a route to bob");
+        let (eid, _) = resolved_to(&test_key("bob"), &message, &state).expect("a route to bob");
 
-        assert!(
-            matches!(route, Resend::Unicast(eid, _) if eid == bob),
-            "a frame directed to bob goes to bob's endpoint: {route:?}"
-        );
+        assert_eq!(eid, bob, "a frame directed to bob goes to bob's endpoint");
     }
 
     #[test]

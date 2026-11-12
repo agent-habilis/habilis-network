@@ -2,9 +2,9 @@
 //!
 //! Alice splits a body into 2 shards. She broadcasts shard 0, so Bob and Carol hold the first half. Bob
 //! misses shard 1: Alice never sends it to the mesh. She then repairs it for Bob alone with `deliver_to`.
-//! Bob completes the group and surfaces the message once. Carol never gets shard 1, so she never completes
-//! the group and surfaces nothing. A repair by `deliver` would flood shard 1, and Carol would surface the
-//! message too.
+//! Bob completes the group and surfaces the message once. Carol holds shard 0 as a partial group, and she
+//! never gets shard 1, so she never completes the group and surfaces nothing. A repair by `deliver` would
+//! flood shard 1, and Carol would surface the message too.
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
@@ -38,6 +38,8 @@ enum Request {
     Key(oneshot::Sender<AuthorKey>),
     /// Broadcast shard 0, then repair shard 1 for the member with this key alone.
     SplitSend(AuthorKey, oneshot::Sender<()>),
+    /// How many partial groups the member holds: a group that waits for a shard.
+    PartialGroups(oneshot::Sender<usize>),
 }
 
 /// Records the body of each message that the engine surfaces to the app, after the reassembly.
@@ -104,13 +106,16 @@ impl NodeDriver for Recorder {
                     .await
                     .expect("shard 0 is broadcast");
                 let second = shard_frame(context, 1, "second half");
-                let bytes = second.serialize().expect("a shard serializes");
                 // The verdict of the repair is Bob's surfacing, which the test reads.
-                let _repair = deliver_to(&requester, &second, bytes, state)
+                let _repair = deliver_to(&requester, &second, state)
                     .await
                     .expect("shard 1 is repaired for the requester");
                 let _ = done.send(());
                 true
+            }
+            Request::PartialGroups(response) => {
+                let _ = response.send(state.reassembly_mut().size().0);
+                false
             }
         }
     }
@@ -204,6 +209,15 @@ impl Member {
         rx.await.expect("the loop answers")
     }
 
+    async fn partial_groups(&self) -> usize {
+        let (tx, rx) = oneshot::channel();
+        self.node
+            .send(Request::PartialGroups(tx))
+            .await
+            .expect("the request reaches the loop");
+        rx.await.expect("the loop answers")
+    }
+
     fn surfaced(&self) -> Vec<String> {
         self.received.lock().expect("no poison").clone()
     }
@@ -214,6 +228,18 @@ async fn surfaced_within(member: &Member, want: usize, bound: Duration) -> usize
     let started = Instant::now();
     loop {
         let count = member.surfaced().len();
+        if count >= want || started.elapsed() > bound {
+            return count;
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The partial groups of a member once it holds `want`, or when the bound runs out.
+async fn partial_groups_within(member: &Member, want: usize, bound: Duration) -> usize {
+    let started = Instant::now();
+    loop {
+        let count = member.partial_groups().await;
         if count >= want || started.elapsed() > bound {
             return count;
         }
@@ -256,6 +282,11 @@ fn a_repaired_shard_reaches_the_requester_alone() {
             .expect("the split send reaches the loop");
         done_rx.await.expect("alice sends both shards");
 
+        let at_carol = partial_groups_within(&carol, 1, REPAIR_BOUND).await;
+        assert_eq!(
+            at_carol, 1,
+            "carol holds shard 0 as a partial group within the bound, and a flooded shard 1 would have completed it"
+        );
         let at_bob = surfaced_within(&bob, 1, REPAIR_BOUND).await;
         assert_eq!(
             at_bob, 1,
@@ -272,6 +303,11 @@ fn a_repaired_shard_reaches_the_requester_alone() {
             carol.surfaced().is_empty(),
             "carol never gets shard 1, so she surfaces nothing: {:?}",
             carol.surfaced()
+        );
+        assert_eq!(
+            carol.partial_groups().await,
+            1,
+            "carol still holds shard 0 and waits for shard 1"
         );
 
         alice.node.leave().await.expect("alice leaves");
