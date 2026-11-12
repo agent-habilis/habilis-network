@@ -20,8 +20,8 @@ use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use iroh::endpoint::presets;
-use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher as _};
+use iroh::endpoint::{RelayStatus, presets};
+use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher};
 use tokio::sync::watch;
 
 pub(crate) use rung_refresh::RungRefresh;
@@ -173,24 +173,23 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
     }
 }
 
-/// The relay mode of a peer endpoint, and the ladder it must follow when the rung it homes on dies.
+/// The relay mode of a peer endpoint, and the ladder it must follow when its rung does not connect.
 ///
 /// iroh homes on the relay with the lowest latency and ignores the order of the map, so a map
 /// that holds the whole ladder does not make rung 0 the home. A peer homes the way the beacon
-/// does: on the first reachable rung, alone in its map. A one-rung ladder has no choice to make,
-/// and neither has a ladder that is empty or has no reachable rung: those keep [`relay_mode`].
-pub(super) async fn peer_relay_mode(choice: &RelayChoice) -> (RelayMode, Option<Homing>) {
+/// does: on one rung, alone in its map. The bind does not wait for a probe: the endpoint starts on
+/// rung 0, and [`Homing::follow`] moves it to the first reachable rung when rung 0 does not
+/// connect. A one-rung ladder has no choice to make, and neither has an empty one: those keep
+/// [`relay_mode`].
+pub(super) fn peer_relay_mode(choice: &RelayChoice) -> (RelayMode, Option<Homing>) {
     let ladder: Vec<RelayUrl> = relay_ladder(choice).collect();
-    if ladder.len() < 2 {
+    let Some(rung) = ladder.first().filter(|_| ladder.len() > 1).cloned() else {
         return (relay_mode(choice), None);
-    }
-    match select_bootstrap_rung(&ladder, RELAY_RUNG_PROBE, None).await {
-        Some(rung) => (
-            relay_mode(&RelayChoice::Custom(vec![rung.clone()])),
-            Some(Homing { ladder, rung }),
-        ),
-        None => (relay_mode(choice), None),
-    }
+    };
+    (
+        relay_mode(&RelayChoice::Custom(vec![rung.clone()])),
+        Some(Homing { ladder, rung }),
+    )
 }
 
 /// The ladder of a peer endpoint, and the rung that it homes on.
@@ -201,44 +200,100 @@ pub(super) struct Homing {
 }
 
 impl Homing {
-    /// Move the endpoint to the first reachable rung each time its rung dies, until the endpoint
-    /// closes. The endpoint swaps its own relay map in place, because a peer endpoint cannot be
-    /// rebuilt under its owner.
+    /// Move the endpoint to the first reachable rung each time its rung does not connect, until
+    /// the endpoint closes. The endpoint swaps its own relay map in place, because a peer endpoint
+    /// cannot be rebuilt under its owner.
     ///
-    /// The beacon monitor is not used here: it asks `online()`, which stays true while the
-    /// connection of the home relay is dead. The net report of iroh is the signal that
-    /// drops: its preferred relay is `None` once no relay of the map answers its probe.
+    /// A rung is alive when the status of the home relay says that the relay connection is up,
+    /// and, off the browser, the net report of iroh still has a preferred relay. Neither signal is
+    /// enough alone. A relay that answers its HTTP probe and refuses the relay connection can keep a
+    /// preferred relay but has no connection. A relay that dies keeps its connection in the status
+    /// for minutes, and the probes of the net report find it dead. A browser has no net report, so
+    /// the status alone decides there. A rung that has not connected when the probe time of a
+    /// rung ends counts as dead at once. A later read counts one failure per interval.
     pub(super) fn follow(self, endpoint: Endpoint) {
         let Self { ladder, mut rung } = self;
         n0future_task::spawn(async move {
-            let mut fails: u32 = 0;
+            let mut status = endpoint.home_relay_status();
+            let connected_at_start = tokio::select! {
+                connected = n0future_time::timeout(
+                    RELAY_RUNG_PROBE,
+                    wait_for_home_connection(&mut status, &rung),
+                ) => matches!(connected, Ok(true)),
+                _closed = endpoint.closed() => return,
+            };
+            let mut fails: u32 = if connected_at_start {
+                0
+            } else {
+                RELAY_LIVENESS_FAILS_TO_EVICT
+            };
             loop {
+                if should_evict_rung(fails) {
+                    fails = 0;
+                    // The rung that failed is not probed again: the probe would wait out its time.
+                    let others: Vec<RelayUrl> = ladder
+                        .iter()
+                        .filter(|other| **other != rung)
+                        .cloned()
+                        .collect();
+                    if let Some(next) = select_bootstrap_rung(&others, RELAY_RUNG_PROBE, None).await
+                    {
+                        tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, "peer endpoint moves to the next relay rung");
+                        // The relay actor of iroh shares the config of a relay.
+                        let config = Arc::new(rung_config(&next));
+                        endpoint.insert_relay(next.clone(), config).await;
+                        endpoint.remove_relay(&rung).await;
+                        rung = next;
+                    }
+                }
                 tokio::select! {
                     () = n0future_time::sleep(RELAY_LIVENESS_INTERVAL) => {}
                     _closed = endpoint.closed() => return,
                 }
-                let answering = endpoint
-                    .net_report()
-                    .get()
-                    .is_none_or(|report| report.preferred_relay.is_some());
-                fails = if answering { 0 } else { fails + 1 };
-                if !should_evict_rung(fails) {
-                    continue;
-                }
-                fails = 0;
-                let selected = select_bootstrap_rung(&ladder, RELAY_RUNG_PROBE, None).await;
-                let Some(next) = selected.filter(|next| *next != rung) else {
-                    continue;
+                fails = if home_connected(&status.get(), &rung) && probes_answer(&endpoint) {
+                    0
+                } else {
+                    fails + 1
                 };
-                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, "peer endpoint moves to the next relay rung");
-                // iroh takes the config of a relay as an `Arc`.
-                endpoint
-                    .insert_relay(next.clone(), Arc::new(rung_config(&next)))
-                    .await;
-                endpoint.remove_relay(&rung).await;
-                rung = next;
             }
         });
+    }
+}
+
+/// Whether the last net report of the endpoint has a preferred relay, or none has run yet.
+#[cfg(not(target_arch = "wasm32"))]
+fn probes_answer(endpoint: &Endpoint) -> bool {
+    endpoint
+        .net_report()
+        .get()
+        .is_none_or(|report| report.preferred_relay.is_some())
+}
+
+/// A browser has no net report: the status of the home relay decides alone.
+#[cfg(target_arch = "wasm32")]
+fn probes_answer(_endpoint: &Endpoint) -> bool {
+    true
+}
+
+/// Whether the endpoint holds a live relay connection to `rung`.
+fn home_connected(statuses: &[RelayStatus], rung: &RelayUrl) -> bool {
+    statuses
+        .iter()
+        .any(|status| status.url() == rung && status.is_connected())
+}
+
+/// Wait until the endpoint holds a live relay connection to `rung`. `false` once the watcher ends.
+async fn wait_for_home_connection(
+    status: &mut impl Watcher<Value = Vec<RelayStatus>>,
+    rung: &RelayUrl,
+) -> bool {
+    loop {
+        if home_connected(&status.get(), rung) {
+            return true;
+        }
+        if status.updated().await.is_err() {
+            return false;
+        }
     }
 }
 
@@ -548,10 +603,13 @@ mod tests {
     use n0_future::task as n0future_task;
     use std::collections::{BTreeSet, HashSet};
     use std::net::{Ipv4Addr, TcpListener};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::net::{TcpListener as AsyncListener, TcpStream};
 
     use crate::lookup::test_relay;
     use crate::util::tuning;
-    use iroh::endpoint::presets;
+    use iroh::endpoint::{Builder, presets};
     use std::cell;
     use std::time::Duration as std_Duration;
     use tokio::time;
@@ -697,9 +755,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let urls: Vec<RelayUrl> = super::relay_mode(&RelayChoice::Pinned).relay_map().urls();
         let ladder: BTreeSet<RelayUrl> = RENDEZVOUS_RELAY_LADDER_URLS.iter().cloned().collect();
+        let mapped: BTreeSet<RelayUrl> = urls.into_iter().collect();
         assert_eq!(
-            urls.into_iter().collect::<BTreeSet<_>>(),
-            ladder,
+            mapped, ladder,
             "the relay map of the default choice is the whole ladder"
         );
     }
@@ -731,17 +789,13 @@ mod tests {
             const ALPN: &[u8] = b"habilis-network/test-dial";
             let (relay_a, _server_a) = test_relay::spawn_plain().await.expect("a local relay");
             let (relay_b, _server_b) = test_relay::spawn_plain().await.expect("a local relay");
-            let producer = iroh::Endpoint::builder(presets::Minimal)
+            let producer_builder: Builder = iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(RelayMode::custom([relay_a.clone()]))
-                .alpns(vec![ALPN.to_vec()])
-                .bind()
-                .await
-                .expect("bind the producer");
-            let consumer = iroh::Endpoint::builder(presets::Minimal)
-                .relay_mode(RelayMode::custom([relay_b]))
-                .bind()
-                .await
-                .expect("bind the consumer");
+                .alpns(vec![ALPN.to_vec()]);
+            let producer = producer_builder.bind().await.expect("bind the producer");
+            let consumer_builder =
+                iroh::Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([relay_b]));
+            let consumer = consumer_builder.bind().await.expect("bind the consumer");
             producer.online().await;
             consumer.online().await;
             let accepting = producer.clone();
@@ -773,6 +827,158 @@ mod tests {
             .await
             .expect("the endpoint is online within 15 s");
         endpoint.addr().relay_urls().cloned().collect()
+    }
+
+    /// **A peer endpoint does not wait for the relay probes to bind.**
+    ///
+    /// The choice of the rung used to run before the bind, one probe of up to 10 s after the other.
+    /// With every rung of the ladder out of reach, the bind took the sum of the probes, and the
+    /// member was not ready for that long. The choice now runs after the bind.
+    #[test]
+    fn a_peer_endpoint_binds_at_once_when_every_rung_is_out_of_reach() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::net_report::reportgen",
+                "probe failed",
+            );
+            let lookups = lookups_on(vec![refused_rung(), refused_rung()]);
+
+            let built =
+                time::timeout(std_Duration::from_secs(3), build_peer_endpoint(&lookups)).await;
+
+            let endpoint = built
+                .expect("the bind returns within 3 s")
+                .expect("a peer endpoint");
+            endpoint.close().await;
+        });
+    }
+
+    /// **A rung that answers a plain request and refuses the relay connection does not hold the
+    /// endpoint.**
+    ///
+    /// The relay in front of a real one forwards until the flag turns on. Then it cuts the open
+    /// connections, answers a plain request with 204 and refuses the relay upgrade with 403. This
+    /// test does not tell the two liveness signals apart: on a plain HTTP rung the net report also
+    /// drops its preferred relay, so the case where only the status of the home relay sees the
+    /// failure is not built here.
+    #[test]
+    #[ignore = "60 s: waits for the endpoint to judge the rung dead and walk the ladder"]
+    fn a_peer_endpoint_leaves_a_rung_that_refuses_the_relay_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::net_report::reportgen",
+                "probe failed",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Failed to connect to relay server",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Lost connection to relay server",
+            );
+            let (real, _real_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (front, half_open) = spawn_switchable_relay(&real).await;
+            let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let endpoint = build_peer_endpoint(&lookups_on(vec![front.clone(), second.clone()]))
+                .await
+                .expect("a peer endpoint");
+            assert_eq!(
+                home_of(&endpoint).await,
+                vec![front],
+                "the first home relay"
+            );
+
+            half_open.store(true, Ordering::SeqCst);
+
+            let moved = time::timeout(
+                std_Duration::from_secs(90),
+                home_becomes(&endpoint, &second),
+            )
+            .await;
+            endpoint.close().await;
+            assert!(
+                moved.is_ok(),
+                "the endpoint stayed on a rung that refuses the relay connection"
+            );
+        });
+    }
+
+    /// A relay URL in front of `real`. While the flag is off, it forwards every connection. When
+    /// the flag turns on, it cuts the open connections, answers a plain request with 204 and
+    /// refuses the relay upgrade with 403.
+    async fn spawn_switchable_relay(real: &RelayUrl) -> (RelayUrl, Arc<AtomicBool>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, copy_bidirectional};
+        let host = real.host_str().expect("the relay URL has a host");
+        let real_port = real.port().expect("the relay URL has a port");
+        let upstream = format!("{host}:{real_port}");
+        let listener: AsyncListener = AsyncListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("a free loopback port");
+        let address = listener.local_addr().expect("the bound address");
+        let port: u16 = address.port();
+        // The flag is shared with the connection tasks of the fake relay and with the test.
+        let half_open = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&half_open);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else {
+                    return;
+                };
+                let flag = Arc::clone(&flag);
+                let upstream = upstream.clone();
+                tokio::spawn(async move {
+                    if !flag.load(Ordering::SeqCst) {
+                        let Ok(mut onward) = TcpStream::connect(&upstream).await else {
+                            return;
+                        };
+                        tokio::select! {
+                            _copied = copy_bidirectional(&mut stream, &mut onward) => {}
+                            () = async {
+                                while !flag.load(Ordering::SeqCst) {
+                                    time::sleep(std_Duration::from_millis(100)).await;
+                                }
+                            } => {}
+                        }
+                        return;
+                    }
+                    let mut request = [0_u8; 2048];
+                    let request_len = stream.read(&mut request).await.unwrap_or(0);
+                    let upgrade = request[..request_len]
+                        .windows(7)
+                        .any(|window| window.eq_ignore_ascii_case(b"upgrade"));
+                    let status = if upgrade {
+                        "403 Forbidden"
+                    } else {
+                        "204 No Content"
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    );
+                    drop(stream.write_all(reply.as_bytes()).await);
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/")
+            .parse()
+            .expect("a literal http URL parses");
+        (url, half_open)
+    }
+
+    /// Wait until the home relay of the endpoint is `rung`.
+    async fn home_becomes(endpoint: &iroh::Endpoint, rung: &RelayUrl) {
+        loop {
+            let home: Vec<RelayUrl> = endpoint.addr().relay_urls().cloned().collect();
+            if home == [rung.clone()] {
+                return;
+            }
+            time::sleep(std_Duration::from_millis(500)).await;
+        }
+    }
+
+    fn is_n0_relay(url: &RelayUrl) -> bool {
+        url.host_str()
+            .is_some_and(|host| host.ends_with(".relay.n0.iroh.link"))
     }
 
     /// How many HTTP connections a relay accepted. An endpoint that holds a relay in its map
@@ -819,9 +1025,7 @@ mod tests {
             endpoint.close().await;
 
             assert!(
-                home.iter().all(|url| url
-                    .host_str()
-                    .is_some_and(|host| host.ends_with(".relay.n0.iroh.link"))),
+                home.iter().all(is_n0_relay),
                 "the home relay is not an n0 relay: {home:?}"
             );
             assert!(udp_v4, "the net report has no udp_v4");
@@ -900,15 +1104,10 @@ mod tests {
 
             drop(first_server);
 
-            let moved = time::timeout(std_Duration::from_secs(120), async {
-                loop {
-                    let home: Vec<RelayUrl> = endpoint.addr().relay_urls().cloned().collect();
-                    if home == [second.clone()] {
-                        return;
-                    }
-                    time::sleep(std_Duration::from_millis(500)).await;
-                }
-            })
+            let moved = time::timeout(
+                std_Duration::from_secs(120),
+                home_becomes(&endpoint, &second),
+            )
             .await;
             endpoint.close().await;
             assert!(moved.is_ok(), "the endpoint never moved to the next rung");

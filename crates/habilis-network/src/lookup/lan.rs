@@ -134,7 +134,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
         // rustls crypto provider. The mDNS / DHT address-lookups are
         // wired **after** bind (below) — in iroh 1.0 they live in
         // companion crates and need the bound endpoint's id.
-        let (mode, followed) = super::relay::peer_relay_mode(&lookups.relay_lookup).await;
+        let (mode, followed) = super::relay::peer_relay_mode(&lookups.relay_lookup);
         homing = followed;
         Endpoint::builder(presets::Minimal).relay_mode(mode)
     };
