@@ -105,7 +105,7 @@ pub(in crate::transport::pool) struct PoolInner {
     /// Endpoints with a dial in flight, each with the receiver of the outcome that its dialer
     /// publishes, so that concurrent cold sends to one peer share one dial instead of racing their
     /// own: the first is the dialer, the others wait on the receiver. Read by
-    /// [`UnicastPool::send_registered`] and [`UnicastPool::send_batch_in_background`]. An inline dial
+    /// [`UnicastPool::send_registered`] and [`UnicastPool::dial_and_send_in_background`]. An inline dial
     /// through [`UnicastPool::warm_or_dial`] waits on the peer lock of `dial_locks` instead.
     pub(in crate::transport::pool) dialing:
         parking_lot::Mutex<HashMap<EndpointId, watch::Receiver<DialOutcome>>>,
