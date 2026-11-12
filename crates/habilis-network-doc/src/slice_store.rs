@@ -1998,11 +1998,11 @@ mod tests {
         );
     }
 
-    /// After many writes of many keys the store stays under its bounds: the author cap holds for the applied slices,
+    /// After many writes of many keys the store stays under its caps: the author cap holds for the applied slices,
     /// the pending set holds at most one frame for each author it can take, and the gone set holds at most `max_authors`
-    /// keys.
+    /// keys. The test counts entries, not bytes: the byte bound of one slice has its own tests.
     #[test]
-    fn memory_stays_under_the_bound_after_many_writes() {
+    fn the_store_stays_under_its_caps_after_many_writes() {
         let limits =
             SliceLimits::new(3072, Duration::from_secs(1), 20, 5).tombstone_ttl(Duration::ZERO);
         let mut store = small_store(limits);
