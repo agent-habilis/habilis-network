@@ -1028,7 +1028,8 @@ impl SliceStore {
     /// a key for each author the store can hold. A key that is already gone is moved to the end, so it takes one entry.
     /// An evicted key that is outside the roster is not applied again, as the engine holds its slice as pending until it
     /// joins. A quiet key that is evicted is not protected: the cap makes this need more than `max_authors` gone keys
-    /// inside the gone TTL.
+    /// inside the gone TTL. The case is a peer that missed the `Left` of a member but got its tombstone: the key is
+    /// quiet there, and only the gone set refuses a late old slice of it.
     fn keep_gone(&mut self, key: AuthorKey, now: Instant) {
         self.gone.retain(|(held, _)| *held != key);
         if self.gone.len() >= self.limits.max_authors {
