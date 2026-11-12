@@ -63,7 +63,7 @@ mod tests {
     use std::collections::HashMap;
     use std::env;
     use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tokio::net::UdpSocket;
     use tokio::time;
     /// A secret that is already in a wiped buffer (the blob salt, the token read off
@@ -766,11 +766,15 @@ mod tests {
         );
     }
 
-    /// A UDP relay on loopback that drops every datagram of the first socket that
-    /// talks to it, both ways, and forwards every later socket to `upstream`. It
-    /// stands for a path where the handshake of one consumer endpoint never
-    /// completes while a new endpoint gets through.
-    async fn proxy_that_drops_the_first_socket(upstream: SocketAddr) -> SocketAddr {
+    /// A UDP relay on loopback between a consumer and `upstream`. With `drop_first_socket` it drops
+    /// every datagram of the first socket that talks to it, both ways, and forwards every later
+    /// socket: a path where the handshake of one consumer endpoint never completes while a new
+    /// endpoint gets through. `delay` holds each datagram for that long in each direction.
+    async fn lossy_proxy(
+        upstream: SocketAddr,
+        drop_first_socket: bool,
+        delay: Duration,
+    ) -> SocketAddr {
         let front = UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
         let address = front.local_addr().expect("proxy address");
         // The reply tasks send through the front socket, so they share it with the loop.
@@ -783,7 +787,7 @@ mod tests {
                 let Ok((read, client)) = front.recv_from(&mut buffer).await else {
                     return;
                 };
-                if *dropped.get_or_insert(client) == client {
+                if drop_first_socket && *dropped.get_or_insert(client) == client {
                     continue;
                 }
                 let route = if let Some(route) = routes.get(&client) {
@@ -797,13 +801,22 @@ mod tests {
                     tokio::spawn(async move {
                         let mut reply_buffer = vec![0u8; 2048];
                         while let Ok(replied) = reply.recv(&mut reply_buffer).await {
-                            let _ = front.send_to(&reply_buffer[..replied], client).await;
+                            let datagram = reply_buffer[..replied].to_vec();
+                            let front = Arc::clone(&front);
+                            tokio::spawn(async move {
+                                time::sleep(delay).await;
+                                let _ = front.send_to(&datagram, client).await;
+                            });
                         }
                     });
                     routes.insert(client, Arc::clone(&route));
                     route
                 };
-                let _ = route.send(&buffer[..read]).await;
+                let datagram = buffer[..read].to_vec();
+                tokio::spawn(async move {
+                    time::sleep(delay).await;
+                    let _ = route.send(&datagram).await;
+                });
             }
         });
         address
@@ -841,7 +854,7 @@ mod tests {
                     .next()
                     .copied()
                     .expect("a loopback ticket carries one IP address");
-                let proxy = proxy_that_drops_the_first_socket(upstream).await;
+                let proxy = lossy_proxy(upstream, true, Duration::ZERO).await;
                 ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
                 let mut out = Vec::new();
                 let fetched =
@@ -853,6 +866,79 @@ mod tests {
                 assert_eq!(
                     out, b"bytes behind a stalled path",
                     "the fetch returns the registered bytes"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A fetch that the caller drops closes the endpoint that it bound.**
+    ///
+    /// `Endpoint::close` is async, so a dropped future cannot await it. A caller that cancels a
+    /// fetch (a deadline, a superseded attempt) must not leave the endpoint open: the task that
+    /// follows its home relay holds a clone of it for the life of the process.
+    #[test]
+    fn a_dropped_fetch_closes_its_endpoint() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes that are never fetched");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-dropped-fetch"))
+                    .await
+                    .expect("register");
+                let upstream = ticket
+                    .address
+                    .ip_addrs()
+                    .next()
+                    .copied()
+                    .expect("a loopback ticket carries one IP address");
+                let proxy = lossy_proxy(upstream, true, Duration::ZERO).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                // The test keeps a clone of each endpoint that the fetch binds.
+                let bound = Arc::new(Mutex::new(Vec::new()));
+                let build = {
+                    let bound = Arc::clone(&bound);
+                    move || {
+                        let bound = Arc::clone(&bound);
+                        async move {
+                            let endpoint =
+                                lookup::build_peer_endpoint(&LookupOpts::loopback()).await?;
+                            bound.lock().expect("lock").push(endpoint.clone());
+                            Ok::<_, anyhow::Error>(endpoint)
+                        }
+                    }
+                };
+                let mut out = Vec::new();
+                let cancelled = time::timeout(
+                    Duration::from_secs(1),
+                    super::consume::fetch_building(&ticket, &mut out, &ticket.secret, build),
+                )
+                .await;
+                assert!(
+                    cancelled.is_err(),
+                    "the fetch still waits for the handshake when the caller drops it"
+                );
+                let endpoint = bound.lock().expect("lock")[0].clone();
+                for _ in 0..30 {
+                    if endpoint.is_closed() {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(100)).await;
+                }
+                assert!(
+                    endpoint.is_closed(),
+                    "the endpoint that a dropped fetch bound is closed within 3 s"
                 );
                 fs::remove_file(&src).ok();
                 server.shutdown().await;

@@ -6,11 +6,14 @@
 
 use std::time::{Duration, Instant};
 
+use std::future::Future;
+
 use anyhow::{Result, anyhow, bail};
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
 use sha2::Sha256;
 use tokio::io::AsyncWrite;
+use tokio::runtime::Handle;
 
 use crate::lookup::{add_peer_addr, address_book, build_peer_endpoint};
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret};
@@ -118,12 +121,63 @@ async fn fetch_with_token<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    // Every attempt binds a new endpoint: a retry from the endpoint that stalled stalls again.
+    let build = || async { Ok(build_peer_endpoint(&ticket.lookups).await?) };
+    fetch_building(ticket, out, token, build).await
+}
+
+/// An endpoint that closes itself when the fetch future is dropped before it closes the
+/// endpoint. `Endpoint::close` is async, so the drop spawns it. Without this a cancelled fetch
+/// leaks the endpoint: the task that follows its home relay holds a clone for the life of the
+/// process.
+struct CloseOnDrop {
+    endpoint: Endpoint,
+    closed: bool,
+}
+
+impl CloseOnDrop {
+    const fn new(endpoint: Endpoint) -> Self {
+        Self {
+            endpoint,
+            closed: false,
+        }
+    }
+
+    async fn close(mut self) {
+        self.endpoint.close().await;
+        self.closed = true;
+    }
+}
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        if !self.closed
+            && let Ok(handle) = Handle::try_current()
+        {
+            let endpoint = self.endpoint.clone();
+            handle.spawn(async move { endpoint.close().await });
+        }
+    }
+}
+
+/// [`fetch_with_token`] with the endpoint builder as a parameter, so that a test sees the
+/// endpoints it binds. Every attempt binds a new endpoint: a retry from the endpoint that
+/// stalled stalls again.
+pub(super) async fn fetch_building<Writer, Build, Built>(
+    ticket: &BlobTicket,
+    out: &mut Writer,
+    token: &TicketSecret,
+    build: Build,
+) -> Result<()>
+where
+    Writer: AsyncWrite + Unpin,
+    Build: Fn() -> Built,
+    Built: Future<Output = Result<Endpoint>>,
+{
     let started = Instant::now();
     let (endpoint, connection) = loop {
-        let endpoint = build_peer_endpoint(&ticket.lookups).await?;
-        add_peer_addr(&address_book(&endpoint), ticket.address.clone());
-        match dial_once(&endpoint, ticket).await {
+        let endpoint = CloseOnDrop::new(build().await?);
+        add_peer_addr(&address_book(&endpoint.endpoint), ticket.address.clone());
+        match dial_once(&endpoint.endpoint, ticket).await {
             Ok(connection) => break (endpoint, connection),
             Err(error) => {
                 endpoint.close().await;
