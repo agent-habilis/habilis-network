@@ -36,5 +36,5 @@ pub(crate) use regraft::{refill_isolated, regraft_due};
 pub(crate) use step::step;
 pub(crate) use watchers::{
     ensure_watchers, mark_proven, nudge_climbing_pairs, nudge_known, nudge_webrtc_riders,
-    on_path_change, prove_routed_pairs,
+    on_path_change, open_lane_after_proof, prove_addressee, prove_routed_pairs,
 };

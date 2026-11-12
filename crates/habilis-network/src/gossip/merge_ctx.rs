@@ -20,7 +20,7 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 use crate::logging::messages;
 use crate::protocol::peer_addr_error;
 use crate::transport;
-use crate::transport::{proven_endpoints, webrtc};
+use crate::transport::{probe, proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
 use n0_future::task;
 use n0_future::time::Instant as n0future_Instant;
@@ -112,6 +112,9 @@ pub async fn send_app(
         // Directed vs. broadcast is decided inside `deliver` from the frame's
         // `to` — the same routing the application's send path rides. A directed
         // frame with no path comes back as an error for the caller to act on.
+        if let Some(peer) = probe::prove_addressee(state, &frame) {
+            probe::open_lane_after_proof(state, context, peer);
+        }
         let outcome = transport::deliver(&frame, bytes, state, context.sender).await;
         if let Err(error @ transport::SendError::Held { .. }) = &outcome {
             // The caller retries; the lane session is asked now, so the retry can find it.

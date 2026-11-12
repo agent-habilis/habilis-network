@@ -15,6 +15,7 @@ use iroh::EndpointId;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
+use crate::protocol::messages::{Verified, sole_addressee};
 use crate::transport::webrtc;
 use crate::util::clock::Instant;
 
@@ -366,8 +367,42 @@ pub(crate) fn proven_by_route(
     proven
 }
 
-/// Mark the pairs that [`proven_by_route`] returns, and flush what waited for them. Runs on the
-/// sweep tick.
+/// Mark the pairs that [`proven_by_route`] returns among `peers`, and give them back.
+pub(crate) fn prove_by_route(
+    state: &mut EventLoopState,
+    peers: impl IntoIterator<Item = EndpointId>,
+) -> Vec<EndpointId> {
+    let proven = proven_by_route(peers, &state.direct, &state.path_watchers, |peer| {
+        state.pair_path_kind(peer)
+    });
+    for peer in &proven {
+        tracing::info!(target: transport::LOG_TARGET, %peer, "pair is off the relay on a multihop route; proven");
+        mark_proven(state, *peer);
+    }
+    proven
+}
+
+/// Flush what waited for the proof of `peer`. The proof must not remove the trigger of the session:
+/// a held frame used to open it, and a pair that is proven is no longer held. A multihop route has
+/// no lane of its own, so the pair keeps racing for one, as the watcher's report of a multihop path
+/// does.
+pub(crate) fn open_lane_after_proof(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    peer: EndpointId,
+) {
+    state.want_lane_session(peer, Instant::now());
+    let has_session = state
+        .webrtc
+        .as_ref()
+        .is_some_and(|handle| handle.has_session(&peer));
+    if !has_session && let Some(address) = state.member_address_of(peer) {
+        webrtc::negotiate_session::negotiate_session(state, context, peer, address);
+    }
+}
+
+/// Prove the pairs that a multihop route proves, and flush what waited for them. Runs on the sweep
+/// tick. A send to one peer runs the same rule for its addressee ([`prove_addressee`]).
 pub(crate) fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let members = state.member_addresses();
     let peers: Vec<EndpointId> = members
@@ -375,22 +410,17 @@ pub(crate) fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCt
         .map(|address| address.id)
         .filter(|id| *id != context.rendezvous_id)
         .collect();
-    let proven = proven_by_route(peers, &state.direct, &state.path_watchers, |peer| {
-        state.pair_path_kind(peer)
-    });
-    for peer in proven {
-        tracing::info!(target: transport::LOG_TARGET, %peer, "pair is off the relay on a multihop route; proven");
-        mark_proven(state, peer);
-        // The proof must not remove the trigger of the session: a held frame used to open it, and a
-        // pair that is proven is no longer held. A multihop route has no lane of its own, so the
-        // pair keeps racing for one, as the watcher's report of a multihop path does.
-        state.want_lane_session(peer, Instant::now());
-        let has_session = state
-            .webrtc
-            .as_ref()
-            .is_some_and(|handle| handle.has_session(&peer));
-        if !has_session && let Some(address) = state.member_address_of(peer) {
-            webrtc::negotiate_session::negotiate_session(state, context, peer, address);
-        }
+    for peer in prove_by_route(state, peers) {
+        open_lane_after_proof(state, context, peer);
     }
+}
+
+/// Prove the addressee of a directed `frame` by the same rule as the sweep, and give it back when it
+/// is proven now. The sweep runs every 10 s, and a pair with no path watcher (the higher id of a
+/// pair) has no other source of the proof, so a send would be held for up to that time though
+/// the pair rides a multihop route.
+pub(crate) fn prove_addressee(state: &mut EventLoopState, frame: &Verified) -> Option<EndpointId> {
+    let key = sole_addressee(&frame.kind)?;
+    let peer = transport::directed_endpoint(key, state)?;
+    prove_by_route(state, [peer]).pop()
 }

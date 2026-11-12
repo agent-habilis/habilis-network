@@ -2316,6 +2316,50 @@ mod first_contact_tests {
         });
     }
 
+    /// A meshed send to a peer with no path watcher, whose selected path is a multihop route, is not
+    /// held: the send proves the peer by its route, and does not wait for the sweep tick. Only the
+    /// lower id of a pair has a watcher, so the higher id had no other source of the proof.
+    #[test]
+    fn a_meshed_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_not_held() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = Node::spawn().await;
+                let context = node.context();
+                let mut state = fresh_state();
+                state.standing.insert(Standing::Meshed);
+                state.relay_transport = PayloadPath::DirectOnly;
+                let (bob, eid) = (test_key("bob"), endpoint_id(7));
+                state.retain_refused_endpoint(bob, iroh::EndpointAddr::new(eid));
+                state.direct.insert(eid, DirectState::RelayOnly);
+                state
+                    .path_kinds
+                    .insert(eid, transport::probe::PathKind::Multihop);
+                let frame = Message::new_pong(
+                    &node.mesh,
+                    &node.author,
+                    bob,
+                    &protocol::MessageId::random(),
+                )
+                .sign(&Identity::generate());
+
+                let sent = ops::send_app(&mut state, &context, frame).await;
+
+                assert!(
+                    !matches!(sent, Err(transport::SendError::Held { .. })),
+                    "the send to a pair on a multihop route was held: {sent:?}"
+                );
+                assert_eq!(
+                    state.direct.get(&eid),
+                    Some(&DirectState::Direct),
+                    "the send did not prove the pair by its route"
+                );
+                node.endpoint.close().await;
+            },
+        );
+    }
+
     /// A meshed send to a peer whose direct path is proven goes by unicast at once. The peer has no
     /// gossip link in this test, so nothing waits for one: the frame reaches a real acceptor on the
     /// peer's unicast endpoint.

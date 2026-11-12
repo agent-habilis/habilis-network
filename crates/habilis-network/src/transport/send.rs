@@ -13,6 +13,7 @@ mod route;
 pub(crate) use deliver::resolve;
 pub(crate) use deliver::{can_unicast, lane_for, note_held, send_best_effort, send_dialing_back};
 pub use deliver::{deliver, deliver_in_background};
+pub(crate) use route::directed_endpoint;
 #[cfg(test)]
 use route::{Route, route};
 mod lane;
@@ -1097,6 +1098,77 @@ mod tests {
             route(&directed_msg(), &state),
             Route::Unicast(bob),
             "the held directed frame is delivered once a direct path is proven"
+        );
+    }
+
+    /// **A peer with no path watcher is proven by its multihop route when a send needs it.**
+    ///
+    /// Only the lower id of a pair has a path watcher. The higher id got `Direct` back only from
+    /// the sweep tick, so for up to one sweep its directed sends were held though the pair rode a
+    /// multihop route. The proof of the addressee runs at the send now.
+    #[test]
+    fn a_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_proven_and_not_held() {
+        use crate::daemon::state::DirectState;
+        use crate::transport::probe::{PathKind, prove_addressee};
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_bob();
+        state.relay_transport = PayloadPath::DirectOnly;
+        state.direct.insert(bob, DirectState::RelayOnly);
+        state.path_kinds.insert(bob, PathKind::Multihop);
+        let frame = directed_msg();
+        assert_eq!(
+            route(&frame, &state),
+            Route::Held(bob),
+            "the premise: before the proof the send is held"
+        );
+
+        assert_eq!(
+            prove_addressee(&mut state, &frame),
+            Some(bob),
+            "the route proves the unwatched peer"
+        );
+
+        assert_eq!(
+            state.direct.get(&bob),
+            Some(&DirectState::Direct),
+            "the proof marks the peer direct"
+        );
+        assert_eq!(
+            route(&frame, &state),
+            Route::Unicast(bob),
+            "the proven pair takes unicast"
+        );
+    }
+
+    /// **A peer with a path watcher is left to its watcher.** The watcher is the only writer of the
+    /// proof of a watched peer, and it also revokes it.
+    #[test]
+    fn a_directed_send_to_a_watched_peer_on_a_multihop_route_stays_held_for_its_watcher() {
+        use crate::daemon::state::DirectState;
+        use crate::transport::probe::{PathKind, prove_addressee};
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_bob();
+        state.relay_transport = PayloadPath::DirectOnly;
+        state.direct.insert(bob, DirectState::RelayOnly);
+        state.path_kinds.insert(bob, PathKind::Multihop);
+        state.path_watchers.insert(bob, None);
+        let frame = directed_msg();
+
+        assert_eq!(
+            prove_addressee(&mut state, &frame),
+            None,
+            "the route proves no watched peer"
+        );
+
+        assert_eq!(
+            state.direct.get(&bob),
+            Some(&DirectState::RelayOnly),
+            "the watcher is the only writer of the proof"
+        );
+        assert_eq!(
+            route(&frame, &state),
+            Route::Held(bob),
+            "a watched peer stays held until its watcher proves it"
         );
     }
 

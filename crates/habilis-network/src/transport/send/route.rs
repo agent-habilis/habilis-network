@@ -47,7 +47,7 @@ pub(super) fn held(eid: EndpointId, state: &EventLoopState) -> bool {
 /// endpoint for, and for the rendezvous pseudo-node (never a directed target). The sources are
 /// the ones of [`EventLoopState::address_of`]. Reachability is left to iroh's connect (direct or
 /// multihop).
-pub(super) fn directed_endpoint(key: &AuthorKey, state: &EventLoopState) -> Option<EndpointId> {
+pub(crate) fn directed_endpoint(key: &AuthorKey, state: &EventLoopState) -> Option<EndpointId> {
     let eid = state.address_of(key)?.id;
     if state.rendezvous_id == Some(eid) {
         return None;
