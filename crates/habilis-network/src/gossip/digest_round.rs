@@ -356,6 +356,7 @@ pub(crate) async fn on_page(
 #[cfg(test)]
 mod tests {
     use super::DigestRound;
+    use crate::protocol::MeshId;
     use crate::testing;
     use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
     use habilis_network_protocol::{AuthorKey, Channel, ContentHash};
@@ -644,23 +645,62 @@ mod tests {
         );
     }
 
+    /// The id of a real mesh with a 1-char name and the loopback config: the shortest id that a mesh makes.
+    fn shortest_mesh_id() -> MeshId {
+        use crate::protocol::{Mesh, MeshConfig, MeshName, Seed};
+
+        let name = MeshName::try_new("a").expect("a 1-char name");
+        let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback config");
+        let mesh = Mesh::try_new(Seed::new([4u8; 32]), name, config).expect("a mesh");
+        MeshId::try_new(&mesh.to_string()).expect("the id of a real mesh")
+    }
+
+    /// The longest mesh id that a real mesh makes, from a 32-char name and a long relay URL: about 511 bytes.
+    fn longest_mesh_id() -> MeshId {
+        use crate::protocol::{Lookup, Mesh, MeshConfig, MeshName, RelayLadder, Seed};
+
+        let name = MeshName::try_new(&"a".repeat(32)).expect("a 32-char name");
+        let mut best = None;
+        for host in 1..400 {
+            let url = format!("https://{}.example.com/", "r".repeat(host));
+            let parsed: Result<RelayLadder, _> = url.parse();
+            let Ok(ladder) = parsed else {
+                continue;
+            };
+            let Ok(config) = MeshConfig::resolve(&[Lookup::Relay], Some(ladder), &[]) else {
+                continue;
+            };
+            let Ok(mesh) = Mesh::try_new(Seed::new([4u8; 32]), name.clone(), config) else {
+                continue;
+            };
+            let text = mesh.to_string();
+            if text.len() > 512 {
+                break;
+            }
+            if let Ok(id) = MeshId::try_new(&text) {
+                best = Some(id);
+            }
+        }
+        best.expect("a long valid mesh id")
+    }
+
     /// The pull of one full page fits one frame at the longest mesh id and nickname: the most keys that a holder can
-    /// list on a page, in the signed frame of the worst session, stay under the wire limit.
+    /// list on a page (the rows of the shortest real mesh id), in the signed frame of the worst session, serialize
+    /// within the wire limit. `serialize` is the check: it refuses a frame over the limit.
     #[test]
     fn a_pull_of_one_full_page_fits_one_frame_at_the_worst_overhead() {
         use crate::protocol::identity::Identity;
-        use crate::protocol::{MeshId, Message, MessageBody, MessageKind, Nickname};
+        use crate::protocol::{Message, MessageBody, MessageKind, Nickname};
         use habilis_network_doc::{SliceLimits, SliceStore};
-        use habilis_network_util::consts::MAX_MESSAGE_SIZE;
 
-        let shortest =
-            habilis_network_doc::page_frame_overhead(&MeshId::from("a"), &Nickname::from("a"));
+        let shortest_overhead =
+            habilis_network_doc::page_frame_overhead(&shortest_mesh_id(), &Nickname::from("a"));
         let store = SliceStore::new(
             Channel::State,
             SliceLimits::default(),
             habilis_network_doc::worst_frame_overhead(),
         )
-        .with_page_overhead(shortest);
+        .with_page_overhead(shortest_overhead);
         let rows = store.page_rows();
         let keys: Vec<AuthorKey> = (0..rows)
             .map(|index| {
@@ -669,7 +709,13 @@ mod tests {
                 AuthorKey::from(bytes)
             })
             .collect();
-        let mesh = MeshId::from("1".repeat(511).as_str());
+        let count = keys.len();
+        let mesh = longest_mesh_id();
+        assert!(
+            mesh.as_str().len() >= 500,
+            "the mesh id is a real longest id, not {} bytes",
+            mesh.as_str().len()
+        );
         let nickname = Nickname::from("😀".repeat(32).as_str());
         let pull = MessageKind::SlicePull {
             to: AuthorKey::from([0xff; 32]),
@@ -678,14 +724,11 @@ mod tests {
         };
         let signed = Message::new_frame(&mesh, &nickname, pull, MessageBody::from("{}"))
             .sign(&Identity::generate());
-        let frame_len: usize = signed
-            .serialize()
-            .expect("a pull frame serializes")
-            .into_bytes()
-            .len();
+        let frame = signed.serialize();
         assert!(
-            frame_len <= MAX_MESSAGE_SIZE,
-            "a pull of {rows} keys is {frame_len} bytes, over the wire limit of {MAX_MESSAGE_SIZE}"
+            frame.is_ok(),
+            "a pull of {count} keys does not fit one frame: {:?}",
+            frame.as_ref().err()
         );
     }
 
