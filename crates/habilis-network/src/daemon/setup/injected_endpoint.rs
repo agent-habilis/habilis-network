@@ -138,14 +138,14 @@ impl InjectedEndpoint {
     /// rule of [`InjectedEndpoint::bind`]: the transports and the connection hook
     /// are installed before the bind, and a bound `Endpoint` takes neither.
     #[must_use]
-    pub const fn endpoint(&self) -> &Endpoint {
+    pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
     }
 
     /// The `WebRTC` handle that the endpoint was bound with, for the caller's own
     /// signaling path (the JSEP offer and answer of a data channel).
     #[must_use]
-    pub const fn webrtc(&self) -> &habilis_network_iroh_webrtc_transport::WebRtcHandle {
+    pub fn webrtc(&self) -> &habilis_network_iroh_webrtc_transport::WebRtcHandle {
         &self.webrtc
     }
 }
