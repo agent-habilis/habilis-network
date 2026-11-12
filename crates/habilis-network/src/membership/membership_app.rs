@@ -885,11 +885,11 @@ impl MembershipApp {
                     let outcome = handle.await.unwrap_or_else(|_| {
                         Err(anyhow::anyhow!("the send ended without an outcome"))
                     });
-                    let _ = reply.send(outcome.map_err(|error| error.to_string()));
+                    let _ = reply.send(outcome.map_err(|error| format!("{error:#}")));
                 });
             }
             Err(error) => {
-                let _ = reply.send(Err(error.to_string()));
+                let _ = reply.send(Err(format!("{error:#}")));
             }
         }
         true

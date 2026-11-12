@@ -1,7 +1,7 @@
 //! The cross-plane send decision: deliver a message on the plane its addressing chooses.
 
 use crate::daemon::state::Standing;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use iroh::EndpointId;
 use tokio::sync::oneshot;
 
@@ -24,8 +24,8 @@ use n0_future::task;
 ///
 /// It returns at once: it never waits on a dial, on the wait for a direct path, or on a write.
 /// A broadcast, a frame held for a direct path, a refused frame, and a send to a warm connection
-/// give their verdict here. A directed message to a cold peer is sent by a task, and the verdict
-/// comes through [`Delivered::Pending`].
+/// give their verdict here. A directed message to a cold peer, or to a warm peer whose connection
+/// reads relay, is sent by a task, and the verdict comes through [`Delivered::Pending`].
 ///
 /// # Errors
 /// Propagates a gossip broadcast failure, a refused path, or a cold peer on the dial-failure
@@ -114,18 +114,22 @@ pub(crate) fn resolve(
 /// - the addressee has no known endpoint yet, or advertises the rendezvous
 ///   pseudo-node. The first can change once its `PeerInfo` arrives. The
 ///   second never does, so a retry budget must not rely on it.
-/// - its only path is a relay that carries no payload. A connection dialed
-///   moments ago reads the same way until its path is selected, for up to
-///   the path-select budget.
+/// - it is held for a direct path: the peer is not proven direct and the
+///   relay carries no payload.
 /// - it is cold and on the per-peer dial-failure cooldown.
 /// - the gossip broadcast failed.
 ///
 /// A `false` send is not queued: the caller tries again later.
 ///
 /// `true` does not prove delivery: a background dial or write can still fail,
-/// and is only logged. It is also optimistic in one case: an inline dial to
-/// the same peer can fail between the cooldown check and the background dial,
-/// and the background dial then stops on the new cooldown.
+/// and is only logged. A warm connection whose selected path reads relay gives
+/// `true` too. The send then waits on a task for up to the path-select budget,
+/// and if no direct path comes, it fails with the relay refusal and is only
+/// logged. The caller gets no `false` and must not rely on a retry.
+///
+/// `true` is also optimistic in one case: an inline dial to the same peer can
+/// fail between the cooldown check and the background dial, and the background
+/// dial then stops on the new cooldown.
 ///
 /// A background dial can outlive its peer's `Left`. If the peer rejoins at a
 /// new address while a stale dial is still running, that dial's failure puts
@@ -215,16 +219,18 @@ fn directly_meshed(key: &AuthorKey, state: &EventLoopState) -> bool {
 /// the write. A connection that reads relay can be a young one whose direct path is still
 /// forming, so the task waits for the path like the dial of a cold peer and shares that wait with
 /// the sends that follow. The error of the dial or of the wait is the send's outcome, through the
-/// handle — there is no fallback. A peer on the dial-failure cooldown is refused at once.
+/// handle — there is no fallback. A cold peer on the dial-failure cooldown is refused at once. A
+/// warm connection needs no dial, so the cooldown does not apply to it.
 pub(super) async fn send_unicast(
     eid: EndpointId,
     bytes: WireFrame,
     pool: &UnicastPool,
 ) -> Result<Delivered> {
-    match pool.send_if_warm(eid, bytes.clone().into_bytes()).await {
+    let warm = pool.send_if_warm(eid, bytes.clone().into_bytes()).await;
+    match warm {
         WarmSend::Sent => Ok(Delivered::Done),
         WarmSend::Cold | WarmSend::Refused => {
-            if pool.is_cooling(eid).await {
+            if warm == WarmSend::Cold && pool.is_cooling(eid).await {
                 return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
                     .context(format!("unicast dial to {eid} failed")));
             }
@@ -237,7 +243,7 @@ pub(super) async fn send_unicast(
                 let sent = pool
                     .send_registered(registration, eid, bytes.into_bytes())
                     .await
-                    .map_err(|error| anyhow::anyhow!("unicast dial to {eid} failed: {error:#}"));
+                    .with_context(|| format!("unicast dial to {eid} failed"));
                 if let Err(Err(error)) = outcome_tx.send(sent) {
                     tracing::debug!(target: "habilis_network::gossip", %eid, %error, "background send not delivered");
                 }

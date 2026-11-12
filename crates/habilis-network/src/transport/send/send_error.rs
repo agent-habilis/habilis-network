@@ -66,7 +66,17 @@ impl fmt::Display for SendError {
             Self::Stopped => f.write_str("mesh event loop has stopped"),
             Self::EventLoop(_) => f.write_str("the mesh event loop failed"),
             Self::State(error) => fmt::Display::fmt(error, f),
-            Self::Internal(error) => fmt::Display::fmt(error.as_ref(), f),
+            Self::Internal(error) => {
+                write!(f, "{error}")?;
+                if f.alternate() {
+                    let mut cause = error.source();
+                    while let Some(inner) = cause {
+                        write!(f, ": {inner}")?;
+                        cause = inner.source();
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }

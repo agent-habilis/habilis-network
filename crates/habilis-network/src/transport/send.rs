@@ -592,12 +592,10 @@ mod tests {
     ) {
         let (relay_url, relay) = test_relay::spawn_plain().await.expect("a local relay");
         let bind = || async {
-            iroh::Endpoint::builder(presets::Minimal)
+            let builder = iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::custom([relay_url.clone()]))
-                .clear_ip_transports()
-                .bind()
-                .await
-                .expect("bind an endpoint on the relay")
+                .clear_ip_transports();
+            builder.bind().await.expect("bind an endpoint on the relay")
         };
         let (frames, received) = mpsc::unbounded_channel();
         let server = bind().await;
@@ -649,20 +647,94 @@ mod tests {
                     handles.push(handle);
                 }
                 assert!(pool.is_dialing(server_id), "the wait is registered");
-                // The budget to select a path (5 s) and one second more.
-                for handle in handles {
-                    let ended = tokio_time::timeout(std_Duration::from_secs(6), handle)
-                        .await
-                        .expect("the send ends within one path budget")
-                        .expect("the task reports");
-                    let error = ended.expect_err("no direct path comes");
-                    assert!(
-                        format!("{error:#}").contains(transport::RELAY_REFUSED),
-                        "the refusal names the relay: {error:#}"
-                    );
-                }
+                // The budget to select a path (5 s) and one second more, for both sends together.
+                tokio_time::timeout(std_Duration::from_secs(6), async {
+                    for handle in handles {
+                        let ended = handle.await.expect("the task reports");
+                        let error = ended.expect_err("no direct path comes");
+                        assert!(
+                            format!("{error:#}").contains(transport::RELAY_REFUSED),
+                            "the refusal names the relay: {error:#}"
+                        );
+                    }
+                })
+                .await
+                .expect("both sends end within one path budget");
                 assert_eq!(pool.dial_attempts(), 1, "the two sends share one wait");
                 assert!(received.try_recv().is_err(), "no frame went over the relay");
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
+    }
+
+    /// **A send to a peer on the dial-failure cooldown fails with the cooldown text.**
+    ///
+    /// The refusal carries the context "unicast dial to X failed" and the cause below it. A caller
+    /// that prints only the outer message reads no reason, so the text of the whole chain must
+    /// hold the cooldown, also after the error became a `SendError`.
+    #[test]
+    fn a_send_to_a_peer_on_the_dial_failure_cooldown_fails_with_the_cooldown_text() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (pool, client, server_id, _received, router, _relay) = relay_only_pair().await;
+                pool.note_dial_failure(server_id).await;
+
+                let frame = WireFrame::fixture_raw(bytes::Bytes::from_static(b"hello"));
+                let error = super::deliver::send_unicast(server_id, frame, &pool)
+                    .await
+                    .expect_err("the cooldown refuses the send at once");
+                assert!(
+                    format!("{error:#}").contains(transport::pool::COOLDOWN_REFUSED),
+                    "the chain names the cooldown: {error:#}"
+                );
+                let error = super::SendError::internal(error);
+                assert!(
+                    format!("{error:#}").contains(transport::pool::COOLDOWN_REFUSED),
+                    "a SendError keeps the cooldown text: {error:#}"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
+    }
+
+    /// **A warm connection that reads relay is waited on, also on the dial-failure cooldown.**
+    ///
+    /// The cooldown guards a new dial. A warm connection needs none, and its path can still be
+    /// forming, so the send waits on it and ends with the relay refusal, not the cooldown one.
+    #[test]
+    fn a_warm_connection_that_reads_relay_is_waited_on_also_on_the_dial_failure_cooldown() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (pool, client, server_id, _received, router, _relay) = relay_only_pair().await;
+                pool.probe_connection(server_id)
+                    .await
+                    .expect("pool the relay connection");
+                pool.note_dial_failure(server_id).await;
+
+                let frame = WireFrame::fixture_raw(bytes::Bytes::from_static(b"hello"));
+                let delivered = super::deliver::send_unicast(server_id, frame, &pool)
+                    .await
+                    .expect("a warm connection is not refused by the cooldown");
+                let Delivered::Pending(handle) = delivered else {
+                    panic!("the send waits for a path on a task of its own");
+                };
+                let waited = tokio_time::timeout(std_Duration::from_secs(6), handle)
+                    .await
+                    .expect("the send ends within one path budget");
+                let ended = waited.expect("the task reports");
+                let error = ended.expect_err("no direct path comes");
+                assert!(
+                    format!("{error:#}").contains(transport::RELAY_REFUSED),
+                    "the refusal names the relay: {error:#}"
+                );
 
                 router.shutdown().await.expect("shutdown");
                 client.close().await;

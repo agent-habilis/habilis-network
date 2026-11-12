@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{
-    self, Blocking, Inspect, InspectTest, Linking, Membership, MessagingTest, Request,
+    self, Blocking, Inspect, InspectTest, Linking, Membership, Messaging, MessagingTest, Request,
 };
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -34,6 +34,10 @@ const FORGET_TRIES: usize = 20;
 /// How long iroh may take to re-run path selection after the block. It reads the path list on its
 /// path-stat updates, which come within a few seconds.
 const BLOCK_TAKES_EFFECT: Duration = Duration::from_secs(30);
+/// The send of the warm test must still wait this long after it started, or it was refused before the wait.
+const WAIT_PREMISE: Duration = Duration::from_millis(500);
+/// The path-select budget of a send (5 s) and a margin.
+const PATH_BUDGET: Duration = Duration::from_secs(8);
 
 struct Member {
     membership: Membership,
@@ -77,6 +81,55 @@ impl Member {
             .await
             .unwrap_or_default();
         json.contains(&format!("\"{nick}\""))
+    }
+
+    async fn until_knows(&self, nick: &str) {
+        let formation_ends = Instant::now() + FORMATION;
+        while !self.knows(nick).await {
+            assert!(
+                Instant::now() < formation_ends,
+                "the member did not learn {nick} within {FORMATION:?}"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// Cut IP from this member to `peer`, and wait until the selected path to it is the relay.
+    async fn cut_ip_to(&self, nick: &str, peer: &Self) {
+        self.block_ip_to(peer.membership.node.bound_ports().to_vec())
+            .await;
+        // `BlockIpTo` returns before iroh has re-run path selection, and a connection that is opened
+        // before it does rides the IP path that iroh still holds. Wait until the path to the peer has
+        // left UDP, so that a connection to it reads relay.
+        let block_ends = Instant::now() + BLOCK_TAKES_EFFECT;
+        while self.selected_rung(nick).await != Some("relay") {
+            assert!(
+                Instant::now() < block_ends,
+                "the path to {nick} did not leave UDP within {BLOCK_TAKES_EFFECT:?}"
+            );
+            time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// A directed send over the normal path, the warm fast path included.
+    async fn send(&self, to: &str, text: &str) -> Result<(), String> {
+        let to = membership::parse_to(Some(to)).expect("a nickname");
+        let body = membership::msg_body(text).expect("fits one frame");
+        self.membership
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
+            .await
+            .expect("the loop answers")
+    }
+
+    /// The texts of the directed messages that arrived since the last call.
+    fn arrived(&mut self) -> Vec<String> {
+        let mut texts = Vec::new();
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            if message.directed {
+                texts.push(message.text);
+            }
+        }
+        texts
     }
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
@@ -138,28 +191,8 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
 
-        let formation_ends = Instant::now() + FORMATION;
-        while !alice.knows("bob").await {
-            assert!(
-                Instant::now() < formation_ends,
-                "alice did not learn bob within {FORMATION:?}"
-            );
-            time::sleep(Duration::from_millis(250)).await;
-        }
-        alice
-            .block_ip_to(bob.membership.node.bound_ports().to_vec())
-            .await;
-        // `BlockIpTo` returns before iroh has re-run path selection, and a connection that is opened
-        // before it does rides the IP path that iroh still holds. Wait until the path to bob has left
-        // UDP, so that a new connection to bob finds no direct path.
-        let block_ends = Instant::now() + BLOCK_TAKES_EFFECT;
-        while alice.selected_rung("bob").await != Some("relay") {
-            assert!(
-                Instant::now() < block_ends,
-                "the path of alice to bob did not leave UDP within {BLOCK_TAKES_EFFECT:?}"
-            );
-            time::sleep(Duration::from_millis(100)).await;
-        }
+        alice.until_knows("bob").await;
+        alice.cut_ip_to("bob", &bob).await;
 
         // Forget the connection to bob, so that the send dials in the common case. A probe of the direct
         // path can still pool one again before the send, so the send is `SendCold`: it never takes the
@@ -202,5 +235,72 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
             local_done < ASK_AFTER + LOCAL_CEILING,
             "alice answered the local request at {local_done:?}, more than {LOCAL_CEILING:?} after it was asked"
         );
+    });
+}
+
+/// **A directed send on a warm connection that reads relay waits for the path that comes.**
+///
+/// A pooled connection whose selected path is the relay is not a refusal: its direct path can
+/// still be forming. The send waits on a task of its own, so the node serves other requests, and
+/// when IP is back before the budget ends, the frame goes out once. The test cuts IP after a
+/// first message pooled the connection, sends while the path reads relay, and gives IP back.
+#[test]
+fn a_directed_send_on_a_warm_connection_that_reads_relay_waits_and_arrives_once_ip_is_back() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let mut bob = Member::join("bob", &alice).await;
+        alice.until_knows("bob").await;
+
+        // A held send before the first probe is an answer, so the first message tries until the
+        // pair is direct. It pools the connection that the next send finds warm.
+        let warm_ends = Instant::now() + FORMATION;
+        while let Err(refusal) = alice.send("bob", "warm").await {
+            assert!(
+                Instant::now() < warm_ends,
+                "the first message did not go out within {FORMATION:?}: {refusal}"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+        alice.cut_ip_to("bob", &bob).await;
+
+        let verdict = {
+            let send = alice.send("bob", "hello");
+            tokio::pin!(send);
+            // The premise: the send is still waiting. An answer here is a refusal before the wait, and
+            // the run proves nothing about the wait.
+            let early = time::timeout(WAIT_PREMISE, &mut send).await;
+            assert!(
+                early.is_err(),
+                "the send answered {early:?} within {WAIT_PREMISE:?}: it did not wait for a path"
+            );
+            alice.block_ip_to(Vec::new()).await;
+            time::timeout(PATH_BUDGET, send)
+                .await
+                .expect("the send ends within the path budget")
+        };
+        assert_eq!(
+            verdict,
+            Ok(()),
+            "IP came back during the wait, so the send must go out"
+        );
+
+        let arrival_ends = Instant::now() + PATH_BUDGET;
+        let mut texts = Vec::new();
+        while !texts.iter().any(|text| text == "hello") {
+            assert!(
+                Instant::now() < arrival_ends,
+                "bob did not read the message; it read {texts:?}"
+            );
+            time::sleep(Duration::from_millis(100)).await;
+            texts.extend(bob.arrived());
+        }
+        time::sleep(Duration::from_secs(1)).await;
+        texts.extend(bob.arrived());
+        let hellos = texts.iter().filter(|text| *text == "hello").count();
+        let _ = bob.membership.node.leave().await;
+        let _ = alice.membership.node.leave().await;
+        assert_eq!(hellos, 1, "bob read the message {hellos} times: {texts:?}");
     });
 }
