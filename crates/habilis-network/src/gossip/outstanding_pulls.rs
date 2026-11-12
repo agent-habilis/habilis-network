@@ -37,6 +37,15 @@ impl OutstandingPulls {
         now: Instant,
         cap: usize,
     ) -> bool {
+        let slot = (holder, channel, author);
+        if self
+            .pulls
+            .get(&slot)
+            .is_some_and(|asked| now.duration_since(*asked) >= DIGEST_PULL_TTL)
+        {
+            self.pulls.remove(&slot);
+            release(&mut self.open, holder);
+        }
         let open = self.open.get(&holder).copied().unwrap_or(0);
         if open >= cap || self.pulls.len() >= DIGEST_PULLS_OPEN {
             return false;
@@ -114,6 +123,49 @@ mod tests {
         assert!(
             pulls.register(holder, Channel::State, key_of(2), now, 1),
             "the taken pull gave its room back"
+        );
+    }
+
+    /// The open count of each holder equals its entries after registers, takes and expiries in turn.
+    #[test]
+    fn the_open_count_of_a_holder_matches_its_entries() {
+        let now = Instant::now();
+        let first = testing::endpoint_id(81);
+        let second = testing::endpoint_id(82);
+        let mut pulls = OutstandingPulls::default();
+        pulls.register(first, Channel::State, key_of(1), now, 8);
+        pulls.register(first, Channel::Meta, key_of(2), now, 8);
+        pulls.register(second, Channel::State, key_of(3), now, 8);
+        pulls.take(first, Channel::State, key_of(1), now);
+        pulls.expire(now + DIGEST_PULL_TTL);
+        pulls.register(first, Channel::State, key_of(4), now + DIGEST_PULL_TTL, 8);
+        for holder in [first, second] {
+            let entries = pulls
+                .pulls
+                .keys()
+                .filter(|(held, _, _)| *held == holder)
+                .count();
+            assert_eq!(
+                pulls.open.get(&holder).copied().unwrap_or(0),
+                entries,
+                "the open count of the holder matches its entries"
+            );
+        }
+    }
+
+    /// A key whose pull has expired is pulled again at once, and the expired pull takes no room.
+    #[test]
+    fn a_key_whose_pull_expired_is_pulled_again_at_once() {
+        let now = Instant::now();
+        let holder = testing::endpoint_id(81);
+        let mut pulls = OutstandingPulls::default();
+        assert!(
+            pulls.register(holder, Channel::State, key_of(1), now, 1),
+            "the first pull is recorded"
+        );
+        assert!(
+            pulls.register(holder, Channel::State, key_of(1), now + DIGEST_PULL_TTL, 1),
+            "a key whose pull expired gets a new pull, and the expired one takes no room"
         );
     }
 
