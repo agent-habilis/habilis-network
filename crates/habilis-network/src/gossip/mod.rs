@@ -16,6 +16,7 @@ pub(crate) mod event;
 pub(crate) mod heal;
 pub(crate) mod lan;
 mod merge_ctx;
+pub(crate) mod outstanding_pulls;
 mod recv;
 pub(crate) mod split;
 

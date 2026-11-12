@@ -28,6 +28,7 @@ use iroh::{EndpointAddr, EndpointId};
 use super::proof_exchange::ProofExchange;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
+use crate::gossip::outstanding_pulls::OutstandingPulls;
 use crate::protocol::identity::{Identity, IdentityProof, verify_proof};
 use crate::protocol::meshes::Mesh;
 use crate::protocol::messages::{Authored, Message, Verified, WireFrame};
@@ -760,6 +761,8 @@ pub struct EventLoopState {
     /// The endpoint that the unicast frame being handled arrived on, while it is handled. Set only
     /// around the handling of a unicast frame, so a proof answer can go back on the same connection.
     pub(crate) unicast_arrival: Option<EndpointId>,
+    /// The slice pulls that wait for an answer, by holder, channel and author.
+    pub(crate) outstanding_pulls: OutstandingPulls,
     /// The released endpoints that wait for the teardown of the pool: `TEARDOWN_PENDING_MAX` at most.
     teardown_pending: BoundedFifoSet<EndpointId>,
     /// The identity proofs of the sessions this node verified, and the sessions it asked for one.
@@ -961,6 +964,7 @@ impl EventLoopState {
             },
             identity: init.keys.session,
             unicast_arrival: None,
+            outstanding_pulls: OutstandingPulls::default(),
             teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             proofs: ProofExchange::with_cap(QUIET_CAP),
             own_answer: None,

@@ -227,6 +227,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     }
     state.release_strangers();
     state.docs.expire(Instant::now());
+    state.outstanding_pulls.expire(Instant::now());
     // Keep `quiet_since` bounded to current `quiet` membership: peers that
     // returned (drained from `quiet`) or fell off the bounded `quiet` FIFO
     // drop their stale recency here.

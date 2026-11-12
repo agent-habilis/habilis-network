@@ -45,6 +45,10 @@ pub const KNOWN_ENDPOINTS_CAP: usize = 64;
 /// so the backfill tests reconcile in seconds. Clamped to `>= 1 s`.
 pub const BACKFILL_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How long a slice pull waits for its answer. A pull that the holder does not answer in this time is
+/// dropped, and the asker pulls again at its next tick.
+pub const DIGEST_PULL_TTL: Duration = Duration::from_secs(5);
+
 /// The live value, after any CLI override of [`BACKFILL_INTERVAL`].
 ///
 /// # Examples

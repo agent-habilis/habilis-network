@@ -1385,7 +1385,10 @@ mod slice_repair_kinds {
         let mut entries: Vec<DigestEntry> = (1..=18)
             .map(|seed| DigestEntry::new(key_of_seed(seed), 1, zero_hash()))
             .collect();
-        entries.sort_by(|left, right| left.key().as_bytes().cmp(right.key().as_bytes()));
+        entries.sort_by(|left, right| {
+            let (left_key, right_key) = (left.key(), right.key());
+            left_key.as_bytes().cmp(right_key.as_bytes())
+        });
         let page = DigestPage::build(&entries, 18, 0, 1).expect("a page of 18 rows");
         let kind = MessageKind::SlicePage {
             to: key_of_seed(4),

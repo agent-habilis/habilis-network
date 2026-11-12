@@ -520,6 +520,24 @@ pub(crate) async fn ingest(
     ingest_from(frame, state, app, context).await;
 }
 
+/// Whether `verified` answers a slice pull of this node. It is a State or Meta frame that came by unicast
+/// from the holder that the pull named, for the author that it named. The pull is spent by the answer.
+fn take_pulled_answer(verified: &Verified, state: &mut EventLoopState, now: Instant) -> bool {
+    let Some(holder) = state.unicast_arrival else {
+        return false;
+    };
+    let channel = if matches!(&verified.kind, MessageKind::State) {
+        Channel::State
+    } else if matches!(&verified.kind, MessageKind::Meta) {
+        Channel::Meta
+    } else {
+        return false;
+    };
+    state
+        .outstanding_pulls
+        .take(holder, channel, verified.key(), now)
+}
+
 /// [`ingest`] for a frame that came on a unicast connection: the census counts a repeat by it.
 pub(crate) async fn ingest_from(
     frame: Bytes,
@@ -583,7 +601,8 @@ pub(crate) async fn ingest_from(
     // `joined`/`Alive` mint fresh ids so they are never falsely suppressed
     // here. Only authenticated messages reach this gate. A shard stays out of the set: the
     // reassembly store dedups its own slots, and a reaped group must complete when a shard is served again.
-    if verified.shard.is_none() && state.mark_seen(&verified) {
+    let pulled = take_pulled_answer(&verified, state, Instant::now());
+    if verified.shard.is_none() && !pulled && state.mark_seen(&verified) {
         state.idle.duplicates += 1;
         restore_lost_proof(&verified, state, app, context).await;
         return;
@@ -683,6 +702,7 @@ pub(crate) async fn ingest_from(
                 state,
                 app,
                 context,
+                !pulled,
             )
             .await;
         }
@@ -709,6 +729,7 @@ async fn dispatch_infra(
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
+    live: bool,
 ) -> ControlFlow<()> {
     match &message.kind {
         MessageKind::PeerInfo => {
@@ -750,6 +771,7 @@ async fn dispatch_infra(
                     channel: Channel::State,
                     message,
                     surfaceable,
+                    live,
                 },
                 state,
                 app,
@@ -763,6 +785,7 @@ async fn dispatch_infra(
                     channel: Channel::Meta,
                     message,
                     surfaceable,
+                    live,
                 },
                 state,
                 app,
@@ -1205,6 +1228,8 @@ struct ChannelEvent<'message> {
     channel: Channel,
     message: &'message Verified,
     surfaceable: bool,
+    // False for a slice that answers a pull of this node: the store takes it with no token.
+    live: bool,
 }
 
 fn dispatch_channel(
@@ -1253,6 +1278,7 @@ fn promote_pending(
                 channel,
                 message: &frame,
                 surfaceable,
+                live: true,
             };
             dispatch_channel(event, state, app, context);
         }
@@ -1284,11 +1310,10 @@ fn ingest_channel_event(
         channel,
         message,
         surfaceable,
+        live,
     } = event;
-    // Every arrival is live: a frame the node did not ask for is charged a token, a replay from the
-    // gossip cache included.
     let applied = matches!(
-        docs.ingest(channel, message, true, now),
+        docs.ingest(channel, message, live, now),
         SliceIngest::Applied
     );
     if applied && surfaceable {
@@ -1940,7 +1965,7 @@ mod first_contact_tests {
     use crate::daemon::state::DirectState;
     #[cfg(feature = "multihop")]
     use crate::gossip;
-    use crate::gossip::split;
+    use crate::gossip::{ingest_from, split};
     use crate::lifecycle::heartbeat;
     use crate::protocol::messages::AppFrameParams;
     use crate::transport::outbox::Resend;
@@ -2535,7 +2560,8 @@ mod first_contact_tests {
                 let pong =
                     Message::new_pong(&node.mesh, &twin, node.our_pubkey, &probe.id).sign(run);
                 let flow =
-                    dispatch_infra(&pong, true, &update, &mut state, &mut Inert, &context).await;
+                    dispatch_infra(&pong, true, &update, &mut state, &mut Inert, &context, true)
+                        .await;
                 assert!(flow.is_break(), "a pong is handled by the engine");
             }
 
@@ -3068,56 +3094,6 @@ mod first_contact_tests {
         }
     }
 
-    /// The four slice kinds name one addressee, so a node that is not the addressee does not take them.
-    #[test]
-    fn a_slice_kind_is_for_its_addressee_only() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let node = Node::spawn().await;
-            let addressee = Identity::generate().author_key();
-            let other = Identity::generate().author_key();
-            let kinds_to = |to: AuthorKey| {
-                let root = || DigestRoot::new(ContentHash::of(b"root"), 1).expect("one page");
-                let entries = vec![DigestEntry::new(to, 1, ContentHash::of(b"row"))];
-                vec![
-                    MessageKind::SliceRoot {
-                        to,
-                        state: root(),
-                        meta: root(),
-                    },
-                    MessageKind::SlicePull {
-                        to,
-                        channel: Channel::State,
-                        keys: vec![],
-                    },
-                    MessageKind::SlicePageRequest {
-                        to,
-                        channel: Channel::Meta,
-                        index: 0,
-                    },
-                    MessageKind::SlicePage {
-                        to,
-                        channel: Channel::State,
-                        page: DigestPage::build(&entries, 1, 0, 1).expect("a page of one row"),
-                    },
-                ]
-            };
-            for kind in kinds_to(addressee) {
-                let display = kind.to_string();
-                let message =
-                    Message::new_frame(&node.mesh, &nick("alice"), kind, MessageBody::from("{}"));
-                assert!(
-                    super::addressed_to_us(&message, &addressee),
-                    "the addressee does not take a {display}"
-                );
-                assert!(
-                    !super::addressed_to_us(&message, &other),
-                    "a key that is not the addressee takes a {display}"
-                );
-            }
-            node.endpoint.close().await;
-        });
-    }
-
     /// Two keys can use one nickname, and the meta slot of each is its own. The hook that tells
     /// the app which slot changed names the key of the author, so the app reads the slot of that
     /// key and not the slot of the other key.
@@ -3149,6 +3125,7 @@ mod first_contact_tests {
                         channel: Channel::Meta,
                         message: &frame,
                         surfaceable: true,
+                        live: true,
                     },
                     &mut state,
                     &mut app,
@@ -3195,6 +3172,7 @@ mod first_contact_tests {
                         channel: Channel::Meta,
                         message: &frame,
                         surfaceable: true,
+                        live: true,
                     },
                     &mut state,
                     &mut app,
@@ -3268,6 +3246,7 @@ mod first_contact_tests {
                     channel: Channel::Meta,
                     message: &frame,
                     surfaceable: true,
+                    live: true,
                 };
                 dispatch_channel(event, &mut state, &mut app, &context);
             }
@@ -3278,11 +3257,197 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &frame,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             assert!(
                 meta_slot(&state, &member.author_key()).is_some(),
                 "a roster author writes its slice while 256 strangers wait"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The four slice kinds name one addressee, so a node that is not the addressee does not take them.
+    #[test]
+    fn a_slice_kind_is_for_its_addressee_only() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let addressee = Identity::generate().author_key();
+            let other = Identity::generate().author_key();
+            let kinds_to = |to: AuthorKey| {
+                let root = || DigestRoot::new(ContentHash::of(b"root"), 1).expect("one page");
+                let entries = vec![DigestEntry::new(to, 1, ContentHash::of(b"row"))];
+                vec![
+                    MessageKind::SliceRoot {
+                        to,
+                        state: root(),
+                        meta: root(),
+                    },
+                    MessageKind::SlicePull {
+                        to,
+                        channel: Channel::State,
+                        keys: vec![],
+                    },
+                    MessageKind::SlicePageRequest {
+                        to,
+                        channel: Channel::Meta,
+                        index: 0,
+                    },
+                    MessageKind::SlicePage {
+                        to,
+                        channel: Channel::State,
+                        page: DigestPage::build(&entries, 1, 0, 1).expect("a page of one row"),
+                    },
+                ]
+            };
+            for kind in kinds_to(addressee) {
+                let display = kind.to_string();
+                let message =
+                    Message::new_frame(&node.mesh, &nick("alice"), kind, MessageBody::from("{}"));
+                assert!(
+                    super::addressed_to_us(&message, &addressee),
+                    "the addressee does not take a {display}"
+                );
+                assert!(
+                    !super::addressed_to_us(&message, &other),
+                    "a key that is not the addressee takes a {display}"
+                );
+            }
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A signed slice frame of `identity` on `channel` at `version`, with the value `{"n": version}`.
+    fn slice_bytes(node: &Node, identity: &Identity, channel: Channel, version: u64) -> Bytes {
+        let body = MessageBody::try_new(&format!(
+            r#"{{"version":{version},"value":{{"n":{version}}}}}"#
+        ))
+        .expect("a slice body");
+        Message::new_channel_event(&node.mesh, &nick("twin"), body, channel)
+            .sign(identity)
+            .serialize()
+            .expect("serialize")
+            .into_bytes()
+    }
+
+    /// The `n` of the slice that `document` holds for `identity`, or `None` when it holds none.
+    fn held_n(document: &serde_json::Value, identity: &Identity) -> Option<u64> {
+        let hex = String::from_utf8_lossy(&identity.author_key().hex()).into_owned();
+        document.get(hex)?.get("n")?.as_u64()
+    }
+
+    /// A pulled slice takes no token, so it applies after the bucket of its author is empty.
+    #[test]
+    fn a_pulled_frame_takes_no_token() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            let live = slice_bytes(&node, &identity, Channel::State, 101);
+            ingest(live, &mut state, &mut app, &context).await;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(101),
+                "the bucket is empty, so a live frame is refused"
+            );
+
+            let holder = endpoint_id(81);
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+            );
+            state.unicast_arrival = Some(holder);
+            let pulled = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest_from(pulled, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "the pulled slice applies with no token"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pulled slice is not a duplicate of a copy that the store refused before the pull.
+    #[test]
+    fn a_pulled_frame_skips_the_dedup() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            let refused = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest(refused.clone(), &mut state, &mut app, &context).await;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "the bucket is empty, so the first copy is refused"
+            );
+
+            let holder = endpoint_id(81);
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+            );
+            state.unicast_arrival = Some(holder);
+            ingest_from(refused, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "the answer to a pull is applied, not dropped as a duplicate"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A slice that a holder sends without a pull is live, so it takes a token and is refused.
+    #[test]
+    fn an_unasked_frame_is_charged() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            state.outstanding_pulls.register(
+                endpoint_id(81),
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+            );
+            state.unicast_arrival = Some(endpoint_id(82));
+            let unasked = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest_from(unasked, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "a holder with no pull is charged, and the empty bucket refuses the slice"
             );
             node.endpoint.close().await;
         });
@@ -3304,6 +3469,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &frame,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             assert!(
@@ -3340,6 +3506,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &frame,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             assert!(
@@ -3372,6 +3539,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &frame,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             assert!(
@@ -3408,6 +3576,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &frame,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             assert!(
@@ -3438,6 +3607,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &frame,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             assert!(
@@ -3471,6 +3641,7 @@ mod first_contact_tests {
                     channel: Channel::Meta,
                     message: &frame,
                     surfaceable: true,
+                    live: true,
                 };
                 dispatch_channel(event, &mut state, &mut app, &context);
             }
@@ -3498,6 +3669,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &returned,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             assert_eq!(
@@ -3526,6 +3698,7 @@ mod first_contact_tests {
                     channel: Channel::Meta,
                     message: &frame,
                     surfaceable: true,
+                    live: true,
                 };
                 dispatch_channel(event, &mut state, &mut app, &context);
             }
@@ -3562,6 +3735,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &first,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             let nickname = nick("member");
@@ -3652,6 +3826,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &frame,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             assert!(
@@ -3695,6 +3870,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &frame,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             state.peers.insert(key);
@@ -3733,6 +3909,7 @@ mod first_contact_tests {
                 channel: Channel::Meta,
                 message: &frame,
                 surfaceable: true,
+                live: true,
             };
             dispatch_channel(event, &mut state, &mut app, &context);
             let nickname = nick("member");
