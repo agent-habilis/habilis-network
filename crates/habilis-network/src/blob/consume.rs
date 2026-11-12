@@ -148,6 +148,12 @@ where
 /// dials from it too, and the first dial to connect wins. The loser is cancelled, and the
 /// endpoint that `build` bound is closed. A handshake that completes in time binds nothing.
 ///
+/// `build` must return the endpoint as its last step: the fetch cancels a build that is still
+/// running when the first dial connects, and a cancelled build drops an endpoint it bound but did
+/// not return, which iroh logs as an error. The error of `build` must implement `std::error::Error`,
+/// so a builder that returns `anyhow::Error` maps it first. A build that fails or is slow costs the
+/// hedge only: the first dial keeps waiting until its cap.
+///
 /// The endpoint of the caller is only dialed from and never closed. If every attempt stalls, this
 /// returns [`BlobError::HandshakeStalled`], as [`fetch_with_endpoint`] does, and the caller builds
 /// a new endpoint.
@@ -553,37 +559,78 @@ where
         () = time::sleep(delay) => {}
     }
     tracing::debug!(target: "habilis_network::blob", after = ?delay, "hedge started: no handshake yet, dialing from a new endpoint");
-    let second = tokio::select! {
+    // The cap applies while the second endpoint builds: a slow builder must not hold the dial.
+    let second_build = tokio::select! {
         biased;
         connected = &mut first => return Ok(Dialed { connection: connected?, hedge: None }),
-        bound = build() => CloseOnDrop::new(bound?),
+        () = &mut deadline => return Err(Stalled(cap).into()),
+        result = build() => result,
+    };
+    let second = match second_build {
+        Ok(fresh) => CloseOnDrop::new(fresh),
+        Err(error) => {
+            // No hedge for this attempt: the first dial keeps its chance until the cap.
+            tracing::debug!(target: "habilis_network::blob", %error, "no hedge: the second endpoint did not build");
+            return tokio::select! {
+                biased;
+                connected = &mut first => Ok(Dialed { connection: connected?, hedge: None }),
+                () = &mut deadline => Err(Stalled(cap).into()),
+            };
+        }
     };
     add_peer_addr(&address_book(&second.endpoint), ticket.address.clone());
     // The dial borrows the endpoint of the hedge, so it ends before the endpoint moves.
-    let winner = {
+    let outcome = {
         let second_dial = connect(&second.endpoint, ticket);
         tokio::pin!(second_dial);
         tokio::select! {
             biased;
-            connected = &mut first => Some(("first", connected)),
-            connected = &mut second_dial => Some(("hedge", connected)),
-            () = &mut deadline => None,
+            connected = &mut first => match connected {
+                Ok(connection) => Outcome::First(connection),
+                // A fresh socket is the point of the hedge: it keeps its chance until the cap.
+                Err(error) => tokio::select! {
+                    biased;
+                    hedged = &mut second_dial => hedged.map_or(Outcome::Failed(error), Outcome::Hedge),
+                    () = &mut deadline => Outcome::Failed(error),
+                },
+            },
+            connected = &mut second_dial => match connected {
+                Ok(connection) => Outcome::Hedge(connection),
+                Err(error) => {
+                    tracing::debug!(target: "habilis_network::blob", %error, "the hedge dial failed; the first dial keeps waiting");
+                    tokio::select! {
+                        biased;
+                        retried = &mut first => retried.map_or_else(Outcome::Failed, Outcome::First),
+                        () = &mut deadline => Outcome::Deadline,
+                    }
+                }
+            },
+            () = &mut deadline => Outcome::Deadline,
         }
     };
-    match winner {
-        Some(("hedge", connected)) => {
+    match outcome {
+        Outcome::First(connection) => Ok(Dialed {
+            connection,
+            hedge: None,
+        }),
+        Outcome::Hedge(connection) => {
             tracing::debug!(target: "habilis_network::blob", "the hedge connected first");
             Ok(Dialed {
-                connection: connected?,
+                connection,
                 hedge: Some(second),
             })
         }
-        Some((_, connected)) => Ok(Dialed {
-            connection: connected?,
-            hedge: None,
-        }),
-        None => Err(Stalled(cap).into()),
+        Outcome::Failed(error) => Err(error),
+        Outcome::Deadline => Err(Stalled(cap).into()),
     }
+}
+
+/// How a hedged attempt ended.
+enum Outcome {
+    First(Connection),
+    Hedge(Connection),
+    Failed(anyhow::Error),
+    Deadline,
 }
 
 /// Turn a producer-side connection close into a readable error — the coded
