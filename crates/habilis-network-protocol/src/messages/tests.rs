@@ -1396,9 +1396,10 @@ mod slice_repair_kinds {
                 renamed, text,
                 "the {display} frame names its addressee in the form it expects"
             );
+            let refused = Message::parse(renamed.as_bytes());
             assert!(
-                Message::parse(renamed.as_bytes()).is_err(),
-                "a {display} frame to a nickname parses"
+                matches!(refused, Err(crate::messages::MessageError::Source { .. })),
+                "a {display} frame to a nickname is not refused as a source error: {refused:?}"
             );
         }
     }
