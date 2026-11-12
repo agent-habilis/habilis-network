@@ -71,7 +71,7 @@ use super::node::SignalHandling;
 #[cfg(feature = "host")]
 use super::shutdown;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
-use super::state::{EventLoopState, MeshSecrets};
+use super::state::{EventLoopState, FrameOverheads, MeshSecrets};
 use super::timers;
 use crate::daemon::setup::LiveCount;
 use ctx_parts::CtxParts;
@@ -157,7 +157,10 @@ async fn run_checked<Driver: NodeDriver>(
         &transports,
         started,
         state_file,
-        habilis_network_doc::frame_overhead(mesh.mesh.as_str(), mesh.author.as_str()),
+        FrameOverheads {
+            frame: habilis_network_doc::frame_overhead(mesh.mesh.as_str(), mesh.author.as_str()),
+            page: habilis_network_doc::page_frame_overhead(&mesh.mesh, &mesh.author),
+        },
     );
     let owned = OwnedEndpoints {
         router: endpoints.router,
@@ -404,7 +407,7 @@ fn initial_state(
     transports: &TransportSet,
     started: Instant,
     state_file: StateFileSeed,
-    frame_overhead: usize,
+    overheads: FrameOverheads,
 ) -> EventLoopState {
     #[cfg(not(feature = "host"))]
     drop(state_file);
@@ -414,7 +417,8 @@ fn initial_state(
             state_file,
             keys,
             secrets,
-            frame_overhead,
+            frame_overhead: overheads.frame,
+            page_overhead: overheads.page,
             // The *same* table the Router's signal acceptor holds, not a fresh
             // one: the cap only counts if both roles count against it together.
             webrtc_admission: transports.webrtc_admission.clone(),

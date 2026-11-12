@@ -28,5 +28,5 @@ mod slice_store;
 
 pub use slice_store::{
     LocalDraft, SliceError, SliceIngest, SliceLimits, SliceStore, frame_overhead,
-    worst_frame_overhead,
+    page_frame_overhead, worst_frame_overhead,
 };

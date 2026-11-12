@@ -3,10 +3,6 @@ use serde::{Deserialize, Serialize};
 use super::{DigestEntry, DigestError};
 use crate::{AuthorKey, ContentHash};
 
-/// The bytes of a digest page around its rows: the index, the total, the range, the hash, and the
-/// JSON around them.
-pub const PAGE_WRAPPER: usize = 328;
-
 /// The bytes of one page row at the longest version, `["<key hex>",18446744073709551615,"<hash
 /// hex>"],`.
 pub const PAGE_ROW: usize = 160;
@@ -232,9 +228,7 @@ pub fn page_hash(entries: &[DigestEntry]) -> ContentHash {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DigestEntry, DigestError, DigestPage, PAGE_ROW, PAGE_WRAPPER, page_hash, row_wire,
-    };
+    use super::{DigestEntry, DigestError, DigestPage, PAGE_ROW, page_hash, row_wire};
     use crate::{AuthorKey, ContentHash};
     use serde_json::{Value, json};
 
@@ -283,15 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn the_page_estimates_cover_the_measured_wrapper_and_row() {
-        let empty = DigestPage::build(&[], 1, 0, 1).expect("a page the store would build");
-        let wrapper = serde_json::to_string(&empty)
-            .expect("a page must serialize")
-            .len();
-        assert!(
-            PAGE_WRAPPER >= wrapper,
-            "PAGE_WRAPPER must cover the measured {wrapper} bytes"
-        );
+    fn the_page_row_estimate_covers_the_measured_row() {
         let row_entry = DigestEntry::new(key(1), u64::MAX, ContentHash::of(b"row"));
         let row = serde_json::to_string(&row_wire(&row_entry))
             .expect("a row must serialize")

@@ -47,6 +47,14 @@ pub(crate) struct RunKeys {
 /// Everything `EventLoopState::new` needs beyond the clock, grouped for the
 /// same reason [`MeshSecrets`] is: the argument budget. `now` stays separate
 /// because tests pin it to a deterministic instant.
+/// The overheads of this session. `frame` sets the body cap of a slice, and `page` sets the rows of a
+/// digest page. Both come from a probe of the session.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FrameOverheads {
+    pub(crate) frame: usize,
+    pub(crate) page: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct StateInit {
     #[cfg(feature = "host")]
@@ -56,6 +64,8 @@ pub(crate) struct StateInit {
     /// The frame overhead of this session, with its mesh id and nickname: it sets the body cap of the
     /// shared-state slices.
     pub(crate) frame_overhead: usize,
+    /// The page overhead of this session, as `page_frame_overhead` measures it for its mesh id and nickname.
+    pub(crate) page_overhead: usize,
     pub secrets: MeshSecrets,
     /// The negotiation-slot table the Router's signal acceptor was built with.
     ///

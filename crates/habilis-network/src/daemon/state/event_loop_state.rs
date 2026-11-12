@@ -968,12 +968,14 @@ impl EventLoopState {
                     SliceLimits::default(),
                     init.frame_overhead,
                 )
+                .with_page_overhead(init.page_overhead)
                 .with_key(state_key),
                 meta: SliceStore::new(
                     protocol::Channel::Meta,
                     SliceLimits::default(),
                     init.frame_overhead,
                 )
+                .with_page_overhead(init.page_overhead)
                 .with_key(meta_key),
             },
             identity: init.keys.session,

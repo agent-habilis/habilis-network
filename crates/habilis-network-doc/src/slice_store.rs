@@ -20,11 +20,12 @@ use std::time::Duration;
 use habilis_network_util::clock::Instant;
 use habilis_network_util::tuning;
 
-use habilis_network_protocol::digest::{
-    DigestEntry, DigestPage, DigestRoot, PAGE_ROW, PAGE_WRAPPER, page_hash,
-};
+use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot, PAGE_ROW, page_hash};
 use habilis_network_protocol::messages::Verified;
-use habilis_network_protocol::{AuthorKey, Channel, ContentHash, MessageBody, SymmetricKey};
+use habilis_network_protocol::{
+    AuthorKey, Channel, ContentHash, Identity, MeshId, Message, MessageBody, MessageKind, Nickname,
+    SymmetricKey,
+};
 use habilis_network_util::consts::MAX_MESSAGE_SIZE;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -53,6 +54,68 @@ const MAX_NICKNAME_LEN: usize = 128;
 /// id from `MeshId::from("test")` and a 4-byte nickname is 404 bytes, so the base is 404 - 66. A
 /// test checks that the overhead grows one byte for each byte of mesh id and nickname.
 const FRAME_BASE_OVERHEAD: usize = 338;
+
+/// The page overhead of a store that no probe sized, beyond its event overhead: 374 bytes for the fields of
+/// a `SlicePage` (the addressee, the channel, the 3-digit index and total, and the end key), and 32 bytes
+/// for the escape of up to 32 quote characters in a nickname. `page_frame_overhead` measures the same 374 and
+/// the escapes of the session, and the engine always sets that value.
+const PAGE_OVERHEAD_UNPROBED: usize = 406;
+
+/// The bytes of a signed `SlicePage` frame of this session that its rows do not fill. It is the frame of
+/// one row, less the bytes of that row, at the worst shape: a 3-digit index and total, an end key, and the
+/// longer channel name. The frame is built and serialized, so a quote in the nickname is escaped, and the
+/// fields of the kind are counted, as the wire writes them.
+///
+/// # Examples
+///
+/// A page of this session fits one frame with the rows that its overhead leaves room for.
+///
+/// ```
+/// use habilis_network_doc::page_frame_overhead;
+/// use habilis_network_protocol::{MeshId, Nickname};
+///
+/// let mesh = MeshId::try_new("3JdXQ9vrT6yaHUx8D5NwPc1qEb2f7tr4V2R4NcAzv6MmL3N2nSxpRCYZBz8dL7wyqjW")
+///     .unwrap_or_else(|_| MeshId::from("test"));
+/// let overhead = page_frame_overhead(&mesh, &Nickname::from("peer"));
+/// assert!(overhead < 1_000);
+/// ```
+#[must_use]
+pub fn page_frame_overhead(mesh: &MeshId, nickname: &Nickname) -> usize {
+    let one = page_frame_len(mesh, nickname, 1);
+    let two = page_frame_len(mesh, nickname, 2);
+    one.saturating_sub(two.saturating_sub(one))
+}
+
+/// The length of a signed `SlicePage` frame of `rows` rows, at the worst shape of the page: index 998
+/// of 999 pages, so both numbers take 3 digits, and the page has an end key.
+fn page_frame_len(mesh: &MeshId, nickname: &Nickname, rows: usize) -> usize {
+    let entries: Vec<DigestEntry> = (0..2000u64)
+        .map(|index| {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&index.to_be_bytes());
+            DigestEntry::new(
+                AuthorKey::from(bytes),
+                u64::MAX,
+                ContentHash::of(&index.to_be_bytes()),
+            )
+        })
+        .collect();
+    let Ok(page) = DigestPage::build(&entries, rows, 998, 999) else {
+        return usize::MAX;
+    };
+    let kind = MessageKind::SlicePage {
+        to: AuthorKey::from([0xff; 32]),
+        channel: Channel::State,
+        page,
+    };
+    let Ok(body) = MessageBody::try_new("{}") else {
+        return usize::MAX;
+    };
+    let signed = Message::new_frame(mesh, nickname, kind, body).sign(&Identity::generate());
+    signed
+        .serialize()
+        .map_or(usize::MAX, |frame| frame.into_bytes().len())
+}
 
 /// The frame overhead of the worst case: the longest mesh id and the longest nickname. Pass it to
 /// [`SliceStore::new`] only where no probe of the session is possible.
@@ -311,6 +374,8 @@ pub struct SliceStore {
     key: Option<SymmetricKey>,
     limits: SliceLimits,
     frame_overhead: usize,
+    /// The bytes of a `SlicePage` frame that its rows do not fill, as `page_frame_overhead` measures them.
+    page_overhead: usize,
     slices: HashMap<AuthorKey, Slice>,
     buckets: HashMap<AuthorKey, Bucket>,
     /// The gone keys, oldest first, with the time each one left.
@@ -358,11 +423,20 @@ impl SliceStore {
             key: None,
             limits,
             frame_overhead,
+            page_overhead: frame_overhead + PAGE_OVERHEAD_UNPROBED,
             slices: HashMap::new(),
             buckets: HashMap::new(),
             gone: VecDeque::new(),
             pending,
         }
+    }
+
+    /// Sets the page overhead that the rows of a digest page must leave room for. The engine sets the value
+    /// that `page_frame_overhead` measures for its session.
+    #[must_use]
+    pub fn with_page_overhead(mut self, page_overhead: usize) -> Self {
+        self.page_overhead = page_overhead;
+        self
     }
 
     /// Sets the channel key of a passworded mesh. `None` keeps the bodies in plain JSON.
@@ -750,7 +824,7 @@ impl SliceStore {
     /// The rows of one digest page, derived from the frame overhead, so a page fits one message. A page
     /// is never sealed, because its kind is never sealed, so every store has the same rows.
     fn page_rows(&self) -> usize {
-        let budget = MAX_MESSAGE_SIZE.saturating_sub(self.frame_overhead + PAGE_WRAPPER);
+        let budget = MAX_MESSAGE_SIZE.saturating_sub(self.page_overhead);
         (budget / PAGE_ROW).max(1)
     }
 
@@ -971,8 +1045,8 @@ impl SliceStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        FRAME_BASE_OVERHEAD, LocalDraft, MAX_MESH_ID_LEN, MAX_NICKNAME_LEN, SliceError,
-        SliceIngest, SliceLimits, SliceStore, WORST_FRAME_OVERHEAD, wire,
+        FRAME_BASE_OVERHEAD, LocalDraft, MAX_MESH_ID_LEN, MAX_NICKNAME_LEN, PAGE_OVERHEAD_UNPROBED,
+        SliceError, SliceIngest, SliceLimits, SliceStore, WORST_FRAME_OVERHEAD, wire,
     };
     use habilis_network_protocol::digest::DigestPage;
     use habilis_network_protocol::messages::{MessageError, Verified};
@@ -1971,9 +2045,11 @@ mod tests {
             "the test must run at a mesh id near the limit"
         );
         let overhead = super::frame_overhead(mesh.as_str(), nickname.as_str());
+        let page_overhead = super::page_frame_overhead(&mesh, &nickname);
         let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
         for channel in [Channel::Meta, Channel::State] {
-            let mut store = SliceStore::new(channel, limits, overhead);
+            let mut store =
+                SliceStore::new(channel, limits, overhead).with_page_overhead(page_overhead);
             for index in 0..256 {
                 let body = json!({"version": u64::MAX, "value": {"n": index}});
                 apply(
@@ -1994,8 +2070,47 @@ mod tests {
         }
     }
 
-    /// At every overhead from the fixture to the worst case, a page of the rows that the store takes
-    /// fits one frame at the fixture mesh id and nickname, plus the extra overhead.
+    /// A nickname of `emoji` four-byte characters and `quotes` quote characters. Each quote is one byte in
+    /// the nickname, and two bytes on the wire, where JSON escapes it.
+    fn nickname_with_quotes(emoji: usize, quotes: usize) -> Nickname {
+        let text = format!("{}{}", "\u{1F600}".repeat(emoji), "\"".repeat(quotes));
+        Nickname::try_new(&text).expect("a nickname of 1 to 32 characters")
+    }
+
+    /// Every page of both channels fits one frame at every nickname that holds quote characters. The quote
+    /// is escaped in the JSON, so its frame is longer than its raw byte count. The sweep takes the most
+    /// characters that fit 32 with each count of quotes, at both mesh ids.
+    #[test]
+    fn every_page_on_both_channels_fits_for_a_nickname_with_quotes() {
+        let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
+        let meshes = [MeshId::from("test"), longest_mesh_id()];
+        for mesh in &meshes {
+            for quotes in 0..=32 {
+                let nickname = nickname_with_quotes(32 - quotes, quotes);
+                let overhead = super::frame_overhead(mesh.as_str(), nickname.as_str());
+                let page_overhead = super::page_frame_overhead(mesh, &nickname);
+                for channel in [Channel::Meta, Channel::State] {
+                    let mut store = SliceStore::new(channel, limits, overhead)
+                        .with_page_overhead(page_overhead);
+                    for index in 0..256 {
+                        let body = json!({"version": u64::MAX, "value": {"n": index}});
+                        apply(
+                            &mut store,
+                            &frame_on(many_key(index), &body.to_string(), channel),
+                        );
+                    }
+                    for page in store.pages() {
+                        let size = slice_page_frame(page, channel, mesh, &nickname);
+                        assert!(
+                            size.as_ref().is_ok_and(|size| *size <= MAX_MESSAGE_SIZE),
+                            "a page on {channel:?} with {quotes} quotes is refused: {size:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// A nickname of exactly `bytes` bytes, from 1- to 4-byte characters, within the 32-character limit.
     fn nickname_of_bytes(bytes: usize) -> Nickname {
         let mut text = String::new();
@@ -2037,6 +2152,21 @@ mod tests {
     /// Every page of both channels fits one frame at every nickname length from 1 to 128 bytes, at the
     /// 62-byte fixture mesh id and at the 511-byte longest mesh id. The store holds 256 authors, so its
     /// pages reach two index digits.
+    /// A store that no probe sized still leaves room for a page of the worst nickname, at both mesh ids.
+    #[test]
+    fn the_default_page_overhead_covers_the_probe_at_the_worst_nickname() {
+        let nickname = nickname_with_quotes(0, 32);
+        for mesh in [MeshId::from("test"), longest_mesh_id()] {
+            let probe = super::page_frame_overhead(&mesh, &nickname);
+            let default =
+                super::frame_overhead(mesh.as_str(), nickname.as_str()) + PAGE_OVERHEAD_UNPROBED;
+            assert!(
+                default >= probe,
+                "the default page overhead {default} is below the probe {probe}"
+            );
+        }
+    }
+
     #[test]
     fn every_page_on_both_channels_fits_at_every_nickname_length() {
         let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
@@ -2045,8 +2175,10 @@ mod tests {
             for bytes in 1..=MAX_NICKNAME_LEN {
                 let nickname = nickname_of_bytes(bytes);
                 let overhead = super::frame_overhead(mesh.as_str(), nickname.as_str());
+                let page_overhead = super::page_frame_overhead(mesh, &nickname);
                 for channel in [Channel::Meta, Channel::State] {
-                    let mut store = SliceStore::new(channel, limits, overhead);
+                    let mut store = SliceStore::new(channel, limits, overhead)
+                        .with_page_overhead(page_overhead);
                     for index in 0..256 {
                         let body = json!({"version": u64::MAX, "value": {"n": index}});
                         let frame = frame_on(many_key(index), &body.to_string(), channel);

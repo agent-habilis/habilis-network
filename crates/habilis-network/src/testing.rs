@@ -20,7 +20,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::daemon::state::{EventLoopState, MeshSecrets, RunKeys, StateInit};
 use crate::protocol::identity::Identity;
-use crate::protocol::{AuthorKey, Nickname};
+use crate::protocol::{AuthorKey, MeshId, Nickname};
 use crate::util::clock::Instant;
 
 use iroh::address_lookup::memory;
@@ -61,6 +61,10 @@ fn fresh_state_that_waits_with_book_and_member(
             #[cfg(feature = "host")]
             state_file: None,
             frame_overhead: habilis_network_doc::frame_overhead("test", "test"),
+            page_overhead: habilis_network_doc::page_frame_overhead(
+                &MeshId::from("test"),
+                &Nickname::from("test"),
+            ),
             // the keys are shared with the loop and its handlers, which hold clones
             keys: RunKeys {
                 member_new: false,

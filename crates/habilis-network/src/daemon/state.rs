@@ -50,7 +50,7 @@ pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
 pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
-pub(crate) use state_init::{RunKeys, StateInit};
+pub(crate) use state_init::{FrameOverheads, RunKeys, StateInit};
 #[cfg(test)]
 pub(crate) use wire_out_tally::app_frame_with_tag;
 pub(crate) use wire_out_tally::{FrameShape, WireOut, WireOutTally, by_arrival, by_class};
