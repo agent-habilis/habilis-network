@@ -948,6 +948,12 @@ impl SliceStore {
         self.buckets.len()
     }
 
+    /// The number of keys in the gone set, for the tests that check a key takes one entry.
+    #[cfg(test)]
+    fn gone_count(&self) -> usize {
+        self.gone.len()
+    }
+
     /// Builds the draft of `own` with `value`, then spends its token.
     fn draft_at(
         &mut self,
@@ -1007,9 +1013,12 @@ impl SliceStore {
     }
 
     /// Adds `key` to the gone set, and drops the oldest gone key when the set holds `max_authors` keys: the set holds
-    /// a key for each author the store can hold. An evicted key is not applied again, as the engine holds a slice of a
-    /// key outside the roster as pending until it joins.
+    /// a key for each author the store can hold. A key that is already gone is moved to the end, so it takes one entry.
+    /// An evicted key that is outside the roster is not applied again, as the engine holds its slice as pending until it
+    /// joins. A quiet key that is evicted is not protected: the cap makes this need more than `max_authors` gone keys
+    /// inside the gone TTL.
     fn keep_gone(&mut self, key: AuthorKey, now: Instant) {
+        self.gone.retain(|(held, _)| *held != key);
         if self.gone.len() >= self.limits.max_authors {
             self.gone.pop_front();
         }
@@ -1974,6 +1983,20 @@ mod tests {
             apply(&mut store, &frame(many_key(1), 1, json!({"a": 1}))),
             SliceIngest::Refused(SliceError::GoneKey),
             "the first key of max_authors gone keys must still be gone"
+        );
+    }
+
+    /// A key that is forgotten twice takes one entry of the gone set, so a repeat does not push other keys out.
+    #[test]
+    fn a_key_forgotten_twice_takes_one_gone_entry() {
+        let mut store = store();
+        let now = Instant::now();
+        store.forget(&key(1), now);
+        store.forget(&key(1), now);
+        assert_eq!(
+            store.gone_count(),
+            1,
+            "a key forgotten twice is one gone entry"
         );
     }
 
