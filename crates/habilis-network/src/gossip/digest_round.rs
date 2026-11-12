@@ -616,9 +616,10 @@ mod tests {
         );
     }
 
-    /// A key that was over the cap is wanted again: once a reading ends, the next differing root reads the holder again.
+    /// A reading that has ended leaves nothing that blocks its holder: the next differing root is noted and read, so a
+    /// page that the pull table refused is asked again.
     #[test]
-    fn a_key_over_the_cap_is_read_again_on_the_next_root() {
+    fn a_holder_whose_reading_ended_is_read_again_on_its_next_differing_root() {
         let now = Instant::now();
         let mut round = DigestRound::default();
         note(&mut round, holder(1), 81, Channel::State, now, 1);

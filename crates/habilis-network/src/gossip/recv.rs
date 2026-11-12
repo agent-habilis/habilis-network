@@ -2171,7 +2171,8 @@ mod first_contact_tests {
     use bytes::Bytes;
     use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
     use habilis_network_util::tuning::{
-        DIGEST_PULL_TTL, DIGEST_SERVES_PER_WINDOW, DIGEST_SETTLE, DIGEST_SETTLE_JITTER,
+        DIGEST_PULL_TTL, DIGEST_PULLS_OPEN, DIGEST_SERVES_PER_WINDOW, DIGEST_SETTLE,
+        DIGEST_SETTLE_JITTER,
     };
 
     use crate::daemon::state::DirectState;
@@ -6327,6 +6328,132 @@ mod first_contact_tests {
                     now
                 ),
                 "a page that arrived by broadcast registers no pull"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A key that the pull table refused is pulled on the next differing root. With the table full, a page that lists
+    /// the key opens no pull; once the table has room, a second root and the page again open it.
+    #[test]
+    fn a_key_refused_by_a_full_pull_table_is_pulled_on_the_next_root() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let holder = Identity::generate();
+            let wanted = Identity::generate();
+            state.peers.insert(holder.author_key());
+            state.peers.insert(wanted.author_key());
+            let filler = |index: usize| -> AuthorKey {
+                let mut bytes = [0u8; 32];
+                bytes[..8].copy_from_slice(
+                    &u64::try_from(index)
+                        .expect("an index fits 64 bits")
+                        .to_be_bytes(),
+                );
+                AuthorKey::from(bytes)
+            };
+            let own = state.identity.author_key();
+            let start = clock::Instant::now();
+            for index in 0..DIGEST_PULLS_OPEN {
+                assert!(
+                    state.outstanding_pulls.register(
+                        endpoint_id(90),
+                        Channel::State,
+                        filler(index),
+                        start,
+                        usize::MAX
+                    ),
+                    "the table takes pulls up to its total cap"
+                );
+            }
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root = || -> Bytes {
+                let signed = Message::new_frame(
+                    &node.mesh,
+                    &nick("holder"),
+                    MessageKind::SliceRoot {
+                        to: own,
+                        state: elsewhere.clone(),
+                        meta: elsewhere.clone(),
+                    },
+                    MessageBody::from("{}"),
+                )
+                .sign(&holder);
+                signed
+                    .serialize()
+                    .expect("a signed root serializes")
+                    .into_bytes()
+            };
+            let page = DigestPage::build(
+                &[DigestEntry::new(
+                    wanted.author_key(),
+                    1,
+                    ContentHash::of(b"row"),
+                )],
+                1,
+                0,
+                1,
+            )
+            .expect("a page of one row");
+            let answer = || -> Bytes {
+                let signed = Message::new_frame(
+                    &node.mesh,
+                    &nick("holder"),
+                    MessageKind::SlicePage {
+                        to: own,
+                        channel: Channel::State,
+                        page: page.clone(),
+                    },
+                    MessageBody::from("{}"),
+                )
+                .sign(&holder);
+                signed
+                    .serialize()
+                    .expect("a signed page serializes")
+                    .into_bytes()
+            };
+            state.unicast_arrival = Some(endpoint_id(81));
+            let first_root = root();
+            ingest_from(first_root, &mut state, &mut app, &context).await;
+            let first_due = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+            state
+                .digest_round
+                .advance(first_due, |_| true, |_, _| false);
+            let first_page = answer();
+            ingest_from(first_page, &mut state, &mut app, &context).await;
+            assert!(
+                !state.outstanding_pulls.take(
+                    endpoint_id(81),
+                    Channel::State,
+                    wanted.author_key(),
+                    first_due
+                ),
+                "a full table opens no pull for the listed key"
+            );
+            state
+                .outstanding_pulls
+                .expire(clock::Instant::now() + DIGEST_PULL_TTL);
+            let second_root = root();
+            ingest_from(second_root, &mut state, &mut app, &context).await;
+            let second_due = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+            state
+                .digest_round
+                .advance(second_due, |_| true, |_, _| false);
+            let second_page = answer();
+            ingest_from(second_page, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert!(
+                state.outstanding_pulls.take(
+                    endpoint_id(81),
+                    Channel::State,
+                    wanted.author_key(),
+                    second_due
+                ),
+                "once the table has room, the next root and page open the pull of the key"
             );
             node.endpoint.close().await;
         });
