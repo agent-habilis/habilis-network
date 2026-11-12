@@ -8,7 +8,7 @@ use std::time::Duration;
 use habilis_network_protocol::digest::{DigestPage, DigestRoot};
 use habilis_network_protocol::{AuthorKey, Channel, Message, MessageBody, MessageKind};
 use habilis_network_util::clock::Instant;
-use habilis_network_util::tuning::{DIGEST_SETTLE, DIGEST_SETTLE_JITTER};
+use habilis_network_util::tuning::{DIGEST_SERVES_PER_WINDOW, DIGEST_SETTLE, DIGEST_SETTLE_JITTER};
 use iroh::EndpointId;
 
 use crate::daemon::handler_ctx::HandlerCtx;
@@ -206,16 +206,24 @@ pub(crate) async fn on_page(
     let Some(address) = state.address_of(&holder).map(|address| address.id) else {
         return;
     };
+    let cap = DIGEST_SERVES_PER_WINDOW * rows;
     for keys in DigestRound::pull_plan(state, channel, page, rows) {
-        for key in &keys {
-            state
+        let mut accepted = Vec::new();
+        for key in keys {
+            if state
                 .outstanding_pulls
-                .register(address, channel, *key, now);
+                .register(address, channel, key, now, cap)
+            {
+                accepted.push(key);
+            }
+        }
+        if accepted.is_empty() {
+            continue;
         }
         let pull = MessageKind::SlicePull {
             to: holder,
             channel,
-            keys,
+            keys: accepted,
         };
         send_kind(state, context, address, pull).await;
     }

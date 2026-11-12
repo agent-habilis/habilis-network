@@ -3459,6 +3459,7 @@ mod first_contact_tests {
                 Channel::State,
                 identity.author_key(),
                 clock::Instant::now(),
+                usize::MAX,
             );
             state.unicast_arrival = Some(holder);
             let answer = slice_bytes(&node, &identity, Channel::State, 100);
@@ -3498,9 +3499,13 @@ mod first_contact_tests {
             let asked = clock::Instant::now()
                 .checked_sub(DIGEST_PULL_TTL)
                 .expect("an instant one pull TTL back");
-            state
-                .outstanding_pulls
-                .register(holder, Channel::State, identity.author_key(), asked);
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                asked,
+                usize::MAX,
+            );
             state.unicast_arrival = Some(holder);
             let late = slice_bytes(&node, &identity, Channel::State, 100);
             ingest_from(late, &mut state, &mut app, &context).await;
@@ -3751,6 +3756,7 @@ mod first_contact_tests {
                 Channel::State,
                 identity.author_key(),
                 clock::Instant::now(),
+                usize::MAX,
             );
             state.unicast_arrival = Some(holder);
             let meta = slice_bytes(&node, &identity, Channel::Meta, 100);
@@ -3936,6 +3942,7 @@ mod first_contact_tests {
                 Channel::State,
                 identity.author_key(),
                 clock::Instant::now(),
+                usize::MAX,
             );
             state.unicast_arrival = Some(holder);
             let pulled = slice_bytes(&node, &identity, Channel::State, 100);
@@ -3978,6 +3985,7 @@ mod first_contact_tests {
                 Channel::State,
                 identity.author_key(),
                 clock::Instant::now(),
+                usize::MAX,
             );
             state.unicast_arrival = Some(holder);
             ingest_from(refused, &mut state, &mut app, &context).await;
@@ -4010,6 +4018,7 @@ mod first_contact_tests {
                 Channel::State,
                 identity.author_key(),
                 clock::Instant::now(),
+                usize::MAX,
             );
             state.unicast_arrival = Some(endpoint_id(82));
             let unasked = slice_bytes(&node, &identity, Channel::State, 100);
