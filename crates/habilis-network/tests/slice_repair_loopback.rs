@@ -413,8 +413,8 @@ fn a_tombstone_after_a_write_burst_still_drops_the_slice() {
     });
 }
 
-/// The bound of a cold join: the backfill that a newcomer is owed on meeting a member, with no digest round. The
-/// round needs more than 12 s, so a joiner that converges inside this bound was served by the backfill.
+/// The bound of a cold join, counted from the moment the joiner sees the writer. The test pins the result inside this
+/// bound, not the path that delivers it: `late_joiner_backfill_loopback.rs` pins the backfill, with the digest round off.
 const COLD_JOIN_BOUND: Duration = Duration::from_secs(6);
 
 async fn write_meta(node: &Node<Store>, keys: usize) {
@@ -466,7 +466,7 @@ async fn converged_within(node: &Node<Store>, want: usize, bound: Duration) -> (
 }
 
 /// A cold joiner meets a meshed pair after a member wrote both documents, and its state and meta views converge on
-/// the writer's slices through the backfill.
+/// the writer's slices.
 #[test]
 fn a_cold_joiner_converges_on_state_and_meta() {
     let guard = habilis_network_test_tracing::init();
