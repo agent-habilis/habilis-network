@@ -108,7 +108,7 @@ Code: `protocol::identity`, `AuthorKey`.
 
 Layer: presentation. Keyed by author key.
 
-A peer whose arrival was shown to the operator or the agent. `surfaced` is a subset of `peers`. It gates what is shown. The roster stays complete: the roster gate of the shared state reads it.
+A peer whose arrival was shown to the operator or the agent. `surfaced` is a subset of `peers`. It gates what is shown. The roster stays complete: the slice gate of the shared state reads `peers` and `quiet` (`keeps_slice`), not `surfaced`.
 
 State: `surfaced`.
 
@@ -116,7 +116,7 @@ State: `surfaced`.
 
 Layer: heartbeat. Keyed by author key.
 
-A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return. A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return.
+A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return. A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return, but the shared state keeps no slice of it: the sweep releases the slice, and the digest round brings it back when the key returns.
 
 State: `quiet`. Code: `lifecycle/heartbeat.rs`.
 
@@ -164,7 +164,7 @@ Code: `habilis-network-doc` (`SliceStore`), `protocol::Channel`.
 
 Layer: state. Keyed by author key.
 
-A member sends its own slice of each channel to a newcomer, and to a peer that returned from quiet. The frame is the original signed frame, so the newcomer checks the signature of the author. A peer that has no path yet stays owed, for 90 s at most.
+A member sends its own slice of each channel to a newcomer, and to a peer that returned from quiet. The frame is the original signed frame, so the newcomer checks the signature of the author. A peer that has no path yet stays owed, for 90 s at most. The backfill starts a newcomer. The digest round (`habilis-network/src/gossip/digest_round.rs`) repairs the loss after it: the sync is pull-only.
 
 Code: `habilis-network/src/gossip/backfill.rs`.
 
@@ -172,7 +172,7 @@ Code: `habilis-network/src/gossip/backfill.rs`.
 
 Layer: state. Keyed by author key.
 
-The place where a slice of a key that is not in the roster waits, as many keys as the author cap of the channel (1024 by default). When the set is full, the key that arrived first goes. A pending slice expires after 90 s, and a newer version of its key restarts the wait. It is applied when its key joins the roster or returns to it. A pending slice is in no view and in no backfill.
+The place where a slice waits when the store keeps no slice of its key: a key that is not in the roster, and a lapsed key. The set holds as many keys as the author cap of the channel (1024 by default). When the set is full, the key that arrived first goes. A pending slice expires after 90 s, and a newer version of its key restarts the wait. It is applied when its key joins the roster or returns to it. A pending slice is in no view and in no backfill.
 
 Code: `PendingSlices` in `crates/habilis-network-doc/src/pending_slices.rs`.
 
@@ -180,7 +180,7 @@ Code: `PendingSlices` in `crates/habilis-network-doc/src/pending_slices.rs`.
 
 Layer: state. Keyed by author key.
 
-The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. The store refuses a slice of a gone key until the gone TTL ends. The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed key is not gone, because it can return.
+The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. A member that leaves first sends a tombstone, a slice with the value `null`. A peer keeps the tombstone for the tombstone TTL (10 minutes), then moves the key to the gone set. The store refuses a slice of a gone key until the gone TTL ends. The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed key is not gone, because it can return: the sweep releases its slice, and the digest round brings it back.
 
 Code: `SliceStore::forget` in `crates/habilis-network-doc/src/slice_store.rs`.
 

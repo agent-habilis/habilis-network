@@ -396,13 +396,15 @@ The parser rejects a key with no signature and a signature with no key.
 The signature covers the canonical form of the message with the key and signature fields empty.
 Unknown keys must be ignored, which leaves room for extension.
 
-The parser gates on an **exact** version match, `17.0`.
+The parser gates on an **exact** version match, `18.0`.
 A frame of another version is refused by its version, also when the frame fails to parse on a field that the version changed.
 A `13.0` peer and a `14.0` peer drop every frame of each other.
 Version `13.0` made the recipient of a directed frame an author key: `to` holds 64 lowercase hex digits, and a nickname there is a parse error.
 The `to` field is part of the signed kind, so the signature binds the recipient.
 Version `17.0` made the shared state one signed slice for each author.
 A `16.0` peer sends an automerge change in a `state` or `meta` frame, so a `17.0` build refuses its frames by version.
+Version `18.0` added the digest kinds `SliceRoot`, `SlicePull`, `SlicePageRequest` and `SlicePage`, and removed the resend trailer.
+A `17.0` peer carries no digest kind, so an `18.0` build refuses its frames by version.
 The crypto byte-domains are mixed into every signature and derivation transcript.
 A silent domain change makes verification fail invisibly, and the exact gate turns that into a loud rejection.
 
@@ -417,6 +419,10 @@ A silent domain change makes verification fail invisibly, and the exact gate tur
 | `ProofRequest { to }` | Unicast. A node asks one session, named by its author key, for the proof of its member. The session answers with its `joined` frame. |
 | `State` | One signed slice of its author on the `state` channel. |
 | `Meta` | One signed slice of its author on the `meta` channel. The shape is the same as `State`. By convention it holds the metadata of the mesh. |
+| `SliceRoot { to }` | Unicast to one linked neighbour. It holds the root of the digest of each channel: a hash and the number of pages (section 7.5). |
+| `SlicePageRequest { to, channel, index }` | Unicast. A node asks a neighbour for one page of the digest of one channel. |
+| `SlicePage { to, channel, page }` | Unicast. The answer to a page request. A page lists rows of an author key, a version and a content hash. |
+| `SlicePull { to, channel, keys }` | Unicast. A node asks a neighbour for the slices of the listed author keys. The neighbour answers with the original signed slice frames. |
 | `LinkState` | The multihop link vector. Ephemeral. |
 
 ### 7.3 Size budgets
@@ -483,7 +489,34 @@ A send that finds no path keeps the peer owed.
 The retry tick sends again.
 A peer stays owed for 90 s at most.
 A proof answer to the newcomer opens a path, so the slices go at once, with a dial back.
-A node does not re-send a frame that another node missed, except the shard repair of section 7.6.
+The backfill starts a newcomer. The digest round repairs the loss that comes after it.
+The sync is pull-only. A node never pushes a slice that it thinks a peer lacks.
+A node sends a frame again only when a peer asks for it: with a pull (below) or with a shard repair (section 7.6).
+
+The digest round has four steps:
+- On each backfill tick (10 s), the node sends one `SliceRoot` frame by unicast to each linked neighbour. Gossip does not carry it.
+- If the root of a neighbour differs from the root of the node, the node waits 1 s plus a random delay of up to 500 ms. The live frames in flight land in this time. Then the node compares the roots again. If they agree now, the round ends.
+- If the roots still differ, the node reads the digest of the neighbour page by page. It reads one neighbour on one channel at a time. For each page it sends a `SlicePageRequest`, and the neighbour answers with a `SlicePage`. The node asks for the next page 1.25 s after a page, because a page costs the neighbour two answers.
+- For each page, the node sends one `SlicePull` with all the keys of the page that it would take. It would take a key that the store lacks, a key at a lower version, and a key at the same version with a lower hash. It pulls no gone key. It pulls no key of which the store keeps no slice (see section 8.1).
+
+The round takes a root or a page only if it comes by unicast from a roster peer.
+It takes a page only if the node asked for it, from the same connection, within 5 s.
+A request that gets no answer within 5 s ends, and the node notes the difference again.
+
+A page holds as many rows as fit one message: `MAX_MESSAGE_SIZE` less the page overhead of the session, divided by 160 bytes for a row, and at least 1 row.
+A pull holds the keys of one page, so it never holds more keys than a page has rows.
+A page is never sealed, so every store of a mesh has the same row count.
+A neighbour that gets a pull looks up the first rows of distinct keys and ignores the rest. The asker pulls the rest at its next round.
+
+A node limits the answers that it gives, so one peer cannot take the whole service:
+- A node gives at most 8 answers to one endpoint on one channel in a window of 5 s. A `SlicePull` and a `SlicePageRequest` each count as one answer.
+- A node gives at most 32 answers in a window of 5 s, whoever asks.
+- The count is by endpoint, not by author key. A signing key costs nothing to make, so a key would let one peer take every answer of a window.
+- A request over the budget gets no answer. The asker asks again at its next round.
+
+A node limits the pulls that it has open:
+- A node has at most 8 times the row count of open pulls for one neighbour, and at most 1024 open pulls in all.
+- An open pull ends when the slice arrives, or after 5 s. A key whose pull ended can be pulled again at once.
 
 ### 7.6 Multipart bodies
 
@@ -530,7 +563,7 @@ The proof book holds 1024 sessions at most. When it is full, the oldest session 
 Each mesh carries two channels of shared state, `state` and `meta`.
 A channel holds one slice for each author.
 A slice is the last signed frame of its author.
-Its body is `{"version": <number>, "value": <object or null>}`.
+Its body is `{"version": <number>, "value": <object or null>}`. A `null` value is the tombstone of a member that leaves (section 8.2).
 The key of a slice is the author key.
 The view of a channel is a JSON object that maps the lowercase hex of each author key to the value of its slice: `{"<hex>": {...}}`.
 
@@ -548,7 +581,7 @@ Authenticity is the job of the engine.
 The store has three caps:
 - A slice and its frame must fit the wire limit, `MAX_MESSAGE_SIZE` (3840 bytes). The cap of a body is that limit minus the frame overhead of the session, which holds the envelope, the mesh id and the nickname. A larger write is refused with the error `TooLarge`.
 - A channel holds 1024 authors at most. This is the cap of the live roster.
-- An author has a burst of 5 versions, and then 1 version for each write interval (1 s). An arrival has a burst of 10, so the jitter of a network does not refuse an honest version. A write or an arrival past the rate limit is refused with the error `RateLimited`. Every arrival of a key in the roster is charged, a replay from the gossip cache too. A key outside the roster is charged when its slice is applied (section 8.1).
+- An author has a burst of 5 versions, and then 1 version for each write interval (1 s). An arrival has a burst of 10, so the jitter of a network does not refuse an honest version. A write or an arrival past the rate limit is refused with the error `RateLimited`. Every arrival of a key that the store keeps is charged, a replay from the gossip cache too. A frame that answers a pull takes no token. A key outside the roster is charged when its slice is applied (section 8.1).
 
 The caps bound the memory.
 In the worst case, a slice takes 3840 bytes.
@@ -558,11 +591,12 @@ A normal slice is about 300 bytes, so a normal full store takes about 600 KiB.
 
 ### 8.1 The roster gate
 
-A slice of a key that is in the roster enters the store at once.
+A slice of a key that the store keeps enters the store at once.
+The store keeps the own key, the live peers and the quiet peers.
 The own key is never a stranger: its slice always enters.
 The roster is the live peers, the quiet peers and the lapsed peers.
-A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return.
-A slice of a key that is not in the roster waits in the **pending set**.
+A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return, but the store keeps no slice of it.
+A slice of any other key waits in the **pending set**: a key that is not in the roster, and a lapsed key.
 The pending set holds the newest slice of each key.
 It holds as many keys as the author cap of the channel, 1024 by default.
 When the set is full, the key that arrived first goes.
@@ -571,20 +605,29 @@ The sweep tick expires the pending slices.
 When the key joins the roster or returns to it, the engine applies the pending slice, and the rate limit charges it then.
 So a flood of fresh keys that are not in the roster cannot fill the store.
 A pending slice is in no view and in no backfill.
-A key that said goodbye is not held: the engine drops its slices.
+A frame of a key that said a signed goodbye is dropped. It does not wait in the pending set.
 
 ### 8.2 The end of a session
 
+A member that leaves sends its tombstone before its `Left`.
+The tombstone is a slice with the value `null` at the next version, on each channel.
+It goes once by gossip, and by unicast to each live peer that the member can dial.
+A peer that gets it keeps the key in its slot with the `null` value, and the view leaves the key out.
+A peer that misses the `Left` still removes the slice of that member from its view, by the tombstone.
+After the tombstone TTL (10 minutes), the key goes to the gone set.
+
 A key that said a signed goodbye, or whose run a newer run replaced, goes to the **gone set**.
 The engine removes its slice, and the store refuses a slice of that key until the gone TTL ends.
+The gone TTL starts when the key goes to the gone set.
 The default of the gone TTL is 2 hours.
 It must stay above the quiet TTL (1 hour) plus the alive timeout, so a peer that missed the goodbye cannot bring back the old slice.
 A new run of a member replaces the older session of that member after the proof of the new run binds, so the view holds one slice for each member.
 A session that lost its nickname to another member can return.
 The engine parks its slice in the pending set, and it does not add the key to the gone set.
 The pending TTL applies to that slice.
-A lapsed key keeps its slice.
-The slice goes only when the key leaves the roster.
+A lapsed key is not gone, because it can return.
+The sweep releases its slice, and its frames wait in the pending set.
+When the key returns, its slice comes back by the digest round.
 
 ## 9. Transports
 
