@@ -508,6 +508,37 @@ pub(crate) async fn commit_and_send(
     Ok(())
 }
 
+/// Sends the tombstone of this node on each channel, the farewell of a leaving member. Each one goes by unicast to
+/// each live peer and by gossip, so a peer that misses the `Left` still drops this node's slice. The order of the
+/// sends is for time, not correctness: a receiver ends in the same state in either order.
+pub(crate) async fn send_tombstones(state: &mut EventLoopState, context: &MergeCtx<'_>) {
+    let own = state.identity.author_key();
+    for channel in [Channel::State, Channel::Meta] {
+        let draft = match state
+            .docs
+            .prepare_leave(channel, &own, clock::Instant::now())
+        {
+            Ok(draft) => draft,
+            Err(error) => {
+                tracing::debug!(target: "habilis_network::gossip", "a tombstone draft was refused: {error:?}");
+                continue;
+            }
+        };
+        if let Err(error) = commit_and_send(
+            state,
+            context,
+            channel,
+            draft,
+            Farewell::UnicastMirror,
+            false,
+        )
+        .await
+        {
+            tracing::debug!(target: "habilis_network::gossip", "a tombstone was not sent: {error}");
+        }
+    }
+}
+
 /// Mirror a farewell frame over the unicast plane to every live peer whose key made its dial hint
 /// with a `PeerInfo` — fire-and-forget dials racing the shutdown propagation sleep. A hint from a
 /// card has no verified key, and dialing it would open dials to addresses that no admitted key

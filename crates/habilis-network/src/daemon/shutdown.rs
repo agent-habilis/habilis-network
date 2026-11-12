@@ -25,10 +25,10 @@ use super::app::NodeDriver;
 use super::handler_ctx::HandlerCtx;
 use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
-use crate::gossip::{Farewell, MergeCtx, commit_and_send};
-use crate::protocol::{Channel, Message};
+use crate::gossip::{MergeCtx, send_tombstones};
+use crate::protocol::Message;
 #[cfg(all(unix, feature = "host"))]
-use crate::util::{clock, tuning};
+use crate::util::tuning;
 
 #[cfg(feature = "host")]
 use crate::util::process;
@@ -72,7 +72,8 @@ pub(super) async fn shutdown<Driver: NodeDriver>(
     context
         .sink
         .emit(NodeEvent::Info(format!("left {}", quit.leave_label)));
-    send_tombstones(state, context).await;
+    let merge_ctx: MergeCtx<'_> = context.into();
+    send_tombstones(state, &merge_ctx).await;
     // The `Left` rides gossip only — deliberately NOT mirrored over unicast
     // (unlike the meta retraction in `on_shutdown`): presence drives the
     // survivors' rendezvous fast-reclaim, and a `Left` that lands while a
@@ -88,37 +89,6 @@ pub(super) async fn shutdown<Driver: NodeDriver>(
     lifecycle::log_leaving(quit.name.as_str());
     n0future_time::sleep(Duration::from_millis(500)).await;
 }
-/// Sends this node's tombstone on each channel, before the `Left`. Each one goes by unicast to each live peer and by
-/// gossip, so a peer that misses the `Left` still drops this node's slice.
-async fn send_tombstones(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    let own = state.identity.author_key();
-    let merge_ctx: MergeCtx<'_> = context.into();
-    for channel in [Channel::State, Channel::Meta] {
-        let draft = match state
-            .docs
-            .prepare_leave(channel, &own, clock::Instant::now())
-        {
-            Ok(draft) => draft,
-            Err(error) => {
-                tracing::debug!(target: "habilis_network::gossip", "a tombstone draft was refused: {error:?}");
-                continue;
-            }
-        };
-        if let Err(error) = commit_and_send(
-            state,
-            &merge_ctx,
-            channel,
-            draft,
-            Farewell::UnicastMirror,
-            false,
-        )
-        .await
-        {
-            tracing::debug!(target: "habilis_network::gossip", "a tombstone was not sent: {error}");
-        }
-    }
-}
-
 /// Announce departure, and say whether the loop must hard-exit the process once it has ended.
 ///
 /// `exit_on_quit` is the CLI hard-exit: the CLI process exits on quit rather than tearing down
