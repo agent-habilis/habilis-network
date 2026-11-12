@@ -889,6 +889,44 @@ mod tests {
         );
     }
 
+    /// A dial that is cancelled leaves no lock behind: the lock of the peer goes when the dial future is dropped, not
+    /// only when the dial ends.
+    #[test]
+    fn a_cancelled_dial_leaves_no_lock_behind() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let pool = super::UnicastPool::new(node.clone(), true);
+                let peer = testing::endpoint_id(7);
+                let _gate = pool.hold_next_dial();
+                let sender = pool.clone();
+                let task = tokio::spawn(async move {
+                    sender
+                        .dial_and_send(peer, bytes::Bytes::from_static(b"one"))
+                        .await
+                });
+                time::sleep(Duration::from_millis(300)).await;
+                assert!(
+                    !pool.inner.dial_locks.lock().is_empty(),
+                    "a dial that waits holds the lock of its peer"
+                );
+                task.abort();
+                let _ = task.await;
+                assert!(
+                    pool.inner.dial_locks.lock().is_empty(),
+                    "a cancelled dial leaves no lock behind"
+                );
+                node.close().await;
+            },
+        );
+    }
+
     /// A send that waits on the dial of a probe finds the probe's connection and takes it: the hold becomes `Used`, so
     /// the sweeper does not close a connection that a send used when the probe ends. The order of the two calls comes
     /// from sleeps, with the first dial held.

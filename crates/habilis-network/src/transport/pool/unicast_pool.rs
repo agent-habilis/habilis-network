@@ -48,6 +48,10 @@ impl fmt::Debug for UnicastPool {
     }
 }
 
+/// The dial locks of the peers that are being dialed.
+// shared: the map and the turn of each dial hold the lock of a peer
+type DialLocks = HashMap<EndpointId, Arc<Mutex<()>>>;
+
 /// Why a pooled connection is held, which decides when it closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::transport::pool) enum Hold {
@@ -112,7 +116,7 @@ pub(in crate::transport::pool) struct PoolInner {
     /// One lock for each peer that is being dialed by [`UnicastPool::dial_pooled`]: a second dial waits for the first
     /// one, then finds its connection pooled. An entry is removed when its last waiter has gone.
     // shared: the dialer and every waiter for one peer hold the same lock
-    dial_locks: parking_lot::Mutex<HashMap<EndpointId, Arc<Mutex<()>>>>,
+    pub(in crate::transport::pool) dial_locks: parking_lot::Mutex<DialLocks>,
     /// Tests only: the next dial waits on this before it connects, so a test can queue a send
     /// behind it.
     #[cfg(test)]
@@ -691,32 +695,20 @@ impl UnicastPool {
     /// when no connection of the peer is open, so an insert never replaces a live connection. A replaced connection
     /// must be closed with `close()`, not dropped: an unacknowledged frame on a dropped connection is lost.
     async fn dial_pooled(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
-        let lock = self.dial_lock(eid);
-        let turn = lock.lock().await;
+        let turn = DialTurn::new(self, eid);
+        let permit = turn.lock.lock().await;
         let result = self.dial_pooled_turn(eid, hold).await;
-        drop(turn);
-        drop(lock);
-        self.release_dial_lock(eid);
+        drop(permit);
         result
     }
 
     /// The lock of `eid` for one dial. It is created on first use.
+    // shared: the turn of each dial of the peer holds a handle
     fn dial_lock(&self, eid: EndpointId) -> Arc<Mutex<()>> {
         let mut locks = self.inner.dial_locks.lock();
         // shared: the dialer and every waiter for the peer hold the same lock
         let lock = locks.entry(eid).or_insert_with(|| Arc::new(Mutex::new(())));
         Arc::clone(lock)
-    }
-
-    /// Removes the lock of `eid` when no caller holds it any more.
-    fn release_dial_lock(&self, eid: EndpointId) {
-        let mut locks = self.inner.dial_locks.lock();
-        if locks
-            .get(&eid)
-            .is_some_and(|lock| Arc::strong_count(lock) == 1)
-        {
-            locks.remove(&eid);
-        }
     }
 
     /// The open pooled connection of `eid`, if there is one. A caller that sends with it (`mark_used`) takes it as
@@ -816,6 +808,35 @@ impl UnicastPool {
         // A rejoin may come back at another address; its `PeerInfo` notes it.
         if let Ok(mut addrs) = self.inner.addrs.lock() {
             addrs.remove(&eid);
+        }
+    }
+}
+
+/// The lock of one peer for one dial. Dropping it, when the dial ends, returns early, is cancelled or panics, gives
+/// the lock back and removes its entry from the map when no other dial waits for it.
+struct DialTurn<'pool> {
+    pool: &'pool UnicastPool,
+    eid: EndpointId,
+    // shared: the dialer and every waiter for the peer hold the same lock
+    lock: Arc<Mutex<()>>,
+}
+
+impl<'pool> DialTurn<'pool> {
+    fn new(pool: &'pool UnicastPool, eid: EndpointId) -> Self {
+        let lock = pool.dial_lock(eid);
+        Self { pool, eid, lock }
+    }
+}
+
+impl Drop for DialTurn<'_> {
+    fn drop(&mut self) {
+        let mut locks = self.pool.inner.dial_locks.lock();
+        // two handles: the map and this turn
+        if locks
+            .get(&self.eid)
+            .is_some_and(|lock| Arc::strong_count(lock) == 2)
+        {
+            locks.remove(&self.eid);
         }
     }
 }
