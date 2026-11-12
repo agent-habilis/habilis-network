@@ -3463,7 +3463,6 @@ mod first_contact_tests {
         });
     }
 
-    /// A pull is for one channel, so a meta frame of the author is live when the pull is for state.
     /// An addressed pull that arrives by unicast spends one answer of the serve budget, so the answer path
     /// runs from the receive path, not only through the pure function.
     #[test]
@@ -3508,6 +3507,7 @@ mod first_contact_tests {
         });
     }
 
+    /// A pull addressed to another key is not this node's to answer, so it spends no answer of the budget.
     #[test]
     fn a_pull_to_another_key_leaves_the_budget_full() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -3549,8 +3549,52 @@ mod first_contact_tests {
         });
     }
 
+    /// An addressed page request that arrives by unicast spends one answer of the serve budget, as a pull does.
     #[test]
     fn a_page_request_that_arrives_is_answered_through_the_receive_path() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let page_request: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePageRequest {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    index: 0,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed page request serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(page_request, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers,
+                DIGEST_SERVES_PER_WINDOW - 1,
+                "the page request spent one slot, so 7 more answers fit in the window"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A page request addressed to another key is not this node's to answer, so it spends no answer of the budget.
+    #[test]
+    fn a_page_request_to_another_key_leaves_the_budget_full() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -3561,7 +3605,7 @@ mod first_contact_tests {
                 &node.mesh,
                 &nick("alice"),
                 MessageKind::SlicePageRequest {
-                    to: state.identity.author_key(),
+                    to: Identity::generate().author_key(),
                     channel: Channel::State,
                     index: 0,
                 },
@@ -3583,14 +3627,58 @@ mod first_contact_tests {
                 })
                 .count();
             assert_eq!(
-                answers,
-                DIGEST_SERVES_PER_WINDOW - 1,
-                "the pull spent one slot, so 7 more answers fit in the window"
+                answers, DIGEST_SERVES_PER_WINDOW,
+                "a pull addressed to another key spends no answer, so all 8 fit"
             );
             node.endpoint.close().await;
         });
     }
 
+    /// One endpoint that signs its pulls with two keys spends two answers of its own budget, whatever the keys.
+    #[test]
+    fn one_endpoint_with_two_keys_spends_one_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            state.unicast_arrival = Some(endpoint_id(81));
+            for signer in [Identity::generate(), Identity::generate()] {
+                let pull: Bytes = Message::new_frame(
+                    &node.mesh,
+                    &nick("alice"),
+                    MessageKind::SlicePull {
+                        to: state.identity.author_key(),
+                        channel: Channel::State,
+                        keys: vec![],
+                    },
+                    MessageBody::from("{}"),
+                )
+                .sign(&signer)
+                .serialize()
+                .expect("a signed pull serializes")
+                .into_bytes();
+                ingest_from(pull, &mut state, &mut app, &context).await;
+            }
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers,
+                DIGEST_SERVES_PER_WINDOW - 2,
+                "two pulls from one endpoint spend two answers, whatever their keys"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pull is for one channel, so a meta frame of the author is live when the pull is for state.
     #[test]
     fn a_pull_of_one_channel_does_not_open_the_other() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {

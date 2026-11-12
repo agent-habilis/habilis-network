@@ -869,16 +869,19 @@ impl SliceStore {
     /// Never: the store lists its entries sorted, and the rows and the total are at least one.
     #[must_use]
     pub fn page(&self, index: usize) -> Option<DigestPage> {
-        let sorted = self.sorted_entries();
-        let rows = self.page_rows();
-        let total = sorted.len().div_ceil(rows).max(1);
+        let (sorted, rows, total) = self.paging();
         if index >= total {
             return None;
         }
-        Some(
-            DigestPage::build(&sorted, rows, index, total)
-                .expect("a store lists sorted entries, with rows and total at least one"),
-        )
+        Some(build_page(&sorted, rows, index, total))
+    }
+
+    /// The sorted entries of the store, the rows of a page, and the number of pages, from one snapshot.
+    fn paging(&self) -> (Vec<DigestEntry>, usize, usize) {
+        let sorted = self.sorted_entries();
+        let rows = self.page_rows();
+        let total = sorted.len().div_ceil(rows).max(1);
+        (sorted, rows, total)
     }
 
     /// Returns every page of the version digest, all built from one snapshot of the store.
@@ -890,13 +893,8 @@ impl SliceStore {
     ///
     /// Never: the store lists its entries sorted, and the rows and the total are at least one.
     pub fn pages(&self) -> impl Iterator<Item = DigestPage> {
-        let sorted = self.sorted_entries();
-        let rows = self.page_rows();
-        let total = sorted.len().div_ceil(rows).max(1);
-        (0..total).map(move |index| {
-            DigestPage::build(&sorted, rows, index, total)
-                .expect("a store lists sorted entries, with rows and total at least one")
-        })
+        let (sorted, rows, total) = self.paging();
+        (0..total).map(move |index| build_page(&sorted, rows, index, total))
     }
 
     /// Whether the root of this store is `root`, so two peers with equal stores need one message.
@@ -1062,6 +1060,13 @@ impl SliceStore {
         bucket.tokens -= 1;
         true
     }
+}
+
+/// Builds page `index` of `total` from the sorted entries of a store. A store lists its entries sorted, and
+/// its rows and total are at least one, so the build cannot refuse them.
+fn build_page(sorted: &[DigestEntry], rows: usize, index: usize, total: usize) -> DigestPage {
+    DigestPage::build(sorted, rows, index, total)
+        .expect("a store lists sorted entries, with rows and total at least one")
 }
 
 #[cfg(test)]
