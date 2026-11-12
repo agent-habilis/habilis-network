@@ -644,6 +644,51 @@ mod tests {
         );
     }
 
+    /// The pull of one full page fits one frame at the longest mesh id and nickname: the most keys that a holder can
+    /// list on a page, in the signed frame of the worst session, stay under the wire limit.
+    #[test]
+    fn a_pull_of_one_full_page_fits_one_frame_at_the_worst_overhead() {
+        use crate::protocol::identity::Identity;
+        use crate::protocol::{MeshId, Message, MessageBody, MessageKind, Nickname};
+        use habilis_network_doc::{SliceLimits, SliceStore};
+        use habilis_network_util::consts::MAX_MESSAGE_SIZE;
+
+        let shortest =
+            habilis_network_doc::page_frame_overhead(&MeshId::from("a"), &Nickname::from("a"));
+        let store = SliceStore::new(
+            Channel::State,
+            SliceLimits::default(),
+            habilis_network_doc::worst_frame_overhead(),
+        )
+        .with_page_overhead(shortest);
+        let rows = store.page_rows();
+        let keys: Vec<AuthorKey> = (0..rows)
+            .map(|index| {
+                let mut bytes = [0xffu8; 32];
+                bytes[0] = u8::try_from(index).unwrap_or(0);
+                AuthorKey::from(bytes)
+            })
+            .collect();
+        let mesh = MeshId::from("1".repeat(511).as_str());
+        let nickname = Nickname::from("😀".repeat(32).as_str());
+        let pull = MessageKind::SlicePull {
+            to: AuthorKey::from([0xff; 32]),
+            channel: Channel::State,
+            keys,
+        };
+        let signed = Message::new_frame(&mesh, &nickname, pull, MessageBody::from("{}"))
+            .sign(&Identity::generate());
+        let frame_len: usize = signed
+            .serialize()
+            .expect("a pull frame serializes")
+            .into_bytes()
+            .len();
+        assert!(
+            frame_len <= MAX_MESSAGE_SIZE,
+            "a pull of {rows} keys is {frame_len} bytes, over the wire limit of {MAX_MESSAGE_SIZE}"
+        );
+    }
+
     /// A lapsed key keeps no slice, so the round does not pull it.
     #[test]
     fn a_lapsed_key_is_not_pulled() {
