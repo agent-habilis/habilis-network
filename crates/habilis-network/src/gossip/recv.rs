@@ -6320,10 +6320,123 @@ mod first_contact_tests {
         });
     }
 
+    /// A lapsed key that returns: its waiting frame is applied when it is seen again, and a later version comes back
+    /// through the round. It is never in the gone set, because the sweep released it and did not forget it.
+    #[test]
+    fn a_lapsed_key_returns_and_its_slices_come_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            let key = alice.author_key();
+            state.peers.insert(key);
+            let slice = |version: u64, value: &str| -> Bytes {
+                let body = MessageBody::try_new(&format!(
+                    r#"{{"version":{version},"value":{{"a":{value}}}}}"#
+                ))
+                .expect("a slice body");
+                Message::new_channel_event(&node.mesh, &nick("alice"), body, Channel::State)
+                    .sign(&alice)
+                    .serialize()
+                    .expect("a signed slice serializes")
+                    .into_bytes()
+            };
+            ingest_from(slice(1, "1"), &mut state, &mut app, &context).await;
+            assert!(
+                state.docs.held_keys().contains(&key),
+                "alice's v1 slice is held while she is a peer"
+            );
+            state.peers.remove(&key);
+            state.clock_evidence.lapsed_quiet.insert(key);
+            state.release_strangers();
+            assert!(
+                !state.docs.held_keys().contains(&key),
+                "the sweep releases a lapsed key's slice"
+            );
+            ingest_from(slice(2, "2"), &mut state, &mut app, &context).await;
+            assert!(
+                !state.docs.held_keys().contains(&key),
+                "a lapsed key's v2 frame waits in pending"
+            );
+            let presence: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::Presence {
+                    subtype: habilis_network_protocol::PresenceSubtype::Alive,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed presence serializes")
+            .into_bytes();
+            ingest_from(presence, &mut state, &mut app, &context).await;
+            assert!(
+                state.docs.held_keys().contains(&key),
+                "alice's return applies her waiting v2 frame"
+            );
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+            state.digest_round.advance(later, |_| true, |_, _| false);
+            let page =
+                DigestPage::build(&[DigestEntry::new(key, 3, ContentHash::of(b"v3"))], 1, 0, 1)
+                    .expect("a page of one row");
+            let answer: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePage {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    page,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed page serializes")
+            .into_bytes();
+            ingest_from(answer, &mut state, &mut app, &context).await;
+            assert!(
+                state
+                    .outstanding_pulls
+                    .take(endpoint_id(81), Channel::State, key, later),
+                "the round pulls the returned key's slice"
+            );
+            ingest_from(slice(3, "3"), &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let view = state.view(Channel::State);
+            assert!(
+                view.as_object()
+                    .is_some_and(|slices| slices.values().any(|slot| slot["a"] == 3)),
+                "the pulled v3 slice reaches the view"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// A key that lapsed and returns gets its slice back by the digest round: its root differs, its page is read, and
     /// the pull of its key is registered.
     #[test]
-    fn a_returning_key_gets_its_slice_back_by_the_round() {
+    fn a_returned_key_is_pulled_from_a_differing_page() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
