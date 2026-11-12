@@ -6628,11 +6628,10 @@ mod first_contact_tests {
                 "the v3 answer used the pull that the round opened"
             );
             let view = state.view(Channel::State);
-            assert!(
-                view.as_object()
-                    .is_some_and(|slices| slices.values().any(|slot| slot["a"] == 3)),
-                "the pulled v3 slice reaches the view"
-            );
+            let v3_held: bool = view
+                .as_object()
+                .is_some_and(|slices| slices.values().any(|slot| slot["a"] == 3));
+            assert!(v3_held, "the pulled v3 slice reaches the view");
             assert!(
                 !state.docs.is_gone(Channel::State, &key),
                 "alice is not gone after her return"
