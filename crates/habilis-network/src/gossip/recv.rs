@@ -6460,7 +6460,8 @@ mod first_contact_tests {
     }
 
     /// A lapsed key that returns: its waiting frame is applied when it is seen again, and a later version comes back
-    /// through the round. It is never in the gone set, because the sweep released it and did not forget it.
+    /// through the round. It is never in the gone set, because the sweep released it and did not forget it. The test sets the
+    /// lapse by hand, and `release_strangers` is the call that the sweep makes.
     #[test]
     fn a_lapsed_key_returns_and_its_slices_come_back() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -6493,6 +6494,10 @@ mod first_contact_tests {
             assert!(
                 !state.docs.held_keys().contains(&key),
                 "the sweep releases a lapsed key's slice"
+            );
+            assert!(
+                !state.docs.is_gone(Channel::State, &key),
+                "the sweep releases the key and does not forget it"
             );
             ingest_from(slice(2, "2"), &mut state, &mut app, &context).await;
             assert!(
@@ -6535,6 +6540,7 @@ mod first_contact_tests {
             state.unicast_arrival = Some(endpoint_id(83));
             ingest_from(root, &mut state, &mut app, &context).await;
             let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+            // every holder is in the roster, and no root matches the store
             state.digest_round.advance(later, |_| true, |_, _| false);
             let page =
                 DigestPage::build(&[DigestEntry::new(key, 3, ContentHash::of(b"v3"))], 1, 0, 1)
@@ -6554,19 +6560,23 @@ mod first_contact_tests {
             .expect("a signed page serializes")
             .into_bytes();
             ingest_from(answer, &mut state, &mut app, &context).await;
-            assert!(
-                state
-                    .outstanding_pulls
-                    .take(endpoint_id(83), Channel::State, key, later),
-                "the round pulls the returned key's slice"
-            );
             ingest_from(slice(3, "3"), &mut state, &mut app, &context).await;
             state.unicast_arrival = None;
+            assert!(
+                !state
+                    .outstanding_pulls
+                    .take(endpoint_id(83), Channel::State, key, later),
+                "the v3 answer used the pull that the round opened"
+            );
             let view = state.view(Channel::State);
             assert!(
                 view.as_object()
                     .is_some_and(|slices| slices.values().any(|slot| slot["a"] == 3)),
                 "the pulled v3 slice reaches the view"
+            );
+            assert!(
+                !state.docs.is_gone(Channel::State, &key),
+                "alice is not gone after her return"
             );
             node.endpoint.close().await;
         });

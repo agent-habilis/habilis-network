@@ -1007,8 +1007,20 @@ impl SliceStore {
         Ok((version, body, measured))
     }
 
-    /// Whether `key` is in the gone set.
-    fn is_gone(&self, key: &AuthorKey) -> bool {
+    /// Whether `key` is in the gone set: a signed goodbye or a replaced run put it there, and the store refuses its
+    /// slices until the gone TTL ends. A key that was only released is not gone.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::{AuthorKey, Channel};
+    ///
+    /// let store = SliceStore::new(Channel::Meta, SliceLimits::default(), worst_frame_overhead());
+    /// assert!(!store.is_gone(&AuthorKey::from([1u8; 32])));
+    /// ```
+    #[must_use]
+    pub fn is_gone(&self, key: &AuthorKey) -> bool {
         self.gone.iter().any(|(gone, _)| gone == key)
     }
 

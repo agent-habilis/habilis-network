@@ -191,6 +191,12 @@ impl ChannelDocs {
         self.get_mut(channel).commit_local(draft, frame, now)
     }
 
+    /// Whether `key` is in the gone set of `channel`, for the tests that check a release does not forget.
+    #[cfg(test)]
+    pub(crate) fn is_gone(&self, channel: protocol::Channel, key: &AuthorKey) -> bool {
+        self.get(channel).is_gone(key)
+    }
+
     /// The signed frame of the slice that `key` holds on `channel`, as a wire frame.
     pub(crate) fn own_frame(
         &self,
@@ -1804,10 +1810,10 @@ impl EventLoopState {
     }
 
     /// Drops the slices of every key that is out of the slice gate, so a key that lapsed quiet loses its slice here.
-    /// Each node lapses a key up to one sweep interval apart from the others, so for that span one node can hold a
-    /// slice that another has released: the digest round then reads pages and pulls nothing, which costs answers only.
-    /// An asymmetric partition keeps a different root with a holder that still hears the key: the round then reads
-    /// pages and pulls nothing, until the holder lapses the key too.
+    /// While one node holds a slice that another has released, their roots differ and the digest round reads pages and
+    /// pulls nothing, which costs answers only. This happens for up to one sweep interval, because nodes lapse a key at
+    /// different times, and for longer in an asymmetric partition, until the holder that still hears the key lapses it
+    /// too.
     pub(crate) fn release_strangers(&mut self) {
         let held = self.docs.held_keys();
         let strangers: Vec<AuthorKey> = held
