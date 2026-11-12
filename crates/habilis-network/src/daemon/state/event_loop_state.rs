@@ -103,6 +103,11 @@ impl Goodbyes {
 /// follow the live roster, which can reach `QUIET_CAP` (1024). At the cap the oldest key goes and its endpoint
 /// state with it.
 pub(crate) const REFUSED_ENDPOINTS_CAP: usize = 256;
+/// The seal keys of unknown signers that wait for a join: 64 at most, and the oldest goes. A member
+/// mints keys for free, so the number is small: a real join follows its `PeerInfo` within a second.
+pub(crate) const PENDING_SEAL_KEYS_CAP: usize = 64;
+/// How long the seal key of an unknown signer waits for its join, as long as a pending slice.
+pub(crate) const PENDING_SEAL_KEY_TTL: Duration = Duration::from_secs(90);
 /// The released endpoints that wait for the teardown of the pool: 256 at most.
 const TEARDOWN_PENDING_MAX: usize = 256;
 /// The orphan endpoints: 1024 at most.
@@ -567,6 +572,11 @@ pub struct EventLoopState {
     /// the key is sealed to it. The map holds a key that is a peer, quiet or named, so the roster
     /// bounds it, and the key leaves with `forget_key`.
     pub(crate) seal_keys: HashMap<AuthorKey, x25519_dalek::PublicKey>,
+    /// The seal key of a `PeerInfo` whose signer is not known yet, with the time that it came, oldest
+    /// first. A `PeerInfo` can come before the `joined` frame of its key, and the next one is a
+    /// refresh period away. The key waits here for the join of its signer, `PENDING_SEAL_KEYS_CAP`
+    /// at most, and a key older than `PENDING_SEAL_KEY_TTL` is dropped.
+    pending_seal_keys: VecDeque<(AuthorKey, x25519_dalek::PublicKey, Instant)>,
     /// The keys of `refused_endpoints` in the order that they were retained, oldest first. It may hold a key
     /// that left the map; it is cut to the keys of the map when it grows past twice the cap.
     refused_order: VecDeque<AuthorKey>,
@@ -960,6 +970,7 @@ impl EventLoopState {
             hint_owner: HashMap::new(),
             refused_endpoints: HashMap::new(),
             seal_keys: HashMap::new(),
+            pending_seal_keys: VecDeque::new(),
             refused_order: VecDeque::new(),
             peer_stamp: HashMap::new(),
             clock_evidence: ClockEvidence::default(),
@@ -1555,6 +1566,8 @@ impl EventLoopState {
         self.clock_evidence.lapsed_quiet.remove(&key);
         self.proven_endpoints.forget_trust(&key);
         self.seal_keys.remove(&key);
+        self.pending_seal_keys
+            .retain(|(waiting, _, _)| *waiting != key);
         self.rival_holders.remove(&key);
         self.names.remove(&key);
         self.clock_evidence.name_stamp.remove(&key);
@@ -2499,15 +2512,54 @@ impl EventLoopState {
         self.seal_keys.get(key)
     }
 
-    /// Keep the seal key that the signed `PeerInfo` of `key` names. A member mints keys for free,
-    /// so only a key that is a peer, quiet or named is kept: the roster bounds the map. A newer
-    /// `PeerInfo` of the key replaces the key.
-    pub(crate) fn note_seal_key(&mut self, key: AuthorKey, seal: x25519_dalek::PublicKey) {
+    /// Keep the seal key that the signed `PeerInfo` of `key` names. A key that said goodbye never
+    /// speaks again, so its `PeerInfo` is a replay and binds nothing. A member mints keys for free,
+    /// so only a key that is a peer, quiet or named is kept: the roster bounds the map. The key of an
+    /// unknown signer waits in a small queue for the join of its signer
+    /// ([`Self::apply_pending_seal_key`]). A newer `PeerInfo` of a key replaces its key.
+    pub(crate) fn note_seal_key(
+        &mut self,
+        key: AuthorKey,
+        seal: x25519_dalek::PublicKey,
+        now: Instant,
+    ) {
+        if self.key_said_goodbye(key) {
+            return;
+        }
+        self.pending_seal_keys
+            .retain(|(waiting, _, _)| *waiting != key);
         let known =
             self.peers.contains(&key) || self.quiet.contains(&key) || self.names.contains_key(&key);
         if known {
             self.seal_keys.insert(key, seal);
+            return;
         }
+        while self.pending_seal_keys.len() >= PENDING_SEAL_KEYS_CAP {
+            self.pending_seal_keys.pop_front();
+        }
+        self.pending_seal_keys.push_back((key, seal, now));
+    }
+
+    /// Keep the seal key that waited for `key` to join, if it is still fresh at `now`. The admission
+    /// of a key to the roster calls this. A key that waited longer than the TTL is dropped, and so
+    /// is every other that did.
+    pub(crate) fn apply_pending_seal_key(&mut self, key: AuthorKey, now: Instant) {
+        self.pending_seal_keys
+            .retain(|(_, _, came)| now.saturating_duration_since(*came) <= PENDING_SEAL_KEY_TTL);
+        let waiting = self
+            .pending_seal_keys
+            .iter()
+            .position(|(held, _, _)| *held == key);
+        if let Some(place) = waiting
+            && let Some((_, seal, _)) = self.pending_seal_keys.remove(place)
+        {
+            self.seal_keys.insert(key, seal);
+        }
+    }
+
+    /// How many seal keys wait for the join of their signer.
+    pub(crate) fn pending_seal_key_count(&self) -> usize {
+        self.pending_seal_keys.len()
     }
 
     /// Bind the endpoint that the meta card of `key` names as its dial hint, as the `PeerInfo` of

@@ -320,6 +320,7 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_graft_backoff = sizes.graft_backoff,
         col_refused_endpoints = sizes.refused_endpoints,
         col_seal_keys = sizes.seal_keys,
+        col_pending_seal_keys = sizes.pending_seal_keys,
         col_orphaned_endpoints = sizes.orphaned_endpoints,
         "collection census"
     );

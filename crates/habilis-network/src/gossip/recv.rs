@@ -1876,6 +1876,11 @@ async fn handle_peer_info(
     let Ok((peer_id, peer_addr)) = peer_addr_error::endpoint_addr_from_json(&parsed) else {
         return;
     };
+    // The seal key is part of the body: a `PeerInfo` that names none, or a text that is not a key,
+    // is not a `PeerInfo` of this wire version, and it binds nothing.
+    let Some(seal) = peer_info_seal_key(&parsed) else {
+        return;
+    };
     if peer_id == context.endpoint.id() {
         return;
     }
@@ -1897,10 +1902,8 @@ async fn handle_peer_info(
     let changed = !state.unicast_pool.remembers_address(&peer_addr);
     state.place_endpoint(hinter, &message.author, peer_addr.clone());
     // The same signature binds the seal key to the author: a directed body for this key is sealed
-    // to it. A body with no seal key is an older node's, and a key that is not known binds none.
-    if let Some(seal) = peer_info_seal_key(&parsed) {
-        state.note_seal_key(hinter, seal);
-    }
+    // to it. The key of a signer that is not known yet waits for its join.
+    state.note_seal_key(hinter, seal, Instant::now());
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.
@@ -2171,7 +2174,7 @@ mod first_contact_tests {
     use crate::protocol::{
         AuthorKey, Channel, ContentHash, MeshId, Message, MessageKind, Nickname,
     };
-    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
+    use crate::testing::{address_json_with_seal, endpoint_id, fresh_state, nick, test_key};
     use crate::transport::MeshSender;
     use bytes::Bytes;
     use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
@@ -3250,11 +3253,8 @@ mod first_contact_tests {
             let address = iroh::EndpointAddr::new(endpoint);
             let info: Verified = {
                 use crate::protocol::messages::MessageBody;
-                use crate::protocol::peer_addr_error;
-                let body = MessageBody::try_new(
-                    &peer_addr_error::endpoint_addr_to_json(&address).to_string(),
-                )
-                .expect("an address body");
+                let body = MessageBody::try_new(&address_json_with_seal(&address).to_string())
+                    .expect("an address body");
                 Message::new_peer_info(&node.mesh, &node.author, body).sign(&claimant)
             };
             let chatter: Verified = Message::new_app(
@@ -5085,7 +5085,7 @@ mod first_contact_tests {
     fn a_peer_info_binds_its_seal_key_to_its_signer_when_the_signer_is_known() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+            use crate::protocol::{AuthorKey, identity};
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -5098,10 +5098,17 @@ mod first_contact_tests {
             let (bob_key, stranger_key) = (key_of(&bob), key_of(&stranger));
             let peer_info = |seal: Option<x25519_dalek::PublicKey>, signed_by: &Identity| {
                 let address = iroh::EndpointAddr::new(endpoint_id(61));
-                let mut json = peer_addr_error::endpoint_addr_to_json(&address);
-                if let Some(seal) = seal {
-                    json["seal"] =
-                        serde_json::Value::String(bs58::encode(seal.as_bytes()).into_string());
+                let mut json = address_json_with_seal(&address);
+                match seal {
+                    Some(seal) => {
+                        json["seal"] =
+                            serde_json::Value::String(bs58::encode(seal.as_bytes()).into_string());
+                    }
+                    None => {
+                        json.as_object_mut()
+                            .expect("the body is an object")
+                            .remove("seal");
+                    }
                 }
                 let body = MessageBody::try_new(&json.to_string()).expect("an address body");
                 Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(signed_by)
@@ -5138,7 +5145,7 @@ mod first_contact_tests {
             assert_eq!(
                 state.seal_key_of(&bob_key),
                 Some(&bob.seal_public()),
-                "a PeerInfo with no seal key leaves the kept key"
+                "a PeerInfo with no seal key is refused and leaves the kept key"
             );
 
             let newer = Identity::generate().seal_public();
@@ -5152,6 +5159,109 @@ mod first_contact_tests {
         });
     }
 
+    /// **A `PeerInfo` that comes before the `joined` frame of its signer keeps its seal key for the
+    /// join.** The next `PeerInfo` of the signer is a refresh period away, so the key that is
+    /// dropped on arrival leaves the first directed sealed send without a key. The key waits, and
+    /// the admission of its signer to the roster applies it.
+    #[test]
+    fn a_peer_info_before_the_join_of_its_signer_gives_its_seal_key_at_the_join() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::lifecycle::membership_update::{self, MembershipUpdate};
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob = Identity::generate();
+            let bob_key = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
+                .expect("a 32-byte key");
+            let mut json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint_id(62)));
+            json["seal"] =
+                serde_json::Value::String(bs58::encode(bob.seal_public().as_bytes()).into_string());
+            let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+            let info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
+
+            let mut state = fresh_state();
+            super::handle_peer_info(&info, &mut state, &context).await;
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                None,
+                "the key of an unknown signer was kept at once"
+            );
+            assert_eq!(
+                state.pending_seal_key_count(),
+                1,
+                "the key of an unknown signer did not wait for its join"
+            );
+
+            let joined = MembershipUpdate {
+                returned: false,
+                joined_new: true,
+                stale: false,
+            };
+            membership_update::apply(&joined, bob_key, &mut state);
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                Some(&bob.seal_public()),
+                "the join did not give the waiting seal key"
+            );
+            assert_eq!(
+                state.pending_seal_key_count(),
+                0,
+                "the key still waits after its join"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// **The old body of a `PeerInfo`, with no seal key, binds nothing.** Wire 18.0 is not released,
+    /// so the seal key is part of the body. The literal below is the body before the seal key: an
+    /// address and a proof. The frame is signed and its address is good, and the receiver still
+    /// refuses it: no endpoint, no proof, no key.
+    #[test]
+    fn a_peer_info_with_no_seal_key_binds_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob = Identity::generate();
+            let bob_key = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
+                .expect("a 32-byte key");
+            let mut old =
+                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint_id(63)));
+            old["proof"] = serde_json::Value::String("proof".to_owned());
+            assert!(
+                old.get("seal").is_none(),
+                "the premise: the body has no seal"
+            );
+            let body = MessageBody::try_new(&old.to_string()).expect("an address body");
+            let info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
+
+            let mut state = fresh_state();
+            state.peers.insert(bob_key);
+            state.names.insert(bob_key, nick("bob"));
+            super::handle_peer_info(&info, &mut state, &context).await;
+
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                None,
+                "a body with no seal kept a key"
+            );
+            assert_eq!(
+                state.pending_seal_key_count(),
+                0,
+                "a body with no seal left a key waiting"
+            );
+            assert!(
+                state.known_endpoints.is_empty() && state.peer_endpoints.is_empty(),
+                "a body with no seal bound an endpoint"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// A `PeerInfo` binds its signer to its endpoint only with that endpoint's
     /// proof over that signer. Bob's proof is public on gossip, so a frame that
     /// carries it but is signed by another key must bind nothing.
@@ -5159,7 +5269,7 @@ mod first_contact_tests {
     fn a_peer_info_binds_its_signer_only_with_the_endpoints_proof() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+            use crate::protocol::{AuthorKey, identity};
             use crate::transport::proven_endpoints;
 
             let node = Node::spawn().await;
@@ -5171,8 +5281,7 @@ mod first_contact_tests {
             let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
                 .expect("a 32-byte key");
             let peer_info = |proof: Option<&str>, signed_by: &Identity| {
-                let mut json =
-                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+                let mut json = address_json_with_seal(&iroh::EndpointAddr::new(bob_endpoint));
                 if let Some(proof) = proof {
                     json["proof"] = serde_json::Value::String(proof.to_owned());
                 }
@@ -5302,7 +5411,6 @@ mod first_contact_tests {
     fn the_endpoint_a_rival_key_was_refused_becomes_the_hint_when_the_first_key_leaves() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -5313,8 +5421,7 @@ mod first_contact_tests {
             for (run, endpoint) in [(&first, first_endpoint), (&second, second_endpoint)] {
                 state.names.insert(run.author_key(), twin.clone());
                 state.peers.insert(run.author_key());
-                let json =
-                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+                let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint));
                 let body = MessageBody::try_new(&json.to_string()).expect("an address body");
                 let peer_info = Message::new_peer_info(&node.mesh, &twin, body).sign(run);
                 super::handle_peer_info(&peer_info, &mut state, &context).await;
@@ -5346,7 +5453,6 @@ mod first_contact_tests {
     fn a_refused_key_that_binds_releases_the_endpoint_it_had_retained() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -5359,8 +5465,7 @@ mod first_contact_tests {
                 state.peers.insert(run.author_key());
             }
             let advertise = |run: &Identity, endpoint| {
-                let json =
-                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+                let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint));
                 let body = MessageBody::try_new(&json.to_string()).expect("an address body");
                 Message::new_peer_info(&node.mesh, &twin, body).sign(run)
             };
@@ -5391,7 +5496,7 @@ mod first_contact_tests {
     fn the_beacon_flag_of_a_trusted_key_whose_proof_left_the_table_is_believed() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+            use crate::protocol::{AuthorKey, identity};
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -5399,8 +5504,7 @@ mod first_contact_tests {
             let bob = Identity::generate();
             let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
                 .expect("a 32-byte key");
-            let mut json =
-                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            let mut json = address_json_with_seal(&iroh::EndpointAddr::new(bob_endpoint));
             json["beacon"] = serde_json::Value::Bool(true);
             let body = MessageBody::try_new(&json.to_string()).expect("an address body");
             let peer_info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
@@ -5432,7 +5536,7 @@ mod first_contact_tests {
     fn a_proof_recorded_before_the_signer_joined_the_roster_is_trusted_by_the_next_peer_info() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+            use crate::protocol::{AuthorKey, identity};
             use crate::transport::proven_endpoints;
 
             let node = Node::spawn().await;
@@ -5443,8 +5547,7 @@ mod first_contact_tests {
             let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
                 .expect("a 32-byte key");
             let proof = proven_endpoints::sign(&bob_endpoint_key, &node.mesh, &bob_signer);
-            let mut json =
-                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            let mut json = address_json_with_seal(&iroh::EndpointAddr::new(bob_endpoint));
             json["proof"] = serde_json::Value::String(proof);
             let body = MessageBody::try_new(&json.to_string()).expect("an address body");
             let peer_info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
@@ -5483,7 +5586,6 @@ mod first_contact_tests {
             use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
             use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
-            use crate::protocol::peer_addr_error;
             use crate::transport::proven_endpoints;
 
             async fn handle_for(secret: &SecretKey) -> MultihopHandle {
@@ -5526,8 +5628,7 @@ mod first_contact_tests {
                 "a node with no peers has no topology edges"
             );
 
-            let mut address =
-                peer_addr_error::endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
+            let mut address = address_json_with_seal(&EndpointAddr::new(author_key.public()));
             address["proof"] = serde_json::Value::String(proven_endpoints::sign(
                 &author_key,
                 &node.mesh,
@@ -5652,11 +5753,9 @@ mod first_contact_tests {
     /// A `PeerInfo` of the author `bob` that carries `addr`, signed by `by`.
     fn peer_info_signed_by(node: &Node, address: &iroh::EndpointAddr, by: &Identity) -> Verified {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
 
-        let body =
-            MessageBody::try_new(&peer_addr_error::endpoint_addr_to_json(address).to_string())
-                .expect("an address body");
+        let body = MessageBody::try_new(&address_json_with_seal(address).to_string())
+            .expect("an address body");
         Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(by)
     }
 
@@ -5668,11 +5767,9 @@ mod first_contact_tests {
         at: UnixSecs,
     ) -> Verified {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
         use crate::transport::proven_endpoints;
 
-        let mut address =
-            peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint_key.public()));
+        let mut address = address_json_with_seal(&iroh::EndpointAddr::new(endpoint_key.public()));
         address["proof"] = serde_json::Value::String(proven_endpoints::sign(
             endpoint_key,
             &node.mesh,
@@ -5995,7 +6092,6 @@ mod first_contact_tests {
     fn a_second_peer_info_right_after_a_deferred_dial_does_not_dial() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -6007,8 +6103,7 @@ mod first_contact_tests {
                 }
             };
             let body = MessageBody::try_new(
-                &peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(lower))
-                    .to_string(),
+                &address_json_with_seal(&iroh::EndpointAddr::new(lower)).to_string(),
             )
             .expect("an address body");
             let peer_info = Message::new_peer_info(&node.mesh, &nick("lower"), body)
@@ -6045,7 +6140,6 @@ mod first_contact_tests {
     fn a_peer_info_leaves_one_slot_free_in_a_mesh_larger_than_g_plus_one() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -6058,8 +6152,7 @@ mod first_contact_tests {
                 }
             };
             let body = MessageBody::try_new(
-                &peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer))
-                    .to_string(),
+                &address_json_with_seal(&iroh::EndpointAddr::new(newcomer)).to_string(),
             )
             .expect("an address body");
             let peer_info = Message::new_peer_info(&node.mesh, &nick("newcomer"), body)
@@ -6120,9 +6213,7 @@ mod first_contact_tests {
             let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
 
             let mut peer_info_first = fresh_state();
-            let json = protocol::peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(
-                endpoint_id(7),
-            ));
+            let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint_id(7)));
             let body = MessageBody::try_new(&json.to_string()).expect("an address body");
             let first = Message::new_peer_info(&node.mesh, &nick("late"), body).sign(&newcomer);
             ingest(wire(&first), &mut peer_info_first, &mut app, &context).await;
@@ -8076,7 +8167,7 @@ mod dedup_counter_tests {
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, Verified};
     use crate::protocol::{AuthorKey, MeshId, Message, MessageKind, PresenceSubtype};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{address_json_with_seal, endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
     use bytes::Bytes;
     use std::sync::Mutex;
@@ -8280,13 +8371,11 @@ mod dedup_counter_tests {
     #[test]
     fn a_refused_session_peer_info_registers_the_address_for_the_proof_request() {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
 
         let bound = Identity::generate();
         let intruder = Identity::generate();
         let initial = state_with_bound_nickname(&bound, "alice");
-        let json =
-            peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint_id(61)));
+        let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint_id(61)));
         let body = MessageBody::try_new(&json.to_string()).expect("an address body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("test"), &nick("alice"), body).sign(&intruder);
@@ -8315,13 +8404,12 @@ mod dedup_counter_tests {
     #[test]
     fn the_address_of_a_peer_info_is_registered_in_the_pool_before_the_proof_request_goes() {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
 
         let session = Identity::generate();
         let address = iroh::EndpointAddr::new(endpoint_id(62));
         let mut initial = fresh_state();
         initial.linked_endpoints.insert(endpoint_id(62));
-        let json = peer_addr_error::endpoint_addr_to_json(&address);
+        let json = address_json_with_seal(&address);
         let body = MessageBody::try_new(&json.to_string()).expect("an address body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("test"), &nick("carol"), body).sign(&session);
@@ -9581,12 +9669,11 @@ mod dedup_counter_tests {
     #[test]
     fn an_ask_for_a_refused_session_that_waited_goes_when_the_path_comes_up() {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
 
         let bound = Identity::generate();
         let session = Identity::generate();
         let endpoint = endpoint_id(65);
-        let json = peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+        let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint));
         let body = MessageBody::try_new(&json.to_string()).expect("an address body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("test"), &nick("alice"), body).sign(&session);

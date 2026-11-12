@@ -202,8 +202,10 @@ The ephemeral key gives forward secrecy.
 Sender authenticity comes from the Ed25519 signature of the frame, which covers the ciphertext.
 A relay forwards the frame and can verify the signature, but it cannot open the body.
 A node tells its static key in its signed `PeerInfo`, as the Base58 text `seal`.
+The key is required: a node refuses a `PeerInfo` that names none.
 The engine keeps the key of each known author key, and `EventLoopState::seal_key_of` reads it.
-A key that no `PeerInfo` named has no seal key, and neither has a node of an older version.
+The key of a signer that is not known yet waits for its join: 64 keys at most, for 90 s at most.
+A key that no `PeerInfo` named has no seal key.
 The key adds 58 bytes to each `PeerInfo` frame.
 
 ## 5. Bootstrap

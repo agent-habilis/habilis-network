@@ -20,7 +20,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::daemon::state::{EventLoopState, FrameOverheads, MeshSecrets, RunKeys, StateInit};
 use crate::protocol::identity::Identity;
-use crate::protocol::{AuthorKey, Channel, MeshId, Nickname};
+use crate::protocol::{AuthorKey, Channel, MeshId, Nickname, peer_addr_error};
 use crate::util::clock::Instant;
 
 use iroh::address_lookup::memory;
@@ -94,6 +94,15 @@ fn fresh_state_that_waits_with_book_and_member(
         },
         Instant::now(),
     )
+}
+
+/// The JSON body of a `PeerInfo` for `address`, with a seal key: the body of this wire version
+/// names one, and a receiver refuses a body that does not.
+pub(crate) fn address_json_with_seal(address: &iroh::EndpointAddr) -> serde_json::Value {
+    let mut json = peer_addr_error::endpoint_addr_to_json(address);
+    let seal = x25519_dalek::PublicKey::from([9u8; 32]);
+    json["seal"] = serde_json::Value::String(bs58::encode(seal.as_bytes()).into_string());
+    json
 }
 
 /// A nickname, panicking on an invalid one — a test fixture, so a bad literal

@@ -40,6 +40,8 @@ use crate::util::tuning;
 
 pub use event_loop_state::EventLoopState;
 pub(crate) use event_loop_state::{ChannelDocs, LiveRun, PendingSuspend};
+#[cfg(test)]
+pub(crate) use event_loop_state::{PENDING_SEAL_KEY_TTL, PENDING_SEAL_KEYS_CAP};
 
 pub(crate) use collection_sizes::CollectionSizes;
 pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
@@ -121,7 +123,7 @@ mod tests {
         let seal = x25519_dalek::PublicKey::from([3u8; 32]);
 
         for key in [peer, quiet, named, stranger] {
-            state.note_seal_key(key, seal);
+            state.note_seal_key(key, seal, Instant::now());
         }
 
         for kept in [peer, quiet, named] {
@@ -147,6 +149,60 @@ mod tests {
             state.seal_key_of(&peer),
             None,
             "the seal key leaves with its key"
+        );
+    }
+
+    /// The queue of the seal keys that wait for a join is bounded and short-lived: it holds 64 keys,
+    /// the oldest goes first, and a key older than 90 s is dropped. A key that said goodbye is a
+    /// replay, so it does not wait.
+    #[test]
+    fn the_seal_keys_that_wait_for_a_join_are_few_and_fresh_and_never_a_goodbye() {
+        use super::{PENDING_SEAL_KEY_TTL, PENDING_SEAL_KEYS_CAP};
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let now = Instant::now();
+        let seal = x25519_dalek::PublicKey::from([2u8; 32]);
+        let keys: Vec<AuthorKey> = (0..=PENDING_SEAL_KEYS_CAP)
+            .map(|number| test_key(&format!("waiting {number}")))
+            .collect();
+
+        for key in &keys {
+            state.note_seal_key(*key, seal, now);
+        }
+        assert_eq!(
+            state.pending_seal_key_count(),
+            PENDING_SEAL_KEYS_CAP,
+            "the queue passed its cap"
+        );
+        state.apply_pending_seal_key(keys[0], now);
+        assert_eq!(
+            state.seal_key_of(&keys[0]),
+            None,
+            "the oldest key stayed when the queue was full"
+        );
+        state.apply_pending_seal_key(keys[1], now + PENDING_SEAL_KEY_TTL);
+        assert_eq!(
+            state.seal_key_of(&keys[1]),
+            Some(&seal),
+            "a key at the age of the TTL was dropped"
+        );
+        let late = keys[2];
+        state.apply_pending_seal_key(late, now + PENDING_SEAL_KEY_TTL + Duration::from_secs(1));
+        assert_eq!(
+            state.seal_key_of(&late),
+            None,
+            "a key past the TTL was applied"
+        );
+
+        let gone = test_key("goodbye");
+        state.note_stranger_left(gone);
+        state.note_seal_key(gone, seal, now);
+        state.peers.insert(gone);
+        state.apply_pending_seal_key(gone, now);
+        assert_eq!(
+            state.seal_key_of(&gone),
+            None,
+            "a key that said goodbye kept a seal key"
         );
     }
 

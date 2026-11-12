@@ -400,6 +400,7 @@ pub(crate) fn apply(update: &MembershipUpdate, key: AuthorKey, state: &mut Event
     }
     if update.returned || update.joined_new {
         state.promote_stored_proof(key);
+        state.apply_pending_seal_key(key, Instant::now());
         state.write_peer_count();
         tracing::debug!(
             key = %key,

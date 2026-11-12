@@ -34,6 +34,7 @@ pub(crate) struct CollectionSizes {
     pub(crate) graft_backoff: usize,
     pub(crate) refused_endpoints: usize,
     pub(crate) seal_keys: usize,
+    pub(crate) pending_seal_keys: usize,
     pub(crate) orphaned_endpoints: usize,
 }
 
@@ -79,6 +80,7 @@ impl CollectionSizes {
         sizes.graft_backoff = state.graft_backoff.len();
         sizes.refused_endpoints = state.refused_endpoints.len();
         sizes.seal_keys = state.seal_keys.len();
+        sizes.pending_seal_keys = state.pending_seal_key_count();
         sizes.orphaned_endpoints = state.orphaned_endpoints.len();
         sizes
     }
@@ -90,6 +92,7 @@ mod tests {
     use crate::protocol::MeshId;
     use crate::protocol::identity::Identity;
     use crate::testing::{self, fresh_state, nick, test_key};
+    use crate::util::clock::Instant;
 
     /// A count that passes the width of the target saturates. A 0 would read as a node that
     /// refused nothing, and the count says the opposite.
@@ -137,7 +140,11 @@ mod tests {
     fn the_census_counts_the_seal_keys() {
         let mut state = fresh_state();
         state.peers.insert(test_key("ant"));
-        state.note_seal_key(test_key("ant"), x25519_dalek::PublicKey::from([1u8; 32]));
+        state.note_seal_key(
+            test_key("ant"),
+            x25519_dalek::PublicKey::from([1u8; 32]),
+            Instant::now(),
+        );
 
         assert_eq!(
             CollectionSizes::read(&state).seal_keys,

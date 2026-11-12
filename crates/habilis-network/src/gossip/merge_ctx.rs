@@ -607,8 +607,8 @@ fn farewell_targets(state: &EventLoopState) -> Vec<iroh::EndpointId> {
 
 /// The body of our `PeerInfo`: our address, the proof that we own it, the x25519 key that a peer
 /// seals a directed body to (`seal`, Base58), and, while we hold the rendezvous, a flag that lets
-/// another holder in the same overlay order itself against us. A body with no `seal` is the body
-/// of an older node: it names no seal key, and the rest reads as before.
+/// another holder in the same overlay order itself against us. The `seal` is required: a receiver
+/// refuses a body that has none.
 pub(crate) fn peer_info_json(
     address: &iroh::EndpointAddr,
     proof: String,
@@ -734,8 +734,10 @@ fn json_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::{farewell_targets, peer_info_json};
-    use crate::protocol::MeshId;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::{MeshId, Message, MessageBody, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
+    use crate::util::consts::MAX_MESSAGE_SIZE;
 
     use crate::protocol::peer_addr_error;
     #[cfg(feature = "host")]
@@ -1055,10 +1057,10 @@ mod tests {
     }
 
     /// **Wire pin of the seal key of a `PeerInfo`.** The body names the x25519 key as Base58 under
-    /// `seal`. A node of an older version sends no `seal`: its body names no key, and its address
-    /// still reads.
+    /// `seal`, and the key is required: a body with no `seal` names no key, and a receiver refuses
+    /// it (`a_peer_info_with_no_seal_key_binds_nothing`).
     #[test]
-    fn a_peer_info_body_names_the_seal_key_in_base58_and_an_older_body_names_none() {
+    fn a_peer_info_body_pins_the_seal_text_and_a_body_with_no_seal_names_no_key() {
         let _guard = ::habilis_network_test_tracing::init();
         let id = iroh::SecretKey::generate().public();
         let address = iroh::EndpointAddr::new(id);
@@ -1076,19 +1078,46 @@ mod tests {
             "the key reads back from the body"
         );
 
-        let mut older = json;
-        older
+        let mut without = json;
+        without
             .as_object_mut()
             .expect("the body is an object")
             .remove("seal");
         assert_eq!(
-            super::peer_info_seal_key(&older),
+            super::peer_info_seal_key(&without),
             None,
-            "an older body names no seal key"
+            "a body with no seal names no key"
         );
-        let (read, _) =
-            peer_addr_error::endpoint_addr_from_json(&older).expect("the address reads");
-        assert_eq!(read, id, "an older body still names its address");
+    }
+
+    /// **A `PeerInfo` frame fits the frame limit at every longest field.** The mesh id of 512 bytes,
+    /// a nickname of 32 characters of 4 bytes, an address with 16 `IPv6` addresses and a relay `URL`, the
+    /// proof, the beacon flag and the seal key go in one signed frame under `MAX_MESSAGE_SIZE`. The
+    /// seal key adds 58 bytes, so the room that is left says how many addresses fit.
+    #[test]
+    fn a_peer_info_frame_with_every_longest_field_fits_the_frame_limit() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mesh = MeshId::from("m".repeat(512).as_str());
+        let nickname = Nickname::from("\u{1F600}".repeat(32).as_str());
+        let relay: iroh::RelayUrl = "https://relay.example.com./".parse().expect("a relay url");
+        let id = iroh::SecretKey::generate().public();
+        let mut address = iroh::EndpointAddr::new(id).with_relay_url(relay);
+        for index in 0..16u16 {
+            let ip = format!("[ffff:ffff:ffff:ffff:ffff:ffff:ffff:{index:x}]:65535");
+            address = address.with_ip_addr(ip.parse().expect("an IPv6 socket address"));
+        }
+        let proof = "1".repeat(100);
+        let seal = x25519_dalek::PublicKey::from([255u8; 32]);
+        let json = peer_info_json(&address, proof, true, &seal);
+        let body = MessageBody::try_new(&json.to_string()).expect("a body");
+
+        let frame = Message::new_peer_info(&mesh, &nickname, body).sign(&Identity::generate());
+        let size = frame.wire_len();
+
+        assert!(
+            size <= MAX_MESSAGE_SIZE,
+            "a PeerInfo frame of {size} bytes passes the {MAX_MESSAGE_SIZE}-byte limit"
+        );
     }
 
     /// A `seal` that is not the Base58 of 32 bytes names no key: a wrong length, a character out of
