@@ -42,8 +42,8 @@ use n0_future::{task as n0future_task, time as n0future_time};
 /// dial: a creator-independent bootstrap that needs no address lookup to
 /// reach the rendezvous.
 ///
-/// Rung 0 is our own operated relay; rungs 1..4 are iroh `defaults::prod`
-/// (NA-east, NA-west, EU, AP) as the resilient fallback. Hardcoded,
+/// The ladder is iroh `defaults::prod` (NA-east, NA-west, EU, AP). Our own operated relay is
+/// rung 0 only when `OPERATED_RELAY_IS_RUNG_0` is on, and it is off for now. Hardcoded,
 /// **not** `defaults::prod::default_relay_map()`, so members on different
 /// iroh versions still agree on the *same* ladder. Relay infra is
 /// versioned and not cross-compatible (sendme #121): an iroh bump can
@@ -60,7 +60,22 @@ use n0_future::{task as n0future_task, time as n0future_time};
 /// `relay.agent-habilis.com` cutover then moved rung 0 itself: binaries
 /// from before it home on the retired `swarm-relay.…` host, so they
 /// cannot relay-direct rendezvous with binaries from after.
-pub const RENDEZVOUS_RELAY_LADDER: [&str; 5] = [
+pub const RENDEZVOUS_RELAY_LADDER: &[&str] = if OPERATED_RELAY_IS_RUNG_0 {
+    RUNGS.as_slice()
+} else {
+    RUNGS.split_at(1).1
+};
+
+/// Whether our own relay is rung 0 of the default ladder. It is off: `relay.agent-habilis.com` is
+/// behind Cloudflare, which does not proxy UDP 7842, so the relay has no QUIC address discovery.
+/// A peer that homes on it learns no public address and cannot hole-punch. Set this to `true`
+/// when the relay is served without the proxy and answers QUIC address discovery.
+const OPERATED_RELAY_IS_RUNG_0: bool = false;
+
+#[cfg(test)]
+const OPERATED_RELAY_HOST: &str = "relay.agent-habilis.com";
+
+const RUNGS: [&str; 5] = [
     // No trailing-dot FQDN on any rung. Safari rejects the certificate of a
     // dotted host, so a browser member could reach none of them. Rung 0 has
     // a second reason: Cloudflare routes by exact Host header and 404s the
@@ -522,13 +537,13 @@ async fn monitor_relay_less(
 #[cfg(test)]
 mod tests {
     use super::{
-        RELAY_LIVENESS_FAILS_TO_EVICT, RENDEZVOUS_RELAY_LADDER_URLS, RelayChoice, RelayUrl,
-        RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder, select_bootstrap_rung,
-        select_first_reachable, should_evict_rung,
+        OPERATED_RELAY_HOST, RELAY_LIVENESS_FAILS_TO_EVICT, RENDEZVOUS_RELAY_LADDER_URLS,
+        RelayChoice, RelayUrl, RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder,
+        select_bootstrap_rung, select_first_reachable, should_evict_rung,
     };
     use crate::lookup::{TransportOpts, build_peer_endpoint, build_peer_webrtc};
     use crate::protocol::meshes::LookupOpts;
-    use iroh::RelayMode;
+    use iroh::{RelayMode, Watcher as _};
     use iroh_relay::server::Server;
     use n0_future::task as n0future_task;
     use std::collections::{BTreeSet, HashSet};
@@ -542,8 +557,8 @@ mod tests {
     use tokio::time;
     /// Tripwire: the iroh fallback rungs of our pinned rendezvous ladder
     /// must stay equal to iroh's `defaults::prod` relay hosts, **in
-    /// order** (rung 1 = NA-east). Rung 0 is our own operated relay and
-    /// is excluded here. Relay infra is versioned and not cross-compatible
+    /// order** (rung 1 = NA-east). Our own operated relay is not an iroh
+    /// relay, so it is left out when it is on the ladder. Relay infra is versioned and not cross-compatible
     /// (sendme #121); if an iroh bump moves a prod relay off these hosts,
     /// the relay-direct bootstrap silently breaks for members on a
     /// different iroh version. Failing here forces a manual review (are
@@ -558,10 +573,9 @@ mod tests {
             prod::EU_RELAY_HOSTNAME,
             prod::AP_RELAY_HOSTNAME,
         ];
-        // Skip rung 0 (our own relay); the rest must track iroh's prod set.
         let ours: Vec<&str> = RENDEZVOUS_RELAY_LADDER_URLS
             .iter()
-            .skip(1)
+            .filter(|url| url.host_str() != Some(OPERATED_RELAY_HOST))
             .map(|url| {
                 url.host_str()
                     .expect("ladder relay URL has a host")
@@ -576,6 +590,62 @@ mod tests {
             ours, theirs,
             "RENDEZVOUS_RELAY_LADDER drifted from iroh's prod relay set \
              (sendme #121): review the RENDEZVOUS_RELAY_LADDER doc comment before bumping iroh"
+        );
+    }
+
+    /// **The default ladder is the n0 relays.**
+    ///
+    /// `relay.agent-habilis.com` is behind Cloudflare and has no QUIC address discovery on UDP
+    /// 7842. A peer that homes on it learns no public address. The operated relay is off the
+    /// default ladder until `OPERATED_RELAY_IS_RUNG_0` is on, and no default relay map holds it.
+    #[test]
+    fn the_default_ladder_does_not_hold_the_operated_relay() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let hosts: Vec<&str> = RENDEZVOUS_RELAY_LADDER_URLS
+            .iter()
+            .filter_map(|url| url.host_str())
+            .collect();
+        assert!(
+            !hosts.contains(&OPERATED_RELAY_HOST),
+            "the default ladder holds the operated relay: {hosts:?}"
+        );
+        assert_eq!(
+            hosts.first().copied(),
+            Some("use1-1.relay.n0.iroh.link"),
+            "rung 0 of the default ladder is an n0 relay"
+        );
+        let mapped: Vec<RelayUrl> = super::relay_mode(&RelayChoice::Pinned).relay_map().urls();
+        assert!(
+            mapped
+                .iter()
+                .all(|url| url.host_str() != Some(OPERATED_RELAY_HOST)),
+            "the relay map of the default choice holds the operated relay: {mapped:?}"
+        );
+    }
+
+    /// **A new default ladder changes no mesh id.**
+    ///
+    /// The default choice puts one flag byte in the mesh config and no relay URL. An old build and
+    /// a new build with a different default ladder derive the same mesh id and the same topic. A
+    /// custom ladder is the case that puts URLs on the wire.
+    #[test]
+    fn the_default_ladder_is_not_on_the_wire() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut pinned = Vec::new();
+        LookupOpts::new(RelayChoice::Pinned).encode_into(&mut pinned);
+        assert_eq!(
+            pinned,
+            [0b0100],
+            "the default choice is one flag byte: relay on, no custom ladder"
+        );
+        let url: RelayUrl = "https://a.example/"
+            .parse()
+            .expect("a literal https URL parses");
+        let mut custom = Vec::new();
+        LookupOpts::new(RelayChoice::Custom(vec![url])).encode_into(&mut custom);
+        assert!(
+            custom.len() > pinned.len(),
+            "a custom ladder puts its URLs on the wire"
         );
     }
 
@@ -630,7 +700,7 @@ mod tests {
         assert_eq!(
             urls.into_iter().collect::<BTreeSet<_>>(),
             ladder,
-            "the relay map of the default choice is the ladder, rung 0 included"
+            "the relay map of the default choice is the whole ladder"
         );
     }
 
@@ -725,6 +795,38 @@ mod tests {
         let mut lookups = LookupOpts::loopback();
         lookups.relay_lookup = RelayChoice::Custom(ladder);
         lookups
+    }
+
+    /// **A default peer endpoint homes on an n0 relay and learns its public address.**
+    ///
+    /// The n0 relays answer QUIC address discovery, so the net report has a public address and
+    /// `udp_v4`. Rung 0 of the old ladder had none. This test needs the internet.
+    #[test]
+    #[ignore = "needs the internet: it builds a peer endpoint on the n0 relays"]
+    fn a_default_peer_endpoint_homes_on_n0_and_has_a_public_address() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let endpoint = build_peer_endpoint(&LookupOpts::new(RelayChoice::Pinned))
+                .await
+                .expect("a peer endpoint");
+            let home = home_of(&endpoint).await;
+            time::sleep(std_Duration::from_secs(5)).await;
+            let mut net_report = endpoint.net_report();
+            let report = net_report
+                .get()
+                .expect("a net report 5 s after the endpoint is online");
+            let global_v4 = report.global_v4;
+            let udp_v4 = report.udp_v4;
+            endpoint.close().await;
+
+            assert!(
+                home.iter().all(|url| url
+                    .host_str()
+                    .is_some_and(|host| host.ends_with(".relay.n0.iroh.link"))),
+                "the home relay is not an n0 relay: {home:?}"
+            );
+            assert!(udp_v4, "the net report has no udp_v4");
+            assert!(global_v4.is_some(), "the net report has no public address");
+        });
     }
 
     #[test]

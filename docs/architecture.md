@@ -243,7 +243,7 @@ A lost `PeerInfo` is back within one period, that is within 7.5 minutes for a me
 
 ### 5.3 The relay ladder
 
-`RENDEZVOUS_RELAY_LADDER` is a five-rung list: the project relay first, then four n0 regions.
+`RENDEZVOUS_RELAY_LADDER` is a four-rung list of the n0 regions. The project relay is rung 0 only when `OPERATED_RELAY_IS_RUNG_0` is on. It is off, because the project relay has no QUIC address discovery behind Cloudflare.
 The beacon homes on the first reachable rung, and the joiner pre-registers at the same rung.
 These two choices must agree, or the bootstrap dial finds nothing.
 Setup picks rung 0 without a probe, so readiness never blocks on the network.
