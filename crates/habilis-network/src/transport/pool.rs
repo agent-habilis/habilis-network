@@ -889,6 +889,104 @@ mod tests {
         );
     }
 
+    /// Waits until `condition` holds, polling every 10 ms, so that a test orders its calls by what the pool shows and
+    /// not by a sleep. It fails after 5 s.
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        let started = time::Instant::now();
+        while !condition() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the pool did not reach the state that the test waits for"
+            );
+            time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The handles that hold the dial lock of a peer: the map, and the turn of each dial that waits or dials.
+    fn lock_handles(pool: &super::UnicastPool) -> usize {
+        use std::sync::Arc;
+
+        let locks = pool.inner.dial_locks.lock();
+        locks.values().map(Arc::strong_count).max().unwrap_or(0)
+    }
+
+    /// Two probes that dial one cold peer at once share one connection, and it keeps the hold of a probe: `Probing`
+    /// while the probes run, and `Probed` once they end. A send is what turns it into `Used`.
+    #[test]
+    fn two_probes_at_once_leave_the_hold_probing() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::Router;
+
+                use super::super::unicast_acceptor::UnicastAcceptor;
+                use super::unicast_pool::Hold;
+
+                let (tx, _frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        super::super::UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                let pool = super::UnicastPool::new(node.clone(), true);
+                let peer = server.id();
+
+                let gate = pool.hold_next_dial();
+                let first_probe = pool.probe_connection(peer);
+                let second_probe = async {
+                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    pool.probe_connection(peer).await
+                };
+                let release = async {
+                    wait_until(|| lock_handles(&pool) >= 3).await;
+                    gate.notify_one();
+                };
+                let (one, two, ()) = tokio::join!(first_probe, second_probe, release);
+                one.expect("the first probe connection");
+                two.expect("the second probe connection");
+                let running = pool
+                    .inner
+                    .conns
+                    .lock()
+                    .await
+                    .get(&peer)
+                    .map(|pooled| pooled.hold);
+                assert!(
+                    matches!(running, Some(Hold::Probing)),
+                    "two probes that share a connection leave it probing, not {running:?}"
+                );
+                pool.probe_done(peer).await;
+                let ended = pool
+                    .inner
+                    .conns
+                    .lock()
+                    .await
+                    .get(&peer)
+                    .map(|pooled| pooled.hold);
+                assert!(
+                    matches!(ended, Some(Hold::Probed(_))),
+                    "the connection is probed once the probes end, not {ended:?}"
+                );
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
     /// A dial that is cancelled leaves no lock behind: the lock of the peer goes when the dial future is dropped, not
     /// only when the dial ends.
     #[test]
