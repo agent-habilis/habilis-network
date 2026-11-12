@@ -697,7 +697,9 @@ pub(crate) async fn ingest_from(
         | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::Meta
-        | MessageKind::LinkState => {
+        | MessageKind::LinkState
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. } => {
             let _ = dispatch_infra(
                 &verified,
                 surfaceable,
@@ -709,11 +711,7 @@ pub(crate) async fn ingest_from(
             )
             .await;
         }
-        MessageKind::SliceRoot { .. }
-        | MessageKind::SlicePull { .. }
-        | MessageKind::SlicePageRequest { .. }
-        | MessageKind::SlicePage { .. }
-        | _ => {}
+        MessageKind::SliceRoot { .. } | MessageKind::SlicePage { .. } | _ => {}
     }
 }
 
@@ -3448,6 +3446,92 @@ mod first_contact_tests {
     }
 
     /// A pull is for one channel, so a meta frame of the author is live when the pull is for state.
+    /// An addressed pull that arrives by unicast spends one answer of the serve budget, so the answer path
+    /// runs from the receive path, not only through the pure function.
+    #[test]
+    fn a_pull_that_arrives_is_answered_through_the_receive_path() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let pull: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePull {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    keys: vec![],
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed pull serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(pull, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(asker.author_key(), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers,
+                DIGEST_SERVES_PER_WINDOW - 1,
+                "the pull spent one slot, so 7 more answers fit in the window"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_page_request_that_arrives_is_answered_through_the_receive_path() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let pull: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePageRequest {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    index: 0,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed pull serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(pull, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(asker.author_key(), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers,
+                DIGEST_SERVES_PER_WINDOW - 1,
+                "the pull spent one slot, so 7 more answers fit in the window"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     #[test]
     fn a_pull_of_one_channel_does_not_open_the_other() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
