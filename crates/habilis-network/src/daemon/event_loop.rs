@@ -625,7 +625,11 @@ async fn alive_arm(
 
 /// The backfill tick: note the gap, then send the backfill that a newcomer is still owed. Loss
 /// repair is not back yet, so the tick does not repair a lost frame.
-async fn backfill_arm(anchors: &mut TickAnchors, state: &mut EventLoopState) {
+async fn backfill_arm(
+    anchors: &mut TickAnchors,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
     timers::note_tick_gap(
         "backfill",
         &mut anchors.backfill,
@@ -633,6 +637,7 @@ async fn backfill_arm(anchors: &mut TickAnchors, state: &mut EventLoopState) {
         backfill_interval(),
     );
     gossip::backfill::settle(state, Instant::now()).await;
+    gossip::digest_round::tick(state, context, Instant::now()).await;
 }
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
@@ -1425,7 +1430,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
 
     async fn backfill(&mut self) {
         self.state.idle.backfill += 1;
-        backfill_arm(&mut self.anchors, &mut self.state).await;
+        let context = self.parts.handler_ctx(&self.sender);
+        backfill_arm(&mut self.anchors, &mut self.state, &context).await;
     }
 
     // Counted before the census reads them, so the tick that reports an

@@ -12,6 +12,7 @@ use habilis_network_util::consts;
 use iroh_gossip::proto;
 pub(crate) mod app;
 pub(crate) mod backfill;
+pub(crate) mod digest_round;
 pub(crate) mod event;
 pub(crate) mod heal;
 pub(crate) mod lan;

@@ -831,9 +831,11 @@ impl SliceStore {
         }
     }
 
-    /// The rows of one digest page, derived from the frame overhead, so a page fits one message. A page
-    /// is never sealed, because its kind is never sealed, so every store has the same rows.
-    fn page_rows(&self) -> usize {
+    /// The number of rows that one digest page holds, and so the number of keys that one pull carries. It is
+    /// derived from the page overhead, so a page fits one message. A page is never sealed, because its kind
+    /// is never sealed, so every store has the same rows.
+    #[must_use]
+    pub fn page_rows(&self) -> usize {
         let budget = MAX_MESSAGE_SIZE.saturating_sub(self.page_overhead);
         (budget / PAGE_ROW).max(1)
     }

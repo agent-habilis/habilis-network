@@ -28,6 +28,7 @@ use iroh::{EndpointAddr, EndpointId};
 use super::proof_exchange::ProofExchange;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
+use crate::gossip::digest_round::DigestRound;
 use crate::gossip::outstanding_pulls::OutstandingPulls;
 use crate::gossip::serve_budget::ServeBudget;
 use crate::protocol::identity::{Identity, IdentityProof, verify_proof};
@@ -39,7 +40,8 @@ use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 use habilis_network_doc::{SliceError, SliceIngest, SliceLimits, SliceStore};
-use habilis_network_protocol::digest::DigestPage;
+use habilis_network_protocol::ContentHash;
+use habilis_network_protocol::digest::{DigestPage, DigestRoot};
 
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, LANE_WANTED, PENDING_OUTBOUND_CAP, QUIET_CAP, REASSEMBLED_GROUPS_CAP,
@@ -237,6 +239,26 @@ impl ChannelDocs {
     pub(crate) fn release(&mut self, key: &AuthorKey) {
         self.state.release(key);
         self.meta.release(key);
+    }
+
+    /// The digest of `channel`.
+    pub(crate) fn digest(&self, channel: protocol::Channel) -> DigestRoot {
+        self.get(channel).digest()
+    }
+
+    /// Whether `root` is the digest of `channel`.
+    pub(crate) fn matches(&self, channel: protocol::Channel, root: &ContentHash) -> bool {
+        self.get(channel).matches(root)
+    }
+
+    /// The keys that `page` lists and `channel` would take.
+    pub(crate) fn wanted(&self, channel: protocol::Channel, page: &DigestPage) -> Vec<AuthorKey> {
+        self.get(channel).wanted_from(page).collect()
+    }
+
+    /// The number of keys that one pull of `channel` carries.
+    pub(crate) fn pull_rows(&self, channel: protocol::Channel) -> usize {
+        self.get(channel).page_rows()
     }
 
     /// The signed slice frames of `keys` that `channel` holds, at most one page of them.
@@ -775,6 +797,8 @@ pub struct EventLoopState {
     pub(crate) unicast_arrival: Option<EndpointId>,
     /// The slice pulls that wait for an answer, by holder, channel and author.
     pub(crate) outstanding_pulls: OutstandingPulls,
+    /// The digests that differ from ours, until their pages are read.
+    pub(crate) digest_round: DigestRound,
     /// The answers that this node gives to slice pulls and page requests, per window.
     pub(crate) serve_budget: ServeBudget,
     /// The released endpoints that wait for the teardown of the pool: `TEARDOWN_PENDING_MAX` at most.
@@ -981,6 +1005,7 @@ impl EventLoopState {
             identity: init.keys.session,
             unicast_arrival: None,
             outstanding_pulls: OutstandingPulls::default(),
+            digest_round: DigestRound::default(),
             serve_budget: ServeBudget::default(),
             teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             proofs: ProofExchange::with_cap(QUIET_CAP),

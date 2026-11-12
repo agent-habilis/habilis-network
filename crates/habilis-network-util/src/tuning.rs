@@ -1178,3 +1178,11 @@ pub const DIGEST_SERVES_GLOBAL: usize = 32;
 
 /// The length of the window of the serve budget.
 pub const DIGEST_SERVE_WINDOW: Duration = Duration::from_secs(5);
+
+/// How long a node waits after it sees a digest that differs from its own, before it asks for the pages.
+/// The live frames in flight land during this delay, so most differences end with no request.
+pub const DIGEST_SETTLE: Duration = Duration::from_secs(1);
+
+/// The random part of the settle delay: each mismatch waits `DIGEST_SETTLE` plus up to this, so the peers
+/// that see the same difference do not all ask at once.
+pub const DIGEST_SETTLE_JITTER: Duration = Duration::from_millis(500);

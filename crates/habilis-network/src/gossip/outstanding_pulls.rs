@@ -15,9 +15,7 @@ pub(crate) struct OutstandingPulls {
 }
 
 impl OutstandingPulls {
-    /// Records a pull of the slice of `author` on `channel`, asked of `holder` at `now`. The pull sender
-    /// that calls it arrives with the digest round, so only the tests call it for now.
-    #[cfg(test)]
+    /// Records a pull of the slice of `author` on `channel`, asked of `holder` at `now`.
     pub(crate) fn register(
         &mut self,
         holder: EndpointId,

@@ -28,9 +28,10 @@ use habilis_network_doc::SliceIngest;
 use n0_future::time::Instant as TokioInstant;
 
 use super::app::{AppClass, InboundApp, NodeApp};
-use super::backfill;
 use super::merge_ctx::{announce_arrival, broadcast_peer_info};
+use super::{backfill, digest_round};
 use crate::net;
+use habilis_network_protocol::digest::{DigestPage, DigestRoot};
 
 #[cfg(feature = "multihop")]
 use crate::daemon::event_loop;
@@ -699,7 +700,9 @@ pub(crate) async fn ingest_from(
         | MessageKind::Meta
         | MessageKind::LinkState
         | MessageKind::SlicePull { .. }
-        | MessageKind::SlicePageRequest { .. } => {
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePage { .. } => {
             let _ = dispatch_infra(
                 &verified,
                 surfaceable,
@@ -711,7 +714,7 @@ pub(crate) async fn ingest_from(
             )
             .await;
         }
-        MessageKind::SliceRoot { .. } | MessageKind::SlicePage { .. } | _ => {}
+        _ => {}
     }
 }
 
@@ -721,6 +724,42 @@ pub(crate) async fn ingest_from(
 struct Asker {
     endpoint: iroh::EndpointId,
     key: AuthorKey,
+}
+
+/// A holder's root is for this node when it names this node: the roots that differ are noted for the round.
+fn note_digest_root(
+    message: &Verified,
+    to: &AuthorKey,
+    root_state: &DigestRoot,
+    root_meta: &DigestRoot,
+    state: &mut EventLoopState,
+) {
+    if *to != state.identity.author_key() {
+        return;
+    }
+    let roots = [(Channel::State, root_state), (Channel::Meta, root_meta)];
+    digest_round::on_root(
+        state,
+        message.key(),
+        roots,
+        Instant::now(),
+        digest_round::settle_jitter(),
+    );
+}
+
+/// A page of a holder's digest is for this node when it names this node: the round pulls and asks on.
+async fn answer_digest_page(
+    message: &Verified,
+    to: AuthorKey,
+    channel: Channel,
+    page: &DigestPage,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
+    if to != state.identity.author_key() {
+        return;
+    }
+    digest_round::on_page(state, context, message.key(), channel, page, Instant::now()).await;
 }
 
 /// The signed frames that answer a pull of `keys` on `channel` from `asker`: the held ones, at most a page.
@@ -941,7 +980,19 @@ async fn dispatch_infra(
             }
             return ControlFlow::Break(());
         }
-        MessageKind::SliceRoot { .. } | MessageKind::SlicePage { .. } | _ => {}
+        MessageKind::SliceRoot {
+            to,
+            state: root_state,
+            meta: root_meta,
+        } => {
+            note_digest_root(message, to, root_state, root_meta, state);
+            return ControlFlow::Break(());
+        }
+        MessageKind::SlicePage { to, channel, page } => {
+            answer_digest_page(message, *to, *channel, page, state, context).await;
+            return ControlFlow::Break(());
+        }
+        _ => {}
     }
     ControlFlow::Continue(())
 }
