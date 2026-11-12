@@ -318,6 +318,16 @@ pub async fn probe_ladder(
     statuses.into_iter()
 }
 
+/// The relay mode of a probe endpoint: this one rung, without QUIC address discovery. The probe
+/// asks whether the relay answers. When the QUIC port of the relay is out of reach (behind a
+/// proxy, or blocked), the first net report waits for the 3 s probe timeout of iroh, and
+/// `online()` with it: 4 s for each probe, against 0.4 s without the discovery.
+fn probe_relay_mode(rung: &RelayUrl) -> RelayMode {
+    let mut config = rung_config(rung);
+    config.quic = None;
+    RelayMode::Custom([config].into_iter().collect())
+}
+
 /// Probe a single relay rung: bind an ephemeral endpoint pinned to just
 /// this relay and wait for `online()` within `timeout`, or until `stop`'s
 /// sender is dropped. Closes the probe endpoint before returning either way.
@@ -330,7 +340,7 @@ async fn relay_rung_reachable(
         return false;
     }
     let Ok(endpoint) = Endpoint::builder(presets::Minimal)
-        .relay_mode(RelayMode::custom([rung.clone()]))
+        .relay_mode(probe_relay_mode(rung))
         .bind()
         .await
     else {
@@ -621,6 +631,24 @@ mod tests {
             urls.into_iter().collect::<BTreeSet<_>>(),
             ladder,
             "the relay map of the default choice is the ladder, rung 0 included"
+        );
+    }
+
+    /// **A probe endpoint does not wait for QUIC address discovery.**
+    ///
+    /// The probe asks one question: does this relay answer? An endpoint with QUIC address discovery
+    /// on holds its first net report until the 3 s probe timeout of iroh when the QUIC port of the
+    /// relay is out of reach (behind a proxy, or blocked), so `online()` took 4 s on every rung,
+    /// every time an endpoint was built. The probe needs the relay connection, not the discovery.
+    #[test]
+    fn a_probe_endpoint_does_not_wait_for_quic_address_discovery() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let rung = rung("probe.example");
+        let relay_map = super::probe_relay_mode(&rung).relay_map();
+        let config = relay_map.get(&rung).expect("the rung is in the relay map");
+        assert!(
+            config.quic.is_none(),
+            "the probe of a rung does not ask for QUIC address discovery"
         );
     }
 
