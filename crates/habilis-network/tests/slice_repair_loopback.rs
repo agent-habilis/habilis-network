@@ -5,7 +5,7 @@
 //! so the frame is seen and lost, as on a real network. The hook goes off and Alice writes nothing more. The
 //! digest round of the tick then pulls the slice to Carol within the bound.
 
-#![cfg(feature = "host")]
+#![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
 use habilis_network::protocol::messages::Authored;
 use std::sync::{Arc, Mutex};
