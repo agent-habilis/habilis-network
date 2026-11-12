@@ -135,6 +135,9 @@ pub fn worst_frame_overhead() -> usize {
 /// nickname and the length of the channel name are counted. A store on `channel` takes a body of at most
 /// `slice_bytes` minus this overhead, escaped, and the frame then fits.
 ///
+/// If the probe cannot serialize its frame, the result is `usize::MAX`: the cap is then zero, and every
+/// write is refused as too large. That is the fail-closed answer, and it is a bug, not a state of a session.
+///
 /// # Examples
 ///
 /// ```
@@ -1075,11 +1078,11 @@ mod tests {
         LocalDraft, PAGE_OVERHEAD_UNPROBED, SliceError, SliceIngest, SliceLimits, SliceStore,
         WORST_FRAME_OVERHEAD, wire,
     };
-    use habilis_network_protocol::digest::DigestPage;
+    use habilis_network_protocol::digest::{DigestEntry, DigestPage};
     use habilis_network_protocol::messages::{MessageError, Verified};
     use habilis_network_protocol::{
-        AuthorKey, Channel, Identity, Lookup, Mesh, MeshConfig, MeshId, MeshName, Message,
-        MessageBody, Nickname, RelayLadder, Seed, SymmetricKey,
+        AuthorKey, Channel, ContentHash, Identity, Lookup, Mesh, MeshConfig, MeshId, MeshName,
+        Message, MessageBody, Nickname, RelayLadder, Seed, SymmetricKey,
     };
     use habilis_network_util::consts::MAX_MESSAGE_SIZE;
     use serde_json::{Map, Value, json};
@@ -1587,7 +1590,7 @@ mod tests {
         let typical = super::frame_overhead(
             Channel::Meta,
             &MeshId::from("test"),
-            &Nickname::from("peer"),
+            &nickname_with_quotes(9, 0),
         );
         assert!(
             sealed(typical).body_len(&key(1), card.clone()).is_ok(),
@@ -2117,9 +2120,49 @@ mod tests {
         Nickname::try_new(&text).expect("a nickname of 1 to 32 characters")
     }
 
-    /// Every page of both channels fits one frame at every nickname that holds quote characters. The quote
-    /// is escaped in the JSON, so its frame is longer than its raw byte count. The sweep takes the most
-    /// characters that fit 32 with each count of quotes, at both mesh ids.
+    /// One row of a page with its comma: `["<64 hex>",18446744073709551615,"<64 hex>"],`, 157 bytes.
+    const ROW_WITH_COMMA: usize = 157;
+
+    /// A signed `SlicePage` of the worst shape (index 998 of 999, an end key, `state`) is the page probe
+    /// plus exactly one row for each row. The frame is built here, independently of the probe, so a probe
+    /// a few bytes short fails this test.
+    #[test]
+    fn a_worst_shape_page_frame_is_the_probe_plus_its_rows_exactly() {
+        let mesh = MeshId::from("test");
+        let nickname = nickname_with_quotes(9, 0);
+        let overhead = super::page_frame_overhead(&mesh, &nickname);
+        let sorted: Vec<DigestEntry> = (0..999u64 * 16 + 2)
+            .map(|index| {
+                let mut bytes = [0u8; 32];
+                bytes[..8].copy_from_slice(&index.to_be_bytes());
+                DigestEntry::new(
+                    AuthorKey::from(bytes),
+                    u64::MAX,
+                    ContentHash::of(&index.to_be_bytes()),
+                )
+            })
+            .collect();
+        for rows in [1usize, 16] {
+            let page =
+                DigestPage::build(&sorted, rows, 998, 999).expect("a page of the worst shape");
+            let kind = habilis_network_protocol::MessageKind::SlicePage {
+                to: key(9),
+                channel: Channel::State,
+                page,
+            };
+            let body = MessageBody::try_new("{}").expect("a body");
+            let signed =
+                Message::new_frame(&mesh, &nickname, kind, body).sign(&Identity::generate());
+            let frame = signed.serialize().expect("a worst-shape page serializes");
+            let state = frame.into_bytes().len();
+            assert_eq!(
+                state,
+                overhead + rows * ROW_WITH_COMMA,
+                "a {rows}-row page of the worst shape is the probe plus its rows, exactly"
+            );
+        }
+    }
+
     /// The largest local draft that the cap takes, on each channel, with a nickname of 32 quotes, is a
     /// signed channel event that serializes. The cap is the limit of the body, so a frame that does not
     /// serialize at the cap is a draft that the store took and the wire refuses.
@@ -2162,6 +2205,9 @@ mod tests {
         }
     }
 
+    /// Every page of both channels fits one frame at every nickname that holds quote characters. The quote
+    /// is escaped in the JSON, so its frame is longer than its raw byte count. The sweep takes the most
+    /// characters that fit 32 with each count of quotes, at both mesh ids.
     #[test]
     fn every_page_on_both_channels_fits_for_a_nickname_with_quotes() {
         let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);

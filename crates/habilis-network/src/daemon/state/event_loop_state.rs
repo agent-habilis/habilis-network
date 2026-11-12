@@ -3000,7 +3000,7 @@ mod slice_surface_tests {
             channel,
             SliceLimits::default(),
             habilis_network_doc::frame_overhead(
-                Channel::Meta,
+                channel,
                 &MeshId::from("test"),
                 &Nickname::from("alice"),
             ),
