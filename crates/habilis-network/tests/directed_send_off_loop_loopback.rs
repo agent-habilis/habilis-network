@@ -40,6 +40,8 @@ const WAIT_PREMISE: Duration = Duration::from_millis(500);
 const PATH_BUDGET: Duration = Duration::from_secs(8);
 /// A send that must fail on the relay refusal ends within this: the path budget (5 s) and a margin.
 const SAFETY_BUDGET: Duration = Duration::from_secs(6);
+/// The end of the refusal of a held send, which the caller can retry.
+const HELD_TEXT: &str = "retry the send later";
 /// The cooldown text of the pool (`COOLDOWN_REFUSED`), which is not public.
 const COOLDOWN_TEXT: &str = "unicast dial on cooldown after a recent failure";
 /// The relay refusal of the pool (`RELAY_REFUSED`), which is not public.
@@ -418,13 +420,15 @@ fn the_reply_of_a_send_that_fails_on_its_dial_task_names_the_relay_refusal() {
     });
 }
 
-/// **A send to an unprobed pair whose only path is the relay puts no payload on it.**
+/// **A send to an unprobed pair whose only path is the relay is refused and delivers nothing.**
 ///
 /// A directed send is no longer held for want of a probe: the node reads no path for the pair, so
 /// it dials and waits for a direct path. The safety of a lookup-only mesh is the live path of the
-/// connection, so the frame must not go out while the path reads relay. The test cuts IP, forgets
-/// the proof of the pair, and sends. The send waits, then fails with the relay refusal inside the
-/// path budget, and bob reads nothing.
+/// connection, so the frame must not go out while the path reads relay. The test cuts IP, erases
+/// the proof of the pair, and sends. The send fails inside the path budget, with the relay refusal
+/// after a wait or with a hold if the path watcher read the pair first, and bob reads nothing. The
+/// accept side holds a connection on a relay path unread, so the test proves that bob reads
+/// nothing, and not that the relay carried no byte.
 #[test]
 fn a_directed_send_to_an_unprobed_pair_on_the_relay_is_refused_and_bob_reads_nothing() {
     let guard = habilis_network_test_tracing::init();
@@ -470,9 +474,13 @@ fn a_directed_send_to_an_unprobed_pair_on_the_relay_is_refused_and_bob_reads_not
             refusal.contains(RELAY_TEXT),
             "the reply names the relay refusal, and it reads: {refusal}"
         );
+        // The path watcher of the lower id can read the pair as relay-only between the erase and the
+        // send, and then the send is held at once. Both refusals are safe, so only the one that is
+        // not held must have waited.
+        let held = refusal.contains(HELD_TEXT);
         assert!(
-            waited >= WAIT_PREMISE,
-            "the send was refused after {waited:?}: it did not wait for a path, so it was held"
+            held || waited >= WAIT_PREMISE,
+            "the send was refused after {waited:?} with no wait and no hold: {refusal}"
         );
         assert!(
             read.is_empty(),

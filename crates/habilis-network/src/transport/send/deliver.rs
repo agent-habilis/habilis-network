@@ -167,11 +167,12 @@ pub async fn deliver_in_background(
 }
 
 /// Whether a frame can be sent to `eid` by unicast now, with no dial and no wait: its direct path
-/// is proven, or the frame being handled came by unicast from `eid`. The unicast acceptor admits a connection only on a
-/// selected path that is not the relay when the relay is lookup-only, so that arrival proves what a
-/// probe would, before the probe of the node reads it, and the reply goes back on it. The exception
-/// is for the frame at hand: `unicast_arrival` is set only while an unicast frame is handled, so a
-/// send outside a reply, and any other endpoint, keep the check of the path as before.
+/// is proven, or the frame being handled came by unicast from `eid`. The unicast acceptor admits
+/// a connection only on a selected path that is not the relay when the relay is lookup-only, so
+/// that arrival proves what a probe would, before the probe of the node reads it, and the reply
+/// goes back on it. The exception is for the frame at hand: `unicast_arrival` is set only while
+/// an unicast frame is handled, so a send outside a reply, and any other endpoint, keep the check
+/// of the path as before.
 pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
     !super::route::unproven(eid, state) || state.unicast_arrival == Some(eid)
 }
@@ -221,7 +222,9 @@ fn want_lane_if_needed(state: &mut EventLoopState, eid: EndpointId) {
 /// The roster's `transport` column. A directed frame to a known peer takes a
 /// unicast connect; we label it `unicast` when a *direct* path is expected (the
 /// peer is in our gossip mesh) and `multihop` otherwise — a best-effort hint,
-/// since the actual path is chosen by iroh at connect time.
+/// since the actual path is chosen by iroh at connect time. `RelayOnly` means that a probe proved
+/// the pair relay-only on a mesh whose relay is lookup only: a pair that no probe has read is not
+/// labeled by its state, and it reads `unicast` or `multihop`.
 pub(crate) fn lane_for(key: &AuthorKey, state: &EventLoopState) -> Lane {
     let Some(eid) = super::route::directed_endpoint(key, state) else {
         return Lane::Unreachable;
