@@ -6,6 +6,8 @@
 
 use std::time::{Duration, Instant};
 
+use std::error::Error;
+use std::fmt;
 use std::future::Future;
 
 use anyhow::{Result, anyhow, bail};
@@ -29,10 +31,34 @@ use tokio::time;
 /// propagates through the lookups (mirrors the application's bridge ticket).
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(90);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
-/// How long one dial attempt waits for the handshake. A handshake takes milliseconds. On a LAN
+/// How long each dial attempt waits for the handshake. A handshake takes milliseconds. On a LAN
 /// with two interfaces, the reply flight of the producer to one endpoint is sometimes lost for
-/// good, and iroh waits 30 s before it gives up on the attempt.
-const DIAL_ATTEMPT: Duration = Duration::from_secs(5);
+/// good, and iroh waits 30 s before it gives up on the attempt. A slow link needs more than 5 s,
+/// so each attempt waits longer than the one before, and the last cap repeats.
+const DIAL_CAPS: Caps = [
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+];
+type Caps = [Duration; 3];
+
+/// The cap of attempt number `attempt`, counted from 0.
+fn cap_of(caps: &Caps, attempt: usize) -> Duration {
+    caps[attempt.min(caps.len() - 1)]
+}
+
+/// A dial attempt that got no handshake within its cap. The wait was the delay, so the retry
+/// follows at once.
+#[derive(Debug)]
+struct Stalled(Duration);
+
+impl fmt::Display for Stalled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "no handshake within {:?}", self.0)
+    }
+}
+
+impl Error for Stalled {}
 const CHUNK: usize = 64 * 1024;
 
 /// Fetch the blob named by `ticket`, streaming its bytes to `out` and verifying
@@ -122,7 +148,7 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let build = || async { Ok(build_peer_endpoint(&ticket.lookups).await?) };
-    fetch_building(ticket, out, token, build).await
+    fetch_building(ticket, out, token, &DIAL_CAPS, build).await
 }
 
 /// An endpoint that closes itself when the fetch future is dropped before it closes the
@@ -166,6 +192,7 @@ pub(super) async fn fetch_building<Writer, Build, Built>(
     ticket: &BlobTicket,
     out: &mut Writer,
     token: &TicketSecret,
+    caps: &Caps,
     build: Build,
 ) -> Result<()>
 where
@@ -174,10 +201,11 @@ where
     Built: Future<Output = Result<Endpoint>>,
 {
     let started = Instant::now();
+    let mut attempt = 0;
     let (endpoint, connection) = loop {
         let endpoint = CloseOnDrop::new(build().await?);
         add_peer_addr(&address_book(&endpoint.endpoint), ticket.address.clone());
-        match dial_once(&endpoint.endpoint, ticket).await {
+        match dial_once(&endpoint.endpoint, ticket, cap_of(caps, attempt)).await {
             Ok(connection) => break (endpoint, connection),
             Err(error) => {
                 endpoint.close().await;
@@ -185,7 +213,10 @@ where
                     bail!("connecting to the blob producer failed: {error}");
                 }
                 tracing::debug!(target: "habilis_network::blob", %error, "blob dial retrying on a new endpoint");
-                time::sleep(RETRY_DELAY).await;
+                if !error.is::<Stalled>() {
+                    time::sleep(RETRY_DELAY).await;
+                }
+                attempt += 1;
             }
         }
     };
@@ -291,24 +322,28 @@ fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<Ticket
 /// producer whose address is still propagating is waited for, not failed on.
 async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
     let started = Instant::now();
+    let mut attempt = 0;
     loop {
-        match dial_once(endpoint, ticket).await {
+        match dial_once(endpoint, ticket, cap_of(&DIAL_CAPS, attempt)).await {
             Ok(connection) => return Ok(connection),
             Err(error) if started.elapsed() < DISCOVERY_DEADLINE => {
                 tracing::debug!(%error, "blob dial retrying while the address propagates");
-                time::sleep(RETRY_DELAY).await;
+                if !error.is::<Stalled>() {
+                    time::sleep(RETRY_DELAY).await;
+                }
+                attempt += 1;
             }
             Err(error) => bail!("connecting to the blob producer failed: {error}"),
         }
     }
 }
 
-/// One dial attempt, cut off after [`DIAL_ATTEMPT`].
-async fn dial_once(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
+/// One dial attempt, cut off after `cap`.
+async fn dial_once(endpoint: &Endpoint, ticket: &BlobTicket, cap: Duration) -> Result<Connection> {
     let attempt = endpoint.connect(ticket.address.clone(), BLOB_ALPN);
-    match time::timeout(DIAL_ATTEMPT, attempt).await {
+    match time::timeout(cap, attempt).await {
         Ok(connected) => Ok(connected?),
-        Err(_) => bail!("no handshake within {DIAL_ATTEMPT:?}"),
+        Err(_) => Err(Stalled(cap).into()),
     }
 }
 

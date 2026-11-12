@@ -922,7 +922,13 @@ mod tests {
                 let mut out = Vec::new();
                 let cancelled = time::timeout(
                     Duration::from_secs(1),
-                    super::consume::fetch_building(&ticket, &mut out, &ticket.secret, build),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(5); 3],
+                        build,
+                    ),
                 )
                 .await;
                 assert!(
@@ -939,6 +945,69 @@ mod tests {
                 assert!(
                     endpoint.is_closed(),
                     "the endpoint that a dropped fetch bound is closed within 3 s"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A slow handshake gets a longer attempt, not the same short one again.**
+    ///
+    /// A new endpoint is online about 3 s after it binds, and a lossy or distant link needs more
+    /// than 5 s for a handshake. Here every datagram takes 400 ms in each direction, so the
+    /// handshake needs about 0.8 s. The first attempt (500 ms) must give up, and a later attempt
+    /// must wait long enough. A fixed cap of 500 ms never completes.
+    #[test]
+    fn a_slow_handshake_gets_a_longer_attempt() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes behind a slow path");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-slow-handshake"))
+                    .await
+                    .expect("register");
+                let upstream = ticket
+                    .address
+                    .ip_addrs()
+                    .next()
+                    .copied()
+                    .expect("a loopback ticket carries one IP address");
+                let proxy = lossy_proxy(upstream, false, Duration::from_millis(400)).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let caps = [
+                    Duration::from_millis(500),
+                    Duration::from_millis(1500),
+                    Duration::from_secs(3),
+                ];
+                let build = || async {
+                    Ok::<_, anyhow::Error>(
+                        lookup::build_peer_endpoint(&LookupOpts::loopback()).await?,
+                    )
+                };
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(30),
+                    super::consume::fetch_building(&ticket, &mut out, &ticket.secret, &caps, build),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes on a later, longer attempt within 30 s: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a slow path",
+                    "the fetch returns the registered bytes"
                 );
                 fs::remove_file(&src).ok();
                 server.shutdown().await;
