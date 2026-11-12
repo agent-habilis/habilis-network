@@ -38,8 +38,8 @@ pub(crate) struct UnicastAcceptor {
     tx: mpsc::Sender<UnicastFrame>,
     relay_transport: PayloadPath,
     /// How long an accepted connection may carry no new stream before it is
-    /// closed. The dialing pool has the same timeout, so this is the backstop for a dialer
-    /// that is gone.
+    /// closed. The time counts from the end of the path check, not from the accept. The dialing
+    /// pool has the same timeout, so this is the backstop for a dialer that is gone.
     idle: Duration,
     /// The table whose ceiling the accepted connections count against: a stream that is being
     /// read marks its connection busy.
@@ -219,9 +219,10 @@ mod tests {
         }
     }
 
-    /// Advance the paused clock until the close reaches us, within 5 s of real time. The accept
-    /// task arms its idle timer only after its path check, which a loaded machine delays past a
-    /// fixed advance, so a fixed advance can end before the timer exists.
+    /// Advance the paused clock in steps of 1 s until the close reaches us. The bound of 5 s is
+    /// real time, and the steps are paused time. The accept task arms its idle timer only after
+    /// its path check, which a loaded machine delays past a fixed advance, so a fixed advance
+    /// can end before the timer exists.
     async fn closed_after_advancing(connection: &Connection) -> bool {
         let started = Instant::now();
         while connection.close_reason().is_none() {
