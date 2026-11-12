@@ -6227,6 +6227,12 @@ mod first_contact_tests {
             let mut app = Inert;
             let alice = Identity::generate();
             state.peers.insert(alice.author_key());
+            state.names.insert(alice.author_key(), nick("alice"));
+            state.bind_peer_endpoint(
+                alice.author_key(),
+                nick("alice"),
+                iroh::EndpointAddr::new(endpoint_id(83)),
+            );
             let elsewhere =
                 DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
             let root: Bytes = Message::new_frame(
@@ -6265,13 +6271,19 @@ mod first_contact_tests {
             let alice = Identity::generate();
             let carol = Identity::generate();
             state.peers.insert(alice.author_key());
+            state.names.insert(alice.author_key(), nick("alice"));
+            state.bind_peer_endpoint(
+                alice.author_key(),
+                nick("alice"),
+                iroh::EndpointAddr::new(endpoint_id(83)),
+            );
             state.peers.insert(carol.author_key());
             let now = clock::Instant::now();
             let elsewhere =
                 DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
             state.digest_round.note_root(
                 alice.author_key(),
-                endpoint_id(81),
+                endpoint_id(83),
                 Channel::State,
                 &elsewhere,
                 false,
@@ -6309,7 +6321,7 @@ mod first_contact_tests {
             ingest_from(frame, &mut state, &mut app, &context).await;
             assert!(
                 !state.outstanding_pulls.take(
-                    endpoint_id(81),
+                    endpoint_id(83),
                     Channel::State,
                     carol.author_key(),
                     now
@@ -6393,7 +6405,7 @@ mod first_contact_tests {
             .serialize()
             .expect("a signed root serializes")
             .into_bytes();
-            state.unicast_arrival = Some(endpoint_id(81));
+            state.unicast_arrival = Some(endpoint_id(83));
             ingest_from(root, &mut state, &mut app, &context).await;
             let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
             state.digest_round.advance(later, |_| true, |_, _| false);
@@ -6418,7 +6430,7 @@ mod first_contact_tests {
             assert!(
                 state
                     .outstanding_pulls
-                    .take(endpoint_id(81), Channel::State, key, later),
+                    .take(endpoint_id(83), Channel::State, key, later),
                 "the round pulls the returned key's slice"
             );
             ingest_from(slice(3, "3"), &mut state, &mut app, &context).await;
@@ -6466,7 +6478,7 @@ mod first_contact_tests {
             .serialize()
             .expect("a signed root serializes")
             .into_bytes();
-            state.unicast_arrival = Some(endpoint_id(81));
+            state.unicast_arrival = Some(endpoint_id(83));
             ingest_from(root, &mut state, &mut app, &context).await;
             let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
             let requests = state.digest_round.advance(later, |_| true, |_, _| false);
@@ -6501,7 +6513,7 @@ mod first_contact_tests {
             assert!(
                 state
                     .outstanding_pulls
-                    .take(endpoint_id(81), Channel::State, key, later),
+                    .take(endpoint_id(83), Channel::State, key, later),
                 "the pull of the returned key is registered"
             );
             node.endpoint.close().await;
@@ -6609,7 +6621,7 @@ mod first_contact_tests {
             .serialize()
             .expect("a signed root serializes")
             .into_bytes();
-            state.unicast_arrival = Some(endpoint_id(81));
+            state.unicast_arrival = Some(endpoint_id(83));
             ingest_from(root, &mut state, &mut app, &context).await;
             state.unicast_arrival = None;
             assert_eq!(
@@ -6647,7 +6659,7 @@ mod first_contact_tests {
             .serialize()
             .expect("a signed root serializes")
             .into_bytes();
-            state.unicast_arrival = Some(endpoint_id(81));
+            state.unicast_arrival = Some(endpoint_id(83));
             ingest_from(root, &mut state, &mut app, &context).await;
             state.unicast_arrival = None;
             assert_eq!(
@@ -6684,7 +6696,7 @@ mod first_contact_tests {
             .serialize()
             .expect("a signed root serializes")
             .into_bytes();
-            state.unicast_arrival = Some(endpoint_id(81));
+            state.unicast_arrival = Some(endpoint_id(83));
             ingest_from(root, &mut state, &mut app, &context).await;
             state.unicast_arrival = None;
             assert_eq!(
@@ -6739,11 +6751,11 @@ mod first_contact_tests {
                     .into_bytes()
             };
             let now = clock::Instant::now();
-            state.unicast_arrival = Some(endpoint_id(81));
+            state.unicast_arrival = Some(endpoint_id(83));
             ingest_from(frame(page.clone()), &mut state, &mut app, &context).await;
             assert!(
                 !state.outstanding_pulls.take(
-                    endpoint_id(81),
+                    endpoint_id(83),
                     Channel::State,
                     carol.author_key(),
                     now
@@ -6754,7 +6766,7 @@ mod first_contact_tests {
                 DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
             state.digest_round.note_root(
                 alice.author_key(),
-                endpoint_id(81),
+                endpoint_id(83),
                 Channel::State,
                 &elsewhere,
                 false,
@@ -6765,7 +6777,7 @@ mod first_contact_tests {
             state.unicast_arrival = None;
             assert!(
                 state.outstanding_pulls.take(
-                    endpoint_id(81),
+                    endpoint_id(83),
                     Channel::State,
                     carol.author_key(),
                     now
