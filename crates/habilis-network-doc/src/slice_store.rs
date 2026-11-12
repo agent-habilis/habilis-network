@@ -2487,6 +2487,25 @@ mod tests {
     }
 
     #[test]
+    fn serve_returns_the_frame_of_a_tombstone() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"a": 1})));
+        apply(&mut store, &frame(key(1), 2, Value::Null));
+        let served: Vec<Verified> = store.serve(&[key(1)]).collect();
+        assert_eq!(served.len(), 1, "a held tombstone is served");
+        let wire = served[0].serialize().expect("a served frame serializes");
+        let text = String::from_utf8_lossy(wire.as_bytes()).into_owned();
+        assert!(
+            text.contains(r#"\"value\":null"#),
+            "the served frame must carry the null value of the tombstone: {text}"
+        );
+        assert!(
+            !text.contains(r#"\"a\":1"#),
+            "the served frame must not carry the old value: {text}"
+        );
+    }
+
+    #[test]
     fn prepare_leave_spends_no_token_and_is_never_rate_limited() {
         let mut store = small_store(SliceLimits::new(3072, Duration::from_secs(1), 256, 1));
         let now = Instant::now();
