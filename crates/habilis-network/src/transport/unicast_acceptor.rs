@@ -146,13 +146,15 @@ mod tests {
     use std::time::Duration;
 
     use iroh::endpoint::{Connection, ConnectionError};
-    use iroh::protocol::Router;
+    use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
     use super::super::UNICAST_ALPN;
     use super::{DIRECT_IDLE_BACKSTOP, IDLE, PayloadPath, UnicastAcceptor, UnicastFrame, mpsc};
     use crate::lookup;
     use iroh::endpoint::presets;
+    use std::sync::Arc;
     use std::time::Instant;
+    use tokio::sync::Notify;
     use tokio::{task, time, time as tokio_time};
     /// A server accepting unicast with the given idle timeout, and a client
     /// connected to it.
@@ -164,6 +166,16 @@ mod tests {
         iroh::Endpoint,
         mpsc::Receiver<UnicastFrame>,
     ) {
+        let (tx, frames) = mpsc::channel(8);
+        let handler = UnicastAcceptor::with_idle(tx, PayloadPath::RelayAllowed, idle);
+        let (connection, router, client) = connected_to(handler).await;
+        (connection, router, client, frames)
+    }
+
+    /// A server that runs `handler` for the unicast ALPN, and a client connected to it.
+    async fn connected_to<Handler: ProtocolHandler>(
+        handler: Handler,
+    ) -> (Connection, Router, iroh::Endpoint) {
         let bind = || async {
             iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
@@ -171,13 +183,9 @@ mod tests {
                 .await
                 .expect("bind a loopback endpoint")
         };
-        let (tx, frames) = mpsc::channel(8);
         let server = bind().await;
         let router = Router::builder(server.clone())
-            .accept(
-                UNICAST_ALPN,
-                UnicastAcceptor::with_idle(tx, PayloadPath::RelayAllowed, idle),
-            )
+            .accept(UNICAST_ALPN, handler)
             .spawn();
         let client = bind().await;
         lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
@@ -185,7 +193,23 @@ mod tests {
             .connect(server.id(), UNICAST_ALPN)
             .await
             .expect("connect");
-        (connection, router, client, frames)
+        (connection, router, client)
+    }
+
+    /// A handler that starts the acceptor only when `start` is notified: a loaded machine starts the
+    /// accept task late, after the client has connected.
+    #[derive(Debug, Clone)]
+    struct LateStart {
+        inner: UnicastAcceptor,
+        // The test holds the other handle and releases the start; the router holds this one.
+        start: Arc<Notify>,
+    }
+
+    impl ProtocolHandler for LateStart {
+        async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+            self.start.notified().await;
+            self.inner.accept(connection).await
+        }
     }
 
     async fn advance_secs(seconds: u64) {
@@ -193,6 +217,20 @@ mod tests {
             tokio_time::advance(Duration::from_secs(1)).await;
             task::yield_now().await;
         }
+    }
+
+    /// Advance the paused clock until the close reaches us, within 5 s of real time. The accept
+    /// task arms its idle timer only after its path check, which a loaded machine delays past a
+    /// fixed advance, so a fixed advance can end before the timer exists.
+    async fn closed_after_advancing(connection: &Connection) -> bool {
+        let started = Instant::now();
+        while connection.close_reason().is_none() {
+            if started.elapsed() > Duration::from_secs(5) {
+                return false;
+            }
+            advance_secs(1).await;
+        }
+        true
     }
 
     /// Wait in real time for the close to reach us. The server closes inside the
@@ -231,13 +269,39 @@ mod tests {
                 "inside the idle timeout"
             );
 
-            advance_secs(6).await;
-            assert!(closed_soon(&connection).await, "never closed");
+            assert!(closed_after_advancing(&connection).await, "never closed");
             assert!(
                 closed_by_the_acceptor(&connection),
                 "{:?}",
                 connection.close_reason()
             );
+
+            tokio_time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    #[test]
+    fn an_accept_task_that_starts_late_still_closes_an_idle_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (tx, _frames) = mpsc::channel(8);
+            // Shared by the test, which releases the start, and the handler, which the router owns.
+            let start = Arc::new(Notify::new());
+            let handler = LateStart {
+                inner: UnicastAcceptor::with_idle(
+                    tx,
+                    PayloadPath::RelayAllowed,
+                    Duration::from_secs(8),
+                ),
+                start: Arc::clone(&start),
+            };
+            let (connection, router, client) = connected_to(handler).await;
+            tokio_time::pause();
+
+            advance_secs(12).await;
+            start.notify_one();
+            assert!(closed_after_advancing(&connection).await, "never closed");
 
             tokio_time::resume();
             router.shutdown().await.expect("shutdown");
