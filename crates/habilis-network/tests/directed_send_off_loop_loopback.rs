@@ -38,6 +38,8 @@ const BLOCK_TAKES_EFFECT: Duration = Duration::from_secs(30);
 const WAIT_PREMISE: Duration = Duration::from_millis(500);
 /// The path-select budget of a send (5 s) and a margin.
 const PATH_BUDGET: Duration = Duration::from_secs(8);
+/// A send that must fail on the relay refusal ends within this: the path budget (5 s) and a margin.
+const SAFETY_BUDGET: Duration = Duration::from_secs(6);
 /// The cooldown text of the pool (`COOLDOWN_REFUSED`), which is not public.
 const COOLDOWN_TEXT: &str = "unicast dial on cooldown after a recent failure";
 /// The relay refusal of the pool (`RELAY_REFUSED`), which is not public.
@@ -186,6 +188,21 @@ impl Member {
             .expect("alice knows bob");
     }
 
+    /// Forget that `peer` is proven direct, so that the node reads no path for the pair, as it
+    /// does before the first probe.
+    async fn forget_direct(&self, peer: &str) {
+        self.membership
+            .request(|reply| {
+                Request::Linking(Linking::ForgetDirect {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
+            .await
+            .expect("the loop answers")
+            .expect("alice knows bob");
+    }
+
     /// Whether a unicast connection to `peer` was pooled, and is forgotten now.
     async fn forget_unicast(&self, peer: &str) -> bool {
         self.membership
@@ -275,8 +292,8 @@ fn a_directed_send_on_a_warm_connection_that_reads_relay_waits_and_arrives_once_
         let mut bob = Member::join("bob", &alice).await;
         alice.until_knows("bob").await;
 
-        // A held send before the first probe is an answer, so the first message tries until the
-        // pair is direct. It pools the connection that the next send finds warm.
+        // The first message pools the connection that the next send finds warm. It tries until the
+        // pair is direct, as a caller does.
         let warm_ends = Instant::now() + FORMATION;
         while let Err(refusal) = alice.send("bob", "warm").await {
             assert!(
@@ -397,6 +414,69 @@ fn the_reply_of_a_send_that_fails_on_its_dial_task_names_the_relay_refusal() {
         assert!(
             refusal.contains(RELAY_TEXT),
             "the reply names the relay refusal, and it reads: {refusal}"
+        );
+    });
+}
+
+/// **A send to an unprobed pair whose only path is the relay puts no payload on it.**
+///
+/// A directed send is no longer held for want of a probe: the node reads no path for the pair, so
+/// it dials and waits for a direct path. The safety of a lookup-only mesh is the live path of the
+/// connection, so the frame must not go out while the path reads relay. The test cuts IP, forgets
+/// the proof of the pair, and sends. The send waits, then fails with the relay refusal inside the
+/// path budget, and bob reads nothing.
+#[test]
+fn a_directed_send_to_an_unprobed_pair_on_the_relay_is_refused_and_bob_reads_nothing() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let mut bob = Member::join("bob", &alice).await;
+        alice.until_knows("bob").await;
+
+        let warm_ends = Instant::now() + FORMATION;
+        while let Err(refusal) = alice.send("bob", "warm").await {
+            assert!(
+                Instant::now() < warm_ends,
+                "the first message did not go out within {FORMATION:?}: {refusal}"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+        let arrival_ends = Instant::now() + PATH_BUDGET;
+        let mut earlier = Vec::new();
+        while !earlier.iter().any(|text| text == "warm") {
+            assert!(
+                Instant::now() < arrival_ends,
+                "bob did not read the first message; it read {earlier:?}"
+            );
+            time::sleep(Duration::from_millis(100)).await;
+            earlier.extend(bob.arrived());
+        }
+        alice.cut_ip_to("bob", &bob).await;
+        alice.forget_direct("bob").await;
+
+        let started = Instant::now();
+        let verdict = time::timeout(SAFETY_BUDGET, alice.send("bob", "late"))
+            .await
+            .expect("the send ends within the safety budget");
+        let waited = started.elapsed();
+        time::sleep(Duration::from_secs(1)).await;
+        let read = bob.arrived();
+
+        let _ = bob.membership.node.leave().await;
+        let _ = alice.membership.node.leave().await;
+        let refusal = verdict.expect_err("the only path is the relay, so the send fails");
+        assert!(
+            refusal.contains(RELAY_TEXT),
+            "the reply names the relay refusal, and it reads: {refusal}"
+        );
+        assert!(
+            waited >= WAIT_PREMISE,
+            "the send was refused after {waited:?}: it did not wait for a path, so it was held"
+        );
+        assert!(
+            read.is_empty(),
+            "bob read {read:?} over a path that is the relay on a lookup-only mesh"
         );
     });
 }

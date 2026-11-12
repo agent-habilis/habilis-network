@@ -68,7 +68,8 @@ pub(crate) use pool::UnicastPool;
 pub(crate) use send::resolve;
 pub use send::{Delivered, Lane, PendingSend, SendError, deliver, deliver_in_background};
 pub(crate) use send::{
-    can_unicast, directed_endpoint, lane_for, note_held, send_best_effort, send_dialing_back,
+    can_unicast, directed_endpoint, lane_for, note_held, note_unproven, send_best_effort,
+    send_dialing_back,
 };
 pub(crate) use unicast_acceptor::{UnicastAcceptor, UnicastFrame};
 pub use webrtc::MAX_DIRECT_PEERS;

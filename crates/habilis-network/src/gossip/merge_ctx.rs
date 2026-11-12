@@ -65,10 +65,12 @@ use tokio::sync::oneshot;
 /// Refuses a body too large for one frame, propagates a serialize/deliver
 /// failure, and errors if the unmeshed buffer is full. A directed frame names its recipient by
 /// author key, so two live peers that use one nickname are two addressees, and neither send is
-/// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. An unmeshed
-/// node refuses every directed frame ([`crate::transport::SendError::Undeliverable`]), and a
-/// meshed node refuses a frame to a relay-only peer whose direct path is not probed yet
-/// ([`crate::transport::SendError::Held`]). The caller retries, and nothing is buffered.
+/// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. A directed
+/// frame does not wait for the gossip overlay: an unmeshed node sends it too. A node refuses a
+/// frame to a peer whose probe proved a relay-only path, on a mesh where the relay is lookup only
+/// ([`crate::transport::SendError::Held`]). A peer with no proven path yet is dialed, and the send
+/// waits for a direct path on a task of its own, within the path-select budget. The caller retries
+/// a refused frame, and nothing is buffered.
 ///
 /// # Examples
 ///
@@ -108,12 +110,19 @@ pub async fn send_app(
         .serialize()
         .map_err(|error| transport::SendError::Internal(error.into()))?;
     messages::log_out(&frame);
-    if state.standing.contains(&Standing::Meshed) {
+    // A directed frame rides the unicast connection, never the gossip overlay, so it needs no
+    // link to a real peer: the pool dials the addressee, and the live path of the connection
+    // decides whether the payload may go out (`payload_allowed_on`). Only a broadcast waits for
+    // the overlay.
+    let directed = sole_addressee(&frame.kind).is_some();
+    if directed || state.standing.contains(&Standing::Meshed) {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
         // `to` — the same routing the application's send path rides. A directed
         // frame with no path comes back as an error for the caller to act on.
         if let Some(peer) = probe::prove_addressee(state, &frame) {
             probe::open_lane_after_proof(state, context, peer);
+        } else if transport::note_unproven(state, &frame) {
+            offer_for_held(state, context, &frame);
         }
         let outcome = transport::deliver(&frame, bytes, state, context.sender).await;
         if let Err(error @ transport::SendError::Held { .. }) = &outcome {
@@ -122,12 +131,6 @@ pub async fn send_app(
             offer_for_held(state, context, &frame);
         }
         return outcome;
-    }
-    // An unmeshed node refuses a directed frame at once: it is not buffered.
-    if let Some(key) = sole_addressee(&frame.kind) {
-        return Err(transport::SendError::Undeliverable(format!(
-            "directed message to {key} undeliverable: this node is not meshed yet"
-        )));
     }
     // An unmeshed node buffers a broadcast frame for the meshed edge.
     if state.pending_outbound.push((frame.clone(), bytes)) {

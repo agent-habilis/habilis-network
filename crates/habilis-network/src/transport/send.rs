@@ -11,7 +11,9 @@ mod deliver;
 mod route;
 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
 pub(crate) use deliver::resolve;
-pub(crate) use deliver::{can_unicast, lane_for, note_held, send_best_effort, send_dialing_back};
+pub(crate) use deliver::{
+    can_unicast, lane_for, note_held, note_unproven, send_best_effort, send_dialing_back,
+};
 pub use deliver::{deliver, deliver_in_background};
 pub(crate) use route::directed_endpoint;
 #[cfg(test)]
@@ -33,7 +35,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, can_unicast, lane_for, note_held, resolve, route};
+    use super::{Lane, Route, can_unicast, lane_for, note_held, note_unproven, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified};
     use crate::protocol::{
@@ -105,7 +107,8 @@ mod tests {
     // ── lane peers ────────────────────────────────────────────────────
 
     /// A lane peer: no IP address, only a relay. On a mesh whose relay is lookup only, a frame to
-    /// it is held, and holding it is what asks for its session.
+    /// it is held once a probe reads its path as the relay, and holding it is what asks for its
+    /// session. Before that reading it is unproven, and the send asks for the session itself.
     fn state_knowing_a_lane_bob() -> (EventLoopState, EndpointId) {
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
@@ -126,6 +129,7 @@ mod tests {
     fn a_frame_held_for_a_lane_peer_marks_its_session_wanted() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_a_lane_bob();
+        state.direct.insert(bob, DirectState::RelayOnly);
         let now = clock::Instant::now();
         assert!(!state.lane_session_wanted(bob, now), "nothing is held yet");
 
@@ -161,6 +165,7 @@ mod tests {
         };
         state.bind_peer_endpoint(first, nick("bob"), lane(first_endpoint));
         state.retain_refused_endpoint(second, lane(second_endpoint));
+        state.direct.insert(second_endpoint, DirectState::RelayOnly);
 
         let error = resolve(
             &directed_msg_to(second),
@@ -176,13 +181,13 @@ mod tests {
         );
     }
 
-    /// A peer with an IP path is held too on a lookup-only relay, but its direct path comes
-    /// from the probe, so no session is wanted for it.
+    /// A peer with an IP path is held too on a lookup-only relay once a probe reads its path as
+    /// the relay, but its direct path comes from the probe, so no session is wanted for it.
     #[test]
     fn a_frame_held_for_a_peer_with_an_ip_path_does_not_want_a_session() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
-        state.direct.remove(&bob);
+        state.direct.insert(bob, DirectState::RelayOnly);
         state.names.insert(test_key("bob"), nick("bob"));
         state.bind_peer_endpoint(
             test_key("bob"),
@@ -1058,12 +1063,12 @@ mod tests {
         assert!(can_unicast(bob, &state), "a proven direct path still goes");
     }
 
-    /// With the relay lookup only, a directed frame is parked until a direct
-    /// path to the peer is proven — unprobed, pending and relay-only alike;
-    /// once proven it takes unicast like any other.
+    /// With the relay lookup only, a directed frame is refused only for a pair that a probe proved
+    /// relay-only. A pair that no probe has read, or whose probe is in flight, goes by unicast: the
+    /// dial waits for a direct path, and the live path of the connection refuses the relay. The
+    /// state lags the connection by a few milliseconds after a join, so it must not refuse alone.
     #[test]
-    fn directed_frame_is_held_until_a_direct_path_is_proven_when_the_relay_is_lookup_only() {
-        use crate::daemon::state::DirectState;
+    fn a_directed_frame_is_held_only_for_a_pair_that_a_probe_proved_relay_only() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
@@ -1071,17 +1076,18 @@ mod tests {
         assert_eq!(
             route(&directed_msg(), &state),
             Route::Unicast(bob),
-            "a directed frame is held while the relay is lookup-only and no direct path is proven"
+            "a relay-only pair is sent to when the relay carries payload"
         );
         state.relay_transport = PayloadPath::DirectOnly;
-        for unproven in [
-            None,
-            Some(DirectState::Pending),
-            Some(DirectState::RelayOnly),
+        for (reading, expected) in [
+            (None, Route::Unicast(bob)),
+            (Some(DirectState::Pending), Route::Unicast(bob)),
+            (Some(DirectState::RelayOnly), Route::Held(bob)),
+            (Some(DirectState::Direct), Route::Unicast(bob)),
         ] {
-            match unproven {
-                Some(reading) => {
-                    state.direct.insert(bob, reading);
+            match reading {
+                Some(proved) => {
+                    state.direct.insert(bob, proved);
                 }
                 None => {
                     state.direct.remove(&bob);
@@ -1089,15 +1095,60 @@ mod tests {
             }
             assert_eq!(
                 route(&directed_msg(), &state),
-                Route::Held(bob),
-                "{unproven:?}"
+                expected,
+                "the route for the reading {reading:?}"
             );
         }
+    }
+
+    /// A send that is not held still asks for the lane session of an unproven peer that needs
+    /// one: the send dials it and waits for a direct path, and a lane peer has none to wait for.
+    /// A proven peer, and a mesh whose relay carries payload, ask for nothing.
+    #[test]
+    fn an_unproven_lane_peer_asks_for_its_session_at_the_send_and_a_proven_peer_does_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_a_lane_bob();
+        state.relay_transport = PayloadPath::DirectOnly;
+        let now = clock::Instant::now();
+
         state.direct.insert(bob, DirectState::Direct);
+        assert!(
+            !note_unproven(&mut state, &directed_msg()),
+            "a proven peer is not unproven"
+        );
+        assert!(
+            !state.lane_session_wanted(bob, now),
+            "a proven peer asked for a session"
+        );
+
+        state.direct.remove(&bob);
+        state.relay_transport = PayloadPath::RelayAllowed;
+        assert!(
+            !note_unproven(&mut state, &directed_msg()),
+            "a mesh whose relay carries payload has no unproven peer"
+        );
+        assert!(
+            !state.lane_session_wanted(bob, now),
+            "a relay mesh asked for a session"
+        );
+
+        state.relay_transport = PayloadPath::DirectOnly;
+        assert!(
+            note_unproven(&mut state, &directed_msg()),
+            "an unread peer on a lookup-only relay is unproven"
+        );
         assert_eq!(
             route(&directed_msg(), &state),
             Route::Unicast(bob),
-            "the held directed frame is delivered once a direct path is proven"
+            "the unproven peer is sent to, not held"
+        );
+        assert!(
+            state.lane_session_wanted(bob, now),
+            "the unproven lane peer did not ask for its session"
+        );
+        assert!(
+            !note_unproven(&mut state, &open_broadcast()),
+            "a broadcast has no addressee to prove"
         );
     }
 

@@ -2316,6 +2316,80 @@ mod first_contact_tests {
         });
     }
 
+    /// **A directed send right after a join is not refused for want of a mesh or a probe.**
+    ///
+    /// The `PeerInfo` of a peer reaches the node a few milliseconds before its first real-peer link
+    /// sets `Meshed` and the first reading of `direct`. In that window the node holds the endpoint
+    /// of bob, is not meshed, and has read no path. The send must start: the dial waits for a direct
+    /// path, and the live path of the connection decides. The peer is a lane peer, so the send
+    /// asks for its session at once. Two controls keep the rule narrow: a pair
+    /// that a probe proved relay-only is still held, and a broadcast is still buffered.
+    #[test]
+    fn an_unmeshed_directed_send_to_an_unprobed_peer_is_started_and_not_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.remove(&Standing::Meshed);
+            state.relay_transport = PayloadPath::DirectOnly;
+            state.local_udp_transport = UdpTransport::Present;
+            let (bob, eid) = (test_key("bob"), endpoint_id(7));
+            let lane_address = iroh::EndpointAddr::new(eid)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+            state.names.insert(bob, nick("bob"));
+            state.bind_peer_endpoint(bob, nick("bob"), lane_address);
+            let frame = || {
+                Message::new_pong(
+                    &node.mesh,
+                    &node.author,
+                    bob,
+                    &protocol::MessageId::random(),
+                )
+                .sign(&Identity::generate())
+            };
+
+            let sent = ops::send_app(&mut state, &context, frame()).await;
+            assert!(
+                matches!(sent, Ok(transport::Delivered::Pending(_))),
+                "the send to an unprobed peer on an unmeshed node did not start: {sent:?}"
+            );
+            assert!(
+                state.lane_session_wanted(eid, clock::Instant::now()),
+                "the send to an unprobed lane peer did not ask for its session"
+            );
+
+            state.direct.insert(eid, DirectState::RelayOnly);
+            let held = ops::send_app(&mut state, &context, frame()).await;
+            assert!(
+                matches!(held, Err(transport::SendError::Held { .. })),
+                "a pair that a probe proved relay-only was not held: {held:?}"
+            );
+
+            let broadcast = Message::new_app(
+                &node.mesh,
+                &node.author,
+                AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("hi"),
+                ),
+            )
+            .sign(&Identity::generate());
+            let buffered = ops::send_app(&mut state, &context, broadcast).await;
+            assert!(
+                matches!(buffered, Ok(transport::Delivered::Done)),
+                "the unmeshed broadcast was not accepted: {buffered:?}"
+            );
+            assert_eq!(
+                state.pending_outbound.len(),
+                1,
+                "the unmeshed broadcast was not buffered for the meshed edge"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// A meshed send to a peer with no path watcher, whose selected path is a multihop route, is not
     /// held: the send proves the peer by its route, and does not wait for the sweep tick. Only the
     /// lower id of a pair has a watcher, so the higher id had no other source of the proof.
@@ -2551,12 +2625,13 @@ mod first_contact_tests {
         });
     }
 
-    /// An unmeshed node refuses a directed frame at once, whatever the key. A key that no roster,
-    /// quiet set or address book holds is undeliverable. A quiet key, and a key that only has a
-    /// retained endpoint, are not delivered to now either, and the caller hears it at once. The
-    /// buffer holds broadcast frames only.
+    /// An unmeshed node routes a directed frame like a meshed one: it needs no gossip link. A key
+    /// that no roster, quiet set or address book holds is undeliverable, and so is a quiet key with
+    /// no endpoint, and the caller hears it at once. A key that has a retained endpoint is sent to
+    /// by a task. The buffer holds broadcast frames only.
     #[test]
-    fn an_unmeshed_send_to_a_key_outside_the_roster_is_refused() {
+    fn an_unmeshed_send_is_refused_for_a_key_with_no_endpoint_and_started_for_one_with_an_endpoint()
+    {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -2582,16 +2657,19 @@ mod first_contact_tests {
                 "the refused frame was buffered"
             );
 
-            for key in [quiet, hinted] {
-                let outcome = ops::send_app(&mut state, &context, frame_to(key)).await;
-                assert!(
-                    matches!(outcome, Err(transport::SendError::Undeliverable(_))),
-                    "the unmeshed send to {key} was not refused: {outcome:?}"
-                );
-            }
+            let quiet_outcome = ops::send_app(&mut state, &context, frame_to(quiet)).await;
+            assert!(
+                matches!(quiet_outcome, Err(transport::SendError::Undeliverable(_))),
+                "the unmeshed send to a quiet key with no endpoint was not refused: {quiet_outcome:?}"
+            );
+            let hinted_outcome = ops::send_app(&mut state, &context, frame_to(hinted)).await;
+            assert!(
+                matches!(hinted_outcome, Ok(transport::Delivered::Pending(_))),
+                "the unmeshed send to a key with an endpoint did not start: {hinted_outcome:?}"
+            );
             assert!(
                 state.pending_outbound.is_empty(),
-                "a refused directed frame was buffered"
+                "a directed frame was buffered"
             );
             node.endpoint.close().await;
         });

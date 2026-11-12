@@ -166,14 +166,14 @@ pub async fn deliver_in_background(
     deliver(message, bytes, state, sender).await.is_ok()
 }
 
-/// Whether a frame can be sent to `eid` by unicast now: its payload path is not held, or the frame
-/// being handled came by unicast from `eid`. The unicast acceptor admits a connection only on a
+/// Whether a frame can be sent to `eid` by unicast now, with no dial and no wait: its direct path
+/// is proven, or the frame being handled came by unicast from `eid`. The unicast acceptor admits a connection only on a
 /// selected path that is not the relay when the relay is lookup-only, so that arrival proves what a
 /// probe would, before the probe of the node reads it, and the reply goes back on it. The exception
 /// is for the frame at hand: `unicast_arrival` is set only while an unicast frame is handled, so a
 /// send outside a reply, and any other endpoint, keep the check of the path as before.
 pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
-    !super::route::held(eid, state) || state.unicast_arrival == Some(eid)
+    !super::route::unproven(eid, state) || state.unicast_arrival == Some(eid)
 }
 
 /// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
@@ -184,14 +184,37 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
     let SendError::Held { eid } = error else {
         return;
     };
-    let needs_lane = state.member_address_of(*eid).is_some_and(|address| {
+    want_lane_if_needed(state, *eid);
+}
+
+/// The same reason as [`note_held`], for a frame that is not held: a directed frame to a peer
+/// whose direct path is not proven yet, on a mesh where the relay is lookup only. The send dials
+/// the peer and waits for a direct path. A peer that has no IP path, or that turns out relay-only,
+/// needs a lane session, so it is asked now and not on the next retry pass. Returns whether the
+/// frame is such a frame, and the peer is a candidate for the offer.
+pub(crate) fn note_unproven(state: &mut EventLoopState, message: &Verified) -> bool {
+    let Some(key) = sole_addressee(&message.kind) else {
+        return false;
+    };
+    let Some(eid) = super::route::directed_endpoint(key, state) else {
+        return false;
+    };
+    if !super::route::unproven(eid, state) {
+        return false;
+    }
+    want_lane_if_needed(state, eid);
+    true
+}
+
+fn want_lane_if_needed(state: &mut EventLoopState, eid: EndpointId) {
+    let needs_lane = state.member_address_of(eid).is_some_and(|address| {
         webrtc::session_policy::pair_needs_lane(&address, state.local_udp_transport)
     });
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.
-    let reads_as_relay = state.pair_path_kind(*eid) == Some(PathKind::Relay);
+    let reads_as_relay = state.pair_path_kind(eid) == Some(PathKind::Relay);
     if needs_lane || reads_as_relay {
-        state.want_lane_session(*eid, clock::Instant::now());
+        state.want_lane_session(eid, clock::Instant::now());
     }
 }
 

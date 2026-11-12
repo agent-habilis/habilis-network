@@ -456,6 +456,15 @@ pub enum Linking {
         /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
+    /// Tests only: erase what the node knows of the direct path to the member `peer`, so that
+    /// the pair reads as before the first probe: no reading at all, which is not a relay-only
+    /// reading.
+    ForgetDirect {
+        /// The peer, by nickname.
+        peer: String,
+        /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
+        reply: oneshot::Sender<Result<(), UnknownPeer>>,
+    },
     /// Tests only: close the live gossip connections to the member `peer` and nothing else. The
     /// engine then runs its own `NeighborDown` path.
     CloseLink {
@@ -1110,6 +1119,14 @@ impl MembershipApp {
                     );
                 });
                 let _ = reply.send(result);
+                false
+            }
+            Linking::ForgetDirect { peer, reply } => {
+                let result = known_peer(state, &peer).map(|address| address.id);
+                if let Ok(id) = &result {
+                    state.direct.remove(id);
+                }
+                let _ = reply.send(result.map(|_| ()));
                 false
             }
             Linking::CloseLink { peer, reply } => {
@@ -1924,11 +1941,12 @@ mod tests {
     }
 
     /// Two live keys use one nickname. A send by nickname is refused, because the engine never
-    /// picks one of them. A send to a key is refused at once while unmeshed: a directed frame is
-    /// not buffered, so nothing is queued for the caller's key.
+    /// picks one of them. A send to a key reaches the routing while unmeshed, because a directed
+    /// frame needs no gossip link: this fixture holds no endpoint for the key, so the routing
+    /// refuses it for that cause and not for the lack of a mesh. A directed frame is not buffered.
     #[cfg(feature = "host")]
     #[test]
-    fn a_send_to_a_key_of_two_keys_that_share_a_nickname_is_refused_while_unmeshed() {
+    fn a_send_to_a_key_of_two_keys_that_share_a_nickname_reaches_the_routing_while_unmeshed() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = LaneNode::start().await;
             let context = node.context();
@@ -1971,8 +1989,8 @@ mod tests {
             app.handle_session(to_key, &mut state, &context).await;
             let outcome = by_key.await.expect("the request is answered");
             assert!(
-                matches!(outcome, Err(ref error) if error.contains("not meshed yet")),
-                "the send to a key of the nickname was not refused while unmeshed: {outcome:?}"
+                matches!(outcome, Err(ref error) if error.contains("no known endpoint")),
+                "the send to a key of the nickname did not reach the routing while unmeshed: {outcome:?}"
             );
             assert!(
                 state.pending_outbound.is_empty(),
