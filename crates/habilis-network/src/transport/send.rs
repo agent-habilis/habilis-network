@@ -673,7 +673,8 @@ mod tests {
     ///
     /// The refusal carries the context "unicast dial to X failed" and the cause below it. A caller
     /// that prints only the outer message reads no reason, so the text of the whole chain must
-    /// hold the cooldown, also after the error became a `SendError`.
+    /// hold the cooldown, also after `SendError::internal` wrapped the error. The text that a user
+    /// reads, the `Messaging::Send` reply, is pinned by a test of its own in the loopback tests.
     #[test]
     fn a_send_to_a_peer_on_the_dial_failure_cooldown_fails_with_the_cooldown_text() {
         ::habilis_network_test_tracing::run_multi_thread(

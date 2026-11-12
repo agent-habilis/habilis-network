@@ -42,7 +42,8 @@ pub enum SendError {
     /// The shared state refused a write of this node, with the typed reason. A write past the rate
     /// limit is not retried: the caller sends it again later. A value too large for a frame is refused.
     State(habilis_network_doc::SliceError),
-    /// A cause no caller acts on. It keeps its text and its chain.
+    /// A cause no caller acts on. It keeps its text and its chain. `{}` prints only the outer
+    /// text; `{:#}` prints the chain.
     Internal(Box<dyn error::Error + Send + Sync>),
 }
 

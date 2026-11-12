@@ -475,6 +475,15 @@ pub enum Linking {
         /// Gets the answer, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<bool, UnknownPeer>>,
     },
+    /// Tests only: forget the pooled unicast connection of the member `peer`, then put it on the
+    /// dial-failure cooldown, as a failed dial does. The next directed send to it is cold and
+    /// the cooldown refuses it at once, so a test reads the text of that refusal in the reply.
+    NoteDialFailure {
+        /// The peer, by nickname.
+        peer: String,
+        /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
+        reply: oneshot::Sender<Result<(), UnknownPeer>>,
+    },
     /// Tests only: mark the gossip topic closed without a real end of the stream, as the heal
     /// arm reads a terminal `None`. The loop stops reading the topic, the heal tick resubscribes,
     /// and the messages that arrive in between must still reach the app.
@@ -1110,6 +1119,20 @@ impl MembershipApp {
                 let pool = &state.unicast_pool;
                 let outcome = match id {
                     Ok(id) => Ok(pool.drop_connection(id).await),
+                    Err(unknown) => Err(unknown),
+                };
+                let _ = reply.send(outcome);
+                false
+            }
+            Linking::NoteDialFailure { peer, reply } => {
+                let id = known_peer(state, &peer).map(|address| address.id);
+                let pool = &state.unicast_pool;
+                let outcome = match id {
+                    Ok(id) => {
+                        pool.drop_connection(id).await;
+                        pool.note_dial_failure(id).await;
+                        Ok(())
+                    }
                     Err(unknown) => Err(unknown),
                 };
                 let _ = reply.send(outcome);

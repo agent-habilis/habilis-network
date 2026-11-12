@@ -38,6 +38,8 @@ const BLOCK_TAKES_EFFECT: Duration = Duration::from_secs(30);
 const WAIT_PREMISE: Duration = Duration::from_millis(500);
 /// The path-select budget of a send (5 s) and a margin.
 const PATH_BUDGET: Duration = Duration::from_secs(8);
+/// The cooldown text of the pool (`COOLDOWN_REFUSED`), which is not public.
+const COOLDOWN_TEXT: &str = "unicast dial on cooldown after a recent failure";
 
 struct Member {
     membership: Membership,
@@ -168,6 +170,20 @@ impl Member {
             .expect("the loop answers")
     }
 
+    /// Forget the pooled connection to `peer` and put it on the dial-failure cooldown.
+    async fn note_dial_failure(&self, peer: &str) {
+        self.membership
+            .request(|reply| {
+                Request::Linking(Linking::NoteDialFailure {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
+            .await
+            .expect("the loop answers")
+            .expect("alice knows bob");
+    }
+
     /// Whether a unicast connection to `peer` was pooled, and is forgotten now.
     async fn forget_unicast(&self, peer: &str) -> bool {
         self.membership
@@ -244,6 +260,10 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
 /// still be forming. The send waits on a task of its own, so the node serves other requests, and
 /// when IP is back before the budget ends, the frame goes out once. The test cuts IP after a
 /// first message pooled the connection, sends while the path reads relay, and gives IP back.
+///
+/// The send is never `Held` here, because this mesh has no `WebRTC`: the admission demote does
+/// nothing, so the pair stays `Direct` after the cut. On a mesh with `WebRTC`, the same cut makes
+/// the pair `RelayOnly`, and the send is `Held` by design.
 #[test]
 fn a_directed_send_on_a_warm_connection_that_reads_relay_waits_and_arrives_once_ip_is_back() {
     let guard = habilis_network_test_tracing::init();
@@ -302,5 +322,41 @@ fn a_directed_send_on_a_warm_connection_that_reads_relay_waits_and_arrives_once_
         let _ = bob.membership.node.leave().await;
         let _ = alice.membership.node.leave().await;
         assert_eq!(hellos, 1, "bob read the message {hellos} times: {texts:?}");
+    });
+}
+
+/// **The reply of a send to a peer on the dial-failure cooldown names the cooldown.**
+///
+/// The pool refuses the send with a context and the cooldown text below it. The `Messaging::Send`
+/// reply is the text that a user reads, so it must print the whole chain and not the outer message.
+#[test]
+fn the_reply_of_a_send_to_a_peer_on_the_dial_failure_cooldown_names_the_cooldown() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let bob = Member::join("bob", &alice).await;
+        alice.until_knows("bob").await;
+
+        // A send before the node is meshed is refused for another reason, so the first message tries
+        // until it goes out. The cooldown then replaces the connection that it pooled.
+        let warm_ends = Instant::now() + FORMATION;
+        while let Err(refusal) = alice.send("bob", "warm").await {
+            assert!(
+                Instant::now() < warm_ends,
+                "the first message did not go out within {FORMATION:?}: {refusal}"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+        alice.note_dial_failure("bob").await;
+        let verdict = alice.send("bob", "hello").await;
+
+        let _ = bob.membership.node.leave().await;
+        let _ = alice.membership.node.leave().await;
+        let refusal = verdict.expect_err("the cooldown refuses the send");
+        assert!(
+            refusal.contains(COOLDOWN_TEXT),
+            "the reply names the cooldown, and it reads: {refusal}"
+        );
     });
 }
