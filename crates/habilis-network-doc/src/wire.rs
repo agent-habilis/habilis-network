@@ -59,7 +59,22 @@ pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBo
 /// A seal draws a fresh nonce, and the Base58 text of one blob can be a byte or two shorter or longer
 /// than the text of the next blob of the same length. A caller that checks a size needs one number,
 /// so it takes this bound.
-pub(crate) fn sealed_body_len_bound(plain_len: usize) -> usize {
+///
+/// # Examples
+///
+/// The bound is at least the length of a real sealed body.
+///
+/// ```
+/// use habilis_network_doc::wire::{encrypt_body, sealed_body_len_bound};
+/// use habilis_network_protocol::{MessageBody, SymmetricKey};
+///
+/// let key = SymmetricKey::from([9u8; 32]);
+/// let plain = MessageBody::try_new("hello").expect("a body");
+/// let sealed = encrypt_body(&plain, &key).expect("a sealed body");
+/// assert!(sealed.as_str().len() <= sealed_body_len_bound("hello".len()));
+/// ```
+#[must_use]
+pub fn sealed_body_len_bound(plain_len: usize) -> usize {
     // The blob is the 12-byte nonce, the ciphertext, and the 16-byte tag. Base58 takes at most
     // 1.3657 characters per byte, and 138 percent is the bound used here.
     const NONCE_AND_TAG: usize = 12 + 16;

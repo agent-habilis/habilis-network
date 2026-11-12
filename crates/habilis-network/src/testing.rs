@@ -118,6 +118,35 @@ pub(crate) fn test_key(nickname: &str) -> AuthorKey {
     AuthorKey::from_bytes(Sha256::digest(nickname.as_bytes()).into())
 }
 
+/// The longest mesh id that a real mesh makes, from a 32-char name and a long relay URL: about 511 bytes.
+pub(crate) fn longest_mesh_id() -> MeshId {
+    use crate::protocol::{Lookup, Mesh, MeshConfig, MeshName, RelayLadder, Seed};
+
+    let name = MeshName::try_new(&"a".repeat(32)).expect("a 32-char name");
+    let mut best = None;
+    for host in 1..400 {
+        let url = format!("https://{}.example.com/", "r".repeat(host));
+        let parsed: Result<RelayLadder, _> = url.parse();
+        let Ok(ladder) = parsed else {
+            continue;
+        };
+        let Ok(config) = MeshConfig::resolve(&[Lookup::Relay], Some(ladder), &[]) else {
+            continue;
+        };
+        let Ok(mesh) = Mesh::try_new(Seed::new([4u8; 32]), name.clone(), config) else {
+            continue;
+        };
+        let text = mesh.to_string();
+        if text.len() > 512 {
+            break;
+        }
+        if let Ok(id) = MeshId::try_new(&text) {
+            best = Some(id);
+        }
+    }
+    best.expect("a long valid mesh id")
+}
+
 /// A deterministic endpoint id from `seed`, so a test can name the same peer
 /// twice and assert on identity.
 pub(crate) fn endpoint_id(seed: u8) -> EndpointId {

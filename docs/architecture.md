@@ -201,6 +201,9 @@ A fresh ephemeral X25519 key agrees with the static key of the recipient, and Ch
 The ephemeral key gives forward secrecy.
 Sender authenticity comes from the Ed25519 signature of the frame, which covers the ciphertext.
 A relay forwards the frame and can verify the signature, but it cannot open the body.
+The app decides by tag which directed bodies are sealed, through `NodeApp::seals`.
+The engine seals such a body in `app_frame`, before it signs, and the receiver opens it by the same rule.
+On a passworded mesh the engine seals every broadcast body with the mesh key.
 A node tells its static key in its signed `PeerInfo`, as the Base58 text `seal`.
 The key is required: a node refuses a `PeerInfo` that names none.
 The engine keeps the key of each known author key, and `EventLoopState::seal_key_of` reads it.

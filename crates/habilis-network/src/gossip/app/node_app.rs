@@ -2,7 +2,7 @@ use super::{AppClass, InboundApp};
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::messages::Authored;
-use crate::protocol::{AuthorKey, Nickname};
+use crate::protocol::{AppTag, AuthorKey, Nickname};
 
 /// The seam the engine drives for application-payload handling. The engine
 /// owns [`EventLoopState`] and hands the app the frame plus the loop context
@@ -26,6 +26,17 @@ use crate::protocol::{AuthorKey, Nickname};
 pub trait NodeApp: Send {
     /// Classify one inbound `App` frame by tag/payload — see [`super::AppClass`].
     fn classify(&self, message: &Authored) -> AppClass;
+
+    /// Whether the directed body of a frame with this `tag` is sealed to its addressee. One rule
+    /// for both sides: `app_frame` seals a directed body for a tag that seals, to the seal key of
+    /// the addressee, and the receiver opens a body that is directed to it under the same tag. A
+    /// tag that does not seal sends its directed body in plaintext, authenticated by the signature
+    /// of the frame. A broadcast body is never sealed by this rule: on a passworded mesh the engine
+    /// seals every broadcast body with the mesh key, whatever the tag. The default is `false`.
+    fn seals(&self, tag: &AppTag) -> bool {
+        let _ = tag;
+        false
+    }
 
     /// Dispatch an inbound `App` frame after the engine's generic prefix. The frame can be
     /// addressed to us, broadcast, or directed to **another key** that this node forwards: the

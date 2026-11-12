@@ -1546,7 +1546,7 @@ fn ingest_channel_event(
 /// applies in `lifecycle::{handle_msg, handle_task}`.
 /// A structurally **directed** app frame — one with an addressee (`to:
 /// Some(_)`). Whether its body is *sealed* (encrypted to that addressee) is a
-/// separate, app-driven decision ([`super::app::AppClass::sealed`]): an app's
+/// separate, app-driven decision ([`super::app::NodeApp::seals`]): an app's
 /// directed tags arrive sealed, a plaintext-directed consumer's do not. `Pong`
 /// is directed for routing but a distinct infra kind, so it is not covered here.
 fn is_directed_content(kind: &MessageKind) -> bool {
@@ -1639,13 +1639,14 @@ fn gate_and_decrypt<F: Proof>(
 /// Validate + decrypt a directed frame that's addressed to us (as opposed to
 /// one we're only relaying).
 fn gate_directed_to_us<F: Proof>(frame: &F, state: &EventLoopState, app: &dyn NodeApp) -> Gated {
-    // Whether the directed body is sealed is the app's call, not a
-    // structural given: an app's directed tags may arrive encrypted, but a
+    // Whether the directed body is sealed is the app's call, by the tag, through the one rule that
+    // `app_frame` seals by (`NodeApp::seals`): an app's directed tags may arrive encrypted, but a
     // consumer with its own data model may send plaintext directed bytes. The frame is
-    // signature-authenticated either way; `sealed=false` only means "not
-    // additionally encrypted".
+    // signature-authenticated either way; a tag that does not seal means "not additionally
+    // encrypted". A directed frame of another kind has no tag and no seal.
     let wire = frame.authored();
-    if !app.classify(&wire).sealed() {
+    let seals = matches!(&frame.kind, MessageKind::App { tag, .. } if app.seals(tag));
+    if !seals {
         // Plaintext directed body: the wire body is already the final body.
         let Some(class) = gate_app_payload(&wire, app) else {
             return Gated::Drop;
@@ -2160,12 +2161,12 @@ mod first_contact_tests {
     use iroh_gossip::net::Gossip;
 
     use super::{
-        ChannelEvent, dispatch_channel, dispatch_infra, handle_gossip_event, ingest, pong_for,
-        promote_pending,
+        ChannelEvent, Gated, dispatch_channel, dispatch_infra, gate_and_decrypt,
+        handle_gossip_event, ingest, pong_for, promote_pending,
     };
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::{EventLoopState, PingRound};
-    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::app::{AppClass, AppFrameError, InboundApp, NodeApp};
     use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
     use crate::lifecycle::membership_update::MembershipUpdate;
     use crate::ops;
@@ -2210,6 +2211,29 @@ mod first_contact_tests {
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
             AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    /// An app whose tag `sealed_tag` seals its directed body, and whose tag `plain_tag` does not.
+    struct Sealing;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Sealing {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::PUSH.union(AppClass::VALID)
+        }
+
+        fn seals(&self, tag: &protocol::AppTag) -> bool {
+            tag.as_str() == "sealed_tag"
         }
 
         async fn on_app_frame(
@@ -2274,6 +2298,193 @@ mod first_contact_tests {
                 sink: &self.sink,
             }
         }
+    }
+
+    /// The frame of an app frame test: tag `tag`, to `to`, with the body `text`.
+    fn frame_params(tag: &str, to: Option<AuthorKey>, text: &str) -> AppFrameParams {
+        AppFrameParams::new(
+            protocol::AppTag::try_new(tag).expect("a valid app tag"),
+            to,
+            None,
+            MessageBody::try_new(text).expect("a body"),
+        )
+    }
+
+    /// **A directed frame of a tag that seals is sealed on the wire, and its addressee opens it.**
+    ///
+    /// The sender knows the seal key of the addressee from a `PeerInfo`. The signed body is the
+    /// envelope, which holds no byte of the text. The receiver gate reads the same rule of the app
+    /// (`NodeApp::seals`) and hands the app the plain body. A tag that does not seal goes in plain,
+    /// the control that keeps the rule to the tag.
+    #[test]
+    fn a_directed_frame_of_a_sealing_tag_is_sealed_on_the_wire_and_its_addressee_opens_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let receiver = fresh_state();
+            let bob = receiver.identity.author_key();
+            let mut sender = fresh_state();
+            sender.peers.insert(bob);
+            sender.note_seal_key(bob, receiver.identity.seal_public(), clock::Instant::now());
+            let context = node.context();
+            let app = Sealing;
+
+            let sealed = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("sealed_tag", Some(bob), "the secret"),
+            )
+            .expect("the frame is built");
+            assert!(
+                !sealed.body.as_str().contains("the secret"),
+                "the signed body of a sealing tag holds the text: {}",
+                sealed.body.as_str()
+            );
+
+            let at_bob = HandlerCtx {
+                our_pubkey: bob,
+                ..node.context()
+            };
+            let Gated::Pass { view: opened, .. } =
+                gate_and_decrypt(&sealed, &receiver, &at_bob, &app)
+            else {
+                panic!("the addressee dropped the sealed frame");
+            };
+            assert_eq!(
+                opened.body.as_str(),
+                "the secret",
+                "the addressee does not read the plain body"
+            );
+
+            let plain = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("plain_tag", Some(bob), "the open text"),
+            )
+            .expect("the frame is built");
+            assert_eq!(
+                plain.body.as_str(),
+                "the open text",
+                "a tag that does not seal sent a sealed body"
+            );
+            let Gated::Pass {
+                view: unchanged, ..
+            } = gate_and_decrypt(&plain, &receiver, &at_bob, &app)
+            else {
+                panic!("the addressee dropped the plain frame");
+            };
+            assert_eq!(
+                unchanged.body.as_str(),
+                "the open text",
+                "a plain body changed on its way through the gate"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A tag that seals, to a key with no known seal key, is not built: the error names the key, and
+    /// a later call can succeed once the `PeerInfo` has come. A tag that does not seal needs no key.
+    #[test]
+    fn a_sealing_tag_to_a_key_with_no_seal_key_is_not_built() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut sender = fresh_state();
+            let bob = test_key("bob");
+            sender.peers.insert(bob);
+            let app = Sealing;
+
+            let refused = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("sealed_tag", Some(bob), "text"),
+            );
+            assert_eq!(
+                refused.map(|_| ()),
+                Err(AppFrameError::NoSealKey { to: bob }),
+                "a sealing tag with no seal key was built"
+            );
+            let plain = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("plain_tag", Some(bob), "text"),
+            );
+            assert!(plain.is_ok(), "a tag that does not seal needs no seal key");
+
+            sender.note_seal_key(
+                bob,
+                x25519_dalek::PublicKey::from([4u8; 32]),
+                clock::Instant::now(),
+            );
+            let later = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("sealed_tag", Some(bob), "text"),
+            );
+            assert!(
+                later.is_ok(),
+                "the frame is not built once the key is known"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// **A broadcast body on a passworded mesh is sealed by the engine, and a peer reads it.**
+    ///
+    /// Receivers drop any other body on such a mesh, so no app can send a plain one. The tag does
+    /// not matter: the app does not seal a broadcast. On a mesh with no password the body goes as it
+    /// is.
+    #[test]
+    fn a_broadcast_on_a_passworded_mesh_is_sealed_by_the_engine_and_a_peer_reads_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let key = protocol::SymmetricKey::from([5u8; 32]);
+            let mut sender = fresh_state();
+            sender.broadcast_key = Some(key.clone());
+            let mut peer = fresh_state();
+            peer.broadcast_key = Some(key);
+            let app = Sealing;
+
+            let sealed = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("plain_tag", None, "for everyone"),
+            )
+            .expect("the frame is built");
+            assert!(
+                !sealed.body.as_str().contains("for everyone"),
+                "a broadcast body on a passworded mesh went in plain: {}",
+                sealed.body.as_str()
+            );
+            let Gated::Pass { view, .. } = gate_and_decrypt(&sealed, &peer, &context, &app) else {
+                panic!("a peer dropped the sealed broadcast");
+            };
+            assert_eq!(
+                view.body.as_str(),
+                "for everyone",
+                "the peer does not read the plain body"
+            );
+
+            let open = ops::app_frame(
+                &fresh_state(),
+                &context,
+                &app,
+                frame_params("plain_tag", None, "for everyone"),
+            )
+            .expect("the frame is built");
+            assert_eq!(
+                open.body.as_str(),
+                "for everyone",
+                "a mesh with no password sealed a broadcast"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// A meshed send to a relay-only peer whose direct path is not probed is refused at once. The

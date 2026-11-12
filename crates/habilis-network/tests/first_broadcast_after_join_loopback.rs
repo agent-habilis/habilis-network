@@ -264,14 +264,17 @@ impl NodeDriver for Chat {
         match session {
             ChatSession::Send(text, reply) => {
                 let frame = app_frame(
+                    state,
                     context,
+                    self,
                     AppFrameParams::new(
                         AppTag::try_new("chat").expect("a valid app tag"),
                         None,
                         None,
                         MessageBody::try_new(&text).expect("a short body"),
                     ),
-                );
+                )
+                .expect("a chat frame is built");
                 let sent = send_app(state, context, frame).await.map(|_| ());
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true

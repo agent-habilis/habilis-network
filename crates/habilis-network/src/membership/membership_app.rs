@@ -888,8 +888,10 @@ impl MembershipApp {
         body: MessageBody,
         reply: oneshot::Sender<Result<(), String>>,
     ) -> bool {
-        let frame = app_frame(
+        let built = app_frame(
+            state,
             context,
+            self,
             AppFrameParams::new(
                 AppTag::try_new(MSG_TAG).expect("a valid app tag"),
                 to,
@@ -897,6 +899,13 @@ impl MembershipApp {
                 body,
             ),
         );
+        let frame = match built {
+            Ok(frame) => frame,
+            Err(error) => {
+                let _ = reply.send(Err(reply_text(&error)));
+                return false;
+            }
+        };
         match send_app(state, context, frame).await {
             Ok(Delivered::Done) => {
                 let _ = reply.send(Ok(()));
@@ -968,8 +977,10 @@ impl MembershipApp {
                         return false;
                     }
                 };
-                let frame = app_frame(
+                let built = app_frame(
+                    state,
                     context,
+                    self,
                     AppFrameParams::new(
                         AppTag::try_new(MSG_TAG).expect("a valid app tag"),
                         to,
@@ -977,6 +988,13 @@ impl MembershipApp {
                         body,
                     ),
                 );
+                let frame = match built {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        let _ = reply.send(Err(reply_text(&error)));
+                        return false;
+                    }
+                };
                 let routed: Result<_, String> = frame
                     .serialize()
                     .map_err(|error| error.to_string())

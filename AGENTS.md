@@ -140,9 +140,9 @@ Code: `protocol::messages::shard`, `protocol::reassembly`.
 
 Layer: protocol. A property of a message body.
 
-The encryption of a body. A directed frame is sealed to the x25519 public key of the addressee. On a passworded mesh, state, meta, and broadcast bodies are sealed with a `SymmetricKey` that every member holds. Encryption comes before signing, so the signature covers the ciphertext.
+The encryption of a body. A directed frame is sealed to the x25519 public key of the addressee, which a `PeerInfo` names (`EventLoopState::seal_key_of`). The app decides by tag, through `NodeApp::seals`: `app_frame` seals a directed body of a tag that seals, and the receiver opens it by the same rule. On a passworded mesh, state, meta, and broadcast bodies are sealed with a `SymmetricKey` that every member holds. Encryption comes before signing, so the signature covers the ciphertext. `app_frame` seals a broadcast body with the mesh key on a passworded mesh, whatever the tag.
 
-Code: `protocol::seal_error`.
+Code: `protocol::seal_error`, `gossip::merge_ctx::app_frame`.
 
 ### blob
 

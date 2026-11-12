@@ -6,7 +6,7 @@
 
 pub use crate::gossip::{
     Farewell, MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge,
-    send_app, start_ping_round, unicast_farewell,
+    sealed_body_len_bound, send_app, start_ping_round, unicast_farewell,
 };
 pub use crate::transport::{
     Delivered, MeshSender, PendingSend, deliver, deliver_in_background, deliver_to,

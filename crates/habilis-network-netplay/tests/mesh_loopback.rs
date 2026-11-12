@@ -467,7 +467,8 @@ impl NodeApp for Probe {
                     format!(r#"{{"magic":7,"body":{{"SyncRequest":{{"token":{token}}}}}}}"#);
                 let body = MessageBody::try_new(&payload).expect("a valid body");
                 let params = AppFrameParams::new(tag, Some(to), None, body);
-                let sent = ops::app_frame(context, params).authored();
+                let built = ops::app_frame(state, context, self, params);
+                let sent = built.expect("the frame is built").authored();
                 let mut copy = frame.clone();
                 copy.message = &sent;
                 self.inner.on_app_frame(copy, state, context).await;

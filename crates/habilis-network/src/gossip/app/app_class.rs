@@ -4,7 +4,7 @@ use std::{fmt, ops};
 /// Only meaningful for `MessageKind::App` frames — the engine consults it
 /// solely when [`crate::protocol::MessageKind::app_tag`] is `Some`.
 ///
-/// A set of five independent per-frame wire policies, one bit each. Build one with
+/// A set of independent per-frame wire policies, one bit each. Build one with
 /// [`AppClass::NONE`](super::AppClass::NONE), the flags, [`AppClass::union`](super::AppClass::union) and [`AppClass::plus_if`](super::AppClass::plus_if).
 ///
 /// # Examples
@@ -22,7 +22,7 @@ use std::{fmt, ops};
 pub struct AppClass(u8);
 
 impl AppClass {
-    /// No policy: the frame is not pushed, not a beat, not valid and not sealed.
+    /// No policy: the frame is not pushed, not a beat and not valid.
     pub const NONE: Self = Self(0);
     /// Pushed to the inbound channel of the in-process consumer (vs. plumbing like an
     /// RPC request/response, which reaches its caller via a parked waiter).
@@ -33,14 +33,6 @@ impl AppClass {
     /// The payload parses and agrees with its frame (id / addressing / role /
     /// correlation). A failing frame is dropped whole before it surfaces.
     pub const VALID: Self = Self(1 << 2);
-    /// Does this frame's directed body arrive **sealed** (encrypted) to the
-    /// addressee? When set, a directed frame addressed to us must unseal
-    /// (decrypt) or be dropped — the convention an app picks for its directed tags. When
-    /// not set, the directed body is plaintext and passes through unchanged (a
-    /// consumer with its own data model's explicit choice). Only consulted on the addressee's
-    /// directed path; ignored for broadcast/infra frames, which are never
-    /// sealed. `sealed: false` is load-bearing for the membership app (membership/app.rs).
-    pub const SEALED: Self = Self(1 << 4);
 
     /// Both policies at once.
     #[must_use]
@@ -76,12 +68,6 @@ impl AppClass {
     pub fn valid(self) -> bool {
         self.0 & Self::VALID.0 != 0
     }
-
-    /// Whether the directed body is sealed ([`AppClass::SEALED`](super::AppClass::SEALED)).
-    #[must_use]
-    pub fn sealed(self) -> bool {
-        self.0 & Self::SEALED.0 != 0
-    }
 }
 
 impl ops::BitOr for AppClass {
@@ -98,7 +84,6 @@ impl fmt::Debug for AppClass {
         debug.field("pushable", &self.pushable());
         debug.field("beat", &self.beat());
         debug.field("valid", &self.valid());
-        debug.field("sealed", &self.sealed());
         debug.finish()
     }
 }

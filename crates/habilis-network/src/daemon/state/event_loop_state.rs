@@ -105,6 +105,9 @@ impl Goodbyes {
 pub(crate) const REFUSED_ENDPOINTS_CAP: usize = 256;
 /// The seal keys of unknown signers that wait for a join: 64 at most, and the oldest goes. A member
 /// mints keys for free, so the number is small: a real join follows its `PeerInfo` within a second.
+/// The cap does not follow `max_authors` on purpose. A mass join of more than 64 keys before their
+/// `joined` frames drops the oldest key, and its peer has no seal key until its next `PeerInfo`: a
+/// delay of one refresh period, not a leak.
 pub(crate) const PENDING_SEAL_KEYS_CAP: usize = 64;
 /// How long the seal key of an unknown signer waits for its join, as long as a pending slice.
 pub(crate) const PENDING_SEAL_KEY_TTL: Duration = Duration::from_secs(90);
@@ -575,7 +578,8 @@ pub struct EventLoopState {
     /// The seal key of a `PeerInfo` whose signer is not known yet, with the time that it came, oldest
     /// first. A `PeerInfo` can come before the `joined` frame of its key, and the next one is a
     /// refresh period away. The key waits here for the join of its signer, `PENDING_SEAL_KEYS_CAP`
-    /// at most, and a key older than `PENDING_SEAL_KEY_TTL` is dropped.
+    /// at most, and a key older than `PENDING_SEAL_KEY_TTL` is dropped when a join looks for its key.
+    /// With no join, a stale key stays until the cap pushes it out: the memory is bounded by the cap.
     pending_seal_keys: VecDeque<(AuthorKey, x25519_dalek::PublicKey, Instant)>,
     /// The keys of `refused_endpoints` in the order that they were retained, oldest first. It may hold a key
     /// that left the map; it is cut to the keys of the map when it grows past twice the cap.

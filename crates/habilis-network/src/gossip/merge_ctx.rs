@@ -12,13 +12,15 @@ use crate::transport::MeshSender;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
+use crate::doc::wire;
+use crate::gossip::app::{AppFrameError, NodeApp};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 use crate::logging::messages;
-use crate::protocol::peer_addr_error;
+use crate::protocol::{peer_addr_error, seal_error};
 use crate::transport;
 use crate::transport::{probe, proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
@@ -43,20 +45,12 @@ use tokio::sync::oneshot;
 /// chain), so `body` must fit one wire frame. A body whose signed frame would
 /// exceed [`MAX_MESSAGE_SIZE`] is refused rather than silently dropped by the
 /// gossip actor; a bytes-carrying consumer chunks its stream below that bound.
-/// It also does **not** seal a directed frame — the recipient's encryption key
-/// is discovered through an app-level convention (the application publishes cards to the
-/// meta channel) the engine does not own; a directed `App` frame sent here rides
-/// in plaintext (authenticated by the Ed25519 frame signature).
+/// The size is checked after the seal: `frame` comes from [`app_frame`], which seals the body
+/// before it signs (a directed body of a tag that seals, and a broadcast body on a passworded
+/// mesh), so the signed frame is the one that goes on the wire. This function seals nothing itself.
 ///
-/// Nor does it seal a **broadcast** body: on a passworded mesh (a
-/// `broadcast_key` is set), receivers require every broadcast body to be
-/// mesh-key-sealed and drop a plaintext one on decrypt (see
-/// `gossip::recv::decrypt_broadcast`). A generic consumer that needs passworded
-/// broadcast must therefore seal its body under the mesh key before calling
-/// this; the shipped application does so on its broadcast chat path.
-///
-/// `frame` comes from [`app_frame`]. The app classifies it (`app.classify(&frame)`) on the inbound
-/// side, and the send does not take a class.
+/// The app classifies the frame (`app.classify(&frame)`) on the inbound side, and the send does
+/// not take a class.
 ///
 /// A directed frame to a cold peer comes back as [`crate::transport::Delivered::Pending`]: the
 /// dial runs on a task, and the caller awaits the handle off its event loop.
@@ -144,27 +138,89 @@ pub async fn send_app(
     }
 }
 
-/// Build and sign the frame that [`send_app`] sends. A plain function, so that a caller can
-/// classify the frame (`app.classify(&frame)`) before the send and hold no reference to the app
-/// across the `await` of [`send_app`]: the app is not `Sync`, and a future that holds it is not
-/// `Send`.
+/// Build, seal and sign the frame that [`send_app`] sends. A plain function, so that a caller can
+/// hold no reference to the app across the `await` of [`send_app`]: the app is not `Sync`, and a
+/// future that holds it is not `Send`.
+///
+/// The seal is inside the signature, so it is made here, before the frame is signed:
+/// - A directed body of a tag that seals (`NodeApp::seals`, the rule that the receiver reads too)
+///   is sealed to the seal key of the addressee (`EventLoopState::seal_key_of`). If no `PeerInfo`
+///   named that key yet, the call returns [`AppFrameError::NoSealKey`], and a later call can
+///   succeed.
+/// - A broadcast body on a passworded mesh is sealed with the mesh key, whatever the tag: the
+///   receivers drop any other body.
+/// - Any other body goes as it is.
+///
+/// The sealed body is longer than the plain one. [`sealed_body_len_bound`] gives the longest sealed
+/// length, for an app that cuts a body into shards, and [`send_app`] checks the size of the frame
+/// after the seal.
+///
+/// # Errors
+/// [`AppFrameError::NoSealKey`] for a sealing tag whose addressee has no known seal key, and
+/// [`AppFrameError::Seal`] when the sealed body is not a valid message body.
 ///
 /// # Examples
 ///
-/// It builds a signed application frame from the handler context. The doc test compiles it but does not run it.
+/// It builds a signed application frame from the state, the handler context and the app. The doc test compiles it but does not run it.
 ///
 /// ```no_run
-/// use habilis_network::embed::HandlerCtx;
+/// use habilis_network::embed::{AppFrameError, EventLoopState, HandlerCtx, NodeApp};
 /// use habilis_network::ops::app_frame;
 /// use habilis_network::protocol::{AppFrameParams, Verified};
 ///
-/// # fn demo(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
-/// app_frame(context, params)
+/// # fn demo<App: NodeApp>(state: &EventLoopState, context: &HandlerCtx<'_>, app: &App, params: AppFrameParams) -> Result<Verified, AppFrameError> {
+/// app_frame(state, context, app, params)
+/// # }
+/// ```
+pub fn app_frame<App: NodeApp + ?Sized>(
+    state: &EventLoopState,
+    context: &HandlerCtx<'_>,
+    app: &App,
+    mut params: AppFrameParams,
+) -> Result<Verified, AppFrameError> {
+    let sealed = match params.to {
+        Some(to) if app.seals(&params.tag) => {
+            let seal = state
+                .seal_key_of(&to)
+                .ok_or(AppFrameError::NoSealKey { to })?;
+            Some(
+                seal_error::seal_to_body(seal, params.body.as_str())
+                    .map_err(|error| AppFrameError::Seal(error.to_string()))?,
+            )
+        }
+        None => match state.broadcast_key() {
+            Some(key) => Some(
+                wire::encrypt_body(&params.body, key)
+                    .map_err(|error| AppFrameError::Seal(error.to_string()))?,
+            ),
+            None => None,
+        },
+        Some(_) => None,
+    };
+    if let Some(body) = sealed {
+        params.body = body;
+    }
+    Ok(Message::new_app(context.mesh, context.author, params).sign(context.identity))
+}
+
+/// The longest escaped length of a sealed body for a plain body of `plain_len` bytes, whether the
+/// body is sealed to a peer or with the mesh key. An app that cuts a body into shards cuts the plain
+/// body so that this length, and the rest of the frame, fit [`MAX_MESSAGE_SIZE`].
+///
+/// # Examples
+///
+/// It gives the longest sealed length of a body. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::sealed_body_len_bound;
+///
+/// # fn demo(plain_len: usize) -> usize {
+/// sealed_body_len_bound(plain_len)
 /// # }
 /// ```
 #[must_use]
-pub fn app_frame(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
-    Message::new_app(context.mesh, context.author, params).sign(context.identity)
+pub fn sealed_body_len_bound(plain_len: usize) -> usize {
+    seal_error::sealed_to_body_len_bound(plain_len).max(wire::sealed_body_len_bound(plain_len))
 }
 
 /// Fire-and-forget gossip broadcast. Serialize errors are swallowed:
@@ -733,10 +789,10 @@ fn json_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{farewell_targets, peer_info_json};
+    use super::{farewell_targets, peer_info_json, wire};
     use crate::protocol::identity::Identity;
-    use crate::protocol::{MeshId, Message, MessageBody, Nickname};
-    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
+    use crate::protocol::{MeshId, Message, MessageBody, Nickname, SymmetricKey, seal_to_body};
+    use crate::testing::{endpoint_id, fresh_state, longest_mesh_id, nick, test_key};
     use crate::util::consts::MAX_MESSAGE_SIZE;
 
     use crate::protocol::peer_addr_error;
@@ -1090,14 +1146,20 @@ mod tests {
         );
     }
 
-    /// **A `PeerInfo` frame fits the frame limit at every longest field.** The mesh id of 512 bytes,
-    /// a nickname of 32 characters of 4 bytes, an address with 16 `IPv6` addresses and a relay `URL`, the
-    /// proof, the beacon flag and the seal key go in one signed frame under `MAX_MESSAGE_SIZE`. The
-    /// seal key adds 58 bytes, so the room that is left says how many addresses fit.
+    /// **A `PeerInfo` frame fits the frame limit at every longest field.** The longest real mesh id
+    /// (about 511 bytes), a nickname of 32 characters of 4 bytes, an address with 16 `IPv6` addresses
+    /// and a relay `URL`, the proof, the beacon flag and the seal key go in one signed frame under
+    /// `MAX_MESSAGE_SIZE`. The seal key adds 58 bytes, so the room that is left says how many
+    /// addresses fit.
     #[test]
     fn a_peer_info_frame_with_every_longest_field_fits_the_frame_limit() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mesh = MeshId::from("m".repeat(512).as_str());
+        let mesh = longest_mesh_id();
+        assert!(
+            mesh.as_str().len() >= 500,
+            "the mesh id of {} bytes is not a longest real id",
+            mesh.as_str().len()
+        );
         let nickname = Nickname::from("\u{1F600}".repeat(32).as_str());
         let relay: iroh::RelayUrl = "https://relay.example.com./".parse().expect("a relay url");
         let id = iroh::SecretKey::generate().public();
@@ -1118,6 +1180,32 @@ mod tests {
             size <= MAX_MESSAGE_SIZE,
             "a PeerInfo frame of {size} bytes passes the {MAX_MESSAGE_SIZE}-byte limit"
         );
+    }
+
+    /// The sealed length bound covers a real sealed body, for a seal to a peer and for a seal with the
+    /// mesh key, at every length that an app can cut a shard to.
+    #[test]
+    fn the_sealed_length_bound_covers_every_sealed_body() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let recipient = Identity::generate();
+        let key = SymmetricKey::from([3u8; 32]);
+        for plain_len in [0usize, 1, 2, 31, 32, 33, 100, 500, 1000, 2000, 3000] {
+            let text = "x".repeat(plain_len);
+            let body = MessageBody::try_new(&text).expect("a body");
+            let to_peer =
+                seal_to_body(&recipient.seal_public(), &text).expect("a body sealed to a peer");
+            let with_key = wire::encrypt_body(&body, &key).expect("a sealed body");
+            let bound = super::sealed_body_len_bound(plain_len);
+            for sealed in [&to_peer, &with_key] {
+                let escaped = serde_json::to_string(sealed.as_str())
+                    .expect("a string")
+                    .len();
+                assert!(
+                    escaped <= bound,
+                    "a sealed body of {escaped} bytes passes the bound {bound} for {plain_len} plain bytes"
+                );
+            }
+        }
     }
 
     /// A `seal` that is not the Base58 of 32 bytes names no key: a wrong length, a character out of

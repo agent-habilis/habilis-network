@@ -357,7 +357,7 @@ pub(crate) async fn on_page(
 mod tests {
     use super::DigestRound;
     use crate::protocol::MeshId;
-    use crate::testing;
+    use crate::testing::{self, longest_mesh_id};
     use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
     use habilis_network_protocol::{AuthorKey, Channel, ContentHash};
     use habilis_network_util::clock::Instant;
@@ -653,35 +653,6 @@ mod tests {
         let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback config");
         let mesh = Mesh::try_new(Seed::new([4u8; 32]), name, config).expect("a mesh");
         MeshId::try_new(&mesh.to_string()).expect("the id of a real mesh")
-    }
-
-    /// The longest mesh id that a real mesh makes, from a 32-char name and a long relay URL: about 511 bytes.
-    fn longest_mesh_id() -> MeshId {
-        use crate::protocol::{Lookup, Mesh, MeshConfig, MeshName, RelayLadder, Seed};
-
-        let name = MeshName::try_new(&"a".repeat(32)).expect("a 32-char name");
-        let mut best = None;
-        for host in 1..400 {
-            let url = format!("https://{}.example.com/", "r".repeat(host));
-            let parsed: Result<RelayLadder, _> = url.parse();
-            let Ok(ladder) = parsed else {
-                continue;
-            };
-            let Ok(config) = MeshConfig::resolve(&[Lookup::Relay], Some(ladder), &[]) else {
-                continue;
-            };
-            let Ok(mesh) = Mesh::try_new(Seed::new([4u8; 32]), name.clone(), config) else {
-                continue;
-            };
-            let text = mesh.to_string();
-            if text.len() > 512 {
-                break;
-            }
-            if let Ok(id) = MeshId::try_new(&text) {
-                best = Some(id);
-            }
-        }
-        best.expect("a long valid mesh id")
     }
 
     /// The pull of one full page fits one frame at the longest mesh id and nickname: the most keys that a holder can
