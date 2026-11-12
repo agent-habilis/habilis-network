@@ -18,9 +18,9 @@ use std::sync::Arc;
 use iroh::{EndpointId, SecretKey};
 use sha2::{Digest as _, Sha256};
 
-use crate::daemon::state::{EventLoopState, MeshSecrets, RunKeys, StateInit};
+use crate::daemon::state::{EventLoopState, FrameOverheads, MeshSecrets, RunKeys, StateInit};
 use crate::protocol::identity::Identity;
-use crate::protocol::{AuthorKey, MeshId, Nickname};
+use crate::protocol::{AuthorKey, Channel, MeshId, Nickname};
 use crate::util::clock::Instant;
 
 use iroh::address_lookup::memory;
@@ -60,11 +60,22 @@ fn fresh_state_that_waits_with_book_and_member(
         StateInit {
             #[cfg(feature = "host")]
             state_file: None,
-            frame_overhead: habilis_network_doc::frame_overhead("test", "test"),
-            page_overhead: habilis_network_doc::page_frame_overhead(
-                &MeshId::from("test"),
-                &Nickname::from("test"),
-            ),
+            overheads: FrameOverheads {
+                state: habilis_network_doc::frame_overhead(
+                    Channel::State,
+                    &MeshId::from("test"),
+                    &Nickname::from("test"),
+                ),
+                meta: habilis_network_doc::frame_overhead(
+                    Channel::Meta,
+                    &MeshId::from("test"),
+                    &Nickname::from("test"),
+                ),
+                page: habilis_network_doc::page_frame_overhead(
+                    &MeshId::from("test"),
+                    &Nickname::from("test"),
+                ),
+            },
             // the keys are shared with the loop and its handlers, which hold clones
             keys: RunKeys {
                 member_new: false,

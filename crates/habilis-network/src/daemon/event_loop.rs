@@ -74,6 +74,7 @@ use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit
 use super::state::{EventLoopState, FrameOverheads, MeshSecrets};
 use super::timers;
 use crate::daemon::setup::LiveCount;
+use crate::protocol::Channel;
 use ctx_parts::CtxParts;
 pub use event_loop_error::EventLoopError;
 use tick_gap::TickGap;
@@ -158,7 +159,8 @@ async fn run_checked<Driver: NodeDriver>(
         started,
         state_file,
         FrameOverheads {
-            frame: habilis_network_doc::frame_overhead(mesh.mesh.as_str(), mesh.author.as_str()),
+            state: habilis_network_doc::frame_overhead(Channel::State, &mesh.mesh, &mesh.author),
+            meta: habilis_network_doc::frame_overhead(Channel::Meta, &mesh.mesh, &mesh.author),
             page: habilis_network_doc::page_frame_overhead(&mesh.mesh, &mesh.author),
         },
     );
@@ -417,8 +419,7 @@ fn initial_state(
             state_file,
             keys,
             secrets,
-            frame_overhead: overheads.frame,
-            page_overhead: overheads.page,
+            overheads,
             // The *same* table the Router's signal acceptor holds, not a fresh
             // one: the cap only counts if both roles count against it together.
             webrtc_admission: transports.webrtc_admission.clone(),

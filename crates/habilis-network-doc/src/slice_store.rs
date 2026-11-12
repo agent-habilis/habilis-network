@@ -44,16 +44,8 @@ const GONE_CAP: usize = 256;
 /// drops the key. The engine test `the_gone_ttl_outlasts_the_quiet_ttl_and_the_alive_timeout` pins it.
 const DEFAULT_GONE_TTL: Duration = Duration::from_hours(2);
 
-/// The longest mesh id text, in bytes. It is `MeshId`'s own limit.
-const MAX_MESH_ID_LEN: usize = 512;
-
-/// The longest nickname, in bytes: 32 characters of up to 4 bytes each.
-const MAX_NICKNAME_LEN: usize = 128;
-
-/// The frame bytes that do not depend on the mesh id or the nickname. A probe with a 62-byte mesh
-/// id from `MeshId::from("test")` and a 4-byte nickname is 404 bytes, so the base is 404 - 66. A
-/// test checks that the overhead grows one byte for each byte of mesh id and nickname.
-const FRAME_BASE_OVERHEAD: usize = 338;
+/// The escaped length of the empty body, `""`. A frame with no body still carries it, so the probe takes it off.
+const EMPTY_BODY_ESCAPED: usize = 2;
 
 /// The page overhead of a store that no probe sized, beyond its event overhead: 374 bytes for the fields of
 /// a `SlicePage` (the addressee, the channel, the 3-digit index and total, and the end key), and 32 bytes
@@ -117,9 +109,10 @@ fn page_frame_len(mesh: &MeshId, nickname: &Nickname, rows: usize) -> usize {
         .map_or(usize::MAX, |frame| frame.into_bytes().len())
 }
 
-/// The frame overhead of the worst case: the longest mesh id and the longest nickname. Pass it to
-/// [`SliceStore::new`] only where no probe of the session is possible.
-const WORST_FRAME_OVERHEAD: usize = FRAME_BASE_OVERHEAD + MAX_MESH_ID_LEN + MAX_NICKNAME_LEN;
+/// The frame overhead of the worst case: a State event with the longest mesh id (512 bytes) and the longest
+/// nickname (32 emoji). A test pins it against the probe. Pass it to [`SliceStore::new`] only where no probe
+/// of the session is possible.
+const WORST_FRAME_OVERHEAD: usize = 979;
 
 /// The frame overhead of the worst case: the longest mesh id and the longest nickname. Use it
 /// only where no probe is possible, because it is larger than most sessions need.
@@ -136,19 +129,33 @@ pub fn worst_frame_overhead() -> usize {
     WORST_FRAME_OVERHEAD
 }
 
-/// The frame overhead of a session with this mesh id and this nickname: the envelope of a signed frame
-/// around the body, with the mesh id and the nickname in it.
+/// The frame overhead of a session on `channel`: the bytes of a signed channel event that its body does not
+/// fill. It is the envelope, the mesh id, the nickname as JSON, and the channel name. The probe signs and
+/// serializes a real frame with an empty body, and takes off the escaped empty body, so a quote in the
+/// nickname and the length of the channel name are counted. A store on `channel` takes a body of at most
+/// `slice_bytes` minus this overhead, escaped, and the frame then fits.
 ///
 /// # Examples
 ///
 /// ```
 /// use habilis_network_doc::{frame_overhead, worst_frame_overhead};
+/// use habilis_network_protocol::{Channel, MeshId, Nickname};
 ///
-/// assert!(frame_overhead("mesh", "nick") < worst_frame_overhead());
+/// let mesh = MeshId::from("test");
+/// let overhead = frame_overhead(Channel::State, &mesh, &Nickname::from("peer"));
+/// assert!(overhead < worst_frame_overhead());
 /// ```
 #[must_use]
-pub fn frame_overhead(mesh_id: &str, nickname: &str) -> usize {
-    FRAME_BASE_OVERHEAD + mesh_id.len() + nickname.len()
+pub fn frame_overhead(channel: Channel, mesh: &MeshId, nickname: &Nickname) -> usize {
+    let Ok(body) = MessageBody::try_new("") else {
+        return usize::MAX;
+    };
+    Message::new_channel_event(mesh, nickname, body, channel)
+        .sign(&Identity::generate())
+        .serialize()
+        .map_or(usize::MAX, |frame| {
+            frame.into_bytes().len() - EMPTY_BODY_ESCAPED
+        })
 }
 
 /// The caps that bound a [`SliceStore`].
@@ -1060,18 +1067,24 @@ impl SliceStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        FRAME_BASE_OVERHEAD, LocalDraft, MAX_MESH_ID_LEN, MAX_NICKNAME_LEN, PAGE_OVERHEAD_UNPROBED,
-        SliceError, SliceIngest, SliceLimits, SliceStore, WORST_FRAME_OVERHEAD, wire,
+        LocalDraft, PAGE_OVERHEAD_UNPROBED, SliceError, SliceIngest, SliceLimits, SliceStore,
+        WORST_FRAME_OVERHEAD, wire,
     };
     use habilis_network_protocol::digest::DigestPage;
     use habilis_network_protocol::messages::{MessageError, Verified};
     use habilis_network_protocol::{
-        AuthorKey, Channel, Lookup, Mesh, MeshConfig, MeshId, MeshName, Message, MessageBody,
-        Nickname, RelayLadder, Seed, SymmetricKey,
+        AuthorKey, Channel, Identity, Lookup, Mesh, MeshConfig, MeshId, MeshName, Message,
+        MessageBody, Nickname, RelayLadder, Seed, SymmetricKey,
     };
     use habilis_network_util::consts::MAX_MESSAGE_SIZE;
     use serde_json::{Map, Value, json};
     use std::time::{Duration, Instant};
+
+    /// The longest mesh id text, in bytes. It is `MeshId`'s own limit.
+    const MAX_MESH_ID_LEN: usize = 512;
+
+    /// The longest nickname, in bytes: 32 characters of up to 4 bytes each.
+    const MAX_NICKNAME_LEN: usize = 128;
 
     fn key(byte: u8) -> AuthorKey {
         AuthorKey::from([byte; 32])
@@ -1287,7 +1300,11 @@ mod tests {
         let channel_key = SymmetricKey::from([3u8; 32]);
         let plain_body = MessageBody::from(r#"{"version":1,"value":{}}"#);
         let sealed = wire::encrypt_body(&plain_body, &channel_key).expect("a sealed body");
-        let overhead = super::frame_overhead("m".repeat(62).as_str(), "nick");
+        let overhead = super::frame_overhead(
+            Channel::Meta,
+            &MeshId::from("m".repeat(62).as_str()),
+            &Nickname::from("nick"),
+        );
         let limits = SliceLimits::default();
         let mut plain = SliceStore::new(Channel::Meta, limits, overhead);
         let mut passworded =
@@ -1562,7 +1579,11 @@ mod tests {
                 .with_key(Some(SymmetricKey::from([3u8; 32])))
         };
         let card = object(json!({"card": "x".repeat(2300)}));
-        let typical = super::frame_overhead(&"m".repeat(100), &"n".repeat(36));
+        let typical = super::frame_overhead(
+            Channel::Meta,
+            &MeshId::from("test"),
+            &Nickname::from("peer"),
+        );
         assert!(
             sealed(typical).body_len(&key(1), card.clone()).is_ok(),
             "a card of about 2.3 KB fits the frame of a session with a typical mesh id and nickname"
@@ -1972,11 +1993,7 @@ mod tests {
 
     /// The frame overhead of a probe channel event with `mesh` and `nickname` and an empty body.
     fn probe_overhead(mesh: &MeshId, nickname: &Nickname) -> usize {
-        let probe = Verified::fixture_unchecked(
-            Message::new_channel_event(mesh, nickname, MessageBody::from(""), Channel::Meta),
-            key(7),
-        );
-        probe.serialize().expect("a probe must serialize").len() - 2
+        super::frame_overhead(Channel::State, mesh, nickname)
     }
 
     /// The escaped length of the body of a draft whose value has `blob` as its only string.
@@ -2059,12 +2076,15 @@ mod tests {
             mesh.as_str().len() >= 500,
             "the test must run at a mesh id near the limit"
         );
-        let overhead = super::frame_overhead(mesh.as_str(), nickname.as_str());
         let page_overhead = super::page_frame_overhead(&mesh, &nickname);
         let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
         for channel in [Channel::Meta, Channel::State] {
-            let mut store =
-                SliceStore::new(channel, limits, overhead).with_page_overhead(page_overhead);
+            let mut store = SliceStore::new(
+                channel,
+                limits,
+                super::frame_overhead(channel, &mesh, &nickname),
+            )
+            .with_page_overhead(page_overhead);
             for index in 0..256 {
                 let body = json!({"version": u64::MAX, "value": {"n": index}});
                 apply(
@@ -2095,6 +2115,48 @@ mod tests {
     /// Every page of both channels fits one frame at every nickname that holds quote characters. The quote
     /// is escaped in the JSON, so its frame is longer than its raw byte count. The sweep takes the most
     /// characters that fit 32 with each count of quotes, at both mesh ids.
+    /// The largest local draft that the cap takes, on each channel, with a nickname of 32 quotes, is a
+    /// signed channel event that serializes. The cap is the limit of the body, so a frame that does not
+    /// serialize at the cap is a draft that the store took and the wire refuses.
+    #[test]
+    fn a_draft_at_the_cap_serializes_on_both_channels_with_quotes() {
+        let mesh = MeshId::from("test");
+        let nickname = nickname_with_quotes(0, 32);
+        for channel in [Channel::Meta, Channel::State] {
+            let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
+            let draft_of = |len: usize| {
+                let mut value = Map::new();
+                value.insert("text".to_owned(), Value::String("a".repeat(len)));
+                SliceStore::new(
+                    channel,
+                    limits,
+                    super::frame_overhead(channel, &mesh, &nickname),
+                )
+                .prepare_local(&key(1), value, Instant::now())
+                .ok()
+            };
+            let (mut low, mut high) = (0usize, 100_000usize);
+            while low < high {
+                let middle = (low + high).div_ceil(2);
+                if draft_of(middle).is_some() {
+                    low = middle;
+                } else {
+                    high = middle - 1;
+                }
+            }
+            let draft = draft_of(low).expect("a draft fits at some length");
+            let signed =
+                Message::new_channel_event(&mesh, &nickname, draft.body().clone(), channel)
+                    .sign(&Identity::generate());
+            let frame = signed.serialize();
+            assert!(
+                frame.is_ok(),
+                "a draft at the cap on {channel:?} with 32 quotes does not serialize: {:?}",
+                frame.err()
+            );
+        }
+    }
+
     #[test]
     fn every_page_on_both_channels_fits_for_a_nickname_with_quotes() {
         let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
@@ -2102,11 +2164,14 @@ mod tests {
         for mesh in &meshes {
             for quotes in 0..=32 {
                 let nickname = nickname_with_quotes(32 - quotes, quotes);
-                let overhead = super::frame_overhead(mesh.as_str(), nickname.as_str());
                 let page_overhead = super::page_frame_overhead(mesh, &nickname);
                 for channel in [Channel::Meta, Channel::State] {
-                    let mut store = SliceStore::new(channel, limits, overhead)
-                        .with_page_overhead(page_overhead);
+                    let mut store = SliceStore::new(
+                        channel,
+                        limits,
+                        super::frame_overhead(channel, mesh, &nickname),
+                    )
+                    .with_page_overhead(page_overhead);
                     for index in 0..256 {
                         let body = json!({"version": u64::MAX, "value": {"n": index}});
                         apply(
@@ -2174,7 +2239,7 @@ mod tests {
         for mesh in [MeshId::from("test"), longest_mesh_id()] {
             let probe = super::page_frame_overhead(&mesh, &nickname);
             let default =
-                super::frame_overhead(mesh.as_str(), nickname.as_str()) + PAGE_OVERHEAD_UNPROBED;
+                super::frame_overhead(Channel::Meta, &mesh, &nickname) + PAGE_OVERHEAD_UNPROBED;
             assert!(
                 default >= probe,
                 "the default page overhead {default} is below the probe {probe}"
@@ -2189,11 +2254,14 @@ mod tests {
         for mesh in &meshes {
             for bytes in 1..=MAX_NICKNAME_LEN {
                 let nickname = nickname_of_bytes(bytes);
-                let overhead = super::frame_overhead(mesh.as_str(), nickname.as_str());
                 let page_overhead = super::page_frame_overhead(mesh, &nickname);
                 for channel in [Channel::Meta, Channel::State] {
-                    let mut store = SliceStore::new(channel, limits, overhead)
-                        .with_page_overhead(page_overhead);
+                    let mut store = SliceStore::new(
+                        channel,
+                        limits,
+                        super::frame_overhead(channel, mesh, &nickname),
+                    )
+                    .with_page_overhead(page_overhead);
                     for index in 0..256 {
                         let body = json!({"version": u64::MAX, "value": {"n": index}});
                         let frame = frame_on(many_key(index), &body.to_string(), channel);
@@ -2203,7 +2271,7 @@ mod tests {
                         let size = slice_page_frame(page, channel, mesh, &nickname);
                         assert!(
                             size.as_ref().is_ok_and(|size| *size <= MAX_MESSAGE_SIZE),
-                            "a page on {channel:?} at a {bytes} B nickname and overhead {overhead} is refused: {size:?}"
+                            "a page on {channel:?} at a {bytes} B nickname is refused: {size:?}"
                         );
                     }
                 }
@@ -2534,15 +2602,19 @@ mod tests {
         );
     }
 
+    /// The probe of a channel event grows one byte for each byte of mesh id and of nickname, on each channel.
     #[test]
     fn frame_overhead_grows_one_byte_per_mesh_id_and_nickname_byte() {
         let mesh = MeshId::from("test");
         let short = Nickname::from("peer");
-        assert_eq!(
-            probe_overhead(&mesh, &short),
-            FRAME_BASE_OVERHEAD + mesh.as_str().len() + short.as_str().len(),
-            "the overhead must be the base plus the mesh id and the nickname"
-        );
+        let longer = Nickname::from("peers");
+        for channel in [Channel::Meta, Channel::State] {
+            assert_eq!(
+                super::frame_overhead(channel, &mesh, &longer),
+                super::frame_overhead(channel, &mesh, &short) + 1,
+                "one more nickname byte is one more frame byte on {channel:?}"
+            );
+        }
     }
 
     #[test]

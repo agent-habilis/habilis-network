@@ -966,16 +966,16 @@ impl EventLoopState {
                 state: SliceStore::new(
                     protocol::Channel::State,
                     SliceLimits::default(),
-                    init.frame_overhead,
+                    init.overheads.state,
                 )
-                .with_page_overhead(init.page_overhead)
+                .with_page_overhead(init.overheads.page)
                 .with_key(state_key),
                 meta: SliceStore::new(
                     protocol::Channel::Meta,
                     SliceLimits::default(),
-                    init.frame_overhead,
+                    init.overheads.meta,
                 )
-                .with_page_overhead(init.page_overhead)
+                .with_page_overhead(init.overheads.page)
                 .with_key(meta_key),
             },
             identity: init.keys.session,
@@ -2993,13 +2993,17 @@ mod slice_surface_tests {
     use super::ChannelDocs;
     use crate::protocol::{Channel, Identity, MeshId, Message, Nickname, SymmetricKey};
     use crate::util::clock::Instant;
-    use habilis_network_doc::{SliceLimits, SliceStore, frame_overhead};
+    use habilis_network_doc::{SliceLimits, SliceStore};
 
     fn keyed_store(channel: Channel) -> SliceStore {
         SliceStore::new(
             channel,
             SliceLimits::default(),
-            frame_overhead("test", "alice"),
+            habilis_network_doc::frame_overhead(
+                Channel::Meta,
+                &MeshId::from("test"),
+                &Nickname::from("alice"),
+            ),
         )
         .with_key(Some(SymmetricKey::from([3u8; 32])))
     }
