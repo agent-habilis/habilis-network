@@ -33,12 +33,6 @@ use serde_json::{Map, Value, json};
 use crate::pending_slices::PendingSlices;
 use crate::wire;
 
-/// The most gone keys one store holds. It matches the author cap, so the set holds a key for each
-/// author the store can hold. An overflow evicts the oldest gone key. The engine holds a slice of a
-/// key outside the roster as pending, and does not apply it, so an evicted key is not applied
-/// either until it joins.
-const GONE_CAP: usize = 256;
-
 /// The default time a key stays gone, after a signed goodbye or a replaced run. It must cover
 /// `QUIET_TTL` plus `ALIVE_TIMEOUT`: a peer that missed the goodbye keeps the old slice until it
 /// drops the key. The engine test `the_gone_ttl_outlasts_the_quiet_ttl_and_the_alive_timeout` pins it.
@@ -844,7 +838,8 @@ impl SliceStore {
 
     /// The number of rows that one digest page holds, and so the number of keys that one pull carries. It is
     /// derived from the page overhead, so a page fits one message. A page is never sealed, because its kind
-    /// is never sealed, so every store has the same rows.
+    /// is never sealed, so a sealed and a plain store of one session have the same rows. The overhead depends on
+    /// the mesh id and the nickname of the session, so two nodes can have different rows.
     #[must_use]
     pub fn page_rows(&self) -> usize {
         let budget = MAX_MESSAGE_SIZE.saturating_sub(self.page_overhead);
@@ -1011,9 +1006,11 @@ impl SliceStore {
         self.gone.iter().any(|(gone, _)| gone == key)
     }
 
-    /// Adds `key` to the gone set, and drops the oldest gone key when the set is full.
+    /// Adds `key` to the gone set, and drops the oldest gone key when the set holds `max_authors` keys: the set holds
+    /// a key for each author the store can hold. An evicted key is not applied again, as the engine holds a slice of a
+    /// key outside the roster as pending until it joins.
     fn keep_gone(&mut self, key: AuthorKey, now: Instant) {
-        if self.gone.len() >= GONE_CAP {
+        if self.gone.len() >= self.limits.max_authors {
             self.gone.pop_front();
         }
         self.gone.push_back((key, now));
@@ -1962,13 +1959,31 @@ mod tests {
         assert_eq!(store.authors(), 0, "a refused gone key must leave no slice");
     }
 
+    /// The gone set holds one key for each author the store can hold, so forgetting `max_authors` keys at once keeps
+    /// the first one gone: the store does not evict it while there is room for it.
+    #[test]
+    fn a_gone_set_of_max_authors_keeps_its_first_key_gone() {
+        let limits =
+            SliceLimits::new(3072, Duration::from_secs(1), 300, 5).tombstone_ttl(Duration::ZERO);
+        let mut store = small_store(limits);
+        let start = Instant::now();
+        for index in 1..=300 {
+            store.forget(&many_key(index), start);
+        }
+        assert_eq!(
+            apply(&mut store, &frame(many_key(1), 1, json!({"a": 1}))),
+            SliceIngest::Refused(SliceError::GoneKey),
+            "the first key of max_authors gone keys must still be gone"
+        );
+    }
+
     #[test]
     fn gone_set_keeps_its_cap_and_the_oldest_leaves_first() {
         let limits =
             SliceLimits::new(3072, Duration::from_secs(1), 300, 5).tombstone_ttl(Duration::ZERO);
         let mut store = small_store(limits);
         let start = Instant::now();
-        for index in 1..=257 {
+        for index in 1..=301 {
             let at = start + Duration::from_millis(u64::try_from(index).unwrap_or(0));
             store.ingest(&frame(many_key(index), 1, json!({})), false, at);
             store.ingest(&frame(many_key(index), 2, Value::Null), false, at);
@@ -1980,7 +1995,7 @@ mod tests {
             "the oldest gone key must leave the gone set when the set is full"
         );
         assert_eq!(
-            apply(&mut store, &frame(many_key(257), 3, json!({"a": 3}))),
+            apply(&mut store, &frame(many_key(301), 3, json!({"a": 3}))),
             SliceIngest::Refused(SliceError::GoneKey),
             "the newest gone key must stay in the gone set"
         );
