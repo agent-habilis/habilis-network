@@ -12,6 +12,18 @@ use iroh::EndpointId;
 #[derive(Debug, Default)]
 pub(crate) struct OutstandingPulls {
     pulls: HashMap<(EndpointId, Channel, AuthorKey), Instant>,
+    /// The open pulls of each holder, in all channels, kept beside `pulls` so that the cap is read in one step.
+    open: HashMap<EndpointId, usize>,
+}
+
+/// Gives back the room of one pull of `holder`.
+fn release(open: &mut HashMap<EndpointId, usize>, holder: EndpointId) {
+    if let Some(count) = open.get_mut(&holder) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            open.remove(&holder);
+        }
+    }
 }
 
 impl OutstandingPulls {
@@ -25,15 +37,13 @@ impl OutstandingPulls {
         now: Instant,
         cap: usize,
     ) -> bool {
-        let open = self
-            .pulls
-            .keys()
-            .filter(|(held, _, _)| *held == holder)
-            .count();
+        let open = self.open.get(&holder).copied().unwrap_or(0);
         if open >= cap || self.pulls.len() >= DIGEST_PULLS_OPEN {
             return false;
         }
-        self.pulls.insert((holder, channel, author), now);
+        if self.pulls.insert((holder, channel, author), now).is_none() {
+            *self.open.entry(holder).or_insert(0) += 1;
+        }
         true
     }
 
@@ -45,15 +55,23 @@ impl OutstandingPulls {
         author: AuthorKey,
         now: Instant,
     ) -> bool {
-        self.pulls
-            .remove(&(holder, channel, author))
-            .is_some_and(|asked| now.duration_since(asked) < DIGEST_PULL_TTL)
+        let Some(asked) = self.pulls.remove(&(holder, channel, author)) else {
+            return false;
+        };
+        release(&mut self.open, holder);
+        now.duration_since(asked) < DIGEST_PULL_TTL
     }
 
     /// Drops the pulls that are older than [`DIGEST_PULL_TTL`] at `now`.
     pub(crate) fn expire(&mut self, now: Instant) {
-        self.pulls
-            .retain(|_, asked| now.duration_since(*asked) < DIGEST_PULL_TTL);
+        let open = &mut self.open;
+        self.pulls.retain(|(holder, _, _), asked| {
+            let live = now.duration_since(*asked) < DIGEST_PULL_TTL;
+            if !live {
+                release(open, *holder);
+            }
+            live
+        });
     }
 }
 
@@ -63,7 +81,7 @@ mod tests {
     use crate::testing;
     use habilis_network_protocol::{AuthorKey, Channel};
     use habilis_network_util::clock::Instant;
-    use habilis_network_util::tuning::DIGEST_PULLS_OPEN;
+    use habilis_network_util::tuning::{DIGEST_PULL_TTL, DIGEST_PULLS_OPEN};
 
     fn key_of(index: usize) -> AuthorKey {
         let mut bytes = [0u8; 32];
@@ -73,6 +91,47 @@ mod tests {
                 .to_be_bytes(),
         );
         AuthorKey::from(bytes)
+    }
+
+    /// A pull that is taken gives its room back to the holder.
+    #[test]
+    fn a_taken_pull_gives_its_room_back() {
+        let now = Instant::now();
+        let holder = testing::endpoint_id(81);
+        let mut pulls = OutstandingPulls::default();
+        assert!(
+            pulls.register(holder, Channel::State, key_of(1), now, 1),
+            "the first pull is recorded"
+        );
+        assert!(
+            !pulls.register(holder, Channel::State, key_of(2), now, 1),
+            "the holder is at its cap"
+        );
+        assert!(
+            pulls.take(holder, Channel::State, key_of(1), now),
+            "the open pull is taken"
+        );
+        assert!(
+            pulls.register(holder, Channel::State, key_of(2), now, 1),
+            "the taken pull gave its room back"
+        );
+    }
+
+    /// A pull that expires gives its room back to the holder.
+    #[test]
+    fn an_expired_pull_gives_its_room_back() {
+        let now = Instant::now();
+        let holder = testing::endpoint_id(81);
+        let mut pulls = OutstandingPulls::default();
+        assert!(
+            pulls.register(holder, Channel::State, key_of(1), now, 1),
+            "the first pull is recorded"
+        );
+        pulls.expire(now + DIGEST_PULL_TTL);
+        assert!(
+            pulls.register(holder, Channel::State, key_of(2), now + DIGEST_PULL_TTL, 1),
+            "the expired pull gave its room back"
+        );
     }
 
     /// The table holds at most `DIGEST_PULLS_OPEN` pulls in all, whichever holder they are for.
