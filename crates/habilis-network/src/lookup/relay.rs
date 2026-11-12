@@ -212,12 +212,23 @@ impl Homing {
     /// the status alone decides there. A rung that has not connected when the probe time of a
     /// rung ends counts as dead at once. A later read counts one failure per interval.
     pub(super) fn follow(self, endpoint: Endpoint) {
+        drop(self.follow_with(endpoint, RELAY_RUNG_PROBE, RELAY_LIVENESS_INTERVAL));
+    }
+
+    /// [`Self::follow`] with its two times as parameters, so that a test runs it in seconds. It
+    /// returns the task, which ends when the endpoint closes.
+    fn follow_with(
+        self,
+        endpoint: Endpoint,
+        probe: Duration,
+        interval: Duration,
+    ) -> n0future_task::JoinHandle<()> {
         let Self { ladder, mut rung } = self;
         n0future_task::spawn(async move {
             let mut status = endpoint.home_relay_status();
             let connected_at_start = tokio::select! {
                 connected = n0future_time::timeout(
-                    RELAY_RUNG_PROBE,
+                    probe,
                     wait_for_home_connection(&mut status, &rung),
                 ) => matches!(connected, Ok(true)),
                 _closed = endpoint.closed() => return,
@@ -237,7 +248,19 @@ impl Homing {
                     fails = 0;
                     let walk = rungs_to_walk(&ladder, &rung, skip_rung);
                     skip_rung = false;
-                    let selected = select_bootstrap_rung(&walk, RELAY_RUNG_PROBE, None).await;
+                    // The walk stops when its endpoint closes: dropping `stop_walk` ends the probe in
+                    // flight, and that probe closes its own endpoint before the walk returns.
+                    let (stop_walk, stopped_walk) = watch::channel(());
+                    let walking = select_bootstrap_rung(&walk, probe, Some(&stopped_walk));
+                    tokio::pin!(walking);
+                    let selected = tokio::select! {
+                        selected = &mut walking => selected,
+                        _closed = endpoint.closed() => {
+                            drop(stop_walk);
+                            walking.await;
+                            return;
+                        }
+                    };
                     if let Some(next) = selected.filter(|next| *next != rung) {
                         tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, "peer endpoint moves to the next relay rung");
                         // The relay actor of iroh shares the config of a relay.
@@ -248,7 +271,7 @@ impl Homing {
                     }
                 }
                 tokio::select! {
-                    () = n0future_time::sleep(RELAY_LIVENESS_INTERVAL) => {}
+                    () = n0future_time::sleep(interval) => {}
                     _closed = endpoint.closed() => return,
                 }
                 fails = if home_connected(&status.get(), &rung) && probes_answer(&endpoint) {
@@ -257,7 +280,7 @@ impl Homing {
                     fails + 1
                 };
             }
-        });
+        })
     }
 }
 
@@ -617,6 +640,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::{TcpListener as AsyncListener, TcpStream};
+    use tokio::task::JoinHandle;
 
     use crate::lookup::test_relay;
     use crate::util::tuning;
@@ -976,6 +1000,73 @@ mod tests {
             .parse()
             .expect("a literal http URL parses");
         (url, half_open)
+    }
+
+    /// **The rung walk stops when its endpoint closes.**
+    ///
+    /// The rung of the endpoint never connects, so the follower walks the ladder, and every other
+    /// rung accepts the connection and never answers: each probe waits out its time. A fetch that
+    /// closes its endpoint during the walk must not leave the task to bind and probe the rungs that
+    /// remain. The task ends soon after the close, and the probe in flight closes its own endpoint
+    /// (iroh logs an error for an endpoint that is dropped open, and the test fails on it).
+    #[test]
+    fn the_rung_walk_stops_when_its_endpoint_closes() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::net_report::reportgen",
+                "probe failed",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Failed to connect to relay server",
+            );
+            let mut ladder = vec![refused_rung()];
+            let mut silent = Vec::new();
+            for _ in 0..3 {
+                let (rung, listener) = spawn_silent_rung().await;
+                ladder.push(rung);
+                silent.push(listener);
+            }
+            let first = ladder[0].clone();
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![first.clone()])));
+            let endpoint = builder.bind().await.expect("bind the endpoint");
+            let homing = super::Homing {
+                ladder,
+                rung: first,
+            };
+            let probe = std_Duration::from_secs(3);
+            let follower = homing.follow_with(endpoint.clone(), probe, std_Duration::from_secs(1));
+
+            // The first walk starts after the 3 s that the rung gets to connect, and it takes 9 s.
+            time::sleep(std_Duration::from_millis(4500)).await;
+            endpoint.close().await;
+            let ended = time::timeout(std_Duration::from_secs(2), follower).await;
+
+            assert!(
+                ended.is_ok(),
+                "the walk went on for more than 2 s after its endpoint closed"
+            );
+        });
+    }
+
+    /// A relay URL on a local port that accepts connections and never answers.
+    async fn spawn_silent_rung() -> (RelayUrl, JoinHandle<()>) {
+        let listener: AsyncListener = AsyncListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("a free loopback port");
+        let address = listener.local_addr().expect("the bound address");
+        let port: u16 = address.port();
+        let holder = tokio::spawn(async move {
+            let mut held: Vec<TcpStream> = Vec::new();
+            while let Ok((stream, _peer)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/")
+            .parse()
+            .expect("a literal http URL parses");
+        (url, holder)
     }
 
     /// **A walk after a false failure of a live rung can stay on it.**

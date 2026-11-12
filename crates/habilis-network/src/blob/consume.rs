@@ -145,7 +145,7 @@ where
 }
 
 /// [`fetch_with_endpoint`] that does not wait out a dial the producer cannot answer. A dial
-/// with no handshake after 2 s is hedged: `build` binds one more endpoint, the fetch
+/// with no handshake after `HEDGE_DELAY` is hedged: `build` binds one more endpoint, the fetch
 /// dials from it too, and the first dial to connect wins. The loser is cancelled, and the
 /// endpoint that `build` bound is closed. A handshake that completes in time binds nothing.
 ///
