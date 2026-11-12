@@ -18,6 +18,7 @@ pub(crate) mod lan;
 mod merge_ctx;
 pub(crate) mod outstanding_pulls;
 mod recv;
+pub(crate) mod serve_budget;
 pub(crate) mod split;
 
 #[cfg(feature = "multihop")]

@@ -1168,3 +1168,13 @@ pub const PROBE_HOLD: Duration = Duration::from_secs(15);
 /// `host`-only with the file sink: a browser has no log file to rotate.
 #[cfg(feature = "host")]
 pub const LOG_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
+
+/// How many slice answers this node gives one asker on one channel in one window. A pull and a page
+/// request both count.
+pub const DIGEST_SERVES_PER_WINDOW: usize = 8;
+
+/// How many slice answers this node gives in all, in one window, whoever asks.
+pub const DIGEST_SERVES_GLOBAL: usize = 32;
+
+/// The length of the window of the serve budget.
+pub const DIGEST_SERVE_WINDOW: Duration = Duration::from_secs(5);

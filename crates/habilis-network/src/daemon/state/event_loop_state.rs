@@ -29,6 +29,7 @@ use super::proof_exchange::ProofExchange;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::outstanding_pulls::OutstandingPulls;
+use crate::gossip::serve_budget::ServeBudget;
 use crate::protocol::identity::{Identity, IdentityProof, verify_proof};
 use crate::protocol::meshes::Mesh;
 use crate::protocol::messages::{Authored, Message, Verified, WireFrame};
@@ -38,6 +39,7 @@ use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 use habilis_network_doc::{SliceError, SliceIngest, SliceLimits, SliceStore};
+use habilis_network_protocol::digest::DigestPage;
 
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, LANE_WANTED, PENDING_OUTBOUND_CAP, QUIET_CAP, REASSEMBLED_GROUPS_CAP,
@@ -235,6 +237,16 @@ impl ChannelDocs {
     pub(crate) fn release(&mut self, key: &AuthorKey) {
         self.state.release(key);
         self.meta.release(key);
+    }
+
+    /// The signed slice frames of `keys` that `channel` holds, at most one page of them.
+    pub(crate) fn serve(&self, channel: protocol::Channel, keys: &[AuthorKey]) -> Vec<Verified> {
+        self.get(channel).serve(keys).collect()
+    }
+
+    /// The page `index` of the digest of `channel`, when the page exists.
+    pub(crate) fn page(&self, channel: protocol::Channel, index: usize) -> Option<DigestPage> {
+        self.get(channel).page(index)
     }
 
     /// The keys that hold a slice on either channel.
@@ -763,6 +775,8 @@ pub struct EventLoopState {
     pub(crate) unicast_arrival: Option<EndpointId>,
     /// The slice pulls that wait for an answer, by holder, channel and author.
     pub(crate) outstanding_pulls: OutstandingPulls,
+    /// The answers that this node gives to slice pulls and page requests, per window.
+    pub(crate) serve_budget: ServeBudget,
     /// The released endpoints that wait for the teardown of the pool: `TEARDOWN_PENDING_MAX` at most.
     teardown_pending: BoundedFifoSet<EndpointId>,
     /// The identity proofs of the sessions this node verified, and the sessions it asked for one.
@@ -965,6 +979,7 @@ impl EventLoopState {
             identity: init.keys.session,
             unicast_arrival: None,
             outstanding_pulls: OutstandingPulls::default(),
+            serve_budget: ServeBudget::default(),
             teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             proofs: ProofExchange::with_cap(QUIET_CAP),
             own_answer: None,

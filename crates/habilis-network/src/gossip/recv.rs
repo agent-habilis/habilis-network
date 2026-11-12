@@ -17,7 +17,9 @@ use crate::daemon::state::{ChannelDocs, DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::{self, MembershipUpdate};
 use crate::protocol::messages::{Authored, MessageBody, MessageError, Proof, Verified, WireFrame};
-use crate::protocol::{AuthorKey, Channel, Message, MessageKind, PresenceSubtype};
+use crate::protocol::{
+    AuthorKey, Channel, MeshId, Message, MessageKind, Nickname, PresenceSubtype,
+};
 use crate::util::clock::Instant;
 use crate::{lifecycle, lookup};
 use habilis_network_doc::SliceIngest;
@@ -715,7 +717,99 @@ pub(crate) async fn ingest_from(
     }
 }
 
-/// The engine's own message kinds: presence, peer info, ping/pong,
+/// The signed frames that answer a pull of `keys` on `channel` from `asker`: the held ones, at most a page.
+/// A pull over the serve budget gets none.
+fn slice_pull_answer(
+    asker: &AuthorKey,
+    channel: Channel,
+    keys: &[AuthorKey],
+    state: &mut EventLoopState,
+    now: Instant,
+) -> Vec<Verified> {
+    if !state.serve_budget.admit(*asker, channel, now) {
+        tracing::debug!(target: "habilis_network::gossip", "a slice pull over the serve budget gets no answer");
+        return Vec::new();
+    }
+    state.docs.serve(channel, keys)
+}
+
+/// The signed page that answers a page request of `channel` from `asker`. A request over the serve budget,
+/// or past the last page, gets none.
+fn page_request_answer(
+    asker: &AuthorKey,
+    channel: Channel,
+    index: usize,
+    mesh: &MeshId,
+    own: &Nickname,
+    state: &mut EventLoopState,
+    now: Instant,
+) -> Option<Verified> {
+    if !state.serve_budget.admit(*asker, channel, now) {
+        tracing::debug!(target: "habilis_network::gossip", "a page request over the serve budget gets no answer");
+        return None;
+    }
+    let page = state.docs.page(channel, index)?;
+    let kind = MessageKind::SlicePage {
+        to: *asker,
+        channel,
+        page,
+    };
+    let Ok(body) = MessageBody::try_new("{}") else {
+        return None;
+    };
+    Some(Message::new_frame(mesh, own, kind, body).sign(&state.identity))
+}
+
+/// Sends the slice frames that answer a pull, on the connection that the pull came on.
+async fn answer_slice_pull(
+    message: &Verified,
+    channel: Channel,
+    keys: &[AuthorKey],
+    state: &mut EventLoopState,
+) {
+    let Some(eid) = state.unicast_arrival else {
+        tracing::debug!(target: "habilis_network::gossip", "a slice pull that did not come by unicast gets no answer");
+        return;
+    };
+    for frame in slice_pull_answer(&message.key(), channel, keys, state, Instant::now()) {
+        let Ok(bytes) = frame.serialize() else {
+            continue;
+        };
+        transport::send_best_effort(eid, bytes, state).await;
+    }
+}
+
+/// Sends the page that answers a page request, on the connection that the request came on.
+async fn answer_page_request(
+    message: &Verified,
+    channel: Channel,
+    index: usize,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
+    let Some(eid) = state.unicast_arrival else {
+        tracing::debug!(target: "habilis_network::gossip", "a page request that did not come by unicast gets no answer");
+        return;
+    };
+    let answer = page_request_answer(
+        &message.key(),
+        channel,
+        index,
+        context.mesh,
+        context.author,
+        state,
+        Instant::now(),
+    );
+    let Some(answer) = answer else {
+        return;
+    };
+    let Ok(bytes) = answer.serialize() else {
+        return;
+    };
+    transport::send_best_effort(eid, bytes, state).await;
+}
+
+/// The engine.s own message kinds: presence, peer info, ping/pong,
 /// channel events, link state.
 ///
 /// [`ControlFlow::Break`] means the kind is fully handled here and must not
@@ -819,11 +913,19 @@ async fn dispatch_infra(
             answer_proof_request(to, message, state, context).await;
             return ControlFlow::Break(());
         }
-        MessageKind::SliceRoot { .. }
-        | MessageKind::SlicePull { .. }
-        | MessageKind::SlicePageRequest { .. }
-        | MessageKind::SlicePage { .. }
-        | _ => {}
+        MessageKind::SlicePull { to, channel, keys } => {
+            if *to == state.identity.author_key() {
+                answer_slice_pull(message, *channel, keys, state).await;
+            }
+            return ControlFlow::Break(());
+        }
+        MessageKind::SlicePageRequest { to, channel, index } => {
+            if *to == state.identity.author_key() {
+                answer_page_request(message, *channel, *index, state, context).await;
+            }
+            return ControlFlow::Break(());
+        }
+        MessageKind::SliceRoot { .. } | MessageKind::SlicePage { .. } | _ => {}
     }
     ControlFlow::Continue(())
 }
@@ -1962,7 +2064,7 @@ mod first_contact_tests {
     use crate::transport::MeshSender;
     use bytes::Bytes;
     use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
-    use habilis_network_util::tuning::DIGEST_PULL_TTL;
+    use habilis_network_util::tuning::{DIGEST_PULL_TTL, DIGEST_SERVES_PER_WINDOW};
 
     use crate::daemon::state::DirectState;
     #[cfg(feature = "multihop")]
@@ -3376,6 +3478,74 @@ mod first_contact_tests {
                 held_n(&state.docs.to_json(Channel::Meta), &identity),
                 Some(100),
                 "a meta frame is live when the pull is for state, so the empty bucket refuses it"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pull over the serve budget gets no frame, even for a slice that this node holds.
+    #[test]
+    fn a_refused_pull_gets_no_frames() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            let held = slice_bytes(&node, &identity, Channel::State, 1);
+            ingest(held, &mut state, &mut app, &context).await;
+            let asker = Identity::generate().author_key();
+            for _ in 0..DIGEST_SERVES_PER_WINDOW {
+                state
+                    .serve_budget
+                    .admit(asker, Channel::State, clock::Instant::now());
+            }
+            let answer = super::slice_pull_answer(
+                &asker,
+                Channel::State,
+                &[identity.author_key()],
+                &mut state,
+                clock::Instant::now(),
+            );
+            assert!(
+                answer.is_empty(),
+                "a pull over the serve budget gets no frame"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An admitted pull gets the frames of the keys that this node holds, and none for the others.
+    #[test]
+    fn an_admitted_pull_gets_the_held_frames_of_its_keys() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            let held = slice_bytes(&node, &identity, Channel::State, 1);
+            ingest(held, &mut state, &mut app, &context).await;
+            let asker = Identity::generate().author_key();
+            let stranger = Identity::generate().author_key();
+            let answer = super::slice_pull_answer(
+                &asker,
+                Channel::State,
+                &[identity.author_key(), stranger],
+                &mut state,
+                clock::Instant::now(),
+            );
+            assert_eq!(
+                answer.len(),
+                1,
+                "the held key answers, and the stranger has no frame"
+            );
+            assert_eq!(
+                answer[0].key(),
+                identity.author_key(),
+                "the frame is the one of the held key"
             );
             node.endpoint.close().await;
         });
