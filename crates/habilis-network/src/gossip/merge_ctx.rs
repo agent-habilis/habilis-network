@@ -791,7 +791,9 @@ mod tests {
     }
 
     /// A leaving member's tombstone reaches each peer by unicast, once per channel, with the null value. The overlay
-    /// is not meshed, so only the unicast mirror can deliver it.
+    /// is not meshed, so only the unicast mirror can deliver it. The mesh is plain, with no password: a passworded
+    /// mesh seals the same tombstone, and the loopback test of a sealed meta write covers that. The State channel has
+    /// an earlier local write, so its tombstone is version 2; Meta has none, so its tombstone is version 1.
     #[test]
     fn a_tombstone_reaches_each_peer_by_unicast_on_each_channel() {
         ::habilis_network_test_tracing::run_multi_thread(
@@ -806,10 +808,10 @@ mod tests {
                 use tokio::sync::mpsc;
                 use tokio::time;
 
-                use crate::gossip::MergeCtx;
                 use crate::gossip::event::SilentSink;
+                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
                 use crate::lookup;
-                use crate::protocol::{Message, MessageKind};
+                use crate::protocol::{Channel, Message, MessageKind};
                 use crate::transport::{
                     MeshSender, PayloadPath, UNICAST_ALPN, UnicastAcceptor, UnicastPool,
                 };
@@ -855,6 +857,20 @@ mod tests {
                     sender: &sender,
                     sink: &SilentSink,
                 };
+                let earlier_write = StateMergeParams::new(
+                    MergeCtx {
+                        mesh: &mesh,
+                        author: &author,
+                        sender: &sender,
+                        sink: &SilentSink,
+                    },
+                    Channel::State,
+                    serde_json::json!({"a": 1}),
+                )
+                .surface(false);
+                broadcast_state_merge(&mut state, earlier_write)
+                    .await
+                    .expect("an earlier local write");
                 super::send_tombstones(&mut state, &context).await;
 
                 let own_key = state.identity.author_key();
@@ -876,9 +892,14 @@ mod tests {
                     );
                     let body: serde_json::Value =
                         serde_json::from_str(verified.body.as_str()).expect("a slice body is JSON");
+                    let expected = if matches!(verified.kind, MessageKind::State) {
+                        2
+                    } else {
+                        1
+                    };
                     assert_eq!(
-                        body["version"], 1,
-                        "the tombstone is the version after the last one"
+                        body["version"], expected,
+                        "the tombstone is the version after the last one of its channel"
                     );
                     assert!(
                         body["value"].is_null(),
