@@ -539,6 +539,46 @@ mod tests {
         assert_eq!(due[0].index, 1, "and it is page 1");
     }
 
+    /// A difference is compared again when its settle ends: a store that agrees by then asks for nothing.
+    #[test]
+    fn a_store_that_agrees_at_the_due_time_asks_for_nothing() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 1);
+        let due = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| true);
+        assert!(due.is_empty(), "a store that agrees at the due time asks for nothing");
+    }
+
+    /// A holder that leaves the roster loses its difference and its reading, so nothing is asked of it.
+    #[test]
+    fn a_holder_that_leaves_the_roster_is_dropped() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 1);
+        note(&mut round, holder(2), 82, Channel::Meta, now, 1);
+        round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert_eq!(round.reading_count(), 2, "both holders are read, one per channel");
+        let asked = round.advance(now + DIGEST_SETTLE, |key| *key != holder(1), |_, _| false);
+        assert!(asked.iter().all(|request| request.holder != holder(1)), "a holder that left is not asked");
+        assert_eq!(round.reading_count(), 1, "the reading of the holder that left is dropped");
+    }
+
+    /// While one holder is read on a channel, a second holder that is due does not replace its reading.
+    #[test]
+    fn a_due_holder_does_not_replace_a_reading_in_progress() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 3);
+        round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        note(&mut round, holder(2), 82, Channel::State, now, 3);
+        let during = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert!(during.is_empty(), "the second holder waits while the first is read");
+        assert!(
+            round.accepts(holder(1), testing::endpoint_id(81), Channel::State, 0, now + DIGEST_SETTLE),
+            "the reading of the first holder is kept"
+        );
+    }
+
     /// A page lists a key that is not in the roster. The pull plan keeps the roster key only.
     #[test]
     fn a_key_outside_the_roster_is_not_pulled() {

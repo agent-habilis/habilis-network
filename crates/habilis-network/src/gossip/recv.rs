@@ -6175,6 +6175,100 @@ mod first_contact_tests {
         });
     }
 
+    /// A root that arrives by broadcast, with no unicast connection, notes nothing.
+    #[test]
+    fn a_root_that_arrives_by_broadcast_notes_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.peers.insert(alice.author_key());
+            let elsewhere = DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = None;
+            ingest_from(root, &mut state, &mut app, &context).await;
+            assert_eq!(
+                requests_after_settle(&mut state),
+                0,
+                "a root that arrived by broadcast notes no difference"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A page that arrives by broadcast, with no unicast connection, registers no pull, even for a page asked for.
+    #[test]
+    fn a_page_that_arrives_by_broadcast_registers_no_pull() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            let carol = Identity::generate();
+            state.peers.insert(alice.author_key());
+            state.peers.insert(carol.author_key());
+            let now = clock::Instant::now();
+            let elsewhere = DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            state.digest_round.note_root(
+                alice.author_key(),
+                endpoint_id(81),
+                Channel::State,
+                &elsewhere,
+                false,
+                now,
+            );
+            state.digest_round.advance(now, |_| true, |_, _| false);
+            let page = DigestPage::build(
+                &[DigestEntry::new(carol.author_key(), 1, ContentHash::of(b"row"))],
+                1,
+                0,
+                1,
+            )
+            .expect("a page of one row");
+            let own = state.identity.author_key();
+            let signed = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePage {
+                    to: own,
+                    channel: Channel::State,
+                    page,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice);
+            let frame: Bytes = signed
+                .serialize()
+                .expect("a signed page serializes")
+                .into_bytes();
+            state.unicast_arrival = None;
+            ingest_from(frame, &mut state, &mut app, &context).await;
+            assert!(
+                !state
+                    .outstanding_pulls
+                    .take(endpoint_id(81), Channel::State, carol.author_key(), now),
+                "a page that arrived by broadcast registers no pull"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// The differences that the round would read once the settle of the latest one has ended.
     fn requests_after_settle(state: &mut EventLoopState) -> usize {
         let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
