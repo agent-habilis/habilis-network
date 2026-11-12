@@ -40,6 +40,8 @@ const WAIT_PREMISE: Duration = Duration::from_millis(500);
 const PATH_BUDGET: Duration = Duration::from_secs(8);
 /// The cooldown text of the pool (`COOLDOWN_REFUSED`), which is not public.
 const COOLDOWN_TEXT: &str = "unicast dial on cooldown after a recent failure";
+/// The relay refusal of the pool (`RELAY_REFUSED`), which is not public.
+const RELAY_TEXT: &str = "the relay is lookup only on this mesh";
 
 struct Member {
     membership: Membership,
@@ -357,6 +359,44 @@ fn the_reply_of_a_send_to_a_peer_on_the_dial_failure_cooldown_names_the_cooldown
         assert!(
             refusal.contains(COOLDOWN_TEXT),
             "the reply names the cooldown, and it reads: {refusal}"
+        );
+    });
+}
+
+/// **The reply of a send that fails on its dial task names the cause.**
+///
+/// A pooled connection that reads relay is waited on by a task, so the failure after the path
+/// budget does not come back from the send itself. That reply is built on another arm of the
+/// reply code than the cooldown refusal, and it must print the whole chain too.
+#[test]
+fn the_reply_of_a_send_that_fails_on_its_dial_task_names_the_relay_refusal() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let bob = Member::join("bob", &alice).await;
+        alice.until_knows("bob").await;
+
+        let warm_ends = Instant::now() + FORMATION;
+        while let Err(refusal) = alice.send("bob", "warm").await {
+            assert!(
+                Instant::now() < warm_ends,
+                "the first message did not go out within {FORMATION:?}: {refusal}"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+        alice.cut_ip_to("bob", &bob).await;
+
+        let verdict = time::timeout(PATH_BUDGET, alice.send("bob", "late"))
+            .await
+            .expect("the send ends within the path budget");
+
+        let _ = bob.membership.node.leave().await;
+        let _ = alice.membership.node.leave().await;
+        let refusal = verdict.expect_err("no direct path comes back, so the send fails");
+        assert!(
+            refusal.contains(RELAY_TEXT),
+            "the reply names the relay refusal, and it reads: {refusal}"
         );
     });
 }

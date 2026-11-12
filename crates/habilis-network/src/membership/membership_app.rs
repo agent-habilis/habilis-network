@@ -54,7 +54,6 @@ use crate::util::clock;
 use n0_future::task;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::error;
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::fmt;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::net;
@@ -863,6 +862,12 @@ impl NodeDriver for MembershipApp {
     }
 }
 
+/// The text of a failed send in a reply: the whole chain of causes, not only the outer message.
+/// Both arms of `send_msg` use it, so a failure on the dial task reads like a failure at the send.
+fn reply_text(error: &impl fmt::Display) -> String {
+    format!("{error:#}")
+}
+
 impl MembershipApp {
     /// Send one `msg` frame to `to` (a broadcast for `None`) and answer `reply` with the outcome.
     /// Returns `true`: a frame that went out is a live frame.
@@ -894,11 +899,11 @@ impl MembershipApp {
                     let outcome = handle.await.unwrap_or_else(|_| {
                         Err(anyhow::anyhow!("the send ended without an outcome"))
                     });
-                    let _ = reply.send(outcome.map_err(|error| format!("{error:#}")));
+                    let _ = reply.send(outcome.map_err(|error| reply_text(&error)));
                 });
             }
             Err(error) => {
-                let _ = reply.send(Err(format!("{error:#}")));
+                let _ = reply.send(Err(reply_text(&error)));
             }
         }
         true

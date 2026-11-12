@@ -525,7 +525,7 @@ impl UnicastPool {
     }
 
     /// Put `eid` on the dial-failure cooldown, as a failed dial does.
-    #[cfg(any(test, feature = "iroh-test-utils"))]
+    #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
     pub(crate) async fn note_dial_failure(&self, eid: EndpointId) {
         self.inner
             .dial_failures
