@@ -26,9 +26,11 @@
 //! `MAX_BLOB_BYTES` check, which cannot run before the length is known.
 
 mod blob_digest;
+mod close_on_drop;
 mod consts;
 mod consume;
 mod content_id;
+mod dialed;
 mod error;
 mod offload_request;
 mod online;

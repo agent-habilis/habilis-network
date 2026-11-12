@@ -15,12 +15,13 @@ use iroh::Endpoint;
 use iroh::endpoint::Connection;
 use sha2::Sha256;
 use tokio::io::AsyncWrite;
-use tokio::runtime::Handle;
 
 use crate::lookup::{add_peer_addr, address_book, build_peer_endpoint};
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret};
 use crate::util::consts::MAX_BLOB_BYTES;
 
+use super::close_on_drop::CloseOnDrop;
+use super::dialed::Dialed;
 use super::error::BlobError;
 use super::ticket::BlobTicket;
 use super::{BLOB_ALPN, HASH_LEN, SECRET_LEN};
@@ -46,7 +47,7 @@ pub(super) const DIAL_CAPS: Caps = [
     Duration::from_secs(10),
     Duration::from_secs(20),
 ];
-pub(super) type Caps = [Duration; 3];
+type Caps = [Duration; 3];
 
 /// The cap of attempt number `attempt`, counted from 0.
 pub(super) fn cap_of(caps: &Caps, attempt: usize) -> Duration {
@@ -144,7 +145,7 @@ where
 }
 
 /// [`fetch_with_endpoint`] that does not wait out a dial the producer cannot answer. A dial
-/// with no handshake after [`HEDGE_DELAY`] is hedged: `build` binds one more endpoint, the fetch
+/// with no handshake after 2 s is hedged: `build` binds one more endpoint, the fetch
 /// dials from it too, and the first dial to connect wins. The loser is cancelled, and the
 /// endpoint that `build` bound is closed. A handshake that completes in time binds nothing.
 ///
@@ -283,41 +284,6 @@ where
 {
     let build = || async { Ok(build_peer_endpoint(&ticket.lookups).await?) };
     fetch_building(ticket, out, token, &DIAL_CAPS, Some(HEDGE_DELAY), build).await
-}
-
-/// An endpoint that closes itself when the fetch future is dropped before it closes the
-/// endpoint. `Endpoint::close` is async, so the drop spawns it. Without this a cancelled fetch
-/// leaks the endpoint: the task that follows its home relay holds a clone for the life of the
-/// process.
-struct CloseOnDrop {
-    endpoint: Endpoint,
-    // The runtime of the fetch. A drop on a plain thread has no runtime of its own.
-    runtime: Handle,
-    closed: bool,
-}
-
-impl CloseOnDrop {
-    fn new(endpoint: Endpoint) -> Self {
-        Self {
-            endpoint,
-            runtime: Handle::current(),
-            closed: false,
-        }
-    }
-
-    async fn close(mut self) {
-        self.endpoint.close().await;
-        self.closed = true;
-    }
-}
-
-impl Drop for CloseOnDrop {
-    fn drop(&mut self) {
-        if !self.closed {
-            let endpoint = self.endpoint.clone();
-            self.runtime.spawn(async move { endpoint.close().await });
-        }
-    }
 }
 
 /// [`fetch_with_token`] with the endpoint builder as a parameter, so that a test sees the
@@ -510,22 +476,6 @@ where
                 attempt += 1;
             }
             Err(error) => bail!("connecting to the blob producer failed: {error}"),
-        }
-    }
-}
-
-/// A connection, and the endpoint of the hedge when the hedge won. The connection lives on that
-/// endpoint, so it stays open until the transfer ends.
-pub(super) struct Dialed {
-    connection: Connection,
-    hedge: Option<CloseOnDrop>,
-}
-
-impl Dialed {
-    /// Close the endpoint of the hedge, if the hedge won.
-    async fn close(self) {
-        if let Some(hedge) = self.hedge {
-            hedge.close().await;
         }
     }
 }
