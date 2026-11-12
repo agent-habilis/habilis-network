@@ -817,6 +817,78 @@ mod tests {
     /// A send over a pooled connection is a use of it: the ledger of the ceiling moves its
     /// last use to the end of the send, so the connection of a peer that is being talked to
     /// is not the least recently used.
+    /// Two frames sent at once to a peer with no warm connection both arrive. A leaver's mirror of its two
+    /// channels is this case.
+    #[test]
+    fn two_frames_sent_at_once_to_a_cold_peer_both_arrive() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use std::sync::atomic::Ordering;
+
+                use iroh::protocol::Router;
+
+                use super::super::unicast_acceptor::UnicastAcceptor;
+
+                let (tx, mut frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        super::super::UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                let pool = super::UnicastPool::new(node.clone(), true);
+
+                // The first dial is held until the second send has started its own dial, so the race is the
+                // same on each run: a pool that dials twice replaces the first connection, and its frame is lost.
+                let gate = pool.hold_next_dial();
+                let first_send = pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"one"));
+                let second_send = async {
+                    time::sleep(Duration::from_millis(200)).await;
+                    pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"two"))
+                        .await
+                };
+                let release = async {
+                    time::sleep(Duration::from_millis(600)).await;
+                    gate.notify_one();
+                };
+                let (first, second, ()) = tokio::join!(first_send, second_send, release);
+                first.expect("the first send");
+                second.expect("the second send");
+                let dials = pool.inner.dials_started.load(Ordering::Relaxed);
+                assert_eq!(
+                    dials, 1,
+                    "two sends at once to a cold peer make one dial, not {dials}"
+                );
+
+                let mut arrived = 0;
+                while arrived < 2 {
+                    match time::timeout(Duration::from_secs(5), frames.recv()).await {
+                        Ok(Some(_)) => arrived += 1,
+                        _ => {
+                            panic!("only {arrived} of the 2 frames sent at once arrived within 5 s")
+                        }
+                    }
+                }
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
     #[test]
     fn a_send_marks_its_connection_as_used_in_the_ledger() {
         ::habilis_network_test_tracing::run_multi_thread(

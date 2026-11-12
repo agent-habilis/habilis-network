@@ -99,13 +99,20 @@ pub(in crate::transport::pool) struct PoolInner {
     /// before dialing, and a warm hit inside never dials, but both mean the
     /// caller was willing to.
     pub(in crate::transport::pool) dial_attempts: AtomicU64,
+    /// Tests only: the dials that reached the endpoint, where `dial_attempts` counts the calls.
+    #[cfg(test)]
+    pub(in crate::transport::pool) dials_started: AtomicU64,
     /// Endpoints with a dial in flight, each with the receiver of the outcome that its dialer
     /// publishes, so that concurrent cold sends to one peer share one dial instead of racing their
     /// own: the first is the dialer, the others wait on the receiver. Read by
-    /// [`UnicastPool::send_registered`] and [`UnicastPool::send_batch_in_background`]: an inline
-    /// dial through [`UnicastPool::warm_or_dial`] does not.
+    /// [`UnicastPool::send_registered`] and [`UnicastPool::send_batch_in_background`]. An inline dial
+    /// through [`UnicastPool::warm_or_dial`] waits on the peer lock of `dial_locks` instead.
     pub(in crate::transport::pool) dialing:
         parking_lot::Mutex<HashMap<EndpointId, watch::Receiver<DialOutcome>>>,
+    /// One lock for each peer that is being dialed by [`UnicastPool::dial_pooled`]: a second dial waits for the first
+    /// one, then finds its connection pooled. An entry is removed when its last waiter has gone.
+    // shared: the dialer and every waiter for one peer hold the same lock
+    dial_locks: parking_lot::Mutex<HashMap<EndpointId, Arc<Mutex<()>>>>,
     /// Tests only: the next dial waits on this before it connects, so a test can queue a send
     /// behind it.
     #[cfg(test)]
@@ -164,7 +171,10 @@ impl UnicastPool {
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                #[cfg(test)]
+                dials_started: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
+                dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
@@ -230,7 +240,10 @@ impl UnicastPool {
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
+                #[cfg(test)]
+                dials_started: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
+                dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
@@ -674,8 +687,50 @@ impl UnicastPool {
         }
     }
 
-    /// Dial `eid` and pool the connection under `hold`.
+    /// Dial `eid` and pool the connection under `hold`. One dial runs for each peer at a time, and a dial starts only
+    /// when no connection of the peer is open, so an insert never replaces a live connection. A replaced connection
+    /// must be closed with `close()`, not dropped: an unacknowledged frame on a dropped connection is lost.
     async fn dial_pooled(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
+        let lock = self.dial_lock(eid);
+        let turn = lock.lock().await;
+        let result = self.dial_pooled_turn(eid, hold).await;
+        drop(turn);
+        drop(lock);
+        self.release_dial_lock(eid);
+        result
+    }
+
+    /// The lock of `eid` for one dial. It is created on first use.
+    fn dial_lock(&self, eid: EndpointId) -> Arc<Mutex<()>> {
+        let mut locks = self.inner.dial_locks.lock();
+        // shared: the dialer and every waiter for the peer hold the same lock
+        let lock = locks.entry(eid).or_insert_with(|| Arc::new(Mutex::new(())));
+        Arc::clone(lock)
+    }
+
+    /// Removes the lock of `eid` when no caller holds it any more.
+    fn release_dial_lock(&self, eid: EndpointId) {
+        let mut locks = self.inner.dial_locks.lock();
+        if locks
+            .get(&eid)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
+            locks.remove(&eid);
+        }
+    }
+
+    /// The open pooled connection of `eid`, if there is one.
+    async fn open_pooled(&self, eid: EndpointId) -> Option<Connection> {
+        let conns = self.inner.conns.lock().await;
+        let pooled = conns.get(&eid)?;
+        Some(pooled.connection.clone()).filter(|connection| connection.close_reason().is_none())
+    }
+
+    /// The body of [`Self::dial_pooled`], run under the lock of the peer.
+    async fn dial_pooled_turn(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
+        if let Some(connection) = self.open_pooled(eid).await {
+            return Ok(connection);
+        }
         let Some(endpoint) = self.inner.endpoint.clone() else {
             bail!("unicast pool has no endpoint");
         };
@@ -704,10 +759,19 @@ impl UnicastPool {
                 gate.notified().await;
             }
         }
+        #[cfg(test)]
+        self.inner.dials_started.fetch_add(1, Ordering::Relaxed);
         match dial(&endpoint, address).await {
             Ok(connection) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
-                self.inner.conns.lock().await.insert(
+                let mut conns = self.inner.conns.lock().await;
+                debug_assert!(
+                    conns
+                        .get(&eid)
+                        .is_none_or(|pooled| pooled.connection.close_reason().is_some()),
+                    "a dial must not replace an open pooled connection"
+                );
+                conns.insert(
                     eid,
                     Pooled {
                         connection: connection.clone(),
@@ -715,6 +779,7 @@ impl UnicastPool {
                         hold,
                     },
                 );
+                drop(conns);
                 self.ensure_sweeper();
                 Ok(connection)
             }
