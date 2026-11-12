@@ -2401,9 +2401,8 @@ mod first_contact_tests {
                 &app,
                 frame_params("sealed_tag", Some(bob), "text"),
             );
-            assert_eq!(
-                refused.map(|_| ()),
-                Err(AppFrameError::NoSealKey { to: bob }),
+            assert!(
+                matches!(refused, Err(AppFrameError::NoSealKey { to }) if to == bob),
                 "a sealing tag with no seal key was built"
             );
             let plain = ops::app_frame(
@@ -2482,6 +2481,118 @@ mod first_contact_tests {
                 open.body.as_str(),
                 "for everyone",
                 "a mesh with no password sealed a broadcast"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// **A sharded broadcast on a passworded mesh is sealed whole, then cut, and a peer opens it.**
+    ///
+    /// The receiver joins the shards and opens the joined body once, so a shard is a cut of one
+    /// ciphertext and not an envelope of its own. The test seals the whole body with
+    /// `seal_broadcast_body`, cuts the sealed text in two, signs the two shards, and a peer that
+    /// holds the mesh key hands its app the plain text. The control seals each cut on its own, as an
+    /// app would that sealed the shards: the joined text is no envelope, the peer drops it, and the
+    /// app hears nothing.
+    #[test]
+    fn a_sharded_broadcast_on_a_passworded_mesh_is_sealed_whole_then_cut_and_a_peer_opens_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let key = protocol::SymmetricKey::from([5u8; 32]);
+            let mut sender = fresh_state();
+            sender.broadcast_key = Some(key.clone());
+            let author = Identity::generate();
+            let plain = MessageBody::from("a body that is cut into two shards");
+            let shard = |group: &ShardGroup, index: u32, part: &str| {
+                let mut message = Message::new_app(
+                    &node.mesh,
+                    &nick("bob"),
+                    AppFrameParams::new(
+                        protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::try_new(part).expect("a body"),
+                    ),
+                );
+                message.shard = Some(Shard::new(group.clone(), 2).index(index));
+                message.sign(&author)
+            };
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+            let cut = |text: &str| {
+                let (first, second) = text.split_at(text.len() / 2);
+                (first.to_owned(), second.to_owned())
+            };
+
+            // The app and the test share the texts that it records.
+            let delivered = Arc::new(Mutex::new(Vec::new()));
+            let mut app = Recorded(Arc::clone(&delivered));
+            let mut peer = fresh_state();
+            peer.broadcast_key = Some(key.clone());
+
+            let whole = ops::seal_broadcast_body(&sender, &plain).expect("the body is sealed");
+            assert!(
+                !whole.as_str().contains("cut into two"),
+                "the sealed body holds the text"
+            );
+            let group = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440001")
+                .expect("a valid group");
+            let (first, second) = cut(whole.as_str());
+            ingest(
+                wire(&shard(&group, 0, &first)),
+                &mut peer,
+                &mut app,
+                &context,
+            )
+            .await;
+            ingest(
+                wire(&shard(&group, 1, &second)),
+                &mut peer,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                *delivered.lock().expect("no poison"),
+                [plain.as_str().to_owned()],
+                "the peer did not open the whole sealed body that was cut"
+            );
+
+            let each = |part: &str| {
+                let part = MessageBody::try_new(part).expect("a body");
+                ops::seal_broadcast_body(&sender, &part).expect("the part is sealed")
+            };
+            let (head, tail) = cut(plain.as_str());
+            let other = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440002")
+                .expect("a valid group");
+            let mut second_peer = fresh_state();
+            second_peer.broadcast_key = Some(key);
+            // The app and the test share the texts that it records.
+            let overheard = Arc::new(Mutex::new(Vec::new()));
+            let mut second_app = Recorded(Arc::clone(&overheard));
+            let sealed_head = each(&head);
+            let sealed_tail = each(&tail);
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "dropping a broadcast body that failed mesh-key decryption",
+            );
+            ingest(
+                wire(&shard(&other, 0, sealed_head.as_str())),
+                &mut second_peer,
+                &mut second_app,
+                &context,
+            )
+            .await;
+            ingest(
+                wire(&shard(&other, 1, sealed_tail.as_str())),
+                &mut second_peer,
+                &mut second_app,
+                &context,
+            )
+            .await;
+            assert!(
+                overheard.lock().expect("no poison").is_empty(),
+                "shards that were sealed one by one reached the app"
             );
             node.endpoint.close().await;
         });

@@ -530,6 +530,7 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R16 | `Answer` | `habilis-network/src/transport/webrtc/backend_native/answer.rs` | holds a field type that is not Clone |
 | R16 | `Offer` | `habilis-network/src/transport/webrtc/backend_native/offer.rs` | holds a field type that is not Clone |
 | R16 | `Delivered` | `habilis-network/src/transport/send/delivered.rs` | holds a field type that is not Clone |
+| R16 | `AppFrameError` | `habilis-network/src/gossip/app/app_frame_error.rs` | holds a `dyn` field, which is not Clone |
 | R16 | `SendError` | `habilis-network/src/transport/send/send_error.rs` | holds a `dyn` field, which is not Clone |
 | R16 | `CountingSink` | `habilis-network/src/gossip/event.rs` | holds a field type that is not Clone |
 | R16 | `Request` | `habilis-network/src/membership/membership_app.rs` | holds a field type that is not Clone |

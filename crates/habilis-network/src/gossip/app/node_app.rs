@@ -33,8 +33,7 @@ pub trait NodeApp: Send {
     /// tag that does not seal sends its directed body in plaintext, authenticated by the signature
     /// of the frame. A broadcast body is never sealed by this rule: on a passworded mesh the engine
     /// seals every broadcast body with the mesh key, whatever the tag. The default is `false`.
-    fn seals(&self, tag: &AppTag) -> bool {
-        let _ = tag;
+    fn seals(&self, _tag: &AppTag) -> bool {
         false
     }
 

@@ -15,7 +15,7 @@ use std::{error, fmt};
 /// error.to_string()
 /// # }
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
 pub enum AppFrameError {
@@ -25,8 +25,8 @@ pub enum AppFrameError {
         /// The addressee.
         to: AuthorKey,
     },
-    /// The seal failed: the sealed body is not a valid message body.
-    Seal(String),
+    /// The seal failed: the sealed body is not a valid message body. The source keeps the cause.
+    Seal(Box<dyn error::Error + Send + Sync>),
 }
 
 impl fmt::Display for AppFrameError {
@@ -41,4 +41,11 @@ impl fmt::Display for AppFrameError {
     }
 }
 
-impl error::Error for AppFrameError {}
+impl error::Error for AppFrameError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Self::NoSealKey { .. } => None,
+            Self::Seal(cause) => Some(cause.as_ref()),
+        }
+    }
+}

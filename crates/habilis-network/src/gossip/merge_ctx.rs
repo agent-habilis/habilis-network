@@ -149,11 +149,16 @@ pub async fn send_app(
 ///   succeed.
 /// - A broadcast body on a passworded mesh is sealed with the mesh key, whatever the tag: the
 ///   receivers drop any other body.
-/// - Any other body goes as it is.
+/// - Any other body goes as it is. That includes a directed body of a tag that does not seal, also
+///   on a passworded mesh: the password covers the broadcast bodies, the state and the meta slices,
+///   and a relay can read a directed body that no tag seals.
 ///
-/// The sealed body is longer than the plain one. [`sealed_body_len_bound`] gives the longest sealed
-/// length, for an app that cuts a body into shards, and [`send_app`] checks the size of the frame
-/// after the seal.
+/// This builds one frame. A body that is cut into shards is sealed whole, then cut, because the
+/// receiver joins the shards and opens the joined body once: a shard is a cut of one ciphertext, not
+/// an envelope of its own. An app that shards seals the whole body with
+/// [`seal_broadcast_body`], or with `protocol::seal_to_body` and `seal_key_of` for a directed body,
+/// cuts the sealed text, and signs each shard. [`sealed_body_len_bound`] bounds the whole sealed
+/// body. [`send_app`] checks the size of a frame after the seal.
 ///
 /// # Errors
 /// [`AppFrameError::NoSealKey`] for a sealing tag whose addressee has no known seal key, and
@@ -178,34 +183,57 @@ pub fn app_frame<App: NodeApp + ?Sized>(
     app: &App,
     mut params: AppFrameParams,
 ) -> Result<Verified, AppFrameError> {
-    let sealed = match params.to {
+    match params.to {
         Some(to) if app.seals(&params.tag) => {
             let seal = state
                 .seal_key_of(&to)
                 .ok_or(AppFrameError::NoSealKey { to })?;
-            Some(
-                seal_error::seal_to_body(seal, params.body.as_str())
-                    .map_err(|error| AppFrameError::Seal(error.to_string()))?,
-            )
+            params.body = seal_error::seal_to_body(seal, params.body.as_str())
+                .map_err(|error| AppFrameError::Seal(Box::new(error)))?;
         }
-        None => match state.broadcast_key() {
-            Some(key) => Some(
-                wire::encrypt_body(&params.body, key)
-                    .map_err(|error| AppFrameError::Seal(error.to_string()))?,
-            ),
-            None => None,
-        },
-        Some(_) => None,
-    };
-    if let Some(body) = sealed {
-        params.body = body;
+        None => params.body = seal_broadcast_body(state, &params.body)?,
+        Some(_) => {}
     }
     Ok(Message::new_app(context.mesh, context.author, params).sign(context.identity))
 }
 
+/// Seal a whole broadcast body with the mesh key, as [`app_frame`] does for one frame. On a mesh
+/// with no password the body comes back as it is. An app that cuts a broadcast body into shards
+/// calls this on the whole body, then cuts the result: the receiver joins the shards and opens the
+/// joined body once.
+///
+/// # Errors
+/// [`AppFrameError::Seal`] when the sealed body is not a valid message body.
+///
+/// # Examples
+///
+/// It seals a whole broadcast body, and the body comes back as it is on a mesh with no password. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::{AppFrameError, EventLoopState};
+/// use habilis_network::ops::seal_broadcast_body;
+/// use habilis_network::protocol::MessageBody;
+///
+/// # fn demo(state: &EventLoopState, body: &MessageBody) -> Result<MessageBody, AppFrameError> {
+/// seal_broadcast_body(state, body)
+/// # }
+/// ```
+pub fn seal_broadcast_body(
+    state: &EventLoopState,
+    body: &MessageBody,
+) -> Result<MessageBody, AppFrameError> {
+    match state.broadcast_key() {
+        Some(key) => {
+            wire::encrypt_body(body, key).map_err(|error| AppFrameError::Seal(Box::new(error)))
+        }
+        None => Ok(body.clone()),
+    }
+}
+
 /// The longest escaped length of a sealed body for a plain body of `plain_len` bytes, whether the
-/// body is sealed to a peer or with the mesh key. An app that cuts a body into shards cuts the plain
-/// body so that this length, and the rest of the frame, fit [`MAX_MESSAGE_SIZE`].
+/// body is sealed to a peer or with the mesh key. It bounds a whole body: an app that cuts a sealed
+/// body into shards seals the whole body first, so the bound applies to the whole body and not to a
+/// shard, and each shard, with the rest of its frame, must fit [`MAX_MESSAGE_SIZE`].
 ///
 /// # Examples
 ///
