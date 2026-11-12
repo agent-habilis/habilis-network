@@ -23,8 +23,8 @@ use std::{error, fmt};
 #[non_exhaustive]
 #[must_use]
 pub enum SendError {
-    /// The send is refused: its peer's only path is the relay, which is lookup only on this mesh,
-    /// and no direct path is probed yet. The caller can retry the send later.
+    /// The send is refused: a probe found that the only path of its peer is the relay, which is
+    /// lookup only on this mesh. The caller can retry the send later, when a direct path is proven.
     Held {
         /// The endpoint the frame is held for.
         eid: EndpointId,
@@ -59,7 +59,7 @@ impl fmt::Display for SendError {
         match self {
             Self::Held { eid } => write!(
                 f,
-                "directed message to {eid} refused: its path is not probed yet, and the relay is lookup only on this mesh; retry the send later"
+                "directed message to {eid} refused: a probe found only the relay, and the relay is lookup only on this mesh; retry the send later"
             ),
             Self::Undeliverable(message)
             | Self::Oversize(message)

@@ -2301,7 +2301,8 @@ mod first_contact_tests {
                 "the refusal is not Held: {error}"
             );
             assert!(
-                error.to_string().contains("not probed yet") && error.to_string().contains("retry"),
+                error.to_string().contains("a probe found only the relay")
+                    && error.to_string().contains("retry"),
                 "the refusal does not tell the caller to retry: {error}"
             );
             assert!(
