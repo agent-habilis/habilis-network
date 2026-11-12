@@ -97,6 +97,9 @@ impl DigestRound {
     /// request got no answer within [`DIGEST_PULL_TTL`]: a new difference of that holder is then noted again. A
     /// difference whose settle delay has ended is compared again: if it agrees, it is cancelled; if it still
     /// differs, and no holder is read on its channel, it is read. Returns the page requests that are due.
+    ///
+    /// The check for a reading on the channel comes before the compare: a compare sorts and hashes every key of the
+    /// store, and a difference that waits for a busy channel would pay it on every tick of the round.
     pub(crate) fn advance(
         &mut self,
         now: Instant,
