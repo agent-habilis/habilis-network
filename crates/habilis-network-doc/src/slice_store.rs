@@ -12,7 +12,7 @@
 //! another author's slice.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;
@@ -856,9 +856,22 @@ impl SliceStore {
 
     /// Returns page `index` of the version digest, or `None` past the last page. Each call reads
     /// the store again. Use [`SliceStore::pages`] to read every page from one snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Never: the store lists its entries sorted, and the rows and the total are at least one.
     #[must_use]
     pub fn page(&self, index: usize) -> Option<DigestPage> {
-        self.pages().nth(index)
+        let sorted = self.sorted_entries();
+        let rows = self.page_rows();
+        let total = sorted.len().div_ceil(rows).max(1);
+        if index >= total {
+            return None;
+        }
+        Some(
+            DigestPage::build(&sorted, rows, index, total)
+                .expect("a store lists sorted entries, with rows and total at least one"),
+        )
     }
 
     /// Returns every page of the version digest, all built from one snapshot of the store.
@@ -922,10 +935,12 @@ impl SliceStore {
     }
 
     /// The frames of the held keys among `keys`, the answer to a pull. It answers at most one
-    /// page of keys: the first `page_rows` of `keys` are looked up, and the rest are ignored, so
+    /// page of keys: the first `page_rows` distinct keys of `keys` are looked up, and the rest are ignored, so
     /// the asker pulls again for them. A gone key is never held, so it is never served.
     pub fn serve<'a>(&'a self, keys: &'a [AuthorKey]) -> impl Iterator<Item = Verified> + 'a {
-        let first = keys.iter().take(self.page_rows());
+        let mut asked = HashSet::new();
+        let distinct = keys.iter().filter(move |key| asked.insert(**key));
+        let first = distinct.take(self.page_rows());
         let held = first.filter_map(move |key| self.slices.get(key));
         held.map(|slice| slice.frame.clone())
     }
@@ -2234,6 +2249,19 @@ mod tests {
                 "page {index} must match page()"
             );
         }
+    }
+
+    /// A pull that names one held key many times gets one frame of it, not one per name.
+    #[test]
+    fn serve_answers_each_key_once() {
+        let mut store = store();
+        apply(&mut store, &frame(author_key(1), 1, json!({"n": 1})));
+        let asked = vec![author_key(1); 18];
+        assert_eq!(
+            store.serve(&asked).count(),
+            1,
+            "one key named 18 times is one frame"
+        );
     }
 
     #[test]

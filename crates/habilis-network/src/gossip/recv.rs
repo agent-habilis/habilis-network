@@ -715,16 +715,24 @@ pub(crate) async fn ingest_from(
     }
 }
 
+/// The peer that asked for a slice: the endpoint of its connection, which the answer goes to, and the
+/// author key, which the answer names. The budget counts the endpoint, because TLS proves it.
+#[derive(Clone, Copy)]
+struct Asker {
+    endpoint: iroh::EndpointId,
+    key: AuthorKey,
+}
+
 /// The signed frames that answer a pull of `keys` on `channel` from `asker`: the held ones, at most a page.
 /// A pull over the serve budget gets none.
 fn slice_pull_answer(
-    asker: &AuthorKey,
+    asker: Asker,
     channel: Channel,
     keys: &[AuthorKey],
     state: &mut EventLoopState,
     now: Instant,
 ) -> Vec<Verified> {
-    if !state.serve_budget.admit(*asker, channel, now) {
+    if !state.serve_budget.admit(asker.endpoint, channel, now) {
         tracing::debug!(target: "habilis_network::gossip", "a slice pull over the serve budget gets no answer");
         return Vec::new();
     }
@@ -734,7 +742,7 @@ fn slice_pull_answer(
 /// The signed page that answers a page request of `channel` from `asker`. A request over the serve budget,
 /// or past the last page, gets none.
 fn page_request_answer(
-    asker: &AuthorKey,
+    asker: Asker,
     channel: Channel,
     index: usize,
     mesh: &MeshId,
@@ -742,13 +750,13 @@ fn page_request_answer(
     state: &mut EventLoopState,
     now: Instant,
 ) -> Option<Verified> {
-    if !state.serve_budget.admit(*asker, channel, now) {
+    if !state.serve_budget.admit(asker.endpoint, channel, now) {
         tracing::debug!(target: "habilis_network::gossip", "a page request over the serve budget gets no answer");
         return None;
     }
     let page = state.docs.page(channel, index)?;
     let kind = MessageKind::SlicePage {
-        to: *asker,
+        to: asker.key,
         channel,
         page,
     };
@@ -769,8 +777,13 @@ async fn answer_slice_pull(
         tracing::debug!(target: "habilis_network::gossip", "a slice pull that did not come by unicast gets no answer");
         return;
     };
-    for frame in slice_pull_answer(&message.key(), channel, keys, state, Instant::now()) {
+    let asker = Asker {
+        endpoint: eid,
+        key: message.key(),
+    };
+    for frame in slice_pull_answer(asker, channel, keys, state, Instant::now()) {
         let Ok(bytes) = frame.serialize() else {
+            tracing::debug!(target: "habilis_network::gossip", "a slice frame of a pull did not serialize, so it is not sent");
             continue;
         };
         transport::send_best_effort(eid, bytes, state).await;
@@ -789,8 +802,12 @@ async fn answer_page_request(
         tracing::debug!(target: "habilis_network::gossip", "a page request that did not come by unicast gets no answer");
         return;
     };
+    let asker = Asker {
+        endpoint: eid,
+        key: message.key(),
+    };
     let answer = page_request_answer(
-        &message.key(),
+        asker,
         channel,
         index,
         context.mesh,
@@ -802,12 +819,13 @@ async fn answer_page_request(
         return;
     };
     let Ok(bytes) = answer.serialize() else {
+        tracing::debug!(target: "habilis_network::gossip", "a page answer did not serialize, so it is not sent");
         return;
     };
     transport::send_best_effort(eid, bytes, state).await;
 }
 
-/// The engine.s own message kinds: presence, peer info, ping/pong,
+/// The engine's own message kinds: presence, peer info, ping/pong,
 /// channel events, link state.
 ///
 /// [`ControlFlow::Break`] means the kind is fully handled here and must not
@@ -3478,13 +3496,54 @@ mod first_contact_tests {
                 .filter(|_| {
                     state
                         .serve_budget
-                        .admit(asker.author_key(), Channel::State, now)
+                        .admit(endpoint_id(81), Channel::State, now)
                 })
                 .count();
             assert_eq!(
                 answers,
                 DIGEST_SERVES_PER_WINDOW - 1,
                 "the pull spent one slot, so 7 more answers fit in the window"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_pull_to_another_key_leaves_the_budget_full() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let pull: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePull {
+                    to: Identity::generate().author_key(),
+                    channel: Channel::State,
+                    keys: vec![],
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed pull serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(pull, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers, DIGEST_SERVES_PER_WINDOW,
+                "a pull addressed to another key spends no answer, so all 8 fit"
             );
             node.endpoint.close().await;
         });
@@ -3520,7 +3579,7 @@ mod first_contact_tests {
                 .filter(|_| {
                     state
                         .serve_budget
-                        .admit(asker.author_key(), Channel::State, now)
+                        .admit(endpoint_id(81), Channel::State, now)
                 })
                 .count();
             assert_eq!(
@@ -3579,14 +3638,17 @@ mod first_contact_tests {
             state.peers.insert(identity.author_key());
             let held = slice_bytes(&node, &identity, Channel::State, 1);
             ingest(held, &mut state, &mut app, &context).await;
-            let asker = Identity::generate().author_key();
+            let asker = super::Asker {
+                endpoint: endpoint_id(81),
+                key: Identity::generate().author_key(),
+            };
             for _ in 0..DIGEST_SERVES_PER_WINDOW {
                 state
                     .serve_budget
-                    .admit(asker, Channel::State, clock::Instant::now());
+                    .admit(asker.endpoint, Channel::State, clock::Instant::now());
             }
             let answer = super::slice_pull_answer(
-                &asker,
+                asker,
                 Channel::State,
                 &[identity.author_key()],
                 &mut state,
@@ -3612,10 +3674,13 @@ mod first_contact_tests {
             state.peers.insert(identity.author_key());
             let held = slice_bytes(&node, &identity, Channel::State, 1);
             ingest(held, &mut state, &mut app, &context).await;
-            let asker = Identity::generate().author_key();
+            let asker = super::Asker {
+                endpoint: endpoint_id(81),
+                key: Identity::generate().author_key(),
+            };
             let stranger = Identity::generate().author_key();
             let answer = super::slice_pull_answer(
-                &asker,
+                asker,
                 Channel::State,
                 &[identity.author_key(), stranger],
                 &mut state,
