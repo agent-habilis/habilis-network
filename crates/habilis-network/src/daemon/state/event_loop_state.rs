@@ -802,6 +802,9 @@ pub struct EventLoopState {
     /// The author whose State and Meta frames this node drops after the dedup gate, for the loss tests.
     #[cfg(feature = "iroh-test-utils")]
     pub(crate) drop_slices_from: Option<AuthorKey>,
+    /// The author whose Left this node drops after the dedup gate, for the farewell tests.
+    #[cfg(feature = "iroh-test-utils")]
+    pub(crate) drop_left_from: Option<AuthorKey>,
     /// The answers that this node gives to slice pulls and page requests, per window.
     pub(crate) serve_budget: ServeBudget,
     /// The released endpoints that wait for the teardown of the pool: `TEARDOWN_PENDING_MAX` at most.
@@ -1011,6 +1014,8 @@ impl EventLoopState {
             digest_round: DigestRound::default(),
             #[cfg(feature = "iroh-test-utils")]
             drop_slices_from: None,
+            #[cfg(feature = "iroh-test-utils")]
+            drop_left_from: None,
             serve_budget: ServeBudget::default(),
             teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             proofs: ProofExchange::with_cap(QUIET_CAP),
@@ -1574,6 +1579,12 @@ impl EventLoopState {
     #[cfg(feature = "iroh-test-utils")]
     pub fn drop_slices_from(&mut self, author: Option<AuthorKey>) {
         self.drop_slices_from = author;
+    }
+
+    /// Sets the author whose Left this node drops after the dedup gate, or none.
+    #[cfg(feature = "iroh-test-utils")]
+    pub fn drop_left_from(&mut self, author: Option<AuthorKey>) {
+        self.drop_left_from = author;
     }
 
     /// A quiet key keeps its address, so a peer that returns keeps its route. A key that left the
