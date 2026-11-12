@@ -714,6 +714,10 @@ impl UnicastPool {
     /// The open pooled connection of `eid`, if there is one. A caller that sends with it (`mark_used`) takes it as
     /// [`warm`](Self::warm) does: the hold becomes `Used`. A probe leaves the hold the connection has, so a probe
     /// dial that finds a connection of a send does not turn it into a probe hold.
+    ///
+    /// The `Probing` hold matters here: the sweeper closes a connection that is `Probed` for longer than the probe
+    /// hold, and a connection is `Probed` only if its hold was `Probing` when the probe ended. A send that takes a
+    /// `Probing` connection without marking it `Used` would let the sweeper close a connection in use.
     async fn open_pooled(&self, eid: EndpointId, mark_used: bool) -> Option<Connection> {
         let mut conns = self.inner.conns.lock().await;
         let pooled: &mut Pooled = conns
