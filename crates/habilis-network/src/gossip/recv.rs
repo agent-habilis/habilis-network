@@ -3356,6 +3356,50 @@ mod first_contact_tests {
         });
     }
 
+    /// Two keys that use one nickname keep two slices: the meta view holds one slot for each key, and neither slice
+    /// replaces the other.
+    #[test]
+    fn two_keys_of_one_nickname_keep_two_slices_in_the_view() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let twin = nick("twin");
+            let identities = [Identity::generate(), Identity::generate()];
+            for identity in &identities {
+                state.peers.insert(identity.author_key());
+            }
+            for identity in &identities {
+                let frame = Message::new_channel_event(
+                    &node.mesh,
+                    &twin,
+                    MessageBody::from(r#"{"version":1,"value":{"a":1}}"#),
+                    Channel::Meta,
+                )
+                .sign(identity);
+                dispatch_channel(
+                    ChannelEvent {
+                        channel: Channel::Meta,
+                        message: &frame,
+                        surfaceable: true,
+                        live: true,
+                    },
+                    &mut state,
+                    &mut app,
+                    &context,
+                );
+            }
+            let view = state.view(Channel::Meta);
+            assert_eq!(
+                view.as_object().map(serde_json::Map::len),
+                Some(2),
+                "two keys of one nickname keep one slot each in the view"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// A meta slice that the store refuses does not reach the hook: the hook adopts the endpoint hint of a
     /// slice the store took, so a stale version must not run it.
     #[test]
