@@ -809,6 +809,7 @@ mod tests {
                 use crate::gossip::MergeCtx;
                 use crate::gossip::event::SilentSink;
                 use crate::lookup;
+                use crate::protocol::{Message, MessageKind};
                 use crate::transport::{
                     MeshSender, PayloadPath, UNICAST_ALPN, UnicastAcceptor, UnicastPool,
                 };
@@ -856,17 +857,42 @@ mod tests {
                 };
                 super::send_tombstones(&mut state, &context).await;
 
-                for channel in ["state", "meta"] {
+                let own_key = state.identity.author_key();
+                let mut states = 0;
+                let mut metas = 0;
+                for _ in 0..2 {
                     let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
                     let Ok(Some(frame)) = delivered else {
-                        panic!("a tombstone of the {channel} channel arrives within 5 s");
+                        panic!("a tombstone frame arrives within 5 s");
                     };
-                    let text = String::from_utf8_lossy(&frame.bytes).into_owned();
-                    assert!(
-                        text.contains(r#"\"value\":null"#),
-                        "the {channel} tombstone carries the null value: {text}"
+                    let message = Message::parse(&frame.bytes).expect("a tombstone frame parses");
+                    let verified = message
+                        .verify()
+                        .expect("the signature of a tombstone verifies");
+                    assert_eq!(
+                        verified.key(),
+                        own_key,
+                        "the tombstone is signed by the leaver"
                     );
+                    let body: serde_json::Value =
+                        serde_json::from_str(verified.body.as_str()).expect("a slice body is JSON");
+                    assert_eq!(
+                        body["version"], 1,
+                        "the tombstone is the version after the last one"
+                    );
+                    assert!(
+                        body["value"].is_null(),
+                        "the tombstone carries the null value"
+                    );
+                    if matches!(verified.kind, MessageKind::State) {
+                        states += 1;
+                    } else if matches!(verified.kind, MessageKind::Meta) {
+                        metas += 1;
+                    }
                 }
+                assert_eq!((states, metas), (1, 1), "one tombstone for each channel");
+                let extra = time::timeout(Duration::from_millis(500), frames.recv()).await;
+                assert!(extra.is_err(), "no third tombstone frame follows");
                 router.shutdown().await.expect("shutdown");
                 node.close().await;
                 server.close().await;
