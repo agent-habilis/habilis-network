@@ -1545,6 +1545,123 @@ mod tests {
         );
     }
 
+    /// **A first dial that fails and a hedge that stays silent is a stall.**
+    ///
+    /// Neither dial got a handshake by the cap, so the caller must retire its endpoint, as it
+    /// does for any stall. The error of the first dial is not what the caller acts on. This calls
+    /// one attempt: a second attempt on the closed endpoint would fail at once for another reason.
+    #[test]
+    fn a_failed_first_dial_and_a_silent_hedge_is_a_stall() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, mut ticket, src) = ticket_behind_proxy(
+                    "blob-test-failed-first-silent-hedge",
+                    b"bytes never fetched",
+                    false,
+                    Duration::ZERO,
+                )
+                .await;
+                // A socket that nobody reads: no reply ever comes, on any endpoint.
+                let silent = UdpSocket::bind("127.0.0.1:0").await.expect("bind silent");
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id)
+                    .with_ip_addr(silent.local_addr().expect("silent address"));
+                let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                let closing = caller.clone();
+                let closer = tokio::spawn(async move {
+                    time::sleep(Duration::from_millis(800)).await;
+                    closing.close().await;
+                });
+                let bound = Bound::default();
+                let attempt = time::timeout(
+                    Duration::from_secs(10),
+                    super::consume::dial_once(
+                        &caller,
+                        &ticket,
+                        Duration::from_secs(2),
+                        Some(Duration::from_millis(300)),
+                        &|| async { Ok(bound.build().await?) },
+                    ),
+                )
+                .await;
+                let error = attempt
+                    .expect("the attempt ends at its cap")
+                    .err()
+                    .expect("no dial connects");
+                assert!(
+                    error.to_string().starts_with("no handshake within"),
+                    "the first dial fails at 800 ms and the hedge gets no reply, so the attempt is a stall: {error}"
+                );
+                closer.await.expect("the caller endpoint closes");
+                assert!(
+                    bound.all_closed().await,
+                    "every hedge endpoint is closed within 6 s"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A hedge whose dial fails leaves the first dial waiting.**
+    ///
+    /// The hedge endpoint has no transport, so its dial fails at once. Every datagram takes
+    /// 600 ms in each direction, so the first dial needs more than the hedge delay and still
+    /// completes. The failed hedge must not end the attempt.
+    #[test]
+    fn a_failed_hedge_dial_leaves_the_first_dial_waiting() {
+        let guard = ::habilis_network_test_tracing::init();
+        // The hedge endpoint is closed, and the address book of a closed endpoint says so.
+        guard.allow_warn("habilis_network::lookup", "no lookup services");
+        ::habilis_network_test_tracing::run_multi_thread(guard, 2, async {
+            let (server, ticket, src) = ticket_behind_proxy(
+                "blob-test-failed-hedge-dial",
+                b"bytes behind a slow flow",
+                false,
+                Duration::from_millis(600),
+            )
+            .await;
+            let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                .await
+                .expect("caller endpoint");
+            let bound = Bound::default();
+            let build = || async {
+                let closed = bound.build().await?;
+                closed.close().await;
+                Ok::<_, lookup::EndpointError>(closed)
+            };
+            let mut out = Vec::new();
+            let fetched = time::timeout(
+                Duration::from_secs(30),
+                super::consume::fetch_hedged_caps(
+                    &caller,
+                    build,
+                    &ticket,
+                    &mut out,
+                    None,
+                    &[Duration::from_secs(20); 3],
+                    Some(Duration::from_millis(300)),
+                ),
+            )
+            .await;
+            assert!(
+                matches!(fetched, Ok(Ok(()))),
+                "the first dial completes although the hedge dial fails: {fetched:?}"
+            );
+            assert_eq!(
+                out, b"bytes behind a slow flow",
+                "the fetch returns the registered bytes"
+            );
+            assert_eq!(bound.count(), 1, "the hedge bound one endpoint");
+            caller.close().await;
+            fs::remove_file(&src).ok();
+            server.shutdown().await;
+        });
+    }
+
     /// **A hedged fetch that the caller drops closes both endpoints.**
     ///
     /// Both dials get no reply (a socket that nobody reads), and the caller gives up while they

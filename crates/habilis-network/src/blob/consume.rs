@@ -509,7 +509,7 @@ where
 
 /// A connection, and the endpoint of the hedge when the hedge won. The connection lives on that
 /// endpoint, so it stays open until the transfer ends.
-struct Dialed {
+pub(super) struct Dialed {
     connection: Connection,
     hedge: Option<CloseOnDrop>,
 }
@@ -530,7 +530,7 @@ async fn connect(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection>
 /// One dial attempt, cut off after `cap`. With `hedge`, a dial with no handshake after that delay
 /// binds a new endpoint with `build` and dials from it too. The first dial to connect wins, and
 /// the other is dropped: a dropped `CloseOnDrop` closes its endpoint.
-async fn dial_once<Build, Built>(
+pub(super) async fn dial_once<Build, Built>(
     endpoint: &Endpoint,
     ticket: &BlobTicket,
     cap: Duration,
@@ -591,7 +591,11 @@ where
                 Err(error) => tokio::select! {
                     biased;
                     hedged = &mut second_dial => hedged.map_or(Outcome::Failed(error), Outcome::Hedge),
-                    () = &mut deadline => Outcome::Failed(error),
+                    // Neither dial got a handshake by the cap: that is a stall, whatever the first error was.
+                    () = &mut deadline => {
+                        tracing::debug!(target: "habilis_network::blob", %error, "the first dial failed and the hedge got no handshake by the cap");
+                        Outcome::Deadline
+                    }
                 },
             },
             connected = &mut second_dial => match connected {
