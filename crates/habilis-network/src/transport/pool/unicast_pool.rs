@@ -711,19 +711,19 @@ impl UnicastPool {
         Arc::clone(lock)
     }
 
-    /// The open pooled connection of `eid`, if there is one. A caller that sends with it (`mark_used`) takes it as
-    /// [`warm`](Self::warm) does: the hold becomes `Used`. A probe leaves the hold the connection has, so a probe
+    /// The open pooled connection of `eid`, if there is one. A caller that sends with it (`hold` is `Used`) takes it as
+    /// [`warm`](Self::warm) does: the hold of the connection becomes `Used`. A probe leaves the hold the connection has, so a probe
     /// dial that finds a connection of a send does not turn it into a probe hold.
     ///
     /// The `Probing` hold matters here: the sweeper closes a connection that is `Probed` for longer than the probe
     /// hold, and a connection is `Probed` only if its hold was `Probing` when the probe ended. A send that takes a
     /// `Probing` connection without marking it `Used` would let the sweeper close a connection in use.
-    async fn open_pooled(&self, eid: EndpointId, mark_used: bool) -> Option<Connection> {
+    async fn open_pooled(&self, eid: EndpointId, hold: Hold) -> Option<Connection> {
         let mut conns = self.inner.conns.lock().await;
         let pooled: &mut Pooled = conns
             .get_mut(&eid)
             .filter(|pooled| pooled.connection.close_reason().is_none())?;
-        if mark_used {
+        if matches!(hold, Hold::Used) {
             pooled.last_used = PoolInstant::now();
             pooled.hold = Hold::Used;
         }
@@ -732,7 +732,7 @@ impl UnicastPool {
 
     /// The body of [`Self::dial_pooled`], run under the lock of the peer.
     async fn dial_pooled_turn(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
-        if let Some(connection) = self.open_pooled(eid, matches!(hold, Hold::Used)).await {
+        if let Some(connection) = self.open_pooled(eid, hold).await {
             return Ok(connection);
         }
         let Some(endpoint) = self.inner.endpoint.clone() else {
