@@ -601,6 +601,7 @@ pub(crate) async fn ingest_from(
     // `joined`/`Alive` mint fresh ids so they are never falsely suppressed
     // here. Only authenticated messages reach this gate. A shard stays out of the set: the
     // reassembly store dedups its own slots, and a reaped group must complete when a shard is served again.
+    // A slice that answers a pull skips this gate, because the store is idempotent and takes it once.
     let pulled = take_pulled_answer(&verified, state, Instant::now());
     if verified.shard.is_none() && !pulled && state.mark_seen(&verified) {
         state.idle.duplicates += 1;
@@ -1961,6 +1962,7 @@ mod first_contact_tests {
     use crate::transport::MeshSender;
     use bytes::Bytes;
     use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
+    use habilis_network_util::tuning::DIGEST_PULL_TTL;
 
     use crate::daemon::state::DirectState;
     #[cfg(feature = "multihop")]
@@ -3263,6 +3265,117 @@ mod first_contact_tests {
             assert!(
                 meta_slot(&state, &member.author_key()).is_some(),
                 "a roster author writes its slice while 256 strangers wait"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pull is spent by its answer, so the next frame of the same author from the same holder is live.
+    #[test]
+    fn a_spent_pull_does_not_open_the_gate_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            let holder = endpoint_id(81);
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+            );
+            state.unicast_arrival = Some(holder);
+            let answer = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest_from(answer, &mut state, &mut app, &context).await;
+            assert_eq!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "the answer to the pull applies"
+            );
+            let next = slice_bytes(&node, &identity, Channel::State, 101);
+            ingest_from(next, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "a frame after the spent pull is live, and the empty bucket refuses it"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An answer that comes after the pull TTL is live: it takes a token, and the empty bucket refuses it.
+    #[test]
+    fn an_answer_after_the_pull_ttl_is_charged() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            let holder = endpoint_id(81);
+            let asked = clock::Instant::now()
+                .checked_sub(DIGEST_PULL_TTL)
+                .expect("an instant one pull TTL back");
+            state
+                .outstanding_pulls
+                .register(holder, Channel::State, identity.author_key(), asked);
+            state.unicast_arrival = Some(holder);
+            let late = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest_from(late, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "a late answer is charged, so the empty bucket refuses it"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pull is for one channel, so a meta frame of the author is live when the pull is for state.
+    #[test]
+    fn a_pull_of_one_channel_does_not_open_the_other() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let state_bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(state_bytes, &mut state, &mut app, &context).await;
+                let meta_bytes = slice_bytes(&node, &identity, Channel::Meta, version);
+                ingest(meta_bytes, &mut state, &mut app, &context).await;
+            }
+            let holder = endpoint_id(81);
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+            );
+            state.unicast_arrival = Some(holder);
+            let meta = slice_bytes(&node, &identity, Channel::Meta, 100);
+            ingest_from(meta, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::Meta), &identity),
+                Some(100),
+                "a meta frame is live when the pull is for state, so the empty bucket refuses it"
             );
             node.endpoint.close().await;
         });
