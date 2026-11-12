@@ -16,7 +16,8 @@ use habilis_network::embed::{
 };
 use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
 use habilis_network::protocol::{
-    AuthorKey, Channel, LookupOpts, MessageKind, Nickname, PresenceSubtype,
+    AuthorKey, Channel, LookupOpts, Mesh, MeshConfig, MeshName, MessageKind, Nickname, Password,
+    PresenceSubtype, Seed,
 };
 use habilis_network::runtime::{
     Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
@@ -502,5 +503,76 @@ fn a_cold_joiner_converges_on_state_and_meta() {
         alice.leave().await.expect("alice leaves");
         bob.leave().await.expect("bob leaves");
         carol.leave().await.expect("carol leaves");
+    });
+}
+
+/// A node of a given mesh, with the password of the mesh when it has one. The sink is shared: the node holds it, and
+/// the test reads what the node emitted into it.
+// shared: the node holds the sink, and the test reads it
+async fn spawn_in(
+    mesh: &Mesh,
+    name: &str,
+    password: Option<Password>,
+    // shared: the node holds the sink, and the test reads it
+) -> (Node<Store>, Arc<Joined>) {
+    // shared with the node that emits into it, and read by the test
+    let sink = Arc::new(Joined::default());
+    let config = setup_mesh(
+        SetupKind::Join {
+            mesh: mesh.clone(),
+            password,
+        },
+        SetupParams::new(nick(name), Arc::clone(&sink)).max_peers(16),
+    )
+    .await
+    .expect("setup_mesh on a loopback mesh must not touch the network");
+    (
+        Node::spawn(config, Store, None, SignalHandling::Leave),
+        sink,
+    )
+}
+
+/// The meta keys of the writer that a node holds once it has `want` of them, or when the bound runs out.
+async fn meta_within(node: &Node<Store>, want: usize, bound: Duration) -> usize {
+    let started = Instant::now();
+    loop {
+        let held = meta_key_count(&read_meta(node).await);
+        if held >= want || started.elapsed() > bound {
+            return held;
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Two nodes of a passworded mesh: the meta write of one is sealed with the key of the mesh, and the other opens it and
+/// reads the keys in clear.
+#[test]
+fn a_sealed_meta_write_is_read_by_a_peer_of_a_passworded_mesh() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+        let mut mesh = Mesh::try_new(
+            Seed::new(rand::random()),
+            MeshName::try_new("sealed-meta").expect("a name"),
+            config,
+        )
+        .expect("a mesh");
+        mesh.set_password(Password::new("correct horse battery".to_owned()));
+        let password = || Password::new("correct horse battery".to_owned());
+
+        let (alice, _) = spawn_in(&mesh, "alice", Some(password())).await;
+        let (bob, bob_saw) = spawn_in(&mesh, "bob", Some(password())).await;
+        assert!(
+            bob_saw
+                .wait_for(&nick("alice"), Duration::from_secs(45))
+                .await,
+            "bob never saw alice join"
+        );
+        write_meta(&alice, 5).await;
+        let held = meta_within(&bob, 5, Duration::from_secs(10)).await;
+        assert_eq!(held, 5, "bob reads {held} of alice's 5 sealed meta keys");
+
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
     });
 }
