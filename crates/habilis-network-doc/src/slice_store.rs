@@ -977,7 +977,8 @@ mod tests {
     use habilis_network_protocol::digest::DigestPage;
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
-        AuthorKey, Channel, MeshId, Message, MessageBody, Nickname, SymmetricKey,
+        AuthorKey, Channel, Lookup, Mesh, MeshConfig, MeshId, MeshName, Message, MessageBody,
+        Nickname, RelayLadder, Seed, SymmetricKey,
     };
     use habilis_network_util::consts::MAX_MESSAGE_SIZE;
     use serde_json::{Map, Value, json};
@@ -1193,25 +1194,44 @@ mod tests {
     }
 
     #[test]
-    fn a_passworded_page_holds_18_rows_as_a_plain_page_does() {
+    fn a_passworded_page_holds_the_rows_of_a_plain_page() {
         let channel_key = SymmetricKey::from([3u8; 32]);
-        let plain = MessageBody::from(r#"{"version":1,"value":{}}"#);
-        let sealed = wire::encrypt_body(&plain, &channel_key).expect("a sealed body");
+        let plain_body = MessageBody::from(r#"{"version":1,"value":{}}"#);
+        let sealed = wire::encrypt_body(&plain_body, &channel_key).expect("a sealed body");
         let overhead = super::frame_overhead("m".repeat(62).as_str(), "nick");
-        let mut store = SliceStore::new(Channel::Meta, SliceLimits::default(), overhead)
-            .with_key(Some(channel_key));
-        for seed in 1..=18 {
+        let limits = SliceLimits::default();
+        let mut plain = SliceStore::new(Channel::Meta, limits, overhead);
+        let mut passworded =
+            SliceStore::new(Channel::Meta, limits, overhead).with_key(Some(channel_key));
+        for index in 0..40 {
             assert_eq!(
-                apply(&mut store, &frame_with_body(key(seed), sealed.as_str())),
+                apply(
+                    &mut plain,
+                    &frame_with_body(many_key(index), plain_body.as_str())
+                ),
                 SliceIngest::Applied,
-                "a sealed slice of key {seed} must apply"
+                "a plain slice of key {index} must apply"
+            );
+            assert_eq!(
+                apply(
+                    &mut passworded,
+                    &frame_with_body(many_key(index), sealed.as_str())
+                ),
+                SliceIngest::Applied,
+                "a sealed slice of key {index} must apply"
             );
         }
-        let first = store.pages().next().expect("a page");
+        let plain_first = plain.pages().next().expect("a page");
+        let plain_rows: usize = plain_first.entries().len();
+        let sealed_first = passworded.pages().next().expect("a page");
+        let sealed_rows: usize = sealed_first.entries().len();
+        assert!(
+            plain_rows < 40,
+            "the page holds fewer rows than the 40 slices, so it is one page of many"
+        );
         assert_eq!(
-            first.entries().len(),
-            18,
-            "a page of a passworded store holds 18 rows, as a plain page does"
+            sealed_rows, plain_rows,
+            "a page of a passworded store holds the rows of a plain page at the same overhead"
         );
     }
 
@@ -1909,28 +1929,111 @@ mod tests {
         );
     }
 
+    /// The longest mesh id that a real mesh makes: 511 bytes, from a 32-char name and a long relay URL.
+    fn longest_mesh_id() -> MeshId {
+        let name = MeshName::try_new(&"a".repeat(32)).expect("a 32-char name");
+        let mut best = None;
+        for host in 1..400 {
+            let url = format!("https://{}.example.com/", "r".repeat(host));
+            let parsed: Result<RelayLadder, _> = url.parse();
+            let Ok(ladder) = parsed else {
+                continue;
+            };
+            let Ok(config) = MeshConfig::resolve(&[Lookup::Relay], Some(ladder), &[]) else {
+                continue;
+            };
+            let Ok(mesh) = Mesh::try_new(Seed::new([4u8; 32]), name.clone(), config) else {
+                continue;
+            };
+            let text = mesh.to_string();
+            if text.len() > 512 {
+                break;
+            }
+            if let Ok(id) = MeshId::try_new(&text) {
+                best = Some(id);
+            }
+        }
+        best.expect("a long valid mesh id")
+    }
+
+    /// The longest nickname: 32 emoji, 128 bytes.
+    fn longest_nickname() -> Nickname {
+        Nickname::from(&*"\u{1F600}".repeat(MAX_NICKNAME_LEN / 4))
+    }
+
+    /// A signed-looking `SlicePage` frame of `page`, on `mesh` and `nickname`, as the wire carries it.
+    fn slice_page_frame_size(page: DigestPage, mesh: &MeshId, nickname: &Nickname) -> usize {
+        let kind = habilis_network_protocol::MessageKind::SlicePage {
+            to: key(9),
+            channel: Channel::Meta,
+            page,
+        };
+        let mut message = Message::fixture(kind, "");
+        message.mesh = mesh.clone();
+        message.author = nickname.clone();
+        Verified::fixture_unchecked(message, key(9))
+            .serialize()
+            .expect("a slice page frame serializes")
+            .into_bytes()
+            .len()
+    }
+
+    /// Every page of a full store at the longest mesh id and nickname is one frame that fits.
     #[test]
-    fn a_page_fits_the_exact_session_overhead() {
+    fn every_page_at_the_longest_mesh_id_fits_one_frame() {
+        let mesh = longest_mesh_id();
+        let nickname = longest_nickname();
+        assert!(
+            mesh.as_str().len() >= 500,
+            "the test must run at a mesh id near the limit"
+        );
+        let overhead = super::frame_overhead(mesh.as_str(), nickname.as_str());
+        let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
+        let mut store = SliceStore::new(Channel::Meta, limits, overhead);
+        for index in 0..256 {
+            let body = json!({"version": u64::MAX, "value": {"n": index}});
+            apply(
+                &mut store,
+                &frame_with_body(many_key(index), &body.to_string()),
+            );
+        }
+        let mut pages = 0;
+        for page in store.pages() {
+            pages += 1;
+            let size = slice_page_frame_size(page, &mesh, &nickname);
+            assert!(
+                size <= MAX_MESSAGE_SIZE,
+                "a page at the longest mesh id is {size} bytes, past {MAX_MESSAGE_SIZE}"
+            );
+        }
+        assert!(pages > 0, "a full store has pages");
+    }
+
+    /// At every overhead from the fixture to the worst case, a page of the rows that the store takes
+    /// fits one frame at the fixture mesh id and nickname, plus the extra overhead.
+    #[test]
+    fn a_page_fits_at_every_overhead_up_to_the_worst() {
         let mesh = MeshId::from("test");
-        let nickname = Nickname::from(&*"\u{1F600}".repeat(MAX_NICKNAME_LEN / 4));
-        for overhead in [probe_overhead(&mesh, &nickname), WORST_FRAME_OVERHEAD] {
-            let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
-            let mut plain = SliceStore::new(Channel::Meta, limits, overhead);
+        let nickname = longest_nickname();
+        let fixture = probe_overhead(&mesh, &nickname);
+        let limits = SliceLimits::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 256, 5);
+        for overhead in fixture..=WORST_FRAME_OVERHEAD {
+            let mut store = SliceStore::new(Channel::Meta, limits, overhead);
             for index in 0..256 {
                 let body = json!({"version": u64::MAX, "value": {"n": index}});
                 apply(
-                    &mut plain,
-                    &frame_with_body(author_key(index), &body.to_string()),
+                    &mut store,
+                    &frame_with_body(many_key(index), &body.to_string()),
                 );
             }
-            for page in plain.pages() {
-                let text = serde_json::to_string(&page).expect("a page must serialize");
-                let escaped = serde_json::to_string(text.as_str()).expect("escaped").len();
-                assert!(
-                    escaped + overhead <= MAX_MESSAGE_SIZE,
-                    "a plain page must fit at {overhead}"
-                );
-            }
+            let Some(page) = store.pages().next() else {
+                panic!("a full store has a page at overhead {overhead}");
+            };
+            let size = slice_page_frame_size(page, &mesh, &nickname) + (overhead - fixture);
+            assert!(
+                size <= MAX_MESSAGE_SIZE,
+                "a page at overhead {overhead} is {size} bytes, past {MAX_MESSAGE_SIZE}"
+            );
         }
     }
 

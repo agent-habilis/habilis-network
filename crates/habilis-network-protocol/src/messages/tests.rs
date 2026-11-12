@@ -1305,7 +1305,6 @@ mod slice_repair_kinds {
     use crate::digest::{DigestEntry, DigestPage, DigestRoot};
     use crate::identity::Identity;
     use crate::{Channel, ContentHash};
-    use habilis_network_util::consts::MAX_MESSAGE_SIZE;
 
     fn zero_hash() -> ContentHash {
         ContentHash::decode_hex(&"0".repeat(64)).expect("a hash")
@@ -1379,34 +1378,6 @@ mod slice_repair_kinds {
     }
 
     /// A page with the most rows that one pull carries stays inside one frame.
-    #[test]
-    fn a_full_slice_page_fits_one_frame() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut entries: Vec<DigestEntry> = (1..=18)
-            .map(|seed| DigestEntry::new(key_of_seed(seed), 1, zero_hash()))
-            .collect();
-        entries.sort_by(|left, right| {
-            let (left_key, right_key) = (left.key(), right.key());
-            left_key.as_bytes().cmp(right_key.as_bytes())
-        });
-        let page = DigestPage::build(&entries, 18, 0, 1).expect("a page of 18 rows");
-        let kind = MessageKind::SlicePage {
-            to: key_of_seed(4),
-            channel: Channel::State,
-            page,
-        };
-        let size = Message::fixture(kind, "{}")
-            .sign(&Identity::fixed_secret([7; 32]))
-            .serialize()
-            .expect("a signed slice frame serializes")
-            .into_bytes()
-            .len();
-        assert!(
-            size <= MAX_MESSAGE_SIZE,
-            "a full page is {size} bytes, past the {MAX_MESSAGE_SIZE} of one frame"
-        );
-    }
-
     /// A slice kind names its addressee as an author key. A nickname in that place is a parse error.
     #[test]
     fn a_nickname_in_the_addressee_of_a_slice_kind_is_refused_at_parse() {
