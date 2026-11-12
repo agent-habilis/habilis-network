@@ -49,7 +49,7 @@ pub use ticket::BlobTicket;
 
 #[cfg(test)]
 mod tests {
-    use super::{BlobServer, ContentId, fetch};
+    use super::{BlobError, BlobServer, ContentId, fetch};
     use crate::protocol::meshes::LookupOpts;
     use crate::transport::PayloadPath;
     use rand::RngCore;
@@ -1009,6 +1009,70 @@ mod tests {
                     out, b"bytes behind a slow path",
                     "the fetch returns the registered bytes"
                 );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A caller endpoint that stalls on every attempt gets a typed error.**
+    ///
+    /// A retry from an endpoint that the producer cannot answer stalls again, and the caller owns
+    /// the endpoint, so only the caller can build a new one. `fetch_with_endpoint` must stop after
+    /// the attempts of its caps and return `BlobError::HandshakeStalled`, and leave the endpoint
+    /// open for the caller to close.
+    #[test]
+    fn a_stalled_caller_endpoint_gets_a_handshake_stalled_error() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes behind a dead path");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-stalled-caller"))
+                    .await
+                    .expect("register");
+                let upstream = ticket
+                    .address
+                    .ip_addrs()
+                    .next()
+                    .copied()
+                    .expect("a loopback ticket carries one IP address");
+                let proxy = lossy_proxy(upstream, true, Duration::ZERO).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let endpoint = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                let caps = [
+                    Duration::from_millis(200),
+                    Duration::from_millis(300),
+                    Duration::from_millis(400),
+                ];
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(10),
+                    super::consume::fetch_with_endpoint_caps(
+                        &endpoint, &ticket, &mut out, None, &caps,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Err(BlobError::HandshakeStalled))),
+                    "every attempt stalls, so the fetch returns HandshakeStalled within 10 s: {fetched:?}"
+                );
+                assert!(
+                    !endpoint.is_closed(),
+                    "the caller endpoint stays open for the caller to close"
+                );
+                endpoint.close().await;
                 fs::remove_file(&src).ok();
                 server.shutdown().await;
             },

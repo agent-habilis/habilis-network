@@ -94,7 +94,7 @@ where
     let token = auth_token(ticket, password.as_ref())?;
     fetch_with_token(ticket, out, &token)
         .await
-        .map_err(BlobError::internal)
+        .map_err(blob_error)
 }
 
 /// [`fetch`] over an endpoint the caller already holds, so a caller that fetches
@@ -133,10 +133,34 @@ pub async fn fetch_with_endpoint<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    fetch_with_endpoint_caps(endpoint, ticket, out, password, &DIAL_CAPS).await
+}
+
+/// [`fetch_with_endpoint`] with the caps of the dial attempts as a parameter, so that a test does
+/// not wait for the real ones.
+pub(super) async fn fetch_with_endpoint_caps<Writer>(
+    endpoint: &Endpoint,
+    ticket: &BlobTicket,
+    out: &mut Writer,
+    password: Option<Password>,
+    caps: &Caps,
+) -> Result<(), BlobError>
+where
+    Writer: AsyncWrite + Unpin,
+{
     let token = auth_token(ticket, password.as_ref())?;
-    fetch_over(endpoint, ticket, &token, out)
+    fetch_over(endpoint, ticket, &token, out, caps)
         .await
-        .map_err(BlobError::internal)
+        .map_err(blob_error)
+}
+
+/// A stalled handshake is a cause the caller acts on, so it keeps its own variant.
+fn blob_error(error: anyhow::Error) -> BlobError {
+    if error.is::<Stalled>() {
+        BlobError::HandshakeStalled
+    } else {
+        BlobError::internal(error)
+    }
 }
 
 async fn fetch_with_token<Writer>(
@@ -210,6 +234,9 @@ where
             Err(error) => {
                 endpoint.close().await;
                 if started.elapsed() >= DISCOVERY_DEADLINE {
+                    if error.is::<Stalled>() {
+                        return Err(error);
+                    }
                     bail!("connecting to the blob producer failed: {error}");
                 }
                 tracing::debug!(target: "habilis_network::blob", %error, "blob dial retrying on a new endpoint");
@@ -230,11 +257,12 @@ async fn fetch_over<Writer>(
     ticket: &BlobTicket,
     token: &TicketSecret,
     out: &mut Writer,
+    caps: &Caps,
 ) -> Result<()>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let connection = dial(endpoint, ticket).await?;
+    let connection = dial(endpoint, ticket, caps).await?;
     transfer(&connection, ticket, token, out).await
 }
 
@@ -319,18 +347,28 @@ fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<Ticket
 }
 
 /// Dial the producer's blob endpoint, retrying until [`DISCOVERY_DEADLINE`] so a
-/// producer whose address is still propagating is waited for, not failed on.
-async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
+/// producer whose address is still propagating is waited for, not failed on. A retry from the
+/// endpoint that stalled can stall again, and the caller owns the endpoint: after one attempt of
+/// each cap, all stalled, this returns the stall and the caller decides.
+async fn dial(endpoint: &Endpoint, ticket: &BlobTicket, caps: &Caps) -> Result<Connection> {
     let started = Instant::now();
     let mut attempt = 0;
+    let mut stalls = 0;
     loop {
-        match dial_once(endpoint, ticket, cap_of(&DIAL_CAPS, attempt)).await {
+        match dial_once(endpoint, ticket, cap_of(caps, attempt)).await {
             Ok(connection) => return Ok(connection),
+            Err(error) if error.is::<Stalled>() => {
+                stalls += 1;
+                if stalls >= caps.len() {
+                    return Err(error);
+                }
+                tracing::debug!(%error, "blob dial retrying after a stalled handshake");
+                attempt += 1;
+            }
             Err(error) if started.elapsed() < DISCOVERY_DEADLINE => {
                 tracing::debug!(%error, "blob dial retrying while the address propagates");
-                if !error.is::<Stalled>() {
-                    time::sleep(RETRY_DELAY).await;
-                }
+                stalls = 0;
+                time::sleep(RETRY_DELAY).await;
                 attempt += 1;
             }
             Err(error) => bail!("connecting to the blob producer failed: {error}"),
