@@ -416,13 +416,7 @@ pub async fn broadcast_state_merge(
     params: StateMergeParams<'_>,
 ) -> Result<(), transport::SendError> {
     let StateMergeParams {
-        context:
-            MergeCtx {
-                mesh,
-                author,
-                sender,
-                sink,
-            },
+        context,
         channel,
         merge,
         surface,
@@ -450,8 +444,23 @@ pub async fn broadcast_state_merge(
         .docs
         .prepare_local(channel, &own, next.clone(), now)
         .map_err(transport::SendError::State)?;
-    let signed = Message::new_channel_event(mesh, author, draft.body().clone(), channel)
-        .sign(&state.identity);
+    commit_and_send(state, &context, channel, draft, farewell, surface).await
+}
+
+/// Commits a local draft, then sends its signed frame. A frame that announces a departure also goes to each live
+/// peer by unicast before gossip takes it. With no gossip path yet, the frame waits in the outbound buffer.
+async fn commit_and_send(
+    state: &mut EventLoopState,
+    context: &MergeCtx<'_>,
+    channel: Channel,
+    draft: habilis_network_doc::LocalDraft,
+    farewell: Farewell,
+    surface: bool,
+) -> Result<(), transport::SendError> {
+    let now = clock::Instant::now();
+    let signed =
+        Message::new_channel_event(context.mesh, context.author, draft.body().clone(), channel)
+            .sign(&state.identity);
     // The token that prepare_local spent is not refunded if this serialize fails. The frame_overhead probe keeps
     // a draft at the cap within one frame, so the failure cannot happen for a draft the store took.
     let bytes = signed
@@ -469,15 +478,16 @@ pub async fn broadcast_state_merge(
         unicast_farewell(state, &bytes);
     }
 
-    // 4. Surface our own change, and gossip it (or buffer while no gossip path
-    //    exists — the change is kept in the local slice, and its frame is sent once a path exists).
+    // Surface our own change, and gossip it (or buffer while no gossip path exists — the change is kept in the
+    // local slice, and its frame is sent once a path exists).
     if surface {
         // Surface our own change from a plaintext-bodied view so the `m` delta
         // renders even when the wire body we signed is sealed.
+        let own = state.identity.author_key();
         let plain_body = state.docs.plain_body(channel, &own).ok_or_else(|| {
             transport::SendError::internal(anyhow::anyhow!("the own slice is not in the store"))
         })?;
-        sink.emit(NodeEvent::StateChanged {
+        context.sink.emit(NodeEvent::StateChanged {
             channel,
             event: Box::new(signed.copy_with_body(plain_body)),
             document: state.docs.to_json(channel),
@@ -485,7 +495,8 @@ pub async fn broadcast_state_merge(
         });
     }
     if state.overlay_reachable() {
-        sender
+        context
+            .sender
             .broadcast(bytes)
             .await
             .map_err(|error| transport::SendError::internal(anyhow::anyhow!("{error}")))?;
