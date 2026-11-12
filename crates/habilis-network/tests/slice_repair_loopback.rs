@@ -571,6 +571,15 @@ fn a_sealed_meta_write_is_read_by_a_peer_of_a_passworded_mesh() {
         write_meta(&alice, 5).await;
         let held = meta_within(&bob, 5, Duration::from_secs(10)).await;
         assert_eq!(held, 5, "bob reads {held} of alice's 5 sealed meta keys");
+        let alice_hex = String::from_utf8_lossy(&key_of(&alice).await.hex()).into_owned();
+        let meta = read_meta(&bob).await;
+        for index in 0..5 {
+            assert_eq!(
+                meta[&alice_hex][format!("m{index}")],
+                index,
+                "bob reads the value that alice wrote for m{index}"
+            );
+        }
 
         alice.leave().await.expect("alice leaves");
         bob.leave().await.expect("bob leaves");
