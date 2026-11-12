@@ -28,7 +28,7 @@ use habilis_network_doc::SliceIngest;
 use n0_future::time::Instant as TokioInstant;
 
 use super::app::{AppClass, InboundApp, NodeApp};
-use super::merge_ctx::{announce_arrival, broadcast_peer_info};
+use super::merge_ctx::{announce_arrival, broadcast_peer_info, peer_info_seal_key};
 use super::{backfill, digest_round};
 use crate::net;
 use habilis_network_protocol::digest::{DigestPage, DigestRoot};
@@ -1896,6 +1896,11 @@ async fn handle_peer_info(
     // path to its node.
     let changed = !state.unicast_pool.remembers_address(&peer_addr);
     state.place_endpoint(hinter, &message.author, peer_addr.clone());
+    // The same signature binds the seal key to the author: a directed body for this key is sealed
+    // to it. A body with no seal key is an older node's, and a key that is not known binds none.
+    if let Some(seal) = peer_info_seal_key(&parsed) {
+        state.note_seal_key(hinter, seal);
+    }
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.
@@ -5068,6 +5073,80 @@ mod first_contact_tests {
             assert!(
                 webrtc::rendezvous::rendezvous_graftable(&state),
                 "so the heal tick may graft it"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The seal key of a `PeerInfo` belongs to its signer, and only a key that the node knows keeps
+    /// one: a member mints keys for free, so the roster bounds the map. A body with no seal key
+    /// changes nothing, and a newer `PeerInfo` of the key replaces the key.
+    #[test]
+    fn a_peer_info_binds_its_seal_key_to_its_signer_when_the_signer_is_known() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob = Identity::generate();
+            let stranger = Identity::generate();
+            let key_of = |who: &Identity| {
+                AuthorKey::decode_hex(&identity::encode_pubkey(&who.public()))
+                    .expect("a 32-byte key")
+            };
+            let (bob_key, stranger_key) = (key_of(&bob), key_of(&stranger));
+            let peer_info = |seal: Option<x25519_dalek::PublicKey>, signed_by: &Identity| {
+                let address = iroh::EndpointAddr::new(endpoint_id(61));
+                let mut json = peer_addr_error::endpoint_addr_to_json(&address);
+                if let Some(seal) = seal {
+                    json["seal"] =
+                        serde_json::Value::String(bs58::encode(seal.as_bytes()).into_string());
+                }
+                let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+                Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(signed_by)
+            };
+
+            let mut state = fresh_state();
+            state.peers.insert(bob_key);
+            state.names.insert(bob_key, nick("bob"));
+            super::handle_peer_info(
+                &peer_info(Some(bob.seal_public()), &bob),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                Some(&bob.seal_public()),
+                "the seal key of a known signer is kept"
+            );
+
+            super::handle_peer_info(
+                &peer_info(Some(bob.seal_public()), &stranger),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.seal_key_of(&stranger_key),
+                None,
+                "a key that the node does not know keeps no seal key"
+            );
+
+            super::handle_peer_info(&peer_info(None, &bob), &mut state, &context).await;
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                Some(&bob.seal_public()),
+                "a PeerInfo with no seal key leaves the kept key"
+            );
+
+            let newer = Identity::generate().seal_public();
+            super::handle_peer_info(&peer_info(Some(newer), &bob), &mut state, &context).await;
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                Some(&newer),
+                "a newer PeerInfo replaces the seal key"
             );
             node.endpoint.close().await;
         });

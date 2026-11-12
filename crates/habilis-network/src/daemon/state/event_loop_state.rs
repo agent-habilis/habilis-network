@@ -563,6 +563,10 @@ pub struct EventLoopState {
     /// nickname of its signer. It waits here: the signer takes the nickname over when the other
     /// key leaves, and the sweep releases the endpoint of a signer that left the roster.
     pub(crate) refused_endpoints: HashMap<AuthorKey, EndpointAddr>,
+    /// The x25519 key that each known key published in its signed `PeerInfo`. A directed body for
+    /// the key is sealed to it. The map holds a key that is a peer, quiet or named, so the roster
+    /// bounds it, and the key leaves with `forget_key`.
+    pub(crate) seal_keys: HashMap<AuthorKey, x25519_dalek::PublicKey>,
     /// The keys of `refused_endpoints` in the order that they were retained, oldest first. It may hold a key
     /// that left the map; it is cut to the keys of the map when it grows past twice the cap.
     refused_order: VecDeque<AuthorKey>,
@@ -955,6 +959,7 @@ impl EventLoopState {
             names: HashMap::new(),
             hint_owner: HashMap::new(),
             refused_endpoints: HashMap::new(),
+            seal_keys: HashMap::new(),
             refused_order: VecDeque::new(),
             peer_stamp: HashMap::new(),
             clock_evidence: ClockEvidence::default(),
@@ -1549,6 +1554,7 @@ impl EventLoopState {
         self.clock_evidence.returned_unshown.remove(&key);
         self.clock_evidence.lapsed_quiet.remove(&key);
         self.proven_endpoints.forget_trust(&key);
+        self.seal_keys.remove(&key);
         self.rival_holders.remove(&key);
         self.names.remove(&key);
         self.clock_evidence.name_stamp.remove(&key);
@@ -2482,6 +2488,25 @@ impl EventLoopState {
         } else {
             self.bind_peer_endpoint(key, nickname.clone(), endpoint);
             self.release_refused_endpoint(&key);
+        }
+    }
+
+    /// The x25519 key that `key` published in its `PeerInfo`, which a directed body for `key` is
+    /// sealed to. `None` before the first `PeerInfo` of the key, for a node of an older version, and
+    /// for a key that left.
+    #[must_use]
+    pub fn seal_key_of(&self, key: &AuthorKey) -> Option<&x25519_dalek::PublicKey> {
+        self.seal_keys.get(key)
+    }
+
+    /// Keep the seal key that the signed `PeerInfo` of `key` names. A member mints keys for free,
+    /// so only a key that is a peer, quiet or named is kept: the roster bounds the map. A newer
+    /// `PeerInfo` of the key replaces the key.
+    pub(crate) fn note_seal_key(&mut self, key: AuthorKey, seal: x25519_dalek::PublicKey) {
+        let known =
+            self.peers.contains(&key) || self.quiet.contains(&key) || self.names.contains_key(&key);
+        if known {
+            self.seal_keys.insert(key, seal);
         }
     }
 

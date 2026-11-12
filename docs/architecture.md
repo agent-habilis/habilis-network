@@ -201,6 +201,10 @@ A fresh ephemeral X25519 key agrees with the static key of the recipient, and Ch
 The ephemeral key gives forward secrecy.
 Sender authenticity comes from the Ed25519 signature of the frame, which covers the ciphertext.
 A relay forwards the frame and can verify the signature, but it cannot open the body.
+A node tells its static key in its signed `PeerInfo`, as the Base58 text `seal`.
+The engine keeps the key of each known author key, and `EventLoopState::seal_key_of` reads it.
+A key that no `PeerInfo` named has no seal key, and neither has a node of an older version.
+The key adds 58 bytes to each `PeerInfo` frame.
 
 ## 5. Bootstrap
 
@@ -414,7 +418,7 @@ A silent domain change makes verification fail invisibly, and the exact gate tur
 |---|---|
 | `App { tag, to, corr }` | Every application payload. The engine dispatches on the opaque tag. |
 | `Presence { joined \| left \| alive }` | Arrival, departure, keepalive. |
-| `PeerInfo` | A signed card with the self-advertised endpoint. |
+| `PeerInfo` | A signed card with the self-advertised endpoint and the seal key. |
 | `Ping`, `Pong { to, probe }` | Reachability rounds. A pong names the ping it answers. |
 | `ProofRequest { to }` | Unicast. A node asks one session, named by its author key, for the proof of its member. The session answers with its `joined` frame. |
 | `State` | One signed slice of its author on the `state` channel. |

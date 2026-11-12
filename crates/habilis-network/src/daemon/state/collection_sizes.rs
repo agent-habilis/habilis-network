@@ -33,6 +33,7 @@ pub(crate) struct CollectionSizes {
     pub(crate) linked_endpoints: usize,
     pub(crate) graft_backoff: usize,
     pub(crate) refused_endpoints: usize,
+    pub(crate) seal_keys: usize,
     pub(crate) orphaned_endpoints: usize,
 }
 
@@ -77,6 +78,7 @@ impl CollectionSizes {
         sizes.linked_endpoints = state.linked_endpoints.len();
         sizes.graft_backoff = state.graft_backoff.len();
         sizes.refused_endpoints = state.refused_endpoints.len();
+        sizes.seal_keys = state.seal_keys.len();
         sizes.orphaned_endpoints = state.orphaned_endpoints.len();
         sizes
     }
@@ -127,6 +129,20 @@ mod tests {
         assert_eq!(
             sizes.orphaned_endpoints, 1,
             "the orphaned endpoint is counted"
+        );
+    }
+
+    /// The seal keys are a long-lived collection: a reader of the census that hunts for growth sees them.
+    #[test]
+    fn the_census_counts_the_seal_keys() {
+        let mut state = fresh_state();
+        state.peers.insert(test_key("ant"));
+        state.note_seal_key(test_key("ant"), x25519_dalek::PublicKey::from([1u8; 32]));
+
+        assert_eq!(
+            CollectionSizes::read(&state).seal_keys,
+            1,
+            "the seal key is counted"
         );
     }
 

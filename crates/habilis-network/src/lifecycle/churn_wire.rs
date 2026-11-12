@@ -62,8 +62,8 @@ fn data_frame(mesh: &MeshId, us: &protocol::Nickname, identity: &Identity, len: 
 }
 
 /// The bytes of one `PeerInfo` frame that do not depend on the address of the node: the envelope,
-/// the nickname, the stamp, the proof and the signature.
-const ANNOUNCE_FIXED_BYTES: usize = 549;
+/// the nickname, the stamp, the proof, the seal key (58 bytes escaped) and the signature.
+const ANNOUNCE_FIXED_BYTES: usize = 607;
 
 /// The bytes that the address of the node adds to a `PeerInfo` frame. The body holds the address
 /// as a JSON string inside a JSON string, so the count is that of the escaped text. A port of 4

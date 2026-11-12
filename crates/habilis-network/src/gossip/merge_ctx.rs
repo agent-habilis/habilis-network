@@ -605,19 +605,32 @@ fn farewell_targets(state: &EventLoopState) -> Vec<iroh::EndpointId> {
     targets
 }
 
-/// The body of our `PeerInfo`: our address, the proof that we own it, and, while we hold the
-/// rendezvous, a flag that lets another holder in the same overlay order itself against us.
+/// The body of our `PeerInfo`: our address, the proof that we own it, the x25519 key that a peer
+/// seals a directed body to (`seal`, Base58), and, while we hold the rendezvous, a flag that lets
+/// another holder in the same overlay order itself against us. A body with no `seal` is the body
+/// of an older node: it names no seal key, and the rest reads as before.
 pub(crate) fn peer_info_json(
     address: &iroh::EndpointAddr,
     proof: String,
     holds_beacon: bool,
+    seal: &x25519_dalek::PublicKey,
 ) -> serde_json::Value {
     let mut json = peer_addr_error::endpoint_addr_to_json(address);
     json["proof"] = serde_json::Value::String(proof);
+    json["seal"] = serde_json::Value::String(bs58::encode(seal.as_bytes()).into_string());
     if holds_beacon {
         json["beacon"] = serde_json::Value::Bool(true);
     }
     json
+}
+
+/// The seal key that a `PeerInfo` body names, or `None` when the body names none or the text is
+/// not the Base58 of 32 bytes.
+pub(crate) fn peer_info_seal_key(json: &serde_json::Value) -> Option<x25519_dalek::PublicKey> {
+    let text = json["seal"].as_str()?;
+    let decoded = bs58::decode(text).into_vec().ok()?;
+    let bytes: [u8; 32] = decoded.try_into().ok()?;
+    Some(x25519_dalek::PublicKey::from(bytes))
 }
 
 /// Broadcast a `PeerInfo` carrying our endpoint address so peers can
@@ -649,12 +662,14 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
             proven_endpoints::sign(context.endpoint.secret_key(), context.mesh, &author_key)
         })
         .clone();
+    let seal = state.identity.seal_public();
     let addr_json = peer_info_json(
         &our_addr,
         proof,
         state
             .rendezvous_flags
             .contains(&RendezvousFlag::HostsRendezvous),
+        &seal,
     );
     let addr_data = serde_json::to_string(&addr_json)
         .expect("endpoint_addr_to_json produces a Value that always serializes");
@@ -1020,8 +1035,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let address = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
 
-        let holding = peer_info_json(&address, "proof".to_owned(), true);
-        let idle = peer_info_json(&address, "proof".to_owned(), false);
+        let seal = x25519_dalek::PublicKey::from([7u8; 32]);
+        let holding = peer_info_json(&address, "proof".to_owned(), true, &seal);
+        let idle = peer_info_json(&address, "proof".to_owned(), false, &seal);
 
         assert_eq!(
             holding["beacon"],
@@ -1038,13 +1054,81 @@ mod tests {
         );
     }
 
+    /// **Wire pin of the seal key of a `PeerInfo`.** The body names the x25519 key as Base58 under
+    /// `seal`. A node of an older version sends no `seal`: its body names no key, and its address
+    /// still reads.
+    #[test]
+    fn a_peer_info_body_names_the_seal_key_in_base58_and_an_older_body_names_none() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let id = iroh::SecretKey::generate().public();
+        let address = iroh::EndpointAddr::new(id);
+        let seal = x25519_dalek::PublicKey::from([7u8; 32]);
+
+        let json = peer_info_json(&address, "proof".to_owned(), false, &seal);
+
+        assert_eq!(
+            json["seal"], "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            "the golden text of the seal key moved: this is a wire change"
+        );
+        assert_eq!(
+            super::peer_info_seal_key(&json),
+            Some(seal),
+            "the key reads back from the body"
+        );
+
+        let mut older = json;
+        older
+            .as_object_mut()
+            .expect("the body is an object")
+            .remove("seal");
+        assert_eq!(
+            super::peer_info_seal_key(&older),
+            None,
+            "an older body names no seal key"
+        );
+        let (read, _) =
+            peer_addr_error::endpoint_addr_from_json(&older).expect("the address reads");
+        assert_eq!(read, id, "an older body still names its address");
+    }
+
+    /// A `seal` that is not the Base58 of 32 bytes names no key: a wrong length, a character out of
+    /// the alphabet, and a text that is not a string.
+    #[test]
+    fn a_seal_text_that_is_not_32_bytes_of_base58_names_no_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let short = bs58::encode([7u8; 31]).into_string();
+        let long = bs58::encode([7u8; 33]).into_string();
+        for (bad, why) in [
+            (serde_json::json!({ "seal": short }), "31 bytes"),
+            (serde_json::json!({ "seal": long }), "33 bytes"),
+            (
+                serde_json::json!({ "seal": "0OIl" }),
+                "characters out of the alphabet",
+            ),
+            (serde_json::json!({ "seal": 7 }), "a number"),
+            (serde_json::json!({}), "no field"),
+        ] {
+            assert_eq!(
+                super::peer_info_seal_key(&bad),
+                None,
+                "a seal of {why} named a key"
+            );
+        }
+    }
+
     /// Members built before the flag read the body by key. The new key must not stop them from
     /// reading the address.
     #[test]
     fn a_reader_that_predates_the_flag_still_reads_the_address() {
         let _guard = ::habilis_network_test_tracing::init();
         let id = iroh::SecretKey::generate().public();
-        let json = peer_info_json(&iroh::EndpointAddr::new(id), "proof".to_owned(), true);
+        let seal = x25519_dalek::PublicKey::from([7u8; 32]);
+        let json = peer_info_json(
+            &iroh::EndpointAddr::new(id),
+            "proof".to_owned(),
+            true,
+            &seal,
+        );
 
         let (read, _) = peer_addr_error::endpoint_addr_from_json(&json).expect("the address reads");
 

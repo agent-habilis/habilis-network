@@ -103,6 +103,53 @@ mod tests {
         test_key,
     };
 
+    /// The seal key of a key is kept only for a key that is a peer, quiet or named, so the roster
+    /// bounds the map. The accessor reads it, and the key leaves with the roster entry.
+    #[test]
+    fn a_seal_key_is_kept_for_a_known_key_only_and_leaves_with_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (peer, quiet, named, stranger) = (
+            test_key("peer"),
+            test_key("quiet"),
+            test_key("named"),
+            test_key("stranger"),
+        );
+        state.peers.insert(peer);
+        state.quiet.insert(quiet);
+        state.names.insert(named, nick("named"));
+        let seal = x25519_dalek::PublicKey::from([3u8; 32]);
+
+        for key in [peer, quiet, named, stranger] {
+            state.note_seal_key(key, seal);
+        }
+
+        for kept in [peer, quiet, named] {
+            assert_eq!(
+                state.seal_key_of(&kept),
+                Some(&seal),
+                "a known key keeps its seal key"
+            );
+        }
+        assert_eq!(
+            state.seal_key_of(&stranger),
+            None,
+            "a key that nobody knows keeps none"
+        );
+        assert_eq!(
+            state.seal_keys.len(),
+            3,
+            "the map holds the known keys only"
+        );
+
+        state.forget_key(peer);
+        assert_eq!(
+            state.seal_key_of(&peer),
+            None,
+            "the seal key leaves with its key"
+        );
+    }
+
     /// The proof of a session is signed by the member key, over the session key, the nickname and
     /// the mesh. The session key signs frames, so a proof signed by it would prove nothing.
     #[test]
