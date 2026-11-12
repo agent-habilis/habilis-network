@@ -1998,6 +1998,36 @@ mod tests {
         );
     }
 
+    /// After many writes of many keys the store stays under its bounds: the author cap holds for the applied slices,
+    /// the pending set holds at most one frame for each author it can take, and the gone set holds at most `max_authors`
+    /// keys.
+    #[test]
+    fn memory_stays_under_the_bound_after_many_writes() {
+        let limits =
+            SliceLimits::new(3072, Duration::from_secs(1), 20, 5).tombstone_ttl(Duration::ZERO);
+        let mut store = small_store(limits);
+        let now = Instant::now();
+        for index in 1..=500 {
+            store.ingest(&frame(many_key(index), 1, json!({"a": 1})), false, now);
+            store
+                .hold(&frame(many_key(index + 1000), 1, json!({})), now)
+                .expect("the frame is well formed");
+            store.forget(&many_key(index + 2000), now);
+        }
+        assert!(
+            store.authors() <= 20,
+            "the applied slices stay under the author cap"
+        );
+        let pending: usize = (1..=500)
+            .filter(|index| store.take_pending(&many_key(index + 1000), now).is_some())
+            .count();
+        assert!(
+            pending <= 20,
+            "the pending set stays under its cap, not {pending}"
+        );
+        assert!(store.gone_count() <= 20, "the gone set stays under its cap");
+    }
+
     /// A key that is forgotten twice takes one entry of the gone set, so a repeat does not push other keys out.
     #[test]
     fn a_key_forgotten_twice_takes_one_gone_entry() {
