@@ -798,11 +798,18 @@ impl SliceStore {
     ///
     /// Page `index` covers the keys from the page's first key up to the next page's first key.
     /// The first page starts at the zero key, so every key is in some page.
+    ///
+    /// # Panics
+    ///
+    /// Never: the store lists its entries sorted, and the rows and the total are at least one.
     pub fn pages(&self) -> impl Iterator<Item = DigestPage> {
         let sorted = self.sorted_entries();
         let rows = self.page_rows();
         let total = sorted.len().div_ceil(rows).max(1);
-        (0..total).map(move |index| DigestPage::build(&sorted, rows, index, total))
+        (0..total).map(move |index| {
+            DigestPage::build(&sorted, rows, index, total)
+                .expect("a store lists sorted entries, with rows and total at least one")
+        })
     }
 
     /// Whether the root of this store is `root`, so two peers with equal stores need one message.

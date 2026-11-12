@@ -18,6 +18,16 @@ impl DigestRoot {
     /// # Errors
     ///
     /// [`DigestError::NoPages`] when `total` is zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_protocol::ContentHash;
+    /// use habilis_network_protocol::digest::{DigestError, DigestRoot};
+    ///
+    /// assert!(DigestRoot::new(ContentHash::of(b"root"), 1).is_ok());
+    /// assert!(matches!(DigestRoot::new(ContentHash::of(b"root"), 0), Err(DigestError::NoPages)));
+    /// ```
     pub fn new(root: ContentHash, total: usize) -> Result<Self, DigestError> {
         if total == 0 {
             return Err(DigestError::NoPages);
@@ -59,7 +69,7 @@ impl TryFrom<RootWire> for DigestRoot {
     type Error = DigestError;
 
     fn try_from(wire: RootWire) -> Result<Self, Self::Error> {
-        let root = ContentHash::decode_hex(&wire.root).ok_or(DigestError::NotHex("the root"))?;
+        let root = ContentHash::decode_hex(&wire.root).ok_or(DigestError::NotHash)?;
         Self::new(root, wire.total)
     }
 }
