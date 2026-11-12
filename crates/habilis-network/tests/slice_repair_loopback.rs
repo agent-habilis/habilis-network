@@ -356,3 +356,43 @@ fn a_member_that_misses_the_left_drops_the_slice_by_the_tombstone() {
         carol.leave().await.expect("carol leaves");
     });
 }
+
+/// Alice writes a burst of five versions, then leaves. Bob misses her Left, and her tombstone still drops her slice,
+/// though the tombstone comes after a burst that spent her write tokens.
+#[test]
+fn a_tombstone_after_a_write_burst_still_drops_the_slice() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let nonce: u64 = rand::random();
+        let topic = format!("slice-burst-{nonce}");
+
+        let (alice, _) = spawn(&topic, "alice").await;
+        let (bob, bob_saw) = spawn(&topic, "bob").await;
+        assert!(
+            bob_saw
+                .wait_for(&nick("alice"), Duration::from_secs(45))
+                .await,
+            "bob never saw alice join"
+        );
+
+        let alice_key = key_of(&alice).await;
+        drop_left_from(&bob, Some(alice_key)).await;
+        for _ in 0..5 {
+            write_log(&alice, 1).await;
+        }
+        let bob_held = held_within(&bob, REPAIR_BOUND).await;
+        assert!(
+            bob_held >= 1,
+            "bob holds {bob_held} keys of alice before she leaves"
+        );
+
+        alice.leave().await.expect("alice leaves");
+        let bob_kept = kept_within(&bob, FAREWELL_BOUND).await;
+        assert_eq!(
+            bob_kept, 0,
+            "bob still holds {bob_kept} keys of alice {FAREWELL_BOUND:?} after she left"
+        );
+
+        bob.leave().await.expect("bob leaves");
+    });
+}
