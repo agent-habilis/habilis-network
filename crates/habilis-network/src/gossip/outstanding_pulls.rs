@@ -28,7 +28,9 @@ fn release(open: &mut HashMap<EndpointId, usize>, holder: EndpointId) {
 
 impl OutstandingPulls {
     /// Records a pull of the slice of `author` on `channel`, asked of `holder` at `now`. A holder that already
-    /// has `cap` open pulls gets no more: the pull is not recorded, and the function says so.
+    /// has `cap` open pulls gets no more: the pull is not recorded, and the function says so. The table also holds at
+    /// most [`DIGEST_PULLS_OPEN`] pulls in all. An expired pull of the same key is dropped first, even when the cap
+    /// then refuses the new pull, so the expired pull never takes room.
     pub(crate) fn register(
         &mut self,
         holder: EndpointId,
