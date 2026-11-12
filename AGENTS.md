@@ -116,7 +116,7 @@ State: `surfaced`.
 
 Layer: heartbeat. Keyed by author key.
 
-A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return. A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return, but the shared state keeps no slice of it: the sweep releases the slice, and the digest round brings it back when the key returns.
+A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return. A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return, but the shared state keeps no slice of it: the sweep releases the slice. When the key returns, its pending frame applies, and the digest round pulls the rest.
 
 State: `quiet`. Code: `lifecycle/heartbeat.rs`.
 
@@ -180,7 +180,7 @@ Code: `PendingSlices` in `crates/habilis-network-doc/src/pending_slices.rs`.
 
 Layer: state. Keyed by author key.
 
-The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. A member that leaves first sends a tombstone, a slice with the value `null`. A peer keeps the tombstone for the tombstone TTL (10 minutes), then moves the key to the gone set. The store refuses a slice of a gone key until the gone TTL ends. The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed key is not gone, because it can return: the sweep releases its slice, and the digest round brings it back.
+The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. A member that leaves first sends a tombstone, a slice with the value `null`. A peer that gets the `Left` moves the key to the gone set at once. A peer that missed the `Left` keeps the tombstone for the tombstone TTL (10 minutes), then moves the key to the gone set. The store refuses a slice of a gone key until the gone TTL ends. The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed key is not gone, because it can return: the sweep releases its slice. When the key returns, its pending frame applies, and the digest round pulls the rest.
 
 Code: `SliceStore::forget` in `crates/habilis-network-doc/src/slice_store.rs`.
 

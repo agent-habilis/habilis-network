@@ -203,8 +203,8 @@ impl DigestRound {
 }
 
 impl DigestRound {
-    /// The keys of `page` that this node wants and keeps, in pulls of at most `rows` keys each. A key that is
-    /// not in the roster is not pulled: the store would hold its slice only as a pending one.
+    /// The keys of `page` that this node wants and keeps, for the one pull of the page. A key that the store keeps
+    /// no slice of is not pulled: the store would hold its slice only as a pending one.
     pub(crate) fn pull_plan(
         state: &EventLoopState,
         channel: Channel,
@@ -312,8 +312,8 @@ pub(crate) fn on_root(
 }
 
 /// A page of a holder's digest arrived by unicast from `endpoint`. It is taken only when this node asked for it.
-/// This node then pulls the keys of the page that it wants, in pulls of the store's row count. The next page is
-/// asked for by the round tick, after the serve window.
+/// This node then pulls the keys of the page that it wants, in one pull. The next page is asked for by the round
+/// tick, a quarter of the serve window after this page.
 pub(crate) async fn on_page(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,

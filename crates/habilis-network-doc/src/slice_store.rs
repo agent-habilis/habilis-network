@@ -840,6 +840,8 @@ impl SliceStore {
     /// derived from the page overhead, so a page fits one message. A page is never sealed, because its kind
     /// is never sealed, so a sealed and a plain store of one session have the same rows. The overhead depends on
     /// the mesh id and the nickname of the session, so two nodes can have different rows.
+    /// A pull holds the keys of one page of the holder, and the holder serves at most one of its pages, so the
+    /// counts need not agree.
     #[must_use]
     pub fn page_rows(&self) -> usize {
         let budget = MAX_MESSAGE_SIZE.saturating_sub(self.page_overhead);
