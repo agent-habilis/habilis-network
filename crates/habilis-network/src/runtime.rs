@@ -22,6 +22,7 @@ pub use crate::daemon::setup::{
 pub use crate::daemon::{OwnerPidError, validate_owner_pid};
 pub use crate::lookup::MdnsHandle;
 pub use crate::transport::SendError;
+pub use habilis_network_doc::SliceError;
 
 /// The session state file the daemon writes for external readers — its sole
 /// writer. Daemon-session state, not a generic filesystem helper.
