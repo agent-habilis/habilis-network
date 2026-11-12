@@ -11,11 +11,10 @@ use iroh_gossip::proto::HyparviewConfig;
 use crate::transport::PayloadPath;
 
 use crate::transport;
-/// How many events of a topic the gossip keeps for a task that is not scheduled yet. The value keeps
-/// the old size, which held the burst of an earlier join wave. A join wave now brings fewer frames
-/// (presence, proof and two slices per peer), so size it again when the loss repair lands. The default of 256
-/// overflowed on a loaded host (the reader got `Lagged`, and the node logged "gossip event stream
-/// lagged").
+/// How many events of a topic the gossip keeps for a reader that is not scheduled yet. A join wave of N peers
+/// puts about four topic frames per peer into the burst: presence, the proof, and the two slices. So 1024
+/// covers a wave of about 250 peers. The digest round sends its roots to neighbours, not on the topic, so the
+/// roots do not grow this count. The default of 256 overflowed on a loaded host (the reader got `Lagged`).
 const TOPIC_EVENT_CAPACITY: usize = 1024;
 
 /// Build an iroh-gossip instance and a Router that accepts incoming gossip connections.
