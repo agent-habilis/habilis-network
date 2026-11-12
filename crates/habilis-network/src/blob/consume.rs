@@ -26,6 +26,10 @@ use tokio::time;
 /// propagates through the lookups (mirrors the application's bridge ticket).
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(90);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
+/// How long one dial attempt waits for the handshake. A handshake takes milliseconds. On a LAN
+/// with two interfaces, the reply flight of the producer to one endpoint is sometimes lost for
+/// good, and iroh waits 30 s before it gives up on the attempt.
+const DIAL_ATTEMPT: Duration = Duration::from_secs(5);
 const CHUNK: usize = 64 * 1024;
 
 /// Fetch the blob named by `ticket`, streaming its bytes to `out` and verifying
@@ -114,9 +118,24 @@ async fn fetch_with_token<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let endpoint = build_peer_endpoint(&ticket.lookups).await?;
-    add_peer_addr(&address_book(&endpoint), ticket.address.clone());
-    let result = fetch_over(&endpoint, ticket, token, out).await;
+    // Every attempt binds a new endpoint: a retry from the endpoint that stalled stalls again.
+    let started = Instant::now();
+    let (endpoint, connection) = loop {
+        let endpoint = build_peer_endpoint(&ticket.lookups).await?;
+        add_peer_addr(&address_book(&endpoint), ticket.address.clone());
+        match dial_once(&endpoint, ticket).await {
+            Ok(connection) => break (endpoint, connection),
+            Err(error) => {
+                endpoint.close().await;
+                if started.elapsed() >= DISCOVERY_DEADLINE {
+                    bail!("connecting to the blob producer failed: {error}");
+                }
+                tracing::debug!(target: "habilis_network::blob", %error, "blob dial retrying on a new endpoint");
+                time::sleep(RETRY_DELAY).await;
+            }
+        }
+    };
+    let result = transfer(&connection, ticket, token, out).await;
     endpoint.close().await;
     result
 }
@@ -130,15 +149,27 @@ async fn fetch_over<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let connection = dial(endpoint, ticket).await?;
+    transfer(&connection, ticket, token, out).await
+}
+
+async fn transfer<Writer>(
+    connection: &Connection,
+    ticket: &BlobTicket,
+    token: &TicketSecret,
+    out: &mut Writer,
+) -> Result<()>
+where
+    Writer: AsyncWrite + Unpin,
+{
     use sha2::Digest;
     use tokio::io::AsyncWriteExt as _;
-    let connection = dial(endpoint, ticket).await?;
     // A fresh connection to a peer behind NAT starts on the relay and punches
     // inside it, so this waits rather than refusing at once. The producer
     // waits too; refusing here first spares the round trip and names the
     // cause.
     transport::refuse_relayed(
-        &connection,
+        connection,
         ticket.relay_transport,
         transport::PROBE_DEADLINE,
         super::RELAY_REFUSED_CODE,
@@ -155,7 +186,7 @@ where
     // coded reason before the size arrives.
     let mut size_buf = [0u8; 8];
     if recv.read_exact(&mut size_buf).await.is_err() {
-        return Err(refusal(&connection));
+        return Err(refusal(connection));
     }
     let size = u64::from_le_bytes(size_buf);
     if size != ticket.size {
@@ -207,7 +238,7 @@ fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<Ticket
 async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
     let started = Instant::now();
     loop {
-        match endpoint.connect(ticket.address.clone(), BLOB_ALPN).await {
+        match dial_once(endpoint, ticket).await {
             Ok(connection) => return Ok(connection),
             Err(error) if started.elapsed() < DISCOVERY_DEADLINE => {
                 tracing::debug!(%error, "blob dial retrying while the address propagates");
@@ -215,6 +246,15 @@ async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
             }
             Err(error) => bail!("connecting to the blob producer failed: {error}"),
         }
+    }
+}
+
+/// One dial attempt, cut off after [`DIAL_ATTEMPT`].
+async fn dial_once(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
+    let attempt = endpoint.connect(ticket.address.clone(), BLOB_ALPN);
+    match time::timeout(DIAL_ATTEMPT, attempt).await {
+        Ok(connected) => Ok(connected?),
+        Err(_) => bail!("no handshake within {DIAL_ATTEMPT:?}"),
     }
 }
 

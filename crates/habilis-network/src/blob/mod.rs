@@ -60,7 +60,11 @@ mod tests {
     use crate::lookup;
     use crate::protocol::crypto;
     use iroh::endpoint::presets;
+    use std::collections::HashMap;
     use std::env;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use tokio::net::UdpSocket;
     use tokio::time;
     /// A secret that is already in a wiped buffer (the blob salt, the token read off
     /// the wire) moves into its type whole, through the constructor that takes the
@@ -755,6 +759,100 @@ mod tests {
                 assert!(
                     fetch(&ticket, &mut out, None).await.is_err(),
                     "a size disagreement must be rejected"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// A UDP relay on loopback that drops every datagram of the first socket that
+    /// talks to it, both ways, and forwards every later socket to `upstream`. It
+    /// stands for a path where the handshake of one consumer endpoint never
+    /// completes while a new endpoint gets through.
+    async fn proxy_that_drops_the_first_socket(upstream: SocketAddr) -> SocketAddr {
+        let front = UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+        let address = front.local_addr().expect("proxy address");
+        // The reply tasks send through the front socket, so they share it with the loop.
+        let front = Arc::new(front);
+        tokio::spawn(async move {
+            let mut dropped = None;
+            let mut routes: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
+            let mut buffer = vec![0u8; 2048];
+            loop {
+                let Ok((read, client)) = front.recv_from(&mut buffer).await else {
+                    return;
+                };
+                if *dropped.get_or_insert(client) == client {
+                    continue;
+                }
+                let route = if let Some(route) = routes.get(&client) {
+                    Arc::clone(route)
+                } else {
+                    let route = UdpSocket::bind("127.0.0.1:0").await.expect("bind route");
+                    route.connect(upstream).await.expect("connect route");
+                    // One socket per client, read by a task and written by this loop.
+                    let route = Arc::new(route);
+                    let (reply, front) = (Arc::clone(&route), Arc::clone(&front));
+                    tokio::spawn(async move {
+                        let mut reply_buffer = vec![0u8; 2048];
+                        while let Ok(replied) = reply.recv(&mut reply_buffer).await {
+                            let _ = front.send_to(&reply_buffer[..replied], client).await;
+                        }
+                    });
+                    routes.insert(client, Arc::clone(&route));
+                    route
+                };
+                let _ = route.send(&buffer[..read]).await;
+            }
+        });
+        address
+    }
+
+    /// **A handshake that stalls is retried on a new endpoint, not waited out.**
+    ///
+    /// On a LAN with two interfaces, the reply flight of the producer to one consumer endpoint is
+    /// sometimes lost for good, and every retry from the same endpoint is lost as well. The dial
+    /// waited 30 s for each attempt on that one endpoint. Here the first socket of the consumer
+    /// gets no reply at all. The fetch must give up that attempt after a few seconds, bind a new
+    /// endpoint, and complete through it.
+    #[test]
+    fn a_stalled_handshake_is_retried_on_a_new_endpoint() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes behind a stalled path");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-stalled-handshake"))
+                    .await
+                    .expect("register");
+                let upstream = ticket
+                    .address
+                    .ip_addrs()
+                    .next()
+                    .copied()
+                    .expect("a loopback ticket carries one IP address");
+                let proxy = proxy_that_drops_the_first_socket(upstream).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let mut out = Vec::new();
+                let fetched =
+                    time::timeout(Duration::from_secs(20), fetch(&ticket, &mut out, None)).await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes through a new endpoint within 20 s: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a stalled path",
+                    "the fetch returns the registered bytes"
                 );
                 fs::remove_file(&src).ok();
                 server.shutdown().await;
