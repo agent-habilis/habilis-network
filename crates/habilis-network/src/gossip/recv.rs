@@ -3370,11 +3370,13 @@ mod first_contact_tests {
             for identity in &identities {
                 state.peers.insert(identity.author_key());
             }
-            for identity in &identities {
+            let indexed: Vec<(usize, &Identity)> = identities.iter().enumerate().collect();
+            for &(index, identity) in &indexed {
+                let body = format!(r#"{{"version":1,"value":{{"a":{index}}}}}"#);
                 let frame = Message::new_channel_event(
                     &node.mesh,
                     &twin,
-                    MessageBody::from(r#"{"version":1,"value":{"a":1}}"#),
+                    MessageBody::from(body.as_str()),
                     Channel::Meta,
                 )
                 .sign(identity);
@@ -3396,6 +3398,13 @@ mod first_contact_tests {
                 Some(2),
                 "two keys of one nickname keep one slot each in the view"
             );
+            for &(index, identity) in &indexed {
+                let hex = String::from_utf8_lossy(&identity.author_key().hex()).into_owned();
+                assert_eq!(
+                    view[&hex]["a"], index,
+                    "the slot of each key holds the value that the key wrote"
+                );
+            }
             node.endpoint.close().await;
         });
     }
