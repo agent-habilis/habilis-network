@@ -719,16 +719,24 @@ impl UnicastPool {
         }
     }
 
-    /// The open pooled connection of `eid`, if there is one.
-    async fn open_pooled(&self, eid: EndpointId) -> Option<Connection> {
-        let conns = self.inner.conns.lock().await;
-        let pooled = conns.get(&eid)?;
-        Some(pooled.connection.clone()).filter(|connection| connection.close_reason().is_none())
+    /// The open pooled connection of `eid`, if there is one. A caller that sends with it (`mark_used`) takes it as
+    /// [`warm`](Self::warm) does: the hold becomes `Used`. A probe leaves the hold the connection has, so a probe
+    /// dial that finds a connection of a send does not turn it into a probe hold.
+    async fn open_pooled(&self, eid: EndpointId, mark_used: bool) -> Option<Connection> {
+        let mut conns = self.inner.conns.lock().await;
+        let pooled: &mut Pooled = conns
+            .get_mut(&eid)
+            .filter(|pooled| pooled.connection.close_reason().is_none())?;
+        if mark_used {
+            pooled.last_used = PoolInstant::now();
+            pooled.hold = Hold::Used;
+        }
+        Some(pooled.connection.clone())
     }
 
     /// The body of [`Self::dial_pooled`], run under the lock of the peer.
     async fn dial_pooled_turn(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
-        if let Some(connection) = self.open_pooled(eid).await {
+        if let Some(connection) = self.open_pooled(eid, matches!(hold, Hold::Used)).await {
             return Ok(connection);
         }
         let Some(endpoint) = self.inner.endpoint.clone() else {

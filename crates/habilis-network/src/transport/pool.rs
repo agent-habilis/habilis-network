@@ -889,6 +889,75 @@ mod tests {
         );
     }
 
+    /// A send that waits on the dial of a probe finds the probe's connection and takes it: the hold becomes `Used`, so
+    /// the sweeper does not close a connection that a send used when the probe ends. The order of the two calls comes
+    /// from sleeps, with the first dial held.
+    #[test]
+    fn a_send_that_waits_on_a_probe_dial_takes_the_connection_as_used() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::Router;
+
+                use super::super::unicast_acceptor::UnicastAcceptor;
+
+                let (tx, mut frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        super::super::UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                let pool = super::UnicastPool::new(node.clone(), true);
+
+                let gate = pool.hold_next_dial();
+                let probe_dial = pool.probe_connection(server.id());
+                let send = async {
+                    time::sleep(Duration::from_millis(200)).await;
+                    pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"one"))
+                        .await
+                };
+                let release = async {
+                    time::sleep(Duration::from_millis(600)).await;
+                    gate.notify_one();
+                };
+                let (dialed, outcome, ()) = tokio::join!(probe_dial, send, release);
+                dialed.expect("the probe connection");
+                outcome.expect("the send");
+                let used: bool = pool
+                    .inner
+                    .conns
+                    .lock()
+                    .await
+                    .get(&server.id())
+                    .is_some_and(|pooled| matches!(pooled.hold, super::unicast_pool::Hold::Used));
+                assert!(
+                    used,
+                    "a send that used the probe's connection holds it as used"
+                );
+                assert!(
+                    frames.recv().await.is_some(),
+                    "the frame of the send arrives"
+                );
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
     #[test]
     fn a_send_marks_its_connection_as_used_in_the_ledger() {
         ::habilis_network_test_tracing::run_multi_thread(
