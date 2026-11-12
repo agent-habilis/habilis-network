@@ -908,25 +908,6 @@ impl SliceStore {
         page_hash(&self.sorted_entries()) == *root
     }
 
-    /// The stored frames that `page` lacks in its range, or lists at a lower version, or lists at
-    /// the same version with a higher hash. This is the push of a peer that lacks an entry, so it
-    /// is used once per page. A gone key has no slice, so it is never offered.
-    pub fn missing_for<'a>(&'a self, page: &'a DigestPage) -> impl Iterator<Item = Verified> + 'a {
-        self.slices
-            .iter()
-            .filter(move |(key, _)| page.covers(key))
-            .filter(move |(key, slice)| {
-                match page.entries().iter().find(|listed| listed.key() == **key) {
-                    None => true,
-                    Some(entry) => {
-                        slice.version > entry.version()
-                            || (slice.version == entry.version() && slice.hash < entry.hash())
-                    }
-                }
-            })
-            .map(|(_, slice)| slice.frame.clone())
-    }
-
     /// The keys that `page` lists and this store would take: a key it lacks, or a key at a lower
     /// version, or at the same version with a lower hash. A gone key is never wanted. This is the
     /// pull of the asker.
@@ -2445,107 +2426,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_for_offers_an_author_the_other_side_lacks() {
-        let mut store = store();
-        apply(&mut store, &frame(key(1), 1, json!({"a": 1})));
-        let theirs = store_with_nothing();
-        let page = theirs.page(0).expect("a page");
-        let offered: Vec<Verified> = store.missing_for(&page).collect();
-        assert_eq!(offered.len(), 1, "a lacking author must be offered");
-        assert_eq!(
-            offered[0].key(),
-            key(1),
-            "the offered frame must be the author's own"
-        );
-    }
-
-    /// A store that holds nothing, for the tests that read an empty peer.
-    fn store_with_nothing() -> SliceStore {
-        store()
-    }
-
-    /// A store that holds the one entry `key` at `version` with the frame `signed`.
-    fn peer_holding(signed: &Verified) -> SliceStore {
-        let mut peer = store();
-        apply(&mut peer, signed);
-        peer
-    }
-
-    #[test]
-    fn missing_for_offers_a_higher_version_and_never_a_lower_one() {
-        let mut store = store();
-        apply(&mut store, &frame(key(1), 2, json!({"a": 2})));
-        let behind = peer_holding(&frame(key(1), 1, json!({"a": 1})));
-        let behind_page = behind.page(0).expect("a page");
-        assert_eq!(
-            store.missing_for(&behind_page).count(),
-            1,
-            "a higher version must be offered"
-        );
-        let ahead = peer_holding(&frame(key(1), 3, json!({"a": 3})));
-        let ahead_page = ahead.page(0).expect("a page");
-        assert_eq!(
-            store.missing_for(&ahead_page).count(),
-            0,
-            "a lower version must never be offered"
-        );
-    }
-
-    #[test]
-    fn missing_for_resolves_an_equal_version_by_the_lower_hash() {
-        let one = frame(key(1), 1, json!({"a": 1}));
-        let other = frame(key(1), 1, json!({"a": 2}));
-        let (low, high) = if one.content_hash() < other.content_hash() {
-            (one, other)
-        } else {
-            (other, one)
-        };
-        let mut holds_high = store();
-        apply(&mut holds_high, &high);
-        let theirs_low = peer_holding(&low);
-        let theirs_low_page = theirs_low.page(0).expect("a page");
-        assert_eq!(
-            holds_high.missing_for(&theirs_low_page).count(),
-            0,
-            "the higher hash must not be offered against the lower hash"
-        );
-        let mut holds_low = store();
-        apply(&mut holds_low, &low);
-        let theirs_high = peer_holding(&high);
-        let theirs_high_page = theirs_high.page(0).expect("a page");
-        assert_eq!(
-            holds_low.missing_for(&theirs_high_page).count(),
-            1,
-            "the lower hash must be offered against the higher hash"
-        );
-    }
-
-    #[test]
-    fn missing_for_offers_a_tombstone_as_its_frame() {
-        let mut store = store();
-        apply(&mut store, &frame(key(1), 2, Value::Null));
-        let behind = peer_holding(&frame(key(1), 1, json!({"a": 1})));
-        let page = behind.page(0).expect("a page");
-        let offered: Vec<Verified> = store.missing_for(&page).collect();
-        assert_eq!(offered.len(), 1, "a tombstone must be offered");
-        assert!(
-            offered[0].body.as_str().contains("null"),
-            "the offered tombstone must be its own signed frame with a null value"
-        );
-    }
-
-    #[test]
-    fn a_forgotten_key_is_never_offered_listed_or_wanted() {
+    fn a_forgotten_key_is_never_wanted_or_listed() {
         let mut store = store();
         apply(&mut store, &frame(key(1), 1, json!({"a": 1})));
         store.forget(&key(1), Instant::now());
         let high = peer_holding(&frame(key(1), 9, json!({"a": 9})));
         let page = high.page(0).expect("a page");
-        assert_eq!(
-            store.missing_for(&page).count(),
-            0,
-            "a forgotten key must not be offered"
-        );
         assert_eq!(
             store.wanted_from(&page).count(),
             0,
@@ -2560,6 +2446,13 @@ mod tests {
             store.page(0).expect("a page").entries().is_empty(),
             "a forgotten key must not be listed"
         );
+    }
+
+    /// A store that holds the one entry `key` at `version` with the frame `signed`.
+    fn peer_holding(signed: &Verified) -> SliceStore {
+        let mut peer = store();
+        apply(&mut peer, signed);
+        peer
     }
 
     #[test]
@@ -2806,11 +2699,6 @@ mod tests {
                         0,
                         "nothing must be wanted on {index}"
                     );
-                    assert_eq!(
-                        node.missing_for(&page).count(),
-                        0,
-                        "nothing must be missing on {index}"
-                    );
                 }
             }
         }
@@ -2822,8 +2710,8 @@ mod tests {
         );
     }
 
-    /// Carries a pass of the sync from `from` to `to`: `from` pulls the keys it wants from `to`, and
-    /// pushes the frames that `to` lacks, page by page. A lossy pass drops some frames.
+    /// Carries a pass of the sync from `from` to `to`: `from` pulls the keys it wants from `to`, page by page.
+    /// A lossy pass drops some frames.
     fn exchange(
         nodes: &mut [SliceStore],
         from: usize,
@@ -2839,12 +2727,6 @@ mod tests {
             for frame in &pulled {
                 if !lossy || pick(seed, 4) != 0 {
                     nodes[from].ingest(frame, false, now);
-                }
-            }
-            let pushed: Vec<Verified> = nodes[from].missing_for(page).collect();
-            for frame in &pushed {
-                if !lossy || pick(seed, 4) != 0 {
-                    nodes[to].ingest(frame, false, now);
                 }
             }
         }
