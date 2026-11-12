@@ -740,6 +740,9 @@ fn note_digest_root(
     root_meta: &DigestRoot,
     state: &mut EventLoopState,
 ) {
+    let Some(endpoint) = state.unicast_arrival else {
+        return;
+    };
     if *to != state.identity.author_key() {
         return;
     }
@@ -747,6 +750,7 @@ fn note_digest_root(
     digest_round::on_root(
         state,
         message.key(),
+        endpoint,
         roots,
         Instant::now(),
         digest_round::settle_jitter(),
@@ -762,10 +766,22 @@ async fn answer_digest_page(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
+    let Some(endpoint) = state.unicast_arrival else {
+        return;
+    };
     if to != state.identity.author_key() {
         return;
     }
-    digest_round::on_page(state, context, message.key(), channel, page, Instant::now()).await;
+    digest_round::on_page(
+        state,
+        context,
+        message.key(),
+        endpoint,
+        channel,
+        page,
+        Instant::now(),
+    )
+    .await;
 }
 
 /// The signed frames that answer a pull of `keys` on `channel` from `asker`: the held ones, at most a page.
@@ -2137,7 +2153,9 @@ mod first_contact_tests {
     use crate::transport::MeshSender;
     use bytes::Bytes;
     use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
-    use habilis_network_util::tuning::{DIGEST_PULL_TTL, DIGEST_SERVES_PER_WINDOW};
+    use habilis_network_util::tuning::{
+        DIGEST_PULL_TTL, DIGEST_SERVES_PER_WINDOW, DIGEST_SETTLE, DIGEST_SETTLE_JITTER,
+    };
 
     use crate::daemon::state::DirectState;
     #[cfg(feature = "multihop")]
@@ -6152,6 +6170,208 @@ mod first_contact_tests {
             assert!(
                 !state.unicast_pool.is_dialing(endpoint_id(83)),
                 "the answer goes to the known address by a plain send, not by a dial back"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The differences that the round would read once the settle of the latest one has ended.
+    fn requests_after_settle(state: &mut EventLoopState) -> usize {
+        let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+        state
+            .digest_round
+            .advance(later, |_| true, |_, _| false)
+            .len()
+    }
+
+    /// A root from a roster peer that names this node, sent by unicast, notes the difference of both channels.
+    #[test]
+    fn a_root_from_a_roster_peer_notes_a_difference() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.peers.insert(alice.author_key());
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                requests_after_settle(&mut state),
+                2,
+                "both channels of the roster peer's root are noted"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A root that names another key is not this node's to note: the round stays empty.
+    #[test]
+    fn a_root_for_another_key_notes_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.peers.insert(alice.author_key());
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: Identity::generate().author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                requests_after_settle(&mut state),
+                0,
+                "a root for another key notes no difference"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A root from a key that is not in the roster notes nothing.
+    #[test]
+    fn a_root_from_a_stranger_notes_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let stranger = Identity::generate();
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("stranger"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&stranger)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                requests_after_settle(&mut state),
+                0,
+                "a root from a stranger notes no difference"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A page that this node asked for registers the pulls of its keys. A page that it did not ask for registers
+    /// none.
+    #[test]
+    fn a_page_is_pulled_only_when_it_was_asked_for() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            let carol = Identity::generate();
+            state.peers.insert(alice.author_key());
+            state.peers.insert(carol.author_key());
+            let page = DigestPage::build(
+                &[DigestEntry::new(
+                    carol.author_key(),
+                    1,
+                    ContentHash::of(b"row"),
+                )],
+                1,
+                0,
+                1,
+            )
+            .expect("a page of one row");
+            let own = state.identity.author_key();
+            let frame = |digest: DigestPage| -> Bytes {
+                let signed = Message::new_frame(
+                    &node.mesh,
+                    &nick("alice"),
+                    MessageKind::SlicePage {
+                        to: own,
+                        channel: Channel::State,
+                        page: digest,
+                    },
+                    MessageBody::from("{}"),
+                )
+                .sign(&alice);
+                signed
+                    .serialize()
+                    .expect("a signed page serializes")
+                    .into_bytes()
+            };
+            let now = clock::Instant::now();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(frame(page.clone()), &mut state, &mut app, &context).await;
+            assert!(
+                !state.outstanding_pulls.take(
+                    endpoint_id(81),
+                    Channel::State,
+                    carol.author_key(),
+                    now
+                ),
+                "a page that was not asked for registers no pull"
+            );
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            state.digest_round.note_root(
+                alice.author_key(),
+                endpoint_id(81),
+                Channel::State,
+                &elsewhere,
+                false,
+                now,
+            );
+            state.digest_round.advance(now, |_| true, |_, _| false);
+            ingest_from(frame(page), &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert!(
+                state.outstanding_pulls.take(
+                    endpoint_id(81),
+                    Channel::State,
+                    carol.author_key(),
+                    now
+                ),
+                "a page that was asked for registers the pull of its key"
             );
             node.endpoint.close().await;
         });

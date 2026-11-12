@@ -49,8 +49,8 @@ use crate::util::clock::{Instant, millis_saturating};
 // `tokio::time::Instant`). Aliased rather than path-qualified, matching
 // `daemon::state` / `daemon::app`.
 use crate::util::tuning::{
-    ALIVE_INTERVAL, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH, backfill_interval,
-    heal_interval, sweep_interval,
+    ALIVE_INTERVAL, DIGEST_ROUND_TICK, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH,
+    backfill_interval, heal_interval, sweep_interval,
 };
 use n0_future::time::Instant as TokioInstant;
 // Gated with `spawn_orphan_watch`, its only caller.
@@ -637,7 +637,7 @@ async fn backfill_arm(
         backfill_interval(),
     );
     gossip::backfill::settle(state, Instant::now()).await;
-    gossip::digest_round::tick(state, context, Instant::now()).await;
+    gossip::digest_round::send_roots(state, context).await;
 }
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
@@ -1436,6 +1436,11 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
 
     // Counted before the census reads them, so the tick that reports an
     // interval is itself in that interval's numbers.
+    async fn digest_round(&mut self) {
+        let context = self.parts.handler_ctx(&self.sender);
+        gossip::digest_round::advance(&mut self.state, &context, Instant::now()).await;
+    }
+
     async fn state_refresh(&mut self) {
         self.state.idle.state_refresh += 1;
         timers::tick_state_refresh(&mut self.state, self.parts.endpoint, &self.gossip).await;
@@ -1685,6 +1690,7 @@ async fn run_loop<Driver: NodeDriver>(
                 lifecycle::end_pending_endpoints(&mut lp.state).await;
             },
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
+            _ = lp.intervals.digest_round.tick() => { lp.digest_round().await; },
             Ok(()) = lp.rung_rx.changed() => { lp.rung_change(); },
             found_rival = beacon::probe_verdict(&mut lp.rival_probe) => { lp.probe_verdict(found_rival).await; },
             Some(report) = lp.rung_reports.recv() => { lp.rung_report(report).await; },
@@ -1898,6 +1904,8 @@ struct MaintenanceIntervals {
     /// Periodic backfill check (recover slices missed
     /// while partitioned/asleep).
     backfill: time::Interval,
+    /// The digest round: the settle ends and the page requests are sent on this tick.
+    digest_round: time::Interval,
     state_refresh: time::Interval,
     /// Periodic relay link-state re-broadcast (our own measured links), so peers
     /// keep a fresh routing graph.
@@ -1934,6 +1942,9 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
     let mut backfill = time::interval(backfill_interval());
     backfill.set_missed_tick_behavior(Skip);
     backfill.tick().await;
+    let mut digest_round = time::interval(DIGEST_ROUND_TICK);
+    digest_round.set_missed_tick_behavior(Skip);
+    digest_round.tick().await;
     let mut state_refresh = time::interval(STATE_REFRESH);
     state_refresh.set_missed_tick_behavior(Skip);
     state_refresh.tick().await;
@@ -1947,6 +1958,7 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
         heal,
         reclaim,
         backfill,
+        digest_round,
         state_refresh,
         linkstate,
     }

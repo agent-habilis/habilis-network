@@ -1186,3 +1186,6 @@ pub const DIGEST_SETTLE: Duration = Duration::from_secs(1);
 /// The random part of the settle delay: each mismatch waits `DIGEST_SETTLE` plus up to this, so the peers
 /// that see the same difference do not all ask at once.
 pub const DIGEST_SETTLE_JITTER: Duration = Duration::from_millis(500);
+
+/// How often the digest round checks its differences and sends its page requests, so a settle that ends is acted on at once.
+pub const DIGEST_ROUND_TICK: Duration = Duration::from_millis(250);
