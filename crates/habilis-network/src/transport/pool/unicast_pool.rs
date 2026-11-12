@@ -914,3 +914,37 @@ pub(super) async fn send_one(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{DialTurn, UnicastPool};
+    use crate::testing;
+    use std::sync::Arc;
+
+    /// Two dial turns of one peer share one lock. When the first turn ends, the map still holds the lock for the
+    /// second one; when the last turn ends, the map is empty.
+    #[test]
+    fn the_last_turn_of_a_peer_removes_its_lock() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let pool = UnicastPool::disconnected();
+        let peer = testing::endpoint_id(7);
+        let first = DialTurn::new(&pool, peer);
+        let second = DialTurn::new(&pool, peer);
+        drop(first);
+        let second_keeps_it = pool
+            .inner
+            .dial_locks
+            .lock()
+            .get(&peer)
+            .is_some_and(|lock| Arc::ptr_eq(lock, &second.lock));
+        assert!(
+            second_keeps_it,
+            "the map still holds the lock that the second turn waits on"
+        );
+        drop(second);
+        assert!(
+            pool.inner.dial_locks.lock().is_empty(),
+            "the last turn of the peer removes its lock"
+        );
+    }
+}
