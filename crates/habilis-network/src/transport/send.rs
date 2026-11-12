@@ -14,7 +14,7 @@ pub(crate) use deliver::resolve;
 pub(crate) use deliver::{
     can_unicast, lane_for, note_held, note_unproven, send_best_effort, send_dialing_back,
 };
-pub use deliver::{deliver, deliver_in_background};
+pub use deliver::{deliver, deliver_in_background, deliver_to, deliver_to_in_background};
 pub(crate) use route::directed_endpoint;
 #[cfg(test)]
 use route::{Route, route};
@@ -35,12 +35,16 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, can_unicast, lane_for, note_held, note_unproven, resolve, route};
+    use super::{
+        Lane, Route, SendError, can_unicast, deliver, lane_for, note_held, note_unproven, resolve,
+        route,
+    };
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified};
     use crate::protocol::{
         AppTag, AuthorKey, CorrId, Identity, MeshId, Message, MessageBody, MessageId, UnixSecs,
     };
+    use crate::transport::outbox::Resend;
 
     use super::Delivered;
     use crate::daemon::state::DirectState;
@@ -644,7 +648,7 @@ mod tests {
                 let frame = || WireFrame::fixture_raw(bytes::Bytes::from_static(b"hello"));
                 let mut handles = Vec::new();
                 for _ in 0..2 {
-                    let delivered = super::deliver::send_unicast(server_id, frame(), &pool)
+                    let delivered = deliver::send_unicast(server_id, frame(), &pool)
                         .await
                         .expect("a refused path is not an error before the wait ends");
                     let Delivered::Pending(handle) = delivered else {
@@ -691,14 +695,14 @@ mod tests {
                 pool.note_dial_failure(server_id).await;
 
                 let frame = WireFrame::fixture_raw(bytes::Bytes::from_static(b"hello"));
-                let error = super::deliver::send_unicast(server_id, frame, &pool)
+                let error = deliver::send_unicast(server_id, frame, &pool)
                     .await
                     .expect_err("the cooldown refuses the send at once");
                 assert!(
                     format!("{error:#}").contains(transport::pool::COOLDOWN_REFUSED),
                     "the chain names the cooldown: {error:#}"
                 );
-                let error = super::SendError::internal(error);
+                let error = SendError::internal(error);
                 assert!(
                     format!("{error:#}").contains(transport::pool::COOLDOWN_REFUSED),
                     "a SendError keeps the cooldown text: {error:#}"
@@ -727,7 +731,7 @@ mod tests {
                 pool.note_dial_failure(server_id).await;
 
                 let frame = WireFrame::fixture_raw(bytes::Bytes::from_static(b"hello"));
-                let delivered = super::deliver::send_unicast(server_id, frame, &pool)
+                let delivered = deliver::send_unicast(server_id, frame, &pool)
                     .await
                     .expect("a warm connection is not refused by the cooldown");
                 let Delivered::Pending(handle) = delivered else {
@@ -1285,6 +1289,143 @@ mod tests {
             lane_for(&test_key("carol"), &state),
             Lane::Unreachable,
             "an unknown peer is unreachable"
+        );
+    }
+
+    // ── a frame of this node, to one key ──────────────────────────────
+
+    /// A broadcast frame that this node signed.
+    fn own_broadcast(state: &EventLoopState) -> Verified {
+        Message::new_app(
+            &mesh(),
+            &nick("alice"),
+            AppFrameParams::new(
+                AppTag::try_new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                body(),
+            ),
+        )
+        .sign(&state.identity)
+    }
+
+    /// A frame that this node signed, directed to `key`.
+    fn own_directed(state: &EventLoopState, key: AuthorKey) -> Verified {
+        Message::new_pong(&mesh(), &nick("alice"), key, &MessageId::random()).sign(&state.identity)
+    }
+
+    fn resolved_to(
+        to: &AuthorKey,
+        message: &Verified,
+        state: &EventLoopState,
+    ) -> Result<Resend, SendError> {
+        deliver::resolve_to(
+            to,
+            message,
+            message.serialize().expect("a frame serializes"),
+            state,
+        )
+    }
+
+    #[test]
+    fn an_own_broadcast_frame_sent_to_one_key_takes_unicast_never_gossip() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, bob) = state_knowing_bob();
+        let message = own_broadcast(&state);
+
+        let route = resolved_to(&test_key("bob"), &message, &state).expect("a route to bob");
+
+        assert!(
+            matches!(route, Resend::Unicast(eid, _) if eid == bob),
+            "an own broadcast frame goes to bob's endpoint, not to gossip: {route:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_directed_to_the_key_takes_unicast() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, bob) = state_knowing_bob();
+        let message = own_directed(&state, test_key("bob"));
+
+        let route = resolved_to(&test_key("bob"), &message, &state).expect("a route to bob");
+
+        assert!(
+            matches!(route, Resend::Unicast(eid, _) if eid == bob),
+            "a frame directed to bob goes to bob's endpoint: {route:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_another_key_signed_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, _) = state_knowing_bob();
+
+        let error = resolved_to(&test_key("bob"), &open_broadcast(), &state)
+            .expect_err("a frame of another key");
+
+        assert!(
+            matches!(error, SendError::ForeignFrame),
+            "a node is no unicast relay for a frame it did not sign: {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_directed_to_another_key_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, _) = state_knowing_bob();
+        let message = own_directed(&state, test_key("carol"));
+
+        let error =
+            resolved_to(&test_key("bob"), &message, &state).expect_err("a frame directed to carol");
+
+        assert!(
+            matches!(error, SendError::OtherAddressee),
+            "its body is sealed to carol, and bob cannot open it: {error:?}"
+        );
+    }
+
+    #[test]
+    fn the_signer_is_checked_before_the_addressee() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, _) = state_knowing_bob();
+        let message = directed_msg_to(test_key("carol"));
+
+        let error =
+            resolved_to(&test_key("bob"), &message, &state).expect_err("a foreign directed frame");
+
+        assert!(
+            matches!(error, SendError::ForeignFrame),
+            "the check of the signer comes first: {error:?}"
+        );
+    }
+
+    #[test]
+    fn an_own_frame_to_a_key_without_an_endpoint_is_undeliverable() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, _) = state_knowing_bob();
+        let message = own_broadcast(&state);
+
+        let error =
+            resolved_to(&test_key("carol"), &message, &state).expect_err("carol has no endpoint");
+
+        assert!(
+            matches!(&error, SendError::Undeliverable(text) if text.contains("no known endpoint")),
+            "a key with no endpoint is undeliverable, never gossip: {error:?}"
+        );
+    }
+
+    #[test]
+    fn an_own_frame_to_a_relay_only_pair_is_held() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_bob();
+        state.direct.insert(bob, DirectState::RelayOnly);
+        let message = own_broadcast(&state);
+
+        let error = resolved_to(&test_key("bob"), &message, &state).expect_err("a held pair");
+
+        assert!(
+            matches!(error, SendError::Held { eid } if eid == bob),
+            "the directed rules hold the frame for a direct path: {error:?}"
         );
     }
 }

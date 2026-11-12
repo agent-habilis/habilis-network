@@ -8,7 +8,10 @@ pub use crate::gossip::{
     Farewell, MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge,
     send_app, start_ping_round, unicast_farewell,
 };
-pub use crate::transport::{Delivered, MeshSender, PendingSend, deliver, deliver_in_background};
+pub use crate::transport::{
+    Delivered, MeshSender, PendingSend, deliver, deliver_in_background, deliver_to,
+    deliver_to_in_background,
+};
 
 /// Handing a peer a payload too large for a gossip frame: offload it to a
 /// local store, send the ticket, let the peer fetch it over the blob ALPN.

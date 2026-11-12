@@ -86,24 +86,114 @@ pub(crate) fn resolve(
         Route::Broadcast => Ok(Resend::Broadcast(bytes)),
         Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
         Route::Held(eid) => Err(SendError::Held { eid }),
-        Route::Undeliverable => {
-            let addressee = sole_addressee(&message.kind);
-            let name = addressee.map_or_else(|| "<none>".to_owned(), ToString::to_string);
-            // Two distinct causes hide behind one route: waiting on PeerInfo
-            // is retryable, an addressee advertising the rendezvous is not.
-            let via_rendezvous = addressee
-                .and_then(|key| state.address_of(key))
-                .is_some_and(|address| state.rendezvous_id == Some(address.id));
-            let cause = if via_rendezvous {
-                "its advertised endpoint is the rendezvous pseudo-node, never a directed target"
-            } else {
-                "no known endpoint (PeerInfo not yet received)"
-            };
-            Err(SendError::Undeliverable(format!(
-                "directed message to {name} undeliverable: {cause}"
-            )))
-        }
+        Route::Undeliverable => Err(undeliverable(sole_addressee(&message.kind), state)),
     }
+}
+
+/// Why a directed message has no endpoint to go to.
+fn undeliverable(addressee: Option<&AuthorKey>, state: &EventLoopState) -> SendError {
+    let name = addressee.map_or_else(|| "<none>".to_owned(), ToString::to_string);
+    // Two distinct causes hide behind one route: waiting on PeerInfo
+    // is retryable, an addressee advertising the rendezvous is not.
+    let via_rendezvous = addressee
+        .and_then(|key| state.address_of(key))
+        .is_some_and(|address| state.rendezvous_id == Some(address.id));
+    let cause = if via_rendezvous {
+        "its advertised endpoint is the rendezvous pseudo-node, never a directed target"
+    } else {
+        "no known endpoint (PeerInfo not yet received)"
+    };
+    SendError::Undeliverable(format!("directed message to {name} undeliverable: {cause}"))
+}
+
+/// Send a frame that this node signed, unchanged, by unicast to `to` alone. Its use is the repair
+/// of an own frame for 1 peer: a broadcast shard that the peer missed goes to the peer that asks,
+/// and no other member receives it again. The bytes MUST be `message.serialize()`.
+///
+/// It checks, in this order, that the frame is one this node signed ([`SendError::ForeignFrame`]),
+/// that the frame is a broadcast or is directed to `to` ([`SendError::OtherAddressee`]), and that
+/// `to` has an endpoint to go to, by the directed rules of [`deliver`] ([`SendError::Undeliverable`]
+/// or [`SendError::Held`]). The payload path check applies as it does for [`deliver`], and the
+/// send waits on nothing: a cold peer is dialed by a task, and the verdict comes through
+/// [`Delivered::Pending`].
+///
+/// # Errors
+/// One of the refusals above, or the failure of a send to a warm connection.
+///
+/// # Examples
+///
+/// It repairs one frame of this node for one peer. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+/// use habilis_network::ops::{Delivered, deliver_to};
+/// use habilis_network::protocol::{AuthorKey, Verified, messages::WireFrame};
+/// use habilis_network::runtime::SendError;
+///
+/// # async fn demo(to: &AuthorKey, message: &Verified, bytes: WireFrame, state: &EventLoopState) -> Result<Delivered, SendError> {
+/// deliver_to(to, message, bytes, state).await
+/// # }
+/// ```
+pub async fn deliver_to(
+    to: &AuthorKey,
+    message: &Verified,
+    bytes: WireFrame,
+    state: &EventLoopState,
+) -> Result<Delivered, SendError> {
+    let Resend::Unicast(eid, bytes) = resolve_to(to, message, bytes, state)? else {
+        unreachable!("a route to one key is never a broadcast");
+    };
+    send_unicast(eid, bytes, &state.unicast_pool)
+        .await
+        .map_err(SendError::internal)
+}
+
+/// The decision of [`deliver_to`], without the send.
+///
+/// # Errors
+/// The same as [`deliver_to`] for a frame that is refused or has no path now.
+pub(crate) fn resolve_to(
+    to: &AuthorKey,
+    message: &Verified,
+    bytes: WireFrame,
+    state: &EventLoopState,
+) -> Result<Resend, SendError> {
+    if message.key() != state.identity.author_key() {
+        return Err(SendError::ForeignFrame);
+    }
+    if sole_addressee(&message.kind).is_some_and(|addressee| addressee != to) {
+        return Err(SendError::OtherAddressee);
+    }
+    match super::route::route_to_key(to, state) {
+        Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
+        Route::Held(eid) => Err(SendError::Held { eid }),
+        Route::Undeliverable | Route::Broadcast => Err(undeliverable(Some(to), state)),
+    }
+}
+
+/// [`deliver_to`] for a caller on the event loop: it returns whether the send was accepted, as
+/// [`deliver_in_background`] does, and it never waits on a dial or a write.
+///
+/// # Examples
+///
+/// It repairs one frame of this node for one peer in the background. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+/// use habilis_network::ops::deliver_to_in_background;
+/// use habilis_network::protocol::{AuthorKey, Verified, messages::WireFrame};
+///
+/// # async fn demo(to: &AuthorKey, message: &Verified, bytes: WireFrame, state: &EventLoopState) -> bool {
+/// deliver_to_in_background(to, message, bytes, state).await
+/// # }
+/// ```
+pub async fn deliver_to_in_background(
+    to: &AuthorKey,
+    message: &Verified,
+    bytes: WireFrame,
+    state: &EventLoopState,
+) -> bool {
+    deliver_to(to, message, bytes, state).await.is_ok()
 }
 
 /// Route like [`deliver`], but never wait on a dial or a stream write: for a

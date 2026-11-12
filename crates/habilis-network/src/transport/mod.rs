@@ -66,7 +66,10 @@ pub(crate) use payload_path::{PayloadPath, RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
 pub(crate) use send::resolve;
-pub use send::{Delivered, Lane, PendingSend, SendError, deliver, deliver_in_background};
+pub use send::{
+    Delivered, Lane, PendingSend, SendError, deliver, deliver_in_background, deliver_to,
+    deliver_to_in_background,
+};
 pub(crate) use send::{
     can_unicast, directed_endpoint, lane_for, note_held, note_unproven, send_best_effort,
     send_dialing_back,

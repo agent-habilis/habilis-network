@@ -29,6 +29,12 @@ pub(super) fn route(message: &Verified, state: &EventLoopState) -> Route {
     let Some(key) = sole_addressee(&message.kind) else {
         return Route::Broadcast;
     };
+    route_to_key(key, state)
+}
+
+/// The directed rules for a frame that goes to `key` alone: unicast to its endpoint, held for a
+/// direct path, or undeliverable. It never gives [`Route::Broadcast`].
+pub(super) fn route_to_key(key: &AuthorKey, state: &EventLoopState) -> Route {
     match directed_endpoint(key, state) {
         Some(eid) if held(eid, state) => Route::Held(eid),
         Some(eid) => Route::Unicast(eid),

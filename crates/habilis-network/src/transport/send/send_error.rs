@@ -33,6 +33,12 @@ pub enum SendError {
     Undeliverable(String),
     /// The message is larger than one frame carries.
     Oversize(String),
+    /// A send to one key of a frame that another key signed. A node sends only the frames it
+    /// signed, so it is not a unicast relay for any frame it has seen.
+    ForeignFrame,
+    /// A send to one key of a frame that is not for that key: a directed frame to another key,
+    /// or a frame of a kind that has no sole recipient.
+    OtherAddressee,
     /// The addressee is not a valid nickname.
     InvalidAddressee(String),
     /// The mesh event loop has stopped, so nothing can carry the message.
@@ -64,6 +70,12 @@ impl fmt::Display for SendError {
             Self::Undeliverable(message)
             | Self::Oversize(message)
             | Self::InvalidAddressee(message) => f.write_str(message),
+            Self::ForeignFrame => f.write_str("send to one key refused: a node sends to one key only a frame that it signed"),
+            Self::OtherAddressee => {
+                f.write_str(
+                    "send to one key refused: the frame is directed to another key, or it has no sole recipient",
+                )
+            }
             Self::Stopped => f.write_str("mesh event loop has stopped"),
             Self::EventLoop(_) => f.write_str("the mesh event loop failed"),
             Self::State(error) => fmt::Display::fmt(error, f),
@@ -92,6 +104,8 @@ impl error::Error for SendError {
             | Self::Undeliverable(_)
             | Self::Oversize(_)
             | Self::InvalidAddressee(_)
+            | Self::ForeignFrame
+            | Self::OtherAddressee
             | Self::Stopped => None,
         }
     }
