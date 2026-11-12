@@ -38,6 +38,8 @@ enum Request {
     Key(oneshot::Sender<AuthorKey>),
     DropFrom(Option<AuthorKey>, oneshot::Sender<()>),
     DropLeft(Option<AuthorKey>, oneshot::Sender<()>),
+    WriteMeta(serde_json::Value, oneshot::Sender<()>),
+    ReadMeta(oneshot::Sender<serde_json::Value>),
 }
 
 /// Presence alone forms the mesh; members write and read the state document, and drop frames on request.
@@ -98,6 +100,20 @@ impl NodeDriver for Store {
             Request::DropLeft(author, done) => {
                 state.drop_left_from(author);
                 let _ = done.send(());
+                false
+            }
+            Request::WriteMeta(merge, done) => {
+                broadcast_state_merge(
+                    state,
+                    StateMergeParams::new(context.into(), Channel::Meta, merge).surface(false),
+                )
+                .await
+                .expect("a small merge is accepted");
+                let _ = done.send(());
+                true
+            }
+            Request::ReadMeta(response) => {
+                let _ = response.send(state.view(Channel::Meta));
                 false
             }
         }
@@ -394,5 +410,97 @@ fn a_tombstone_after_a_write_burst_still_drops_the_slice() {
         );
 
         bob.leave().await.expect("bob leaves");
+    });
+}
+
+/// The bound of a cold join: the backfill that a newcomer is owed on meeting a member, with no digest round. The
+/// round needs more than 12 s, so a joiner that converges inside this bound was served by the backfill.
+const COLD_JOIN_BOUND: Duration = Duration::from_secs(6);
+
+async fn write_meta(node: &Node<Store>, keys: usize) {
+    let merge: serde_json::Map<String, serde_json::Value> = (0..keys)
+        .map(|index| (format!("m{index}"), serde_json::json!(index)))
+        .collect();
+    let (done_tx, done_rx) = oneshot::channel();
+    node.send(Request::WriteMeta(
+        serde_json::Value::Object(merge),
+        done_tx,
+    ))
+    .await
+    .expect("the meta write reaches the loop");
+    done_rx.await.expect("the meta write is applied");
+}
+
+async fn read_meta(node: &Node<Store>) -> serde_json::Value {
+    let (tx, rx) = oneshot::channel();
+    node.send(Request::ReadMeta(tx))
+        .await
+        .expect("the meta read reaches the loop");
+    rx.await.expect("the loop answers")
+}
+
+/// The meta keys that start with `m` in every author's slice of the meta document.
+fn meta_key_count(document: &serde_json::Value) -> usize {
+    let mut count = 0;
+    if let Some(authors) = document.as_object() {
+        for slice in authors.values() {
+            if let Some(fields) = slice.as_object() {
+                count += fields.keys().filter(|key| key.starts_with('m')).count();
+            }
+        }
+    }
+    count
+}
+
+/// The keys of both documents that a node holds, once it holds `want` of each or the bound runs out.
+async fn converged_within(node: &Node<Store>, want: usize, bound: Duration) -> (usize, usize) {
+    let started = Instant::now();
+    loop {
+        let state_keys = key_count(&read(node).await);
+        let meta_keys = meta_key_count(&read_meta(node).await);
+        if (state_keys >= want && meta_keys >= want) || started.elapsed() > bound {
+            return (state_keys, meta_keys);
+        }
+        time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// A cold joiner meets a meshed pair after a member wrote both documents, and its state and meta views converge on
+/// the writer's slices through the backfill.
+#[test]
+fn a_cold_joiner_converges_on_state_and_meta() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let nonce: u64 = rand::random();
+        let topic = format!("slice-cold-{nonce}");
+
+        let (alice, _) = spawn(&topic, "alice").await;
+        let (bob, bob_saw) = spawn(&topic, "bob").await;
+        assert!(
+            bob_saw
+                .wait_for(&nick("alice"), Duration::from_secs(45))
+                .await,
+            "bob never saw alice join"
+        );
+        write_log(&alice, 20).await;
+        write_meta(&alice, 20).await;
+
+        let (carol, carol_saw) = spawn(&topic, "carol").await;
+        assert!(
+            carol_saw
+                .wait_for(&nick("alice"), Duration::from_secs(45))
+                .await,
+            "carol never saw alice join"
+        );
+        let (state_keys, meta_keys) = converged_within(&carol, 20, COLD_JOIN_BOUND).await;
+        assert_eq!(
+            (state_keys, meta_keys),
+            (20, 20),
+            "the cold joiner holds {state_keys} state keys and {meta_keys} meta keys of alice's 20 of each"
+        );
+
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+        carol.leave().await.expect("carol leaves");
     });
 }
