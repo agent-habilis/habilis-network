@@ -6409,6 +6409,9 @@ mod first_contact_tests {
                 AuthorKey::from(bytes)
             };
             let own = state.identity.author_key();
+            let own_meta = state.docs.digest(Channel::Meta);
+            let in_roster = |_: &AuthorKey| true;
+            let matches_nothing = |_: Channel, _: &ContentHash| false;
             let start = clock::Instant::now();
             for index in 0..DIGEST_PULLS_OPEN {
                 assert!(
@@ -6424,23 +6427,7 @@ mod first_contact_tests {
             }
             let elsewhere =
                 DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
-            let root = || -> Bytes {
-                let signed = Message::new_frame(
-                    &node.mesh,
-                    &nick("holder"),
-                    MessageKind::SliceRoot {
-                        to: own,
-                        state: elsewhere.clone(),
-                        meta: elsewhere.clone(),
-                    },
-                    MessageBody::from("{}"),
-                )
-                .sign(&holder);
-                signed
-                    .serialize()
-                    .expect("a signed root serializes")
-                    .into_bytes()
-            };
+            let root = || root_frame(&node.mesh, &holder, own, &elsewhere, &own_meta);
             let page = DigestPage::build(
                 &[DigestEntry::new(
                     wanted.author_key(),
@@ -6452,32 +6439,21 @@ mod first_contact_tests {
                 1,
             )
             .expect("a page of one row");
-            let answer = || -> Bytes {
-                let signed = Message::new_frame(
-                    &node.mesh,
-                    &nick("holder"),
-                    MessageKind::SlicePage {
-                        to: own,
-                        channel: Channel::State,
-                        page: page.clone(),
-                    },
-                    MessageBody::from("{}"),
-                )
-                .sign(&holder);
-                signed
-                    .serialize()
-                    .expect("a signed page serializes")
-                    .into_bytes()
-            };
+            let answer = || page_frame(&node.mesh, &holder, own, &page);
             state.unicast_arrival = Some(endpoint_id(81));
             let first_root = root();
             ingest_from(first_root, &mut state, &mut app, &context).await;
             let first_due = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
             state
                 .digest_round
-                .advance(first_due, |_| true, |_, _| false);
+                .advance(first_due, in_roster, matches_nothing);
             let first_page = answer();
             ingest_from(first_page, &mut state, &mut app, &context).await;
+            assert_eq!(
+                state.digest_round.reading_count(),
+                0,
+                "the page ended the reading of the holder"
+            );
             assert!(
                 !state.outstanding_pulls.take(
                     endpoint_id(81),
@@ -6495,7 +6471,12 @@ mod first_contact_tests {
             let second_due = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
             state
                 .digest_round
-                .advance(second_due, |_| true, |_, _| false);
+                .advance(second_due, in_roster, matches_nothing);
+            assert_eq!(
+                state.digest_round.reading_count(),
+                1,
+                "the next differing root reads the holder again"
+            );
             let second_page = answer();
             ingest_from(second_page, &mut state, &mut app, &context).await;
             state.unicast_arrival = None;
@@ -6779,6 +6760,42 @@ mod first_contact_tests {
             );
             node.endpoint.close().await;
         });
+    }
+
+    /// The signed `SliceRoot` that `holder` sends to `to`, with its State and Meta digests.
+    fn root_frame(
+        mesh: &MeshId,
+        holder: &Identity,
+        to: AuthorKey,
+        state: &DigestRoot,
+        meta: &DigestRoot,
+    ) -> Bytes {
+        let kind = MessageKind::SliceRoot {
+            to,
+            state: state.clone(),
+            meta: meta.clone(),
+        };
+        let signed =
+            Message::new_frame(mesh, &nick("holder"), kind, MessageBody::from("{}")).sign(holder);
+        signed
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes()
+    }
+
+    /// The signed `SlicePage` of the State channel that `holder` sends to `to`.
+    fn page_frame(mesh: &MeshId, holder: &Identity, to: AuthorKey, page: &DigestPage) -> Bytes {
+        let kind = MessageKind::SlicePage {
+            to,
+            channel: Channel::State,
+            page: page.clone(),
+        };
+        let signed =
+            Message::new_frame(mesh, &nick("holder"), kind, MessageBody::from("{}")).sign(holder);
+        signed
+            .serialize()
+            .expect("a signed page serializes")
+            .into_bytes()
     }
 
     /// The differences that the round would read once the settle of the latest one has ended.
