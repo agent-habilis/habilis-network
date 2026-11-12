@@ -4288,7 +4288,7 @@ mod first_contact_tests {
     }
 
     #[test]
-    fn a_lapsed_key_keeps_its_slice_and_a_dropped_key_loses_it() {
+    fn a_lapsed_key_and_a_dropped_key_lose_their_slices() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -4316,29 +4316,12 @@ mod first_contact_tests {
             state.peers.remove(&dropped.author_key());
             heartbeat::tick_sweep(&mut state, &SilentSink);
             assert!(
-                meta_slot(&state, &lapsed.author_key()).is_some(),
-                "a lapsed key keeps its slice while it can return"
+                meta_slot(&state, &lapsed.author_key()).is_none(),
+                "a lapsed key keeps no slice: the sweep releases it, and it can still return"
             );
             assert!(
                 meta_slot(&state, &dropped.author_key()).is_none(),
                 "a key that left the roster loses its slice"
-            );
-            let body =
-                MessageBody::try_new(r#"{"version":2,"value":{"n":2}}"#).expect("a slice body");
-            let returned =
-                Message::new_channel_event(&node.mesh, &nick("slice"), body, Channel::Meta)
-                    .sign(&lapsed);
-            let event = ChannelEvent {
-                channel: Channel::Meta,
-                message: &returned,
-                surfaceable: true,
-                live: true,
-            };
-            dispatch_channel(event, &mut state, &mut app, &context);
-            assert_eq!(
-                meta_slot(&state, &lapsed.author_key()).and_then(|slot| slot["n"].as_u64()),
-                Some(2),
-                "a lapsed key that returns writes its new slice, not a gone refusal"
             );
             node.endpoint.close().await;
         });
@@ -6332,6 +6315,72 @@ mod first_contact_tests {
                     now
                 ),
                 "a page that arrived by broadcast registers no pull"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A frame of a key that lapsed quiet waits in the pending set: it is not applied, so the view does not hold it.
+    #[test]
+    fn a_frame_of_a_lapsed_key_waits_in_the_pending_set() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.clock_evidence.lapsed_quiet.insert(alice.author_key());
+            let body = MessageBody::try_new(r#"{"version":1,"value":{"a":1}}"#).expect("a body");
+            let frame: Bytes =
+                Message::new_channel_event(&node.mesh, &nick("alice"), body, Channel::State)
+                    .sign(&alice)
+                    .serialize()
+                    .expect("a signed slice serializes")
+                    .into_bytes();
+            ingest_from(frame, &mut state, &mut app, &context).await;
+            assert!(
+                !state.docs.held_keys().contains(&alice.author_key()),
+                "a lapsed key's frame is not applied"
+            );
+            assert!(
+                state
+                    .docs
+                    .take_pending(Channel::State, &alice.author_key(), clock::Instant::now())
+                    .is_some(),
+                "a lapsed key's frame waits in the pending set"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A key that lapsed quiet keeps no slice: the sweep that lapses it releases the slice that it held.
+    #[test]
+    fn a_lapsed_key_keeps_no_slice() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.peers.insert(alice.author_key());
+            let body = MessageBody::try_new(r#"{"version":1,"value":{"a":1}}"#).expect("a body");
+            let frame: Bytes =
+                Message::new_channel_event(&node.mesh, &nick("alice"), body, Channel::State)
+                    .sign(&alice)
+                    .serialize()
+                    .expect("a signed slice serializes")
+                    .into_bytes();
+            ingest_from(frame, &mut state, &mut app, &context).await;
+            assert!(
+                state.docs.held_keys().contains(&alice.author_key()),
+                "alice's slice is held while she is in the roster"
+            );
+            state.peers.remove(&alice.author_key());
+            state.clock_evidence.lapsed_quiet.insert(alice.author_key());
+            state.release_strangers();
+            assert!(
+                !state.docs.held_keys().contains(&alice.author_key()),
+                "a lapsed key keeps no slice after the sweep"
             );
             node.endpoint.close().await;
         });

@@ -605,6 +605,26 @@ mod tests {
         );
     }
 
+    /// A lapsed key keeps no slice, so the round does not pull it.
+    #[test]
+    fn a_lapsed_key_is_not_pulled() {
+        let mut state = testing::fresh_state();
+        let lapsed = AuthorKey::from([3; 32]);
+        state.clock_evidence.lapsed_quiet.insert(lapsed);
+        let page = DigestPage::build(
+            &[DigestEntry::new(lapsed, 2, ContentHash::of(b"row"))],
+            1,
+            0,
+            1,
+        )
+        .expect("a page of one row");
+        let planned: Vec<AuthorKey> = DigestRound::pull_plan(&state, Channel::State, &page, 18)
+            .into_iter()
+            .flatten()
+            .collect();
+        assert!(!planned.contains(&lapsed), "a lapsed key is not pulled");
+    }
+
     /// A page lists a key that is not in the roster. The pull plan keeps the roster key only.
     #[test]
     fn a_key_outside_the_roster_is_not_pulled() {

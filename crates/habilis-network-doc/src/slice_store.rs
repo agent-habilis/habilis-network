@@ -780,8 +780,8 @@ impl SliceStore {
 
     /// Drops the slice and the bucket of `key`, and puts the key in the gone set.
     ///
-    /// The engine calls it for a signed goodbye and for a replaced run, never for a key that lapses
-    /// quiet: that key can return, and it keeps its slice.
+    /// The engine calls it for a signed goodbye and for a replaced run. A key that lapses quiet goes through
+    /// [`SliceStore::release`] instead: that key can return, so it gets no gone entry.
     pub fn forget(&mut self, key: &AuthorKey, now: Instant) {
         self.slices.remove(key);
         self.buckets.remove(key);

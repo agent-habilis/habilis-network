@@ -1796,12 +1796,16 @@ impl EventLoopState {
         at >= self.joined_at
     }
 
-    /// Whether the store keeps the slice of `key`: the own key, and every key in the roster.
+    /// Whether the store keeps the slice of `key`: the own key, a live peer, and a quiet peer. A key that lapsed
+    /// quiet can return, but it keeps no slice: its frames wait in the pending set, and its slice comes back by the
+    /// digest round when it returns.
     pub(crate) fn keeps_slice(&self, key: &AuthorKey) -> bool {
-        *key == self.identity.author_key() || self.in_roster(key)
+        *key == self.identity.author_key() || self.peers.contains(key) || self.quiet.contains(key)
     }
 
-    /// Drops the slices of every key that is out of the roster. A key that leaves the roster keeps no slice.
+    /// Drops the slices of every key that is out of the slice gate, so a key that lapsed quiet loses its slice here.
+    /// Each node lapses a key up to one sweep interval apart from the others, so for that span one node can hold a
+    /// slice that another has released: the digest round then reads pages and pulls nothing, which costs answers only.
     pub(crate) fn release_strangers(&mut self) {
         let held = self.docs.held_keys();
         let strangers: Vec<AuthorKey> = held
