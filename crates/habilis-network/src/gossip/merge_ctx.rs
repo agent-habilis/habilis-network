@@ -5,7 +5,7 @@
 //! carries the generic transport primitives the app rides. Inbound dispatch
 //! lives in [`super::recv`].
 
-use crate::daemon::state::{Latch, RendezvousFlag, Standing};
+use crate::daemon::state::{Latch, PeerInfoFlood, RendezvousFlag, Standing};
 use std::fmt;
 
 use crate::transport::MeshSender;
@@ -69,7 +69,11 @@ use tokio::sync::oneshot;
 ///
 /// # Errors
 /// Refuses a body too large for one frame, propagates a serialize/deliver
-/// failure, and errors if the unmeshed buffer is full.
+/// failure, and errors if the unmeshed buffer is full. A directed frame names its recipient by
+/// author key, so two live peers that use one nickname are two addressees, and neither send is
+/// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. An unmeshed
+/// node refuses a directed frame to a key that no roster, quiet set or known address holds
+/// ([`crate::transport::SendError::Undeliverable`]), because nobody can deliver it later.
 ///
 /// # Examples
 ///
@@ -97,6 +101,15 @@ pub async fn send_app(
             frame.wire_len()
         )));
     }
+    // A key that nobody holds can never be delivered to, so the caller hears that now, meshed or
+    // not: the later "no known endpoint" cause would tell it to wait for a `PeerInfo`.
+    if let Some(key) = sole_addressee(&frame.kind)
+        && !state.knows_key(key)
+    {
+        return Err(transport::SendError::Undeliverable(format!(
+            "directed message to {key} undeliverable: no roster, quiet set or known address holds this key"
+        )));
+    }
     let bytes = frame
         .serialize()
         .map_err(|error| transport::SendError::Internal(error.into()))?;
@@ -118,6 +131,7 @@ pub async fn send_app(
             }
         }
     } else {
+        // An unmeshed node buffers a directed frame for the meshed edge.
         park_and_offer(state, context, &frame, &bytes);
     }
     if state.pending_outbound.push((frame.clone(), bytes)) {
@@ -370,7 +384,8 @@ pub enum Farewell {
     /// The frame goes over gossip only.
     #[default]
     GossipOnly,
-    /// The frame also goes to each rostered peer by unicast.
+    /// The frame also goes by unicast to each live peer whose key made its dial hint with a
+    /// `PeerInfo`. A peer known only by a card has no such hint and gets the frame by gossip only.
     UnicastMirror,
 }
 
@@ -465,7 +480,7 @@ pub async fn broadcast_state_merge(
         Ingested::Duplicate => return Ok(()),
         Ingested::Rejected => {
             return Err(transport::SendError::internal(anyhow::anyhow!(
-                "write rejected: a member may only write its own /peers/<nick>/card"
+                "write rejected: a member may only write the gated field of the slot that its own key names"
             )));
         }
         Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
@@ -510,8 +525,11 @@ pub async fn broadcast_state_merge(
     Ok(())
 }
 
-/// Mirror a farewell frame over the unicast plane to every rostered peer —
-/// fire-and-forget dials racing the shutdown propagation sleep. The gossip
+/// Mirror a farewell frame over the unicast plane to every live peer whose key made its dial hint
+/// with a `PeerInfo` — fire-and-forget dials racing the shutdown propagation sleep. A hint from a
+/// card has no verified key, and dialing it would open dials to addresses that no admitted key
+/// owns, so a peer known only by its card is left to gossip. The same holds for a second key under a
+/// nickname whose hint another key owns. The gossip
 /// overlay can be silently linkless (a post-join flap heals in seconds, but a
 /// leaver exits first), and a farewell that dies with the leaver can never be
 /// healed by anti-entropy — no live replica holds it. Receiver-side dedup
@@ -527,7 +545,7 @@ pub async fn broadcast_state_merge(
 ///
 /// # Examples
 ///
-/// It sends a farewell frame to each peer that has an endpoint. The doc test compiles it but does not run it.
+/// It sends a farewell frame to each live peer that owns a dial hint. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::embed::EventLoopState;
@@ -539,14 +557,8 @@ pub async fn broadcast_state_merge(
 /// # }
 /// ```
 pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
-    for (nick, endpoint_id) in &state.peer_endpoints {
-        // The rendezvous pseudo-node is never a directed target, and a
-        // quiet/ghost peer's stale hint isn't worth a dial at shutdown.
-        if state.rendezvous_id == Some(endpoint_id.id) || !state.peers.contains(nick) {
-            continue;
-        }
+    for endpoint_id in farewell_targets(state) {
         let pool = state.unicast_pool.clone();
-        let endpoint_id = endpoint_id.id;
         let bytes = bytes.clone();
         task::spawn(async move {
             if let Err(error) = pool.dial_and_send(endpoint_id, bytes.into_bytes()).await {
@@ -554,6 +566,23 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
             }
         });
     }
+}
+
+/// The endpoints that [`unicast_farewell`] dials: the dial address of each live peer, once for each
+/// endpoint, whatever the keys that use it. The rendezvous pseudo-node is never a directed target,
+/// and a quiet or ghost peer's stale address isn't worth a dial at shutdown.
+fn farewell_targets(state: &EventLoopState) -> Vec<iroh::EndpointId> {
+    let mut targets: Vec<iroh::EndpointId> = Vec::new();
+    for key in &state.peers {
+        let Some(address) = state.address_of(key) else {
+            continue;
+        };
+        let new_target = !targets.contains(&address.id);
+        if state.rendezvous_id != Some(address.id) && new_target {
+            targets.push(address.id);
+        }
+    }
+    targets
 }
 
 /// The body of our `PeerInfo`: our address, the proof that we own it, and, while we hold the
@@ -575,10 +604,11 @@ pub(crate) fn peer_info_json(
 /// dial us directly. Unlike `joined`, `PeerInfo` never enters the
 /// message log (`handle_peer_info` returns before the log push), so
 /// re-sending it is invisible to `poll`/`fetch_messages` consumers —
-/// safe to repeat on every new neighbor. Stamps `peerinfo_flooded_at`, the
-/// window the `joined` re-flood gate reads.
+/// safe to repeat on every new neighbor. Stamps `peerinfo_flood`, the
+/// window the `joined` re-flood gate and the periodic refresh read, and draws the spread of the
+/// next refresh period.
 pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    state.peerinfo_flooded_at = Some(clock::Instant::now());
+    state.peerinfo_flood = Some(PeerInfoFlood::at(clock::Instant::now()));
     state.latches.remove(&Latch::PeerInfoDeferred);
     let our_addr = context.endpoint.addr();
     state.last_flooded_addr = Some(our_addr.clone());
@@ -658,10 +688,10 @@ pub(crate) fn park_and_offer(
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
 fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
-    let Some(nick) = sole_addressee(&frame.kind) else {
+    let Some(key) = sole_addressee(&frame.kind) else {
         return;
     };
-    let Some(address) = state.peer_endpoints.get(nick).cloned() else {
+    let Some(address) = state.address_of(key) else {
         return;
     };
     if state.lane_session_wanted(address.id, clock::Instant::now()) {
@@ -674,9 +704,9 @@ mod tests {
     use crate::daemon::state::Standing;
     use crate::transport::UdpTransport;
 
-    use super::{mark_parked, peer_info_json};
+    use super::{farewell_targets, mark_parked, peer_info_json};
     use crate::protocol::{MeshId, Message};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
 
     use crate::protocol;
     use crate::protocol::messages::AppFrameParams;
@@ -684,6 +714,75 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::testing;
     use crate::util::clock;
+    /// The mirror dials the hint of a live peer whose key made it. It skips a hint from a card (no
+    /// verified key, even when a key is admitted under the nickname later), a hint of a quiet key,
+    /// and the rendezvous.
+    #[test]
+    fn the_farewell_mirror_dials_only_the_hints_that_a_live_key_made() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (owned, card, quiet, rendezvous) = (
+            endpoint_id(1),
+            endpoint_id(2),
+            endpoint_id(3),
+            endpoint_id(9),
+        );
+        state.rendezvous_id = Some(rendezvous);
+        // A live key made its hint with a PeerInfo.
+        state.peer_for_test("owned");
+        state.names.insert(test_key("owned"), nick("owned"));
+        state.bind_peer_endpoint(
+            test_key("owned"),
+            nick("owned"),
+            iroh::EndpointAddr::new(owned),
+        );
+        // A card names a nickname that no key uses yet; a key is admitted under it afterwards.
+        state.note_peer_endpoint(nick("card"), iroh::EndpointAddr::new(card));
+        state.peer_for_test("card");
+        // The key that made a hint went quiet.
+        state.quiet_for_test("quiet");
+        state.names.insert(test_key("quiet"), nick("quiet"));
+        state.bind_peer_endpoint(
+            test_key("quiet"),
+            nick("quiet"),
+            iroh::EndpointAddr::new(quiet),
+        );
+        // A live key advertised the rendezvous.
+        state.peer_for_test("beacon");
+        state.names.insert(test_key("beacon"), nick("beacon"));
+        state.bind_peer_endpoint(
+            test_key("beacon"),
+            nick("beacon"),
+            iroh::EndpointAddr::new(rendezvous),
+        );
+
+        assert_eq!(
+            farewell_targets(&state),
+            vec![owned],
+            "the mirror dialed a hint that no live key made, or the rendezvous"
+        );
+    }
+
+    /// Two nicknames can bind one endpoint (a node that restarted under a new name, both keys
+    /// live). The mirror dials the endpoint once, not once per nickname.
+    #[test]
+    fn the_farewell_mirror_dials_an_endpoint_once_whatever_the_nicknames_that_bind_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(1);
+        for name in ["swift-cedar", "lost-heron"] {
+            state.peer_for_test(name);
+            state.names.insert(test_key(name), nick(name));
+            state.bind_peer_endpoint(test_key(name), nick(name), iroh::EndpointAddr::new(shared));
+        }
+
+        assert_eq!(
+            farewell_targets(&state),
+            vec![shared],
+            "the mirror dialed the same endpoint once for each nickname that binds it"
+        );
+    }
+
     /// A departure written with a farewell reaches each peer by unicast at once. The overlay is
     /// not meshed, so gossip carries nothing: only the unicast mirror can deliver the frame, and
     /// no anti-entropy round is needed.
@@ -738,8 +837,9 @@ mod tests {
                 let mut state = fresh_state();
                 state.unicast_pool = UnicastPool::new(node.clone(), false);
                 lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
-                state.peer_endpoints.insert(nick("bob"), server.addr());
-                state.peers.insert(nick("bob"));
+                state.names.insert(test_key("bob"), nick("bob"));
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), server.addr());
+                state.peer_for_test("bob");
 
                 let mesh = MeshId::from("test");
                 let author = nick("alice");
@@ -819,7 +919,9 @@ mod tests {
         state.standing.remove(&Standing::Meshed);
         state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
-        state.peer_endpoints.insert(
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(
+            test_key("bob"),
             nick("bob"),
             iroh::EndpointAddr::new(bob)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url")),
@@ -827,7 +929,7 @@ mod tests {
         let frame = Message::new_pong(
             &MeshId::from("test"),
             &nick("alice"),
-            nick("bob"),
+            test_key("bob"),
             &protocol::MessageId::random(),
         )
         .sign(&protocol::Identity::generate());
@@ -850,9 +952,8 @@ mod tests {
         let mut state = fresh_state();
         state.standing.remove(&Standing::Meshed);
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.names.insert(test_key("bob"), nick("bob"));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         let frame = Message::new_app(
             &MeshId::from("test"),
             &nick("alice"),

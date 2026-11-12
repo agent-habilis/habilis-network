@@ -14,7 +14,9 @@ use crate::embed::{
 };
 use crate::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
 use crate::protocol::messages::Authored;
-use crate::protocol::{AppFrameParams, AppTag, Channel, MessageBody, MessageKind, Nickname};
+use crate::protocol::{
+    AppFrameParams, AppTag, AuthorKey, Channel, MessageBody, MessageKind, Nickname,
+};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -72,7 +74,7 @@ pub const DEPARTURE_GRACE: Duration = Duration::from_millis(750);
 
 /// What a signed `App` frame costs beyond its body: ids, the pubkey, the
 /// signature, the mesh id and the JSON keys. Checked by
-/// `the_envelope_fits_its_reserve` against a 32-scalar author and addressee
+/// `the_envelope_fits_its_reserve` against a 32-scalar author, an addressee key
 /// and a mesh id carrying a custom relay ladder.
 const ENVELOPE_RESERVE: usize = 1024;
 
@@ -151,7 +153,48 @@ pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, transport::SendErr
         .map_err(|error| transport::SendError::InvalidAddressee(error.to_string()))
 }
 
-/// `text` as `serde_json` writes it inside quotes.
+/// Parse the author key of an addressee from its 64 lowercase hex digits, the form that
+/// [`Inbound::key`] has in text and that the roster JSON names in `key`.
+///
+/// # Errors
+/// `key` is not 64 lowercase hex digits.
+///
+/// # Examples
+///
+/// A key is 64 lowercase hex digits, and any other text is refused.
+///
+/// ```
+/// use habilis_network::membership::parse_key;
+///
+/// assert!(parse_key(&"ab".repeat(32)).is_ok());
+/// assert!(parse_key("bob").is_err());
+/// ```
+pub fn parse_key(key: &str) -> Result<AuthorKey, transport::SendError> {
+    AuthorKey::decode_hex(key).ok_or_else(|| {
+        transport::SendError::InvalidAddressee(
+            "the author key of an addressee is 64 lowercase hex digits".to_owned(),
+        )
+    })
+}
+
+/// The key a directed send by nickname goes to ([`EventLoopState::addressee_key`]). A frame names
+/// its recipient by key, so a nickname that no key uses, or that two or more keys of one rank
+/// use, is refused here with the text of the cause. No `to` is a broadcast.
+fn recipient_key(
+    state: &EventLoopState,
+    to: Option<Nickname>,
+) -> Result<Option<AuthorKey>, String> {
+    let Some(nickname) = to else {
+        return Ok(None);
+    };
+    state
+        .addressee_key(&nickname)
+        .map(Some)
+        .map_err(|error| format!("directed message to {nickname} refused: {error}"))
+}
+
+/// The length in bytes of `text` as `serde_json` writes it inside quotes: `"`, `\`, newline, tab
+/// and carriage return take two bytes, and every other scalar keeps its UTF-8 length.
 fn escaped_len(text: &str) -> usize {
     text.chars()
         .map(|scalar| match scalar {
@@ -181,8 +224,10 @@ fn escaped_len(text: &str) -> usize {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Inbound {
-    /// The author's nickname.
+    /// The author's nickname. Two live members can use one nickname, so it names no author.
     pub nick: String,
+    /// The author's key. A reply goes to this key with [`Messaging::SendToKey`].
+    pub key: AuthorKey,
     /// The message was addressed to us specifically, not broadcast.
     pub directed: bool,
     /// The body of the message, as UTF-8.
@@ -270,6 +315,17 @@ pub enum Messaging {
         /// Gets `Ok` when the request is done, or the error text.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Send one `msg` to the member that holds an author key. Two live members can use one
+    /// nickname, and [`Messaging::Send`] refuses such a nickname; a key names one member. Build
+    /// `body` with [`msg_body`].
+    SendToKey {
+        /// The author key of the recipient.
+        to: AuthorKey,
+        /// The body of the message (sealed for a directed frame on a passworded mesh).
+        body: MessageBody,
+        /// Gets `Ok` when the request is done, or the error text.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Merge a change into the shared state.
     StateMerge {
         /// The RFC 7386 merge to apply.
@@ -320,7 +376,8 @@ pub enum Inspect {
         /// Gets the text of the answer.
         reply: oneshot::Sender<String>,
     },
-    /// How many members there are.
+    /// How many members are in the mesh now, this member included: the shown peers that are not
+    /// quiet, and this member. A member that is alone reads 1.
     PeerCount {
         /// Gets the count.
         reply: oneshot::Sender<usize>,
@@ -725,12 +782,20 @@ impl NodeApp for MembershipApp {
         if message.kind.app_tag().map(AppTag::as_str) != Some(MSG_TAG) {
             return false;
         }
-        // The engine only dispatches frames addressed to us or broadcast, so a
-        // present `to` is us.
+        // The engine hands over a directed frame for another key too: only a frame for this
+        // key, or a broadcast, is a message to the member.
+        if let MessageKind::App { to: Some(to), .. } = &message.kind
+            && *to != context.our_pubkey
+        {
+            return false;
+        }
+        let directed = matches!(message.kind, MessageKind::App { to: Some(_), .. });
+        let text = message.body.as_str().to_owned();
         let inbound = Inbound {
             nick: message.author.to_string(),
-            directed: matches!(message.kind, MessageKind::App { to: Some(_), .. }),
-            text: message.body.as_str().to_owned(),
+            key: message.key(),
+            directed,
+            text,
         };
         // Full or closed: the caller is not draining. Dropping is the only
         // option that neither blocks the event loop nor grows without bound.
@@ -802,6 +867,47 @@ impl NodeDriver for MembershipApp {
 }
 
 impl MembershipApp {
+    /// Send one `msg` frame to `to` (a broadcast for `None`) and answer `reply` with the outcome.
+    /// Returns `true`: a frame that went out is a live frame.
+    async fn send_msg(
+        &mut self,
+        state: &mut EventLoopState,
+        context: &HandlerCtx<'_>,
+        to: Option<AuthorKey>,
+        body: MessageBody,
+        reply: oneshot::Sender<Result<(), String>>,
+    ) -> bool {
+        let frame = app_frame(
+            context,
+            AppFrameParams::new(
+                AppTag::try_new(MSG_TAG).expect("a valid app tag"),
+                to,
+                None,
+                body,
+            ),
+        );
+        let class = self.classify(&frame.authored());
+        match send_app(state, context, frame, class).await {
+            Ok(Delivered::Done) => {
+                let _ = reply.send(Ok(()));
+            }
+            Ok(Delivered::Pending(handle)) => {
+                // The dial runs on a task, and so does the wait for its outcome: the loop
+                // serves the next request meanwhile.
+                task::spawn(async move {
+                    let outcome = handle.await.unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!("the send ended without an outcome"))
+                    });
+                    let _ = reply.send(outcome.map_err(|error| error.to_string()));
+                });
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error.to_string()));
+            }
+        }
+        true
+    }
+
     async fn handle_messaging(
         &mut self,
         request: Messaging,
@@ -810,35 +916,17 @@ impl MembershipApp {
     ) -> bool {
         match request {
             Messaging::Send { to, body, reply } => {
-                let frame = app_frame(
-                    context,
-                    AppFrameParams::new(
-                        AppTag::try_new(MSG_TAG).expect("a valid app tag"),
-                        to,
-                        None,
-                        body,
-                    ),
-                );
-                let class = self.classify(&frame.authored());
-                match send_app(state, context, frame, class).await {
-                    Ok(Delivered::Done) => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    Ok(Delivered::Pending(handle)) => {
-                        // The dial runs on a task, and so does the wait for its outcome: the loop
-                        // serves the next request meanwhile.
-                        task::spawn(async move {
-                            let outcome = handle.await.unwrap_or_else(|_| {
-                                Err(anyhow::anyhow!("the send ended without an outcome"))
-                            });
-                            let _ = reply.send(outcome.map_err(|error| error.to_string()));
-                        });
-                    }
+                let to = match recipient_key(state, to) {
+                    Ok(to) => to,
                     Err(error) => {
-                        let _ = reply.send(Err(error.to_string()));
+                        let _ = reply.send(Err(error));
+                        return false;
                     }
-                }
-                true
+                };
+                self.send_msg(state, context, to, body, reply).await
+            }
+            Messaging::SendToKey { to, body, reply } => {
+                self.send_msg(state, context, Some(to), body, reply).await
             }
             Messaging::StateMerge { merge, reply } => {
                 let merged = broadcast_state_merge(
@@ -848,7 +936,9 @@ impl MembershipApp {
                 .await;
                 let outcome = merged.map_err(|error| error.to_string());
                 let _ = reply.send(outcome);
-                true
+                // A durable write is not a live frame: it proves life only within one alive
+                // timeout of the clock of the reader, so it must not hold back the `alive`.
+                false
             }
         }
     }
@@ -862,6 +952,13 @@ impl MembershipApp {
     ) -> bool {
         match request {
             MessagingTest::SendCold { to, body, reply } => {
+                let to = match recipient_key(state, to) {
+                    Ok(to) => to,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return false;
+                    }
+                };
                 let frame = app_frame(
                     context,
                     AppFrameParams::new(
@@ -919,10 +1016,8 @@ impl MembershipApp {
                 false
             }
             Inspect::PeerCount { reply } => {
-                // `peers.len()`, not the snapshot's `count` — that one includes
-                // self, and a caller asking "is anyone else here?" wants zero
-                // when it is alone.
-                let _ = reply.send(state.roster_snapshot().peers.len());
+                // The one count of the engine: see `EventLoopState::member_count`.
+                let _ = reply.send(state.member_count());
                 false
             }
         }
@@ -1083,8 +1178,8 @@ impl MembershipApp {
             Routing::SessionsToNonNeighbors { reply } => {
                 let sessions: usize = state.webrtc.as_ref().map_or(0, |webrtc| {
                     state
-                        .peer_endpoints
-                        .values()
+                        .member_addresses()
+                        .iter()
                         .filter(|address| {
                             webrtc.has_session(&address.id)
                                 && !state.linked_endpoints.contains(&address.id)
@@ -1105,8 +1200,8 @@ impl MembershipApp {
             Routing::RedialCounts { reply } => {
                 let now = clock::Instant::now();
                 let ids: Vec<_> = state
-                    .peer_endpoints
-                    .values()
+                    .member_addresses()
+                    .iter()
                     .map(|address| address.id)
                     .collect();
                 for id in ids {
@@ -1169,7 +1264,7 @@ impl MembershipApp {
                 );
                 // iroh re-selects only on path events: nudge every peer so the
                 // new set takes effect now.
-                for address in state.peer_endpoints.values() {
+                for address in &state.member_addresses() {
                     let endpoint = context.endpoint.clone();
                     let peer = address.id;
                     task::spawn(async move {
@@ -1191,7 +1286,7 @@ impl MembershipApp {
                 );
                 // iroh re-selects only on path events: nudge every peer so the
                 // change takes effect now.
-                for address in state.peer_endpoints.values() {
+                for address in &state.member_addresses() {
                     let endpoint = context.endpoint.clone();
                     let peer = address.id;
                     task::spawn(async move {
@@ -1254,7 +1349,7 @@ impl MembershipApp {
             }
             Blocking::BlockUdp { blocked, reply } => {
                 habilis_network_iroh_webrtc_transport::block_ip_paths(blocked);
-                for address in state.peer_endpoints.values() {
+                for address in &state.member_addresses() {
                     let endpoint = context.endpoint.clone();
                     let peer = address.id;
                     task::spawn(async move {
@@ -1472,15 +1567,116 @@ fn route_diag(state: &EventLoopState) -> String {
 }
 
 #[cfg(test)]
+mod peer_count_tests {
+    use std::sync::atomic::Ordering;
+
+    use super::{Inspect, MembershipApp};
+    use crate::daemon::setup::LiveCount;
+    use crate::daemon::state::EventLoopState;
+    use crate::testing::{fresh_state, test_key};
+    use tokio::sync::oneshot;
+
+    /// How many members the consumer reads for `Inspect::PeerCount`.
+    fn peer_count_of(state: &mut EventLoopState) -> usize {
+        let (reply, mut answer) = oneshot::channel();
+        MembershipApp::handle_inspect(Inspect::PeerCount { reply }, state);
+        answer.try_recv().expect("the handler answers at once")
+    }
+
+    /// `PeerCount` answers "how many members are in the mesh right now, this node included". A
+    /// quiet peer is a row of the roster, but it is not in the mesh now: a member whose only peer
+    /// went quiet reads 1, the same as a member that is alone.
+    #[test]
+    fn the_peer_count_leaves_out_quiet_peers() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peer_for_test("swift-cedar");
+        state.surfaced_for_test("swift-cedar");
+        state.quiet_for_test("lost-heron");
+
+        assert_eq!(
+            peer_count_of(&mut state),
+            2,
+            "a quiet peer counts as a member that is in the mesh"
+        );
+
+        state.peers.remove(&test_key("swift-cedar"));
+        state.quiet_for_test("swift-cedar");
+        assert_eq!(
+            peer_count_of(&mut state),
+            1,
+            "a member whose peers are all quiet reads as alone"
+        );
+    }
+
+    /// A member that is alone counts itself.
+    #[test]
+    fn a_lone_member_counts_itself() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+
+        assert_eq!(peer_count_of(&mut state), 1, "a lone member reads 0, not 1");
+    }
+
+    /// One algorithm for every surface that shows a count. The state has a shown peer, a peer
+    /// that is surfaced and quiet, a live peer that is not shown yet, and a peer that left. Only
+    /// the shown peer and this node count, so the answer is 2 everywhere: the member count, the
+    /// peer count of the embed, the count of the roster snapshot, the non-quiet rows plus this
+    /// node, and the live counter (which the state file and the directory advert read).
+    #[test]
+    fn every_surface_shows_the_same_count() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let live = LiveCount::default();
+        state.live_count = Some(live.clone());
+        state.peer_for_test("swift-cedar");
+        state.surfaced_for_test("swift-cedar");
+        state.surfaced_for_test("lost-heron");
+        state.quiet_for_test("lost-heron");
+        state.peer_for_test("calm-otter");
+        state.write_peer_count();
+
+        let roster = state.roster_snapshot();
+        let live_rows = roster.peers.iter().filter(|entry| !entry.quiet).count();
+        let quiet_rows = roster.peers.iter().filter(|entry| entry.quiet).count();
+        assert_eq!(quiet_rows, 1, "the quiet peer is a row with quiet: true");
+        let counts = [
+            ("member_count", state.member_count()),
+            ("Inspect::PeerCount", peer_count_of(&mut state)),
+            ("roster count", roster.count),
+            ("non-quiet rows plus this node", live_rows + 1),
+            ("live counter", live.load(Ordering::Relaxed)),
+        ];
+        for (surface, count) in counts {
+            assert_eq!(count, 2, "{surface} disagrees with the member count");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         AppFrameParams, AppTag, ENVELOPE_RESERVE, ESCAPED_BUDGET, MAX_MESSAGE_SIZE, MAX_MSG,
-        MSG_TAG, MembershipApp, MessageBody, Nickname, mpsc, msg_body, msg_fits,
+        MSG_TAG, MembershipApp, MessageBody, Messaging, Nickname, Request, mpsc, msg_body,
+        msg_fits, parse_key, recipient_key, transport,
     };
-    use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
+    #[cfg(feature = "host")]
+    use crate::daemon::state::Standing;
+    #[cfg(feature = "host")]
+    use crate::gossip::app::{InboundApp, NodeApp};
+    #[cfg(feature = "host")]
+    use crate::protocol::messages::sole_addressee;
+    use crate::protocol::{AuthorKey, Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
+    #[cfg(feature = "host")]
+    use crate::testing::LaneNode;
+    use crate::testing::{fresh_state, test_key};
 
+    #[cfg(feature = "host")]
+    use super::NodeDriver;
     use std::iter;
+    #[cfg(feature = "host")]
+    use tokio::sync::oneshot;
     /// The longest nickname there is: 32 four-byte scalars.
     fn widest_nick(seed: char) -> Nickname {
         let text: String = iter::repeat_n(seed, 32).collect();
@@ -1510,13 +1706,93 @@ mod tests {
             &widest_nick('\u{1F980}'),
             AppFrameParams::new(
                 AppTag::try_new(MSG_TAG).expect("a valid app tag"),
-                Some(widest_nick('\u{1F99E}')),
+                Some(AuthorKey::from_bytes([0xab; 32])),
                 None,
                 MessageBody::try_new(text).expect("body"),
             ),
         )
         .sign(&Identity::generate())
         .wire_len()
+    }
+
+    /// A send by nickname names the one live key that uses it. A nickname that no live key uses,
+    /// or that two or more use, is refused with the cause, and a send with no nickname is a
+    /// broadcast. The frame names a key, so the engine never picks one of two.
+    #[test]
+    fn a_send_by_nickname_resolves_to_the_one_live_key_and_refuses_the_rest() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let alone = test_key("alone");
+        state.names.insert(alone, Nickname::from("alone"));
+        state.peers.insert(alone);
+        for key in [test_key("twin#first"), test_key("twin#second")] {
+            state.names.insert(key, Nickname::from("twin"));
+            state.peers.insert(key);
+        }
+
+        assert_eq!(
+            recipient_key(&state, Some(Nickname::from("alone"))),
+            Ok(Some(alone)),
+            "one live key uses the nickname"
+        );
+        assert_eq!(
+            recipient_key(&state, None),
+            Ok(None),
+            "no nickname is a broadcast"
+        );
+        let clash = recipient_key(&state, Some(Nickname::from("twin")))
+            .expect_err("two live keys use the nickname");
+        assert!(
+            clash.contains("two or more live peers use this nickname"),
+            "the refusal does not name the cause: {clash}"
+        );
+        let stranger = recipient_key(&state, Some(Nickname::from("nobody")))
+            .expect_err("no live key uses the nickname");
+        assert!(
+            stranger.contains("no live peer uses this nickname"),
+            "the refusal does not name the cause: {stranger}"
+        );
+    }
+
+    /// A peer that went quiet may return, and a send by nickname to it was sent before: it goes to
+    /// the hint of the quiet key. A live key of the nickname wins over a quiet one, and two quiet
+    /// keys with no live key are as ambiguous as two live keys.
+    #[test]
+    fn a_send_by_nickname_to_the_only_quiet_key_of_it_is_sent() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (sleeper, live, quiet) = (
+            test_key("sleeper"),
+            test_key("mixed#live"),
+            test_key("mixed#quiet"),
+        );
+        state.names.insert(sleeper, Nickname::from("sleeper"));
+        state.quiet.insert(sleeper);
+        state.names.insert(live, Nickname::from("mixed"));
+        state.peers.insert(live);
+        state.names.insert(quiet, Nickname::from("mixed"));
+        state.quiet.insert(quiet);
+        for key in [test_key("snooze#first"), test_key("snooze#second")] {
+            state.names.insert(key, Nickname::from("snooze"));
+            state.quiet.insert(key);
+        }
+
+        assert_eq!(
+            recipient_key(&state, Some(Nickname::from("sleeper"))),
+            Ok(Some(sleeper)),
+            "the only key of the nickname is quiet, and it may return"
+        );
+        assert_eq!(
+            recipient_key(&state, Some(Nickname::from("mixed"))),
+            Ok(Some(live)),
+            "a live key wins over a quiet key of the same nickname"
+        );
+        let clash = recipient_key(&state, Some(Nickname::from("snooze")))
+            .expect_err("two quiet keys use the nickname");
+        assert!(
+            clash.contains("two or more"),
+            "the refusal does not name the cause: {clash}"
+        );
     }
 
     #[test]
@@ -1553,6 +1829,37 @@ mod tests {
         );
     }
 
+    /// A caller of a binding holds the key as text. The parse reads the one form the wire
+    /// carries and refuses every other form with the cause, so a bad key is an error and not a send.
+    #[test]
+    fn a_key_is_read_from_64_lowercase_hex_and_nothing_else() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let key = test_key("parse#key");
+        let text: String = String::from_utf8(key.hex().to_vec()).expect("hex is ASCII");
+
+        assert_eq!(
+            parse_key(&text).expect("the hex of a key"),
+            key,
+            "parse_key did not read back the key that the hex was made from"
+        );
+        for (bad, why) in [
+            ("", "an empty text"),
+            (&text[..63], "63 digits"),
+            (&format!("{text}0"), "65 digits"),
+            (&text.to_uppercase(), "uppercase digits"),
+            (&format!("{}g", &text[..63]), "a character that is not hex"),
+            ("alice", "a nickname"),
+        ] {
+            assert!(
+                matches!(
+                    parse_key(bad),
+                    Err(transport::SendError::InvalidAddressee(_))
+                ),
+                "{why} was read as a key"
+            );
+        }
+    }
+
     #[test]
     fn a_body_round_trips_and_refuses_what_it_cannot_carry() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1586,5 +1893,236 @@ mod tests {
             [false, true, false, false, false, true],
             "a stall surfaces once until the queue drains"
         );
+    }
+
+    /// The loop refreshes the keepalive clock when a session request reports a broadcast. A
+    /// durable write is stamped by the clock of the writer and does not prove life to a peer that
+    /// is quiet, so it must not hold back the `alive` that does.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_state_merge_does_not_report_a_live_broadcast() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            let (inbound, _queue) = mpsc::channel(1);
+            let mut app = MembershipApp::new(inbound);
+            let (reply, answer) = oneshot::channel();
+            let request = Request::Messaging(Messaging::StateMerge {
+                merge: serde_json::json!({"note": "durable"}),
+                reply,
+            });
+
+            let live = app.handle_session(request, &mut state, &context).await;
+
+            assert_eq!(
+                answer.await.expect("the request is answered"),
+                Ok(()),
+                "the merge was made and broadcast"
+            );
+            assert!(
+                !live,
+                "a state merge is a durable write and does not refresh the keepalive clock"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// Two live keys use one nickname. A send by nickname is refused, because the engine never
+    /// picks one of them. A send to a key reaches the key that the caller names.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_send_to_a_key_reaches_one_of_two_keys_that_share_a_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            state.standing.remove(&Standing::Meshed);
+            let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+            for key in [first, second] {
+                state.names.insert(key, Nickname::from("twin"));
+                state.peers.insert(key);
+            }
+            let (inbound, _queue) = mpsc::channel(1);
+            let mut app = MembershipApp::new(inbound);
+
+            let (reply, by_nickname) = oneshot::channel();
+            let request = Request::Messaging(Messaging::Send {
+                to: Some(Nickname::from("twin")),
+                body: MessageBody::from("hi"),
+                reply,
+            });
+            app.handle_session(request, &mut state, &context).await;
+            let refused = by_nickname
+                .await
+                .expect("the request is answered")
+                .expect_err("a send to a nickname of two live keys");
+            assert!(
+                refused.contains("two or more live peers use this nickname"),
+                "the refusal does not name the cause: {refused}"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the refused send was buffered"
+            );
+
+            let (key_reply, by_key) = oneshot::channel();
+            let to_key = Request::Messaging(Messaging::SendToKey {
+                to: second,
+                body: MessageBody::from("hi"),
+                reply: key_reply,
+            });
+            app.handle_session(to_key, &mut state, &context).await;
+            assert_eq!(
+                by_key.await.expect("the request is answered"),
+                Ok(()),
+                "the send to a key of the nickname was refused"
+            );
+            let buffered = state.pending_outbound.take();
+            assert_eq!(buffered.len(), 1, "the accepted frame is in the buffer");
+            assert_eq!(
+                sole_addressee(&buffered[0].0.kind),
+                Some(&second),
+                "the frame does not name the key that the caller chose"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A key that no roster, quiet set or address holds has no one to wait for. A meshed node
+    /// refuses a send to it with that cause, as an unmeshed node does. The cause "no known endpoint
+    /// (`PeerInfo` not yet received)" would tell a caller with a mistyped key to wait.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_send_to_a_key_that_nobody_holds_names_that_cause_on_a_meshed_node() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            state.standing.insert(Standing::Meshed);
+            let (inbound, _queue) = mpsc::channel(1);
+            let mut app = MembershipApp::new(inbound);
+
+            let (reply, answer) = oneshot::channel();
+            let request = Request::Messaging(Messaging::SendToKey {
+                to: test_key("nobody#holds-this"),
+                body: MessageBody::from("hi"),
+                reply,
+            });
+            app.handle_session(request, &mut state, &context).await;
+
+            let refused = answer
+                .await
+                .expect("the request is answered")
+                .expect_err("a send to a key that nobody holds");
+            assert!(
+                refused.contains("no roster, quiet set or known address holds this key"),
+                "the refusal does not name the cause: {refused}"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the refused send was buffered"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The engine hands a directed frame for another key to the app too. A member that shares a
+    /// nickname with that key is another peer, so its queue holds only the frames for its own
+    /// key, and the broadcasts.
+    #[cfg(feature = "host")]
+    #[test]
+    fn the_member_app_queues_a_directed_frame_only_for_its_own_key() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            let (inbound, mut queue) = mpsc::channel(4);
+            let mut app = MembershipApp::new(inbound);
+            let sender = Identity::generate();
+            let frame_to = |to: Option<AuthorKey>, text: &str| {
+                let params = AppFrameParams::new(
+                    AppTag::try_new(MSG_TAG).expect("a valid app tag"),
+                    to,
+                    None,
+                    MessageBody::from(text),
+                );
+                Message::new_app(&MeshId::from("test"), &Nickname::from("alice"), params)
+                    .sign(&sender)
+            };
+            let other = test_key("twin#other");
+
+            for (to, text, kept) in [
+                (Some(other), "for the other key", false),
+                (Some(context.our_pubkey), "for this key", true),
+                (None, "for everyone", true),
+            ] {
+                let frame = frame_to(to, text);
+                let retain = app
+                    .on_app_frame(
+                        InboundApp {
+                            message: &frame.authored(),
+                            surfaceable: true,
+                        },
+                        &mut state,
+                        &context,
+                    )
+                    .await;
+                assert!(!retain, "the member app never asks to retain a frame");
+                assert_eq!(
+                    queue.try_recv().is_ok(),
+                    kept,
+                    "the queue of the member took, or missed, the frame {text:?}"
+                );
+            }
+            node.endpoint.close().await;
+        });
+    }
+
+    /// Two members can use one nickname, so the nickname of an inbound message names no
+    /// author. The message carries the key, and a reply to that key reaches only its author.
+    #[cfg(feature = "host")]
+    #[test]
+    fn an_inbound_message_names_the_key_of_its_author() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            let (inbound, mut queue) = mpsc::channel(4);
+            let mut app = MembershipApp::new(inbound);
+            let twins = [Identity::generate(), Identity::generate()];
+
+            let mesh = MeshId::from("test");
+            let nickname = Nickname::from("twin");
+            for twin in &twins {
+                let params = AppFrameParams::new(
+                    AppTag::try_new(MSG_TAG).expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("hello"),
+                );
+                let frame = Message::new_app(&mesh, &nickname, params).sign(twin);
+                app.on_app_frame(
+                    InboundApp {
+                        message: &frame.authored(),
+                        surfaceable: true,
+                    },
+                    &mut state,
+                    &context,
+                )
+                .await;
+            }
+
+            let keys: Vec<AuthorKey> = vec![
+                queue.try_recv().expect("the first message is queued").key,
+                queue.try_recv().expect("the second message is queued").key,
+            ];
+            assert_eq!(
+                keys,
+                [twins[0].author_key(), twins[1].author_key()],
+                "an inbound message does not name the key of its author"
+            );
+            node.endpoint.close().await;
+        });
     }
 }

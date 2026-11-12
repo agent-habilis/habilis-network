@@ -444,7 +444,7 @@ mod tests {
         let answer = protocol::Message::new_pong(
             &mesh,
             &author,
-            testing::nick("bob"),
+            testing::test_key("bob"),
             &protocol::MessageId::random(),
         )
         .sign(&protocol::Identity::generate());

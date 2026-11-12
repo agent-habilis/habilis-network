@@ -5,7 +5,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{AppTag, CorrId, MessageId, PresenceSubtype};
-use crate::nickname_error::Nickname;
+use crate::AuthorKey;
 
 /// Message kind — the frame's routing discriminator. The engine owns the
 /// infrastructure kinds (presence, peer-info, digests, ping/pong, channel
@@ -41,7 +41,7 @@ pub enum MessageKind {
         tag: AppTag,
         /// The recipient, when the message is directed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        to: Option<Nickname>,
+        to: Option<AuthorKey>,
         /// The correlation id of a request or reply.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         corr: Option<CorrId>,
@@ -69,8 +69,8 @@ pub enum MessageKind {
     /// pinger reads the RTT from the probe that the pong names, and drops a pong
     /// that names none of its own. Same plumbing treatment as `Ping`.
     Pong {
-        /// The member that sent the probe.
-        to: Nickname,
+        /// The member that sent the probe, by author key.
+        to: AuthorKey,
         /// The probe that this pong answers.
         probe: MessageId,
     },
@@ -176,7 +176,7 @@ impl MessageKind {
     /// `tag` is not a valid [`AppTag`]. A fixture names a fixed literal.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
-    pub fn app_to(tag: &str, to: Nickname, corr: Option<CorrId>) -> Self {
+    pub fn app_to(tag: &str, to: AuthorKey, corr: Option<CorrId>) -> Self {
         MessageKind::App {
             tag: AppTag::try_new(tag).expect("a valid app tag"),
             to: Some(to),

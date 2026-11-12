@@ -17,9 +17,9 @@ use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::MembershipUpdate;
 use crate::protocol::messages::{
-    Authored, MessageBody, Proof, Verified, WireFrame, shard_fits_log,
+    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log,
 };
-use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
+use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
 use crate::{lifecycle, lookup};
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
@@ -519,6 +519,39 @@ fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Verified) -> boo
     false
 }
 
+/// The first [`VERSION_TEXT_MAX`] characters of a version that a sender chose, each one that is not
+/// printable ASCII replaced by `?`. The frame is not verified, so the text is hostile: this bounds
+/// the error line and the set of named versions, whatever the sender wrote.
+fn printable_prefix(version: &str) -> String {
+    version
+        .chars()
+        .take(VERSION_TEXT_MAX)
+        .map(|ch| if ch.is_ascii_graphic() { ch } else { '?' })
+        .collect()
+}
+
+/// The longest version text that an error line names.
+const VERSION_TEXT_MAX: usize = 16;
+
+/// Say that an inbound frame did not parse. A frame of another protocol version names it, once for
+/// each version: the key of the sender is not proven before the frame parses, so a sender could
+/// make up keys, and the set of named versions is bounded.
+fn report_unparsed(error: &MessageError, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    if let MessageError::UnsupportedVersion(wire_version) = error {
+        let version = printable_prefix(wire_version);
+        // The frame is not verified, so the log obeys the same cap as the error lines.
+        if let Some(line) = state.receive_memory.refused_version_line(&version) {
+            context.sink.emit(NodeEvent::Error(line));
+            tracing::warn!(target: "habilis_network::gossip", %version, "dropping a frame of an unsupported protocol version");
+        }
+        return;
+    }
+    context
+        .sink
+        .emit(NodeEvent::Error("Failed to parse message".to_owned()));
+    tracing::warn!(target: "habilis_network::gossip", "failed to parse inbound gossip message");
+}
+
 /// Validate + dispatch one inbound wire message, regardless of transport. Both
 /// the gossip event pump (`handle_gossip_event`) and the unicast inbound arm
 /// (`daemon::event_loop`) funnel here, so signature-verify, the mesh gate, and
@@ -532,12 +565,12 @@ pub(crate) async fn ingest(
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
-    let Ok((message, _resend_nonce)) = Message::parse_wire(&frame) else {
-        context
-            .sink
-            .emit(NodeEvent::Error("Failed to parse message".to_owned()));
-        tracing::warn!(target: "habilis_network::gossip", "failed to parse inbound gossip message");
-        return;
+    let (message, _resend_nonce) = match Message::parse_wire(&frame) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            report_unparsed(&error, state, context);
+            return;
+        }
     };
     // Authenticity gate, **before** the self-echo drop, dedup, and every other step: every inbound
     // message must carry a valid signature over its canonical bytes. Verifying before `mark_seen`
@@ -625,10 +658,9 @@ pub(crate) async fn ingest(
         return;
     }
 
-    // Directed frames are sealed to their addressee. A **relay** forwards and
-    // retains the opaque frame but never validates or surfaces its content (it
-    // can't read it, and `maybe_push_inbound`/dispatch below are already gated to
-    // the addressee). The **addressee** decrypts the body in place, then the
+    // Directed frames are sealed to their addressee. A **relay** forwards the
+    // opaque frame and never validates, surfaces or retains its content (it can't read it, and
+    // `maybe_push_inbound` is gated to the addressee). The **addressee** decrypts the body in place, then the
     // recovered plaintext passes the app boundary gate exactly as a broadcast
     // does. A frame sealed to us that fails to open (tampered / wrong key) is
     // dropped. Retention gets the original `verified` frame, so the log keeps
@@ -718,11 +750,14 @@ async fn dispatch_infra(
 ) -> ControlFlow<()> {
     match &message.kind {
         MessageKind::PeerInfo => {
-            handle_peer_info(message, state, context).await;
+            // A stale frame proves no presence: it registers no endpoint and starts no dial.
+            if !update.stale {
+                handle_peer_info(message, state, context).await;
+            }
             return ControlFlow::Break(());
         }
         MessageKind::Digest => {
-            antientropy::handle_digest(message, state, context.author);
+            antientropy::handle_digest(message, state, &context.our_pubkey);
             return ControlFlow::Break(());
         }
         MessageKind::Ping => {
@@ -735,11 +770,16 @@ async fn dispatch_infra(
             // bounds the map and keeps `responded`/`known` honest against a peer
             // that forges pongs from fabricated authors, and the probe id drops a
             // pong that answers a round that is over.
-            if to == context.author
-                && state.peers.contains(message.author.as_str())
+            if *to == context.our_pubkey
+                && state.peers.contains(&message.key())
                 && let Some(round) = state.ping_round.as_mut()
             {
-                let known = round.record_pong(message.author.clone(), probe, TokioInstant::now());
+                let known = round.record_pong(
+                    message.key(),
+                    message.author.clone(),
+                    probe,
+                    TokioInstant::now(),
+                );
                 if !known {
                     tracing::debug!(target: "habilis_network::gossip", pong_from = %message.author, "pong names no probe of this round");
                 }
@@ -811,7 +851,7 @@ async fn dispatch_infra(
 /// `LinkVector`) supersede the last vector we held for that origin. Dropped
 /// silently when the multihop transport is off or the body is malformed —
 /// plumbing like the digests, never logged or surfaced. Returns whether the topology changed.
-fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
+fn handle_link_state(message: &Verified, state: &mut EventLoopState) -> bool {
     #[cfg(not(feature = "multihop"))]
     {
         // No multihop transport off-host: nothing consumes a routing table.
@@ -829,37 +869,34 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
             Ok(vector) => {
                 // A signature proves who made the vector, not that the origin is
                 // a member: anyone holding the mesh id can mint keys. So the
-                // origin must be the endpoint the roster binds to the message's
-                // author, the same binding that routes a directed message. A
-                // peer whose address we have not learned yet is waited for: its
-                // next vector, one interval on, finds the binding.
-                let bound = state
-                    .peer_endpoints
-                    .get(&message.author)
-                    .map(|address| address.id);
-                // The `PeerInfo` of the author can be a few milliseconds behind its first
-                // vector: the vector waits for the binding, and is fed when it is written.
+                // origin must be the endpoint that the signer proved, the same
+                // proof that a point-to-point answer follows. A nickname is a
+                // label, so the dial hint under it is no proof. A signer that has
+                // proved none yet is waited for: its next vector, one interval
+                // on, finds the proof.
+                let signer = message.key();
+                let bound = state.proven_endpoints.trusted(&signer);
+                // The `PeerInfo` of the signer can be a few milliseconds behind its first
+                // vector: the vector waits for the proof, and is fed when it is recorded.
                 if bound.is_none() {
-                    let kept = state
-                        .parked_link_states
-                        .park(message.author.clone(), vector);
+                    let kept = state.parked_link_states.park(signer, vector);
                     tracing::debug!(target: "habilis_network::gossip",
                         author = %message.author,
                         kept,
-                        "parked multihop link-state: no endpoint is bound to its author yet"
+                        "parked multihop link-state: its signer has proved no endpoint yet"
                     );
                     return false;
                 }
                 if bound != Some(vector.origin().get()) {
                     tracing::debug!(target: "habilis_network::gossip",
                         author = %message.author,
-                        "dropping multihop link-state: its origin is not the endpoint bound to its author"
+                        "dropping multihop link-state: its origin is not the endpoint its signer proved"
                     );
                     return false;
                 }
                 let updated = handle.feed_topology(vector);
                 // A vector that waited for this author is older than the one just fed.
-                state.parked_link_states.take(&message.author);
+                state.parked_link_states.take(&signer);
                 tracing::debug!(target: "habilis_network::gossip",
                     author = %message.author,
                     updated,
@@ -895,20 +932,10 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
 /// traffic waited with it, once per identity the pinger cared to mint. A pong
 /// nobody receives is the right outcome: the pinger's round misses us and
 /// tries again.
-async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerCtx<'_>) {
-    let pong = Message::new_pong(
-        context.mesh,
-        context.author,
-        message.author.clone(),
-        &message.id,
-    )
-    .sign(context.identity);
-    messages::log_out(&pong);
-    let author_endpoint = state.peer_endpoints.get(message.author.as_str());
-    let warm_endpoint = author_endpoint
-        .map(|address| address.id)
-        .filter(|eid| Some(*eid) != state.rendezvous_id);
-    match (warm_endpoint, pong.serialize()) {
+async fn auto_pong(message: &Verified, state: &EventLoopState, context: &HandlerCtx<'_>) {
+    let (answer, target) = pong_for(message, state, context);
+    messages::log_out(&answer);
+    match (target, answer.serialize()) {
         (Some(eid), Ok(bytes)) => {
             if !transport::send_best_effort(eid, bytes, state).await {
                 tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no warm path");
@@ -918,6 +945,29 @@ async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerC
             tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no known endpoint");
         }
     }
+}
+
+/// The pong that answers `ping`, and where it goes: the endpoint that the signer of the ping proved
+/// in its `PeerInfo`, unless it is the rendezvous. The roster's trust of the key comes first, because
+/// it has no cap, and the proof table is a FIFO that a roster key can fall out of. The nickname on
+/// the ping is a label that any signer can take, so the dial hint under that nickname can name the
+/// endpoint of another key. A signer that has proved no endpoint gets no target, and so no pong. A
+/// warm connection does not change that: it proves which endpoint it reaches, and nothing ties the
+/// key of a gossip ping to it.
+fn pong_for(
+    request: &Verified,
+    state: &EventLoopState,
+    context: &HandlerCtx<'_>,
+) -> (Verified, Option<iroh::EndpointId>) {
+    let signer = request.key();
+    let answer =
+        Message::new_pong(context.mesh, context.author, signer, &request.id).sign(context.identity);
+    let proofs = &state.proven_endpoints;
+    let target: Option<iroh::EndpointId> = proofs
+        .trusted(&signer)
+        .or_else(|| proofs.get(&signer))
+        .filter(|eid| Some(*eid) != state.rendezvous_id);
+    (answer, target)
 }
 
 struct InboundFrame<'message> {
@@ -944,8 +994,8 @@ async fn handle_shard(
     // A directed shard (task leg / RPC) not addressed to us is relayed at the
     // gossip layer but never retained or reassembled here — a third party must
     // not persist or reconstruct a task exchange it is not part of. The
-    // single-frame path drops non-addressee directed frames the same way.
-    if !addressed_to_us(message, context.author) {
+    // single-frame path hands such a frame to the app, which decides.
+    if !addressed_to_us(message, &context.our_pubkey) {
         return;
     }
     // The raw shard's own per-tag policy (loggability/chain) — computed from its
@@ -1159,7 +1209,7 @@ fn dispatch_channel(
     if channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
-        app.on_meta_applied(&message.author, state, context);
+        app.on_meta_applied(&message.key(), state, context);
     }
 }
 
@@ -1275,10 +1325,10 @@ fn gate_and_decrypt<F: Proof>(
     app: &dyn NodeApp,
 ) -> Gated {
     if is_directed_content(&frame.kind) {
-        if !addressed_to_us(frame, context.author) {
-            // Relay: an opaque directed frame — forwarded + retained, never
-            // validated or surfaced (the dispatch below is gated to the
-            // addressee), so it needs no classification here.
+        if !addressed_to_us(frame, &context.our_pubkey) {
+            // Relay: an opaque directed frame — forwarded, never validated, surfaced or
+            // retained. The engine cannot open it, so it has no classification, and an
+            // `App` kind without one is not loggable (see `is_loggable`).
             return Gated::Pass {
                 class: None,
                 view: frame.authored(),
@@ -1390,7 +1440,7 @@ fn decrypt_directed<F: ops::Deref<Target = Message>>(
     }
 }
 
-fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
+fn addressed_to_us(message: &Message, us: &AuthorKey) -> bool {
     match &message.kind {
         MessageKind::App { to: Some(to), .. } => to == us,
         // Broadcast app frames (chat) and infra kinds are delivered to everyone.
@@ -1433,7 +1483,7 @@ fn maybe_push_inbound(
     };
     if tx.receiver_count() == 0
         || !surfaceable
-        || !addressed_to_us(message, context.author)
+        || !addressed_to_us(message, &context.our_pubkey)
         || matches!(
             message.kind,
             MessageKind::Digest
@@ -1531,8 +1581,17 @@ async fn handle_peer_info(
     // fresh endpoint replaces the old. The beacon gossips *as* the rendezvous,
     // so it advertises `rendezvous_id` here — record that too, so a joiner can
     // tell its rendezvous link belongs to the beacon's nickname.
-    let changed = state.peer_endpoints.get(&message.author) != Some(&peer_addr);
-    state.bind_peer_endpoint(message.author.clone(), peer_addr.clone());
+    // The hint belongs to the key that made it. A key that said goodbye never speaks again, so
+    // its `PeerInfo` is a replay and binds nothing. Another key under the same nickname binds
+    // nothing while the key that made the hint is still in the roster: a directed send must not
+    // reach a node that only borrowed the label.
+    let hinter = message.key();
+    // Whether the address differs from the one registered for this endpoint. A dial hint is no
+    // registration: a hint of another nickname can name the address that nothing put in the book.
+    // It does not depend on `may_bind`: a rival key binds no hint, but its address is still a
+    // path to its node.
+    let changed = !state.unicast_pool.remembers_address(&peer_addr);
+    state.place_endpoint(hinter, &message.author, peer_addr.clone());
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.
@@ -1540,20 +1599,20 @@ async fn handle_peer_info(
         return;
     }
     // The only binding a digest's answer may follow: this signer proved it
-    // owns `peer_id`. A `PeerInfo` arrives many times, so a known pair is not
-    // checked again.
+    // owns `peer_id`. A `PeerInfo` arrives many times, so a pair that the roster trusts is not
+    // checked again. A proof that the table holds for a signer not yet in the roster is checked
+    // again, so the trust follows the roster.
     let signer = message.key();
     if let Some(proof) = parsed["proof"].as_str()
-        && state.proven_endpoints.get(&signer) != Some(peer_id)
+        && state.proven_endpoints.trusted(&signer) != Some(peer_id)
         && proven_endpoints::verifies(peer_id, context.mesh, &signer, proof)
     {
-        state
-            .proven_endpoints
-            .insert(signer, peer_id, &state.linked_endpoints);
+        state.note_proven_endpoint(signer, peer_id, message.timestamp);
     }
     // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
     // endpoint is believed.
-    let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
+    let proven = state.proven_endpoints.get(&signer) == Some(peer_id)
+        || state.proven_endpoints.trusted(&signer) == Some(peer_id);
     state.note_rival_beacon_flag(
         context.endpoint.id(),
         signer,
@@ -1655,7 +1714,7 @@ async fn handle_peer_info(
     // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
     // rendezvous here, which returned above.
     let below = state.linked_endpoints.len()
-        < peer_info_graft_below(context.max_peers, state.peer_endpoints.len() + 1);
+        < peer_info_graft_below(context.max_peers, state.member_addresses().len() + 1);
     if !defer_first_dial
         && below
         && !state.linked_endpoints.contains(&peer_id)
@@ -1715,7 +1774,8 @@ fn is_loggable(kind: &MessageKind) -> bool {
             | MessageKind::State
             | MessageKind::Meta
             // App-frame loggability is decided by the app's `classify`, never
-            // this infra predicate; an App kind never reaches here.
+            // this infra predicate. An App kind that reaches here has no class: it is the
+            // opaque directed frame of a relay, which is not kept.
             | MessageKind::App { .. }
     )
 }
@@ -1963,7 +2023,7 @@ mod retain_own_broadcast_tests {
             &Nickname::from("me"),
             AppFrameParams::new(
                 protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                to.map(Nickname::from),
+                to.map(testing::test_key),
                 None,
                 protocol::MessageBody::from("hello"),
             ),
@@ -2040,7 +2100,7 @@ mod retain_own_broadcast_tests {
             max: 64,
             // "us" is the peer whose digest advertised the window; presence is
             // undirected, so the addressee gate passes it either way.
-            requester: &Nickname::from("us"),
+            requester: &testing::test_key("us"),
         });
         assert!(
             offered.is_empty(),
@@ -2231,35 +2291,46 @@ mod evicted_orphan_tests {
 #[cfg(test)]
 mod first_contact_tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
+    use crate::protocol::UnixSecs;
     use crate::transport::UdpTransport;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
 
-    use super::{handle_gossip_event, ingest};
+    use super::{
+        ChannelEvent, dispatch_channel, dispatch_infra, handle_gossip_event, ingest, pong_for,
+    };
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::EventLoopState;
+    use crate::daemon::message_log::{self, MissingQuery};
+    use crate::daemon::state::{EventLoopState, PingRound};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::SilentSink;
+    use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
+    use crate::lifecycle::membership_update::MembershipUpdate;
+    use crate::ops;
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
-    use crate::protocol::{Channel, MeshId, Message, Nickname};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::protocol::{AuthorKey, Channel, MeshId, Message, MessageKind, Nickname};
+    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::MeshSender;
+    use bytes::Bytes;
 
     use crate::daemon::state::DirectState;
     #[cfg(feature = "multihop")]
     use crate::gossip;
     use crate::gossip::split;
     use crate::lifecycle::heartbeat;
-    use crate::protocol::messages::AppFrameParams;
+    use crate::protocol::messages::{AppFrameParams, sole_addressee};
+    use crate::transport::outbox::Resend;
+    use crate::transport::proven_endpoints::ProvenEndpoints;
     use crate::transport::{PayloadPath, webrtc};
     use crate::util::{clock, tuning};
     use crate::{lookup, protocol, transport};
     use iroh_gossip::proto;
     use n0_future::task;
+    use n0_future::time::Instant as TokioInstant;
+    use std::collections::HashSet;
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, atomic};
+    use std::sync::{Arc, Mutex, atomic};
     use std::time::{Duration as std_Duration, Instant as std_Instant};
     use std::{future, net};
     use tokio::sync::mpsc;
@@ -2289,7 +2360,7 @@ mod first_contact_tests {
         sender: MeshSender,
         mesh: MeshId,
         identity: Identity,
-        our_pubkey: protocol::AuthorKey,
+        our_pubkey: AuthorKey,
         author: Nickname,
         sink: SilentSink,
     }
@@ -2360,13 +2431,14 @@ mod first_contact_tests {
                 state.standing.insert(Standing::Meshed);
                 state.unicast_pool = transport::UnicastPool::new(node.endpoint.clone(), false);
                 state.direct.insert(bob, DirectState::Direct);
-                state.peer_endpoints.insert(nick("bob"), bob_addr);
+                state.names.insert(test_key("bob"), nick("bob"));
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob_addr);
                 let (failed_tx, mut failed_rx) = mpsc::unbounded_channel();
                 state.flush_failed = failed_tx;
                 let frame = Message::new_pong(
                     &node.mesh,
                     &node.author,
-                    nick("bob"),
+                    test_key("bob"),
                     &protocol::MessageId::random(),
                 )
                 .sign(&Identity::generate());
@@ -2399,6 +2471,177 @@ mod first_contact_tests {
                 assert_eq!(parked[0].0.id, frame.id, "and it is the same frame");
                 node.endpoint.close().await;
             },
+        );
+    }
+
+    /// A directed frame names a key, so a nickname that two live peers use does not make it
+    /// undeliverable: the frame to the second key of the nickname waits only for an endpoint of
+    /// that key. The flush keeps it until the key retains one, and then the send decision routes
+    /// it to that endpoint, not to the dial hint that the first key owns.
+    #[test]
+    fn a_buffered_frame_to_the_second_key_of_a_nickname_waits_for_its_own_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.insert(Standing::Meshed);
+            let twin = nick("twin");
+            let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+            for key in [first, second] {
+                state.names.insert(key, twin.clone());
+                state.peers.insert(key);
+            }
+            state.names.insert(first, twin.clone());
+            state.bind_peer_endpoint(first, twin, iroh::EndpointAddr::new(endpoint_id(5)));
+            let frame = Message::new_pong(
+                &node.mesh,
+                &node.author,
+                second,
+                &protocol::MessageId::random(),
+            )
+            .sign(&Identity::generate());
+            let bytes = frame.serialize().expect("serialize");
+            assert!(
+                state.pending_outbound.push((frame.clone(), bytes.clone())),
+                "the frame is parked before the flush"
+            );
+
+            super::flush_pending(&mut state, &context, "test").await;
+
+            assert!(
+                !state.pending_outbound.is_empty(),
+                "the flush dropped a frame that a later flush can deliver"
+            );
+
+            state.retain_refused_endpoint(second, iroh::EndpointAddr::new(endpoint_id(6)));
+            state.direct.insert(endpoint_id(6), DirectState::Direct);
+
+            assert!(
+                matches!(
+                    transport::resolve(&frame, bytes, &state),
+                    Ok(Resend::Unicast(eid, _)) if eid == endpoint_id(6)
+                ),
+                "the frame to the second key did not route to the endpoint of that key"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A directed frame to either of two live keys that use a nickname is accepted. An unmeshed
+    /// node buffers each frame with its own key as the recipient, in the order of the sends, and
+    /// tells the caller `Ok`.
+    #[test]
+    fn an_unmeshed_send_to_either_key_of_a_nickname_is_buffered() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.remove(&Standing::Meshed);
+            let twin = nick("twin");
+            let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+            for key in [first, second] {
+                state.names.insert(key, twin.clone());
+                state.peers.insert(key);
+            }
+
+            for to in [second, first] {
+                let frame =
+                    Message::new_pong(&node.mesh, &node.author, to, &protocol::MessageId::random())
+                        .sign(&Identity::generate());
+                let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+                assert!(
+                    sent.is_ok(),
+                    "the send to a key of the nickname was refused"
+                );
+            }
+
+            let buffered = state.pending_outbound.take();
+            let recipients: Vec<AuthorKey> = buffered
+                .iter()
+                .filter_map(|(frame, _)| sole_addressee(&frame.kind).copied())
+                .collect();
+            assert_eq!(
+                recipients,
+                [second, first],
+                "the buffer lost a frame or the key of a recipient"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An unmeshed node buffers a directed frame until the meshed edge. A key that no roster, quiet
+    /// set or address book holds is a key that nobody can deliver to, and the caller was told `Ok`
+    /// before. It is refused at once and the buffer stays empty. A quiet key, and a key that only
+    /// has a retained endpoint, can still return or be dialed, so their frames wait.
+    #[test]
+    fn an_unmeshed_send_to_a_key_outside_the_roster_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.remove(&Standing::Meshed);
+            let (quiet, hinted, stranger) =
+                (test_key("quiet"), test_key("hinted"), test_key("stranger"));
+            state.names.insert(quiet, nick("quiet"));
+            state.quiet.insert(quiet);
+            state.retain_refused_endpoint(hinted, iroh::EndpointAddr::new(endpoint_id(8)));
+            let frame_to = |to: AuthorKey| {
+                Message::new_pong(&node.mesh, &node.author, to, &protocol::MessageId::random())
+                    .sign(&Identity::generate())
+            };
+
+            let refused =
+                ops::send_app(&mut state, &context, frame_to(stranger), AppClass::NONE).await;
+            assert!(
+                matches!(refused, Err(transport::SendError::Undeliverable(_))),
+                "the unmeshed send to a stranger was not refused: {refused:?}"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the refused frame was buffered"
+            );
+
+            for key in [quiet, hinted] {
+                let sent = ops::send_app(&mut state, &context, frame_to(key), AppClass::NONE).await;
+                assert!(sent.is_ok(), "the unmeshed send to {key} was refused");
+            }
+            assert_eq!(
+                state.pending_outbound.take().len(),
+                2,
+                "the frames of the quiet key and of the key with an endpoint wait"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// Two live keys use one nickname. A directed frame names one key, so the other key is not its
+    /// addressee, though it shares the nickname and a relay can hand it the frame. A broadcast is
+    /// for both.
+    #[test]
+    fn a_frame_to_one_key_of_a_nickname_is_not_addressed_to_the_other_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+        let tag = protocol::AppTag::try_new("app_msg").expect("a valid app tag");
+        let frame = |to: Option<AuthorKey>| {
+            Message::new_app(
+                &MeshId::from("test"),
+                &nick("sender"),
+                AppFrameParams::new(tag.clone(), to, None, MessageBody::from("hi")),
+            )
+        };
+
+        let to_first = frame(Some(first));
+        assert!(
+            super::addressed_to_us(&to_first, &first),
+            "the addressee did not take its frame"
+        );
+        assert!(
+            !super::addressed_to_us(&to_first, &second),
+            "the other key of the nickname took a frame meant for the first"
+        );
+        assert!(
+            super::addressed_to_us(&frame(None), &second),
+            "a broadcast is for every key"
         );
     }
 
@@ -2439,6 +2682,153 @@ mod first_contact_tests {
         });
     }
 
+    /// The roster keys a peer by author key, so two live keys that share a nickname are two
+    /// peers, and each one that answers the ping is a responder.
+    #[test]
+    fn two_live_keys_of_one_nickname_both_answer_a_ping_round() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let twin = nick("twin");
+            let runs = [Identity::generate(), Identity::generate()];
+            for run in &runs {
+                state.names.insert(run.author_key(), twin.clone());
+                state.peers.insert(run.author_key());
+            }
+            let probe = Message::new_ping(&node.mesh, &node.author);
+            let started = TokioInstant::now();
+            let window = started + std_Duration::from_secs(10);
+            state.arm_ping_round(PingRound::new(&probe, started, window, None));
+            let update = MembershipUpdate {
+                returned: false,
+                joined_new: false,
+                stale: false,
+            };
+
+            for run in &runs {
+                let pong =
+                    Message::new_pong(&node.mesh, &twin, node.our_pubkey, &probe.id).sign(run);
+                let flow =
+                    dispatch_infra(&pong, true, &update, &mut state, &mut Inert, &context).await;
+                assert!(flow.is_break(), "a pong is handled by the engine");
+            }
+
+            let answered = state.ping_round.as_ref().map(|round| round.pongs.len());
+            assert_eq!(
+                answered,
+                Some(2),
+                "the second key of the nickname was dropped from the responders"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// Two live keys share a nickname, and each proved its own endpoint. The dial hint under the
+    /// nickname names the endpoint of one of them. The pong to a ping goes to the endpoint of the
+    /// key that signed the ping.
+    #[test]
+    fn a_pong_goes_to_the_endpoint_that_the_ping_signer_proved() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let mut state = fresh_state();
+            let twin = nick("twin");
+            let (first, second) = (Identity::generate(), Identity::generate());
+            let (first_endpoint, second_endpoint) = (endpoint_id(21), endpoint_id(22));
+            state
+                .peer_endpoints
+                .insert(twin.clone(), iroh::EndpointAddr::new(first_endpoint));
+            state.proven_endpoints.insert(
+                first.author_key(),
+                first_endpoint,
+                UnixSecs::from(1),
+                &HashSet::new(),
+                |_| true,
+            );
+            state.proven_endpoints.insert(
+                second.author_key(),
+                second_endpoint,
+                UnixSecs::from(1),
+                &HashSet::new(),
+                |_| true,
+            );
+
+            let request = Message::new_ping(&node.mesh, &twin).sign(&second);
+
+            let (answer, target) = pong_for(&request, &state, &node.context());
+
+            assert_eq!(
+                target,
+                Some(second_endpoint),
+                "the pong went to the endpoint under the nickname, not to the signer's"
+            );
+            assert!(
+                matches!(&answer.kind, MessageKind::Pong { to, probe } if *to == second.author_key() && *probe == request.id),
+                "the pong does not answer the probe of the pinger: {:?}",
+                answer.kind
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The proof table is a FIFO with a cap, and a roster key can fall out of it. The roster keeps
+    /// its own trust of each key it holds, with no cap, so a ping from a roster key still finds the
+    /// endpoint that the key proved.
+    #[test]
+    fn a_ping_from_a_roster_key_whose_proof_left_the_fifo_still_gets_its_pong() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let mut state = fresh_state();
+            state.proven_endpoints = ProvenEndpoints::new(2);
+            let pinger = Identity::generate();
+            let pinger_endpoint = endpoint_id(31);
+            state.peers.insert(pinger.author_key());
+            state.note_proven_endpoint(pinger.author_key(), pinger_endpoint, UnixSecs::from(1));
+            for byte in 0..2u8 {
+                let stranger = Identity::generate().author_key();
+                state.note_proven_endpoint(stranger, endpoint_id(40 + byte), UnixSecs::from(1));
+            }
+            assert_eq!(
+                state.proven_endpoints.get(&pinger.author_key()),
+                None,
+                "precondition: strangers pushed the proof of the roster key out of the FIFO"
+            );
+
+            let request = Message::new_ping(&node.mesh, &nick("pinger")).sign(&pinger);
+            let (_answer, target) = pong_for(&request, &state, &node.context());
+
+            assert_eq!(
+                target,
+                Some(pinger_endpoint),
+                "a ping from a roster key got no pong after its proof left the FIFO"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A signer that has proved no endpoint gets no pong, whatever dial hint its nickname has: a
+    /// hint is a claim. The ping round of that signer misses us and tries again.
+    #[test]
+    fn a_ping_from_a_signer_with_no_proof_gets_no_pong() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let mut state = fresh_state();
+            let pinger = nick("pinger");
+            state
+                .peer_endpoints
+                .insert(pinger.clone(), iroh::EndpointAddr::new(endpoint_id(21)));
+            let request = Message::new_ping(&node.mesh, &pinger).sign(&Identity::generate());
+
+            let (_answer, target) = pong_for(&request, &state, &node.context());
+
+            assert_eq!(
+                target, None,
+                "a hint under the nickname was taken for a proof"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// An app frame counts the times that it reaches the app.
     // the app and the test share the counter
     struct Counting(Arc<atomic::AtomicUsize>);
@@ -2458,6 +2848,243 @@ mod first_contact_tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             true
         }
+    }
+
+    /// A sink that keeps the text of each error line.
+    #[derive(Default)]
+    struct ErrorLines(Mutex<Vec<String>>);
+
+    impl NodeSink for ErrorLines {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::Error(text) = event {
+                self.0
+                    .lock()
+                    .expect("the lines lock is not poisoned")
+                    .push(text);
+            }
+        }
+    }
+
+    /// A frame of another protocol version does not parse. The error line names the version that
+    /// the frame carries, so an operator can tell a peer that runs an older build from a corrupt
+    /// frame, and a second frame of the same version adds no line.
+    #[test]
+    fn a_frame_of_another_wire_version_is_reported_by_its_version_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "dropping a frame of an unsupported protocol version",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let frame = Message::new_app(
+                &node.mesh,
+                &nick("alice"),
+                AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("old"),
+                ),
+            )
+            .sign(&Identity::generate());
+            let text = frame.serialize().expect("serialize").into_bytes();
+            let old = String::from_utf8(text.to_vec())
+                .expect("a frame is text")
+                .replacen(r#""v":"13.0""#, r#""v":"12.0""#, 1);
+            assert!(old.contains("12.0"), "the test frame names version 12.0");
+
+            ingest(Bytes::from(old.clone()), &mut state, &mut app, &context).await;
+            ingest(Bytes::from(old), &mut state, &mut app, &context).await;
+
+            let seen = lines
+                .0
+                .lock()
+                .expect("the lines lock is not poisoned")
+                .clone();
+            let naming: Vec<&String> = seen.iter().filter(|line| line.contains("12.0")).collect();
+            assert_eq!(
+                naming.len(),
+                1,
+                "the version of the frame is named once: {seen:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The version of a frame that does not parse is chosen by its sender, and the frame is not
+    /// verified. A version of 500 characters with control bytes gives a short line of printable
+    /// characters, and the set of named versions holds the cut text.
+    #[test]
+    fn the_version_in_the_error_line_is_cut_and_printable() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "dropping a frame of an unsupported protocol version",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let frame = Message::new_app(
+                &node.mesh,
+                &nick("alice"),
+                AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("hostile"),
+                ),
+            )
+            .sign(&Identity::generate());
+            let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
+            let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
+            let version = format!(r"\u0007\u001b[31m{}", "x".repeat(500));
+            let hostile = text.replacen(r#""v":"13.0""#, &format!(r#""v":"{version}""#), 1);
+
+            ingest(Bytes::from(hostile), &mut state, &mut app, &context).await;
+
+            let seen: Vec<String> = {
+                let held = lines.0.lock().expect("the lines lock is not poisoned");
+                held.clone()
+            };
+            assert_eq!(seen.len(), 1, "one line for the frame: {seen:?}");
+            let line = &seen[0];
+            let printable: bool = line
+                .chars()
+                .all(|ch| ch.is_ascii() && !ch.is_ascii_control());
+            assert!(
+                line.len() < 120 && printable,
+                "the line is long or holds a control byte: {line:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A sender that makes up versions gets a bounded number of error lines. The frame is not
+    /// verified, so a version set that evicts its oldest entry lets a cycle of `cap + 1` versions
+    /// name each frame again. After the cap, the set takes no new version and one line says that
+    /// many versions are unknown.
+    #[test]
+    fn a_sender_that_cycles_versions_gets_at_most_cap_plus_one_lines() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "dropping a frame of an unsupported protocol version",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let frame = Message::new_app(
+                &node.mesh,
+                &nick("alice"),
+                AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("cycle"),
+                ),
+            )
+            .sign(&Identity::generate());
+            let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
+            let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
+            let cap = tuning::UNSUPPORTED_VERSION_CAP;
+
+            // Two passes over `cap + 1` versions: an evicting set names every frame of both.
+            for version in (0..=cap).chain(0..=cap) {
+                let other = text.replacen(r#""v":"13.0""#, &format!(r#""v":"v{version}""#), 1);
+                ingest(Bytes::from(other), &mut state, &mut app, &context).await;
+            }
+
+            let seen: Vec<String> = {
+                let held = lines.0.lock().expect("the lines lock is not poisoned");
+                held.clone()
+            };
+            assert_eq!(
+                seen.len(),
+                cap + 1,
+                "one line for each of the first {cap} versions and one for the rest: {seen:?}"
+            );
+            let warned = ::habilis_network_test_tracing::warn_count(
+                "habilis_network::gossip",
+                "dropping a frame of an unsupported protocol version",
+            );
+            assert_eq!(
+                warned,
+                cap + 1,
+                "the stderr log of an unauthenticated flood obeys the cap of the error lines"
+            );
+            let last = seen.last().expect("the lines are not empty");
+            assert!(
+                last.contains("many unknown versions"),
+                "the last line says that many versions are unknown: {last:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A relay forwards a directed frame of another key and keeps no copy, whatever the app
+    /// returns. The engine cannot open the body, and no app of the workspace asks to keep such a
+    /// frame, so a copy would be one that only the log cap bounds. The engine gives no repair for a
+    /// directed frame: the author keeps none, and a relay keeps none. A key that was away gets the
+    /// frame only if the app protocol sends it again.
+    #[test]
+    fn a_relayed_directed_frame_is_not_kept_whatever_the_app_returns() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the counter
+            let reads = Arc::new(atomic::AtomicUsize::new(0));
+            // `Counting` returns `true` for every frame, the answer that asked for a copy.
+            let mut app = Counting(Arc::clone(&reads));
+            let addressee = test_key("twin#addressee");
+            let params = AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                Some(addressee),
+                None,
+                MessageBody::from("for one key"),
+            );
+            let frame =
+                Message::new_app(&node.mesh, &nick("alice"), params).sign(&Identity::generate());
+            let wire = frame.serialize().expect("serialize");
+
+            ingest(wire.into_bytes(), &mut state, &mut app, &context).await;
+
+            assert_eq!(
+                reads.load(Ordering::Relaxed),
+                1,
+                "the app sees the frame of another key once"
+            );
+            let have = HashSet::new();
+            let query = MissingQuery {
+                range: message_log::seconds(UnixSecs::ZERO, UnixSecs::MAX),
+                have: &have,
+                max: 16,
+                requester: &addressee,
+            };
+            assert_eq!(
+                state.message_log.missing_in_window(query).len(),
+                0,
+                "a relay kept a directed frame of another key"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// A resend of a message that the app already read has a new gossip payload, and the ingest
@@ -2492,6 +3119,81 @@ mod first_contact_tests {
                 reads.load(Ordering::Relaxed),
                 1,
                 "the first delivery reaches the app and the resend does not"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An app that records who the meta hook names.
+    // the app and the test share the record
+    struct MetaRecorder(Arc<Mutex<Vec<AuthorKey>>>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for MetaRecorder {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::NONE
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+
+        fn on_meta_applied(
+            &mut self,
+            author: &AuthorKey,
+            _state: &mut EventLoopState,
+            _context: &HandlerCtx<'_>,
+        ) {
+            if let Ok(mut record) = self.0.lock() {
+                record.push(*author);
+            }
+        }
+    }
+
+    /// Two keys can use one nickname, and the meta slot of each is its own. The hook that tells
+    /// the app which slot changed names the key of the author, so the app reads the slot of that
+    /// key and not the slot of the other key.
+    #[test]
+    fn the_meta_hook_tells_two_keys_of_one_nickname_apart() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the record
+            let record = Arc::new(Mutex::new(Vec::new()));
+            let mut app = MetaRecorder(Arc::clone(&record));
+            let twin = nick("twin");
+            let identities = [Identity::generate(), Identity::generate()];
+            for identity in &identities {
+                let frame = Message::new_channel_event(
+                    &node.mesh,
+                    &twin,
+                    MessageBody::from("{}"),
+                    Channel::Meta,
+                )
+                .sign(identity);
+                dispatch_channel(
+                    ChannelEvent {
+                        channel: Channel::Meta,
+                        message: &frame,
+                        surfaceable: true,
+                    },
+                    &mut state,
+                    &mut app,
+                    &context,
+                );
+            }
+
+            let heard = record.lock().expect("the record lock").clone();
+            let keys: Vec<AuthorKey> = identities.iter().map(Identity::author_key).collect();
+            assert_eq!(
+                heard, keys,
+                "the hook did not name the key of each author, in order"
             );
             node.endpoint.close().await;
         });
@@ -2583,16 +3285,21 @@ mod first_contact_tests {
                 lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob.addr());
                 let mut state = fresh_state();
                 state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
-                state.peer_endpoints.insert(nick("bob"), bob.addr());
+                state.names.insert(test_key("bob"), nick("bob"));
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob.addr());
                 feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
                 feed(Event::NeighborDown(bob.id()), &mut state, &context).await;
                 assert!(
                     state.standing.contains(&Standing::Meshed),
                     "the gap does not clear meshed"
                 );
-                let frame =
-                    Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random())
-                        .sign(&Identity::generate());
+                let frame = Message::new_pong(
+                    &node.mesh,
+                    &node.author,
+                    test_key("bob"),
+                    &MessageId::random(),
+                )
+                .sign(&Identity::generate());
                 let bytes = frame.serialize().expect("serialize");
                 assert!(
                     state.pending_outbound.push((frame, bytes.clone())),
@@ -2862,9 +3569,9 @@ mod first_contact_tests {
             let silent = clock::Instant::now()
                 .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
                 .expect("a past instant");
-            state.last_seen.insert(nick("far-side"), silent);
-            state.peers.insert(nick("far-side"));
-            state.surfaced.insert(nick("far-side"));
+            state.last_seen.insert(test_key("far-side"), silent);
+            state.peer_for_test("far-side");
+            state.surfaced_for_test("far-side");
             heartbeat::tick_sweep(&mut state, &SilentSink);
 
             assert!(state.rendezvous_wanted(), "the sweep owes one return");
@@ -2935,6 +3642,184 @@ mod first_contact_tests {
         });
     }
 
+    /// Two live keys use one nickname, and the second binds no dial hint. When the first leaves,
+    /// the second is the only key of the nickname, and its endpoint becomes the hint at once: a
+    /// directed send does not wait for its next `PeerInfo`.
+    #[test]
+    fn the_endpoint_a_rival_key_was_refused_becomes_the_hint_when_the_first_key_leaves() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::peer_addr_error;
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let twin = nick("twin");
+            let (first_endpoint, second_endpoint) = (endpoint_id(51), endpoint_id(52));
+            let (first, second) = (Identity::generate(), Identity::generate());
+            let mut state = fresh_state();
+            for (run, endpoint) in [(&first, first_endpoint), (&second, second_endpoint)] {
+                state.names.insert(run.author_key(), twin.clone());
+                state.peers.insert(run.author_key());
+                let json =
+                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+                let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+                let peer_info = Message::new_peer_info(&node.mesh, &twin, body).sign(run);
+                super::handle_peer_info(&peer_info, &mut state, &context).await;
+            }
+            assert_eq!(
+                state.peer_endpoints.get(&twin).map(|address| address.id),
+                Some(first_endpoint),
+                "the first key holds the hint"
+            );
+
+            state.forget_key(first.author_key());
+
+            assert_eq!(
+                state.peer_endpoints.get(&twin).map(|address| address.id),
+                Some(second_endpoint),
+                "the survivor's endpoint was not bound when the first key left"
+            );
+            assert!(
+                !state.refused_endpoints.contains_key(&second.author_key()),
+                "the retained endpoint stayed after the rebind"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A refused key binds a hint at last, when the key that held the nickname is gone from the
+    /// roster. The endpoint that it had retained is not a hint, and its address leaves the book.
+    #[test]
+    fn a_refused_key_that_binds_releases_the_endpoint_it_had_retained() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::peer_addr_error;
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let twin = nick("twin");
+            let (held, bound) = (endpoint_id(54), endpoint_id(55));
+            let (first, second) = (Identity::generate(), Identity::generate());
+            let mut state = fresh_state();
+            for run in [&first, &second] {
+                state.names.insert(run.author_key(), twin.clone());
+                state.peers.insert(run.author_key());
+            }
+            let advertise = |run: &Identity, endpoint| {
+                let json =
+                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+                let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+                Message::new_peer_info(&node.mesh, &twin, body).sign(run)
+            };
+            super::handle_peer_info(&advertise(&first, endpoint_id(53)), &mut state, &context)
+                .await;
+            super::handle_peer_info(&advertise(&second, held), &mut state, &context).await;
+            assert!(
+                state.refused_endpoints.contains_key(&second.author_key()),
+                "the second key was not refused"
+            );
+            state.peers.remove(&first.author_key());
+
+            super::handle_peer_info(&advertise(&second, bound), &mut state, &context).await;
+
+            assert!(
+                !state
+                    .unicast_pool
+                    .remembers_address(&iroh::EndpointAddr::new(held)),
+                "the endpoint that the key had retained stayed in the book after it bound"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The roster trusts a key whose proof the capped table has dropped. Its beacon flag is
+    /// believed: the trust is what a pong and a link vector follow too.
+    #[test]
+    fn the_beacon_flag_of_a_trusted_key_whose_proof_left_the_table_is_believed() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob_endpoint = iroh::SecretKey::generate().public();
+            let bob = Identity::generate();
+            let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
+                .expect("a 32-byte key");
+            let mut json =
+                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            json["beacon"] = serde_json::Value::Bool(true);
+            let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+            let peer_info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
+
+            let mut state = fresh_state();
+            state.peers.insert(bob_signer);
+            state.proven_endpoints.trust(bob_signer, bob_endpoint);
+            assert_eq!(
+                state.proven_endpoints.get(&bob_signer),
+                None,
+                "the table holds no proof of bob"
+            );
+
+            super::handle_peer_info(&peer_info, &mut state, &context).await;
+
+            assert_eq!(
+                state.rival_holders.get(&bob_signer),
+                Some(&bob_endpoint),
+                "the flag of a key that the roster trusts was dropped"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A `PeerInfo` can come before its signer is in the roster. The table then holds the proof
+    /// and the trust map does not, so the next `PeerInfo` with the same proof must still make the
+    /// trust once the signer is a peer.
+    #[test]
+    fn a_proof_recorded_before_the_signer_joined_the_roster_is_trusted_by_the_next_peer_info() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+            use crate::transport::proven_endpoints;
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob_endpoint_key = iroh::SecretKey::generate();
+            let bob_endpoint = bob_endpoint_key.public();
+            let bob = Identity::generate();
+            let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
+                .expect("a 32-byte key");
+            let proof = proven_endpoints::sign(&bob_endpoint_key, &node.mesh, &bob_signer);
+            let mut json =
+                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            json["proof"] = serde_json::Value::String(proof);
+            let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+            let peer_info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
+
+            let mut state = fresh_state();
+            super::handle_peer_info(&peer_info, &mut state, &context).await;
+            assert_eq!(
+                state.proven_endpoints.get(&bob_signer),
+                Some(bob_endpoint),
+                "the proof is recorded"
+            );
+            assert_eq!(
+                state.proven_endpoints.trusted(&bob_signer),
+                None,
+                "bob is not a peer yet, so nothing is trusted"
+            );
+
+            state.peers.insert(bob_signer);
+            super::handle_peer_info(&peer_info, &mut state, &context).await;
+            assert_eq!(
+                state.proven_endpoints.trusted(&bob_signer),
+                Some(bob_endpoint),
+                "bob is a peer now, and the same proof makes the trust"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// The first vector of a member goes out when its link comes up, and its `PeerInfo` can be a
     /// few milliseconds behind it. The vector waits for the binding, and the `PeerInfo` that
     /// writes the binding feeds it: not the tick, 15 s on, after the relay policy closed the links.
@@ -2946,6 +3831,7 @@ mod first_contact_tests {
             use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
             use crate::protocol::peer_addr_error;
+            use crate::transport::proven_endpoints;
 
             async fn handle_for(secret: &SecretKey) -> MultihopHandle {
                 let underlay_builder = Endpoint::builder(presets::Minimal)
@@ -2974,27 +3860,34 @@ mod first_contact_tests {
                 10,
             )]))
             .expect("a vector serializes");
-            let vector = Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body)
-                .sign(&Identity::generate());
+            let signer = Identity::generate();
+            state.peers.insert(signer.author_key());
+            let vector =
+                Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body).sign(&signer);
             assert!(
                 !super::handle_link_state(&vector, &mut state),
-                "no binding yet: nothing is fed"
+                "no proof yet: nothing is fed"
             );
             assert!(
                 ours.topology_view().edges.is_empty(),
                 "a node with no peers has no topology edges"
             );
 
-            let address =
+            let mut address =
                 peer_addr_error::endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
+            address["proof"] = serde_json::Value::String(proven_endpoints::sign(
+                &author_key,
+                &node.mesh,
+                &signer.author_key(),
+            ));
             let address_body = MessageBody::try_new(&address.to_string()).expect("an address body");
-            let peer_info = Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body)
-                .sign(&Identity::generate());
+            let peer_info =
+                Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body).sign(&signer);
             super::handle_peer_info(&peer_info, &mut state, &context).await;
             assert_eq!(
                 ours.topology_view().edges.len(),
                 1,
-                "the PeerInfo that writes the binding feeds the vector that waited for it"
+                "the PeerInfo that proves the endpoint feeds the vector that waited for it"
             );
             node.endpoint.close().await;
             ours.close().await;
@@ -3049,11 +3942,24 @@ mod first_contact_tests {
                 .add_endpoint_addr(first.clone())
                 .await
                 .expect("the endpoint takes the first address");
-            super::handle_peer_info(&peer_info(&node, &first), &mut state, &context).await;
+            let holder = Identity::generate();
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &first, &holder),
+                &mut state,
+                &context,
+            )
+            .await;
+            state.names.insert(holder.author_key(), nick("bob"));
+            state.peers.insert(holder.author_key());
             assert!(!knows_relay().await, "no relay yet");
 
             let later = first.with_relay_url(relay.clone());
-            super::handle_peer_info(&peer_info(&node, &later), &mut state, &context).await;
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &later, &holder),
+                &mut state,
+                &context,
+            )
+            .await;
 
             assert!(
                 eventually(knows_relay).await,
@@ -3085,15 +3991,323 @@ mod first_contact_tests {
         "192.0.2.10:4000".parse().expect("an address")
     }
 
-    /// A `PeerInfo` of the author `bob` that carries `addr`.
+    /// A `PeerInfo` of the author `bob` that carries `addr`, signed by a key that is new.
     fn peer_info(node: &Node, address: &iroh::EndpointAddr) -> Verified {
+        peer_info_signed_by(node, address, &Identity::generate())
+    }
+
+    /// A `PeerInfo` of the author `bob` that carries `addr`, signed by `by`.
+    fn peer_info_signed_by(node: &Node, address: &iroh::EndpointAddr, by: &Identity) -> Verified {
         use crate::protocol::messages::MessageBody;
         use crate::protocol::peer_addr_error;
 
         let body =
             MessageBody::try_new(&peer_addr_error::endpoint_addr_to_json(address).to_string())
                 .expect("an address body");
-        Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&Identity::generate())
+        Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(by)
+    }
+
+    /// A `PeerInfo` that carries the proof of `signer` for `endpoint_key`, stamped `at`.
+    fn proving_peer_info(
+        node: &Node,
+        endpoint_key: &iroh::SecretKey,
+        signer: &Identity,
+        at: UnixSecs,
+    ) -> Verified {
+        use crate::protocol::messages::MessageBody;
+        use crate::protocol::peer_addr_error;
+        use crate::transport::proven_endpoints;
+
+        let mut address =
+            peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint_key.public()));
+        address["proof"] = serde_json::Value::String(proven_endpoints::sign(
+            endpoint_key,
+            &node.mesh,
+            &signer.author_key(),
+        ));
+        let body = MessageBody::try_new(&address.to_string()).expect("an address body");
+        let mut message = Message::new_peer_info(&node.mesh, &nick("bob"), body);
+        message.timestamp = at;
+        message.sign(signer)
+    }
+
+    /// A crash restart keeps the key of the endpoint and makes a new signing key. A `PeerInfo` of
+    /// the old key, replayed after the new key proved the endpoint, must not take the proof back:
+    /// the digests of the peer would be answered on gossip until its next `PeerInfo`.
+    #[test]
+    fn a_replayed_old_peer_info_does_not_take_the_proof_of_the_new_signer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let endpoint_key = iroh::SecretKey::generate();
+            let (old, new) = (Identity::generate(), Identity::generate());
+            state.peers.insert(old.author_key());
+            state.peers.insert(new.author_key());
+            let now = UnixSecs::now();
+            let earlier = now - std_Duration::from_secs(60);
+
+            let first = proving_peer_info(&node, &endpoint_key, &old, earlier);
+            super::handle_peer_info(&first, &mut state, &context).await;
+            let restarted = proving_peer_info(&node, &endpoint_key, &new, now);
+            super::handle_peer_info(&restarted, &mut state, &context).await;
+            super::handle_peer_info(&first, &mut state, &context).await;
+
+            assert_eq!(
+                state.proven_endpoints.get(&new.author_key()),
+                Some(endpoint_key.public()),
+                "the replay of the old signer took the proof of the new signer"
+            );
+            assert_eq!(
+                state.proven_endpoints.get(&old.author_key()),
+                None,
+                "an endpoint keeps its newest signer"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The dial hint of a nickname belongs to the key that holds it. A `PeerInfo` of another key
+    /// under the same nickname (a frame of one second that lost the nickname) must not move the
+    /// hint, or a directed send reaches a node that does not hold the nickname. The holder may
+    /// rebind (a restart), and a nickname with no holder takes the first hint.
+    #[test]
+    fn a_peer_info_of_a_key_that_does_not_hold_the_nickname_binds_no_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let holder = Identity::generate();
+            let rival = Identity::generate();
+            let held = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+            let taken = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+            let restarted = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &held, &holder),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.peer_endpoints.get("bob"),
+                Some(&held),
+                "a nickname with no holder takes the first hint"
+            );
+            state.names.insert(holder.author_key(), nick("bob"));
+            state.peers.insert(holder.author_key());
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &taken, &rival),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.peer_endpoints.get("bob"),
+                Some(&held),
+                "a key that does not hold the nickname moved the dial hint"
+            );
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &restarted, &holder),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.peer_endpoints.get("bob"),
+                Some(&restarted),
+                "the holder could not rebind its hint"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A key that is not in the roster (it lapsed, or it was pruned) can still send a late
+    /// `PeerInfo`. It must not bind a nickname that a live peer holds: a directed send would
+    /// reach the old node until the live peer sends its own `PeerInfo`.
+    #[test]
+    fn a_late_peer_info_of_a_key_outside_the_roster_does_not_take_a_nickname_a_live_peer_holds() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let (live, late) = (Identity::generate(), Identity::generate());
+            state.names.insert(live.author_key(), nick("bob"));
+            state.peers.insert(live.author_key());
+            let (old_id, current_id) = (
+                iroh::SecretKey::generate().public(),
+                iroh::SecretKey::generate().public(),
+            );
+            let old = iroh::EndpointAddr::new(old_id).with_ip_addr(test_ip());
+            let current = iroh::EndpointAddr::new(current_id).with_ip_addr(test_ip());
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &old, &late),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert!(
+                !state.peer_endpoints.contains_key("bob"),
+                "a key outside the roster took a nickname that a live peer holds"
+            );
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &current, &live),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.peer_endpoints.get("bob"),
+                Some(&current),
+                "the live peer could not bind its own hint"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A rival key does not bind the hint, but its address is still handed to the endpoint: the
+    /// binding is the roster's, the address is a path to a node. Until then a dial goes to the
+    /// stale address.
+    #[test]
+    fn a_rival_keys_changed_address_reaches_the_address_book() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let (owner, rival) = (Identity::generate(), Identity::generate());
+            for key in [owner.author_key(), rival.author_key()] {
+                state.names.insert(key, nick("bob"));
+                state.peers.insert(key);
+            }
+            let held = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+            state.bind_peer_endpoint(owner.author_key(), nick("bob"), held);
+            let rival_id = iroh::SecretKey::generate().public();
+            let first: net::SocketAddr = "127.0.0.1:4101".parse().expect("an address");
+            let second: net::SocketAddr = "127.0.0.1:4102".parse().expect("an address");
+
+            for address in [first, second] {
+                let moved = iroh::EndpointAddr::new(rival_id).with_ip_addr(address);
+                super::handle_peer_info(
+                    &peer_info_signed_by(&node, &moved, &rival),
+                    &mut state,
+                    &context,
+                )
+                .await;
+            }
+
+            let known = state
+                .address_book
+                .get_endpoint_info(rival_id)
+                .expect("the book holds the rival endpoint")
+                .into_endpoint_addr();
+            let ports: Vec<net::SocketAddr> = known.ip_addrs().copied().collect();
+            assert!(
+                ports.contains(&second),
+                "the changed address of a rival key never reached the address book: {ports:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A dial hint that another nickname holds for the same endpoint is a claim, not a registered
+    /// address. When it names the advertised address, the address still has to reach the address
+    /// book and the unicast pool, because nothing else put it there.
+    #[test]
+    fn an_address_held_as_a_hint_of_another_nickname_still_reaches_the_address_book() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let (carol, bob) = (Identity::generate(), Identity::generate());
+            let endpoint_id = iroh::SecretKey::generate().public();
+            let advertised = iroh::EndpointAddr::new(endpoint_id).with_ip_addr(test_ip());
+            state.bind_peer_endpoint(carol.author_key(), nick("carol"), advertised.clone());
+            // Not the first sighting, and already linked, so no graft registers the address:
+            // only `changed` can.
+            state.known_endpoints.insert(endpoint_id);
+            state.linked_endpoints.insert(endpoint_id);
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &advertised, &bob),
+                &mut state,
+                &context,
+            )
+            .await;
+
+            assert!(
+                state.address_book.get_endpoint_info(endpoint_id).is_some(),
+                "the address was held as a hint of another nickname and never reached the book"
+            );
+            assert!(
+                state.unicast_pool.has_addr(endpoint_id),
+                "the address was held as a hint of another nickname and never reached the pool"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A `PeerInfo` of a key that said goodbye is a replay: the goodbye removed the nickname and
+    /// its dial hint, and the replay must not bring the hint back.
+    #[test]
+    fn a_replayed_peer_info_of_a_key_that_said_goodbye_binds_no_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let departed = Identity::generate();
+            let address = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+            state.note_left(departed.author_key());
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &address, &departed),
+                &mut state,
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.peer_endpoints.contains_key("bob"),
+                "a replayed PeerInfo of a departed key restored the dial hint"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A stale `PeerInfo` proves no presence, so it registers no endpoint and starts no dial. The
+    /// frame comes through `ingest`, which is where the lifecycle verdict is known.
+    #[test]
+    fn a_stale_peer_info_registers_no_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the counter
+            let mut app = Counting(Arc::new(atomic::AtomicUsize::new(0)));
+            let departed = Identity::generate();
+            let endpoint = iroh::SecretKey::generate().public();
+            let address = iroh::EndpointAddr::new(endpoint).with_ip_addr(test_ip());
+            state.note_left(departed.author_key());
+            let frame = peer_info_signed_by(&node, &address, &departed)
+                .serialize()
+                .expect("serialize");
+
+            ingest(frame.into_bytes(), &mut state, &mut app, &context).await;
+
+            assert!(
+                !state.known_endpoints.contains(&endpoint),
+                "a stale PeerInfo registered its endpoint for a dial"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// A relayed `PeerInfo` is re-serialized from its verified form, so the bytes that go out are the
@@ -3306,7 +4520,7 @@ mod first_contact_tests {
                     .sign(&newcomer);
             ingest(wire(&digest), &mut digest_first, &mut app, &context).await;
             assert!(
-                digest_first.peerinfo_flooded_at.is_some(),
+                digest_first.peerinfo_flood.is_some(),
                 "a newcomer's digest arrived first, and we never told it our address"
             );
 
@@ -3316,7 +4530,7 @@ mod first_contact_tests {
                     .sign(&newcomer);
             ingest(wire(&change), &mut change_first, &mut app, &context).await;
             assert!(
-                change_first.peerinfo_flooded_at.is_none(),
+                change_first.peerinfo_flood.is_none(),
                 "a state frame does not mark its author present"
             );
             node.endpoint.close().await;
@@ -3384,15 +4598,17 @@ mod first_contact_tests {
 
 #[cfg(all(test, feature = "host"))]
 mod link_state_tests {
+    use crate::protocol::UnixSecs;
     use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
     use iroh::endpoint::presets;
-    use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+    use iroh::{Endpoint, RelayMode, SecretKey};
 
+    use crate::protocol::identity::Identity;
     use crate::protocol::{MeshId, Message};
     use crate::testing::{fresh_state, nick};
 
     use crate::transport::PayloadPath;
-    use crate::{gossip, lookup, protocol};
+    use crate::{gossip, lookup};
     /// A handle over a loopback underlay on the key derived from `secret`.
     async fn handle_for(secret: &SecretKey) -> MultihopHandle {
         let underlay_builder = Endpoint::builder(presets::Minimal)
@@ -3419,7 +4635,7 @@ mod link_state_tests {
             let mut state = fresh_state();
             let body = gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
             let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body)
-                .sign(&protocol::Identity::generate());
+                .sign(&Identity::generate());
             super::retain_own_broadcast(&mut state, message);
             assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
             handle.close().await;
@@ -3427,9 +4643,9 @@ mod link_state_tests {
     }
 
     // A signature proves who made a vector, not that the maker is a member, and
-    // the roster binding is what ties an origin to an author.
+    // the endpoint that the signer proved is what ties an origin to a signer.
     #[test]
-    fn a_link_vector_is_taken_in_only_from_the_peer_the_roster_binds_to_its_origin() {
+    fn a_link_vector_is_taken_in_only_from_the_signer_that_proved_its_origin() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (alice, bob) = (
                 SecretKey::from_bytes(&[51; 32]),
@@ -3445,33 +4661,33 @@ mod link_state_tests {
                 10,
             )]))
             .expect("a vector serializes");
-            let message_from = |author: &str| {
+            let (alice_id, mallory_id) = (Identity::generate(), Identity::generate());
+            state.peers.insert(alice_id.author_key());
+            state.peers.insert(mallory_id.author_key());
+            let message_from = |author: &str, signer: &Identity| {
                 Message::new_link_state(&MeshId::from("test"), &nick(author), body.clone())
+                    .sign(signer)
             };
 
-            super::handle_link_state(&message_from("alice-aa"), &mut state);
+            super::handle_link_state(&message_from("alice-aa", &alice_id), &mut state);
             assert!(
                 ours.topology_view().edges.is_empty(),
-                "no address learned for the author yet"
+                "no endpoint proved by the signer yet"
             );
 
-            state
-                .peer_endpoints
-                .insert(nick("mallory-mm"), EndpointAddr::new(bob.public()));
-            super::handle_link_state(&message_from("mallory-mm"), &mut state);
+            state.note_proven_endpoint(mallory_id.author_key(), bob.public(), UnixSecs::from(1));
+            super::handle_link_state(&message_from("mallory-mm", &mallory_id), &mut state);
             assert!(
                 ours.topology_view().edges.is_empty(),
-                "an author bound to another endpoint cannot speak for this origin"
+                "a signer that proved another endpoint cannot speak for this origin"
             );
 
-            state
-                .peer_endpoints
-                .insert(nick("alice-aa"), EndpointAddr::new(alice.public()));
-            super::handle_link_state(&message_from("alice-aa"), &mut state);
+            state.note_proven_endpoint(alice_id.author_key(), alice.public(), UnixSecs::from(1));
+            super::handle_link_state(&message_from("alice-aa", &alice_id), &mut state);
             assert_eq!(
                 ours.topology_view().edges.len(),
                 1,
-                "the bound peer is heard"
+                "the signer that proved the origin is heard"
             );
             ours.close().await;
             theirs.close().await;
@@ -3560,6 +4776,10 @@ mod left_tests {
             let mut state = fresh_state();
             state.multihop = Some(handle.clone());
             let leaver = nick("leaver");
+            // The leaver is a peer of the roster under the key of its run.
+            let leaver_run = Identity::generate();
+            state.names.insert(leaver_run.author_key(), leaver.clone());
+            state.peers.insert(leaver_run.author_key());
             state.note_peer_endpoint(
                 leaver.clone(),
                 EndpointAddr::new(leaver_handle.app_id().get()),
@@ -3589,7 +4809,7 @@ mod left_tests {
                 external_msg_tx: None,
                 sink: &sink,
             };
-            let message = Message::new_left(&mesh, &leaver).sign(&Identity::generate());
+            let message = Message::new_left(&mesh, &leaver).sign(&leaver_run);
             let update = MembershipUpdate {
                 returned: false,
                 joined_new: false,
@@ -3724,7 +4944,7 @@ mod left_tests {
 mod requeue_tests {
     use crate::daemon::state::Standing;
 
-    use crate::testing::{LaneNode, nick};
+    use crate::testing::{LaneNode, nick, test_key};
 
     use crate::transport;
     use crate::util::clock;
@@ -3763,7 +4983,7 @@ mod requeue_tests {
                     "one admission slot is in flight after the requeue"
                 );
 
-                state.note_peer_endpoint(nick("bob"), address);
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), address);
                 drop(
                     transport::resolve(&frame, bytes.clone(), &state)
                         .expect_err("a lookup-only relay holds the frame"),
@@ -3791,13 +5011,21 @@ mod requeue_tests {
 
 #[cfg(all(test, feature = "host"))]
 mod parked_link_state_tests {
+    use std::thread;
+    use std::time::Duration;
+
+    use crate::protocol::UnixSecs;
+    use crate::util::clock::Instant;
+    use crate::util::tuning::PARKED_LINK_STATE_TTL;
     use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
-    use crate::daemon::state::ParkedLinkStates;
+    use crate::daemon::state::{EventLoopState, ParkedLinkStates};
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::Verified;
     use crate::protocol::{MeshId, Message};
-    use crate::testing::{fresh_state, nick};
+    use crate::testing::{fresh_state, nick, test_key};
 
     use crate::transport::PayloadPath;
     use crate::{gossip, lookup};
@@ -3832,10 +5060,205 @@ mod parked_link_state_tests {
         Message::new_link_state(&MeshId::from("test"), &nick(author), body)
     }
 
-    // The trust rule is the one of a vector that arrives after its binding: the origin must be
-    // the endpoint that the roster binds to the author.
+    /// A vector of `nickname`, signed by `signer`.
+    fn signed_vector(
+        nickname: &str,
+        signer: &Identity,
+        handle: &MultihopHandle,
+        link: iroh::EndpointId,
+    ) -> Verified {
+        vector_message(nickname, handle, vec![(link, 10)]).sign(signer)
+    }
+
+    /// Two live keys of one nickname, each with its own origin: the keys, the secret keys of the
+    /// origins, and the dial hint under the nickname, which names the origin of the first key.
+    struct Twins {
+        first: Identity,
+        second: Identity,
+        first_origin: SecretKey,
+        second_origin: SecretKey,
+    }
+
+    impl Twins {
+        fn new(seed: u8) -> Self {
+            Self {
+                first: Identity::generate(),
+                second: Identity::generate(),
+                first_origin: SecretKey::from_bytes(&[seed; 32]),
+                second_origin: SecretKey::from_bytes(&[seed + 1; 32]),
+            }
+        }
+    }
+
+    // The nickname is a label that any signer can take. The dial hint under it names the endpoint
+    // of one key, and the other key proved its own: a vector of the second key is taken in from
+    // that proven endpoint.
     #[test]
-    fn a_parked_link_vector_whose_origin_is_not_the_bound_endpoint_is_dropped_at_the_binding() {
+    fn a_link_vector_is_taken_in_from_the_endpoint_its_signer_proved() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let twins = Twins::new(80);
+            let carol = SecretKey::from_bytes(&[90; 32]);
+            let ours = handle_for(&SecretKey::from_bytes(&[79; 32])).await;
+            let second = handle_for(&twins.second_origin).await;
+            let mut state = fresh_state();
+            state.multihop = Some(ours.clone());
+            state.peer_endpoints.insert(
+                nick("twin-tt"),
+                EndpointAddr::new(twins.first_origin.public()),
+            );
+            state.peers.insert(twins.first.author_key());
+            state.peers.insert(twins.second.author_key());
+            state.note_proven_endpoint(
+                twins.first.author_key(),
+                twins.first_origin.public(),
+                UnixSecs::from(1),
+            );
+            state.note_proven_endpoint(
+                twins.second.author_key(),
+                twins.second_origin.public(),
+                UnixSecs::from(1),
+            );
+
+            let vector = signed_vector("twin-tt", &twins.second, &second, carol.public());
+            assert!(
+                super::handle_link_state(&vector, &mut state),
+                "the vector of the second key, from the endpoint it proved, changes the topology"
+            );
+            assert_eq!(
+                ours.topology_view().edges.len(),
+                1,
+                "the one link of the vector is an edge"
+            );
+            ours.close().await;
+            second.close().await;
+        });
+    }
+
+    // One park slot per key: the vector of the second key of a nickname waits beside the vector of
+    // the first, and neither the park of the first nor its proof takes it away.
+    #[test]
+    fn the_parked_vector_of_one_key_survives_another_key_of_its_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let twins = Twins::new(83);
+            let carol = SecretKey::from_bytes(&[91; 32]);
+            let ours = handle_for(&SecretKey::from_bytes(&[82; 32])).await;
+            let (first, second) = (
+                handle_for(&twins.first_origin).await,
+                handle_for(&twins.second_origin).await,
+            );
+            let mut state = fresh_state();
+            state.multihop = Some(ours.clone());
+
+            state.peers.insert(twins.first.author_key());
+            state.peers.insert(twins.second.author_key());
+            super::handle_link_state(
+                &signed_vector("twin-tt", &twins.second, &second, carol.public()),
+                &mut state,
+            );
+            super::handle_link_state(
+                &signed_vector("twin-tt", &twins.first, &first, carol.public()),
+                &mut state,
+            );
+            state.note_proven_endpoint(
+                twins.first.author_key(),
+                twins.first_origin.public(),
+                UnixSecs::from(1),
+            );
+            assert_eq!(
+                ours.topology_view().edges.len(),
+                1,
+                "the vector of the first key is fed at its proof"
+            );
+            state.note_proven_endpoint(
+                twins.second.author_key(),
+                twins.second_origin.public(),
+                UnixSecs::from(1),
+            );
+            assert_eq!(
+                ours.topology_view().edges.len(),
+                2,
+                "the vector of the second key waited for its proof, and was fed there"
+            );
+            ours.close().await;
+            first.close().await;
+            second.close().await;
+        });
+    }
+
+    /// The first peer of a roster proves its origin, then `others` more peers prove theirs: the
+    /// state, the first peer's signer and its handle.
+    async fn roster_of(
+        others: usize,
+        ours: &MultihopHandle,
+    ) -> (EventLoopState, Identity, MultihopHandle) {
+        let first_secret = SecretKey::from_bytes(&[100; 32]);
+        let first = Identity::generate();
+        let theirs = handle_for(&first_secret).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+        state.peers.insert(first.author_key());
+        state.note_proven_endpoint(first.author_key(), first_secret.public(), UnixSecs::from(1));
+        for _ in 0..others {
+            let peer = Identity::generate();
+            state.peers.insert(peer.author_key());
+            state.note_proven_endpoint(
+                peer.author_key(),
+                SecretKey::generate().public(),
+                UnixSecs::from(1),
+            );
+        }
+        (state, first, theirs)
+    }
+
+    // The trust of a proof is the roster's to keep, not a FIFO's: a mesh of more than the FIFO cap
+    // (64) must hear the first peer that proved.
+    #[test]
+    fn a_roster_larger_than_the_proof_cap_keeps_the_trust_of_every_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let ours = handle_for(&SecretKey::from_bytes(&[99; 32])).await;
+            let carol = SecretKey::from_bytes(&[98; 32]);
+            let (mut state, first, theirs) = roster_of(69, &ours).await;
+
+            let vector = signed_vector("first-ff", &first, &theirs, carol.public());
+            assert!(
+                super::handle_link_state(&vector, &mut state),
+                "the first of 70 roster peers is still heard"
+            );
+            ours.close().await;
+            theirs.close().await;
+        });
+    }
+
+    // Keys that the roster does not hold are cheap to mint, and a proof of one must not push a
+    // roster peer out of the trust.
+    #[test]
+    fn proofs_of_keys_outside_the_roster_do_not_take_the_trust_of_a_roster_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let ours = handle_for(&SecretKey::from_bytes(&[97; 32])).await;
+            let carol = SecretKey::from_bytes(&[96; 32]);
+            let (mut state, first, theirs) = roster_of(0, &ours).await;
+            for _ in 0..70 {
+                state.note_proven_endpoint(
+                    Identity::generate().author_key(),
+                    SecretKey::generate().public(),
+                    UnixSecs::from(1),
+                );
+            }
+
+            let vector = signed_vector("first-ff", &first, &theirs, carol.public());
+            assert!(
+                super::handle_link_state(&vector, &mut state),
+                "70 minted proofs outside the roster do not evict the roster peer"
+            );
+            ours.close().await;
+            theirs.close().await;
+        });
+    }
+
+    // The trust rule is the one of a vector that arrives after its proof: the origin must be the
+    // endpoint that the signer proved.
+    #[test]
+    fn a_parked_link_vector_whose_origin_is_not_the_proved_endpoint_is_dropped_at_the_proof() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (alice, bob) = (
                 SecretKey::from_bytes(&[64; 32]),
@@ -3846,12 +5269,14 @@ mod parked_link_state_tests {
             let mut state = fresh_state();
             state.multihop = Some(ours.clone());
 
-            let message = vector_message("mallory-mm", &theirs, vec![(bob.public(), 10)]);
+            let mallory = Identity::generate();
+            let message =
+                vector_message("mallory-mm", &theirs, vec![(bob.public(), 10)]).sign(&mallory);
             super::handle_link_state(&message, &mut state);
-            state.bind_peer_endpoint(nick("mallory-mm"), EndpointAddr::new(bob.public()));
+            state.note_proven_endpoint(mallory.author_key(), bob.public(), UnixSecs::from(1));
             assert!(
                 ours.topology_view().edges.is_empty(),
-                "an author bound to another endpoint cannot speak for this origin"
+                "a signer that proved another endpoint cannot speak for this origin"
             );
             ours.close().await;
             theirs.close().await;
@@ -3871,21 +5296,109 @@ mod parked_link_state_tests {
             let mut state = fresh_state();
             state.multihop = Some(ours.clone());
 
-            let older = vector_message("alice-aa", &theirs, vec![(bob.public(), 10)]);
+            let signer = Identity::generate();
+            state.peers.insert(signer.author_key());
+            let older = vector_message("alice-aa", &theirs, vec![(bob.public(), 10)]).sign(&signer);
             let newer = vector_message(
                 "alice-aa",
                 &theirs,
                 vec![(bob.public(), 10), (carol.public(), 10)],
-            );
+            )
+            .sign(&signer);
             super::handle_link_state(&older, &mut state);
             super::handle_link_state(&newer, &mut state);
-            state.bind_peer_endpoint(nick("alice-aa"), EndpointAddr::new(alice.public()));
+            state.note_proven_endpoint(signer.author_key(), alice.public(), UnixSecs::from(1));
             assert_eq!(
                 ours.topology_view().edges.len(),
                 2,
                 "the newer vector, with two links, is the one that is fed"
             );
             ours.close().await;
+            theirs.close().await;
+        });
+    }
+
+    // A signer that never proves itself must not hold its slot for good: after the wait, the slot
+    // is free for a signer that will.
+    #[test]
+    fn the_park_frees_the_slots_of_signers_that_never_prove() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let theirs = handle_for(&SecretKey::from_bytes(&[73; 32])).await;
+            let vector = theirs.link_vector(Vec::new());
+            let mut parked = ParkedLinkStates::new(2);
+            parked.park(test_key("alice-aa"), vector.clone());
+            parked.park(test_key("bobby-bb"), vector.clone());
+            assert!(
+                !parked.park(test_key("carol-cc"), vector.clone()),
+                "the park is full of signers that wait"
+            );
+
+            parked.expire(Instant::now() + PARKED_LINK_STATE_TTL / 2);
+            assert!(
+                !parked.park(test_key("carol-cc"), vector.clone()),
+                "a signer that waits inside the window keeps its slot"
+            );
+
+            parked.expire(Instant::now() + PARKED_LINK_STATE_TTL + Duration::from_secs(1));
+            assert!(
+                parked.park(test_key("carol-cc"), vector),
+                "after the window the slot of a signer that never proved is free"
+            );
+            theirs.close().await;
+        });
+    }
+
+    // The policy: the wait counts from the first vector of a signer. A signer that never proves
+    // and keeps sending cannot renew its slot with each new vector.
+    #[test]
+    fn a_vector_that_replaces_a_parked_one_does_not_renew_the_wait() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let theirs = handle_for(&SecretKey::from_bytes(&[74; 32])).await;
+            let vector = theirs.link_vector(Vec::new());
+            let mut parked = ParkedLinkStates::new(1);
+            parked.park(test_key("alice-aa"), vector.clone());
+            thread::sleep(Duration::from_millis(20));
+            parked.park(test_key("alice-aa"), vector.clone());
+
+            let near_end = PARKED_LINK_STATE_TTL.saturating_sub(Duration::from_millis(5));
+            parked.expire(Instant::now() + near_end);
+            assert!(
+                parked.park(test_key("bobby-bb"), vector),
+                "alice waited longer than the window from her first vector, so her slot is free"
+            );
+            theirs.close().await;
+        });
+    }
+
+    // A proof can come before its signer is in the roster. The signer is not trusted yet, so the
+    // vector stays parked for the proof that comes with the roster.
+    #[test]
+    fn a_proof_of_a_key_outside_the_roster_leaves_its_vector_parked() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = SecretKey::from_bytes(&[75; 32]);
+            let theirs = handle_for(&secret).await;
+            let signer = test_key("alice-aa");
+            let mut state = fresh_state();
+            state
+                .parked_link_states
+                .park(signer, theirs.link_vector(Vec::new()));
+
+            state.note_proven_endpoint(signer, secret.public(), UnixSecs::from(1));
+            let waiting = state.parked_link_states.take(&signer);
+            assert!(
+                waiting.is_some(),
+                "a signer that is not trusted yet lost its parked vector"
+            );
+            if let Some(vector) = waiting {
+                state.parked_link_states.park(signer, vector);
+            }
+
+            state.peers.insert(signer);
+            state.note_proven_endpoint(signer, secret.public(), UnixSecs::from(1));
+            assert!(
+                state.parked_link_states.take(&signer).is_none(),
+                "once the signer is trusted, the vector that waited is fed and gone"
+            );
             theirs.close().await;
         });
     }
@@ -3899,28 +5412,28 @@ mod parked_link_state_tests {
             let mut parked = ParkedLinkStates::new(2);
 
             assert!(
-                parked.park(nick("alice-aa"), vector.clone()),
+                parked.park(test_key("alice-aa"), vector.clone()),
                 "the first vector for alice is parked"
             );
             assert!(
-                parked.park(nick("bobby-bb"), vector.clone()),
+                parked.park(test_key("bobby-bb"), vector.clone()),
                 "the first vector for bobby is parked beside alice's"
             );
             assert!(
-                !parked.park(nick("carol-cc"), vector.clone()),
+                !parked.park(test_key("carol-cc"), vector.clone()),
                 "a third author is refused at the cap"
             );
             assert!(
-                parked.park(nick("alice-aa"), vector.clone()),
+                parked.park(test_key("alice-aa"), vector.clone()),
                 "an author that waits is replaced at the cap"
             );
             assert!(
-                parked.take(&nick("alice-aa")).is_some(),
+                parked.take(&test_key("alice-aa")).is_some(),
                 "alice's vector is taken from the park"
             );
-            assert!(parked.take(&nick("alice-aa")).is_none(), "taken once");
+            assert!(parked.take(&test_key("alice-aa")).is_none(), "taken once");
             assert!(
-                parked.park(nick("carol-cc"), vector),
+                parked.park(test_key("carol-cc"), vector),
                 "a taken vector frees its place"
             );
             theirs.close().await;

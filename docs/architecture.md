@@ -1,7 +1,7 @@
 # habilis-network — Architecture
 
 This document describes the architecture of the habilis-network workspace at version 0.6.0.
-The wire protocol described here is message version `12.0`.
+The wire protocol described here is message version `13.0`.
 The style follows ASD-STE100 Simplified Technical English.
 
 ## Abstract
@@ -233,6 +233,13 @@ On a mesh whose relay is lookup only, the beacon reads nothing from the joiner's
 A joiner that never punches one never links.
 On the first gossip link the joiner announces itself once.
 Later links only re-send `PeerInfo`, behind a cooldown, so a flapping link cannot re-flood the mesh.
+A `PeerInfo` is in no message log, so no digest repairs one that a member missed.
+Without it, a member trusts no endpoint of the sender: it sends no pong to the sender, and it drops the link-state vectors of the sender.
+So a meshed node also floods its `PeerInfo` again when no flood has gone out for a refresh period.
+The period is the larger of 5 minutes and 5 seconds for each live member.
+Each flood draws a random factor between 1.0 and 1.5 that lengthens the next period, so the members do not flood together.
+The factor is never below 1.0, so the whole mesh sends at most 1 refresh per 5 seconds, whatever its size.
+A lost `PeerInfo` is back within one period, that is within 7.5 minutes for a mesh of up to 60 members.
 
 ### 5.3 The relay ladder
 
@@ -373,7 +380,7 @@ Peers then see an immediate neighbor-down event instead of an idle timeout.
 `EventLoopState` is layered, and only specific events write each layer:
 
 - **Transport layer** — live gossip links and remembered endpoints. Only neighbor-up and neighbor-down events write the link set. Cooldowns make sure that a flapping peer cannot start a mesh-wide connection storm.
-- **Membership layer** — the roster, keyed by nickname, with last-seen times and self-advertised endpoints.
+- **Membership layer** — the roster, keyed by author key, with the nickname of each key, last-seen times and self-advertised endpoints. A nickname is a label, so two live keys can use one.
 - **Heartbeat layer** — the quiet set for peers past the keepalive window.
 - **Presentation layer** — the surfaced subset of the roster, behind the join-horizon gate.
 
@@ -389,7 +396,11 @@ The parser rejects a key with no signature and a signature with no key.
 The signature covers the canonical form of the message with the key and signature fields empty.
 Unknown keys must be ignored, which leaves room for extension.
 
-The parser gates on an **exact** version match, `12.0`.
+The parser gates on an **exact** version match, `13.0`.
+A frame of another version is refused by its version, also when the frame fails to parse on a field that the version changed.
+A `12.0` peer and a `13.0` peer drop every frame of each other.
+Version `13.0` made the recipient of a directed frame an author key: `to` holds 64 lowercase hex digits, and a nickname there is a parse error.
+The `to` field is part of the signed kind, so the signature binds the recipient.
 The crypto byte-domains are mixed into every signature and derivation transcript.
 A silent domain change makes verification fail invisibly, and the exact gate turns that into a loud rejection.
 
@@ -430,6 +441,19 @@ flowchart LR
 
 A broadcast rides gossip.
 A directed message rides the unicast QUIC channel only, and gossip never carries it.
+A directed message names one author key, not a nickname.
+The endpoint of that key is the first source that has one:
+- the dial hint that the key made;
+- the endpoint that the key proved in its `PeerInfo`;
+- the endpoint that the key sent while another live key held its nickname.
+
+A quiet key keeps its endpoint, because a quiet peer can return.
+An endpoint that another key has proved is not an address of the old key.
+The engine can pass a directed frame of another key to `NodeApp::on_app_frame`.
+An app must act on it only if `to` is its own key (`HandlerCtx::our_pubkey`).
+Another key that uses the same nickname must not act on it.
+A relay forwards a directed frame of another key and keeps no copy of it.
+An anti-entropy answer gives a directed frame only to its addressee.
 The bytes are the same canonical message on both planes.
 The receive path is one pipeline for both planes:
 
@@ -470,6 +494,10 @@ Authenticity is the job of the engine.
 
 The `state` channel is free-form.
 The `meta` channel carries a **self-write gate**: a per-peer map where one field belongs to the peer the entry names.
+The slot key of that map is the lowercase hex of the author key, not the nickname.
+A nickname is a label that two live keys can share, so a slot named by nickname would belong to both.
+A key can write the gated field only in the slot that names it.
+The other fields of a slot are not gated, so any author can write them.
 The gate matters because a `meta` card carries the cryptographic identity of a peer.
 Ingest applies each foreign change to a throwaway fork first.
 If the change touches the field of any other peer, the gate rejects it.
@@ -679,7 +707,11 @@ The IPC module compiles out on wasm32, and a browser binds nothing.
 ### 10.4 The C ABI
 
 `habilis-network-ffi` exposes opaque handles and blocking calls, declared in `include/habilis_network.h`.
-A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages (`habilis_network_msg_send`, `habilis_network_msg_recv`) and reads the shared state as JSON.
+A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages and reads the shared state as JSON.
+A send names a nickname (`habilis_network_msg_send`) or an author key (`habilis_network_msg_send_to_key`).
+Two live members can use one nickname, so a nickname names no member, and a key does.
+A receive with `habilis_network_msg_recv` gives the key of the author in `habilis_network_msg.key`.
+The struct has 144 bytes on a 64-bit target and no size field, so a caller built with an older header must be rebuilt.
 A stream node (`habilis_network_streams_*`, `habilis_network_stream_*`) creates and opens byte streams (§9.4).
 Panics stop at the boundary through `catch_unwind`.
 For this reason the release profile keeps unwinding and does not set `panic = "abort"`.

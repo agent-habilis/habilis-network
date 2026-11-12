@@ -166,7 +166,6 @@ impl LightCyclesPeer {
             present: snapshot.present,
             waiting: snapshot.waiting,
             desynced: snapshot.desynced,
-            blocked: snapshot.blocked.clone(),
             syncing: snapshot.syncing,
             outcome: outcome_dto(game.outcome()),
             roster,

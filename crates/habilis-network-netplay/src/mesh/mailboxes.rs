@@ -20,11 +20,8 @@ pub(crate) struct Mailboxes<T: Config> {
     pub(crate) lobby: Mutex<Vec<(AuthorKey, String)>>,
     /// This peer's own public key, known only once the event loop starts.
     pub(crate) local_pubkey: Mutex<Option<AuthorKey>>,
-    /// Public key -> nickname, learned from inbound frames.
-    ///
-    /// Needed because `send_app` addresses by `Nickname` while inputs are
-    /// filed by public key — the protocol treats nicknames as cosmetic and
-    /// explicitly non-unique, so they cannot be the identity.
+    /// Public key -> nickname, learned from inbound frames. The nickname is a label for display;
+    /// the key is the identity, and a packet is addressed by key.
     pub(crate) directory: Mutex<HashMap<AuthorKey, Nickname>>,
 }
 

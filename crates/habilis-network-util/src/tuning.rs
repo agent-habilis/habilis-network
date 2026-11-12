@@ -157,6 +157,45 @@ pub const RESIDENT_MEMORY_WARN_MB: u64 = 1024;
 /// timer, so chatty meshes pay zero heartbeat cost.
 pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How long a link vector waits for the endpoint proof of its signer. The next vector of the
+/// signer comes one `LINKSTATE_INTERVAL` on and finds the proof or parks again, so a vector older
+/// than two of those intervals is of no use, and its slot goes to another signer.
+pub const PARKED_LINK_STATE_TTL: Duration = LINKSTATE_INTERVAL.saturating_mul(2);
+
+/// The least time between two `PeerInfo` refreshes of a node. A `PeerInfo` that a member missed is
+/// not in the message log, so no digest repairs it: only the flood of its sender does. The refresh
+/// sends it again, so a lost one is back within one period.
+pub const PEERINFO_REFRESH_MIN: Duration = Duration::from_mins(5);
+
+/// The refresh period grows with the roster by this much per live member. The caller never
+/// shortens the period, so the whole mesh sends at most 1 refresh per this span, however many
+/// members it holds.
+pub const PEERINFO_REFRESH_PER_PEER: Duration = Duration::from_secs(5);
+
+/// The time after the last `PeerInfo` flood at which a node floods it again, for a roster of
+/// `members` live members (itself included). It is the larger of two spans: the tuning value of
+/// [`PEERINFO_REFRESH_MIN`], and the tuning value of [`PEERINFO_REFRESH_PER_PEER`] times
+/// `members`. The caller lengthens the value by a random factor of 1.0 to 1.5, so that the members
+/// do not flood together.
+///
+/// # Examples
+///
+/// A small roster refreshes at the least period.
+///
+/// ```
+/// use habilis_network_util::tuning::{PEERINFO_REFRESH_MIN, peerinfo_refresh_period};
+///
+/// assert_eq!(peerinfo_refresh_period(3), PEERINFO_REFRESH_MIN);
+/// ```
+#[must_use]
+pub fn peerinfo_refresh_period(members: usize) -> Duration {
+    let tuning = current();
+    let grown = tuning
+        .peerinfo_refresh_per_peer
+        .saturating_mul(u32::try_from(members).unwrap_or(u32::MAX));
+    tuning.peerinfo_refresh_min.max(grown)
+}
+
 /// How long a peer can go unheard before the sweeper evicts it.
 /// Must exceed `ALIVE_INTERVAL` comfortably — 3x absorbs one or
 /// two lost gossip rounds. Worst-case ghost window is
@@ -353,6 +392,10 @@ pub struct Tuning {
     pub rendezvous_periodic_return: Duration,
     /// Whether a topic mesh looks up peers over mDNS only.
     pub topic_mdns_only: bool,
+    /// The least time between two refreshes of the `PeerInfo` of a node.
+    pub peerinfo_refresh_min: Duration,
+    /// How much a live member adds to the refresh period.
+    pub peerinfo_refresh_per_peer: Duration,
 }
 
 impl Tuning {
@@ -388,6 +431,27 @@ impl Tuning {
     #[must_use]
     pub fn heal_interval(mut self, heal_interval: Duration) -> Self {
         self.heal_interval = heal_interval;
+        self
+    }
+
+    /// Set how often the sweeper looks for expired peers.
+    #[must_use]
+    pub fn sweep_interval(mut self, sweep_interval: Duration) -> Self {
+        self.sweep_interval = sweep_interval;
+        self
+    }
+
+    /// Set the least time between two refreshes of the `PeerInfo` of a node.
+    #[must_use]
+    pub fn peerinfo_refresh_min(mut self, peerinfo_refresh_min: Duration) -> Self {
+        self.peerinfo_refresh_min = peerinfo_refresh_min;
+        self
+    }
+
+    /// Set how much a live member adds to the refresh period.
+    #[must_use]
+    pub fn peerinfo_refresh_per_peer(mut self, peerinfo_refresh_per_peer: Duration) -> Self {
+        self.peerinfo_refresh_per_peer = peerinfo_refresh_per_peer;
         self
     }
 
@@ -435,6 +499,8 @@ impl Tuning {
         rival_recheck_alone: RIVAL_RECHECK_ALONE,
         rendezvous_periodic_return: RENDEZVOUS_PERIODIC_RETURN,
         topic_mdns_only: false,
+        peerinfo_refresh_min: PEERINFO_REFRESH_MIN,
+        peerinfo_refresh_per_peer: PEERINFO_REFRESH_PER_PEER,
     };
 }
 
@@ -680,6 +746,12 @@ pub const NO_RUNG_REPEAT: Duration = Duration::from_mins(5);
 /// only a missed `peer_return` surface — acceptable. Generously above any
 /// realistic live roster.
 pub const QUIET_CAP: usize = 1024;
+
+/// Max protocol versions that the loop has named in an error line. A frame that names another
+/// version does not parse, so the key of its sender is not proven: the line is once for each
+/// version. The set takes no version past the cap, and one line says that many are unknown, so a
+/// sender that makes up versions gets neither memory nor a line for each frame.
+pub const UNSUPPORTED_VERSION_CAP: usize = 16;
 
 /// Minimum gap between our own re-dial + `PeerInfo` re-flood of the *same*
 /// peer learned via `PeerInfo` (`gossip::recv::handle_peer_info`). Caps the
