@@ -99,9 +99,9 @@ impl Goodbyes {
 
 /// How many keys have an endpoint retained in `refused_endpoints`. The map takes the address of any signed
 /// `PeerInfo` whose key is not the holder of its nickname, and a member mints keys for free, so a flood of them
-/// would fill it until the next sweep. 256 is more than the live roster of a mesh of the size that one node
-/// serves (the beacon limit is far below it), so a real peer is not pushed out; at the cap the oldest key goes
-/// and its endpoint state with it.
+/// would fill it until the next sweep. The map holds refused keys only, not the roster, so its cap does not
+/// follow the live roster, which can reach `QUIET_CAP` (1024). At the cap the oldest key goes and its endpoint
+/// state with it.
 pub(crate) const REFUSED_ENDPOINTS_CAP: usize = 256;
 /// The released endpoints that wait for the teardown of the pool: 256 at most.
 const TEARDOWN_PENDING_MAX: usize = 256;
@@ -235,7 +235,7 @@ impl ChannelDocs {
         self.meta.park(key, now);
     }
 
-    /// Drops the slice of `key` on both channels. Unlike `forget`, the key is not gone.
+    /// Drops the slice of `key` on both channels, and its pending frame. Unlike `forget`, the key is not gone.
     pub(crate) fn release(&mut self, key: &AuthorKey) {
         self.state.release(key);
         self.meta.release(key);
