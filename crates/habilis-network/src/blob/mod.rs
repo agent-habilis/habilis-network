@@ -1078,4 +1078,18 @@ mod tests {
             },
         );
     }
+
+    /// The caps of the dial attempts grow, and the last one repeats. The tests above pass their own
+    /// caps, so this pins the real ones.
+    #[test]
+    fn the_dial_caps_grow_and_the_last_one_repeats() {
+        let caps: Vec<u64> = (0..5)
+            .map(|attempt| super::consume::cap_of(&super::consume::DIAL_CAPS, attempt).as_secs())
+            .collect();
+        assert_eq!(
+            caps,
+            [5, 10, 20, 20, 20],
+            "the caps of the first 5 attempts, in seconds"
+        );
+    }
 }

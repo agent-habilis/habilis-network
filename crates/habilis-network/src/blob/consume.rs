@@ -35,15 +35,15 @@ const RETRY_DELAY: Duration = Duration::from_secs(3);
 /// with two interfaces, the reply flight of the producer to one endpoint is sometimes lost for
 /// good, and iroh waits 30 s before it gives up on the attempt. A slow link needs more than 5 s,
 /// so each attempt waits longer than the one before, and the last cap repeats.
-const DIAL_CAPS: Caps = [
+pub(super) const DIAL_CAPS: Caps = [
     Duration::from_secs(5),
     Duration::from_secs(10),
     Duration::from_secs(20),
 ];
-type Caps = [Duration; 3];
+pub(super) type Caps = [Duration; 3];
 
 /// The cap of attempt number `attempt`, counted from 0.
-fn cap_of(caps: &Caps, attempt: usize) -> Duration {
+pub(super) fn cap_of(caps: &Caps, attempt: usize) -> Duration {
     caps[attempt.min(caps.len() - 1)]
 }
 
@@ -92,9 +92,10 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let token = auth_token(ticket, password.as_ref())?;
+    // `fetch` owns its endpoints, so a stall is not for the caller to act on.
     fetch_with_token(ticket, out, &token)
         .await
-        .map_err(blob_error)
+        .map_err(BlobError::internal)
 }
 
 /// [`fetch`] over an endpoint the caller already holds, so a caller that fetches
@@ -181,13 +182,16 @@ where
 /// process.
 struct CloseOnDrop {
     endpoint: Endpoint,
+    // The runtime of the fetch. A drop on a plain thread has no runtime of its own.
+    runtime: Handle,
     closed: bool,
 }
 
 impl CloseOnDrop {
-    const fn new(endpoint: Endpoint) -> Self {
+    fn new(endpoint: Endpoint) -> Self {
         Self {
             endpoint,
+            runtime: Handle::current(),
             closed: false,
         }
     }
@@ -200,11 +204,9 @@ impl CloseOnDrop {
 
 impl Drop for CloseOnDrop {
     fn drop(&mut self) {
-        if !self.closed
-            && let Ok(handle) = Handle::try_current()
-        {
+        if !self.closed {
             let endpoint = self.endpoint.clone();
-            handle.spawn(async move { endpoint.close().await });
+            self.runtime.spawn(async move { endpoint.close().await });
         }
     }
 }
@@ -349,7 +351,8 @@ fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<Ticket
 /// Dial the producer's blob endpoint, retrying until [`DISCOVERY_DEADLINE`] so a
 /// producer whose address is still propagating is waited for, not failed on. A retry from the
 /// endpoint that stalled can stall again, and the caller owns the endpoint: after one attempt of
-/// each cap, all stalled, this returns the stall and the caller decides.
+/// each cap, all stalled, this returns the stall and the caller decides. A stall does not check the
+/// deadline: after it, at most 2 more attempts run, 20 s each.
 async fn dial(endpoint: &Endpoint, ticket: &BlobTicket, caps: &Caps) -> Result<Connection> {
     let started = Instant::now();
     let mut attempt = 0;
