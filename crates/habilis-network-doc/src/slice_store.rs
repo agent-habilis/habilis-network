@@ -58,10 +58,6 @@ const FRAME_BASE_OVERHEAD: usize = 338;
 /// [`SliceStore::new`] only where no probe of the session is possible.
 const WORST_FRAME_OVERHEAD: usize = FRAME_BASE_OVERHEAD + MAX_MESH_ID_LEN + MAX_NICKNAME_LEN;
 
-/// The size of a sealed body relative to its plain JSON, in percent: base58 of the ciphertext is
-/// about 1.37 times its bytes.
-const SEAL_GROWTH_PERCENT: usize = 138;
-
 /// The frame overhead of the worst case: the longest mesh id and the longest nickname. Use it
 /// only where no probe is possible, because it is larger than most sessions need.
 ///
@@ -751,13 +747,10 @@ impl SliceStore {
         }
     }
 
-    /// The rows of one digest page, derived from the frame overhead, so a page fits one message.
-    /// A sealed store has fewer rows, because its page body grows when it is sealed.
+    /// The rows of one digest page, derived from the frame overhead, so a page fits one message. A page
+    /// is never sealed, because its kind is never sealed, so every store has the same rows.
     fn page_rows(&self) -> usize {
-        let mut budget = MAX_MESSAGE_SIZE.saturating_sub(self.frame_overhead + PAGE_WRAPPER);
-        if self.key.is_some() {
-            budget = budget * 100 / SEAL_GROWTH_PERCENT;
-        }
+        let budget = MAX_MESSAGE_SIZE.saturating_sub(self.frame_overhead + PAGE_WRAPPER);
         (budget / PAGE_ROW).max(1)
     }
 
@@ -1197,6 +1190,29 @@ mod tests {
             "a state frame must not write a meta slice"
         );
         assert_eq!(store.authors(), 0, "a refused channel must leave no author");
+    }
+
+    #[test]
+    fn a_passworded_page_holds_18_rows_as_a_plain_page_does() {
+        let channel_key = SymmetricKey::from([3u8; 32]);
+        let plain = MessageBody::from(r#"{"version":1,"value":{}}"#);
+        let sealed = wire::encrypt_body(&plain, &channel_key).expect("a sealed body");
+        let overhead = super::frame_overhead("m".repeat(62).as_str(), "nick");
+        let mut store = SliceStore::new(Channel::Meta, SliceLimits::default(), overhead)
+            .with_key(Some(channel_key));
+        for seed in 1..=18 {
+            assert_eq!(
+                apply(&mut store, &frame_with_body(key(seed), sealed.as_str())),
+                SliceIngest::Applied,
+                "a sealed slice of key {seed} must apply"
+            );
+        }
+        let first = store.pages().next().expect("a page");
+        assert_eq!(
+            first.entries().len(),
+            18,
+            "a page of a passworded store holds 18 rows, as a plain page does"
+        );
     }
 
     #[test]
@@ -1894,7 +1910,7 @@ mod tests {
     }
 
     #[test]
-    fn a_page_fits_the_exact_session_overhead_plain_and_sealed() {
+    fn a_page_fits_the_exact_session_overhead() {
         let mesh = MeshId::from("test");
         let nickname = Nickname::from(&*"\u{1F600}".repeat(MAX_NICKNAME_LEN / 4));
         for overhead in [probe_overhead(&mesh, &nickname), WORST_FRAME_OVERHEAD] {
@@ -1913,20 +1929,6 @@ mod tests {
                 assert!(
                     escaped + overhead <= MAX_MESSAGE_SIZE,
                     "a plain page must fit at {overhead}"
-                );
-            }
-            let sealed = plain.with_key(Some(SymmetricKey::from([3u8; 32])));
-            for page in sealed.pages() {
-                let text = serde_json::to_string(&page).expect("a page must serialize");
-                let body = wire::encrypt_body(
-                    &MessageBody::from(text.as_str()),
-                    &SymmetricKey::from([3u8; 32]),
-                )
-                .expect("a sealed page");
-                let escaped = serde_json::to_string(body.as_str()).expect("escaped").len();
-                assert!(
-                    escaped + overhead <= MAX_MESSAGE_SIZE,
-                    "a sealed page must fit at {overhead}"
                 );
             }
         }
