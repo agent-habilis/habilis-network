@@ -1,7 +1,7 @@
 //! The cross-plane send decision: deliver a message on the plane its addressing chooses.
 
 use crate::daemon::state::Standing;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use iroh::EndpointId;
 use tokio::sync::oneshot;
 
@@ -18,7 +18,6 @@ use crate::util::clock;
 
 use crate::transport::{Delivered, Lane, SendError};
 
-use crate::transport;
 use n0_future::task;
 /// Route one already-signed, already-serialized message. `bytes` MUST be
 /// `msg.serialize()` — the same wire form gossip uses.
@@ -211,15 +210,20 @@ fn directly_meshed(key: &AuthorKey, state: &EventLoopState) -> bool {
 
 /// Warm pooled connection first (steady state, no dial — an optimistic
 /// fire-and-forget handoff; a write that fails on a dead connection redials
-/// and resends once in the background). A cold peer is dialed on a task of its own, so that the
-/// caller never waits on the dial, the path wait or the write. The dial error is the send's
-/// outcome, through the handle — there is no fallback. A cold peer on the dial-failure cooldown is
-/// refused at once.
-async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> Result<Delivered> {
+/// and resends once in the background). A cold peer, and a warm peer whose connection reads relay,
+/// are served on a task of its own, so that the caller never waits on the dial, the path wait or
+/// the write. A connection that reads relay can be a young one whose direct path is still
+/// forming, so the task waits for the path like the dial of a cold peer and shares that wait with
+/// the sends that follow. The error of the dial or of the wait is the send's outcome, through the
+/// handle — there is no fallback. A peer on the dial-failure cooldown is refused at once.
+pub(super) async fn send_unicast(
+    eid: EndpointId,
+    bytes: WireFrame,
+    pool: &UnicastPool,
+) -> Result<Delivered> {
     match pool.send_if_warm(eid, bytes.clone().into_bytes()).await {
         WarmSend::Sent => Ok(Delivered::Done),
-        WarmSend::Refused => Err(anyhow::anyhow!("{}", transport::RELAY_REFUSED)),
-        WarmSend::Cold => {
+        WarmSend::Cold | WarmSend::Refused => {
             if pool.is_cooling(eid).await {
                 return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
                     .context(format!("unicast dial to {eid} failed")));
@@ -233,7 +237,7 @@ async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> 
                 let sent = pool
                     .send_registered(registration, eid, bytes.into_bytes())
                     .await
-                    .with_context(|| format!("unicast dial to {eid} failed"));
+                    .map_err(|error| anyhow::anyhow!("unicast dial to {eid} failed: {error:#}"));
                 if let Err(Err(error)) = outcome_tx.send(sent) {
                     tracing::debug!(target: "habilis_network::gossip", %eid, %error, "background send not delivered");
                 }

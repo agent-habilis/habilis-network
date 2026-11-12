@@ -106,11 +106,12 @@ pub(in crate::transport::pool) struct PoolInner {
     /// Tests only: the dials that reached the endpoint, where `dial_attempts` counts the calls.
     #[cfg(test)]
     pub(in crate::transport::pool) dials_started: AtomicU64,
-    /// Endpoints with a dial in flight, each with the receiver of the outcome that its dialer
-    /// publishes, so that concurrent cold sends to one peer share one dial instead of racing their
-    /// own: the first is the dialer, the others wait on the receiver. Read by
-    /// [`UnicastPool::send_registered`] and [`UnicastPool::dial_and_send_in_background`]. An inline dial
-    /// through [`UnicastPool::warm_or_dial`] waits on the peer lock of `dial_locks` instead.
+    /// Endpoints with a dial or a path wait in flight, each with the receiver of the outcome that
+    /// its dialer publishes, so that concurrent sends to one peer that has no usable connection
+    /// yet share one dial or one wait instead of racing their own: the first is the dialer, the
+    /// others wait on the receiver. Read by [`UnicastPool::send_registered`] and
+    /// [`UnicastPool::dial_and_send_in_background`]. An inline dial through
+    /// [`UnicastPool::warm_or_dial`] waits on the peer lock of `dial_locks` instead.
     pub(in crate::transport::pool) dialing:
         parking_lot::Mutex<HashMap<EndpointId, watch::Receiver<DialOutcome>>>,
     /// One lock for each peer that is being dialed by [`UnicastPool::dial_pooled`]: a second dial waits for the first
@@ -617,8 +618,8 @@ impl UnicastPool {
         }
     }
 
-    /// Make this caller the dialer of `eid`, or the waiter of the dial that is in flight. Taken by
-    /// the caller itself, synchronously, before the task that sends is spawned.
+    /// Make this caller the dialer of `eid`, or the waiter of the dial or the path wait that is in
+    /// flight. Taken by the caller itself, synchronously, before the task that sends is spawned.
     pub(crate) fn register_dial(&self, eid: EndpointId) -> Registration {
         let mut dialing = self.inner.dialing.lock();
         if let Some(outcome) = dialing.get(&eid) {

@@ -7,7 +7,8 @@ pub(crate) enum WarmSend {
     Sent,
     /// No warm connection: the caller dials inline.
     Cold,
-    /// A warm connection exists, but its selected path is the relay and the
-    /// relay is lookup only. Dialing would find the same connection.
+    /// A warm connection exists, but its selected path reads relay and the relay is lookup
+    /// only. The path can still be forming, so a caller serves it like `Cold`: the dial finds
+    /// the same connection and waits for a direct path.
     Refused,
 }

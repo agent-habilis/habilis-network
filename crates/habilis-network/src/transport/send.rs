@@ -39,15 +39,21 @@ mod tests {
         AppTag, AuthorKey, CorrId, Identity, MeshId, Message, MessageBody, MessageId, UnixSecs,
     };
 
+    use super::Delivered;
     use crate::daemon::state::DirectState;
+    use crate::lookup::test_relay;
+    use crate::protocol::messages::WireFrame;
     use crate::transport::{PayloadPath, payload_path};
     use crate::util::clock;
     use crate::{lookup, transport};
-    use iroh::endpoint::presets;
+    use iroh::endpoint::{Connection, presets};
+    use iroh::protocol::{AcceptError, ProtocolHandler, Router};
     use iroh_gossip::net::Gossip;
     use iroh_gossip::proto;
+    use iroh_relay::server::Server;
     use std::net::{UdpSocket, UdpSocket as std_UdpSocket};
     use std::time::{Duration as std_Duration, Instant as std_Instant};
+    use tokio::sync::mpsc;
     use tokio::{task, time as tokio_time};
     fn mesh() -> MeshId {
         MeshId::from("test")
@@ -555,6 +561,113 @@ mod tests {
             returned_endpoint.close().await;
             endpoint.close().await;
         });
+    }
+
+    /// A protocol handler that holds each unicast connection open and passes on every frame it
+    /// reads.
+    #[derive(Debug, Clone)]
+    struct Collect(mpsc::UnboundedSender<Vec<u8>>);
+
+    impl ProtocolHandler for Collect {
+        async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+            while let Ok(mut stream) = connection.accept_uni().await {
+                if let Ok(bytes) = stream.read_to_end(64 * 1024).await {
+                    let _ = self.0.send(bytes);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// A pool on an endpoint with no IP socket, and a server on the same local relay that
+    /// collects the frames it reads: the only path between them is the relay, and it stays so.
+    /// The router keeps the server up.
+    async fn relay_only_pair() -> (
+        transport::UnicastPool,
+        iroh::Endpoint,
+        EndpointId,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+        Router,
+        Server,
+    ) {
+        let (relay_url, relay) = test_relay::spawn_plain().await.expect("a local relay");
+        let bind = || async {
+            iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(iroh::RelayMode::custom([relay_url.clone()]))
+                .clear_ip_transports()
+                .bind()
+                .await
+                .expect("bind an endpoint on the relay")
+        };
+        let (frames, received) = mpsc::unbounded_channel();
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(transport::UNICAST_ALPN, Collect(frames))
+            .spawn();
+        let client = bind().await;
+        lookup::add_peer_addr(
+            &lookup::address_book(&client),
+            iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url),
+        );
+        let pool = transport::UnicastPool::new(client.clone(), false);
+        (pool, client, server.id(), received, router, relay)
+    }
+
+    /// **A send on a warm connection that reads relay waits one path budget, then fails.**
+    ///
+    /// A connection that is young reads relay until its direct path is selected, so the check of
+    /// a warm send cannot tell a path that is forming from a path that never comes. The send
+    /// waits for the path on a task of its own, like the send to a cold peer. A second send
+    /// shares that wait. Here no direct path can come, so both sends end with the relay refusal
+    /// within one budget, and the server reads no frame.
+    #[test]
+    fn a_send_on_a_relay_selected_warm_connection_waits_one_budget_then_fails() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (pool, client, server_id, mut received, router, _relay) =
+                    relay_only_pair().await;
+                let connection = pool
+                    .probe_connection(server_id)
+                    .await
+                    .expect("pool the relay connection");
+                assert!(
+                    !payload_path::selected_is_direct(&connection),
+                    "the premise: the selected path is the relay"
+                );
+
+                let frame = || WireFrame::fixture_raw(bytes::Bytes::from_static(b"hello"));
+                let mut handles = Vec::new();
+                for _ in 0..2 {
+                    let delivered = super::deliver::send_unicast(server_id, frame(), &pool)
+                        .await
+                        .expect("a refused path is not an error before the wait ends");
+                    let Delivered::Pending(handle) = delivered else {
+                        panic!("the send waits for a path on a task of its own");
+                    };
+                    handles.push(handle);
+                }
+                assert!(pool.is_dialing(server_id), "the wait is registered");
+                // The budget to select a path (5 s) and one second more.
+                for handle in handles {
+                    let ended = tokio_time::timeout(std_Duration::from_secs(6), handle)
+                        .await
+                        .expect("the send ends within one path budget")
+                        .expect("the task reports");
+                    let error = ended.expect_err("no direct path comes");
+                    assert!(
+                        format!("{error:#}").contains(transport::RELAY_REFUSED),
+                        "the refusal names the relay: {error:#}"
+                    );
+                }
+                assert_eq!(pool.dial_attempts(), 1, "the two sends share one wait");
+                assert!(received.try_recv().is_err(), "no frame went over the relay");
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
     }
 
     fn endpoint_of_bob(state: &EventLoopState) -> EndpointId {
