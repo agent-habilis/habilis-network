@@ -180,7 +180,7 @@ Code: `PendingSlices` in `crates/habilis-network-doc/src/pending_slices.rs`.
 
 Layer: state. Keyed by author key.
 
-The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. A member that leaves first sends a tombstone, a slice with the value `null`. A peer that gets the `Left` moves the key to the gone set at once. A peer that missed the `Left` keeps the tombstone for the tombstone TTL (10 minutes), then moves the key to the gone set. The store refuses a slice of a gone key until the gone TTL ends. The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed key is not gone, because it can return: the sweep releases its slice. When the key returns, its pending frame applies, and the digest round pulls the rest.
+The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. A member that leaves first sends a tombstone, a slice with the value `null`. A peer that gets the `Left` moves the key to the gone set at once. A peer that missed the `Left` keeps the tombstone for the tombstone TTL (10 minutes), then moves the key to the gone set. The store refuses a slice of a gone key until the gone TTL ends. The gone set holds as many keys as the author cap (1024 by default). The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed key is not gone, because it can return: the sweep releases its slice. When the key returns, its pending frame applies, and the digest round pulls the rest.
 
 Code: `SliceStore::forget` in `crates/habilis-network-doc/src/slice_store.rs`.
 

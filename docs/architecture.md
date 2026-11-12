@@ -497,7 +497,12 @@ The digest round has four steps:
 - On each backfill tick (10 s), the node sends one `SliceRoot` frame by unicast to each linked neighbour. Gossip does not carry it.
 - If the root of a neighbour differs from the root of the node, the node waits. The wait is about 1 s plus a random delay of up to 500 ms. The live frames in flight land in this time. Then the node compares the roots again. If they agree now, the round ends.
 - If the roots still differ, the node reads the digest of the neighbour page by page. It reads at most one neighbour on each channel at a time. For each page it sends a `SlicePageRequest`, and the neighbour answers with a `SlicePage`. The node asks for the next page 1.25 s after a page, because a page costs the neighbour two answers.
-- For each page, the node sends one `SlicePull` with all the keys of the page that it would take. It would take a key in three cases. The store lacks the key. Or the store holds the key at a lower version. Or the version is the same and the hash on the page is lower. It pulls no gone key. It pulls no key of which the store keeps no slice (see section 8.1).
+- For each page, the node sends one `SlicePull` with all the keys of the page that it would take. The node would take a key in these cases:
+  - The store lacks the key.
+  - The store holds the key at a lower version.
+  - The version is the same, and the hash on the page is lower.
+
+  The node pulls no gone key. It pulls no key of which the store keeps no slice (see section 8.1).
 
 The round takes a root or a page only if it comes by unicast from a roster peer.
 It takes a page only if the node asked for it, from the same connection, within 5 s.
@@ -507,7 +512,7 @@ A page holds as many rows as fit one message: `MAX_MESSAGE_SIZE` less the page o
 A pull holds the keys of one page, so it never holds more keys than a page has rows.
 A page is never sealed, so a sealed store and a plain store of one session have the same row count.
 The row count depends on the mesh id and the nickname of the session, so two nodes can page with different counts.
-A pull holds the keys of one page of the holder, and the holder serves at most one of its pages, so the counts need not agree.
+A pull holds the keys of one page of the holder. The holder serves at most one of its pages, so the counts do not have to agree.
 A neighbour that gets a pull looks up the first rows of distinct keys and ignores the rest. The asker pulls the rest at its next round.
 
 A node limits the answers that it gives, so one peer cannot take the whole service:
@@ -616,13 +621,14 @@ The tombstone is a slice with the value `null` at the next version, on each chan
 It goes once by gossip, and by unicast to each live peer that the member can dial.
 A peer that gets it keeps the key in its slot with the `null` value, and the view leaves the key out.
 A peer that misses the `Left` still removes the slice of that member from its view, by the tombstone.
-After the tombstone TTL (10 minutes), the key goes to the gone set.
+A peer that missed the `Left` moves the key to the gone set after the tombstone TTL (10 minutes).
 A peer that gets the `Left` moves the key to the gone set at once.
 
 A key that said a signed goodbye, or whose run a newer run replaced, goes to the **gone set**.
 The engine removes its slice, and the store refuses a slice of that key until the gone TTL ends.
 The gone TTL starts when the key goes to the gone set.
 The default of the gone TTL is 2 hours.
+The gone set holds as many keys as the author cap, 1024 by default. When it is full, the oldest key goes first.
 It must stay above the quiet TTL (1 hour) plus the alive timeout, so a peer that missed the goodbye cannot bring back the old slice.
 A new run of a member replaces the older session of that member after the proof of the new run binds, so the view holds one slice for each member.
 A session that lost its nickname to another member can return.
