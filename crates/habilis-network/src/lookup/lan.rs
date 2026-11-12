@@ -209,6 +209,12 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     // (decision D11), never the keep-alive, the idle timeout or the multipath settings.
     builder = builder.transport_config(super::endpoint::quic_limits());
 
+    // Two interfaces in one subnet give a peer two addresses that reach this host over one wire.
+    #[cfg(not(target_arch = "wasm32"))]
+    if options.udp && !lookups.is_loopback() {
+        builder = super::subnet_binds::bind_one_address_per_subnet(builder)?;
+    }
+
     // For the private rendezvous endpoint this returns `AddrInUse`
     // when another member already holds the deterministic port — the
     // caller treats that as "someone else is the beacon" and retries.
