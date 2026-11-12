@@ -6320,6 +6320,81 @@ mod first_contact_tests {
         });
     }
 
+    /// A key that lapsed and returns gets its slice back by the digest round: its root differs, its page is read, and
+    /// the pull of its key is registered.
+    #[test]
+    fn a_returning_key_gets_its_slice_back_by_the_round() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            let key = alice.author_key();
+            state.peers.insert(key);
+            state.clock_evidence.lapsed_quiet.insert(key);
+            state.peers.remove(&key);
+            state.release_strangers();
+            state.clock_evidence.lapsed_quiet.remove(&key);
+            state.peers.insert(key);
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+            let requests = state.digest_round.advance(later, |_| true, |_, _| false);
+            assert_eq!(
+                requests.len(),
+                2,
+                "the round asks for the first page of each channel of the returned key's digest"
+            );
+            let page = DigestPage::build(
+                &[DigestEntry::new(key, 2, ContentHash::of(b"row"))],
+                1,
+                0,
+                1,
+            )
+            .expect("a page of one row");
+            let answer: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePage {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    page,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed page serializes")
+            .into_bytes();
+            ingest_from(answer, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert!(
+                state
+                    .outstanding_pulls
+                    .take(endpoint_id(81), Channel::State, key, later),
+                "the pull of the returned key is registered"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// A frame of a key that lapsed quiet waits in the pending set: it is not applied, so the view does not hold it.
     #[test]
     fn a_frame_of_a_lapsed_key_waits_in_the_pending_set() {
