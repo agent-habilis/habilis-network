@@ -159,7 +159,8 @@ where
 /// a new endpoint.
 ///
 /// # Errors
-/// The same as [`fetch_with_endpoint`]. An error of `build` is an error of the fetch.
+/// The same as [`fetch_with_endpoint`]. An error of `build` is not an error of the fetch: it
+/// drops the hedge, and the fetch goes on with the first dial.
 ///
 /// # Examples
 ///
@@ -257,9 +258,15 @@ async fn no_endpoint_to_build() -> Result<Endpoint> {
     bail!("this fetch has no builder for a second endpoint")
 }
 
+/// Whether an error is a dial attempt that got no handshake within its cap.
+fn is_stalled(error: &anyhow::Error) -> bool {
+    let stalled: Option<&Stalled> = error.downcast_ref();
+    stalled.is_some()
+}
+
 /// A stalled handshake is a cause the caller acts on, so it keeps its own variant.
 fn blob_error(error: anyhow::Error) -> BlobError {
-    if error.is::<Stalled>() {
+    if is_stalled(&error) {
         BlobError::HandshakeStalled
     } else {
         BlobError::internal(error)
@@ -347,13 +354,13 @@ where
             Err(error) => {
                 endpoint.close().await;
                 if started.elapsed() >= DISCOVERY_DEADLINE {
-                    if error.is::<Stalled>() {
+                    if is_stalled(&error) {
                         return Err(error);
                     }
                     bail!("connecting to the blob producer failed: {error}");
                 }
                 tracing::debug!(target: "habilis_network::blob", %error, "blob dial retrying on a new endpoint");
-                if !error.is::<Stalled>() {
+                if !is_stalled(&error) {
                     time::sleep(RETRY_DELAY).await;
                 }
                 attempt += 1;
@@ -488,7 +495,7 @@ where
     loop {
         match dial_once(endpoint, ticket, cap_of(caps, attempt), hedge, build).await {
             Ok(dialed) => return Ok(dialed),
-            Err(error) if error.is::<Stalled>() => {
+            Err(error) if is_stalled(&error) => {
                 stalls += 1;
                 if stalls >= caps.len() {
                     return Err(error);

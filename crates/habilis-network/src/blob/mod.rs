@@ -307,7 +307,7 @@ mod tests {
                     .register(&src, content_id.clone())
                     .await
                     .expect("register");
-                let home = old_ticket
+                let home: iroh::RelayUrl = old_ticket
                     .address
                     .relay_urls()
                     .next()
@@ -779,6 +779,7 @@ mod tests {
         let front = Arc::new(front);
         tokio::spawn(async move {
             let mut dropped = None;
+            // One socket per client, shared by its reply task and the loop.
             let mut routes: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
             let mut buffer = vec![0u8; 2048];
             loop {
@@ -846,12 +847,7 @@ mod tests {
                     .register(&src, ContentId::new("blob-test-stalled-handshake"))
                     .await
                     .expect("register");
-                let upstream = ticket
-                    .address
-                    .ip_addrs()
-                    .next()
-                    .copied()
-                    .expect("a loopback ticket carries one IP address");
+                let upstream = only_ip_address(&ticket.address);
                 let proxy = lossy_proxy(upstream, true, Duration::ZERO).await;
                 ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
                 let mut out = Vec::new();
@@ -895,28 +891,12 @@ mod tests {
                     .register(&src, ContentId::new("blob-test-dropped-fetch"))
                     .await
                     .expect("register");
-                let upstream = ticket
-                    .address
-                    .ip_addrs()
-                    .next()
-                    .copied()
-                    .expect("a loopback ticket carries one IP address");
+                let upstream = only_ip_address(&ticket.address);
                 let proxy = lossy_proxy(upstream, true, Duration::ZERO).await;
                 ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
                 // The test keeps a clone of each endpoint that the fetch binds.
-                let bound = Arc::new(Mutex::new(Vec::new()));
-                let build = {
-                    let bound = Arc::clone(&bound);
-                    move || {
-                        let bound = Arc::clone(&bound);
-                        async move {
-                            let endpoint =
-                                lookup::build_peer_endpoint(&LookupOpts::loopback()).await?;
-                            bound.lock().expect("lock").push(endpoint.clone());
-                            Ok::<_, anyhow::Error>(endpoint)
-                        }
-                    }
-                };
+                let bound = Bound::default();
+                let build = || bound.build_anyhow();
                 let mut out = Vec::new();
                 let cancelled = time::timeout(
                     Duration::from_secs(1),
@@ -934,7 +914,7 @@ mod tests {
                     cancelled.is_err(),
                     "the fetch still waits for the handshake when the caller drops it"
                 );
-                let endpoint = bound.lock().expect("lock")[0].clone();
+                let endpoint = bound.first();
                 for _ in 0..30 {
                     if endpoint.is_closed() {
                         break;
@@ -976,12 +956,7 @@ mod tests {
                     .register(&src, ContentId::new("blob-test-slow-handshake"))
                     .await
                     .expect("register");
-                let upstream = ticket
-                    .address
-                    .ip_addrs()
-                    .next()
-                    .copied()
-                    .expect("a loopback ticket carries one IP address");
+                let upstream = only_ip_address(&ticket.address);
                 let proxy = lossy_proxy(upstream, false, Duration::from_millis(400)).await;
                 ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
                 let caps = [
@@ -989,11 +964,7 @@ mod tests {
                     Duration::from_millis(1500),
                     Duration::from_secs(3),
                 ];
-                let build = || async {
-                    Ok::<_, anyhow::Error>(
-                        lookup::build_peer_endpoint(&LookupOpts::loopback()).await?,
-                    )
-                };
+                let build = fresh_endpoint;
                 let mut out = Vec::new();
                 let fetched = time::timeout(
                     Duration::from_secs(30),
@@ -1046,12 +1017,7 @@ mod tests {
                     .register(&src, ContentId::new("blob-test-stalled-caller"))
                     .await
                     .expect("register");
-                let upstream = ticket
-                    .address
-                    .ip_addrs()
-                    .next()
-                    .copied()
-                    .expect("a loopback ticket carries one IP address");
+                let upstream = only_ip_address(&ticket.address);
                 let proxy = lossy_proxy(upstream, true, Duration::ZERO).await;
                 ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
                 let endpoint = lookup::build_peer_endpoint(&LookupOpts::loopback())
@@ -1088,13 +1054,23 @@ mod tests {
     /// Builds loopback peer endpoints and keeps a clone of each, so that a test sees what a fetch
     /// binds.
     #[derive(Clone, Default)]
-    struct Bound(Arc<Mutex<Vec<iroh::Endpoint>>>);
+    struct Bound(Arc<Mutex<Vec<iroh::Endpoint>>>); // clones share the list of one test
 
     impl Bound {
         async fn build(&self) -> Result<iroh::Endpoint, lookup::EndpointError> {
             let endpoint = lookup::build_peer_endpoint(&LookupOpts::loopback()).await?;
             self.0.lock().expect("lock").push(endpoint.clone());
             Ok(endpoint)
+        }
+
+        /// The same build, with the error of an `anyhow` builder.
+        async fn build_anyhow(&self) -> Result<iroh::Endpoint, anyhow::Error> {
+            Ok(self.build().await?)
+        }
+
+        /// The first endpoint that was built.
+        fn first(&self) -> iroh::Endpoint {
+            self.0.lock().expect("lock")[0].clone()
         }
 
         fn count(&self) -> usize {
@@ -1105,13 +1081,13 @@ mod tests {
         /// with no reply takes about 3 s.
         async fn all_closed(&self) -> bool {
             for _ in 0..60 {
-                let open = self
-                    .0
-                    .lock()
-                    .expect("lock")
-                    .iter()
-                    .filter(|endpoint| !endpoint.is_closed())
-                    .count();
+                let open: usize = {
+                    let endpoints = self.0.lock().expect("lock");
+                    endpoints
+                        .iter()
+                        .filter(|endpoint| !endpoint.is_closed())
+                        .count()
+                };
                 if open == 0 {
                     return true;
                 }
@@ -1119,6 +1095,29 @@ mod tests {
             }
             false
         }
+    }
+
+    /// The one IP address of a loopback ticket.
+    fn only_ip_address(address: &iroh::EndpointAddr) -> SocketAddr {
+        let first: Option<SocketAddr> = address.ip_addrs().next().copied();
+        first.expect("a loopback ticket carries one IP address")
+    }
+
+    /// A builder of a loopback peer endpoint, for a fetch that binds its own.
+    async fn fresh_endpoint() -> Result<iroh::Endpoint, anyhow::Error> {
+        Ok(lookup::build_peer_endpoint(&LookupOpts::loopback()).await?)
+    }
+
+    /// A builder that fails, with the error of a custom builder.
+    fn build_error(text: &str) -> Result<iroh::Endpoint, io::Error> {
+        Err(io::Error::other(text.to_owned()))
+    }
+
+    /// A builder whose endpoint is closed when it returns.
+    async fn build_closed(bound: &Bound) -> Result<iroh::Endpoint, lookup::EndpointError> {
+        let closed = bound.build().await?;
+        closed.close().await;
+        Ok(closed)
     }
 
     /// A producer behind `lossy_proxy`, and a ticket that dials the proxy.
@@ -1141,12 +1140,7 @@ mod tests {
             .register(&src, ContentId::new(content))
             .await
             .expect("register");
-        let upstream = ticket
-            .address
-            .ip_addrs()
-            .next()
-            .copied()
-            .expect("a loopback ticket carries one IP address");
+        let upstream = only_ip_address(&ticket.address);
         let proxy = lossy_proxy(upstream, drop_first_socket, delay).await;
         ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
         (server, ticket, src)
@@ -1172,7 +1166,7 @@ mod tests {
                 )
                 .await;
                 let bound = Bound::default();
-                let build = || async { Ok::<_, anyhow::Error>(bound.build().await?) };
+                let build = || bound.build_anyhow();
                 let mut out = Vec::new();
                 let fetched = time::timeout(
                     Duration::from_secs(15),
@@ -1227,7 +1221,7 @@ mod tests {
                 )
                 .await;
                 let bound = Bound::default();
-                let build = || async { Ok::<_, anyhow::Error>(bound.build().await?) };
+                let build = || bound.build_anyhow();
                 let mut out = Vec::new();
                 let fetched = time::timeout(
                     Duration::from_secs(15),
@@ -1344,16 +1338,11 @@ mod tests {
                     .register(&src, ContentId::new("blob-test-losing-hedge"))
                     .await
                     .expect("register");
-                let upstream = ticket
-                    .address
-                    .ip_addrs()
-                    .next()
-                    .copied()
-                    .expect("a loopback ticket carries one IP address");
+                let upstream = only_ip_address(&ticket.address);
                 let proxy = lossy_proxy(upstream, false, Duration::from_millis(600)).await;
                 ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
                 let bound = Bound::default();
-                let build = || async { Ok::<_, anyhow::Error>(bound.build().await?) };
+                let build = || bound.build_anyhow();
                 let mut out = Vec::new();
                 let fetched = time::timeout(
                     Duration::from_secs(30),
@@ -1409,7 +1398,7 @@ mod tests {
                 // The first endpoint of the caller stalls, and the builder never returns.
                 let build = || async {
                     time::sleep(Duration::from_secs(3600)).await;
-                    Err::<iroh::Endpoint, io::Error>(io::Error::other("never built"))
+                    build_error("never built")
                 };
                 let mut out = Vec::new();
                 let fetched = time::timeout(
@@ -1457,8 +1446,7 @@ mod tests {
                 let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
                     .await
                     .expect("caller endpoint");
-                let build =
-                    || async { Err::<iroh::Endpoint, io::Error>(io::Error::other("cannot build")) };
+                let build = || async { build_error("cannot build") };
                 let mut out = Vec::new();
                 let fetched = time::timeout(
                     Duration::from_secs(30),
@@ -1628,11 +1616,7 @@ mod tests {
                 .await
                 .expect("caller endpoint");
             let bound = Bound::default();
-            let build = || async {
-                let closed = bound.build().await?;
-                closed.close().await;
-                Ok::<_, lookup::EndpointError>(closed)
-            };
+            let build = || build_closed(&bound);
             let mut out = Vec::new();
             let fetched = time::timeout(
                 Duration::from_secs(30),
@@ -1684,7 +1668,7 @@ mod tests {
                 ticket.address = iroh::EndpointAddr::new(ticket.address.id)
                     .with_ip_addr(silent.local_addr().expect("silent address"));
                 let bound = Bound::default();
-                let build = || async { Ok::<_, anyhow::Error>(bound.build().await?) };
+                let build = || bound.build_anyhow();
                 let mut out = Vec::new();
                 let cancelled = time::timeout(
                     Duration::from_millis(2500),
