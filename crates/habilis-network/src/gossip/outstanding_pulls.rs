@@ -58,6 +58,12 @@ impl OutstandingPulls {
         true
     }
 
+    /// Whether the pull of `author` on `channel` is open for `holder`, for the tests. It does not take the pull.
+    #[cfg(test)]
+    pub(crate) fn is_open(&self, holder: EndpointId, channel: Channel, author: AuthorKey) -> bool {
+        self.pulls.contains_key(&(holder, channel, author))
+    }
+
     /// Takes the pull of `author` on `channel` from `holder`, if it is still open at `now`.
     pub(crate) fn take(
         &mut self,

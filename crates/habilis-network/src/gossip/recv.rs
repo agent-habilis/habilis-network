@@ -6513,8 +6513,8 @@ mod first_contact_tests {
     }
 
     /// A lapsed key that returns: its waiting frame is applied when it is seen again, and a later version comes back
-    /// through the round. It is never in the gone set, because the sweep released it and did not forget it. The test sets the
-    /// lapse by hand, and `release_strangers` is the call that the sweep makes.
+    /// through the round. It is never in the gone set, because the sweep released it and did not forget it. The test
+    /// sets the lapse by hand, and `release_strangers` is the call that the sweep makes.
     #[test]
     fn a_lapsed_key_returns_and_its_slices_come_back() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -6613,6 +6613,12 @@ mod first_contact_tests {
             .expect("a signed page serializes")
             .into_bytes();
             ingest_from(answer, &mut state, &mut app, &context).await;
+            assert!(
+                state
+                    .outstanding_pulls
+                    .is_open(endpoint_id(83), Channel::State, key),
+                "the round opened the pull of the returned key"
+            );
             ingest_from(slice(3, "3"), &mut state, &mut app, &context).await;
             state.unicast_arrival = None;
             assert!(
