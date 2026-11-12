@@ -1,5 +1,5 @@
 ---
-source: crates/habilis-network-protocol/src/message/mod.rs
+source: crates/habilis-network-protocol/src/messages/tests.rs
 expression: wire
 ---
-{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_resp","to":"0404040404040404040404040404040404040404040404040404040404040404","corr":"00000000-0000-0000-0000-0000000000aa","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"{\"result\":{\"items\":[]}}","ext":{}}
+{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_resp","to":"0404040404040404040404040404040404040404040404040404040404040404","corr":"00000000-0000-0000-0000-0000000000aa","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"{\"result\":{\"items\":[]}}","ext":{}}

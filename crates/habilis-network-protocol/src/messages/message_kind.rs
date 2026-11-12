@@ -4,8 +4,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{AppTag, CorrId, MessageId, PresenceSubtype};
+use super::{AppTag, Channel, CorrId, MessageId, PresenceSubtype};
 use crate::AuthorKey;
+use crate::digest::{DigestPage, DigestRoot};
 
 /// Message kind — the frame's routing discriminator. The engine owns the
 /// infrastructure kinds (presence, peer-info, ping/pong, channel
@@ -75,6 +76,44 @@ pub enum MessageKind {
         /// The session whose proof is asked for, by author key.
         to: AuthorKey,
     },
+    /// The digest roots of both channels, sent by unicast to a linked neighbor on the backfill tick.
+    /// One message carries both roots, so the difference is found in one round.
+    SliceRoot {
+        /// The neighbor that the root is sent to, by author key.
+        to: AuthorKey,
+        /// The root of the `state` channel.
+        state: DigestRoot,
+        /// The root of the `meta` channel.
+        meta: DigestRoot,
+    },
+    /// A pull of slices: the keys that the asker wants of one channel, at most one page of them. The
+    /// holder answers with the signed slice frames of those keys, by unicast.
+    SlicePull {
+        /// The holder that is asked, by author key.
+        to: AuthorKey,
+        /// The channel of the slices.
+        channel: Channel,
+        /// The keys whose slices are wanted.
+        keys: Vec<AuthorKey>,
+    },
+    /// A request for one page of the digest of one channel, when the roots of the two sides differ.
+    SlicePageRequest {
+        /// The holder that is asked, by author key.
+        to: AuthorKey,
+        /// The channel of the digest.
+        channel: Channel,
+        /// The index of the page, from zero.
+        index: usize,
+    },
+    /// One page of the digest of one channel, the answer to a [`SlicePageRequest`](MessageKind::SlicePageRequest).
+    SlicePage {
+        /// The asker that the page answers, by author key.
+        to: AuthorKey,
+        /// The channel of the digest.
+        channel: Channel,
+        /// The page.
+        page: DigestPage,
+    },
     /// A durable `state`-channel event: one signed slice of its author, a
     /// version and a value. Carried on the gossip topic like everything else; the
     /// store keeps the newest slice of each author. Signed like any message, and
@@ -107,6 +146,10 @@ impl fmt::Display for MessageKind {
             MessageKind::State => write!(f, "state"),
             MessageKind::Meta => write!(f, "meta"),
             MessageKind::LinkState => write!(f, "linkstate"),
+            MessageKind::SliceRoot { .. } => write!(f, "slice_root"),
+            MessageKind::SlicePull { .. } => write!(f, "slice_pull"),
+            MessageKind::SlicePageRequest { .. } => write!(f, "slice_page_request"),
+            MessageKind::SlicePage { .. } => write!(f, "slice_page"),
         }
     }
 }
@@ -126,7 +169,11 @@ impl MessageKind {
             | MessageKind::ProofRequest { .. }
             | MessageKind::State
             | MessageKind::Meta
-            | MessageKind::LinkState => None,
+            | MessageKind::LinkState
+            | MessageKind::SliceRoot { .. }
+            | MessageKind::SlicePull { .. }
+            | MessageKind::SlicePageRequest { .. }
+            | MessageKind::SlicePage { .. } => None,
         }
     }
 

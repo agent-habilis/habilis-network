@@ -96,7 +96,7 @@ impl FrameClass {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FrameShape<'frame> {
     pub(crate) class: FrameClass,
-    /// The bytes on the wire: the frame with its resend trailer, if it has one.
+    /// The bytes on the wire: the signed frame.
     pub(crate) wire: usize,
     /// The bytes of the body, as written in the JSON. Zero when the frame has no signature block
     /// to end it.
@@ -229,37 +229,27 @@ pub(crate) fn by_class(bytes: &[u64; CLASS_COUNT]) -> String {
     }
 }
 
-/// How a frame reached `ingest`: on which plane, and whether it carries a resend nonce, so it is
-/// the copy of a backfill answer. The overlay keeps each gossip message id it has seen for
-/// 90 s (`message_id_retention` of the pinned fork), per subscription, and drops a repeat in that
-/// time. So on the gossip plane a plain repeat gets here only after the 90 s, or after a resubscribe,
-/// when `drain_dead_receiver` and `drain_queued` replay frames. A resend, or a frame on the other
-/// plane, gets here at any time.
+/// How a frame reached `ingest`: on which plane. The overlay keeps each gossip message id it has
+/// seen for 90 s (`message_id_retention` of the pinned fork), per subscription, and drops a repeat in
+/// that time. So on the gossip plane a plain repeat gets here only after the 90 s, or after a
+/// resubscribe, when `drain_dead_receiver` and `drain_queued` replay frames. A frame on the unicast
+/// plane gets here at any time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Arrival {
     Gossip,
-    GossipResend,
     Unicast,
-    UnicastResend,
 }
 
-pub(crate) const ARRIVAL_COUNT: usize = 4;
+pub(crate) const ARRIVAL_COUNT: usize = 2;
 
 impl Arrival {
-    const ALL: [Self; ARRIVAL_COUNT] = [
-        Self::Gossip,
-        Self::GossipResend,
-        Self::Unicast,
-        Self::UnicastResend,
-    ];
+    const ALL: [Self; ARRIVAL_COUNT] = [Self::Gossip, Self::Unicast];
 
     /// The text that `scripts/perf/summarize.ts` reads from the census line: a rename breaks it.
     fn name(self) -> &'static str {
         match self {
             Self::Gossip => "gossip",
-            Self::GossipResend => "gossip_resend",
             Self::Unicast => "unicast",
-            Self::UnicastResend => "unicast_resend",
         }
     }
 

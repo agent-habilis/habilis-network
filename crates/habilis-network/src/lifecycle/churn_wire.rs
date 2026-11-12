@@ -197,13 +197,9 @@ fn wire_cost_of_one_minute_with_5_peers() {
 
         let frames = sender.broadcast_frames();
         let counter = WireCounter::of(&frames);
-        let parsed = frames
-            .iter()
-            .filter_map(|bytes| Message::parse_wire(bytes).ok());
-        let data = parsed.filter(|(message, _)| FrameClass::of(&message.kind) == FrameClass::Data);
-        let data_bodies: Vec<usize> = data
-            .map(|(message, _)| message.body.as_str().len())
-            .collect();
+        let parsed = frames.iter().filter_map(|bytes| Message::parse(bytes).ok());
+        let data = parsed.filter(|message| FrameClass::of(&message.kind) == FrameClass::Data);
+        let data_bodies: Vec<usize> = data.map(|message| message.body.as_str().len()).collect();
         eprintln!("WIRE one minute, 5 peers: {counter}");
         assert_eq!(
             counter.frames(FrameClass::Joined),

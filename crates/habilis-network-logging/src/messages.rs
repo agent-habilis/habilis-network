@@ -149,6 +149,10 @@ fn log(direction: &'static str, message: &Message) {
         | MessageKind::Pong { .. }
         | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. }
         | _ => plumbing(),
     }
 }

@@ -40,7 +40,12 @@ impl FrameClass {
                 subtype: PresenceSubtype::Left,
             }
             | MessageKind::LinkState => Self::Membership,
-            MessageKind::State | MessageKind::Meta => Self::Document,
+            MessageKind::State
+            | MessageKind::Meta
+            | MessageKind::SliceRoot { .. }
+            | MessageKind::SlicePull { .. }
+            | MessageKind::SlicePageRequest { .. }
+            | MessageKind::SlicePage { .. } => Self::Document,
             MessageKind::Ping | MessageKind::Pong { .. } | MessageKind::ProofRequest { .. } | _ => {
                 Self::Other
             }
@@ -59,9 +64,8 @@ impl WireCounter {
     pub(crate) fn of(frames: &[Vec<u8>]) -> Self {
         let mut counter = Self::default();
         for bytes in frames {
-            let class = Message::parse_wire(bytes).map_or(FrameClass::Other, |(message, _)| {
-                FrameClass::of(&message.kind)
-            });
+            let class = Message::parse(bytes)
+                .map_or(FrameClass::Other, |message| FrameClass::of(&message.kind));
             let entry = counter.classes.entry(class).or_default();
             entry.0 += 1;
             entry.1 += bytes.len();

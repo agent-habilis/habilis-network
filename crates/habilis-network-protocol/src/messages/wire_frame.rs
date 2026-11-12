@@ -22,7 +22,7 @@ use bytes::Bytes;
 /// ```
 /// use habilis_network_protocol::messages::{Message, Verified, WireFrame};
 ///
-/// const SIGNED: &str = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"410192bd0dce7d09e1a22991fc332d073a67edd0f30c285252c60f97e6920c19d980a8428a7860d3b6fe17cee0d5b59362435296f8cb3bf6ea30d14079c7640d","ext":{}}"#;
+/// const SIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"4add2e3a115a5e480369cac972fab7faa194cc381ec75ccf36840623e57ce83c5d043bf794a93e21050867070a697f02de794fd17d49bafcdd659215cb6eb30e","ext":{}}"#;
 ///
 /// let verified: Verified = Message::parse(SIGNED.as_bytes()).unwrap().verify().unwrap();
 /// let frame: WireFrame = verified.serialize().unwrap();
@@ -59,18 +59,6 @@ impl WireFrame {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-
-    /// The frame with a resend nonce trailer: the new name a re-sent frame carries. The signed fields
-    /// are unchanged. Call it on a frame from [`Verified::serialize`](super::Verified::serialize); a
-    /// frame that already carries a trailer is not re-named.
-    #[must_use]
-    pub fn copy_with_resend_nonce(&self, nonce: u64) -> WireFrame {
-        debug_assert!(
-            super::split_resend_trailer(&self.0).1.is_none(),
-            "a frame from Verified::serialize has no resend trailer yet"
-        );
-        WireFrame(Bytes::from(super::wire_with_resend_nonce(&self.0, nonce)))
     }
 
     /// The bytes, for a consumer that writes them.

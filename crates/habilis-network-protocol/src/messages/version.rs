@@ -1,7 +1,9 @@
 //! The wire version of the message envelope.
 
-/// Protocol version embedded in every message, `17.0`. A `Joined` body can carry an identity proof,
+/// Protocol version embedded in every message, `18.0`. A `Joined` body can carry an identity proof,
 /// and the `ProofRequest` kind asks for one (see below).
+///
+/// The version is `18.0` since the slice repair: the digest kinds `SliceRoot`, `SlicePull`, `SlicePageRequest` and `SlicePage` join the envelope, and the resend trailer is removed. A `17.0` peer carries no digest kinds, and it is refused by its version.
 ///
 /// The version is `17.0` since the shared state is one signed slice per author. A `state` or `meta`
 /// frame carries the whole slice of its author, a version and a value, and no automerge change. The
@@ -79,4 +81,4 @@
 /// - `4.0` — the native application-payload port.
 /// - `3.0` — the application-payload migration.
 /// - `2.0` — RFC 6902 → RFC 7386 shared state.
-pub(crate) const VERSION: &str = "17.0";
+pub(crate) const VERSION: &str = "18.0";

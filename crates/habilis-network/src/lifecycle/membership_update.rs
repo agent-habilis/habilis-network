@@ -66,6 +66,10 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::LinkState
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. }
         | _ => timestamp > now - tuning::alive_timeout(),
     }
 }
@@ -88,6 +92,10 @@ pub(crate) fn is_live_kind(kind: &MessageKind) -> bool {
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::LinkState
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. }
         | _ => false,
     }
 }
@@ -195,7 +203,11 @@ fn compute_proving(
             subtype: PresenceSubtype::Left,
         }
         | MessageKind::State
-        | MessageKind::Meta => false,
+        | MessageKind::Meta
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. } => false,
         MessageKind::App { .. }
         | MessageKind::Presence {
             subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,

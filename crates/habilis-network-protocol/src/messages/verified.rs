@@ -30,7 +30,7 @@ use crate::AuthorKey;
 /// ```compile_fail,E0308
 /// use habilis_network_protocol::messages::{Message, Verified};
 ///
-/// const UNSIGNED: &str = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","ext":{}}"#;
+/// const UNSIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","ext":{}}"#;
 ///
 /// fn takes(_: &Verified) {}
 ///
@@ -43,7 +43,7 @@ use crate::AuthorKey;
 /// ```
 /// use habilis_network_protocol::messages::{Message, Verified};
 ///
-/// const SIGNED: &str = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"410192bd0dce7d09e1a22991fc332d073a67edd0f30c285252c60f97e6920c19d980a8428a7860d3b6fe17cee0d5b59362435296f8cb3bf6ea30d14079c7640d","ext":{}}"#;
+/// const SIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"4add2e3a115a5e480369cac972fab7faa194cc381ec75ccf36840623e57ce83c5d043bf794a93e21050867070a697f02de794fd17d49bafcdd659215cb6eb30e","ext":{}}"#;
 ///
 /// fn takes(_: &Verified) {}
 ///
@@ -56,7 +56,7 @@ use crate::AuthorKey;
 /// ```compile_fail,E0594
 /// use habilis_network_protocol::messages::Message;
 ///
-/// const SIGNED: &str = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"410192bd0dce7d09e1a22991fc332d073a67edd0f30c285252c60f97e6920c19d980a8428a7860d3b6fe17cee0d5b59362435296f8cb3bf6ea30d14079c7640d","ext":{}}"#;
+/// const SIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"4add2e3a115a5e480369cac972fab7faa194cc381ec75ccf36840623e57ce83c5d043bf794a93e21050867070a697f02de794fd17d49bafcdd659215cb6eb30e","ext":{}}"#;
 ///
 /// let mut v = Message::parse(SIGNED.as_bytes()).unwrap().verify().unwrap();
 /// v.body = v.body.clone();
@@ -67,7 +67,7 @@ use crate::AuthorKey;
 /// ```compile_fail,E0507
 /// use habilis_network_protocol::messages::Message;
 ///
-/// const SIGNED: &str = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"410192bd0dce7d09e1a22991fc332d073a67edd0f30c285252c60f97e6920c19d980a8428a7860d3b6fe17cee0d5b59362435296f8cb3bf6ea30d14079c7640d","ext":{}}"#;
+/// const SIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"4add2e3a115a5e480369cac972fab7faa194cc381ec75ccf36840623e57ce83c5d043bf794a93e21050867070a697f02de794fd17d49bafcdd659215cb6eb30e","ext":{}}"#;
 ///
 /// let v = Message::parse(SIGNED.as_bytes()).unwrap().verify().unwrap();
 /// let _ = v.shard(None);
@@ -320,7 +320,7 @@ impl Serialize for Verified {
 /// ```compile_fail,E0277
 /// use habilis_network_protocol::messages::Message;
 ///
-/// const SIGNED: &str = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"410192bd0dce7d09e1a22991fc332d073a67edd0f30c285252c60f97e6920c19d980a8428a7860d3b6fe17cee0d5b59362435296f8cb3bf6ea30d14079c7640d","ext":{}}"#;
+/// const SIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"4add2e3a115a5e480369cac972fab7faa194cc381ec75ccf36840623e57ce83c5d043bf794a93e21050867070a697f02de794fd17d49bafcdd659215cb6eb30e","ext":{}}"#;
 ///
 /// let authored = Message::parse(SIGNED.as_bytes())
 ///     .unwrap()
@@ -336,7 +336,7 @@ impl Serialize for Verified {
 /// ```compile_fail,E0624
 /// use habilis_network_protocol::messages::Message;
 ///
-/// const SIGNED: &str = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"410192bd0dce7d09e1a22991fc332d073a67edd0f30c285252c60f97e6920c19d980a8428a7860d3b6fe17cee0d5b59362435296f8cb3bf6ea30d14079c7640d","ext":{}}"#;
+/// const SIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"4add2e3a115a5e480369cac972fab7faa194cc381ec75ccf36840623e57ce83c5d043bf794a93e21050867070a697f02de794fd17d49bafcdd659215cb6eb30e","ext":{}}"#;
 ///
 /// let authored = Message::parse(SIGNED.as_bytes())
 ///     .unwrap()
@@ -350,7 +350,7 @@ impl Serialize for Verified {
 /// ```compile_fail,E0277
 /// use habilis_network_protocol::messages::Message;
 ///
-/// const SIGNED: &str = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"410192bd0dce7d09e1a22991fc332d073a67edd0f30c285252c60f97e6920c19d980a8428a7860d3b6fe17cee0d5b59362435296f8cb3bf6ea30d14079c7640d","ext":{}}"#;
+/// const SIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"4add2e3a115a5e480369cac972fab7faa194cc381ec75ccf36840623e57ce83c5d043bf794a93e21050867070a697f02de794fd17d49bafcdd659215cb6eb30e","ext":{}}"#;
 ///
 /// let authored = Message::parse(SIGNED.as_bytes())
 ///     .unwrap()

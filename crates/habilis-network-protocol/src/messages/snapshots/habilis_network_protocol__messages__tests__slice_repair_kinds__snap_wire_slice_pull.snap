@@ -1,0 +1,5 @@
+---
+source: crates/habilis-network-protocol/src/messages/tests.rs
+expression: "wire_of(kind, \"{}\")"
+---
+{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"slicepull","to":"0404040404040404040404040404040404040404040404040404040404040404","channel":"state","keys":["0101010101010101010101010101010101010101010101010101010101010101","0202020202020202020202020202020202020202020202020202020202020202"],"mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"{}","ext":{}}

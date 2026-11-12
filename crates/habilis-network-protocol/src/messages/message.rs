@@ -13,7 +13,6 @@ use crate::{AuthorKey, ContentHash, DedupKey};
 use super::{
     AppFrameParams, Channel, MAX_MESSAGE_SIZE, MessageBody, MessageError, MessageId, MessageKind,
     PresenceSubtype, Shard, Signer, VERSION, Verified, Wire, WireIn, default_ext, empty_body,
-    split_resend_trailer,
 };
 
 /// A protocol frame — serialized as JSON on the wire. The transport
@@ -24,7 +23,7 @@ use super::{
 ///
 /// Wire format (compact JSON, one line):
 /// ```json
-/// {"v":"17.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
+/// {"v":"18.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
 /// ```
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
@@ -278,17 +277,6 @@ impl Message {
         Message::try_from(wire).map_err(MessageError::Invalid)
     }
 
-    /// Parse a gossip payload that may end in the trailer of a resend (see
-    /// [`WireFrame::copy_with_resend_nonce`](super::WireFrame::copy_with_resend_nonce)). Returns the message and the nonce, if any. The trailer is
-    /// outside the signature: it changes the gossip message id and nothing else.
-    ///
-    /// # Errors
-    /// A [`MessageError`] as for [`Message::parse`].
-    pub fn parse_wire(data: &[u8]) -> Result<(Self, Option<u64>), MessageError> {
-        let (frame, nonce) = split_resend_trailer(data);
-        Ok((Self::parse(frame)?, nonce))
-    }
-
     /// Deterministic, domain-separated, length-prefixed encoding of every
     /// signed field (i.e. all of them **except** `sig`, including
     /// `pubkey` so the key is bound to the message). This — not the JSON —
@@ -418,7 +406,7 @@ impl Message {
     /// ```compile_fail,E0624
     /// use habilis_network_protocol::messages::Message;
     ///
-    /// const SIGNED: &str = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"be64c678c6336f65be3817c748ba07478c1723863a070d5a09e62a159e06dc6bc01af49a9a2c3e5a5e25fd90e145b46b87cd803915da07fca9453b7b64b4480a","ext":{}}"#;
+    /// const SIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"be64c678c6336f65be3817c748ba07478c1723863a070d5a09e62a159e06dc6bc01af49a9a2c3e5a5e25fd90e145b46b87cd803915da07fca9453b7b64b4480a","ext":{}}"#;
     ///
     /// let message = Message::parse(SIGNED.as_bytes()).unwrap();
     /// let canonical = message.canonical_bytes();

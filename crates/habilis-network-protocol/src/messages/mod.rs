@@ -32,9 +32,6 @@ pub use sole_addressee::sole_addressee;
 mod build_msg_bytes;
 #[cfg(any(test, feature = "test-fixtures"))]
 pub use build_msg_bytes::build_msg_bytes;
-mod resend;
-pub use resend::RESEND_TRAILER_LEN;
-use resend::{split_resend_trailer, wire_with_resend_nonce};
 mod presence_subtype;
 pub use presence_subtype::PresenceSubtype;
 mod app_frame_params;

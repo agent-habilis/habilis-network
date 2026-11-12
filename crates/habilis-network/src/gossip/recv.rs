@@ -529,7 +529,7 @@ pub(crate) async fn ingest_from(
 ) {
     let shape = FrameShape::of(&frame);
     state.idle.wire_in.note_received(&shape);
-    let (message, _) = match Message::parse_wire(&frame) {
+    let message = match Message::parse(&frame) {
         Ok(parsed) => parsed,
         Err(error) => {
             report_unparsed(&error, state, context);
@@ -686,7 +686,11 @@ pub(crate) async fn ingest_from(
             )
             .await;
         }
-        _ => {}
+        MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. }
+        | _ => {}
     }
 }
 
@@ -791,7 +795,11 @@ async fn dispatch_infra(
             answer_proof_request(to, message, state, context).await;
             return ControlFlow::Break(());
         }
-        _ => {}
+        MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. }
+        | _ => {}
     }
     ControlFlow::Continue(())
 }
@@ -1478,6 +1486,10 @@ fn addressed_to_us(message: &Message, us: &AuthorKey) -> bool {
         | MessageKind::Meta
         | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. }
         | _ => true,
     }
 }
@@ -2707,7 +2719,7 @@ mod first_contact_tests {
             let text = frame.serialize().expect("serialize").into_bytes();
             let old = String::from_utf8(text.to_vec())
                 .expect("a frame is text")
-                .replacen(r#""v":"17.0""#, r#""v":"12.0""#, 1);
+                .replacen(r#""v":"18.0""#, r#""v":"12.0""#, 1);
             assert!(old.contains("12.0"), "the test frame names version 12.0");
 
             ingest(Bytes::from(old.clone()), &mut state, &mut app, &context).await;
@@ -2934,7 +2946,7 @@ mod first_contact_tests {
             let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
             let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
             let version = format!(r"\u0007\u001b[31m{}", "x".repeat(500));
-            let hostile = text.replacen(r#""v":"17.0""#, &format!(r#""v":"{version}""#), 1);
+            let hostile = text.replacen(r#""v":"18.0""#, &format!(r#""v":"{version}""#), 1);
 
             ingest(Bytes::from(hostile), &mut state, &mut app, &context).await;
 
@@ -2991,7 +3003,7 @@ mod first_contact_tests {
 
             // Two passes over `cap + 1` versions: an evicting set names every frame of both.
             for version in (0..=cap).chain(0..=cap) {
-                let other = text.replacen(r#""v":"17.0""#, &format!(r#""v":"v{version}""#), 1);
+                let other = text.replacen(r#""v":"18.0""#, &format!(r#""v":"v{version}""#), 1);
                 ingest(Bytes::from(other), &mut state, &mut app, &context).await;
             }
 
@@ -3017,43 +3029,6 @@ mod first_contact_tests {
             assert!(
                 last.contains("many unknown versions"),
                 "the last line says that many versions are unknown: {last:?}"
-            );
-            node.endpoint.close().await;
-        });
-    }
-
-    /// A resend of a message that the app already read has a new gossip payload, and the ingest
-    /// of the app still drops it by the id of the message inside: the app sees the frame once.
-    #[test]
-    fn a_resend_of_a_known_message_reaches_the_app_once() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let node = Node::spawn().await;
-            let context = node.context();
-            let mut state = fresh_state();
-            // the app and the test share the counter
-            let reads = Arc::new(atomic::AtomicUsize::new(0));
-            let mut app = Counting(Arc::clone(&reads));
-            let frame = Message::new_app(
-                &node.mesh,
-                &nick("alice"),
-                AppFrameParams::new(
-                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                    None,
-                    None,
-                    MessageBody::from("hello"),
-                ),
-            )
-            .sign(&Identity::generate());
-            let original = frame.serialize().expect("serialize");
-            let resend = original.copy_with_resend_nonce(42);
-
-            ingest(original.into_bytes(), &mut state, &mut app, &context).await;
-            ingest(resend.into_bytes(), &mut state, &mut app, &context).await;
-
-            assert_eq!(
-                reads.load(Ordering::Relaxed),
-                1,
-                "the first delivery reaches the app and the resend does not"
             );
             node.endpoint.close().await;
         });
@@ -4865,8 +4840,7 @@ mod first_contact_tests {
         .sign(&Identity::generate())
         .serialize()
         .expect("serialize");
-        let (parsed, nonce) = Message::parse_wire(inbound.as_bytes()).expect("parses");
-        assert!(nonce.is_none(), "a relayed peer info carries no nonce");
+        let parsed = Message::parse(inbound.as_bytes()).expect("parses");
         let verified_frame = parsed.verify().expect("verifies");
         let relayed = verified_frame.serialize().expect("serialize");
         assert_eq!(

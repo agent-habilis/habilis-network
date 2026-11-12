@@ -1,5 +1,7 @@
 //! The shared-state channel of a message: state or meta.
 
+use serde::{Deserialize, Serialize};
+
 use super::MessageKind;
 
 /// Which shared-state channel a slice event belongs to. The two channels share
@@ -14,7 +16,8 @@ use super::MessageKind;
 ///
 /// assert_ne!(Channel::State.label(), Channel::Meta.label());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Channel {
     /// The shared state of the mesh.
