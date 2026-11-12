@@ -790,6 +790,90 @@ mod tests {
         );
     }
 
+    /// A leaving member's tombstone reaches each peer by unicast, once per channel, with the null value. The overlay
+    /// is not meshed, so only the unicast mirror can deliver it.
+    #[test]
+    fn a_tombstone_reaches_each_peer_by_unicast_on_each_channel() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use std::time::Duration;
+
+                use iroh::endpoint::presets;
+                use iroh::protocol::Router;
+                use iroh_gossip::{net, proto};
+                use tokio::sync::mpsc;
+                use tokio::time;
+
+                use crate::gossip::MergeCtx;
+                use crate::gossip::event::SilentSink;
+                use crate::lookup;
+                use crate::transport::{
+                    MeshSender, PayloadPath, UNICAST_ALPN, UnicastAcceptor, UnicastPool,
+                };
+
+                let (tx, mut frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([9u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+
+                let mut state = fresh_state();
+                state.unicast_pool = UnicastPool::new(node.clone(), false);
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                state.names.insert(test_key("bob"), nick("bob"));
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), server.addr());
+                state.peer_for_test("bob");
+
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let context = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                super::send_tombstones(&mut state, &context).await;
+
+                for channel in ["state", "meta"] {
+                    let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
+                    let Ok(Some(frame)) = delivered else {
+                        panic!("a tombstone of the {channel} channel arrives within 5 s");
+                    };
+                    let text = String::from_utf8_lossy(&frame.bytes).into_owned();
+                    assert!(
+                        text.contains(r#"\"value\":null"#),
+                        "the {channel} tombstone carries the null value: {text}"
+                    );
+                }
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
     /// A departure written with a farewell reaches each peer by unicast at once. The overlay is
     /// not meshed, so gossip carries nothing: only the unicast mirror can deliver the frame, and
     /// no backfill round is needed.
