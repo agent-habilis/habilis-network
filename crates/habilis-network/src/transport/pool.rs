@@ -1026,8 +1026,8 @@ mod tests {
     }
 
     /// A send that waits on the dial of a probe finds the probe's connection and takes it: the hold becomes `Used`, so
-    /// the sweeper does not close a connection that a send used when the probe ends. The order of the two calls comes
-    /// from sleeps, with the first dial held.
+    /// the sweeper does not close a connection that a send used when the probe ends. The first dial is held until the
+    /// send waits on its lock, so the order of the two calls comes from the pool, not from a sleep.
     #[test]
     fn a_send_that_waits_on_a_probe_dial_takes_the_connection_as_used() {
         ::habilis_network_test_tracing::run_multi_thread(
@@ -1061,12 +1061,12 @@ mod tests {
                 let gate = pool.hold_next_dial();
                 let probe_dial = pool.probe_connection(server.id());
                 let send = async {
-                    time::sleep(Duration::from_millis(200)).await;
+                    wait_until(|| lock_handles(&pool) >= 2).await;
                     pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"one"))
                         .await
                 };
                 let release = async {
-                    time::sleep(Duration::from_millis(600)).await;
+                    wait_until(|| lock_handles(&pool) >= 3).await;
                     gate.notify_one();
                 };
                 let (dialed, outcome, ()) = tokio::join!(probe_dial, send, release);
