@@ -1176,6 +1176,10 @@ pub const DIGEST_SERVES_PER_WINDOW: usize = 8;
 /// How many slice answers this node gives in all, in one window, whoever asks.
 pub const DIGEST_SERVES_GLOBAL: usize = 32;
 
+/// How many slice keys this node pulls and waits for at once, across all holders. A full store of 1024 keys
+/// fits, so a round never needs more.
+pub const DIGEST_PULLS_OPEN: usize = 1024;
+
 /// The length of the window of the serve budget.
 pub const DIGEST_SERVE_WINDOW: Duration = Duration::from_secs(5);
 
