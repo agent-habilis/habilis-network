@@ -616,6 +616,30 @@ mod tests {
         );
     }
 
+    /// A key that was over the cap is wanted again: once a reading ends, the next differing root reads the holder again.
+    #[test]
+    fn a_key_over_the_cap_is_read_again_on_the_next_root() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 1);
+        round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        round.page_read(Channel::State, now + DIGEST_SETTLE);
+        note(
+            &mut round,
+            holder(1),
+            81,
+            Channel::State,
+            now + DIGEST_SETTLE,
+            1,
+        );
+        let again = round.advance(now + DIGEST_SETTLE + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert_eq!(
+            again.len(),
+            1,
+            "a differing root reads the holder again after its reading ended"
+        );
+    }
+
     /// A lapsed key keeps no slice, so the round does not pull it.
     #[test]
     fn a_lapsed_key_is_not_pulled() {
