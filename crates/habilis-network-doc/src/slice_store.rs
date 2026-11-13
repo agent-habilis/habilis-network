@@ -38,6 +38,9 @@ use crate::wire;
 /// drops the key. The engine test `the_gone_ttl_outlasts_the_quiet_ttl_and_the_alive_timeout` pins it.
 const DEFAULT_GONE_TTL: Duration = Duration::from_hours(2);
 
+/// The key that only a chunk pointer may carry at the top of a slice value.
+const CHUNKS_KEY: &str = "$chunks";
+
 /// The escaped length of the empty body, `""`. A frame with no body still carries it, so the probe takes it off.
 const EMPTY_BODY_ESCAPED: usize = 2;
 
@@ -286,6 +289,8 @@ pub enum SliceError {
     StaleDraft,
     /// The body could not be sealed with the channel key.
     Seal,
+    /// The value holds the reserved `$chunks` key, which only a chunk pointer may carry.
+    Reserved,
 }
 
 impl fmt::Display for SliceError {
@@ -304,6 +309,7 @@ impl fmt::Display for SliceError {
             Self::DraftMismatch => write!(f, "the frame is not the draft it claims"),
             Self::StaleDraft => write!(f, "the slice moved on after the draft"),
             Self::Seal => write!(f, "the body could not be sealed"),
+            Self::Reserved => write!(f, "the value holds the reserved \"$chunks\" key"),
         }
     }
 }
@@ -523,6 +529,9 @@ impl SliceStore {
         if !(body.value.is_object() || body.value.is_null()) {
             return Err(SliceError::Malformed);
         }
+        if body.value.get(CHUNKS_KEY).is_some() {
+            return Err(SliceError::Reserved);
+        }
         Ok(body)
     }
 
@@ -632,7 +641,7 @@ impl SliceStore {
     ///
     /// # Errors
     ///
-    /// [`SliceError::Malformed`] when the body does not build, [`SliceError::Seal`] when the
+    /// [`SliceError::Malformed`] when the body does not build, [`SliceError::Reserved`] when the value holds the `$chunks` key, [`SliceError::Seal`] when the
     /// channel key does not seal it, [`SliceError::TooLarge`] when the body is past the cap, and
     /// [`SliceError::RateLimited`] when `own` has no token left.
     pub fn prepare_local(
@@ -985,6 +994,9 @@ impl SliceStore {
         own: &AuthorKey,
         value: Value,
     ) -> Result<(u64, MessageBody, usize), SliceError> {
+        if value.get(CHUNKS_KEY).is_some() {
+            return Err(SliceError::Reserved);
+        }
         let version = self.version(own).unwrap_or(0) + 1;
         let mut body_json = json!({"version": version});
         body_json["value"] = value;
@@ -1292,6 +1304,44 @@ mod tests {
             "a value that is a number must be malformed"
         );
         assert_eq!(store.authors(), 0, "a malformed value must leave no author");
+    }
+
+    #[test]
+    fn ingest_refuses_a_value_with_the_reserved_chunks_key() {
+        let mut store = store();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, json!({"$chunks": 1, "a": 2}))),
+            SliceIngest::Refused(SliceError::Reserved),
+            "an inline value with the chunks key must be refused as reserved"
+        );
+        assert_eq!(store.authors(), 0, "a reserved value must leave no author");
+    }
+
+    #[test]
+    fn prepare_local_refuses_a_value_with_the_reserved_chunks_key() {
+        let mut store = store();
+        assert_eq!(
+            store
+                .prepare_local(&key(1), object(json!({"$chunks": 1})), Instant::now())
+                .map(|_| ()),
+            Err(SliceError::Reserved),
+            "a write with the chunks key must be refused as reserved"
+        );
+    }
+
+    #[test]
+    fn a_nested_chunks_key_is_not_reserved() {
+        let mut store = store();
+        assert!(
+            store
+                .prepare_local(
+                    &key(1),
+                    object(json!({"a": {"$chunks": 1}})),
+                    Instant::now()
+                )
+                .is_ok(),
+            "only the top-level key is reserved"
+        );
     }
 
     #[test]
