@@ -61,7 +61,8 @@ fn subnet_of(nic: &Nic) -> (u32, u8) {
 /// The prefix that routes to the peers of an interface. A point-to-point interface has a `/32`
 /// address, and a `/32` contains no peer: a flow to a peer would leave from the default socket
 /// with the source of another interface. Tailscale is such an interface, and its peers are in the
-/// CGNAT range `100.64.0.0/10`.
+/// CGNAT range `100.64.0.0/10`. Two such interfaces (for example two VPNs) fall into one subnet,
+/// so one of them gets no socket.
 fn route_prefix_len(address: Ipv4Addr, prefix_len: u8) -> u8 {
     const CGNAT_PREFIX_LEN: u8 = 10;
     let is_cgnat = address.octets()[0] == 100 && (address.octets()[1] & 0b1100_0000) == 0b0100_0000;
@@ -302,9 +303,24 @@ mod tests {
             "a point-to-point address in 100.64.0.0/10"
         );
         assert_eq!(
-            route_prefix_len(Ipv4Addr::new(100, 128, 0, 1), 32),
+            route_prefix_len(Ipv4Addr::new(100, 63, 255, 255), 32),
             32,
-            "100.128.0.0 is outside the CGNAT range"
+            "100.63.255.255 is below the CGNAT range"
+        );
+        assert_eq!(
+            route_prefix_len(Ipv4Addr::new(100, 64, 0, 0), 32),
+            10,
+            "100.64.0.0 is the first address of the CGNAT range"
+        );
+        assert_eq!(
+            route_prefix_len(Ipv4Addr::new(100, 127, 255, 255), 32),
+            10,
+            "100.127.255.255 is the last address of the CGNAT range"
+        );
+        assert_eq!(
+            route_prefix_len(Ipv4Addr::new(100, 128, 0, 0), 32),
+            32,
+            "100.128.0.0 is above the CGNAT range"
         );
         assert_eq!(
             route_prefix_len(Ipv4Addr::new(100, 99, 190, 117), 24),
