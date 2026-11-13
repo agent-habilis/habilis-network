@@ -1536,6 +1536,11 @@ mod tests {
         }
 
         async fn close(mut self) {
+            // A shed closes its endpoint on a task of its own. A test that ends before that task
+            // does lets iroh log "Endpoint dropped without calling `Endpoint::close`".
+            if let Some(closed) = self.state.beacon_closing.take() {
+                let _ = closed.await;
+            }
             if let Some(held) = self.rendezvous.take() {
                 held.shed_and_wait().await;
             }
