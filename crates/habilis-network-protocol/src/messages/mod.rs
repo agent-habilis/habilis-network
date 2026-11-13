@@ -7,11 +7,6 @@
 //!   (de)serialization.
 
 #[cfg(any(test, feature = "test-fixtures"))]
-#[cfg(any(test, feature = "test-fixtures"))]
-mod chain_ctx;
-#[cfg(any(test, feature = "test-fixtures"))]
-pub use chain_ctx::ChainCtx;
-#[cfg(any(test, feature = "test-fixtures"))]
 mod build_msg_params;
 #[cfg(any(test, feature = "test-fixtures"))]
 pub use build_msg_params::BuildMsgParams;
@@ -37,9 +32,6 @@ pub use sole_addressee::sole_addressee;
 mod build_msg_bytes;
 #[cfg(any(test, feature = "test-fixtures"))]
 pub use build_msg_bytes::build_msg_bytes;
-mod resend;
-pub use resend::RESEND_TRAILER_LEN;
-use resend::{split_resend_trailer, wire_with_resend_nonce};
 mod presence_subtype;
 pub use presence_subtype::PresenceSubtype;
 mod app_frame_params;
@@ -71,7 +63,7 @@ pub use wire::WireFrame;
 
 pub use body::{BodyError, MessageBody};
 pub use id::{IdError, MessageId};
-pub use shard::{Shard, ShardGroup, shard_fits_log};
+pub use shard::{Shard, ShardGroup};
 
 /// Maximum serialized message size — a network-wide wire contract kept
 /// under iroh-gossip's payload budget so a message we accept always fits

@@ -15,7 +15,6 @@ pub use crate::daemon::handler_ctx::HandlerCtx;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use crate::daemon::state::TestDrop;
 pub use crate::daemon::state::{EventLoopState, KeyOfError, Reach, RosterEntry, RosterSnapshot};
-pub use crate::doc::{SelfWriteGate, TimeSource};
-pub use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+pub use crate::gossip::app::{AppClass, AppFrameError, InboundApp, NodeApp};
 pub use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
 pub use crate::transport::Lane;

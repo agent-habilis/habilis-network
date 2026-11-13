@@ -7,7 +7,7 @@ use super::topic_item::TopicItem;
 
 /// The queue of the mesh messages, from the splitter to the event loop. It is bounded by the
 /// capacity of the topic subscription: a hostile member must not be able to grow it without
-/// limit. When it is full the newest message is dropped and counted, and anti-entropy repairs it
+/// limit. When it is full the newest message is dropped and counted, and nothing repairs it until the loss repair lands
 /// (the topic itself does the same when it lags).
 type DataRx = mpsc::Receiver<TopicItem>;
 

@@ -4,11 +4,12 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{AppTag, CorrId, MessageId, PresenceSubtype};
+use super::{AppTag, Channel, CorrId, MessageId, PresenceSubtype};
 use crate::AuthorKey;
+use crate::digest::{DigestPage, DigestRoot};
 
 /// Message kind — the frame's routing discriminator. The engine owns the
-/// infrastructure kinds (presence, peer-info, digests, ping/pong, channel
+/// infrastructure kinds (presence, peer-info, ping/pong, channel
 /// events, link-state); all application payloads ride the single generic
 /// [`App`](MessageKind::App) variant, distinguished by its opaque `tag`.
 /// - `App`: an application payload — the body is a whole serialized app object
@@ -53,15 +54,9 @@ pub enum MessageKind {
     },
     /// The identity of a peer.
     PeerInfo,
-    /// Anti-entropy digest. Body is a JSON array of recent message ids
-    /// the sender holds; a receiver re-broadcasts any of *its* logged
-    /// messages absent from that list, so a peer that missed them
-    /// (partition / sleep / late join) recovers. Plumbing like
-    /// `PeerInfo`: never logged or surfaced via `poll`/`fetch`.
-    Digest,
     /// Liveness probe broadcast by a node running an RTT round. Every
     /// receiver auto-responds with a `Pong` addressed back to the
-    /// pinger. Plumbing like `PeerInfo`/`Digest`: never logged or surfaced
+    /// pinger. Plumbing like `PeerInfo`: never logged or surfaced
     /// via `poll`/`fetch` — only the originator's `ping_report` event surfaces.
     Ping,
     /// Response to a `Ping`, addressed to the original pinger (`to`). `probe` is
@@ -81,32 +76,57 @@ pub enum MessageKind {
         /// The session whose proof is asked for, by author key.
         to: AuthorKey,
     },
-    /// A durable `state`-channel event: one Base58 automerge change
-    /// (`{"k":"change",…}`) applied to the channel's `MeshDoc`
-    /// CRDT. Carried on the gossip topic like everything else; the signed frame
-    /// is retained as the doc's re-serve store. Signed like any message; never
-    /// entered into the chat message-log, never surfaced via poll/fetch.
+    /// The digest roots of both channels, sent by unicast to a linked neighbor on the backfill tick.
+    /// One message carries both roots, so the difference is found in one round.
+    SliceRoot {
+        /// The neighbor that the root is sent to, by author key.
+        to: AuthorKey,
+        /// The root of the `state` channel.
+        state: DigestRoot,
+        /// The root of the `meta` channel.
+        meta: DigestRoot,
+    },
+    /// A pull of slices: the keys that the asker wants of one channel, at most one page of them. The
+    /// holder answers with the signed slice frames of those keys, by unicast.
+    SlicePull {
+        /// The holder that is asked, by author key.
+        to: AuthorKey,
+        /// The channel of the slices.
+        channel: Channel,
+        /// The keys whose slices are wanted.
+        keys: Vec<AuthorKey>,
+    },
+    /// A request for one page of the digest of one channel, when the roots of the two sides differ.
+    SlicePageRequest {
+        /// The holder that is asked, by author key.
+        to: AuthorKey,
+        /// The channel of the digest.
+        channel: Channel,
+        /// The index of the page, from zero.
+        index: usize,
+    },
+    /// One page of the digest of one channel, the answer to a [`SlicePageRequest`](MessageKind::SlicePageRequest).
+    SlicePage {
+        /// The asker that the page answers, by author key.
+        to: AuthorKey,
+        /// The channel of the digest.
+        channel: Channel,
+        /// The page.
+        page: DigestPage,
+    },
+    /// A durable `state`-channel event: one signed slice of its author, a
+    /// version and a value. Carried on the gossip topic like everything else; the
+    /// store keeps the newest slice of each author. Signed like any message, and
+    /// not surfaced through poll or fetch.
     State,
-    /// Anti-entropy digest for the **state** channel — the dedicated counterpart
-    /// to [`Digest`](MessageKind::Digest). Body is the doc's automerge heads; a
-    /// receiver computes the changes the sender lacks (`changes_since`) and
-    /// re-broadcasts their frames, so a cold/late joiner (advertising an empty or
-    /// genesis-only frontier) pulls the whole history over successive rounds.
-    /// Separate from `Digest` for its own resend budget. Plumbing like `Digest`.
-    StateDigest,
-    /// A durable event on the **meta** channel — a second shared-state channel,
-    /// identical machinery to [`State`](MessageKind::State) but with the
-    /// foreign-card forgery gate enabled (a `meta` card carries a peer's
-    /// cryptographic identity). The split is application convention (`meta` for
-    /// mesh metadata, `state` for the task).
+    /// A durable event on the **meta** channel: a second shared-state channel,
+    /// with the same frame shape as [`State`](MessageKind::State). The split is
+    /// application convention (`meta` for mesh metadata, `state` for the task).
     Meta,
-    /// Anti-entropy digest for the **meta** channel — the meta-channel counterpart
-    /// to [`StateDigest`](MessageKind::StateDigest).
-    MetaDigest,
     /// A multihop-routing **link-state** advertisement: the author's own measured
     /// links + underlay address (`body` is a serialized
     /// `habilis_network_iroh_multihop_transport::LinkVector`). Broadcast
-    /// plumbing like `Digest`/`Ping` — never logged, never surfaced, never
+    /// plumbing like `Ping` — never logged, never surfaced, never
     /// chain/DAG-folded; every node folds the freshest vector per origin into its
     /// routing graph. Ephemeral (a fresh vector supersedes the old by `seq`), so
     /// it rides gossip rather than a durable channel log.
@@ -120,15 +140,16 @@ impl fmt::Display for MessageKind {
             MessageKind::App { tag, .. } => write!(f, "{tag}"),
             MessageKind::Presence { .. } => write!(f, "presence"),
             MessageKind::PeerInfo => write!(f, "peerinfo"),
-            MessageKind::Digest => write!(f, "digest"),
             MessageKind::Ping => write!(f, "ping"),
             MessageKind::Pong { .. } => write!(f, "pong"),
             MessageKind::ProofRequest { .. } => write!(f, "proof_request"),
             MessageKind::State => write!(f, "state"),
-            MessageKind::StateDigest => write!(f, "state_digest"),
             MessageKind::Meta => write!(f, "meta"),
-            MessageKind::MetaDigest => write!(f, "meta_digest"),
             MessageKind::LinkState => write!(f, "linkstate"),
+            MessageKind::SliceRoot { .. } => write!(f, "sliceroot"),
+            MessageKind::SlicePull { .. } => write!(f, "slicepull"),
+            MessageKind::SlicePageRequest { .. } => write!(f, "slicepagerequest"),
+            MessageKind::SlicePage { .. } => write!(f, "slicepage"),
         }
     }
 }
@@ -143,15 +164,16 @@ impl MessageKind {
             MessageKind::App { tag, .. } => Some(tag),
             MessageKind::Presence { .. }
             | MessageKind::PeerInfo
-            | MessageKind::Digest
             | MessageKind::Ping
             | MessageKind::Pong { .. }
             | MessageKind::ProofRequest { .. }
             | MessageKind::State
-            | MessageKind::StateDigest
             | MessageKind::Meta
-            | MessageKind::MetaDigest
-            | MessageKind::LinkState => None,
+            | MessageKind::LinkState
+            | MessageKind::SliceRoot { .. }
+            | MessageKind::SlicePull { .. }
+            | MessageKind::SlicePageRequest { .. }
+            | MessageKind::SlicePage { .. } => None,
         }
     }
 

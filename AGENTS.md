@@ -108,7 +108,7 @@ Code: `protocol::identity`, `AuthorKey`.
 
 Layer: presentation. Keyed by author key.
 
-A peer whose arrival was shown to the operator or the agent. `surfaced` is a subset of `peers`. It gates what is shown. The roster stays complete for anti-entropy.
+A peer whose arrival was shown to the operator or the agent. `surfaced` is a subset of `peers`. It gates what is shown. The roster stays complete: the slice gate of the shared state reads `peers` and `quiet` (`keeps_slice`), not `surfaced`.
 
 State: `surfaced`.
 
@@ -116,7 +116,7 @@ State: `surfaced`.
 
 Layer: heartbeat. Keyed by author key.
 
-A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return.
+A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return. A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return, but the shared state keeps no slice of it: the sweep releases the slice. When the key returns, its pending frame applies, and the digest round pulls the rest.
 
 State: `quiet`. Code: `lifecycle/heartbeat.rs`.
 
@@ -132,7 +132,7 @@ Code: `protocol::directory`.
 
 Layer: protocol. A header on a message.
 
-One slice of a body that is too large for one gossip message. Each shard is a signed message. The receiver puts the shards back together, and only the whole message is surfaced.
+One part of a body that is too large for one gossip message. Each shard is a signed message. The receiver puts the shards back together, and only the whole message is surfaced.
 
 Code: `protocol::messages::shard`, `protocol::reassembly`.
 
@@ -140,9 +140,9 @@ Code: `protocol::messages::shard`, `protocol::reassembly`.
 
 Layer: protocol. A property of a message body.
 
-The encryption of a body. A directed frame is sealed to the x25519 public key of the addressee. On a passworded mesh, state, meta, and broadcast bodies are sealed with a `SymmetricKey` that every member holds. Encryption comes before signing, so the signature covers the ciphertext.
+The encryption of a body. A directed frame is sealed to the x25519 public key of the addressee, which a `PeerInfo` names (`EventLoopState::seal_key_of`). The app decides by tag, through `NodeApp::seals`: `app_frame` seals a directed body of a tag that seals, and the receiver opens it by the same rule. On a passworded mesh, state, meta, and broadcast bodies are sealed with a `SymmetricKey` that every member holds. Encryption comes before signing, so the signature covers the ciphertext. `app_frame` seals a broadcast body with the mesh key on a passworded mesh, whatever the tag.
 
-Code: `protocol::seal_error`.
+Code: `protocol::seal_error`, `gossip::merge_ctx::app_frame`.
 
 ### blob
 
@@ -156,9 +156,33 @@ Code: `habilis-network/src/blob`.
 
 Layer: state. Two channels per mesh: `state` and `meta`.
 
-A JSON document that the whole mesh shares. It is an automerge replica on each member. Members exchange signed changes. The same set of changes gives the same document on every member.
+A JSON object that each member writes in part. A member writes only its own slice, a signed value with a version. A member reads the slice of every author. The view of a channel maps the lowercase hex of each author key to the value of its slice. A frame with a higher version replaces the slice of its author. On a tie of versions, the lower content hash wins. A slice and its frame fit the wire limit, a channel holds 1024 authors, and an author has a burst of 5 versions for a write.
 
-Code: `habilis-network-doc`, `protocol::Channel`.
+Code: `habilis-network-doc` (`SliceStore`), `protocol::Channel`.
+
+### backfill
+
+Layer: state. Keyed by author key.
+
+A member sends its own slice of each channel to a newcomer, and to a peer that returned from quiet. The frame is the original signed frame, so the newcomer checks the signature of the author. A peer that has no path yet stays owed, for 90 s at most. The backfill starts a newcomer. The digest round (`habilis-network/src/gossip/digest_round.rs`) repairs the loss after it: the sync is pull-only.
+
+Code: `habilis-network/src/gossip/backfill.rs`.
+
+### pending set
+
+Layer: state. Keyed by author key.
+
+The place where a slice waits when the store keeps no slice of its key: a key that is not in the roster, and a lapsed key. The set holds as many keys as the author cap of the channel (1024 by default). When the set is full, the keys that waited for 90 s go first, and then the key that arrived first. A pending slice expires after 90 s, and a newer version of its key restarts the wait, not its place in the order. It is applied when its key joins the roster or returns to it. A pending slice is in no view and in no backfill.
+
+Code: `PendingSlices` in `crates/habilis-network-doc/src/pending_slices.rs`.
+
+### gone set
+
+Layer: state. Keyed by author key.
+
+The keys that cannot write again: a key that said a signed goodbye, and a key whose run a newer run replaced. A member that leaves first sends a tombstone, a slice with the value `null`. A peer that gets the `Left` moves the key to the gone set at once. A peer that missed the `Left` keeps the tombstone for the tombstone TTL (10 minutes), then moves the key to the gone set. The store refuses a slice of a gone key until the gone TTL ends. The gone set holds as many keys as the author cap (1024 by default). The gone TTL stays above the quiet TTL plus the alive timeout. A lapsed key is not gone, because it can return: the sweep releases its slice. When the key returns, its pending frame applies, and the digest round pulls the rest.
+
+Code: `SliceStore::forget` in `crates/habilis-network-doc/src/slice_store.rs`.
 
 ## Layering
 
@@ -168,7 +192,7 @@ Keep three layers apart. The rendezvous and the beacon bootstrap a mesh that you
 
 ### Join horizon
 
-A message is surfaced if and only if its timestamp is not before `joined_at`. One cutoff is computed once, in `lifecycle::observe`, and it applies to every surfaced event. A node still relays and logs older traffic for anti-entropy. It never shows it.
+A message is surfaced if and only if its timestamp is not before `joined_at`. One cutoff is computed once, in `lifecycle::observe`, and it applies to every surfaced event. A node still relays older traffic. It never shows it.
 
 ### Lifecycle is one vocabulary
 
@@ -277,7 +301,7 @@ Issue #29 records each decision.
 
 ### Remaining `#[expect]` attributes
 
-Ten `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate, a counting allocator, and libc calls that have no safe wrapper), and one that suppresses `deprecated`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
+Sixteen `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C ABI of the ffi crate and its test, and libc calls that have no safe wrapper), one that suppresses `deprecated`, six that suppress a `clippy` lint, and one that suppresses `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -288,9 +312,15 @@ Ten `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C AB
 | `habilis-network-util/src/resident_memory.rs` (mach call) | `deprecated` | `libc` points to the `mach2` crate for the mach calls; one read does not warrant a dependency |
 | `habilis-network-util/src/resident_memory.rs` (getrusage) | `unsafe_code` | `libc` `getrusage` FFI: no safe wrapper for `RUSAGE_SELF` maxrss |
 | `habilis-network-util/src/resident_memory.rs` (mmap) | `unsafe_code` | `libc` `mmap` and `munmap`: the pages must go back at once, which a heap allocation does not do on macOS |
+| `habilis-network/src/daemon/state/event_loop_state.rs` (constructor `EventLoopState::new`) | `clippy::too_many_lines` | the proof and the member-key lock are four fields over the limit; the constructor is split later |
 | `habilis-network-ffi/src/ffi.rs` (crate) | `unsafe_code` | this module is the C ABI: raw pointers from the foreign caller, and a boxed handle it owns |
 | `habilis-network-ffi/tests/ffi_smoke.rs` (crate) | `unsafe_code` | the surface under test is `unsafe extern "C"`; calling it is the test |
-| `habilis-network-doc/tests/replay_cost.rs` (crate) | `unsafe_code` | the test counts the bytes of a replay, and a counting allocator needs an `unsafe GlobalAlloc` impl |
+| `habilis-network/src/daemon/setup.rs` (`hold_member_key`) | `clippy::unused_async` | the same signature as the version for a target with files |
+| `habilis-network/src/daemon/setup.rs` (`hold_member_key_once`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
+| `habilis-network/src/daemon/setup.rs` (`next_run`) | `clippy::unnecessary_wraps` | the same signature as the file-backed version, so the caller is one call |
+| `habilis-network/src/daemon/setup.rs` (`member_key`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
+| `habilis-network/src/daemon/setup.rs` (`setup_mesh_inner`) | `clippy::too_many_lines` | the setup is one assembly of the mesh, in the order that its parts need |
+| `habilis-network/src/daemon/state/event_loop_state.rs` (field `key_lock`) | `dead_code` | the field is held for the lock it carries, and it is never read |
 
 ### Rules of the guide that do not apply
 
@@ -386,10 +416,10 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `Seed` | `habilis-network-protocol/src/crypto.rs` | The wire seed of a mesh id and the salts of derivations. |
 | `SymmetricKey` | `habilis-network-protocol/src/crypto.rs` | A key that encrypts, wraps, or derives. Wiped on drop. |
 | `TicketSecret` | `habilis-network-protocol/src/crypto.rs` | The bearer secret of a ticket, and the token that a consumer presents. Wiped on drop. |
-| `DedupKey` | `habilis-network-protocol/src/dedup_key.rs` | The 16-byte dedup and anti-entropy key of a message. |
+| `DedupKey` | `habilis-network-protocol/src/dedup_key.rs` | The 16-byte dedup key of a message. |
 | `AuthorKey` | `habilis-network-protocol/src/author_key.rs` | The public key of the author of a message. |
 | `Signer` | `habilis-network-protocol/src/message/mod.rs` | The pair of an `AuthorKey` and its signature. A message holds both or neither (`Message::signer`). |
-| `ContentHash` | `habilis-network-protocol/src/content_hash.rs` | The hash of a message that `prev` and `parents` link to. |
+| `ContentHash` | `habilis-network-protocol/src/content_hash.rs` | The SHA-256 of the canonical bytes of a message, used by the slice store. |
 | `BlobDigest` | `habilis-network/src/blob/mod.rs` | The SHA-256 of a blob. |
 | `StreamId`, `StreamSecret` | `habilis-network-stream/src/hash.rs` | The public id and the bearer secret of a stream. |
 | `PlayerHandle`, `Frame` | `habilis-network-netplay/src/handle.rs`, `frame.rs` | A roster slot and a simulation frame. |
@@ -442,7 +472,6 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R16 | `SealError` | `habilis-network-protocol/src/seal_error.rs` | holds a `dyn` field, which is not Clone |
 | R16 | `Counters` | `habilis-network-iroh-gossip-transport/src/counters.rs` | holds a field type that is not Clone |
 | R16 | `DocError` | `habilis-network-doc/src/doc_error.rs` | holds a `dyn` field, which is not Clone |
-| R16 | `MeshDoc` | `habilis-network-doc/src/mesh_doc.rs` | holds a `Box<` field, which is not Clone |
 | R16 | `Shared` | `habilis-network-iroh-gossip-transport/src/shared.rs` | holds a `Mutex` field, which is not Clone |
 | R16 | `MultihopTransport` | `habilis-network-iroh-multihop-transport/src/multihop_transport.rs` | holds a `Mutex` field, which is not Clone |
 | R16 | `Topology` | `habilis-network-iroh-multihop-transport/src/topology.rs` | holds a field type that is not Clone |
@@ -501,6 +530,7 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R16 | `Answer` | `habilis-network/src/transport/webrtc/backend_native/answer.rs` | holds a field type that is not Clone |
 | R16 | `Offer` | `habilis-network/src/transport/webrtc/backend_native/offer.rs` | holds a field type that is not Clone |
 | R16 | `Delivered` | `habilis-network/src/transport/send/delivered.rs` | holds a field type that is not Clone |
+| R16 | `AppFrameError` | `habilis-network/src/gossip/app/app_frame_error.rs` | holds a `dyn` field, which is not Clone |
 | R16 | `SendError` | `habilis-network/src/transport/send/send_error.rs` | holds a `dyn` field, which is not Clone |
 | R16 | `CountingSink` | `habilis-network/src/gossip/event.rs` | holds a field type that is not Clone |
 | R16 | `Request` | `habilis-network/src/membership/membership_app.rs` | holds a field type that is not Clone |
@@ -539,7 +569,7 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R16 | `Membership` | `habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs` | holds a `broadcast::Receiver`, which is not Clone |
 | R22 | `EventLoopConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `MeshSpec`, a `RendezvousConfig` and a `RuntimeConfig`, which hold channels, trait objects and task handles with no default |
 | R22 | `RendezvousConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a watch receiver and a `StoppableTask`, which have no default |
-| R22 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn NodeSink` and a `SelfWriteGate`, which have no default |
+| R22 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn NodeSink` and a `DriverMode`, which have no default |
 | R12 | `CtxParts`, `RuntimeConfig`, `Victims` | `habilis-network/src/daemon/event_loop/ctx_parts.rs`, `.../config/event_loop_config.rs`, `habilis-network/src/transport/admission/victims.rs` | hold a `dyn` trait object, so Debug prints the name only (`finish_non_exhaustive`) |
 R1 (trait impls early) is review only. For this repository, 'early' means: a library crate (`habilis-network-protocol`, `habilis-network-util`, the transport crates, `habilis-network-chunks`, `habilis-network-stream`) adds the standard impls (Debug, Clone, Copy where it applies, PartialEq, Default for an options type) when the type is written. An application crate (the CLIs, the examples, `habilis-network-tasks`) adds an impl only when a caller in the crate needs it.
 
@@ -575,7 +605,7 @@ Runtime events drive these transitions, so their state is not known at compile t
 | Type | File | Holds |
 |---|---|---|
 | `LockedMesh` / `Mesh` | `habilis-network-protocol/src/mesh/mod.rs` | A decoded mesh with no secret. `unlock` turns it into a `Mesh`, or returns an `UnlockError` that says why not. Only `Mesh` derives a topic, a rendezvous or a port, and `Mesh::new` refuses a config that carries a secret. |
-| `Verified` / `Authored` | `habilis-network-protocol/src/message/verified.rs` | `Verified` is a message whose signature is checked, with its key. It is what the wire and the log take. `Authored` is a message whose author is proven: a read-only view with no `Serialize` of its own. `Deref` is a read door: `Message` has no public `Serialize`, so `&*authored` does not serialize, and only `Verified::serialize` makes a `WireFrame`, which every sender takes. Both share the message behind an `Arc`. `Proof` is the sealed trait both implement, so the gate and the app surface are generic over either. |
+| `Verified` / `Authored` | `habilis-network-protocol/src/message/verified.rs` | `Verified` is a message whose signature is checked, with its key. It is what the wire and the slice store take. `Authored` is a message whose author is proven: a read-only view with no `Serialize` of its own. `Deref` is a read door: `Message` has no public `Serialize`, so `&*authored` does not serialize, and only `Verified::serialize` makes a `WireFrame`, which every sender takes. Both share the message behind an `Arc`. `Proof` is the sealed trait both implement, so the gate and the app surface are generic over either. |
 | `WireFrame` | `habilis-network-protocol/src/message/wire.rs` | The bytes of one signed message as they go on a socket. Only `Verified::serialize` makes one, and its field is private, so the senders take a `WireFrame` and cannot be handed an unsigned frame. |
 | `InjectedEndpoint` | `habilis-network/src/daemon/setup/injected_endpoint.rs` | An endpoint that `InjectedEndpoint::bind` binds. `bind` checks the keys of the handles before it binds, and makes the admission table the hook reports to. The fields are private, so no other path builds one. |
 | `PendingOffer` / `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/jsep.rs` (and `web/jsep.rs`) | A JSEP offer or answer that waits for the remote side. `complete` consumes it. |

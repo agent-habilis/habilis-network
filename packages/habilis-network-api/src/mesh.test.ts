@@ -4,6 +4,9 @@ import type { BackendSink, Opener } from './backend.ts'
 import { openMesh } from './mesh.ts'
 import type { Mesh, MeshEvent, Message } from './types.ts'
 
+// The member key of the state slices in these fixtures: 64 lowercase hex digits.
+const ANA = 'a'.repeat(64)
+
 /** The key of the nth peer of a fixture roster: 64 lowercase hex digits. */
 function keyOf(index: number): string {
   return index.toString(16).padStart(64, '0')
@@ -104,9 +107,9 @@ describe('identity and the opening snapshot', () => {
   })
 
   test('peers and state are populated before the first push', async () => {
-    const { mesh } = await fake({ peers: ['ana'], state: '{"topic":"standup"}' })
+    const { mesh } = await fake({ peers: ['ana'], state: `{"${ANA}":{"topic":"standup"}}` })
     expect(mesh.peers.map((peer) => peer.nick)).toEqual(['ana'])
-    expect(mesh.state.value).toEqual({ topic: 'standup' })
+    expect(mesh.state.value).toEqual({ [ANA]: { topic: 'standup' } })
   })
 
   test('the opening roster is a baseline, not a room full of arrivals', async () => {
@@ -219,35 +222,35 @@ describe('presence', () => {
 describe('state', () => {
   test('merge resolves before the value is readable back', async () => {
     const handle = await fake({ state: '{}' })
-    handle.nextState = '{"topic":"lunch"}'
+    handle.nextState = `{"${ANA}":{"topic":"lunch"}}`
     await handle.mesh.state.merge({ topic: 'lunch' })
 
-    expect(handle.mesh.state.value).toEqual({ topic: 'lunch' })
+    expect(handle.mesh.state.value).toEqual({ [ANA]: { topic: 'lunch' } })
   })
 
   test('a change reaches every changes() iterator', async () => {
     const { mesh, sink } = await fake()
     const changes = drain(mesh.state.changes(), 1)
-    sink.state('{"topic":"standup"}')
+    sink.state(`{"${ANA}":{"topic":"standup"}}`)
 
-    expect(await changes).toEqual([{ topic: 'standup' }])
+    expect(await changes).toEqual([{ [ANA]: { topic: 'standup' } }])
   })
 
   test('an unchanged document is not a change', async () => {
-    const { mesh, sink } = await fake({ state: '{"a":1}' })
+    const { mesh, sink } = await fake({ state: `{"${ANA}":{"a":1}}` })
     const changes = drain(mesh.state.changes(), 1)
-    sink.state('{"a":1}')
-    sink.state('{"a":2}')
+    sink.state(`{"${ANA}":{"a":1}}`)
+    sink.state(`{"${ANA}":{"a":2}}`)
 
-    expect(await changes).toEqual([{ a: 2 }])
+    expect(await changes).toEqual([{ [ANA]: { a: 2 } }])
   })
 
   test('the value is frozen all the way down', async () => {
     const { mesh, sink } = await fake()
-    sink.state('{"nested":{"key":"value"}}')
+    sink.state(`{"${ANA}":{"nested":{"key":"value"}}}`)
 
     expect(Object.isFrozen(mesh.state.value)).toBe(true)
-    expect(Object.isFrozen((mesh.state.value as { nested: object }).nested)).toBe(true)
+    expect(Object.isFrozen((mesh.state.value[ANA] as { nested: object }).nested)).toBe(true)
   })
 })
 

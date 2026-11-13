@@ -1,5 +1,4 @@
-//! The key that names a message in the dedup set, the message log, and the
-//! anti-entropy digest.
+//! The key that names a message in the seen set.
 
 use crate::identity;
 use std::fmt;

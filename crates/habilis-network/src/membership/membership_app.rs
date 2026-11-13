@@ -54,7 +54,6 @@ use crate::util::clock;
 use n0_future::task;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::error;
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::fmt;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::net;
@@ -328,8 +327,9 @@ pub enum Messaging {
     StateMerge {
         /// The RFC 7386 merge to apply.
         merge: serde_json::Value,
-        /// Gets `Ok` when the request is done, or the error text.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Gets `Ok` when the request is done, or the typed error: a write past the rate limit is
+        /// told apart from a value too large for a frame.
+        reply: oneshot::Sender<Result<(), transport::SendError>>,
     },
 }
 
@@ -392,13 +392,6 @@ pub enum InspectTest {
     EndpointId {
         /// Gets the endpoint id.
         reply: oneshot::Sender<iroh::EndpointId>,
-    },
-    /// Tests only: how many messages this node holds in its log, the ones that anti-entropy
-    /// can serve to a peer that asks. A broadcast that a node sent itself is there only if the
-    /// send path retains it.
-    MessageLogLen {
-        /// Gets the count.
-        reply: oneshot::Sender<usize>,
     },
     /// Tests only: how many gossip connections the recursion rule has closed since the process
     /// started (the census field `gossip_recursion_closes_total`): a total, shared by every
@@ -463,6 +456,15 @@ pub enum Linking {
         /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
+    /// Tests only: erase what the node knows of the direct path to the member `peer`, so that
+    /// the pair reads as before the first probe: no reading at all, which is not a relay-only
+    /// reading.
+    ForgetDirect {
+        /// The peer, by nickname.
+        peer: String,
+        /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
+        reply: oneshot::Sender<Result<(), UnknownPeer>>,
+    },
     /// Tests only: close the live gossip connections to the member `peer` and nothing else. The
     /// engine then runs its own `NeighborDown` path.
     CloseLink {
@@ -480,6 +482,16 @@ pub enum Linking {
         peer: String,
         /// Gets the answer, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<bool, UnknownPeer>>,
+    },
+    /// Tests only: forget the pooled unicast connection of the member `peer`, then put it on the
+    /// dial-failure cooldown, as a failed dial does. It waits for the dial that runs for the peer,
+    /// so that dial cannot clear the cooldown after the reply. The next directed send to it is cold
+    /// and the cooldown refuses it at once, so a test reads the text of that refusal in the reply.
+    NoteDialFailure {
+        /// The peer, by nickname.
+        peer: String,
+        /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
+        reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: mark the gossip topic closed without a real end of the stream, as the heal
     /// arm reads a terminal `None`. The loop stops reading the topic, the heal tick resubscribes,
@@ -860,6 +872,12 @@ impl NodeDriver for MembershipApp {
     }
 }
 
+/// The text of a failed send in a reply: the whole chain of causes, not only the outer message.
+/// Both arms of `send_msg` use it, so a failure on the dial task reads like a failure at the send.
+fn reply_text(error: &impl fmt::Display) -> String {
+    format!("{error:#}")
+}
+
 impl MembershipApp {
     /// Send one `msg` frame to `to` (a broadcast for `None`) and answer `reply` with the outcome.
     /// Returns `true`: a frame that went out is a live frame.
@@ -871,8 +889,10 @@ impl MembershipApp {
         body: MessageBody,
         reply: oneshot::Sender<Result<(), String>>,
     ) -> bool {
-        let frame = app_frame(
+        let built = app_frame(
+            state,
             context,
+            self,
             AppFrameParams::new(
                 AppTag::try_new(MSG_TAG).expect("a valid app tag"),
                 to,
@@ -880,8 +900,14 @@ impl MembershipApp {
                 body,
             ),
         );
-        let class = self.classify(&frame.authored());
-        match send_app(state, context, frame, class).await {
+        let frame = match built {
+            Ok(frame) => frame,
+            Err(error) => {
+                let _ = reply.send(Err(reply_text(&error)));
+                return false;
+            }
+        };
+        match send_app(state, context, frame).await {
             Ok(Delivered::Done) => {
                 let _ = reply.send(Ok(()));
             }
@@ -892,11 +918,11 @@ impl MembershipApp {
                     let outcome = handle.await.unwrap_or_else(|_| {
                         Err(anyhow::anyhow!("the send ended without an outcome"))
                     });
-                    let _ = reply.send(outcome.map_err(|error| error.to_string()));
+                    let _ = reply.send(outcome.map_err(|error| reply_text(&error)));
                 });
             }
             Err(error) => {
-                let _ = reply.send(Err(error.to_string()));
+                let _ = reply.send(Err(reply_text(&error)));
             }
         }
         true
@@ -928,8 +954,7 @@ impl MembershipApp {
                     StateMergeParams::new(context.into(), Channel::State, merge),
                 )
                 .await;
-                let outcome = merged.map_err(|error| error.to_string());
-                let _ = reply.send(outcome);
+                let _ = reply.send(merged);
                 // A durable write is not a live frame: it proves life only within one alive
                 // timeout of the clock of the reader, so it must not hold back the `alive`.
                 false
@@ -953,8 +978,10 @@ impl MembershipApp {
                         return false;
                     }
                 };
-                let frame = app_frame(
+                let built = app_frame(
+                    state,
                     context,
+                    self,
                     AppFrameParams::new(
                         AppTag::try_new(MSG_TAG).expect("a valid app tag"),
                         to,
@@ -962,6 +989,13 @@ impl MembershipApp {
                         body,
                     ),
                 );
+                let frame = match built {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        let _ = reply.send(Err(reply_text(&error)));
+                        return false;
+                    }
+                };
                 let routed: Result<_, String> = frame
                     .serialize()
                     .map_err(|error| error.to_string())
@@ -998,7 +1032,7 @@ impl MembershipApp {
     fn handle_inspect(request: Inspect, state: &mut EventLoopState) -> bool {
         match request {
             Inspect::StateJson { reply } => {
-                let state_json = state.doc(Channel::State).to_json().to_string();
+                let state_json = state.docs.to_json(Channel::State).to_string();
                 let _ = reply.send(state_json);
                 false
             }
@@ -1024,10 +1058,6 @@ impl MembershipApp {
         context: &HandlerCtx<'_>,
     ) -> bool {
         match request {
-            InspectTest::MessageLogLen { reply } => {
-                let _ = reply.send(state.message_log.len());
-                false
-            }
             InspectTest::GossipRecursionCloses { reply } => {
                 let _ = reply.send(payload_path::gossip_recursion_closes());
                 false
@@ -1110,6 +1140,14 @@ impl MembershipApp {
                 let _ = reply.send(result);
                 false
             }
+            Linking::ForgetDirect { peer, reply } => {
+                let result = known_peer(state, &peer).map(|address| address.id);
+                if let Ok(id) = &result {
+                    state.direct.remove(id);
+                }
+                let _ = reply.send(result.map(|_| ()));
+                false
+            }
             Linking::CloseLink { peer, reply } => {
                 let result = known_peer(state, &peer).map(|address| {
                     payload_path::close_gossip_links_to(address.id);
@@ -1125,6 +1163,24 @@ impl MembershipApp {
                     Err(unknown) => Err(unknown),
                 };
                 let _ = reply.send(outcome);
+                false
+            }
+            Linking::NoteDialFailure { peer, reply } => {
+                let id = known_peer(state, &peer).map(|address| address.id);
+                match id {
+                    Ok(id) => {
+                        // The failure waits for the dial that runs for the peer, so a task of its own
+                        // waits for it: the loop serves the next request meanwhile.
+                        let pool = state.unicast_pool.clone();
+                        task::spawn(async move {
+                            pool.fail_dial_for_test(id).await;
+                            let _ = reply.send(Ok(()));
+                        });
+                    }
+                    Err(unknown) => {
+                        let _ = reply.send(Err(unknown));
+                    }
+                }
                 false
             }
             Linking::SeverGossip { reply } => {
@@ -1646,8 +1702,6 @@ mod tests {
     use crate::daemon::state::Standing;
     #[cfg(feature = "host")]
     use crate::gossip::app::{InboundApp, NodeApp};
-    #[cfg(feature = "host")]
-    use crate::protocol::messages::sole_addressee;
     use crate::protocol::{AuthorKey, Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
     #[cfg(feature = "host")]
@@ -1897,9 +1951,8 @@ mod tests {
 
             let live = app.handle_session(request, &mut state, &context).await;
 
-            assert_eq!(
-                answer.await.expect("the request is answered"),
-                Ok(()),
+            assert!(
+                answer.await.expect("the request is answered").is_ok(),
                 "the merge was made and broadcast"
             );
             assert!(
@@ -1911,10 +1964,12 @@ mod tests {
     }
 
     /// Two live keys use one nickname. A send by nickname is refused, because the engine never
-    /// picks one of them. A send to a key reaches the key that the caller names.
+    /// picks one of them. A send to a key reaches the routing while unmeshed, because a directed
+    /// frame needs no gossip link: this fixture holds no endpoint for the key, so the routing
+    /// refuses it for that cause and not for the lack of a mesh. A directed frame is not buffered.
     #[cfg(feature = "host")]
     #[test]
-    fn a_send_to_a_key_reaches_one_of_two_keys_that_share_a_nickname() {
+    fn a_send_to_a_key_of_two_keys_that_share_a_nickname_reaches_the_routing_while_unmeshed() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = LaneNode::start().await;
             let context = node.context();
@@ -1955,17 +2010,14 @@ mod tests {
                 reply: key_reply,
             });
             app.handle_session(to_key, &mut state, &context).await;
-            assert_eq!(
-                by_key.await.expect("the request is answered"),
-                Ok(()),
-                "the send to a key of the nickname was refused"
+            let outcome = by_key.await.expect("the request is answered");
+            assert!(
+                matches!(outcome, Err(ref error) if error.contains("no known endpoint")),
+                "the send to a key of the nickname did not reach the routing while unmeshed: {outcome:?}"
             );
-            let buffered = state.pending_outbound.take();
-            assert_eq!(buffered.len(), 1, "the accepted frame is in the buffer");
-            assert_eq!(
-                sole_addressee(&buffered[0].0.kind),
-                Some(&second),
-                "the frame does not name the key that the caller chose"
+            assert!(
+                state.pending_outbound.is_empty(),
+                "the refused directed frame was buffered"
             );
             node.endpoint.close().await;
         });

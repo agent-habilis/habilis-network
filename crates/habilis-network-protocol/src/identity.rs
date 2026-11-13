@@ -4,8 +4,7 @@
 //! Distinct from the two other keys in the system: the transport
 //! `EndpointId` (authenticates the *connection*) and the seed-derived
 //! rendezvous key (shared by every member — see [`super::crypto`]). This
-//! is the first **per-author** credential, and the root of
-//! `docs/history-integrity.md`.
+//! is the first **per-author** credential.
 //!
 //! The public key is the durable identity; the [`crate::Nickname`] is a display
 //! label bound to it trust-on-first-use by the receiver.
@@ -15,7 +14,7 @@
 //! restart therefore mints a *new* key, so under the same nickname it is
 //! seen as a new identity (peers that pinned the old key flag it). Stable
 //! cross-restart identity (on-disk persistence) is a documented follow-up;
-//! see `docs/history-integrity.md`.
+//! see the protocol docs.
 
 use std::fmt;
 
@@ -69,6 +68,15 @@ impl Identity {
     pub fn from_seed(seed: &[u8; 32]) -> Self {
         Identity {
             secret: SecretKey::from_bytes(seed),
+        }
+    }
+
+    /// A fixed identity for the golden tests of the wire form.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn fixed_secret(bytes: [u8; 32]) -> Self {
+        Identity {
+            secret: SecretKey::from_bytes(&bytes),
         }
     }
 
@@ -234,12 +242,12 @@ pub(crate) fn verify(pubkey: &PublicKey, bytes: &[u8], signature: &Signature) ->
     pubkey.verify(bytes, signature).is_ok()
 }
 
-/// A 16-byte dedup / anti-entropy key binding an author's public key to a
-/// message id: `SHA-256(pubkey ‖ id)[..16]`. Dedup and the digest key on
+/// A 16-byte dedup key binding an author's public key to a
+/// message id: `SHA-256(pubkey ‖ id)[..16]`. Dedup keys on
 /// this, not the bare id, so a peer that signs its own message under a
 /// **victim's** id produces a different key — it can no longer suppress the
-/// victim's genuine message (they hash apart) or hide it from anti-entropy.
-/// 16 bytes keeps the digest wire format unchanged; binding the pubkey (not
+/// victim's genuine message (they hash apart).
+/// 16 bytes keeps the key short; binding the pubkey (not
 /// the content) preserves the fresh-id re-announce path (a new id ⇒ a new
 /// key ⇒ not falsely deduped).
 #[must_use]

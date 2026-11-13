@@ -58,7 +58,7 @@ pub struct Stats {
     /// receive loop was not reading fast enough (`Event::Lagged`).
     pub topic_lagged: u64,
     /// Mesh messages that the engine's split dropped because its queue to the event loop was
-    /// full: the newest goes, and anti-entropy repairs it. Not a lag of the topic.
+    /// full: the newest goes, and nothing repairs it until the loss repair lands. Not a lag of the topic.
     pub forward_dropped: u64,
     /// Frames sent without a charge on the budget, because the destination has
     /// no established connection: a handshake.

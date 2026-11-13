@@ -10,23 +10,15 @@
 use std::time::Duration;
 
 use std::sync;
-/// In-memory message-log capacity: how many recent messages each member
-/// retains as the anti-entropy recovery source and poll/fetch history. A
-/// bigger log lets a reconnecting peer recover a longer gap. It also anchors
-/// the shared IPC response cap.
-pub const MESSAGE_LOG_SIZE: usize = 1000;
-const _: () = assert!(MESSAGE_LOG_SIZE >= 1, "a zero-length log retains nothing");
+/// How many completed shard groups are remembered, so that a group is surfaced once. A group
+/// that a repeat of its shards would re-complete is not surfaced again. It stays 1000 as the
+/// count of groups a member keeps; the old log size it was tied to no longer exists.
+pub const REASSEMBLED_GROUPS_CAP: usize = 1000;
 
-/// How many recently-seen message ids are retained for duplicate
-/// suppression. Kept at **2× the message log** so it always covers the
-/// retention window with margin: anti-entropy resends any message still
-/// in the log, and a resend whose id had scrolled out of this set would be
-/// reprocessed and **re-surfaced**. Derived, so the two cannot drift.
-pub const SEEN_IDS_CAP: usize = MESSAGE_LOG_SIZE * 2;
-const _: () = assert!(
-    SEEN_IDS_CAP >= MESSAGE_LOG_SIZE,
-    "the dedup set must outlive the message log"
-);
+/// How many recently-seen message ids are retained for duplicate suppression. Shard frames are
+/// not in this set: the reassembly store dedups their slots. It stays 2000, twice the 1000 that
+/// it was derived from, so the dedup window of a busy room is the same as before.
+pub const SEEN_IDS_CAP: usize = 2000;
 
 /// How many outbound frames are buffered while the node has no gossip link
 /// yet (sent before the first `NeighborUp`). Flushed in order once connected;
@@ -47,55 +39,31 @@ pub const PENDING_OUTBOUND_CAP: usize = 1024;
 /// above a typical mesh so recent peers are always retained.
 pub const KNOWN_ENDPOINTS_CAP: usize = 64;
 
-/// Anti-entropy: how often a member broadcasts its digest (recent
-/// message ids it holds) so peers can re-send anything it missed
-/// while partitioned/asleep. Short enough that a returning peer
-/// recovers within a couple of cycles; digests are small and a
-/// re-send only happens when there is an actual gap, so steady-state
-/// cost is one tiny message per interval. Hidden flag
-/// `--antientropy-interval-secs` so the backfill tests reconcile in
-/// seconds. Clamped to `>= 1 s`.
-pub const ANTIENTROPY_INTERVAL: Duration = Duration::from_secs(10);
+/// Backfill: how often a node runs its backfill check, which asks peers for the slices it lacks
+/// after a partition or a sleep. A returning peer recovers within a couple of cycles, and a
+/// steady mesh pays one small check per interval. The CLI sets it with `--backfill-interval-secs`,
+/// so the backfill tests reconcile in seconds. Clamped to `>= 1 s`.
+pub const BACKFILL_INTERVAL: Duration = Duration::from_secs(10);
 
-/// The live value, after any CLI override of [`ANTIENTROPY_INTERVAL`].
+/// How long a slice pull waits for its answer. A pull that the holder does not answer in this time is
+/// dropped, and the asker pulls again at its next tick.
+pub const DIGEST_PULL_TTL: Duration = Duration::from_secs(5);
+
+/// The live value, after any CLI override of [`BACKFILL_INTERVAL`].
 ///
 /// # Examples
 ///
-/// The anti-entropy interval is always positive.
+/// The backfill interval is always positive.
 ///
 /// ```
-/// use habilis_network_util::tuning::antientropy_interval;
+/// use habilis_network_util::tuning::backfill_interval;
 /// use std::time::Duration;
 ///
-/// assert!(antientropy_interval() > Duration::ZERO);
+/// assert!(backfill_interval() > Duration::ZERO);
 /// ```
 #[must_use]
-pub fn antientropy_interval() -> Duration {
-    current().antientropy_interval.max(Duration::from_secs(1))
-}
-
-/// How long a state document with epochs holds its local writes at the start, waiting for the
-/// first sync, before it writes anyway (`MeshDoc::finish_sync`). A node that restarts has a Lamport
-/// clock of 0, so a write before it heard of another write could get a time below its own earlier
-/// writes and lose to them. A lone node, or a mesh whose peers are all down, would wait for ever
-/// without this limit, so it counts from the start of the node and not from the first peer.
-pub const STATE_SYNC_WAIT: Duration = Duration::from_secs(30);
-
-/// The live value, after any override of [`STATE_SYNC_WAIT`].
-///
-/// # Examples
-///
-/// The wait is 30 seconds unless a test or a tool changes it.
-///
-/// ```
-/// use habilis_network_util::tuning::state_sync_wait;
-/// use std::time::Duration;
-///
-/// assert!(state_sync_wait() <= Duration::from_secs(30));
-/// ```
-#[must_use]
-pub fn state_sync_wait() -> Duration {
-    current().state_sync_wait
+pub fn backfill_interval() -> Duration {
+    current().backfill_interval.max(Duration::from_secs(1))
 }
 
 /// How often a node re-broadcasts its relay **link-state** vector (its own
@@ -121,41 +89,6 @@ pub const LINKSTATE_MAX_AGE: Duration = LINKSTATE_INTERVAL.saturating_mul(3);
 /// the relay until a direct path opens, so the deadline must outlast a normal
 /// hole punch.
 pub const MULTIHOP_RELAY_STUCK: Duration = Duration::from_secs(20);
-
-/// Max ids advertised per digest **window**. A digest carries up to two
-/// windows: an **open-ended newest** one (`[lo, i64::MAX]`, which drives
-/// reconnect recovery — holders re-send every *newer* message the sender
-/// lacks) and a rolling **closed** older one (`[lo, hi]`, which reconciles
-/// deep interior gaps without re-sending the out-of-window remainder). At
-/// 70 ids each (~140 total) the body packs the 16-byte dedup keys
-/// Base58-encoded (~22 chars/id) to ~3.1 KB; plus the `{windows:[…]}` and
-/// message envelope (the mesh id alone is ~80 chars) it stays under
-/// `MAX_MESSAGE_SIZE` (3840) — guarded by the `digest_fits_gossip_cap`
-/// test. Sized to a single gossip message, **not** the (larger,
-/// configurable) log, which the rolling cursor sweeps across rounds.
-pub const ANTIENTROPY_DIGEST_WINDOW_IDS: usize = 70;
-
-/// Max messages re-broadcast in response to one received digest, so a
-/// far-behind peer can't trigger an unbounded burst. This throttles
-/// deep-backfill throughput (~`this × peers` messages per
-/// `ANTIENTROPY_INTERVAL`). Hidden flag `--antientropy-max-resend` (tests raise it for deep backfill).
-pub const ANTIENTROPY_MAX_RESEND: usize = 64;
-
-/// The live value, after any CLI override of [`ANTIENTROPY_MAX_RESEND`].
-///
-/// # Examples
-///
-/// The anti-entropy resend limit is always positive.
-///
-/// ```
-/// use habilis_network_util::tuning::antientropy_max_resend;
-///
-/// assert!(antientropy_max_resend() > 0);
-/// ```
-#[must_use]
-pub fn antientropy_max_resend() -> usize {
-    current().antientropy_max_resend.max(1)
-}
 
 /// Capacity of a `habilis-network`'s `Node`'s inbound push channel
 /// (`DriverMode::InProcess::msg_tx`). Bounded so a slow consumer never
@@ -186,8 +119,8 @@ pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// than two of those intervals is of no use, and its slot goes to another signer.
 pub const PARKED_LINK_STATE_TTL: Duration = LINKSTATE_INTERVAL.saturating_mul(2);
 
-/// The least time between two `PeerInfo` refreshes of a node. A `PeerInfo` that a member missed is
-/// not in the message log, so no digest repairs it: only the flood of its sender does. The refresh
+/// The least time between two `PeerInfo` refreshes of a node. No frame repairs a
+/// `PeerInfo` that a member missed; only the flood of its sender does. The refresh
 /// sends it again, so a lost one is back within one period.
 pub const PEERINFO_REFRESH_MIN: Duration = Duration::from_mins(5);
 
@@ -373,10 +306,8 @@ pub struct Tuning {
     pub sweep_interval: Duration,
     /// How often the mesh checks its links and heals them.
     pub heal_interval: Duration,
-    /// How often a node sends its digest to look for missing messages.
-    pub antientropy_interval: Duration,
-    /// How long the state channel holds the writes of a node that has not synced yet.
-    pub state_sync_wait: Duration,
+    /// How often the backfill tick runs: a node asks its peers for messages it may have missed.
+    pub backfill_interval: Duration,
     /// How long an unmeshed joiner waits before it co-hosts the rendezvous anyway.
     pub cohost_grace: Duration,
     /// How long a ping round collects pongs before it reports.
@@ -391,8 +322,6 @@ pub struct Tuning {
     pub advertise_interval: Duration,
     /// How long a directory entry stays listed without a new advertisement.
     pub directory_expiry: Duration,
-    /// How many messages one received digest may re-broadcast.
-    pub antientropy_max_resend: usize,
     /// Whether a directory advertiser keeps its mesh unlisted.
     pub directory_private: bool,
     /// How soon the first rival check runs after a probed claim.
@@ -414,18 +343,10 @@ pub struct Tuning {
 }
 
 impl Tuning {
-    /// Set how often anti-entropy runs.
+    /// Set how often the backfill tick runs.
     #[must_use]
-    pub fn antientropy_interval(mut self, antientropy_interval: Duration) -> Self {
-        self.antientropy_interval = antientropy_interval;
-        self
-    }
-
-    /// Set how long the state channel holds the writes of a node that has not synced yet. Zero
-    /// ends the wait at the start, for a test that writes at once.
-    #[must_use]
-    pub fn state_sync_wait(mut self, state_sync_wait: Duration) -> Self {
-        self.state_sync_wait = state_sync_wait;
+    pub fn backfill_interval(mut self, backfill_interval: Duration) -> Self {
+        self.backfill_interval = backfill_interval;
         self
     }
 
@@ -506,8 +427,7 @@ impl Tuning {
         alive_timeout: ALIVE_TIMEOUT,
         sweep_interval: SWEEP_INTERVAL,
         heal_interval: HEAL_INTERVAL,
-        antientropy_interval: ANTIENTROPY_INTERVAL,
-        state_sync_wait: STATE_SYNC_WAIT,
+        backfill_interval: BACKFILL_INTERVAL,
         cohost_grace: BEACON_COHOST_GRACE,
         ping_window: PING_WINDOW,
         ppid_watch_interval: PPID_WATCH_INTERVAL,
@@ -515,7 +435,6 @@ impl Tuning {
         starvation_threshold: STARVATION_THRESHOLD,
         advertise_interval: ADVERTISE_INTERVAL,
         directory_expiry: DIRECTORY_EXPIRY,
-        antientropy_max_resend: ANTIENTROPY_MAX_RESEND,
         directory_private: false,
         rival_recheck_first: RIVAL_RECHECK_FIRST,
         rival_recheck: RIVAL_RECHECK,
@@ -1117,72 +1036,6 @@ pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
 /// and yields — a tie-break, not a delay knob, so no flag.
 pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
 
-/// How often one peer's digest may be *served*.
-///
-/// Answering a digest costs up to [`ANTIENTROPY_MAX_RESEND`] mesh-wide
-/// broadcasts, and the budget was per digest with nothing per peer, so one
-/// small crafted frame bought that from every member at once. Comfortably under
-/// [`ANTIENTROPY_INTERVAL`], so the honest cadence is never refused.
-pub const ANTIENTROPY_SERVE_COOLDOWN: Duration = Duration::from_secs(5);
-
-/// How many members answer one chat digest.
-///
-/// Every member that holds a message the asker lacks used to answer, so one
-/// digest bought up to `ANTIENTROPY_MAX_RESEND` broadcasts from each of the N - 1
-/// others, and each broadcast reaches N - 1 links: about N^3 deliveries per
-/// digest round. Of those, all but the first copy of a message are wasted. A
-/// few answerers cover a lost answer and a holder that lacks the message, and
-/// the answerers change with every digest (see `answers_digest`), so a message
-/// that only one member holds still comes back within a few rounds.
-pub const ANTIENTROPY_ANSWERERS: usize = 3;
-
-/// How many resends the outbox of the event loop holds. A digest answer is at
-/// most `ANTIENTROPY_MAX_RESEND` messages, so this is a few answers. When it is
-/// full the resend is dropped and counted: the next digest asks again.
-pub const RESEND_OUTBOX_CAP: usize = 256;
-
-/// How many state digest answers one asker may get per channel on the unicast
-/// plane in one [`ANTIENTROPY_SERVE_COOLDOWN`] window; the same heads get
-/// an answer again only after [`FAST_ROUND_MIN_INTERVAL`]. A backfilling
-/// node asks again as long as a peer's heads show it is behind (a fast round),
-/// so it needs several per window; eight answers of
-/// [`ANTIENTROPY_MAX_RESEND`] frames cover 512 changes, and still bound a node
-/// whose fast rounds misbehave.
-pub const ANTIENTROPY_SERVES_PER_WINDOW: usize = 8;
-
-/// The shortest time between two direct fast-round digests to one peer, for
-/// one channel. A peer that advertises heads nobody can hold then costs one
-/// small frame per interval.
-pub const FAST_ROUND_MIN_INTERVAL: Duration = Duration::from_millis(200);
-
-/// How long after a direct fast-round digest a node holds back its own
-/// broadcast digests for that channel.
-pub const FAST_ROUND_ACTIVE: Duration = Duration::from_secs(1);
-
-/// How long a stalled fast round waits before it asks a peer that is still
-/// ahead again: a lost request, a lost answer, or a refusal costs this, not an
-/// anti-entropy tick. The reclaim timer drives the check, so this matches it.
-pub const FAST_ROUND_RETRY: Duration = Duration::from_millis(400);
-
-/// The retries of a chat digest that a full answer calls for, at most, after one tick's ask: the
-/// ask is repeated while each answer is full (the log grew by the resend cap), so a long gap does
-/// not wait one tick per cap, and it stops after this many.
-pub const CHAT_RETRIES_MAX: u32 = 16;
-
-/// How many authors a holder serves chat continuations to at once, inside the cooldown window of their
-/// digest (see `ChatContinuations`). 64 is four times the members of the largest mesh that was
-/// measured (16): a mesh where every member is catching up at once has room, and the table is a few
-/// bytes for each author for one window of 5 s. When it is full, the continuation of a new author is
-/// refused and meets the cooldown as before.
-pub const CHAT_CONTINUATION_AUTHORS_MAX: usize = 64;
-
-/// How many peers a node remembers as ahead of it, per channel.
-pub const FAST_ROUND_AHEAD_MAX: usize = 16;
-
-/// How long a peer stays remembered as ahead after its heads last showed it:
-/// a peer whose heads we can never hold must not hold a place for ever.
-pub const FAST_ROUND_AHEAD_TTL: Duration = Duration::from_mins(1);
-
 /// `HyParView` **active view** capacity (G): the number of direct gossip
 /// neighbors (open QUIC links) each member keeps per topic. A mesh of G + 1
 /// members or fewer forms a **full mesh** with nothing to shuffle, so it has
@@ -1315,3 +1168,28 @@ pub const PROBE_HOLD: Duration = Duration::from_secs(15);
 /// `host`-only with the file sink: a browser has no log file to rotate.
 #[cfg(feature = "host")]
 pub const LOG_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
+
+/// How many slice answers this node gives one asker on one channel in one window. A pull and a page
+/// request both count.
+pub const DIGEST_SERVES_PER_WINDOW: usize = 8;
+
+/// How many slice answers this node gives in all, in one window, whoever asks.
+pub const DIGEST_SERVES_GLOBAL: usize = 32;
+
+/// How many slice keys this node pulls and waits for at once, across all holders. A full store of 1024 keys
+/// fits, so a round never needs more.
+pub const DIGEST_PULLS_OPEN: usize = 1024;
+
+/// The length of the window of the serve budget.
+pub const DIGEST_SERVE_WINDOW: Duration = Duration::from_secs(5);
+
+/// How long a node waits after it sees a digest that differs from its own, before it asks for the pages.
+/// The live frames in flight land during this delay, so most differences end with no request.
+pub const DIGEST_SETTLE: Duration = Duration::from_secs(1);
+
+/// The random part of the settle delay: each mismatch waits `DIGEST_SETTLE` plus up to this, so the peers
+/// that see the same difference do not all ask at once.
+pub const DIGEST_SETTLE_JITTER: Duration = Duration::from_millis(500);
+
+/// How often the digest round checks its differences and sends its page requests, so a settle that ends is acted on at once.
+pub const DIGEST_ROUND_TICK: Duration = Duration::from_millis(250);

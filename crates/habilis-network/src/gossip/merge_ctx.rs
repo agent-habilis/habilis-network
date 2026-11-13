@@ -12,21 +12,20 @@ use crate::transport::MeshSender;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
-use crate::doc::{DocError, EpochSwitch, split_entry};
-use crate::gossip::app::AppClass;
+use crate::doc::wire;
+use crate::gossip::app::{AppFrameError, NodeApp};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
-use crate::util::consts::{DOC_EPOCH_FRAME_MARGIN, MAX_MESSAGE_SIZE};
+use crate::util::consts::MAX_MESSAGE_SIZE;
 
 use crate::logging::messages;
-use crate::protocol::peer_addr_error;
+use crate::protocol::{peer_addr_error, seal_error};
 use crate::transport;
-use crate::transport::{proven_endpoints, webrtc};
+use crate::transport::{probe, proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
+use n0_future::task;
 use n0_future::time::Instant as n0future_Instant;
-use n0_future::{task, time};
-use std::time::Duration;
 use tokio::sync::oneshot;
 /// Build → sign → deliver one outbound `App` frame — the payload-generic
 /// counterpart to the application's own (chain-stamping, sharding, sealing) chat /
@@ -36,50 +35,40 @@ use tokio::sync::oneshot;
 /// path uses ([`crate::transport::deliver`]) — unicast to a sole addressee,
 /// gossip for a broadcast (`to == None`).
 ///
-/// Reliability matches the engine's own plumbing: while unmeshed the frame is
-/// buffered into `pending_outbound` and flushed through the send decision on
-/// the meshed edge; a directed frame whose addressee is still unknown at that
-/// flush is re-buffered and retried as `PeerInfo`s arrive (dropped only when
-/// the bounded buffer overflows).
+/// Reliability: a broadcast frame sent while unmeshed is buffered into `pending_outbound` and
+/// flushed on the meshed edge (see `gossip::recv::flush_pending`). A directed frame is never
+/// buffered: a send that cannot reach its addressee now returns an error, and the caller decides
+/// whether to retry.
 ///
 /// This is a **single-frame** send: unlike the application's chat path it does not split a
 /// large body across shards (that logic is entangled with the application's per-author hash
 /// chain), so `body` must fit one wire frame. A body whose signed frame would
 /// exceed [`MAX_MESSAGE_SIZE`] is refused rather than silently dropped by the
 /// gossip actor; a bytes-carrying consumer chunks its stream below that bound.
-/// It also does **not** seal a directed frame — the recipient's encryption key
-/// is discovered through an app-level convention (the application publishes cards to the
-/// meta channel) the engine does not own; a directed `App` frame sent here rides
-/// in plaintext (authenticated by the Ed25519 frame signature).
+/// The size is checked after the seal: `frame` comes from [`app_frame`], which seals the body
+/// before it signs (a directed body of a tag that seals, and a broadcast body on a passworded
+/// mesh), so the signed frame is the one that goes on the wire. This function seals nothing itself.
 ///
-/// Nor does it seal a **broadcast** body: on a passworded mesh (a
-/// `broadcast_key` is set), receivers require every broadcast body to be
-/// mesh-key-sealed and drop a plaintext one on decrypt (see
-/// `gossip::recv::decrypt_broadcast`). A generic consumer that needs passworded
-/// broadcast must therefore seal its body under the mesh key before calling
-/// this; the shipped application does so on its broadcast chat path.
+/// The app classifies the frame (`app.classify(&frame)`) on the inbound side, and the send does
+/// not take a class.
 ///
-/// `frame` comes from [`app_frame`], and `class` is what the app says of it
-/// (`app.classify(&frame)`). A **broadcast** frame that the class marks as loggable is kept in
-/// the message log of the sender, as at the ingest of the same frame on a peer. Without it a peer that holds the frame
-/// would resend it to its author on every digest round, and the author could not serve it to a
-/// peer that missed it. A frame the app does not log is not kept. The log holds a frame
-/// once, so a consumer that also pushes the same frame into it costs a lookup, not a duplicate.
-///
-/// A directed frame to a cold peer comes back as [`crate::transport::Delivered::Pending`]: the dial runs on a task,
-/// and the caller awaits the handle off its event loop.
+/// A directed frame to a cold peer comes back as [`crate::transport::Delivered::Pending`]: the
+/// dial runs on a task, and the caller awaits the handle off its event loop.
 ///
 /// # Errors
 /// Refuses a body too large for one frame, propagates a serialize/deliver
 /// failure, and errors if the unmeshed buffer is full. A directed frame names its recipient by
 /// author key, so two live peers that use one nickname are two addressees, and neither send is
-/// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. An unmeshed
-/// node refuses a directed frame to a key that no roster, quiet set or known address holds
-/// ([`crate::transport::SendError::Undeliverable`]), because nobody can deliver it later.
+/// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. A directed
+/// frame does not wait for the gossip overlay: an unmeshed node sends it too. A node refuses a
+/// frame to a peer whose probe proved a relay-only path, on a mesh where the relay is lookup only
+/// ([`crate::transport::SendError::Held`]). A peer with no proven path yet is dialed, and the send
+/// waits for a direct path on a task of its own, within the path-select budget. The caller retries
+/// a refused frame, and nothing is buffered.
 ///
 /// # Examples
 ///
-/// It sends an application frame to the peers that the class names, and it reports how the send went. The doc test compiles it but does not run it.
+/// It sends an application frame to its addressee or to the gossip flood, and it reports how the send went. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::embed::{EventLoopState, HandlerCtx};
@@ -87,15 +76,14 @@ use tokio::sync::oneshot;
 /// use habilis_network::ops::send_app;
 /// use habilis_network::protocol::Verified;
 ///
-/// # async fn demo(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: Verified, class: AppClass) {
-/// let _ = send_app(state, context, frame, class).await;
+/// # async fn demo(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: Verified) {
+/// let _ = send_app(state, context, frame).await;
 /// # }
 /// ```
 pub async fn send_app(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
     frame: Verified,
-    class: AppClass,
 ) -> Result<transport::Delivered, transport::SendError> {
     if frame.wire_len() > MAX_MESSAGE_SIZE {
         return Err(transport::SendError::Oversize(format!(
@@ -116,30 +104,32 @@ pub async fn send_app(
         .serialize()
         .map_err(|error| transport::SendError::Internal(error.into()))?;
     messages::log_out(&frame);
-    if state.standing.contains(&Standing::Meshed) {
+    // A directed frame rides the unicast connection, never the gossip overlay, so it needs no
+    // link to a real peer: the pool dials the addressee, and the live path of the connection
+    // decides whether the payload may go out (`payload_allowed_on`). Only a broadcast waits for
+    // the overlay.
+    let directed = sole_addressee(&frame.kind).is_some();
+    if directed || state.standing.contains(&Standing::Meshed) {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
-        // `to` — the same routing the application's send path rides. A frame
-        // held off a relay-only peer is parked, not failed: the proven direct
-        // path flushes it (see `gossip::recv::flush_pending`).
-        match transport::deliver(&frame, bytes.clone(), state, context.sender).await {
-            Err(transport::SendError::Held { .. }) => {
-                park_and_offer(state, context, &frame, &bytes);
-            }
-            outcome => {
-                if outcome.is_ok() {
-                    super::recv::retain_own_app_broadcast(state, &frame, class);
-                }
-                return outcome;
-            }
+        // `to` — the same routing the application's send path rides. A directed
+        // frame with no path comes back as an error for the caller to act on.
+        if let Some(peer) = probe::prove_addressee(state, &frame) {
+            probe::open_lane_after_proof(state, context, peer);
+        } else if transport::note_unproven(state, &frame) {
+            offer_for_held(state, context, &frame);
         }
-    } else {
-        // An unmeshed node buffers a directed frame for the meshed edge.
-        park_and_offer(state, context, &frame, &bytes);
+        let outcome = transport::deliver(&frame, bytes, state, context.sender).await;
+        if let Err(error @ transport::SendError::Held { .. }) = &outcome {
+            // The caller retries; the lane session is asked now, so the retry can find it.
+            transport::note_held(state, error);
+            offer_for_held(state, context, &frame);
+        }
+        return outcome;
     }
+    // An unmeshed node buffers a broadcast frame for the meshed edge.
     if state.pending_outbound.push((frame.clone(), bytes)) {
         // Buffered until the meshed edge flushes it through the same send
-        // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.
-        super::recv::retain_own_app_broadcast(state, &frame, class);
+        // decision (see `gossip::recv::flush_pending`). A buffered broadcast is still ours.
         Ok(transport::Delivered::Done)
     } else {
         Err(transport::SendError::internal(anyhow::anyhow!(
@@ -148,27 +138,117 @@ pub async fn send_app(
     }
 }
 
-/// Build and sign the frame that [`send_app`] sends. A plain function, so that a caller can
-/// classify the frame (`app.classify(&frame)`) before the send and hold no reference to the app
-/// across the `await` of [`send_app`]: the app is not `Sync`, and a future that holds it is not
-/// `Send`.
+/// Build, seal and sign the frame that [`send_app`] sends. A plain function, so that a caller can
+/// hold no reference to the app across the `await` of [`send_app`]: the app is not `Sync`, and a
+/// future that holds it is not `Send`.
+///
+/// The seal is inside the signature, so it is made here, before the frame is signed:
+/// - A directed body of a tag that seals (`NodeApp::seals`, the rule that the receiver reads too)
+///   is sealed to the seal key of the addressee (`EventLoopState::seal_key_of`). If no `PeerInfo`
+///   named that key yet, the call returns [`AppFrameError::NoSealKey`], and a later call can
+///   succeed.
+/// - A broadcast body on a passworded mesh is sealed with the mesh key, whatever the tag: the
+///   receivers drop any other body.
+/// - Any other body goes as it is. That includes a directed body of a tag that does not seal, also
+///   on a passworded mesh: the password covers the broadcast bodies, the state and the meta slices,
+///   and a relay can read a directed body that no tag seals.
+///
+/// This builds one frame. A body that is cut into shards is sealed whole, then cut, because the
+/// receiver joins the shards and opens the joined body once: a shard is a cut of one ciphertext, not
+/// an envelope of its own. An app that shards seals the whole body with
+/// [`seal_broadcast_body`], or with `protocol::seal_to_body` and `seal_key_of` for a directed body,
+/// cuts the sealed text, and signs each shard. [`sealed_body_len_bound`] bounds the whole sealed
+/// body. [`send_app`] checks the size of a frame after the seal.
+///
+/// # Errors
+/// [`AppFrameError::NoSealKey`] for a sealing tag whose addressee has no known seal key, and
+/// [`AppFrameError::Seal`] when the sealed body is not a valid message body.
 ///
 /// # Examples
 ///
-/// It builds a signed application frame from the handler context. The doc test compiles it but does not run it.
+/// It builds a signed application frame from the state, the handler context and the app. The doc test compiles it but does not run it.
 ///
 /// ```no_run
-/// use habilis_network::embed::HandlerCtx;
+/// use habilis_network::embed::{AppFrameError, EventLoopState, HandlerCtx, NodeApp};
 /// use habilis_network::ops::app_frame;
 /// use habilis_network::protocol::{AppFrameParams, Verified};
 ///
-/// # fn demo(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
-/// app_frame(context, params)
+/// # fn demo<App: NodeApp>(state: &EventLoopState, context: &HandlerCtx<'_>, app: &App, params: AppFrameParams) -> Result<Verified, AppFrameError> {
+/// app_frame(state, context, app, params)
+/// # }
+/// ```
+pub fn app_frame<App: NodeApp + ?Sized>(
+    state: &EventLoopState,
+    context: &HandlerCtx<'_>,
+    app: &App,
+    mut params: AppFrameParams,
+) -> Result<Verified, AppFrameError> {
+    match params.to {
+        Some(to) if app.seals(&params.tag) => {
+            let seal = state
+                .seal_key_of(&to)
+                .ok_or(AppFrameError::NoSealKey { to })?;
+            params.body = seal_error::seal_to_body(seal, params.body.as_str())
+                .map_err(|error| AppFrameError::Seal(Box::new(error)))?;
+        }
+        None => params.body = seal_broadcast_body(state, &params.body)?,
+        Some(_) => {}
+    }
+    Ok(Message::new_app(context.mesh, context.author, params).sign(context.identity))
+}
+
+/// Seal a whole broadcast body with the mesh key, as [`app_frame`] does for one frame. On a mesh
+/// with no password the body comes back as it is. An app that cuts a broadcast body into shards
+/// calls this on the whole body, then cuts the result: the receiver joins the shards and opens the
+/// joined body once.
+///
+/// # Errors
+/// [`AppFrameError::Seal`] when the sealed body is not a valid message body.
+///
+/// # Examples
+///
+/// It seals a whole broadcast body, and the body comes back as it is on a mesh with no password. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::{AppFrameError, EventLoopState};
+/// use habilis_network::ops::seal_broadcast_body;
+/// use habilis_network::protocol::MessageBody;
+///
+/// # fn demo(state: &EventLoopState, body: &MessageBody) -> Result<MessageBody, AppFrameError> {
+/// seal_broadcast_body(state, body)
+/// # }
+/// ```
+pub fn seal_broadcast_body(
+    state: &EventLoopState,
+    body: &MessageBody,
+) -> Result<MessageBody, AppFrameError> {
+    match state.broadcast_key() {
+        Some(key) => {
+            wire::encrypt_body(body, key).map_err(|error| AppFrameError::Seal(Box::new(error)))
+        }
+        None => Ok(body.clone()),
+    }
+}
+
+/// The longest escaped length of a sealed body for a plain body of `plain_len` bytes, whether the
+/// body is sealed to a peer or with the mesh key. It bounds a whole body: an app that cuts a sealed
+/// body into shards seals the whole body first, so the bound applies to the whole body and not to a
+/// shard, and each shard, with the rest of its frame, must fit [`MAX_MESSAGE_SIZE`].
+///
+/// # Examples
+///
+/// It gives the longest sealed length of a body. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::sealed_body_len_bound;
+///
+/// # fn demo(plain_len: usize) -> usize {
+/// sealed_body_len_bound(plain_len)
 /// # }
 /// ```
 #[must_use]
-pub fn app_frame(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
-    Message::new_app(context.mesh, context.author, params).sign(context.identity)
+pub fn sealed_body_len_bound(plain_len: usize) -> usize {
+    seal_error::sealed_to_body_len_bound(plain_len).max(wire::sealed_body_len_bound(plain_len))
 }
 
 /// Fire-and-forget gossip broadcast. Serialize errors are swallowed:
@@ -312,158 +392,6 @@ impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
     }
 }
 
-/// The merges that write the entry of a switch to a new epoch again, as
-/// `{ <map>: { <slot>: <part> } }`, each one for a frame that `fits` accepts. The slot is the
-/// lowercase hex of the key of the owner. An item is an error for a value that cannot be cut to a
-/// frame; the other items are still there.
-pub(crate) fn entry_merges<Fits: FnMut(&serde_json::Value) -> bool>(
-    switch: &EpochSwitch,
-    slot: &str,
-    mut fits: Fits,
-) -> Vec<Result<serde_json::Value, DocError>> {
-    let Some(entry) = switch.own_entry.as_ref() else {
-        return Vec::new();
-    };
-    let map = switch.map.as_str();
-    let wrapped = |part: &serde_json::Value| serde_json::json!({ map: { slot: part } });
-    let cuts = split_entry(entry, |part| fits(&wrapped(part)));
-    cuts.map(|cut| cut.map(|part| wrapped(&part))).collect()
-}
-
-/// Apply a local write to the entry that a waiting switch kept, so the write again does not bring
-/// back what the app deleted or changed between the switch and the sweep.
-/// It patches only when a switch waits and has kept an entry: with no switch, or a switch that kept
-/// none, it does nothing.
-fn follow_own_write(state: &mut EventLoopState, merge: &serde_json::Value) {
-    let slot = state.identity.author_key().to_string();
-    let Some(switch) = state.epoch_write.switch.as_mut() else {
-        return;
-    };
-    let peers = merge.get(&switch.map);
-    let patch = peers.and_then(|peers| peers.get(slot.as_str()));
-    if let (Some(patch), Some(entry)) = (patch, switch.own_entry.as_mut()) {
-        apply_merge_patch(entry, patch);
-    }
-}
-
-/// RFC 7386: an object patch merges into `target` key by key, `null` deletes a key, and any other
-/// value replaces what is there.
-pub(crate) fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
-    let serde_json::Value::Object(fields) = patch else {
-        *target = patch.clone();
-        return;
-    };
-    if !target.is_object() {
-        *target = serde_json::json!({});
-    }
-    let Some(map) = target.as_object_mut() else {
-        return;
-    };
-    for (key, value) in fields {
-        if value.is_null() {
-            map.remove(key);
-        } else {
-            apply_merge_patch(
-                map.entry(key.clone()).or_insert(serde_json::Value::Null),
-                value,
-            );
-        }
-    }
-}
-
-/// The part of `entry` that `held` does not hold yet, or `None` when it holds all of it. A path that
-/// `held` has stays as it is, whatever its value: it is newer than the entry that a switch kept.
-fn unwritten(
-    entry: &serde_json::Value,
-    held: Option<&serde_json::Value>,
-) -> Option<serde_json::Value> {
-    let Some(held) = held else {
-        return Some(entry.clone());
-    };
-    let (serde_json::Value::Object(fields), serde_json::Value::Object(have)) = (entry, held) else {
-        return None;
-    };
-    let missing = |(key, value): (&String, &serde_json::Value)| {
-        let part = unwritten(value, have.get(key))?;
-        Some((key.clone(), part))
-    };
-    let rest: serde_json::Map<String, serde_json::Value> =
-        fields.iter().filter_map(missing).collect();
-    (!rest.is_empty()).then_some(serde_json::Value::Object(rest))
-}
-
-/// Whether the frame of `merge`, built and signed and sealed as a write of this node would be, fits
-/// a message with a margin for the dependencies that a later write adds. A merge that makes no change
-/// has no frame, so it fits.
-///
-/// It builds, composes and signs one frame for each merge that it is asked about, and the cut asks
-/// about each field once for each open merge, so the cost grows with the square of the fields of one
-/// level. It is for the write again after a reset, which runs once on a node. Do not use it on a hot
-/// path.
-fn frame_fits(
-    state: &EventLoopState,
-    mesh: &MeshId,
-    author: &Nickname,
-    merge: &serde_json::Value,
-) -> bool {
-    let seed = *state.identity.public().as_bytes();
-    let doc = state.doc(Channel::Meta);
-    let Ok(built) = doc.build_change(merge, &seed) else {
-        return false;
-    };
-    let Some(change) = built else {
-        return true;
-    };
-    let Ok((body, _plain)) = doc.compose_wire_body(&change, None) else {
-        return false;
-    };
-    let frame = Message::new_channel_event(mesh, author, body, Channel::Meta).sign(&state.identity);
-    frame
-        .serialize()
-        .is_ok_and(|wire| wire.as_bytes().len() + DOC_EPOCH_FRAME_MARGIN <= MAX_MESSAGE_SIZE)
-}
-
-/// Write the entry of this node again after the meta document moved to a new epoch: the reset dropped
-/// the old frames, and only the owner can write its own entry. It runs on the sweep tick, so the
-/// entry is back within 10 s of the switch. The write stays quiet (it is no news for the operator).
-/// A value that cannot be cut to a frame is not written, with a warning for that one value, and the
-/// other fields are written. A path that the document holds already is not written: it is a write of
-/// the app after the switch, newer than the entry that the switch kept.
-pub(crate) async fn write_entry_again(state: &mut EventLoopState, context: &MergeCtx<'_>) {
-    let Some(taken) = state.epoch_write.switch.take() else {
-        return;
-    };
-    let json = state.doc(Channel::Meta).to_json();
-    let peers = json.get(&taken.map);
-    let slot = state.identity.author_key().to_string();
-    let held = peers.and_then(|peers| peers.get(slot.as_str()));
-    let entry = taken.own_entry.as_ref();
-    let rest: Option<serde_json::Value> = entry.and_then(|entry| unwritten(entry, held));
-    let switch = EpochSwitch::new(taken.epoch, taken.map.clone(), rest);
-    let cuts: Vec<Result<serde_json::Value, DocError>> = entry_merges(&switch, &slot, |merge| {
-        frame_fits(state, context.mesh, context.author, merge)
-    });
-    for cut in cuts {
-        let merge = match cut {
-            Ok(merge) => merge,
-            Err(error) => {
-                tracing::warn!(target: "habilis_network::gossip", %error, "a value of the entry of this node is too large for a frame, and is not written again after a reset");
-                continue;
-            }
-        };
-        let params = StateMergeParams::new(context.clone(), Channel::Meta, merge).surface(false);
-        if let Err(error) = broadcast_state_merge(state, params).await {
-            if state.retry_epoch_switch(taken) {
-                tracing::warn!(target: "habilis_network::gossip", %error, "the entry of this node was not written again after a reset, and the next sweep tries again");
-            } else {
-                tracing::warn!(target: "habilis_network::gossip", %error, "the entry of this node was not written again after a reset, and the writes are given up");
-            }
-            return;
-        }
-    }
-    state.epoch_write.attempts = 0;
-}
-
 /// Parameters for [`broadcast_state_merge`]. Agent-driven writes surface to the operator, so
 /// `surface` is `true` unless [`StateMergeParams::surface`] says otherwise.
 ///
@@ -531,7 +459,7 @@ impl<'mesh> StateMergeParams<'mesh> {
 /// Whether a merged frame also goes to each peer over the unicast plane.
 ///
 /// A frame that announces a departure must not die with the leaver. Gossip alone can lose it in
-/// a silently linkless overlay, and anti-entropy cannot heal a frame that no live replica holds.
+/// a silently linkless overlay, and no repair can heal a frame that no live replica holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Farewell {
@@ -544,15 +472,12 @@ pub enum Farewell {
 }
 
 /// The single shared-state write helper, shared by the IPC `state_merge` command
-/// and the in-process `StateMerge` request. Translates the RFC 7386 merge into one
-/// automerge change, gossips it inside a signed frame, and retains it locally so
-/// anti-entropy can serve it (gossip never echoes to self).
+/// and the in-process `StateMerge` request. Applies the RFC 7386 merge to this
+/// member's own slice, gossips the slice inside a signed frame, and keeps it locally
+/// so the backfill can serve it (gossip never echoes to self).
 ///
-/// The change is built on a fork and the frame size-gated **before** the change
-/// touches the live doc, so an oversize merge never lands in a doc it could not
-/// be gossiped for. Applying then runs through [`MeshDoc::ingest`](crate::doc::MeshDoc::ingest)'s gate, so a
-/// local write that would forge another peer's card is refused, not silently
-/// diverged.
+/// The slice is size-gated **before** it touches the live store, so an oversize
+/// merge never lands in a store it could not be gossiped from.
 ///
 /// `surface` controls whether the local write is reported to the operator/agent
 /// as a `state`/`meta` event (`you changed …`). Agent-driven merges pass
@@ -561,8 +486,8 @@ pub enum Farewell {
 /// "you changed shared state" event (nor race into a `fetch_messages` long-poll).
 ///
 /// # Errors
-/// Unrepresentable merge, oversize frame, a rejected foreign-card write, or a
-/// broadcast refusal.
+/// Unrepresentable merge, a slice too large for one frame, a write past the rate
+/// limit, or a broadcast refusal.
 ///
 /// # Examples
 ///
@@ -580,109 +505,62 @@ pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
 ) -> Result<(), transport::SendError> {
-    let mut waited: u32 = 0;
-    loop {
-        let written = write_state_merge(state, params.clone()).await;
-        let clock_ahead = matches!(
-            written,
-            Err(transport::SendError::State(
-                transport::StateRefusal::ClockAhead
-            ))
-        );
-        if !clock_ahead || waited >= CLOCK_AHEAD_RETRIES {
-            return written;
-        }
-        // The clock of the document is at the top of its window: the next time is 1 ms above the
-        // bound, and the bound moves with the wall clock. Nothing was sent and no time was taken,
-        // so the write waits a millisecond and tries again. The wait is short and bounded: the
-        // loop is held at most `CLOCK_AHEAD_RETRIES` ms, and only while a clock is wrong.
-        waited += 1;
-        time::sleep(CLOCK_AHEAD_STEP).await;
-    }
-}
-
-/// How many times a write that finds the clock of the shared state ahead of this machine tries
-/// again, a millisecond apart, before it gives `ClockAhead` to the caller.
-const CLOCK_AHEAD_RETRIES: u32 = 50;
-
-/// The wait between two tries of a write that found the clock ahead.
-const CLOCK_AHEAD_STEP: Duration = Duration::from_millis(1);
-
-/// One try of [`broadcast_state_merge`].
-async fn write_state_merge(
-    state: &mut EventLoopState,
-    params: StateMergeParams<'_>,
-) -> Result<(), transport::SendError> {
-    use crate::doc::Ingested;
-
     let StateMergeParams {
-        context:
-            MergeCtx {
-                mesh,
-                author,
-                sender,
-                sink,
-            },
+        context,
         channel,
         merge,
         surface,
         farewell,
     } = params;
 
-    // 1. Build the change on a fork (no live mutation yet); a no-op merge is a
+    // 1. The own slice with the merge patch applied (RFC 7386). A merge that changes nothing is a
     //    silent success.
-    // The actor seed is the session's signing key, not the nickname: a
-    // rejoined session under a nickname-derived actor would collide seq
-    // numbers with its predecessor's history (see `doc::actor_for`).
-    let actor_seed = *state.identity.public().as_bytes();
-    let fork_doc = state.doc(channel);
-    let built = fork_doc
-        .build_change(&merge, &actor_seed)
-        .map_err(transport::SendError::of_doc)?;
-    let Some(change_bytes) = built else {
-        return Ok(());
+    let own = state.identity.author_key();
+    let now = clock::Instant::now();
+    let mut value = serde_json::Value::Object(state.docs.own_value(channel, &own));
+    json_merge_patch(&mut value, &merge);
+    let serde_json::Value::Object(next) = value else {
+        return Err(transport::SendError::internal(anyhow::anyhow!(
+            "the merge must be a JSON object"
+        )));
     };
+    if next == state.docs.own_value(channel, &own) {
+        return Ok(());
+    }
 
-    // 2. Compose + sign + size-gate before the change touches the live doc.
-    //    Carry the input merge as the surfaced delta only for agent-visible
-    //    writes; the internal card publish stays lean (no delta on the wire).
-    //    On a passworded mesh the wire body is sealed under the channel key;
-    //    `plain_body` keeps the plaintext for our own surfacing below.
-    let channel_doc = state.doc(channel);
-    let composed = channel_doc.compose_wire_body(&change_bytes, surface.then_some(&merge));
-    let (wire_body, plain_body) = composed.map_err(transport::SendError::of_doc)?;
-    let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
+    // 2. The draft of the next version, the signed frame of its body, and the commit of the frame.
+    //    The engine refuses a write past the rate limit; the caller gets the typed error.
+    let draft = state
+        .docs
+        .prepare_local(channel, &own, next.clone(), now)
+        .map_err(transport::SendError::State)?;
+    commit_and_send(state, &context, channel, draft, farewell, surface).await
+}
+
+/// Commits a local draft, then sends its signed frame. A frame that announces a departure also goes to each live
+/// peer by unicast before gossip takes it. With no gossip path yet, the frame waits in the outbound buffer.
+pub(crate) async fn commit_and_send(
+    state: &mut EventLoopState,
+    context: &MergeCtx<'_>,
+    channel: Channel,
+    draft: habilis_network_doc::LocalDraft,
+    farewell: Farewell,
+    surface: bool,
+) -> Result<(), transport::SendError> {
+    let now = clock::Instant::now();
+    let signed =
+        Message::new_channel_event(context.mesh, context.author, draft.body().clone(), channel)
+            .sign(&state.identity);
+    // The token that prepare_local spent is not refunded if this serialize fails. The frame_overhead probe keeps
+    // a draft at the cap within one frame, so the failure cannot happen for a draft the store took.
     let bytes = signed
         .serialize()
         .map_err(|error| transport::SendError::Internal(error.into()))?;
     messages::log_out(&signed);
-
-    // 3. Apply the signed frame to the live doc through the authorization gate.
-    //    Ingest retains the frame as the re-serve store (replacing `StateLog`),
-    //    so anti-entropy can forward it with its original signature.
-    let ingested = state.doc_mut(channel).ingest(&signed);
-    let after = match ingested {
-        Ingested::Applied { doc, .. } => doc,
-        Ingested::Duplicate => return Ok(()),
-        Ingested::Rejected => {
-            return Err(transport::SendError::internal(anyhow::anyhow!(
-                "write rejected: a member may only write the gated field of the slot that its own key names"
-            )));
-        }
-        Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
-        Ingested::Ignored => unreachable!("a locally-built change body always decodes"),
-        Ingested::NewEpoch { .. } => {
-            unreachable!("a locally-built change is of the epoch that the document holds")
-        }
-        _ => {
-            return Err(transport::SendError::internal(anyhow::anyhow!(
-                "the document did not take the change"
-            )));
-        }
-    };
-    if channel == Channel::Meta {
-        follow_own_write(state, &merge);
-    }
+    state
+        .docs
+        .commit_local(channel, draft, &signed, now)
+        .map_err(transport::SendError::State)?;
 
     // A departure is mirrored before gossip takes the frame: once gossip has it, the frame is
     // no longer ours to copy, and a leaver can exit before the overlay carries it.
@@ -690,31 +568,65 @@ async fn write_state_merge(
         unicast_farewell(state, &bytes);
     }
 
-    // 4. Surface our own change, and gossip it (or buffer while no gossip path
-    //    exists — the change is safe in the local doc for heads-based
-    //    anti-entropy).
+    // Surface our own change, and gossip it (or buffer while no gossip path exists — the change is kept in the
+    // local slice, and its frame is sent once a path exists).
     if surface {
         // Surface our own change from a plaintext-bodied view so the `m` delta
         // renders even when the wire body we signed is sealed.
-        sink.emit(NodeEvent::StateChanged {
+        let own = state.identity.author_key();
+        let plain_body = state.docs.plain_body(channel, &own).ok_or_else(|| {
+            transport::SendError::internal(anyhow::anyhow!("the own slice is not in the store"))
+        })?;
+        context.sink.emit(NodeEvent::StateChanged {
             channel,
             event: Box::new(signed.copy_with_body(plain_body)),
-            document: after,
+            document: state.docs.to_json(channel),
             is_self: true,
         });
     }
     if state.overlay_reachable() {
-        sender
+        context
+            .sender
             .broadcast(bytes)
             .await
             .map_err(|error| transport::SendError::internal(anyhow::anyhow!("{error}")))?;
     } else {
-        // No gossip path yet: buffer until we mesh. (The change is already in
-        // the local doc, so heads anti-entropy still reconciles it if the
-        // buffer is full.)
+        // No gossip path yet: buffer until we mesh. The frame is also the slice of this node, so a
+        // newcomer that meets us gets it from the backfill.
         state.pending_outbound.push((signed, bytes));
     }
     Ok(())
+}
+
+/// Sends the tombstone of this node on each channel, the farewell of a leaving member. Each one goes by unicast to
+/// each live peer and by gossip, so a peer that misses the `Left` still drops this node's slice. The order of the
+/// sends is for time, not correctness: a receiver ends in the same state in either order.
+pub(crate) async fn send_tombstones(state: &mut EventLoopState, context: &MergeCtx<'_>) {
+    let own = state.identity.author_key();
+    for channel in [Channel::State, Channel::Meta] {
+        let draft = match state
+            .docs
+            .prepare_leave(channel, &own, clock::Instant::now())
+        {
+            Ok(draft) => draft,
+            Err(error) => {
+                tracing::debug!(target: "habilis_network::gossip", "a tombstone draft was refused: {error:?}");
+                continue;
+            }
+        };
+        if let Err(error) = commit_and_send(
+            state,
+            context,
+            channel,
+            draft,
+            Farewell::UnicastMirror,
+            false,
+        )
+        .await
+        {
+            tracing::debug!(target: "habilis_network::gossip", "a tombstone was not sent: {error}");
+        }
+    }
 }
 
 /// Mirror a farewell frame over the unicast plane to every live peer whose key made its dial hint
@@ -724,7 +636,7 @@ async fn write_state_merge(
 /// nickname whose hint another key owns. The gossip
 /// overlay can be silently linkless (a post-join flap heals in seconds, but a
 /// leaver exits first), and a farewell that dies with the leaver can never be
-/// healed by anti-entropy — no live replica holds it. Receiver-side dedup
+/// repaired by no mechanism until the loss repair lands — no live replica holds it. Receiver-side dedup
 /// makes the double delivery a no-op; the unicast acceptor feeds the same
 /// `ingest` path as gossip. Spawned dials that outlive the shutdown window
 /// die with the endpoint — still best-effort, just no longer single-path.
@@ -777,25 +689,37 @@ fn farewell_targets(state: &EventLoopState) -> Vec<iroh::EndpointId> {
     targets
 }
 
-/// The body of our `PeerInfo`: our address, the proof that we own it, and, while we hold the
-/// rendezvous, a flag that lets another holder in the same overlay order itself against us.
+/// The body of our `PeerInfo`: our address, the proof that we own it, the x25519 key that a peer
+/// seals a directed body to (`seal`, Base58), and, while we hold the rendezvous, a flag that lets
+/// another holder in the same overlay order itself against us. The `seal` is required: a receiver
+/// refuses a body that has none.
 pub(crate) fn peer_info_json(
     address: &iroh::EndpointAddr,
     proof: String,
     holds_beacon: bool,
+    seal: &x25519_dalek::PublicKey,
 ) -> serde_json::Value {
     let mut json = peer_addr_error::endpoint_addr_to_json(address);
     json["proof"] = serde_json::Value::String(proof);
+    json["seal"] = serde_json::Value::String(bs58::encode(seal.as_bytes()).into_string());
     if holds_beacon {
         json["beacon"] = serde_json::Value::Bool(true);
     }
     json
 }
 
+/// The seal key that a `PeerInfo` body names, or `None` when the body names none or the text is
+/// not the Base58 of 32 bytes.
+pub(crate) fn peer_info_seal_key(json: &serde_json::Value) -> Option<x25519_dalek::PublicKey> {
+    let text = json["seal"].as_str()?;
+    let decoded = bs58::decode(text).into_vec().ok()?;
+    let bytes: [u8; 32] = decoded.try_into().ok()?;
+    Some(x25519_dalek::PublicKey::from(bytes))
+}
+
 /// Broadcast a `PeerInfo` carrying our endpoint address so peers can
-/// dial us directly. Unlike `joined`, `PeerInfo` never enters the
-/// message log (`handle_peer_info` returns before the log push), so
-/// re-sending it is invisible to `poll`/`fetch_messages` consumers —
+/// dial us directly. Unlike `joined`, `PeerInfo` is never
+/// surfaced to the app, so re-sending it is invisible to `poll`/`fetch_messages` consumers —
 /// safe to repeat on every new neighbor. Stamps `peerinfo_flood`, the
 /// window the `joined` re-flood gate and the periodic refresh read, and draws the spread of the
 /// next refresh period.
@@ -822,12 +746,14 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
             proven_endpoints::sign(context.endpoint.secret_key(), context.mesh, &author_key)
         })
         .clone();
+    let seal = state.identity.seal_public();
     let addr_json = peer_info_json(
         &our_addr,
         proof,
         state
             .rendezvous_flags
             .contains(&RendezvousFlag::HostsRendezvous),
+        &seal,
     );
     let addr_data = serde_json::to_string(&addr_json)
         .expect("endpoint_addr_to_json produces a Value that always serializes");
@@ -844,42 +770,16 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
 /// Called once at the top of the event loop; the caller bumps
 /// `last_sent_at` afterwards.
 ///
-/// Takes `state` only to retain the `joined` locally — see
-/// [`retain_own_broadcast`](super::recv::retain_own_broadcast) for why a node
-/// that does not hold its own presence makes anti-entropy unconvergeable.
 pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let joined = state.own_joined(context.mesh, context.author);
     broadcast_msg(context.sender, &joined).await;
-    super::recv::retain_own_broadcast(state, joined);
     broadcast_peer_info(state, context).await;
 }
 
-/// A directed frame that is parked because the node is not meshed yet still asks for the session
-/// of a peer that needs one: a node becomes meshed by its first link to a member, and on a lane pair
-/// that link needs the session, so a frame that waited for the link could never ask for it. The rule
-/// is the one of a frame held on a meshed node ([`crate::transport::note_held`]).
-fn mark_parked(state: &mut EventLoopState, frame: &Verified, bytes: &WireFrame) {
-    if let Err(error) = transport::resolve(frame, bytes.clone(), state) {
-        transport::note_held(state, &error);
-    }
-}
-
-/// A directed frame is parked, by `send_app` or by a flush that held it again: ask for the session
-/// of its peer, and offer it now. One helper for both, so that the two cannot drift.
-pub(crate) fn park_and_offer(
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-    frame: &Verified,
-    bytes: &WireFrame,
-) {
-    mark_parked(state, frame, bytes);
-    offer_for_parked(state, context, frame);
-}
-
-/// Offer the session of the peer now, if the parked frame asked for it. Without this the offer waits
+/// Offer the session of the peer now, if a held frame asked for it. Without this the offer waits
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
-fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
+fn offer_for_held(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
     let Some(key) = sole_addressee(&frame.kind) else {
         return;
     };
@@ -891,25 +791,42 @@ fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame:
     }
 }
 
+/// Applies the RFC 7386 JSON merge patch `patch` to `target`, in place.
+fn json_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    let serde_json::Value::Object(patch_map) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let serde_json::Value::Object(target_map) = target else {
+        return;
+    };
+    for (name, value) in patch_map {
+        if value.is_null() {
+            target_map.remove(name);
+        } else {
+            let entry = target_map
+                .entry(name.clone())
+                .or_insert(serde_json::Value::Null);
+            json_merge_patch(entry, value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::daemon::state::Standing;
-    use crate::transport::UdpTransport;
+    use super::{farewell_targets, peer_info_json, wire};
+    use crate::protocol::identity::Identity;
+    use crate::protocol::{MeshId, Message, MessageBody, Nickname, SymmetricKey, seal_to_body};
+    use crate::testing::{endpoint_id, fresh_state, longest_mesh_id, nick, test_key};
+    use crate::util::consts::MAX_MESSAGE_SIZE;
 
-    use super::{
-        entry_merges, farewell_targets, frame_fits, mark_parked, peer_info_json, unwritten,
-        write_entry_again,
-    };
-    use crate::doc::EpochSwitch;
-    use crate::protocol::{MeshId, Message};
-    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
-    use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
-
-    use crate::protocol;
-    use crate::protocol::messages::AppFrameParams;
     use crate::protocol::peer_addr_error;
     #[cfg(feature = "host")]
     use crate::testing;
+    #[cfg(feature = "host")]
     use crate::util::clock;
     /// The mirror dials the hint of a live peer whose key made it. It skips a hint from a card (no
     /// verified key, even when a key is admitted under the nickname later), a hint of a quiet key,
@@ -980,9 +897,140 @@ mod tests {
         );
     }
 
+    /// A leaving member's tombstone reaches each peer by unicast, once per channel, with the null value. The overlay
+    /// is not meshed, so only the unicast mirror can deliver it. The mesh is plain, with no password: a passworded
+    /// mesh seals the same tombstone, and the loopback test of a sealed meta write covers that. The State channel has
+    /// an earlier local write, so its tombstone is version 2; Meta has none, so its tombstone is version 1.
+    #[test]
+    fn a_tombstone_reaches_each_peer_by_unicast_on_each_channel() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use std::time::Duration;
+
+                use iroh::endpoint::presets;
+                use iroh::protocol::Router;
+                use iroh_gossip::{net, proto};
+                use tokio::sync::mpsc;
+                use tokio::time;
+
+                use crate::gossip::event::SilentSink;
+                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
+                use crate::lookup;
+                use crate::protocol::{Channel, Message, MessageKind};
+                use crate::transport::{
+                    MeshSender, PayloadPath, UNICAST_ALPN, UnicastAcceptor, UnicastPool,
+                };
+
+                let (tx, mut frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([9u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+
+                let mut state = fresh_state();
+                state.unicast_pool = UnicastPool::new(node.clone(), false);
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                state.names.insert(test_key("bob"), nick("bob"));
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), server.addr());
+                state.peer_for_test("bob");
+
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let context = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                let earlier_write = StateMergeParams::new(
+                    MergeCtx {
+                        mesh: &mesh,
+                        author: &author,
+                        sender: &sender,
+                        sink: &SilentSink,
+                    },
+                    Channel::State,
+                    serde_json::json!({"a": 1}),
+                )
+                .surface(false);
+                broadcast_state_merge(&mut state, earlier_write)
+                    .await
+                    .expect("an earlier local write");
+                super::send_tombstones(&mut state, &context).await;
+
+                let own_key = state.identity.author_key();
+                let mut states = 0;
+                let mut metas = 0;
+                for _ in 0..2 {
+                    let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
+                    let Ok(Some(frame)) = delivered else {
+                        panic!("a tombstone frame arrives within 5 s");
+                    };
+                    let message = Message::parse(&frame.bytes).expect("a tombstone frame parses");
+                    let verified = message
+                        .verify()
+                        .expect("the signature of a tombstone verifies");
+                    assert_eq!(
+                        verified.key(),
+                        own_key,
+                        "the tombstone is signed by the leaver"
+                    );
+                    let body: serde_json::Value =
+                        serde_json::from_str(verified.body.as_str()).expect("a slice body is JSON");
+                    let expected = if matches!(verified.kind, MessageKind::State) {
+                        2
+                    } else {
+                        1
+                    };
+                    assert_eq!(
+                        body["version"], expected,
+                        "the tombstone is the version after the last one of its channel"
+                    );
+                    assert!(
+                        body["value"].is_null(),
+                        "the tombstone carries the null value"
+                    );
+                    if matches!(verified.kind, MessageKind::State) {
+                        states += 1;
+                    } else if matches!(verified.kind, MessageKind::Meta) {
+                        metas += 1;
+                    }
+                }
+                assert_eq!((states, metas), (1, 1), "one tombstone for each channel");
+                let extra = time::timeout(Duration::from_millis(500), frames.recv()).await;
+                assert!(extra.is_err(), "no third tombstone frame follows");
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
     /// A departure written with a farewell reaches each peer by unicast at once. The overlay is
     /// not meshed, so gossip carries nothing: only the unicast mirror can deliver the frame, and
-    /// no anti-entropy round is needed.
+    /// no backfill round is needed.
     #[test]
     fn a_farewell_merge_reaches_each_peer_by_unicast() {
         ::habilis_network_test_tracing::run_multi_thread(
@@ -1060,590 +1108,11 @@ mod tests {
                 let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
                 assert!(
                     matches!(delivered, Ok(Some(ref frame)) if !frame.bytes.is_empty()),
-                    "a farewell reaches the peer by unicast, without waiting for anti-entropy"
+                    "a farewell reaches the peer by unicast, without waiting for a backfill"
                 );
                 router.shutdown().await.expect("shutdown");
                 node.close().await;
             },
-        );
-    }
-
-    /// The merges that write an entry again each fit the frame that `fits` measures, join into the
-    /// entry, and name the map and the owner.
-    #[test]
-    fn an_entry_is_written_again_in_merges_that_name_the_map_and_the_owner() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let entry = serde_json::json!({
-            "card": "c".repeat(700),
-            "host": "h".repeat(600),
-            "status": "idle",
-        });
-        let mut switch = EpochSwitch::new(1, "peers".to_owned(), Some(entry));
-        let fits =
-            |merge: &serde_json::Value| serde_json::to_vec(merge).expect("json").len() <= 1_000;
-        let cuts = entry_merges(&switch, "alice", fits);
-        assert!(cuts.len() >= 2, "{} merges", cuts.len());
-        for cut in cuts {
-            let merge = cut.expect("every part fits");
-            let fields = merge["peers"]["alice"]
-                .as_object()
-                .expect("the owner's fields");
-            assert!(!fields.is_empty(), "each merge holds at least one field");
-            assert!(fits(&merge), "each merge fits the frame");
-        }
-        switch = EpochSwitch::new(1, "peers".to_owned(), None);
-        assert!(
-            entry_merges(&switch, "alice", fits).is_empty(),
-            "an entry of none gives no merge"
-        );
-    }
-
-    /// After a reset the entry of this node comes back through the same write path as any merge,
-    /// so the document holds it again in the new epoch.
-    #[test]
-    fn the_entry_of_this_node_is_in_the_document_again_after_a_reset() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            async {
-                use iroh::endpoint::presets;
-                use iroh_gossip::{net, proto};
-
-                use crate::doc::{MeshDoc, SelfWriteGate};
-                use crate::gossip::event::SilentSink;
-                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
-                use crate::protocol::Channel;
-                use crate::transport::MeshSender;
-
-                let node = iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::Disabled)
-                    .bind()
-                    .await
-                    .expect("bind a loopback endpoint");
-                let gossip = net::Gossip::builder().spawn(node.clone());
-                let topic = gossip
-                    .subscribe(proto::TopicId::from_bytes([8u8; 32]), vec![])
-                    .await
-                    .expect("subscribe to a peerless topic");
-                let (gossip_sender, _receiver) = topic.split();
-                let sender = MeshSender::new(gossip_sender);
-                let mesh = MeshId::from("test");
-                let author = nick("alice");
-                let write = MergeCtx {
-                    mesh: &mesh,
-                    author: &author,
-                    sender: &sender,
-                    sink: &SilentSink,
-                };
-
-                let mut state = fresh_state();
-                let own_key = state.identity.author_key();
-                let slot = own_key.to_string();
-                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
-                    .epoch_cap(1_000);
-                let fields = [("card", 'c'), ("host", 'h'), ("cwd", 'w')];
-                for (field, fill) in fields {
-                    let merge = serde_json::json!({"peers": {slot.as_str(): {field: fill.to_string().repeat(600)}}});
-                    let params =
-                        StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
-                    broadcast_state_merge(&mut state, params)
-                        .await
-                        .expect("the write is taken");
-                }
-                let before = state.doc(Channel::Meta).to_json();
-                let switch = state
-                    .doc_mut(Channel::Meta)
-                    .tick_epoch(&own_key)
-                    .expect("over the cap: a reset");
-                assert_eq!(
-                    state.doc(Channel::Meta).to_json(),
-                    serde_json::json!({"peers": {}}),
-                    "the reset leaves no entry in the document"
-                );
-                state.note_epoch_switch(switch);
-
-                write_entry_again(&mut state, &write).await;
-
-                assert!(state.epoch_write.switch.is_none(), "the slot is empty");
-                assert_eq!(
-                    state.doc(Channel::Meta).epoch(),
-                    1,
-                    "the reset moved the document to epoch 1"
-                );
-                assert_eq!(
-                    state.doc(Channel::Meta).to_json(),
-                    before,
-                    "the entry of this node is in the document again"
-                );
-                node.close().await;
-            },
-        );
-    }
-
-    /// An entry the size of an agent-gossip card (an array leaf of about 1.1 KB) comes back whole
-    /// after a reset, because the cut follows the measured length of the real frame.
-    #[test]
-    fn a_card_with_a_large_array_leaf_is_in_the_document_again_after_a_reset() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            card_survives_a_reset(None),
-        );
-    }
-
-    /// The same on a mesh with a password: the body is sealed and encoded again, so the frame that
-    /// the cut measures is larger than the open one.
-    #[test]
-    fn a_card_with_a_large_array_leaf_is_in_the_document_again_after_a_reset_with_a_channel_key() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            card_survives_a_reset(Some(protocol::SymmetricKey::from([7u8; 32]))),
-        );
-    }
-
-    /// `len` characters that automerge cannot squeeze, so a frame is about as long as its text.
-    fn noise(len: usize, seed: usize) -> String {
-        let digits = b"abcdefghijklmnopqrstuvwxyz0123456789";
-        let mut state: u64 = 0x9e37_79b9_7f4a_7c15 ^ u64::try_from(seed).unwrap_or(0);
-        let mut next = || {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            char::from(digits[usize::try_from(state >> 33).unwrap_or(0) % digits.len()])
-        };
-        (0..len).map(|_| next()).collect()
-    }
-
-    /// Write a card of the size of an agent-gossip card, reset the document, and write the entry
-    /// again, on a channel with `key` or with none. The whole entry must be back.
-    async fn card_survives_a_reset(key: Option<protocol::SymmetricKey>) {
-        use iroh::endpoint::presets;
-        use iroh_gossip::{net, proto};
-
-        use crate::doc::{MeshDoc, SelfWriteGate};
-        use crate::gossip::event::SilentSink;
-        use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
-        use crate::protocol::Channel;
-        use crate::transport::MeshSender;
-
-        // The array leaf has the size of the real card on both meshes (the extensions of an
-        // agent-gossip card are about 1.1 KB of JSON, and it publishes whole and sealed). The pads are
-        // noise that automerge cannot squeeze; on a mesh with a password they are smaller, so that
-        // 2 of them do not fit one sealed frame and the cut must tell the two meshes apart.
-        let params_len = 150;
-        let pad_len = if key.is_some() { 960 } else { 1_800 };
-
-        let node = iroh::Endpoint::builder(presets::Minimal)
-            .relay_mode(iroh::RelayMode::Disabled)
-            .bind()
-            .await
-            .expect("bind a loopback endpoint");
-        let gossip = net::Gossip::builder().spawn(node.clone());
-        let topic = gossip
-            .subscribe(proto::TopicId::from_bytes([9u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let author = nick("alice");
-        let write = MergeCtx {
-            mesh: &mesh,
-            author: &author,
-            sender: &sender,
-            sink: &SilentSink,
-        };
-        let extension = |index: usize| {
-            serde_json::json!({
-                "uri": format!("https://example.invalid/extensions/{index}"),
-                "params": format!("{index}").repeat(params_len),
-            })
-        };
-        let extensions: Vec<serde_json::Value> = (0..5).map(extension).collect();
-        let pieces = [
-            serde_json::json!({"card": {"capabilities": {"extensions": extensions}}}),
-            serde_json::json!({"card": {"name": "alice", "skills": "s".repeat(900)}}),
-            serde_json::json!({"status": "idle", "model": "m", "graph": {"node": "worker"}}),
-        ];
-
-        let mut state = fresh_state();
-        let own_key = state.identity.author_key();
-        let slot = own_key.to_string();
-        state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
-            .key(key)
-            .epoch_cap(1_000);
-        let mut writes = pieces.to_vec();
-        writes.extend((0..3).map(|index| serde_json::json!({ "pad": noise(pad_len, index) })));
-        for piece in writes {
-            let merge = serde_json::json!({"peers": {slot.as_str(): piece}});
-            let params = StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
-            broadcast_state_merge(&mut state, params)
-                .await
-                .expect("the write is taken");
-        }
-        let before = state.doc(Channel::Meta).to_json();
-        let switch = state
-            .doc_mut(Channel::Meta)
-            .tick_epoch(&own_key)
-            .expect("over the cap: a reset");
-        state.note_epoch_switch(switch);
-
-        write_entry_again(&mut state, &write).await;
-
-        assert_eq!(
-            state.doc(Channel::Meta).to_json(),
-            before,
-            "the whole entry is back, the array leaf too"
-        );
-        node.close().await;
-    }
-
-    /// A write of the app between the switch and the sweep is newer than the entry that the switch
-    /// kept, so the write again must not put the old value over it.
-    #[test]
-    fn a_write_between_the_switch_and_the_sweep_is_not_overwritten_by_the_old_entry() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            async {
-                use iroh::endpoint::presets;
-                use iroh_gossip::{net, proto};
-
-                use crate::doc::{MeshDoc, SelfWriteGate};
-                use crate::gossip::event::SilentSink;
-                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
-                use crate::protocol::Channel;
-                use crate::transport::MeshSender;
-
-                let node = iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::Disabled)
-                    .bind()
-                    .await
-                    .expect("bind a loopback endpoint");
-                let gossip = net::Gossip::builder().spawn(node.clone());
-                let topic = gossip
-                    .subscribe(proto::TopicId::from_bytes([10u8; 32]), vec![])
-                    .await
-                    .expect("subscribe to a peerless topic");
-                let (gossip_sender, _receiver) = topic.split();
-                let sender = MeshSender::new(gossip_sender);
-                let mesh = MeshId::from("test");
-                let author = nick("alice");
-                let write = MergeCtx {
-                    mesh: &mesh,
-                    author: &author,
-                    sender: &sender,
-                    sink: &SilentSink,
-                };
-                let mut state = fresh_state();
-                let own_key = state.identity.author_key();
-                let slot = own_key.to_string();
-                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"))
-                    .epoch_cap(1_000);
-                let first = [
-                    serde_json::json!({"card": {"name": "alice"}, "status": "idle", "model": "m"}),
-                    serde_json::json!({"pad": "a".repeat(1_800)}),
-                    serde_json::json!({"pad2": "b".repeat(1_800)}),
-                    serde_json::json!({"pad3": "c".repeat(1_800)}),
-                ];
-                for piece in first {
-                    let merge = serde_json::json!({"peers": {slot.as_str(): piece}});
-                    let params =
-                        StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
-                    broadcast_state_merge(&mut state, params)
-                        .await
-                        .expect("the write is taken");
-                }
-                let switch = state
-                    .doc_mut(Channel::Meta)
-                    .tick_epoch(&own_key)
-                    .expect("over the cap: a reset");
-                state.note_epoch_switch(switch);
-                // The agent writes a new status before the sweep.
-                let newer = serde_json::json!({"peers": {slot.as_str(): {"status": "busy"}}});
-                let params =
-                    StateMergeParams::new(write.clone(), Channel::Meta, newer).surface(false);
-                broadcast_state_merge(&mut state, params)
-                    .await
-                    .expect("the write is taken");
-
-                write_entry_again(&mut state, &write).await;
-
-                let json = state.doc(Channel::Meta).to_json();
-                let entry = &json["peers"][slot.as_str()];
-                assert_eq!(entry["status"], "busy", "the newer write stays");
-                assert_eq!(
-                    entry["model"], "m",
-                    "a field that was not written since comes back"
-                );
-                assert_eq!(entry["card"]["name"], "alice", "the card comes back");
-                node.close().await;
-            },
-        );
-    }
-
-    /// A write that fails after a reset is tried again on the next sweep. The merge that failed is
-    /// in the document already (the send failed after it), so each sweep writes what is left.
-    #[test]
-    fn a_failed_write_again_is_tried_on_the_next_sweep() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            async {
-                use iroh::endpoint::presets;
-                use iroh_gossip::{net, proto};
-
-                use crate::doc::{MeshDoc, SelfWriteGate};
-                use crate::gossip::MergeCtx;
-                use crate::gossip::event::SilentSink;
-                use crate::protocol::Channel;
-                use crate::transport::MeshSender;
-
-                let node = iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::Disabled)
-                    .bind()
-                    .await
-                    .expect("bind a loopback endpoint");
-                let gossip = net::Gossip::builder().spawn(node.clone());
-                let topic = gossip
-                    .subscribe(proto::TopicId::from_bytes([11u8; 32]), vec![])
-                    .await
-                    .expect("subscribe to a peerless topic");
-                let (gossip_sender, receiver) = topic.split();
-                let sender = MeshSender::new(gossip_sender);
-                let mesh = MeshId::from("test");
-                let author = nick("alice");
-                let write = MergeCtx {
-                    mesh: &mesh,
-                    author: &author,
-                    sender: &sender,
-                    sink: &SilentSink,
-                };
-                let mut state = fresh_state();
-                let slot = state.identity.author_key().to_string();
-                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
-                // The overlay is up, so a write goes to gossip, and gossip is stopped below.
-                state.standing.insert(Standing::Meshed);
-                // Three fields of about 1.8 KB: each one is a merge of its own.
-                let entry = serde_json::json!({
-                    "a": "a".repeat(1_800), "b": "b".repeat(1_800), "c": "c".repeat(1_800),
-                });
-                drop(receiver);
-                gossip.shutdown().await.expect("the gossip stops");
-                ::habilis_network_test_tracing::expect_warn(
-                    "habilis_network::gossip",
-                    "the entry of this node was not written again after a reset",
-                );
-
-                state.note_epoch_switch(EpochSwitch::new(
-                    1,
-                    "peers".to_owned(),
-                    Some(entry.clone()),
-                ));
-                for sweep in 1..=3 {
-                    write_entry_again(&mut state, &write).await;
-                    assert!(
-                        state.epoch_write.switch.is_some(),
-                        "the switch waits for the next sweep after the failed write of sweep {sweep}"
-                    );
-                }
-                write_entry_again(&mut state, &write).await;
-                assert!(
-                    state.epoch_write.switch.is_none(),
-                    "nothing is left to write"
-                );
-                assert_eq!(
-                    state.doc(Channel::Meta).to_json(),
-                    serde_json::json!({ "peers": { slot.as_str(): entry } }),
-                    "each sweep wrote what was left, and the entry is whole"
-                );
-                node.close().await;
-            },
-        );
-    }
-
-    /// Two switches before the sweep writes: the entry that the first one kept is not lost to the
-    /// partial entry of the second (the document held only the writes since the first switch).
-    #[test]
-    fn a_second_switch_keeps_the_fields_of_the_queued_entry() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let first = serde_json::json!({ "card": 1, "status": "idle", "note": "kept" });
-        let partial = serde_json::json!({ "status": "busy" });
-        state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(first)));
-
-        state.note_epoch_switch(EpochSwitch::new(2, "peers".to_owned(), Some(partial)));
-
-        let kept = state.epoch_write.switch.expect("a switch waits").own_entry;
-        assert_eq!(
-            kept,
-            Some(serde_json::json!({ "card": 1, "status": "busy", "note": "kept" })),
-            "the newer write wins and the older fields stay"
-        );
-    }
-
-    /// A send that never works does not keep the switch for ever: it is given up at the last of
-    /// `DOC_EPOCH_WRITE_ATTEMPTS` failed sweeps.
-    #[test]
-    fn a_switch_whose_write_keeps_failing_is_given_up() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let switch = || EpochSwitch::new(1, "peers".to_owned(), Some(serde_json::json!({"a": 1})));
-        for attempt in 1..DOC_EPOCH_WRITE_ATTEMPTS {
-            assert!(
-                state.retry_epoch_switch(switch()),
-                "attempt {attempt} waits"
-            );
-        }
-        assert!(
-            !state.retry_epoch_switch(switch()),
-            "the switch is given up after {DOC_EPOCH_WRITE_ATTEMPTS} tries"
-        );
-    }
-
-    /// A path that the app deletes between the switch and the sweep must not come back from the
-    /// copy that the switch kept: the copy follows the local writes of that window.
-    #[test]
-    fn a_path_deleted_between_the_switch_and_the_sweep_does_not_come_back() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            async {
-                use iroh::endpoint::presets;
-                use iroh_gossip::{net, proto};
-
-                use crate::doc::{MeshDoc, SelfWriteGate};
-                use crate::gossip::event::SilentSink;
-                use crate::gossip::{MergeCtx, StateMergeParams, broadcast_state_merge};
-                use crate::protocol::Channel;
-                use crate::transport::MeshSender;
-
-                let node = iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::Disabled)
-                    .bind()
-                    .await
-                    .expect("bind a loopback endpoint");
-                let gossip = net::Gossip::builder().spawn(node.clone());
-                let topic = gossip
-                    .subscribe(proto::TopicId::from_bytes([12u8; 32]), vec![])
-                    .await
-                    .expect("subscribe to a peerless topic");
-                let (gossip_sender, _receiver) = topic.split();
-                let sender = MeshSender::new(gossip_sender);
-                let mesh = MeshId::from("test");
-                let author = nick("alice");
-                let write = MergeCtx {
-                    mesh: &mesh,
-                    author: &author,
-                    sender: &sender,
-                    sink: &SilentSink,
-                };
-                let mut state = fresh_state();
-                let slot = state.identity.author_key().to_string();
-                state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
-                let entry = serde_json::json!({
-                    "card": {"name": "alice"},
-                    "status": "idle",
-                    "graph": {"node": "worker", "instance": "i"},
-                });
-                state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(entry)));
-                // The agent leaves its graph before the sweep, and sets a new status.
-                for merge in [
-                    serde_json::json!({"peers": {slot.as_str(): {"graph": null}}}),
-                    serde_json::json!({"peers": {slot.as_str(): {"status": "busy"}}}),
-                ] {
-                    let params =
-                        StateMergeParams::new(write.clone(), Channel::Meta, merge).surface(false);
-                    broadcast_state_merge(&mut state, params)
-                        .await
-                        .expect("the write is taken");
-                }
-
-                write_entry_again(&mut state, &write).await;
-
-                let json = state.doc(Channel::Meta).to_json();
-                let written = &json["peers"][slot.as_str()];
-                assert!(
-                    written.get("graph").is_none(),
-                    "the deleted graph stays deleted"
-                );
-                assert_eq!(written["status"], "busy", "the newer status stays");
-                assert_eq!(written["card"]["name"], "alice", "the card comes back");
-                node.close().await;
-            },
-        );
-    }
-
-    /// The frame is measured as the wire takes it: sealed on a mesh with a password. A merge whose
-    /// open frame fits, and whose sealed frame does not, fits on a mesh without a key and not on one
-    /// with a key.
-    #[test]
-    fn a_merge_is_measured_sealed_on_a_mesh_with_a_password() {
-        use crate::doc::{MeshDoc, SelfWriteGate};
-
-        let _guard = ::habilis_network_test_tracing::init();
-        let gate = || SelfWriteGate::new("peers".to_owned(), "card");
-        let mesh = MeshId::from("test");
-        let author = nick("alice");
-        let merge = serde_json::json!({"peers": {"alice": {
-            "a": noise(960, 1),
-            "b": noise(960, 2),
-        }}});
-
-        let mut open = fresh_state();
-        open.meta_doc = MeshDoc::new_gated(gate());
-        assert!(
-            frame_fits(&open, &mesh, &author, &merge),
-            "the open frame of 2 fields of about 1 KB fits a message"
-        );
-
-        let mut sealed = fresh_state();
-        sealed.meta_doc =
-            MeshDoc::new_gated(gate()).key(Some(protocol::SymmetricKey::from([7u8; 32])));
-        assert!(
-            !frame_fits(&sealed, &mesh, &author, &merge),
-            "the sealed frame of the same merge is larger and does not fit"
-        );
-    }
-
-    /// What is in the document already is not written again, at any depth.
-    #[test]
-    fn only_the_paths_that_the_document_does_not_hold_are_written_again() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let entry = serde_json::json!({"status": "idle", "card": {"a": 1, "b": {"c": 2, "d": 3}}});
-        let held = serde_json::json!({"status": "busy", "card": {"b": {"c": 9}}});
-        assert_eq!(
-            unwritten(&entry, Some(&held)),
-            Some(serde_json::json!({"card": {"a": 1, "b": {"d": 3}}})),
-            "the held paths are left out and the rest stays"
-        );
-        assert_eq!(
-            unwritten(&entry, Some(&entry)),
-            None,
-            "an entry that is all there gives nothing to write"
-        );
-        assert_eq!(
-            unwritten(&entry, None),
-            Some(entry),
-            "no entry in the document: the whole entry"
-        );
-    }
-
-    /// A second switch before the entry is written must not lose the entry of the first: the
-    /// document holds no entry of ours since then.
-    #[test]
-    fn a_second_switch_keeps_the_entry_of_the_first() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let entry = serde_json::json!({"card": "mine"});
-        state.note_epoch_switch(EpochSwitch::new(1, "peers".to_owned(), Some(entry.clone())));
-        state.note_epoch_switch(EpochSwitch::new(2, "peers".to_owned(), None));
-        let kept = state.epoch_write.switch.as_ref().expect("a switch waits");
-        assert_eq!(
-            (kept.epoch, kept.own_entry.as_ref()),
-            (2, Some(&entry)),
-            "the second switch has its own epoch and the entry of the first"
         );
     }
 
@@ -1652,8 +1121,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let address = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
 
-        let holding = peer_info_json(&address, "proof".to_owned(), true);
-        let idle = peer_info_json(&address, "proof".to_owned(), false);
+        let seal = x25519_dalek::PublicKey::from([7u8; 32]);
+        let holding = peer_info_json(&address, "proof".to_owned(), true, &seal);
+        let idle = peer_info_json(&address, "proof".to_owned(), false, &seal);
 
         assert_eq!(
             holding["beacon"],
@@ -1670,81 +1140,146 @@ mod tests {
         );
     }
 
+    /// **Wire pin of the seal key of a `PeerInfo`.** The body names the x25519 key as Base58 under
+    /// `seal`, and the key is required: a body with no `seal` names no key, and a receiver refuses
+    /// it (`a_peer_info_with_no_seal_key_binds_nothing`).
+    #[test]
+    fn a_peer_info_body_pins_the_seal_text_and_a_body_with_no_seal_names_no_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let id = iroh::SecretKey::generate().public();
+        let address = iroh::EndpointAddr::new(id);
+        let seal = x25519_dalek::PublicKey::from([7u8; 32]);
+
+        let json = peer_info_json(&address, "proof".to_owned(), false, &seal);
+
+        assert_eq!(
+            json["seal"], "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            "the golden text of the seal key moved: this is a wire change"
+        );
+        assert_eq!(
+            super::peer_info_seal_key(&json),
+            Some(seal),
+            "the key reads back from the body"
+        );
+
+        let mut without = json;
+        without
+            .as_object_mut()
+            .expect("the body is an object")
+            .remove("seal");
+        assert_eq!(
+            super::peer_info_seal_key(&without),
+            None,
+            "a body with no seal names no key"
+        );
+    }
+
+    /// **A `PeerInfo` frame fits the frame limit at every longest field.** The longest real mesh id
+    /// (about 511 bytes), a nickname of 32 characters of 4 bytes, an address with 16 `IPv6` addresses
+    /// and a relay `URL`, the proof, the beacon flag and the seal key go in one signed frame under
+    /// `MAX_MESSAGE_SIZE`. The seal key adds 58 bytes, so the room that is left says how many
+    /// addresses fit.
+    #[test]
+    fn a_peer_info_frame_with_every_longest_field_fits_the_frame_limit() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mesh = longest_mesh_id();
+        assert!(
+            mesh.as_str().len() >= 500,
+            "the mesh id of {} bytes is not a longest real id",
+            mesh.as_str().len()
+        );
+        let nickname = Nickname::from("\u{1F600}".repeat(32).as_str());
+        let relay: iroh::RelayUrl = "https://relay.example.com./".parse().expect("a relay url");
+        let id = iroh::SecretKey::generate().public();
+        let mut address = iroh::EndpointAddr::new(id).with_relay_url(relay);
+        for index in 0..16u16 {
+            let ip = format!("[ffff:ffff:ffff:ffff:ffff:ffff:ffff:{index:x}]:65535");
+            address = address.with_ip_addr(ip.parse().expect("an IPv6 socket address"));
+        }
+        let proof = "1".repeat(100);
+        let seal = x25519_dalek::PublicKey::from([255u8; 32]);
+        let json = peer_info_json(&address, proof, true, &seal);
+        let body = MessageBody::try_new(&json.to_string()).expect("a body");
+
+        let frame = Message::new_peer_info(&mesh, &nickname, body).sign(&Identity::generate());
+        let size = frame.wire_len();
+
+        assert!(
+            size <= MAX_MESSAGE_SIZE,
+            "a PeerInfo frame of {size} bytes passes the {MAX_MESSAGE_SIZE}-byte limit"
+        );
+    }
+
+    /// The sealed length bound covers a real sealed body, for a seal to a peer and for a seal with the
+    /// mesh key, at every length that an app can cut a shard to.
+    #[test]
+    fn the_sealed_length_bound_covers_every_sealed_body() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let recipient = Identity::generate();
+        let key = SymmetricKey::from([3u8; 32]);
+        for plain_len in [0usize, 1, 2, 31, 32, 33, 100, 500, 1000, 2000, 3000] {
+            let text = "x".repeat(plain_len);
+            let body = MessageBody::try_new(&text).expect("a body");
+            let to_peer =
+                seal_to_body(&recipient.seal_public(), &text).expect("a body sealed to a peer");
+            let with_key = wire::encrypt_body(&body, &key).expect("a sealed body");
+            let bound = super::sealed_body_len_bound(plain_len);
+            for sealed in [&to_peer, &with_key] {
+                let escaped = serde_json::to_string(sealed.as_str())
+                    .expect("a string")
+                    .len();
+                assert!(
+                    escaped <= bound,
+                    "a sealed body of {escaped} bytes passes the bound {bound} for {plain_len} plain bytes"
+                );
+            }
+        }
+    }
+
+    /// A `seal` that is not the Base58 of 32 bytes names no key: a wrong length, a character out of
+    /// the alphabet, and a text that is not a string.
+    #[test]
+    fn a_seal_text_that_is_not_32_bytes_of_base58_names_no_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let short = bs58::encode([7u8; 31]).into_string();
+        let long = bs58::encode([7u8; 33]).into_string();
+        for (bad, why) in [
+            (serde_json::json!({ "seal": short }), "31 bytes"),
+            (serde_json::json!({ "seal": long }), "33 bytes"),
+            (
+                serde_json::json!({ "seal": "0OIl" }),
+                "characters out of the alphabet",
+            ),
+            (serde_json::json!({ "seal": 7 }), "a number"),
+            (serde_json::json!({}), "no field"),
+        ] {
+            assert_eq!(
+                super::peer_info_seal_key(&bad),
+                None,
+                "a seal of {why} named a key"
+            );
+        }
+    }
+
     /// Members built before the flag read the body by key. The new key must not stop them from
     /// reading the address.
     #[test]
     fn a_reader_that_predates_the_flag_still_reads_the_address() {
         let _guard = ::habilis_network_test_tracing::init();
         let id = iroh::SecretKey::generate().public();
-        let json = peer_info_json(&iroh::EndpointAddr::new(id), "proof".to_owned(), true);
+        let seal = x25519_dalek::PublicKey::from([7u8; 32]);
+        let json = peer_info_json(
+            &iroh::EndpointAddr::new(id),
+            "proof".to_owned(),
+            true,
+            &seal,
+        );
 
         let (read, _) = peer_addr_error::endpoint_addr_from_json(&json).expect("the address reads");
 
         assert_eq!(
             read, id,
             "a reader that predates the flag still reads the address"
-        );
-    }
-
-    /// A node that is not meshed parks a directed frame to a lane peer, and the park asks for the
-    /// peer's session.
-    #[test]
-    fn an_unmeshed_directed_frame_to_a_lane_peer_marks_the_peer_wanted() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.standing.remove(&Standing::Meshed);
-        state.local_udp_transport = UdpTransport::Present;
-        let bob = endpoint_id(1);
-        state.names.insert(test_key("bob"), nick("bob"));
-        state.bind_peer_endpoint(
-            test_key("bob"),
-            nick("bob"),
-            iroh::EndpointAddr::new(bob)
-                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
-        );
-        let frame = Message::new_pong(
-            &MeshId::from("test"),
-            &nick("alice"),
-            test_key("bob"),
-            &protocol::MessageId::random(),
-        )
-        .sign(&protocol::Identity::generate());
-        let bytes = frame.serialize().expect("serialize");
-        let now = clock::Instant::now();
-        assert!(
-            !state.lane_session_wanted(bob, now),
-            "nothing is parked yet"
-        );
-
-        mark_parked(&mut state, &frame, &bytes);
-
-        assert!(state.lane_session_wanted(bob, now), "the parked frame asks");
-    }
-
-    /// A broadcast has no addressee, so parking it asks for nothing.
-    #[test]
-    fn an_unmeshed_broadcast_asks_for_no_session() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.standing.remove(&Standing::Meshed);
-        let bob = endpoint_id(1);
-        state.names.insert(test_key("bob"), nick("bob"));
-        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
-        let frame = Message::new_app(
-            &MeshId::from("test"),
-            &nick("alice"),
-            AppFrameParams::new(
-                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                None,
-                None,
-                protocol::MessageBody::from("hi"),
-            ),
-        )
-        .sign(&protocol::Identity::generate());
-        mark_parked(&mut state, &frame, &frame.serialize().expect("serialize"));
-        assert!(
-            !state.lane_session_wanted(bob, clock::Instant::now()),
-            "an unmeshed broadcast asks for no session"
         );
     }
 
@@ -1768,9 +1303,9 @@ mod tests {
                 );
 
                 state.want_lane_session(node.bob, clock::Instant::now());
-                super::offer_for_parked(&mut state, &context, &frame);
+                super::offer_for_held(&mut state, &context, &frame);
                 assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
-                super::offer_for_parked(&mut state, &context, &frame);
+                super::offer_for_held(&mut state, &context, &frame);
                 assert_eq!(state.webrtc_admission.in_flight(), 1, "not a second round");
 
                 state.webrtc_admission.close();
@@ -1790,7 +1325,7 @@ mod tests {
                 let node = testing::LaneNode::start().await;
                 let context = node.context();
                 let mut state = node.state();
-                super::offer_for_parked(&mut state, &context, &node.frame_to_bob());
+                super::offer_for_held(&mut state, &context, &node.frame_to_bob());
                 assert_eq!(
                     state.webrtc_admission.in_flight(),
                     0,

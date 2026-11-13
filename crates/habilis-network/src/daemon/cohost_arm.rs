@@ -327,6 +327,14 @@ pub(super) async fn maybe_reclaim(
     }
 }
 
+/// Waits for the close of a beacon that was shed, so that the run does not end with the close of its
+/// endpoint in flight. A receiver whose task was cancelled ends the wait too.
+pub(super) async fn wait_for_shed_close(state: &mut EventLoopState) {
+    if let Some(closed) = state.beacon_closing.take() {
+        let _ = closed.await;
+    }
+}
+
 /// Let go of the beacon at once and read the ladder again: the endpoint is closed, the address of
 /// the shed beacon leaves the book, and the reclaim window opens, so that the next walk reads
 /// whoever holds a rung (and claims the lowest free one when nobody does).
@@ -656,7 +664,7 @@ mod tests {
     use iroh_gossip::proto;
     use n0_future::task;
     use std::{future, net};
-    use tokio::sync::{mpsc, watch};
+    use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time;
     /// A shed cuts the rendezvous a browser reached us through, and the tab
     /// has nothing else: its roster empties mid-transfer. Observed as a
@@ -1536,6 +1544,11 @@ mod tests {
         }
 
         async fn close(mut self) {
+            // A shed closes its endpoint on a task of its own. A test that ends before that task
+            // does lets iroh log "Endpoint dropped without calling `Endpoint::close`".
+            if let Some(closed) = self.state.beacon_closing.take() {
+                let _ = closed.await;
+            }
             if let Some(held) = self.rendezvous.take() {
                 held.shed_and_wait().await;
             }
@@ -1637,6 +1650,54 @@ mod tests {
                 shed_at_the_second,
                 "the beacon stopped answering at two checks and was kept"
             );
+        });
+    }
+
+    /// The run ends after the close of a shed beacon, not during it. The close of the endpoint runs on
+    /// a task of its own, and a host that ends the loop and drops its runtime would cut it short:
+    /// the peers of the shed beacon wait for the idle timeout, and iroh logs an ERROR. The close is
+    /// a task that ends after a delay here, so that the wait is the only thing that can cover it.
+    #[test]
+    fn the_end_of_the_run_waits_for_the_close_of_a_shed_beacon() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            const CLOSE_TAKES: Duration = Duration::from_millis(200);
+            let mut state = testing::fresh_state();
+            let (done, closed) = oneshot::channel();
+            state.beacon_closing = Some(closed);
+            task::spawn(async move {
+                time::sleep(CLOSE_TAKES).await;
+                let _ = done.send(());
+            });
+            let started = time::Instant::now();
+
+            super::wait_for_shed_close(&mut state).await;
+
+            assert!(
+                started.elapsed() >= CLOSE_TAKES,
+                "the end of the run returned before the close of the shed beacon was done"
+            );
+            assert!(
+                state.beacon_closing.is_none(),
+                "the wait leaves the close of the beacon in the state"
+            );
+        });
+    }
+
+    /// A close task that was cancelled never answers, and the end of the run must not wait for it.
+    #[test]
+    fn the_end_of_the_run_does_not_wait_for_a_close_that_was_cancelled() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = testing::fresh_state();
+            let (done, closed): (oneshot::Sender<()>, _) = oneshot::channel();
+            state.beacon_closing = Some(closed);
+            drop(done);
+
+            time::timeout(
+                Duration::from_secs(5),
+                super::wait_for_shed_close(&mut state),
+            )
+            .await
+            .expect("the wait ends when the close task is gone");
         });
     }
 

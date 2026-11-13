@@ -157,12 +157,6 @@ fn two_members_meet_on_a_free_ladder() {
 #[test]
 fn two_members_meet_when_a_foreign_endpoint_holds_the_first_rung() {
     let guard = habilis_network_test_tracing::init();
-    // The members meet after the 30 s of the first-sync wait on a slow host: a joiner that met no
-    // one in 30 s warns once, by design.
-    guard.allow_warn(
-        "habilis_network::gossip",
-        "no peer answered the digest of the state channel within the time limit",
-    );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (met, ladder) = meet(&[0]).await;
         assert!(

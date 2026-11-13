@@ -19,9 +19,9 @@ pub(crate) enum FrameClass {
     Alive,
     /// A `left` presence or a link-state vector.
     Membership,
-    /// A change or a digest of the shared state or meta document.
+    /// A change of the shared state or meta document.
     Document,
-    /// Anything else: the digest of the message log, probes and unknown kinds.
+    /// Anything else: probes and unknown kinds.
     Other,
 }
 
@@ -42,13 +42,13 @@ impl FrameClass {
             | MessageKind::LinkState => Self::Membership,
             MessageKind::State
             | MessageKind::Meta
-            | MessageKind::StateDigest
-            | MessageKind::MetaDigest => Self::Document,
-            MessageKind::Digest
-            | MessageKind::Ping
-            | MessageKind::Pong { .. }
-            | MessageKind::ProofRequest { .. }
-            | _ => Self::Other,
+            | MessageKind::SliceRoot { .. }
+            | MessageKind::SlicePull { .. }
+            | MessageKind::SlicePageRequest { .. }
+            | MessageKind::SlicePage { .. } => Self::Document,
+            MessageKind::Ping | MessageKind::Pong { .. } | MessageKind::ProofRequest { .. } | _ => {
+                Self::Other
+            }
         }
     }
 }
@@ -64,9 +64,8 @@ impl WireCounter {
     pub(crate) fn of(frames: &[Vec<u8>]) -> Self {
         let mut counter = Self::default();
         for bytes in frames {
-            let class = Message::parse_wire(bytes).map_or(FrameClass::Other, |(message, _)| {
-                FrameClass::of(&message.kind)
-            });
+            let class = Message::parse(bytes)
+                .map_or(FrameClass::Other, |message| FrameClass::of(&message.kind));
             let entry = counter.classes.entry(class).or_default();
             entry.0 += 1;
             entry.1 += bytes.len();
@@ -175,20 +174,14 @@ mod tests {
         );
     }
 
-    /// The anti-entropy digest of the chat log is plumbing, not a change of a shared document.
     #[test]
-    fn a_message_log_digest_is_not_document_traffic() {
+    fn a_ping_is_not_document_traffic() {
         assert_eq!(
-            FrameClass::of(&MessageKind::Digest),
+            FrameClass::of(&MessageKind::Ping),
             FrameClass::Other,
-            "a message log digest counted as document traffic"
+            "a ping counted as document traffic"
         );
-        for kind in [
-            MessageKind::State,
-            MessageKind::Meta,
-            MessageKind::StateDigest,
-            MessageKind::MetaDigest,
-        ] {
+        for kind in [MessageKind::State, MessageKind::Meta] {
             assert_eq!(FrameClass::of(&kind), FrameClass::Document, "{kind:?}");
         }
     }

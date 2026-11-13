@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::time::Duration;
+
 use iroh::{Endpoint, EndpointId};
 use n0_future::task::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
@@ -13,6 +16,24 @@ use n0_future::{task, time};
 use std::future;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::runtime;
+/// Runs `closing` on a task of its own, and gives a receiver that resolves when it ends, or when
+/// `bound` runs out. A relay that stopped answering must not hold a shed for ever: whoever waits on
+/// the receiver, the end of the run among them, waits at most `bound`. Past the bound `closing` is
+/// dropped, with the handles that it holds, as [`Rendezvous::shed_and_wait`] does for its own close.
+pub(super) fn spawn_bounded_close(
+    bound: Duration,
+    closing: impl Future<Output = ()> + Send + 'static,
+) -> oneshot::Receiver<()> {
+    let (done, closed) = oneshot::channel();
+    task::spawn(async move {
+        if time::timeout(bound, closing).await.is_err() {
+            tracing::debug!(target: "habilis_network::beacon", "shed beacon close timed out; abandoning it");
+        }
+        let _ = done.send(());
+    });
+    closed
+}
+
 /// A live co-hosted rendezvous endpoint. Dropping it aborts both tasks,
 /// releasing the endpoint + router (and, private, freeing the
 /// deterministic port for the next member to claim).
@@ -116,9 +137,8 @@ impl Rendezvous {
     pub(crate) fn shed_then(mut self) -> oneshot::Receiver<()> {
         self.released = true;
         let endpoint = self.endpoint.clone();
-        let (done, closed) = oneshot::channel();
         let shed_at = Instant::now();
-        task::spawn(async move {
+        let closed = spawn_bounded_close(RENDEZVOUS_CLOSE, async move {
             endpoint.close().await;
             tracing::debug!(
                 target: "habilis_network::beacon",
@@ -128,7 +148,6 @@ impl Rendezvous {
             // The last handle of the endpoint goes before the event does, so that whoever waits sees
             // the id free of it.
             drop(endpoint);
-            let _ = done.send(());
         });
         // `self` drops here, aborting the co-host task and stopping the monitor.
         closed

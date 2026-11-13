@@ -28,7 +28,7 @@ test-fixtures = ["habilis-network-protocol/test-fixtures"]
 # Off by default. Exposes the engine internals (crafted-message + state-doc
 # constructors) the app's `harness::adversarial` shim reaches so the adversarial
 # suite can inject malicious wire messages. Never enabled in a normal build.
-adversarial = ["test-fixtures", "habilis-network-protocol/adversarial", "habilis-network-doc/adversarial"]
+adversarial = ["test-fixtures", "habilis-network-protocol/adversarial"]
 # Off by default. Gates out the daemon's `std::process::exit` on the quit path
 # so the daemon returns cleanly and the app's dhat heap profiler (installed in
 # `main`) can flush `dhat-heap.json`. The app's `dhat-heap` feature forwards to
@@ -87,7 +87,7 @@ mdns = ["host", "dep:iroh-mdns-address-lookup"]
 dht = ["host", "dep:iroh-mainline-address-lookup"]
 # On by default, and the coarsest gate here: the parts of the engine that need
 # an operating system. Turning it off leaves the portable engine — gossip, the
-# CRDT documents, the protocol and identity types, address lookup — which is
+# slice store, the protocol and identity types, address lookup — which is
 # what a browser needs and all it can have. `interprocess`, `libc`, signals,
 # processes and the filesystem have no wasm32 equivalent.
 #
@@ -147,12 +147,11 @@ habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transpor
 habilis-network-util = { path = "../habilis-network-util", default-features = false, features = ["async-io"] }
 # Wire vocabulary: messages, mesh ids, nicknames, identity, sealing, invites.
 habilis-network-protocol = { path = "../habilis-network-protocol", default-features = false }
-# Shared-state CRDT (owns automerge), the tracing sink (owns
+# Shared-state slice store, the tracing sink (owns
 # tracing-subscriber), multipart reassembly, and the directory ad codec.
 habilis-network-doc = { path = "../habilis-network-doc", default-features = false }
 habilis-network-logging = { path = "../habilis-network-logging", default-features = false }
 bs58.workspace = true
-base64.workspace = true
 sha2.workspace = true
 rand.workspace = true
 # mDNS + mainline-DHT address-lookup providers were extracted from iroh core

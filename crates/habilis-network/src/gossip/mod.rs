@@ -2,23 +2,27 @@
 //! send plane is `broadcast` (broadcast/buffer, presence/`PeerInfo`,
 //! the broadcast stdin path); the inbound plane is [`recv`] (the
 //! gossip-event pump, neighbor up/down bookkeeping, the per-message
-//! router); anti-entropy and the healer are [`antientropy`] / [`heal`].
-//! This module holds the shared `json_body` helper, and
+//! router); the healer is [`heal`], and the backfill of a newcomer is [`backfill`].
+//! This module holds the `json_body` helper of the multihop link state, and
 //! re-exports the subsystem's public API. Membership/presentation lives
 //! in `lifecycle`; this layer never touches the peer roster
 //! directly — it calls into `lifecycle::observe` and dispatches by kind.
 
 use habilis_network_util::consts;
 use iroh_gossip::proto;
-pub(crate) mod antientropy;
 pub(crate) mod app;
+pub(crate) mod backfill;
+pub(crate) mod digest_round;
 pub(crate) mod event;
 pub(crate) mod heal;
 pub(crate) mod lan;
 mod merge_ctx;
+pub(crate) mod outstanding_pulls;
 mod recv;
+pub(crate) mod serve_budget;
 pub(crate) mod split;
 
+#[cfg(feature = "multihop")]
 mod json_body;
 mod path_summary;
 
@@ -38,17 +42,17 @@ const _: () = assert!(
     "MAX_MESSAGE_SIZE leaves too little headroom under iroh-gossip's DEFAULT_MAX_MESSAGE_SIZE"
 );
 
+#[cfg(feature = "multihop")]
 pub(crate) use json_body::json_body;
+#[cfg(test)]
+pub(crate) use merge_ctx::peer_info_seal_key;
 pub use merge_ctx::{
     Farewell, MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge,
-    send_app, start_ping_round, unicast_farewell,
+    seal_broadcast_body, sealed_body_len_bound, send_app, start_ping_round, unicast_farewell,
 };
-pub(crate) use merge_ctx::{
-    apply_merge_patch, broadcast_peer_info, send_second_probe, write_entry_again,
-};
+pub(crate) use merge_ctx::{broadcast_peer_info, send_second_probe, send_tombstones};
 pub(crate) use path_summary::PathSummary;
 
 pub(crate) use recv::{
     drain_dead_receiver, drain_queued, flush_pending, handle_gossip_event, ingest_from,
-    requeue_failed,
 };

@@ -1,10 +1,8 @@
-//! A node gets the chat it missed before its first real-peer link within one
-//! round trip of that link, not on its next anti-entropy tick.
-//!
-//! Every node has a window from its join to its first real-peer link in which
-//! a broadcast cannot reach it; the mesh creator's own rendezvous leaves it
-//! alone for up to one reclaim tick. The state channels ask again on that link.
-//! This pins the tick away so only the chat log's own ask can deliver.
+//! A chat broadcast that a late joiner missed is not delivered to it after the late joiner meets
+//! the mesh. Chat has no backfill now: no tick or resend carries it. The late joiner starts
+//! only after iroh-gossip's payload cache (30 s) lets go of the frame, so a graft cannot answer from
+//! that cache; the frame is stamped `AHEAD` so that it stays surfaceable for the late joiner, which
+//! makes the assertion test the engine and not the join horizon.
 
 #![cfg(feature = "host")]
 
@@ -27,13 +25,16 @@ use tokio::sync::{Notify, oneshot};
 use habilis_network::ops;
 use habilis_network::runtime::tuning;
 use tokio::time::{self, Instant};
-/// Bounds a slow join only: with the tick pinned away, nothing but the ask on
-/// the first link can deliver.
+/// The retention of the payload cache of iroh-gossip (`PlumtreeConfig::message_cache_retention`).
+const GOSSIP_CACHE_RETENTION: Duration = Duration::from_secs(30);
+/// Bounds a slow join: the late joiner must mesh with `early` within this time.
 const BUDGET: Duration = Duration::from_secs(15);
 
-/// A frame stamped this far ahead stays inside a node's window even when the
-/// node joins after it was sent, so the only way to get it is to ask.
-const AHEAD: Duration = Duration::from_secs(30);
+/// A frame stamped this far ahead stays surfaceable for the late joiner, so the assertion below
+/// reaches the engine. It must exceed the wait before the late joiner starts (31 s) plus the join
+/// budget (15 s) plus the 5 s read, which is 51 s: 120 s leaves room. Less than that and the join
+/// horizon hides the frame, and the assertion proves nothing.
+const AHEAD: Duration = GOSSIP_CACHE_RETENTION.saturating_mul(4);
 
 /// Logs every chat frame and records the surfaceable ones it receives.
 #[derive(Clone, Default)]
@@ -47,9 +48,7 @@ struct Chat {
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass::NONE
-            .union(AppClass::LOGGABLE)
-            .union(AppClass::VALID)
+        AppClass::NONE.union(AppClass::PUSH).union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -98,9 +97,6 @@ impl NodeDriver for Chat {
         let _ = ops::deliver(&frame, bytes.clone(), state, context.sender)
             .await
             .expect("a meshed node broadcasts");
-        // The sender keeps its own frame, as a chat app does, so any peer late
-        // meets first can answer it.
-        let _ = state.message_log_mut().push(frame.clone());
         let _ = sent.send(frame.id.clone());
         false
     }
@@ -161,8 +157,8 @@ impl Joined {
     }
 }
 
-fn pin_antientropy_tick() {
-    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_hours(1)));
+fn pin_backfill_tick() {
+    tuning::init(tuning::Tuning::DEFAULTS.backfill_interval(Duration::from_secs(1)));
 }
 
 fn nick(name: &str) -> Nickname {
@@ -193,10 +189,10 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
 }
 
 #[test]
-fn a_node_gets_the_chat_it_missed_on_its_first_real_peer_link() {
+fn a_chat_broadcast_missed_by_a_late_joiner_is_not_delivered() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        pin_antientropy_tick();
+        pin_backfill_tick();
         let nonce: u64 = rand::random();
         let topic = format!("missed-chat-{nonce}");
 
@@ -218,18 +214,26 @@ fn a_node_gets_the_chat_it_missed_on_its_first_real_peer_link() {
             "early never got the frame, so it cannot hold it for late"
         );
 
+        // Cheap insurance: iroh-gossip answers a graft from its payload cache, which keeps a message
+        // for `message_cache_retention` (30 s). It was observed once in a failing run log with AHEAD =
+        // 30 s (8 Graft messages, then a Gossip message), and not in 5 runs without this wait at
+        // AHEAD = 120 s. Wait past the retention so that the cache cannot be the path.
+        time::sleep(GOSSIP_CACHE_RETENTION + Duration::from_secs(1)).await;
         let started = Instant::now();
         let (late, late_chat, late_saw) = spawn(&topic, "late").await;
         assert!(
             late_saw.wait_for(&nick("early"), BUDGET).await,
             "late never met the mesh"
         );
-        let got = late_chat.wait_for(&sent, BUDGET).await;
+        let got = late_chat.wait_for(&sent, Duration::from_secs(5)).await;
         eprintln!(
             "late got the missed frame: {got} after {:?}",
             started.elapsed()
         );
-        assert!(got, "late never got the frame it missed");
+        assert!(
+            !got,
+            "late got a chat frame it missed: chat is no longer backfilled"
+        );
 
         alice.leave().await.expect("alice leaves");
         early.leave().await.expect("early leaves");

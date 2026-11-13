@@ -29,6 +29,8 @@ class Waiting<T> {
 }
 
 const KEY = 'cd'.repeat(32)
+/** The shape of the engine: one slice per author, keyed by the author key. */
+const STATE = JSON.stringify({ [KEY]: { a: 1 } })
 
 function roster(...nicks: string[]): string {
   return JSON.stringify({
@@ -84,7 +86,7 @@ function fake(): Fake {
     peersJson: () => Promise.resolve(handle.rosterJson),
     peerCount: () => Promise.resolve(0),
     stateJson: () => Promise.resolve('{}'),
-    stateMerge: () => Promise.resolve('{"a":1}'),
+    stateMerge: () => Promise.resolve(STATE),
     close: () => {
       handle.closes += 1
       return Promise.resolve()
@@ -150,7 +152,7 @@ describe('openWasm', () => {
         kind: 'state_changed',
         channel: 'state',
         author: 'bob',
-        document: { a: 1 },
+        document: { [KEY]: { a: 1 } },
         is_self: false,
       }),
     )
@@ -159,7 +161,7 @@ describe('openWasm', () => {
 
     expect(msgs).toEqual([{ from: 'bob', key: KEY, text: 'hi', directed: true }])
     expect(presence).toEqual([{ kind: 'joined', nick: 'bob', key: KEY }])
-    expect(states).toEqual(['{"a":1}'])
+    expect(states).toEqual([STATE])
     expect(extras).toEqual([{ kind: 'quiet', nick: 'bob', key: KEY }])
     await opened.backend.close()
   })

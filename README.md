@@ -5,8 +5,8 @@ https://habilis.network
 A portable, serverless gossip-network engine that runs on the web and on
 native. Peers find each other, form a mesh, and exchange signed messages and
 shared state, with no server in the middle. It is built on
-[iroh](https://github.com/n0-computer/iroh) for transport and
-[automerge](https://automerge.org) for shared state.
+[iroh](https://github.com/n0-computer/iroh) for transport, and
+signed per-author slices for shared state.
 
 ## Features
 
@@ -15,8 +15,8 @@ shared state, with no server in the middle. It is built on
 - **Serverless** — no server to host, no account to create.
 - **Encrypted** — every link is QUIC over TLS, and every message is signed
   with an [Ed25519](https://ed25519.cr.yp.to/) key and verified on receipt.
-- **Shared state** — a [CRDT](https://crdt.tech/) document every member
-  converges on.
+- **Shared state** — each member writes its own signed slice, and every member
+  reads all of them.
 - **Self-healing** — the mesh re-forms as peers come and go.
 - **Byte streams** — direct 1-1 streams between two peers.
 - **Embeddable** — joining a mesh is a function call, not a daemon.

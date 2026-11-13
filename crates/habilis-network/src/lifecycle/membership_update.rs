@@ -42,8 +42,7 @@ pub(crate) fn is_far_ahead(timestamp: UnixSecs) -> bool {
 /// kind does when it was stamped within the quiet TTL: after that time nothing remembers a silent
 /// peer, so a relay can re-send its last frame as if it were news, and that frame is older than
 /// the TTL. The bound is wide on purpose: a new peer with a slow clock still arrives on its first
-/// live frame. A frame of any other kind (peer info, the durable state and meta changes, the
-/// digests) does only when it was stamped within one alive timeout: a relay or an anti-entropy
+/// live frame. A frame of any other kind (peer info, the durable state and meta slices) does only when it was stamped within one alive timeout: a relay or a backfill
 /// answer re-sends stored frames of any author, a dead one too, and those are old. A frame
 /// stamped within the timeout says that its author was alive within the timeout, which is all
 /// that the timeout asks.
@@ -66,10 +65,11 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
         | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::Meta
-        | MessageKind::Digest
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
         | MessageKind::LinkState
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. }
         | _ => timestamp > now - tuning::alive_timeout(),
     }
 }
@@ -91,10 +91,11 @@ pub(crate) fn is_live_kind(kind: &MessageKind) -> bool {
         | MessageKind::ProofRequest { .. }
         | MessageKind::State
         | MessageKind::Meta
-        | MessageKind::Digest
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
         | MessageKind::LinkState
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. }
         | _ => false,
     }
 }
@@ -118,7 +119,7 @@ pub(crate) const STEP_BACK_FRAMES: u8 = 3;
 
 /// A frame of a quiet peer counts toward a step back only if it arrives this long after the last
 /// one that counted, on our clock. A live peer sends a frame every alive interval, so half of it
-/// is met in a second or two; a relay that answers an anti-entropy digest sends its frames in one
+/// is met in a second or two; a relay that answers a backfill request sends its frames in one
 /// burst, so only the first counts.
 pub(crate) fn step_back_spacing() -> Duration {
     ALIVE_INTERVAL / 2
@@ -195,24 +196,25 @@ fn compute_proving(
     let known = state.peers.contains(&key);
     let unseen = match kind {
         // A `Left` is explicit departure; durable state events never mark a
-        // peer present either — anti-entropy backfill replays historical state
+        // peer present either — the backfill replays historical state
         // whose author may have long since left, and resurrecting them would
         // forge membership.
         MessageKind::Presence {
             subtype: PresenceSubtype::Left,
         }
         | MessageKind::State
-        | MessageKind::Meta => false,
+        | MessageKind::Meta
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. } => false,
         MessageKind::App { .. }
         | MessageKind::Presence {
             subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
         }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
         | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
         | _ => !known,
@@ -268,7 +270,7 @@ const RUN_PACE_TOLERANCE: Duration = Duration::from_secs(5);
 /// like backlog. A run does not: [`STEP_BACK_FRAMES`] frames of one key, each arriving
 /// [`step_back_spacing`] after the one before and no later than [`step_back_window`], with a
 /// stamp that is later by the time that passed on our clock (within [`RUN_PACE_TOLERANCE`]). A
-/// backlog burst arrives in one moment, a relay that answers a digest sends its frames in a burst
+/// backlog burst arrives in one moment, a backfill answer sends its frames in a burst
 /// and not at the pace of the clock that made them, and a run that breaks starts again.
 ///
 /// Limit: a relay that replays at least [`STEP_BACK_FRAMES`] frames of a peer that stopped, one by
@@ -398,6 +400,7 @@ pub(crate) fn apply(update: &MembershipUpdate, key: AuthorKey, state: &mut Event
     }
     if update.returned || update.joined_new {
         state.promote_stored_proof(key);
+        state.apply_pending_seal_key(key, Instant::now());
         state.write_peer_count();
         tracing::debug!(
             key = %key,
@@ -649,8 +652,6 @@ mod tests {
             MessageKind::PeerInfo,
             MessageKind::State,
             MessageKind::Meta,
-            MessageKind::StateDigest,
-            MessageKind::MetaDigest,
         ] {
             let back = compute(&kind, test_key(who.as_str()), now, &state);
             assert!(
@@ -693,7 +694,7 @@ mod tests {
         }
     }
 
-    /// A first contact is an arrival only when the frame proves presence. A peer info or a digest
+    /// A first contact is an arrival only when the frame proves presence. A peer info or a slice
     /// that a relay re-sends from a peer that left an hour ago is no arrival.
     #[test]
     fn an_old_durable_frame_from_an_unknown_peer_is_no_arrival() {
@@ -701,20 +702,14 @@ mod tests {
         let state = fresh_state();
         let who = nick("swift-cedar");
         let old = UnixSecs::now() - Duration::from_hours(2);
-        for kind in [
-            MessageKind::PeerInfo,
-            MessageKind::StateDigest,
-            MessageKind::MetaDigest,
-            MessageKind::Digest,
-        ] {
-            let stale_copy = compute(&kind, test_key(who.as_str()), old, &state);
-            assert!(
-                !stale_copy.joined_new,
-                "{kind:?} stamped 2 h ago made an arrival"
-            );
-            let fresh = compute(&kind, test_key(who.as_str()), UnixSecs::now(), &state);
-            assert!(fresh.joined_new, "{kind:?} stamped now is an arrival");
-        }
+        let kind = MessageKind::PeerInfo;
+        let stale_copy = compute(&kind, test_key(who.as_str()), old, &state);
+        assert!(
+            !stale_copy.joined_new,
+            "{kind:?} stamped 2 h ago made an arrival"
+        );
+        let fresh = compute(&kind, test_key(who.as_str()), UnixSecs::now(), &state);
+        assert!(fresh.joined_new, "{kind:?} stamped now is an arrival");
     }
 
     /// The clocks of two nodes differ, and the difference changes nothing: a replay is stale and a
@@ -916,7 +911,7 @@ mod tests {
 
     /// What does not return a quiet peer whose newest stamp is ahead: one old frame, the same frame
     /// again and again, and a burst of different frames in one second (what a relay sends when it
-    /// answers an anti-entropy digest). Only frames that rise and arrive one alive interval apart
+    /// answers a backfill request). Only frames that rise and arrive one alive interval apart
     /// count.
     #[test]
     fn a_replay_does_not_pass_for_a_step_back() {

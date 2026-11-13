@@ -7,12 +7,11 @@ use habilis_network_util::consts::SHARD_CACHE_BUDGET_BYTES;
 use crate::ShardGroup;
 use crate::messages::WireFrame;
 
-/// The sender-side re-serve source for big (unlogged) outbound groups: their
+/// The sender-side re-serve source for big outbound groups: their
 /// serialized, signed shard frames, kept so a receiver's `shard/repair`
-/// request can be answered. Big groups skip the message log (one huge body
-/// must not evict the anti-entropy history), so without this cache a lost
-/// gossip frame would make the whole body unrecoverable. Byte-budgeted with
-/// whole-group FIFO eviction — the bounded-everything discipline.
+/// request can be answered. No log keeps the shards of a big group, so without
+/// this cache a lost gossip frame would make the whole body unrecoverable.
+/// Byte-budgeted with whole-group FIFO eviction — the bounded-everything discipline.
 ///
 /// # Examples
 ///

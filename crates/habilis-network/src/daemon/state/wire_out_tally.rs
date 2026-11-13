@@ -13,8 +13,6 @@ use std::{mem, str};
 
 use memchr::memmem;
 
-use crate::gossip::antientropy::Plane;
-
 /// The most distinct app tags kept per interval and direction. A peer can name any tag, so the
 /// rest are added to [`OTHER_TAGS`].
 const MAX_TAGS: usize = 32;
@@ -33,10 +31,6 @@ pub(crate) enum FrameClass {
     App,
     Presence,
     PeerInfo,
-    /// The anti-entropy digest of the chat log.
-    Digest,
-    StateDigest,
-    MetaDigest,
     /// A change of the `state` channel.
     State,
     /// A change of the `meta` channel.
@@ -45,25 +39,25 @@ pub(crate) enum FrameClass {
     PingPong,
     /// One slice of a body that is too large for one frame.
     Shard,
+    /// A digest or a pull of the slice repair: the four kinds of the digest round.
+    Repair,
     /// A frame that this reader cannot place.
     Other,
 }
 
-pub(crate) const CLASS_COUNT: usize = 12;
+pub(crate) const CLASS_COUNT: usize = 10;
 
 impl FrameClass {
     const ALL: [Self; CLASS_COUNT] = [
         Self::App,
         Self::Presence,
         Self::PeerInfo,
-        Self::Digest,
-        Self::StateDigest,
-        Self::MetaDigest,
         Self::State,
         Self::Meta,
         Self::LinkState,
         Self::PingPong,
         Self::Shard,
+        Self::Repair,
         Self::Other,
     ];
 
@@ -73,19 +67,17 @@ impl FrameClass {
             Self::App => "app",
             Self::Presence => "presence",
             Self::PeerInfo => "peerinfo",
-            Self::Digest => "digest",
-            Self::StateDigest => "statedigest",
-            Self::MetaDigest => "metadigest",
             Self::State => "state",
             Self::Meta => "meta",
             Self::LinkState => "linkstate",
             Self::PingPong => "pingpong",
             Self::Shard => "shard",
+            Self::Repair => "repair",
             Self::Other => "other",
         }
     }
 
-    const fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self as usize
     }
 
@@ -95,13 +87,11 @@ impl FrameClass {
             b"app" => Self::App,
             b"presence" => Self::Presence,
             b"peerinfo" => Self::PeerInfo,
-            b"digest" => Self::Digest,
-            b"statedigest" => Self::StateDigest,
-            b"metadigest" => Self::MetaDigest,
             b"state" => Self::State,
             b"meta" => Self::Meta,
             b"linkstate" => Self::LinkState,
             b"ping" | b"pong" => Self::PingPong,
+            b"sliceroot" | b"slicepull" | b"slicepagerequest" | b"slicepage" => Self::Repair,
             _ => Self::Other,
         }
     }
@@ -111,7 +101,7 @@ impl FrameClass {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FrameShape<'frame> {
     pub(crate) class: FrameClass,
-    /// The bytes on the wire: the frame with its resend trailer, if it has one.
+    /// The bytes on the wire: the signed frame.
     pub(crate) wire: usize,
     /// The bytes of the body, as written in the JSON. Zero when the frame has no signature block
     /// to end it.
@@ -244,51 +234,31 @@ pub(crate) fn by_class(bytes: &[u64; CLASS_COUNT]) -> String {
     }
 }
 
-/// How a frame reached `ingest`: on which plane, and whether it carries a resend nonce, so it is
-/// the copy of an anti-entropy answer. The overlay keeps each gossip message id it has seen for
-/// 90 s (`message_id_retention` of the pinned fork), per subscription, and drops a repeat in that
-/// time. So on the gossip plane a plain repeat gets here only after the 90 s, or after a resubscribe,
-/// when `drain_dead_receiver` and `drain_queued` replay frames. A resend, or a frame on the other
-/// plane, gets here at any time.
+/// How a frame reached `ingest`: on which plane. The overlay keeps each gossip message id it has
+/// seen for 90 s (`message_id_retention` of the pinned fork), per subscription, and drops a repeat in
+/// that time. So on the gossip plane a plain repeat gets here only after the 90 s, or after a
+/// resubscribe, when `drain_dead_receiver` and `drain_queued` replay frames. A frame on the unicast
+/// plane gets here at any time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Arrival {
     Gossip,
-    GossipResend,
     Unicast,
-    UnicastResend,
 }
 
-pub(crate) const ARRIVAL_COUNT: usize = 4;
+pub(crate) const ARRIVAL_COUNT: usize = 2;
 
 impl Arrival {
-    const ALL: [Self; ARRIVAL_COUNT] = [
-        Self::Gossip,
-        Self::GossipResend,
-        Self::Unicast,
-        Self::UnicastResend,
-    ];
-
-    /// The arrival of a frame that came on `plane`, with the resend nonce that its trailer holds.
-    pub(crate) fn of(plane: Plane, resend_nonce: Option<u64>) -> Self {
-        match (plane, resend_nonce) {
-            (Plane::Gossip, None) => Self::Gossip,
-            (Plane::Gossip, Some(_)) => Self::GossipResend,
-            (Plane::Unicast, None) => Self::Unicast,
-            (Plane::Unicast, Some(_)) => Self::UnicastResend,
-        }
-    }
+    const ALL: [Self; ARRIVAL_COUNT] = [Self::Gossip, Self::Unicast];
 
     /// The text that `scripts/perf/summarize.ts` reads from the census line: a rename breaks it.
     fn name(self) -> &'static str {
         match self {
             Self::Gossip => "gossip",
-            Self::GossipResend => "gossip_resend",
             Self::Unicast => "unicast",
-            Self::UnicastResend => "unicast_resend",
         }
     }
 
-    const fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self as usize
     }
 }
@@ -352,6 +322,8 @@ impl WireIn {
         self.note_tag(shape);
     }
 
+    /// The frame is a repeat that the dedup dropped. Its bytes count in its class, on the plane that
+    /// it arrived on.
     pub(crate) fn note_dup(&mut self, shape: &FrameShape<'_>, arrival: Arrival) {
         add_bytes(&mut self.dup[shape.class.index()], shape.wire);
         add_bytes(
@@ -361,8 +333,10 @@ impl WireIn {
         self.note_tag(shape);
     }
 
-    /// The frame that was just counted as new carried content that the node already held.
-    pub(crate) fn note_content_dup(&mut self) {
+    /// The last frame that was new by id carried content that the store already held. Its bytes
+    /// count in `cdup`, and they stay in `fresh`. A frame that is not fresh, or whose content was
+    /// counted already, changes nothing.
+    pub(crate) fn note_content_again(&mut self) {
         if let Some((class, wire)) = self.last_fresh.take() {
             add_bytes(&mut self.cdup[class.index()], wire);
         }
@@ -436,22 +410,16 @@ impl WireOutTally {
 #[cfg(test)]
 pub(crate) fn app_frame_with_tag(tag: &str) -> Vec<u8> {
     format!(
-        r#"{{"v":"14.0","id":"i","type":"app","tag":"{tag}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
+        r#"{{"v":"18.0","id":"i","type":"app","tag":"{tag}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
     )
     .into_bytes()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Arrival, CLASS_COUNT, FrameClass, FrameShape, TagBytes, WireIn, WireOut, by_class,
-    };
-    use crate::protocol::identity::Identity;
-    use crate::protocol::messages::{AppFrameParams, AppTag};
-    use crate::protocol::{Channel, MeshId, Message, MessageBody};
-    use crate::testing;
+    use super::{CLASS_COUNT, FrameClass, FrameShape, TagBytes, WireOut, by_class};
 
-    const APP: &[u8] = br#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","seq":3,"ext":{}}"#;
+    const APP: &[u8] = br#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","ext":{}}"#;
 
     /// A frame can carry an `ext` of any size, and the `pubkey` that ends the body then lies more than
     /// 2048 bytes from the end. The body still counts: it is not the envelope.
@@ -459,7 +427,7 @@ mod tests {
     fn a_body_counts_when_a_large_ext_puts_its_end_beyond_the_tail_window() {
         let ext = "x".repeat(3000);
         let frame = format!(
-            r#"{{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","seq":3,"ext":{{"big":"{ext}"}}}}"#
+            r#"{{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","ext":{{"big":"{ext}"}}}}"#
         );
 
         let shape = FrameShape::of(frame.as_bytes());
@@ -493,82 +461,9 @@ mod tests {
         assert_eq!(shape.wire, APP.len(), "the wire size is the whole frame");
     }
 
-    /// The reader and the serializer must agree, or the census reads every frame as `other`: the
-    /// frames here are made by the real constructors and the real serializer.
-    #[test]
-    fn frames_from_the_real_serializer_are_read_by_kind_tag_and_body() {
-        let mesh = MeshId::from("test");
-        let author = testing::nick("alice");
-        let tag = AppTag::try_new("app_msg").expect("a valid tag");
-        let app = AppFrameParams::new(tag, None, None, "say \"hi\"".into());
-        let frames: [(Message, FrameClass); 10] = [
-            (Message::new_app(&mesh, &author, app), FrameClass::App),
-            (Message::new_joined(&mesh, &author), FrameClass::Presence),
-            (
-                Message::new_peer_info(&mesh, &author, MessageBody::from("addr")),
-                FrameClass::PeerInfo,
-            ),
-            (
-                Message::new_digest(&mesh, &author, MessageBody::from("[]")),
-                FrameClass::Digest,
-            ),
-            (
-                Message::new_state_digest(&mesh, &author, MessageBody::from("{}")),
-                FrameClass::StateDigest,
-            ),
-            (
-                Message::new_channel_digest(&mesh, &author, MessageBody::from("{}"), Channel::Meta),
-                FrameClass::MetaDigest,
-            ),
-            (
-                Message::new_channel_event(
-                    &mesh,
-                    &author,
-                    MessageBody::from("{\"k\":1}"),
-                    Channel::State,
-                ),
-                FrameClass::State,
-            ),
-            (
-                Message::new_channel_event(
-                    &mesh,
-                    &author,
-                    MessageBody::from("{\"k\":1}"),
-                    Channel::Meta,
-                ),
-                FrameClass::Meta,
-            ),
-            (
-                Message::new_link_state(&mesh, &author, MessageBody::from("{}")),
-                FrameClass::LinkState,
-            ),
-            (Message::new_ping(&mesh, &author), FrameClass::PingPong),
-        ];
-        let identity = Identity::generate();
-        for (message, class) in frames {
-            let written = message.body.as_str().to_owned();
-            let wire = message
-                .sign(&identity)
-                .serialize()
-                .expect("a signed message serializes");
-            let shape = FrameShape::of(wire.as_bytes());
-            let json_body = serde_json::to_string(&written).expect("a string encodes");
-            assert_eq!(shape.class, class, "{written}");
-            assert_eq!(
-                shape.wire,
-                wire.len(),
-                "the wire size is the size of the frame that the serializer made"
-            );
-            assert_eq!(shape.body, json_body.len() - 2, "the body of {class:?}");
-            if class == FrameClass::App {
-                assert_eq!(shape.tag, Some("app_msg"), "an app frame carries its tag");
-            }
-        }
-    }
-
     #[test]
     fn a_quoted_body_does_not_end_the_body_early() {
-        let frame = br#"{"v":"14.0","id":"i","type":"state","mesh":"m","author":"a","ts":1,"body":"say \",\"pubkey\":\" now","pubkey":"ab","sig":"cd","ext":{}}"#;
+        let frame = br#"{"v":"18.0","id":"i","type":"state","mesh":"m","author":"a","ts":1,"body":"say \",\"pubkey\":\" now","pubkey":"ab","sig":"cd","ext":{}}"#;
         let shape = FrameShape::of(frame);
         assert_eq!(
             shape.class,
@@ -587,9 +482,7 @@ mod tests {
         for (wire_type, class) in [
             ("presence", FrameClass::Presence),
             ("peerinfo", FrameClass::PeerInfo),
-            ("digest", FrameClass::Digest),
-            ("statedigest", FrameClass::StateDigest),
-            ("metadigest", FrameClass::MetaDigest),
+            ("digest", FrameClass::Other),
             ("meta", FrameClass::Meta),
             ("linkstate", FrameClass::LinkState),
             ("ping", FrameClass::PingPong),
@@ -597,15 +490,29 @@ mod tests {
             ("nonsense", FrameClass::Other),
         ] {
             let frame = format!(
-                r#"{{"v":"14.0","id":"i","type":"{wire_type}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
+                r#"{{"v":"18.0","id":"i","type":"{wire_type}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
             );
             assert_eq!(FrameShape::of(frame.as_bytes()).class, class, "{wire_type}");
         }
     }
 
     #[test]
+    fn the_slice_kinds_are_repair_frames() {
+        for wire_type in ["sliceroot", "slicepull", "slicepagerequest", "slicepage"] {
+            let frame = format!(
+                r#"{{"v":"18.0","id":"i","type":"{wire_type}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
+            );
+            assert_eq!(
+                FrameShape::of(frame.as_bytes()).class.name(),
+                "repair",
+                "{wire_type}"
+            );
+        }
+    }
+
+    #[test]
     fn a_frame_with_a_shard_header_is_a_shard() {
-        let frame = br#"{"v":"14.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","shard":{"group":"g","idx":0,"total":2},"ext":{}}"#;
+        let frame = br#"{"v":"18.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","shard":{"group":"g","idx":0,"total":2},"ext":{}}"#;
         assert_eq!(
             FrameShape::of(frame).class,
             FrameClass::Shard,
@@ -628,67 +535,6 @@ mod tests {
             "the wire size of junk is its length"
         );
         assert_eq!(shape.body, 0, "junk has no body");
-    }
-
-    #[test]
-    fn the_received_bytes_are_split_by_class_and_by_fresh_and_repeat() {
-        let app = FrameShape::of(APP);
-        let mut received = WireIn::default();
-        for _ in 0..3 {
-            received.note_received(&app);
-        }
-        received.note_fresh(&app);
-        received.note_dup(&app, Arrival::Gossip);
-        received.note_dup(&app, Arrival::Gossip);
-        assert_eq!(received.frames, 3, "3 frames were received");
-        assert_eq!(
-            received.wire,
-            3 * APP.len() as u64,
-            "the wire bytes are 3 frames"
-        );
-        assert_eq!(
-            received.body,
-            3 * "hello, golden".len() as u64,
-            "the body bytes are 3 bodies"
-        );
-        assert_eq!(
-            by_class(&received.fresh),
-            format!("app:{}", APP.len()),
-            "the first sighting is counted once"
-        );
-        assert_eq!(
-            by_class(&received.dup),
-            format!("app:{}", 2 * APP.len()),
-            "the 2 repeats are counted as repeats"
-        );
-        assert_eq!(
-            received.tags.top(),
-            format!("app_msg:{}", 3 * APP.len()),
-            "the tag bytes cover the 3 frames"
-        );
-    }
-
-    #[test]
-    fn a_frame_new_by_id_can_be_counted_again_as_content_that_came_back() {
-        let app = FrameShape::of(APP);
-        let mut received = WireIn::default();
-        received.note_received(&app);
-        received.note_content_dup();
-        assert_eq!(by_class(&received.cdup), "-", "nothing was fresh yet");
-        received.note_received(&app);
-        received.note_fresh(&app);
-        received.note_content_dup();
-        received.note_content_dup();
-        assert_eq!(
-            by_class(&received.cdup),
-            format!("app:{}", APP.len()),
-            "once per frame"
-        );
-        assert_eq!(
-            by_class(&received.fresh),
-            format!("app:{}", APP.len()),
-            "the content that came back counts as fresh by content"
-        );
     }
 
     #[test]

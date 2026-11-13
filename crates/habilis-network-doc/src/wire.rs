@@ -1,365 +1,38 @@
-//! The `state`/`meta` channel wire body: the tagged envelope that carries one
-//! automerge change (or, from an old binary, a legacy RFC 7386 merge the
-//! automerge engine treats as a no-op). The convergent document itself — merge,
-//! authorization, and reconciliation — lives in the parent module.
+//! The sealed channel body: the encrypted form of a `state` or `meta` slice body.
+//!
+//! A sealed body is the tagged envelope `{"k":"enc","d":"<base58>"}`. Its `d` is the Base58 of
+//! `seal_symmetric(channel_key, plaintext)`, so a relay or a captured frame sees only opaque bytes.
+//! A passwordless mesh passes a plain body through; a passworded mesh refuses one.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::borrow::Cow;
 
 use habilis_network_protocol::SymmetricKey;
 
-use habilis_network_util::consts::DOC_TOMBSTONE_PATH_BYTES_MAX;
-
-use crate::{DocError, Stamp};
+use crate::DocError;
 use habilis_network_protocol::messages::MessageBody;
 
 use habilis_network_protocol::seal_error;
 
-pub use crate::{ParsedChange, SeedMark};
-
-/// The tagged `State`/`Meta` message body.
+/// The tagged envelope of a sealed channel body.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "k", rename_all = "snake_case")]
-enum StateOp<'merge> {
-    /// The live wire form: one automerge change, Base58-encoded so the body stays
-    /// `MessageBody`-safe (wire key `c`), plus an optional `m` carrying the
-    /// RFC 7386 merge the author applied — the human-readable delta the
-    /// `state`/`meta` output event surfaces (the change bytes themselves are
-    /// opaque). Omitted for internal writes that are never surfaced (the card
-    /// publish), so those stay lean.
-    Change {
-        #[serde(rename = "c")]
-        data: String,
-        #[serde(rename = "m", default, skip_serializing_if = "Option::is_none")]
-        merge: Option<Cow<'merge, Value>>,
-        /// The epoch of the history this change belongs to (wire key `e`). Left out at 0, so a
-        /// body of epoch 0 is the body from before epochs.
-        #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
-        epoch: Option<u64>,
-        /// The mark of a state seed root (wire key `s`). Left out of every other body.
-        #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
-        seed: Option<SeedMark>,
-        /// The Lamport time of the change (wire key `t`). Only a state channel with state epochs
-        /// writes it, and every other body is the body from before the time.
-        #[serde(rename = "t", default, skip_serializing_if = "Option::is_none")]
-        time: Option<u64>,
-        /// The stamps of the leaves that a seed or a replay frame writes (wire key `o`): for each
-        /// leaf, the time and an index into the tag table `a`.
-        #[serde(rename = "o", default, skip_serializing_if = "Vec::is_empty")]
-        origins: Vec<(u64, u32)>,
-        /// The tombstones of a seed root (wire key `x`): for each deleted path, the path, the time
-        /// of the delete, and an index into the tag table `a`.
-        #[serde(rename = "x", default, skip_serializing_if = "Vec::is_empty")]
-        tombstones: Vec<(Vec<String>, u64, u32)>,
-        /// The tags of the actors that `o` names (wire key `a`), each one once.
-        #[serde(rename = "a", default, skip_serializing_if = "Vec::is_empty")]
-        tags: Vec<String>,
-    },
-    /// The pre-automerge RFC 7386 merge shape. Retained only so a body still
-    /// composes for the adversarial harness; the automerge engine ignores it (a
-    /// no-op), which is the forward-compat behavior an old binary now hits.
-    Merge { merge: Value },
+enum SealedBody {
     /// An encrypted channel body (password-protected mesh only): `d` is Base58
-    /// of `seal_symmetric(channel_key, plaintext)`, where `plaintext` is the
-    /// UTF-8 bytes of a plaintext `change` body — so neither the automerge
-    /// change nor the human-readable `m` delta is exposed on the wire. A relay
-    /// or a captured frame (no key) sees only opaque bytes; every mesh member
-    /// holds the key and decrypts. See [`encrypt_body`]/[`decrypt_body`].
+    /// of `seal_symmetric(channel_key, plaintext)`.
     Enc {
         #[serde(rename = "d")]
         data: String,
     },
 }
 
-/// Compose a legacy RFC 7386 merge body. Only the adversarial harness and tests
-/// emit this now (the live path uses [`change_body`]); a receiver treats it as a
-/// no-op.
+/// Seal a plain body under `key`, and wrap the Base58 of the sealed bytes in the `enc` envelope.
 ///
 /// # Errors
-/// Serialization failure or a body exceeding the size limit.
+/// The envelope does not encode, or the sealed body exceeds the size limit.
 ///
 /// # Examples
 ///
-/// A merge body is not a change, so it carries no change bytes.
-///
-/// ```
-/// use habilis_network_doc::wire::{merge_body, parse_change_body};
-///
-/// let body = merge_body(serde_json::json!({"title": "hi"})).expect("a merge body");
-/// assert!(parse_change_body(body.as_str()).is_none());
-/// ```
-#[cfg(any(test, feature = "adversarial"))]
-pub fn merge_body(merge: Value) -> Result<MessageBody, DocError> {
-    let json = serde_json::to_string(&StateOp::Merge { merge }).map_err(DocError::encode)?;
-    Ok(MessageBody::try_new(&json)?)
-}
-
-/// Wrap one automerge change's raw bytes as a channel-event body. `merge` is the
-/// RFC 7386 delta the author applied, carried for the output event's
-/// human-readable `merge` field; pass `None` for an internal write that is never
-/// surfaced (keeps the body lean — no delta duplicated alongside the change).
-///
-/// # Errors
-/// Serialization failure or a body exceeding the size limit.
-///
-/// # Examples
-///
-/// A change body carries its change bytes, and they read back unchanged.
-///
-/// ```
-/// use habilis_network_doc::wire::{change_body, parse_change_body};
-///
-/// let body = change_body(&[1, 2], None).expect("a change body");
-/// assert_eq!(parse_change_body(body.as_str()), Some(vec![1, 2]));
-/// ```
-pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, DocError> {
-    change_body_at(change, merge, 0)
-}
-
-/// [`change_body`] for a change of `epoch`. Epoch 0 adds nothing to the body, so its bytes are
-/// those of a body from before the epoch existed.
-///
-/// # Errors
-/// Serialization failure or a body exceeding the size limit.
-pub fn change_body_at(
-    change: &[u8],
-    merge: Option<&Value>,
-    epoch: u64,
-) -> Result<MessageBody, DocError> {
-    change_body_seed(change, merge, epoch, None)
-}
-
-/// [`change_body_at`] for the root of a state seed, which carries the `seed` mark of its chain.
-///
-/// # Errors
-/// Serialization failure or a body exceeding the size limit.
-pub fn change_body_seed(
-    change: &[u8],
-    merge: Option<&Value>,
-    epoch: u64,
-    seed: Option<&SeedMark>,
-) -> Result<MessageBody, DocError> {
-    change_body_timed(change, merge, epoch, seed, None)
-}
-
-/// [`change_body_seed`] with the Lamport time of the change (wire key `t`). A body of a channel
-/// that has no state epochs carries none, so its bytes are those of a body from before the time.
-///
-/// # Errors
-/// Serialization failure or a body exceeding the size limit.
-pub fn change_body_timed(
-    change: &[u8],
-    merge: Option<&Value>,
-    epoch: u64,
-    seed: Option<&SeedMark>,
-    time: Option<u64>,
-) -> Result<MessageBody, DocError> {
-    change_body_stamped(change, merge, epoch, seed, time, &[])
-}
-
-/// [`change_body_timed`] with the stamps of the writes that the change carries: a frame of a seed
-/// or a replay names, for each leaf that it writes, the stamp of the write that made its value
-/// (wire keys `o` and `a`). `origins` lists them in the order of the paths of the leaves.
-///
-/// # Errors
-/// Serialization failure or a body exceeding the size limit.
-pub fn change_body_stamped(
-    change: &[u8],
-    merge: Option<&Value>,
-    epoch: u64,
-    seed: Option<&SeedMark>,
-    time: Option<u64>,
-    origins: &[Stamp],
-) -> Result<MessageBody, DocError> {
-    change_body_tombstoned(change, merge, epoch, seed, time, origins, &[])
-}
-
-/// [`change_body_stamped`] with the tombstones of the root frame of a state seed (wire key `x`):
-/// each one is a path that was deleted, and the stamp of the delete. The tag table `a` lists the
-/// tags of `origins` first and then those of the tombstones, each one once, in the order of first
-/// use.
-///
-/// # Errors
-/// Serialization failure or a body exceeding the size limit.
-pub fn change_body_tombstoned(
-    change: &[u8],
-    merge: Option<&Value>,
-    epoch: u64,
-    seed: Option<&SeedMark>,
-    time: Option<u64>,
-    origins: &[Stamp],
-    tombstones: &[(Vec<String>, Stamp)],
-) -> Result<MessageBody, DocError> {
-    // One body for one meaning, which is how `parse_change_full` reads it back: a stamp or a
-    // tombstone needs the time of the change, and the tombstones are paths of a seed root in the
-    // order of the paths, none twice, none empty and none over the cap. A body that breaks a rule
-    // parses on no node, so the composer refuses it here: the caller would sign a frame that the
-    // whole mesh ignores, and the writes it names would be lost.
-    if (!origins.is_empty() || !tombstones.is_empty()) && time.is_none() {
-        return Err(DocError::encode(
-            "a change with stamps or tombstones carries the time of the change",
-        ));
-    }
-    let mut above: Option<&Vec<String>> = None;
-    for (path, _) in tombstones {
-        let bytes: usize = path.iter().map(String::len).sum();
-        if path.is_empty() || bytes > DOC_TOMBSTONE_PATH_BYTES_MAX {
-            return Err(DocError::encode(
-                "a tombstone names a path that is empty or over the bytes of a path",
-            ));
-        }
-        if above.is_some_and(|held| held >= path) {
-            return Err(DocError::encode(
-                "the tombstones are not in the order of their paths, or one of them is there twice",
-            ));
-        }
-        above = Some(path);
-    }
-    let mut tags: Vec<String> = Vec::new();
-    let mut named: Vec<(u64, u32)> = Vec::with_capacity(origins.len());
-    for stamp in origins {
-        named.push((stamp.time, tag_index(&mut tags, &stamp.tag)?));
-    }
-    let mut dead: Vec<(Vec<String>, u64, u32)> = Vec::with_capacity(tombstones.len());
-    for (path, stamp) in tombstones {
-        dead.push((path.clone(), stamp.time, tag_index(&mut tags, &stamp.tag)?));
-    }
-    let tagged: Option<u64> = (epoch != 0).then_some(epoch);
-    let mark: Option<SeedMark> = seed.cloned();
-    let json = serde_json::to_string(&StateOp::Change {
-        data: bs58::encode(change).into_string(),
-        merge: merge.map(Cow::Borrowed),
-        epoch: tagged,
-        seed: mark,
-        time,
-        origins: named,
-        tombstones: dead,
-        tags,
-    })
-    .map_err(DocError::encode)?;
-    Ok(MessageBody::try_new(&json)?)
-}
-
-/// The place of `tag` in the table `tags`: the table gets the tag at its end when it holds none yet.
-fn tag_index(tags: &mut Vec<String>, tag: &str) -> Result<u32, DocError> {
-    let found: Option<usize> = tags.iter().position(|held| held.as_str() == tag);
-    let position = found.unwrap_or_else(|| {
-        tags.push(tag.to_owned());
-        tags.len() - 1
-    });
-    u32::try_from(position).map_err(DocError::encode)
-}
-
-/// Decode a channel-event body back to raw automerge change bytes. `None` for a
-/// non-`change` body (a legacy `merge`, an `enc` envelope, or anything that
-/// doesn't parse) — such a body is a no-op on the automerge doc. Call
-/// [`decrypt_body`] first for a passworded mesh's `enc` bodies.
-///
-/// # Examples
-///
-/// A change body reads back to the change bytes it carries.
-///
-/// ```
-/// use habilis_network_doc::wire::{change_body, parse_change_body};
-///
-/// let body = change_body(&[1, 2], None).expect("a change body");
-/// assert_eq!(parse_change_body(body.as_str()), Some(vec![1, 2]));
-/// ```
-#[must_use]
-pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
-    parse_change(body).map(|(bytes, _)| bytes)
-}
-
-/// [`parse_change_body`] with the epoch of the change. A body with no epoch reads as epoch 0.
-#[must_use]
-pub fn parse_change(body: &str) -> Option<(Vec<u8>, u64)> {
-    parse_change_full(body).map(|parsed| (parsed.bytes, parsed.epoch))
-}
-
-/// [`parse_change`] with the seed mark of a seed root.
-#[must_use]
-pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
-    let op: StateOp<'_> = serde_json::from_str(body).ok()?;
-    match op {
-        StateOp::Change {
-            data,
-            epoch,
-            seed,
-            time,
-            origins,
-            tombstones,
-            tags,
-            ..
-        } => {
-            // One body for one meaning: a stamp or a tombstone needs the time of the change, the
-            // table names each tag once, and every tag of the table is used.
-            let named_any = !origins.is_empty() || !tombstones.is_empty();
-            let repeated: bool = tags
-                .iter()
-                .enumerate()
-                .any(|(at, tag)| tags[..at].contains(tag));
-            if (named_any && time.is_none()) || (!named_any && !tags.is_empty()) || repeated {
-                return None;
-            }
-            // The table is in the order of first use (the stamps first, then the tombstones), so
-            // the same stamps have one body: a stamp names a tag that was used before, or the
-            // next one of the table.
-            let mut next_new: usize = 0;
-            let mut resolve = |index: u32| -> Option<String> {
-                let position = usize::try_from(index).ok()?;
-                let tag = tags.get(position)?;
-                if position > next_new {
-                    return None;
-                }
-                if position == next_new {
-                    next_new += 1;
-                }
-                Some(tag.clone())
-            };
-            let mut stamps: Vec<Stamp> = Vec::with_capacity(origins.len());
-            for (at, index) in origins {
-                stamps.push(Stamp::new(at, resolve(index)?));
-            }
-            let mut dead: Vec<(Vec<String>, Stamp)> = Vec::with_capacity(tombstones.len());
-            for (path, at, index) in tombstones {
-                // One body for one meaning: a tombstone names a real path of at most the bytes
-                // that a tombstone keeps, and the list is in the order of the paths, none twice.
-                let bytes: usize = path.iter().map(String::len).sum();
-                if path.is_empty()
-                    || bytes > DOC_TOMBSTONE_PATH_BYTES_MAX
-                    || dead.last().is_some_and(|last| last.0 >= path)
-                {
-                    return None;
-                }
-                dead.push((path, Stamp::new(at, resolve(index)?)));
-            }
-            if next_new != tags.len() {
-                return None;
-            }
-            Some(ParsedChange {
-                bytes: bs58::decode(&data).into_vec().ok()?,
-                epoch: epoch.unwrap_or(0),
-                seed,
-                time,
-                origins: stamps,
-                tombstones: dead,
-            })
-        }
-        StateOp::Merge { .. } | StateOp::Enc { .. } => None,
-    }
-}
-
-/// Encrypt a plaintext body under `key`, producing an `enc` envelope. Seals the
-/// whole plaintext body — used for the `state`/`meta` change bodies (both the
-/// automerge change and the `m` delta) and for broadcast chat (broadcast chat) bodies.
-///
-/// # Errors
-/// Serialization or `MessageBody` validation of the envelope fails.
-///
-/// # Examples
-///
-/// An encrypted body opens with its key, and only with its key.
+/// A sealed body does not open without its key.
 ///
 /// ```
 /// use habilis_network_doc::wire::{decrypt_body, encrypt_body};
@@ -373,19 +46,57 @@ pub fn parse_change_full(body: &str) -> Option<ParsedChange> {
 /// ```
 pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBody, DocError> {
     let blob = seal_error::seal_symmetric(key, plain.as_str().as_bytes());
-    let json = serde_json::to_string(&StateOp::Enc {
+    let json = serde_json::to_string(&SealedBody::Enc {
         data: bs58::encode(blob).into_string(),
     })
     .map_err(DocError::encode)?;
     Ok(MessageBody::try_new(&json)?)
 }
 
+/// The escaped length of the sealed body that [`encrypt_body`] makes for a plain body of `plain_len`
+/// bytes, at the longest Base58 text that the blob can take.
+///
+/// A seal draws a fresh nonce, and the Base58 text of one blob can be a byte or two shorter or longer
+/// than the text of the next blob of the same length. A caller that checks a size needs one number,
+/// so it takes this bound.
+///
+/// # Examples
+///
+/// The bound is at least the length of a real sealed body.
+///
+/// ```
+/// use habilis_network_doc::wire::{encrypt_body, sealed_body_len_bound};
+/// use habilis_network_protocol::{MessageBody, SymmetricKey};
+///
+/// let key = SymmetricKey::from([9u8; 32]);
+/// let plain = MessageBody::try_new("hello").expect("a body");
+/// let sealed = encrypt_body(&plain, &key).expect("a sealed body");
+/// assert!(sealed.as_str().len() <= sealed_body_len_bound("hello".len()));
+/// ```
+#[must_use]
+pub fn sealed_body_len_bound(plain_len: usize) -> usize {
+    // The blob is the 12-byte nonce, the ciphertext, and the 16-byte tag. Base58 takes at most
+    // 1.3657 characters per byte, and 138 percent is the bound used here. A Base58 text has no
+    // character to escape, so the escaped length is the one of the body with an empty text plus the
+    // length of the text. The sums saturate: a count of bytes that passes the width of a 32-bit
+    // target gives the largest bound, not a wrapped one.
+    const NONCE_AND_TAG: usize = 12 + 16;
+    let blob_len = plain_len.saturating_add(NONCE_AND_TAG);
+    let text_len = blob_len.saturating_mul(138) / 100 + 1;
+    let empty = serde_json::to_string(&SealedBody::Enc {
+        data: String::new(),
+    })
+    .unwrap_or_default();
+    let fixed = serde_json::to_string(&empty).map_or(usize::MAX, |escaped| escaped.len());
+    fixed.saturating_add(text_len)
+}
+
 /// Recover the plaintext body string. With a `key` (passworded mesh) the body
-/// **must** be a sealed `enc` envelope: it is opened, and any non-`enc` body is
+/// **must** be a sealed `enc` envelope: it is opened, and any other body is
 /// rejected (`None`) so cleartext can never slip past the encryption guarantee.
 /// Without a key (passwordless) a body is returned unchanged. `None` also when
 /// an `enc` body can't be opened (wrong key / malformed) — the caller treats a
-/// `None` as an opaque no-op (state/meta) or a drop (chat).
+/// `None` as an opaque no-op.
 ///
 /// # Examples
 ///
@@ -403,15 +114,15 @@ pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBo
 /// ```
 #[must_use]
 pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
-    let op: Result<StateOp<'_>, _> = serde_json::from_str(body);
+    let op: Result<SealedBody, _> = serde_json::from_str(body);
     match op {
-        Ok(StateOp::Enc { data }) => {
+        Ok(SealedBody::Enc { data }) => {
             let key = key?;
             let blob = bs58::decode(&data).into_vec().ok()?;
             let plain = seal_error::open_symmetric(key, &blob).ok()?;
             String::from_utf8(plain).ok()
         }
-        // A non-`enc` body: passthrough on a passwordless mesh (no key), but
+        // A body that is not sealed: passthrough on a passwordless mesh (no key), but
         // rejected on a passworded one — encryption is enforced, not optional.
         _ => match key {
             Some(_) => None,
@@ -422,277 +133,47 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SeedMark, Stamp, change_body, change_body_at, change_body_seed, change_body_stamped,
-        change_body_timed, change_body_tombstoned, decrypt_body, encrypt_body, merge_body,
-        parse_change, parse_change_body, parse_change_full,
-    };
-    use crate::StampedPaths;
-    use habilis_network_protocol::SymmetricKey;
+    use super::{SealedBody, decrypt_body, encrypt_body, sealed_body_len_bound};
+    use habilis_network_protocol::{MessageBody, SymmetricKey};
 
     fn key(byte: u8) -> SymmetricKey {
         SymmetricKey::from([byte; 32])
     }
 
+    /// The bound of the sealed length does not overflow, whatever the plain length, and it is the
+    /// length of the text that it stands for, for every length that a string can be built for.
     #[test]
-    fn a_seed_mark_reads_back_and_a_body_without_one_is_unchanged() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mark = SeedMark::new(565, "ab".repeat(32));
-        let body = change_body_seed(&[1, 2], None, 4, Some(&mark)).expect("a seed root body");
-        let parsed = parse_change_full(body.as_str()).expect("it parses");
-        assert_eq!(parsed.bytes, vec![1, 2], "the change bytes read back");
-        assert_eq!(parsed.epoch, 4, "the epoch reads back");
-        assert_eq!(parsed.seed, Some(mark), "the mark reads back");
-        let plain = change_body_at(&[1, 2], None, 4).expect("a body");
-        assert_eq!(
-            parse_change_full(plain.as_str()).expect("it parses").seed,
-            None,
-            "a body without a mark reads with none"
-        );
-        assert!(
-            !plain.as_str().contains("\"s\""),
-            "a body without a mark adds nothing to the wire"
-        );
-    }
-
-    #[test]
-    fn a_change_time_reads_back_and_a_body_without_one_adds_nothing() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let timed = change_body_timed(&[1, 2, 3], None, 0, None, Some(7)).expect("a body");
-        assert_eq!(
-            timed.as_str(),
-            r#"{"k":"change","c":"Ldp","t":7}"#,
-            "the time is the wire key t"
-        );
-        assert_eq!(
-            parse_change_full(timed.as_str()).expect("it parses").time,
-            Some(7),
-            "the time reads back"
-        );
-        let plain = change_body_timed(&[1, 2, 3], None, 0, None, None).expect("a body");
-        assert_eq!(
-            plain.as_str(),
-            r#"{"k":"change","c":"Ldp"}"#,
-            "a body with no time is the body from before the time"
-        );
-        assert_eq!(
-            parse_change_full(plain.as_str()).expect("it parses").time,
-            None,
-            "a body with no time reads with none"
-        );
-    }
-
-    #[test]
-    fn the_stamps_of_a_frame_read_back_and_a_body_without_them_adds_nothing() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let stamps = vec![
-            Stamp::new(5, "aa".to_owned()),
-            Stamp::new(7, "bb".to_owned()),
-            Stamp::new(5, "aa".to_owned()),
-        ];
-        let body =
-            change_body_stamped(&[1, 2, 3], None, 0, None, Some(7), &stamps).expect("a body");
-        assert_eq!(
-            body.as_str(),
-            r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0],[7,1],[5,0]],"a":["aa","bb"]}"#,
-            "the stamps are the keys o and a, with each tag once"
-        );
-        assert_eq!(
-            parse_change_full(body.as_str()).expect("it parses").origins,
-            stamps,
-            "the stamps read back in order"
-        );
-        let plain = change_body_stamped(&[1, 2, 3], None, 0, None, Some(7), &[]).expect("a body");
-        assert_eq!(
-            plain.as_str(),
-            r#"{"k":"change","c":"Ldp","t":7}"#,
-            "a body with no stamps is the body of step 2"
-        );
-        let broken = r#"{"k":"change","c":"Ldp","t":7,"o":[[5,3]],"a":["aa"]}"#;
-        assert!(
-            parse_change_full(broken).is_none(),
-            "a stamp that names a tag outside the table is no body"
-        );
-    }
-
-    #[test]
-    fn the_tombstones_of_a_seed_root_read_back_and_share_the_tag_table() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let stamps = vec![Stamp::new(5, "aa".to_owned())];
-        let shallow: Vec<String> = vec!["k".to_owned()];
-        let nested: Vec<String> = vec!["m".to_owned(), "n".to_owned()];
-        let tombstones = vec![
-            (shallow, Stamp::new(9, "bb".to_owned())),
-            (nested, Stamp::new(8, "aa".to_owned())),
-        ];
-        let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &stamps, &tombstones)
-            .expect("a body");
-        assert_eq!(
-            body.as_str(),
-            r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0]],"x":[[["k"],9,1],[["m","n"],8,0]],"a":["aa","bb"]}"#,
-            "the tombstones are the key x, and the tags of o and x share the table a"
-        );
-        let parsed = parse_change_full(body.as_str()).expect("it parses");
-        assert_eq!(parsed.origins, stamps, "the stamps read back");
-        assert_eq!(parsed.tombstones, tombstones, "the tombstones read back");
-        let unused = r#"{"k":"change","c":"Ldp","t":7,"x":[[["k"],9,0]],"a":["bb","cc"]}"#;
-        assert!(
-            parse_change_full(unused).is_none(),
-            "a tag that no stamp and no tombstone uses is no body"
-        );
-        let no_time = r#"{"k":"change","c":"Ldp","x":[[["k"],9,0]],"a":["bb"]}"#;
-        assert!(
-            parse_change_full(no_time).is_none(),
-            "tombstones with no time of the change are no body"
-        );
-    }
-
-    /// The composer refuses what no parser accepts. A body of tombstones out of order, or of stamps
-    /// with no time of the change, reads as no body on every node: a caller that gets one signs a
-    /// frame that the whole mesh ignores, and the writes it names are lost.
-    #[test]
-    fn a_change_that_no_parser_accepts_composes_into_no_body() {
-        /// One tombstone of `keys`, with the same stamp for all of them: the order of the paths is
-        /// what the cases below vary.
-        fn dead(keys: &[&str]) -> (Vec<String>, Stamp) {
-            let owned = keys.iter().map(|key| (*key).to_owned());
-            (owned.collect(), Stamp::new(9, "aa".to_owned()))
-        }
-        let _guard = ::habilis_network_test_tracing::init();
-        let over_the_cap: String = "x".repeat(super::DOC_TOMBSTONE_PATH_BYTES_MAX + 1);
-        let cases: Vec<(StampedPaths, Option<u64>, &str)> = vec![
-            (
-                vec![dead(&["b"]), dead(&["a"])],
-                Some(7),
-                "tombstones out of the order of their paths",
-            ),
-            (
-                vec![dead(&["a"]), dead(&["a"])],
-                Some(7),
-                "the same tombstone path twice",
-            ),
-            (vec![dead(&[])], Some(7), "an empty path"),
-            (
-                vec![dead(&[over_the_cap.as_str()])],
-                Some(7),
-                "a path over the cap",
-            ),
-            (
-                vec![dead(&["a"])],
-                None,
-                "tombstones with no time of the change",
-            ),
-        ];
-        for (tombstones, time, why) in cases {
-            assert!(
-                change_body_tombstoned(&[1, 2, 3], None, 0, None, time, &[], &tombstones).is_err(),
-                "the composer gave a body for {why}"
+    fn the_mesh_key_length_bound_does_not_overflow_and_equals_the_built_text() {
+        let built = |plain_len: usize| {
+            let blob_len = plain_len + 12 + 16;
+            let data = "1".repeat(blob_len * 138 / 100 + 1);
+            let body = serde_json::to_string(&SealedBody::Enc { data }).expect("a body");
+            serde_json::to_string(&body).expect("a string").len()
+        };
+        for plain_len in [0usize, 1, 2, 31, 32, 33, 100, 1000, 3000, 70_000] {
+            assert_eq!(
+                sealed_body_len_bound(plain_len),
+                built(plain_len),
+                "the bound for {plain_len} plain bytes is not the length of the built text"
             );
         }
-        let stamp = Stamp::new(9, "aa".to_owned());
+        let huge = sealed_body_len_bound(usize::MAX);
         assert!(
-            change_body_stamped(&[1, 2, 3], None, 0, None, None, &[stamp]).is_err(),
-            "the composer gave a body for stamps with no time of the change"
-        );
-        let fine = vec![dead(&["a"]), dead(&["a", "b"]), dead(&["b"])];
-        let body = change_body_tombstoned(&[1, 2, 3], None, 0, None, Some(7), &[], &fine)
-            .expect("the control: a canonical list composes");
-        assert!(
-            parse_change_full(body.as_str()).is_some(),
-            "the control: a canonical list parses"
+            huge >= sealed_body_len_bound(70_000),
+            "the bound fell for a longer plain body"
         );
     }
 
-    #[test]
-    fn a_body_that_is_not_canonical_in_its_stamps_is_no_body() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let bodies = [
-            (
-                r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0]],"a":["aa","bb"]}"#,
-                "a tag that no stamp uses",
-            ),
-            (
-                r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0],[6,1]],"a":["aa","aa"]}"#,
-                "a tag that the table names twice",
-            ),
-            (
-                r#"{"k":"change","c":"Ldp","t":7,"a":["aa"]}"#,
-                "a table with no stamps",
-            ),
-            (
-                r#"{"k":"change","c":"Ldp","o":[[5,0]],"a":["aa"]}"#,
-                "stamps with no time of the change",
-            ),
-            (
-                r#"{"k":"change","c":"Ldp","t":7,"o":[[5,1],[7,0]],"a":["bb","aa"]}"#,
-                "a table that is not in the order of first use",
-            ),
-        ];
-        for (body, why) in bodies {
-            assert!(parse_change_full(body).is_none(), "refused: {why}");
-        }
-        let canonical = r#"{"k":"change","c":"Ldp","t":7,"o":[[5,0],[6,1]],"a":["aa","bb"]}"#;
-        assert!(
-            parse_change_full(canonical).is_some(),
-            "the control: a canonical body parses"
-        );
+    /// A plain slice body, as the store writes it.
+    fn plain_body() -> MessageBody {
+        MessageBody::try_new(r#"{"version":1,"value":{"board":"x"}}"#).expect("a slice body")
     }
 
     #[test]
-    fn a_seed_mark_with_a_cut_vector_is_no_mark() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mark = SeedMark::new(3, "ab".repeat(32));
-        let body = change_body_seed(&[1, 2], None, 4, Some(&mark)).expect("a seed root body");
-        let plain = format!(r#"{{"n":3,"l":"{}"}}"#, "ab".repeat(32));
-        assert!(
-            body.as_str().contains(&plain),
-            "the mark of a seed names its frames and its last change only: {}",
-            body.as_str()
-        );
-        let old = body.as_str().replace(
-            &plain,
-            &format!(r#"{{"n":3,"l":"{}","c":[["aa",2]]}}"#, "ab".repeat(32)),
-        );
-        assert!(
-            parse_change_full(&old).is_none(),
-            "a mark with the old cut vector key is refused"
-        );
-    }
-
-    #[test]
-    fn an_epoch_above_zero_reads_back_and_epoch_zero_adds_nothing_to_the_body() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let before_epochs = r#"{"k":"change","c":"Ldp"}"#;
-        let epoch_zero = change_body(&[1, 2, 3], None).expect("a body");
-        assert_eq!(
-            epoch_zero.as_str(),
-            before_epochs,
-            "epoch 0 is the old body"
-        );
-        let epoch_seven = change_body_at(&[1, 2, 3], None, 7).expect("a body");
-        assert_eq!(
-            parse_change(epoch_seven.as_str()),
-            Some((vec![1, 2, 3], 7)),
-            "an epoch above 0 reads back"
-        );
-        assert_eq!(
-            parse_change(before_epochs),
-            Some((vec![1, 2, 3], 0)),
-            "a body with no epoch is epoch 0"
-        );
-        assert_eq!(
-            parse_change_body(epoch_seven.as_str()),
-            Some(vec![1, 2, 3]),
-            "the epoch does not change the change bytes"
-        );
-    }
-
-    #[test]
-    fn enc_body_round_trips_and_hides_the_delta() {
+    fn enc_body_round_trips_and_hides_the_value() {
         let _guard = ::habilis_network_test_tracing::init();
         let key = key(3);
-        let plain =
-            change_body(&[1, 2, 3, 4], Some(&serde_json::json!({"board": "x"}))).expect("compose");
+        let plain = plain_body();
         let enc = encrypt_body(&plain, &key).expect("encrypt");
         assert_ne!(
             enc.as_str(),
@@ -701,96 +182,43 @@ mod tests {
         );
         assert!(
             !enc.as_str().contains("board"),
-            "the merge delta must not leak into the ciphertext body"
+            "the value must not leak into the ciphertext body"
         );
-        // decrypt_body recovers the exact plaintext body, which then parses.
         let recovered = decrypt_body(enc.as_str(), Some(&key)).expect("decrypt");
         assert_eq!(
             recovered,
             plain.as_str(),
             "an enc body round trips to the recovered plaintext"
         );
-        assert_eq!(
-            parse_change_body(&recovered),
-            Some(vec![1u8, 2, 3, 4]),
-            "an enc body parses back to the plain change"
-        );
     }
 
     #[test]
     fn enc_body_needs_the_right_key() {
         let _guard = ::habilis_network_test_tracing::init();
-        let enc = encrypt_body(
-            &change_body(&[9, 9], None).expect("a two-byte change is a valid body"),
-            &key(1),
-        )
-        .expect("the body encrypts under a fresh key");
+        let enc =
+            encrypt_body(&plain_body(), &key(1)).expect("the body encrypts under a fresh key");
         assert!(
             decrypt_body(enc.as_str(), Some(&key(2))).is_none(),
             "wrong key"
         );
         assert!(decrypt_body(enc.as_str(), None).is_none(), "no key");
-        // An `enc` body is not itself a change (must be decrypted first).
-        assert_eq!(
-            parse_change_body(enc.as_str()),
-            None,
-            "an enc body needs the right key"
-        );
     }
 
     #[test]
     fn decrypt_enforces_encryption_only_when_keyed() {
         let _guard = ::habilis_network_test_tracing::init();
-        let plain = change_body(&[5], None).expect("compose");
-        // Passwordless (no key): a non-`enc` body is returned verbatim.
+        let plain = plain_body();
+        // Passwordless (no key): a body that is not sealed is returned verbatim.
         assert_eq!(
             decrypt_body(plain.as_str(), None).as_deref(),
             Some(plain.as_str()),
             "decrypt enforces encryption only when keyed"
         );
-        // Passworded (key set): a non-`enc` body is rejected — cleartext can't
+        // Passworded (key set): a body that is not sealed is rejected — cleartext can't
         // slip past the encryption guarantee.
         assert!(
             decrypt_body(plain.as_str(), Some(&key(7))).is_none(),
             "a plain body is refused when keyed"
-        );
-    }
-
-    #[test]
-    fn change_body_round_trips() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let change = vec![1u8, 2, 3, 250, 0, 42];
-        // The optional `m` delta does not affect change decoding either way.
-        let with_merge =
-            change_body(&change, Some(&serde_json::json!({"k": "v"}))).expect("compose");
-        assert_eq!(
-            parse_change_body(with_merge.as_str()),
-            Some(change.clone()),
-            "a change body round trips with a merge"
-        );
-        let lean = change_body(&change, None).expect("compose");
-        assert_eq!(
-            parse_change_body(lean.as_str()),
-            Some(change),
-            "a lean change body round trips"
-        );
-    }
-
-    #[test]
-    fn legacy_merge_body_is_a_no_op_change() {
-        let _guard = ::habilis_network_test_tracing::init();
-        // A legacy `merge` body (or any non-`change` body) decodes to no change,
-        // so the automerge engine ignores it — forward-compat with old binaries.
-        let body = merge_body(serde_json::json!({"turn": "a"})).expect("compose");
-        assert_eq!(
-            parse_change_body(body.as_str()),
-            None,
-            "a legacy merge body is a no-op change"
-        );
-        assert_eq!(
-            parse_change_body("not json"),
-            None,
-            "a non-json body is not a change"
         );
     }
 }

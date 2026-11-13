@@ -211,6 +211,47 @@ pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<Messag
     MessageBody::try_new(&json).map_err(|error| SealError::Invalid(error.to_string()))
 }
 
+/// The escaped length of the sealed body that [`seal_to_body`] makes for a plain body of `plain_len`
+/// bytes, at the longest Base58 text that each field can take.
+///
+/// A seal draws a fresh ephemeral key and nonce, and the Base58 text of one field can be a byte or
+/// two shorter or longer than the text of the next seal of the same length. A caller that checks a
+/// size needs one number, so it takes this bound.
+///
+/// # Examples
+///
+/// The bound is at least the length of a real sealed body.
+///
+/// ```
+/// use habilis_network_protocol::identity::Identity;
+/// use habilis_network_protocol::seal_error::{seal_to_body, sealed_to_body_len_bound};
+///
+/// let me = Identity::generate();
+/// let body = seal_to_body(&me.seal_public(), "hello").expect("seal the body");
+/// assert!(body.as_str().len() <= sealed_to_body_len_bound("hello".len()));
+/// ```
+#[must_use]
+pub fn sealed_to_body_len_bound(plain_len: usize) -> usize {
+    // Base58 takes at most 1.3657 characters per byte, and 138 percent is the bound used here. The
+    // tag of the AEAD adds 16 bytes to the ciphertext. A Base58 text has no character to escape, so
+    // the escaped length is the one of the envelope with empty fields plus the length of each text.
+    // The sums saturate: a count of bytes that passes the width of a 32-bit target gives the
+    // largest bound, not a wrapped one.
+    let longest = |bytes: usize| bytes.saturating_mul(138) / 100 + 1;
+    let empty: Envelope = Envelope {
+        version: ENVELOPE_VERSION.to_string(),
+        epk: String::new(),
+        nonce: String::new(),
+        ct: String::new(),
+    };
+    let body = serde_json::to_string(&empty).unwrap_or_default();
+    let fixed = serde_json::to_string(&body).map_or(usize::MAX, |escaped| escaped.len());
+    fixed
+        .saturating_add(longest(32))
+        .saturating_add(longest(12))
+        .saturating_add(longest(plain_len.saturating_add(16)))
+}
+
 /// Open a sealed directed `body` with our static X25519 secret, recovering the
 /// plaintext application payload string.
 ///
@@ -338,12 +379,49 @@ pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>, SealEr
 
 #[cfg(test)]
 mod tests {
-    use super::{open_symmetric, seal_symmetric, seal_to_body, unseal_from_body};
+    use super::{
+        ENVELOPE_VERSION, Envelope, open_symmetric, seal_symmetric, seal_to_body,
+        sealed_to_body_len_bound, unseal_from_body,
+    };
     use crate::crypto::SymmetricKey;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     fn key(byte: u8) -> SymmetricKey {
         SymmetricKey::from([byte; 32])
+    }
+
+    /// The bound of the sealed length does not overflow, whatever the plain length: on a 32-bit
+    /// target the product by 138 passes `usize::MAX` above about 31 MB, and a debug build panics. It
+    /// is the same number as the length of the text that it stands for, for every length that a
+    /// string can be built for, and it never falls when the plain length grows.
+    #[test]
+    fn the_directed_length_bound_does_not_overflow_and_equals_the_built_text() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let built = |plain_len: usize| {
+            let longest = |bytes: usize| "1".repeat(bytes * 138 / 100 + 1);
+            let envelope = Envelope {
+                version: ENVELOPE_VERSION.to_string(),
+                epk: longest(32),
+                nonce: longest(12),
+                ct: longest(plain_len + 16),
+            };
+            let body = serde_json::to_string(&envelope).expect("an envelope serializes");
+            serde_json::to_string(&body)
+                .expect("a string serializes")
+                .len()
+        };
+        for plain_len in [0usize, 1, 2, 31, 32, 33, 100, 1000, 3000, 70_000] {
+            assert_eq!(
+                sealed_to_body_len_bound(plain_len),
+                built(plain_len),
+                "the bound for {plain_len} plain bytes is not the length of the built text"
+            );
+        }
+        let huge = sealed_to_body_len_bound(usize::MAX);
+        assert!(
+            huge >= sealed_to_body_len_bound(70_000),
+            "the bound fell for a longer plain body"
+        );
     }
 
     #[test]

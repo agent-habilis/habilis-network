@@ -3,7 +3,6 @@
 use super::direct_outcome::DirectOutcome;
 use super::graft_request::{GraftRequest, GraftTarget};
 use super::{graft_request, lanes, regraft};
-use crate::daemon::state::Standing;
 
 use iroh::EndpointId;
 
@@ -13,7 +12,7 @@ use crate::transport::payload_path::{PROBE_DEADLINE, wait_direct};
 use crate::transport::webrtc;
 use crate::util::clock::Instant;
 
-use crate::{gossip, transport};
+use crate::transport;
 use iroh_gossip::api;
 use n0_future::task;
 /// Pure: may a peer be grafted, from what is known right now? A `WebRTC`
@@ -155,9 +154,6 @@ pub(crate) async fn graft_proven(
         if let Err(error) = request_graft(state, context, peer, true).await {
             tracing::warn!(target: transport::LOG_TARGET, %peer, %error, "graft request failed");
         }
-    }
-    if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
-        gossip::flush_pending(state, context, "direct path proven").await;
     }
 }
 

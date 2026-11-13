@@ -196,7 +196,7 @@ unsafe fn copy_out(text: &str, buffer: *mut c_char, cap: usize) -> c_long {
             buffer.add(needed).write(0);
         }
     }
-    // Lengths here are JSON documents bounded by the automerge doc / roster
+    // Lengths here are JSON documents bounded by the roster
     // size, never anywhere near `c_long::MAX`.
     c_long::try_from(needed).unwrap_or(c_long::MAX)
 }

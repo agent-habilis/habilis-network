@@ -4,7 +4,6 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
-mod batch_slots;
 mod in_flight_dial;
 mod registration;
 mod timeouts;
@@ -279,8 +278,10 @@ mod tests {
             );
             dead.close(0u32.into(), b"dead");
 
-            pool.send_batch(server, &dead, &[bytes::Bytes::from_static(b"frame")])
-                .await;
+            assert!(
+                pool.send_marked(server, &dead, b"frame").await.is_err(),
+                "the write on the closed connection fails"
+            );
 
             assert_eq!(
                 pool.connection(server).map(|pooled| pooled.stable_id()),
@@ -816,6 +817,350 @@ mod tests {
     /// A send over a pooled connection is a use of it: the ledger of the ceiling moves its
     /// last use to the end of the send, so the connection of a peer that is being talked to
     /// is not the least recently used.
+    /// Two frames sent at once to a peer with no warm connection both arrive. A leaver's mirror of its two
+    /// channels is this case.
+    #[test]
+    fn two_frames_sent_at_once_to_a_cold_peer_both_arrive() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use std::sync::atomic::Ordering;
+
+                use iroh::protocol::Router;
+
+                use super::super::unicast_acceptor::UnicastAcceptor;
+
+                let (tx, mut frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        super::super::UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                let pool = super::UnicastPool::new(node.clone(), true);
+
+                // The first dial is held until the second send has started its own dial, so the race is the
+                // same on each run: a pool that dials twice replaces the first connection, and its frame is lost.
+                let gate = pool.hold_next_dial();
+                let first_send = pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"one"));
+                let second_send = async {
+                    time::sleep(Duration::from_millis(200)).await;
+                    pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"two"))
+                        .await
+                };
+                let release = async {
+                    time::sleep(Duration::from_millis(600)).await;
+                    gate.notify_one();
+                };
+                let (first, second, ()) = tokio::join!(first_send, second_send, release);
+                first.expect("the first send");
+                second.expect("the second send");
+                let dials = pool.inner.dials_started.load(Ordering::Relaxed);
+                assert_eq!(
+                    dials, 1,
+                    "two sends at once to a cold peer make one dial, not {dials}"
+                );
+
+                let mut arrived = 0;
+                while arrived < 2 {
+                    match time::timeout(Duration::from_secs(5), frames.recv()).await {
+                        Ok(Some(_)) => arrived += 1,
+                        _ => {
+                            panic!("only {arrived} of the 2 frames sent at once arrived within 5 s")
+                        }
+                    }
+                }
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
+    /// Waits until `condition` holds, polling every 10 ms, so that a test orders its calls by what the pool shows and
+    /// not by a sleep. It fails after 5 s.
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        let started = time::Instant::now();
+        while !condition() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the pool did not reach the state that the test waits for"
+            );
+            time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The handles that hold the dial lock of a peer: the map, and the turn of each dial that waits or dials.
+    fn lock_handles(pool: &super::UnicastPool) -> usize {
+        use std::sync::Arc;
+
+        let locks = pool.inner.dial_locks.lock();
+        locks.values().map(Arc::strong_count).max().unwrap_or(0)
+    }
+
+    /// Two probes that dial one cold peer at once share one connection, and it keeps the hold of a probe: `Probing`
+    /// while the probes run, and `Probed` once they end. A send is what turns it into `Used`.
+    #[test]
+    fn two_probes_at_once_leave_the_hold_probing() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::Router;
+
+                use super::super::unicast_acceptor::UnicastAcceptor;
+                use super::unicast_pool::Hold;
+
+                let (tx, _frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        super::super::UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                let pool = super::UnicastPool::new(node.clone(), true);
+                let peer = server.id();
+
+                let gate = pool.hold_next_dial();
+                let first_probe = pool.probe_connection(peer);
+                let second_probe = async {
+                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    pool.probe_connection(peer).await
+                };
+                let release = async {
+                    wait_until(|| lock_handles(&pool) >= 3).await;
+                    gate.notify_one();
+                };
+                let (one, two, ()) = tokio::join!(first_probe, second_probe, release);
+                one.expect("the first probe connection");
+                two.expect("the second probe connection");
+                let running = pool
+                    .inner
+                    .conns
+                    .lock()
+                    .await
+                    .get(&peer)
+                    .map(|pooled| pooled.hold);
+                assert!(
+                    matches!(running, Some(Hold::Probing)),
+                    "two probes that share a connection leave it probing, not {running:?}"
+                );
+                pool.probe_done(peer).await;
+                let ended = pool
+                    .inner
+                    .conns
+                    .lock()
+                    .await
+                    .get(&peer)
+                    .map(|pooled| pooled.hold);
+                assert!(
+                    matches!(ended, Some(Hold::Probed(_))),
+                    "the connection is probed once the probes end, not {ended:?}"
+                );
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
+    /// **A forced dial failure waits for the dial that runs.** A dial that passed the cooldown check
+    /// before the failure was forced ends with a success, clears the cooldown and pools a connection.
+    /// The next send then succeeds instead of meeting the cooldown that the test forced, and the test
+    /// is a race. The forced failure takes the dial lock of the peer, so it comes after that dial.
+    #[test]
+    fn a_forced_dial_failure_waits_for_the_dial_in_flight_and_so_it_stays() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::Router;
+
+                use super::super::unicast_acceptor::UnicastAcceptor;
+
+                let (tx, _frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        super::super::UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                let pool = super::UnicastPool::new(node.clone(), true);
+                let peer = server.id();
+
+                let gate = pool.hold_next_dial();
+                let dial = pool.probe_connection(peer);
+                let force = async {
+                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    let forcing = pool.fail_dial_for_test(peer);
+                    tokio::pin!(forcing);
+                    let early = time::timeout(Duration::from_millis(300), &mut forcing).await;
+                    assert!(
+                        early.is_err(),
+                        "the forced failure did not wait for the dial that was in flight"
+                    );
+                    gate.notify_one();
+                    forcing.await;
+                };
+                let (connected, ()) = tokio::join!(dial, force);
+                connected.expect("the dial in flight ends with a connection");
+
+                assert!(
+                    pool.is_cooling(peer).await,
+                    "the dial in flight cleared the cooldown that the test forced"
+                );
+                assert!(
+                    !pool.has_warm(peer).await,
+                    "the dial in flight left a pooled connection after the forced failure"
+                );
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
+    /// A dial that is cancelled leaves no lock behind: the lock of the peer goes when the dial future is dropped, not
+    /// only when the dial ends.
+    #[test]
+    fn a_cancelled_dial_leaves_no_lock_behind() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let pool = super::UnicastPool::new(node.clone(), true);
+                let peer = testing::endpoint_id(7);
+                let _gate = pool.hold_next_dial();
+                let sender = pool.clone();
+                let task = tokio::spawn(async move {
+                    sender
+                        .dial_and_send(peer, bytes::Bytes::from_static(b"one"))
+                        .await
+                });
+                time::sleep(Duration::from_millis(300)).await;
+                assert!(
+                    !pool.inner.dial_locks.lock().is_empty(),
+                    "a dial that waits holds the lock of its peer"
+                );
+                task.abort();
+                let _ = task.await;
+                assert!(
+                    pool.inner.dial_locks.lock().is_empty(),
+                    "a cancelled dial leaves no lock behind"
+                );
+                node.close().await;
+            },
+        );
+    }
+
+    /// A send that waits on the dial of a probe finds the probe's connection and takes it: the hold becomes `Used`, so
+    /// the sweeper does not close a connection that a send used when the probe ends. The first dial is held until the
+    /// send waits on its lock, so the order of the two calls comes from the pool, not from a sleep.
+    #[test]
+    fn a_send_that_waits_on_a_probe_dial_takes_the_connection_as_used() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::Router;
+
+                use super::super::unicast_acceptor::UnicastAcceptor;
+
+                let (tx, mut frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        super::super::UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                let pool = super::UnicastPool::new(node.clone(), true);
+
+                let gate = pool.hold_next_dial();
+                let probe_dial = pool.probe_connection(server.id());
+                let send = async {
+                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"one"))
+                        .await
+                };
+                let release = async {
+                    wait_until(|| lock_handles(&pool) >= 3).await;
+                    gate.notify_one();
+                };
+                let (dialed, outcome, ()) = tokio::join!(probe_dial, send, release);
+                dialed.expect("the probe connection");
+                outcome.expect("the send");
+                let used: bool = pool
+                    .inner
+                    .conns
+                    .lock()
+                    .await
+                    .get(&server.id())
+                    .is_some_and(|pooled| matches!(pooled.hold, super::unicast_pool::Hold::Used));
+                assert!(
+                    used,
+                    "a send that used the probe's connection holds it as used"
+                );
+                assert!(
+                    frames.recv().await.is_some(),
+                    "the frame of the send arrives"
+                );
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
     #[test]
     fn a_send_marks_its_connection_as_used_in_the_ledger() {
         ::habilis_network_test_tracing::run_multi_thread(

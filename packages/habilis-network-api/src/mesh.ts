@@ -27,12 +27,12 @@ function freeze<T>(value: T): T {
 export async function openMesh(open: Opener): Promise<Mesh> {
   const messages = new Fanout<Message>()
   const events = new Fanout<MeshEvent>()
-  const changes = new Fanout<Record<string, unknown>>()
+  const changes = new Fanout<Record<string, Record<string, unknown>>>()
 
   let peers: Peer[] = []
   let rosterJson = ''
   let stateJson = ''
-  let stateValue: Record<string, unknown> = {}
+  let stateValue: Record<string, Record<string, unknown>> = {}
   // Sticky lifecycle: an `events()` iterator is always created *after* open, so
   // a live `ready` would be unobservable. Events that describe a state are
   // replayed per iterator; events that describe a transition are not.
@@ -77,7 +77,7 @@ export async function openMesh(open: Opener): Promise<Mesh> {
       return
     }
     stateJson = json
-    stateValue = freeze(next as Record<string, unknown>)
+    stateValue = freeze(next as Record<string, Record<string, unknown>>)
     changes.push(stateValue)
   }
 

@@ -78,7 +78,7 @@ A run folder holds `n<i>.out` and `n<i>.err` per node, `summary.txt` (the last c
 line of each node), `host.log` (one line per 10 s), `canary.log` (every pause of the host
 over 0.5 s), `probe.log` and `done`. `summarize.ts` prints one line per run: nodes with a
 full roster, isolated nodes, stalls, link churn (`up` and `down`), dropped data messages,
-send-queue disconnects, the digest answers, memory and load.
+send-queue disconnects, memory and load.
 
 ## Memory of the underlay sessions
 

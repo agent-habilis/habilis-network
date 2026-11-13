@@ -1,13 +1,34 @@
 //! The wire version of the message envelope.
 
-/// Protocol version embedded in every message, `14.0`. The change body of the `state` channel
-/// carries a time, and a `Joined` body can carry an identity proof (see below).
+/// Protocol version embedded in every message, `18.0`. A `Joined` body can carry an identity proof,
+/// and the `ProofRequest` kind asks for one (see below).
 ///
-/// The recipient of a directed frame (`to` of an `app` and of a `pong` frame) is an author key
-/// and no longer a nickname, since `13.0`. A nickname is a label that two live keys can share, so a
-/// frame to a nickname reached both. A `12.0` peer reads a key as an invalid nickname, so the
-/// frames of the two versions must not meet silently: `parse` names the version of a frame that it
-/// refuses, also when the frame fails on a field that the version changed.
+/// The version is `18.0` since the slice repair: the digest kinds `SliceRoot`, `SlicePull`,
+/// `SlicePageRequest` and `SlicePage` join the envelope, and the resend trailer is removed. A `17.0`
+/// peer carries no digest kinds, and it is refused by its version.
+///
+/// The version is `17.0` since the shared state is one signed slice per author. A `state` or `meta`
+/// frame carries the whole slice of its author, a version and a value, and no automerge change. The
+/// `StateDigest` and `MetaDigest` kinds, and the heads they carried, are removed. A frame of a `16.0`
+/// peer carries an automerge change, and it is refused by its version.
+///
+/// The version is `16.0` since the identity proof and the `ProofRequest` kind join the envelope:
+/// a frame of a `15.0` peer carries neither, and it is refused by its version.
+///
+/// The version is `15.0` since the per-author chain (`seq`, `prev`) and the cross-author `parents`
+/// are removed from the envelope: a frame of a `14.0` peer carries them, and it is refused by its
+/// version. Nothing in the protocol reads them any more.
+///
+/// The version was `14.0` since the chat digest kind is removed: a `digest` frame of a `13.0` peer is
+/// refused by its version, and no chat digest is answered any more. The version before it,
+/// `13.0`, is described in the next paragraph.
+///
+/// The version is `13.0` since the recipient of a directed frame
+/// (`to` of an `app` and of a `pong` frame) is an author key and no longer a nickname. A nickname
+/// is a label that two live keys can share, so a frame to a nickname reached both. A `12.0` peer
+/// reads a key as an invalid nickname, so the frames of the two versions must not meet silently:
+/// `parse` names the version of a frame that it refuses, also when the frame fails on a field
+/// that the version changed.
 ///
 /// `12.0` was the engine's de-branding. The crypto byte-domains are mixed into signature and
 /// key-derivation transcripts, so any rebrand changes the bytes an older build
@@ -39,23 +60,8 @@
 /// only because it lands inside the same interop break rather than needing one
 /// of its own.
 ///
-/// - `14.0` — the change body of the `state` and `meta` channels may carry an epoch key `e` (left
-///   out at epoch 0), and the digest window ids are Base64 and not Base58. The change body of the
-///   `state` channel carries a time `t` (a change with no valid `t` is refused), and the seed and
-///   replay frames of a state epoch carry the stamps `o`
-///   with their tag table `a`, and the tombstones `x`. A `Joined` body can carry the identity proof
-///   of the member (`<identity hex>:<run>:<sig hex>`; the signature covers the nickname and the mesh
-///   behind their lengths, label `v2`), and a `ProofRequest` kind is addressed to one
-///   peer. A `13.0` peer and a `14.0` peer do not form a mesh: each side refuses every frame of
-///   the other, with an error that names the wire version and its own. Without the bump a node
-///   that writes no `t` would have all its state writes refused by a node that reads it, with no
-///   report. The meaning of `t` is a time of the wall clock in milliseconds (a hybrid logical
-///   clock): a node takes `max(clock + 1, now)` and refuses a `t` more than 1 hour above its own
-///   wall clock (2 hours for the frames of a seed, which copy the stamps of their cutter).
-///   Without the bump for the epoch key, a `13.0` peer would read a change of epoch above 0 as a
-///   change of epoch 0 whose dependency is missing, keep it as an orphan, and be sent the same
-///   frames again and again, while a `14.0` peer would ignore the frames of the old one. The
-///   state digest request can also carry the flag `first`.
+/// - `14.0` — main's 14.0 (#48) was a parallel format that this branch never reads; its identity
+///   proof is part of 16.0.
 /// - `13.0` — the recipient of a directed frame (`to` of an `app` and of a `pong` frame) is an
 ///   author key, not a nickname. A `12.0` peer and a `13.0` peer do not form a mesh: the join
 ///   succeeds, then each side refuses every frame of the other, with an error that names the wire
@@ -77,4 +83,4 @@
 /// - `4.0` — the native application-payload port.
 /// - `3.0` — the application-payload migration.
 /// - `2.0` — RFC 6902 → RFC 7386 shared state.
-pub(crate) const VERSION: &str = "14.0";
+pub(crate) const VERSION: &str = "18.0";

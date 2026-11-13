@@ -22,7 +22,7 @@ pub enum Lane {
     Unicast,
     /// A send through other members.
     Multihop,
-    /// The peer's only path is the relay. Only reported on a mesh whose relay
+    /// The peer's only path is the relay, as a probe proved it. Only reported on a mesh whose relay
     /// is lookup only, where that path carries no payload; elsewhere it reads
     /// `unicast`.
     #[serde(rename = "relay-only")]

@@ -26,16 +26,18 @@ use super::MessageKind;
 #[must_use]
 pub fn sole_addressee(kind: &MessageKind) -> Option<&AuthorKey> {
     match kind {
-        MessageKind::Pong { to, .. } | MessageKind::ProofRequest { to } => Some(to),
+        MessageKind::Pong { to, .. }
+        | MessageKind::ProofRequest { to }
+        | MessageKind::SliceRoot { to, .. }
+        | MessageKind::SlicePull { to, .. }
+        | MessageKind::SlicePageRequest { to, .. }
+        | MessageKind::SlicePage { to, .. } => Some(to),
         MessageKind::App { to, .. } => to.as_ref(),
         MessageKind::Presence { .. }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::State
-        | MessageKind::StateDigest
         | MessageKind::Meta
-        | MessageKind::MetaDigest
         | MessageKind::LinkState => None,
     }
 }

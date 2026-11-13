@@ -180,6 +180,14 @@ struct BoundReserve {
 }
 
 impl ProofExchange {
+    /// Forget the proof of `session`, which said goodbye, and the requests for it.
+    pub(crate) fn forget(&mut self, session: &AuthorKey) {
+        self.drop_pending(session);
+        self.book.remove(session);
+        self.asked.remove(session);
+        self.deferred.remove(session);
+    }
+
     pub(crate) fn with_cap(cap: usize) -> Self {
         Self {
             book: ProofBook::with_cap(cap),
@@ -250,14 +258,6 @@ impl ProofExchange {
             self.gate_refused += 1;
         }
         admitted
-    }
-
-    /// Forget the proof of `session`, which said goodbye, and the requests for it.
-    pub(crate) fn forget(&mut self, session: &AuthorKey) {
-        self.drop_pending(session);
-        self.book.remove(session);
-        self.asked.remove(session);
-        self.deferred.remove(session);
     }
 
     /// The ask for `session` was skipped for lack of a warm path: it waits for one. A session that waits

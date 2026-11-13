@@ -78,7 +78,7 @@ const NO_RUNG_DEADLINE: Duration = Duration::from_secs(30);
 const NO_RUNG_QUIET: Duration = Duration::from_secs(12);
 
 /// How long the members may take to see each other, from the last start. A mesh that
-/// heals needs a few heal ticks and one round of anti-entropy, so the bound is generous.
+/// heals needs a few heal ticks and one round of backfill, so the bound is generous.
 const MERGE_DEADLINE: Duration = Duration::from_secs(90);
 
 /// How long the old members of B may take to release the rendezvous.

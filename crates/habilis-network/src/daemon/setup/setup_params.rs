@@ -8,7 +8,7 @@ use crate::daemon::CoHostPolicy;
 
 use std::sync::atomic;
 
-use crate::{doc, lookup};
+use crate::lookup;
 use std::{fmt, ops, sync};
 /// The per-session inputs to [`setup_mesh`](super::setup_mesh) that are independent of the
 /// [`SetupKind`](super::SetupKind): this member's identity/io/tuning and the localhost
@@ -61,10 +61,6 @@ pub struct SetupParams {
     /// harness's lever to force a relay-only path. Never part of the mesh id —
     /// see the type.
     pub transports: lookup::TransportOpts,
-    /// The `meta` channel's per-peer write gate, when the application keeps a
-    /// per-peer map there (see [`crate::doc::SelfWriteGate`]). `None` leaves the
-    /// channel free-form.
-    pub per_peer_gate: Option<doc::SelfWriteGate>,
     /// Override the co-host policy the [`SetupKind`](super::SetupKind) would imply. `None` keeps
     /// the derived one; a directory session passes its own (see
     /// [`DIRECTORY_ADVERTISER_COHOST`](crate::daemon::config::DIRECTORY_ADVERTISER_COHOST)).
@@ -98,7 +94,6 @@ impl SetupParams {
             endpoint: None,
             protocols: habilis_network_iroh_transport_util::ProtocolSet::default(),
             transports: lookup::TransportOpts::default(),
-            per_peer_gate: None,
             cohost: None,
             live_count: None,
             keys_in_default_state: false,
@@ -170,15 +165,6 @@ impl SetupParams {
     #[must_use]
     pub fn transports(self, transports: lookup::TransportOpts) -> Self {
         Self { transports, ..self }
-    }
-
-    /// Set the `meta` channel's per-peer write gate.
-    #[must_use]
-    pub fn per_peer_gate(self, per_peer_gate: doc::SelfWriteGate) -> Self {
-        Self {
-            per_peer_gate: Some(per_peer_gate),
-            ..self
-        }
     }
 
     /// Override the co-host policy the [`SetupKind`](super::SetupKind) would imply.

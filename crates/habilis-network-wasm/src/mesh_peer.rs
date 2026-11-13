@@ -205,7 +205,7 @@ impl MeshPeer {
         answer
             .await
             .map_err(|_| to_js_error("mesh event loop has stopped"))?
-            .map_err(|error| to_js_error(&error))?;
+            .map_err(|error| to_js_error(&error.to_string()))?;
         self.state_json().await
     }
 

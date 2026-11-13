@@ -62,10 +62,9 @@ allowed-duplicate-crates = [
     "rand",
     "signature",
     "spki",
-    # automerge 0.10 (habilis-network-doc) pulls the rand 0.10 line; automerge 0.12 keeps it.
+    # hickory-net (through iroh) pulls the rand 0.10 line, so rand_core and chacha20 keep two lines.
     "chacha20",
     "rand_core",
-    "smol_str",
     # the iroh fork's noq-proto pins aes-gcm 0.10 (aead 0.5, crypto-common 0.1, aes 0.8 with cpufeatures 0.2,
     # rand_core 0.6, getrandom 0.2); our chacha20poly1305 0.10 keeps chacha20 0.9 until that moves.
     "crypto-common",
@@ -97,7 +96,6 @@ allowed-duplicate-crates = [
     "thiserror",
     "thiserror-impl",
     # asn1-rs 0.7 (x509-parser 0.18.1, pulled through iroh) pins nom 7 and thiserror 2.
-    # acto 0.8.2 and swarm-discovery (our fork) pin smol_str 0.1; automerge keeps 0.3.
     # futures-buffered 0.2 (n0-future, iroh) pins spin 0.10; heapless 0.7 (postcard, dev) pins spin 0.9.
     "spin",
     # embedded-io: the lock keeps two lines and the lint counts both; no graph we build reaches them.

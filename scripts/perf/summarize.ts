@@ -18,11 +18,8 @@
 //   deltas of every census line, which is the total over the run.
 // - census_lines: the census lines of all nodes. Divide a total below by it for a mean per node
 //   and interval (10 s).
-// - cpu_ms / wakeups / dup / fresh / fr_asks / fr_retries / answers /
-//   frames_uni / frames_bc / rejected: the sums of the `cpu_ms`, `idle_wakeups`,
-//   `idle_duplicates`, `idle_fresh`, `idle_fr_asks`, `idle_fr_retries`, `idle_state_answers`,
-//   `idle_state_frames_unicast`, `idle_state_frames_broadcast` and `idle_state_rejected` deltas of
-//   every census line.
+// - cpu_ms / wakeups / dup / fresh: the sums of the `cpu_ms`, `idle_wakeups`,
+//   `idle_duplicates` and `idle_fresh` deltas of every census line.
 // - wire_in / body_in / frames_in / wire_out / body_out / frames_out: the sums of the `idle_wire_in`,
 //   `idle_body_in`, `idle_frames_in`, `idle_wire_out`, `idle_body_out` and `idle_frames_out`
 //   deltas (the `wire census` line). The wire is the frame as it goes on a socket; the body is its
@@ -58,10 +55,9 @@
 // - dup_share: the bytes of the frames that the dedup dropped as repeats, over all frames of the
 //   kinds that reached it. env_in / env_out: 1 - body / wire, the share of the envelope.
 // - bin_fresh / bin_dup / bin_cdup / bout: `kind:bytes` sums, by kind of frame (app, presence, peerinfo,
-//   digest, statedigest, metadigest, state, meta, linkstate, pingpong, shard, other), largest first.
+//   state, meta, linkstate, pingpong, shard, repair, other), largest first.
 //   tags_in / tags_out: the same for the tags of the app frames.
-// - dup_by_path: the repeats of bin_dup as `arrival.kind:bytes`. The arrival is gossip, gossip_resend, unicast or
-//   unicast_resend: the plane, and whether the frame carried a resend nonce. The overlay keeps a gossip message id
+// - dup_by_path: the repeats of bin_dup as `arrival.kind:bytes`. The arrival is gossip or unicast: the plane. The overlay keeps a gossip message id
 //   for 90 s (message_id_retention) per subscription and drops a repeat in that time, so a plain repeat on the
 //   gossip plane is a copy after the 90 s or after a resubscribe, which replays frames. No eager or lazy copy
 //   inside the 90 s is in it.
@@ -89,12 +85,6 @@ const TOTALS: [string, string][] = [
   ["wakeups", "idle_wakeups"],
   ["dup", "idle_duplicates"],
   ["fresh", "idle_fresh"],
-  ["fr_asks", "idle_fr_asks"],
-  ["fr_retries", "idle_fr_retries"],
-  ["answers", "idle_state_answers"],
-  ["frames_uni", "idle_state_frames_unicast"],
-  ["frames_bc", "idle_state_frames_broadcast"],
-  ["rejected", "idle_state_rejected"],
   ["wire_in", "idle_wire_in"],
   ["body_in", "idle_body_in"],
   ["frames_in", "idle_frames_in"],

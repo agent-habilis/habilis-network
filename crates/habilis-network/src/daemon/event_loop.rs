@@ -2,7 +2,7 @@
 //!
 //! [`run`] sets up per-session state then drives [`event_loop`], which
 //! multiplexes external inputs (stdin / IPC / gossip), time-driven
-//! maintenance (heartbeat, sweep, heal, anti-entropy, reclaim), and
+//! maintenance (heartbeat, sweep, heal, backfill, reclaim), and
 //! shutdown. The orchestration lives here; the behavioral subsystems are
 //! crate-root siblings (`crate::{gossip,lifecycle,beacon,lookup}`), and
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
@@ -17,7 +17,7 @@ use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 use crate::protocol;
 use crate::{lookup, transport};
 use iroh_gossip::net;
-use n0_future::{task, time};
+use n0_future::time;
 #[cfg(feature = "host")]
 use serde::de;
 use std::{future, path, process};
@@ -35,16 +35,13 @@ use std::time::Duration;
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr, RelayUrl, Watcher as _};
 use iroh_gossip::api::{ApiError, Event, GossipReceiver, GossipTopic};
-use n0_future::task::JoinError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
-use crate::doc::SelfWriteGate;
-use crate::gossip::antientropy::Plane;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::{Mesh, MeshName};
-use crate::protocol::messages::{Authored, Verified};
+use crate::protocol::messages::Authored;
 use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
@@ -52,8 +49,8 @@ use crate::util::clock::{Instant, millis_saturating};
 // `tokio::time::Instant`). Aliased rather than path-qualified, matching
 // `daemon::state` / `daemon::app`.
 use crate::util::tuning::{
-    ALIVE_INTERVAL, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH, antientropy_interval,
-    heal_interval, sweep_interval,
+    ALIVE_INTERVAL, DIGEST_ROUND_TICK, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH,
+    backfill_interval, heal_interval, sweep_interval,
 };
 use n0_future::time::Instant as TokioInstant;
 // Gated with `spawn_orphan_watch`, its only caller.
@@ -74,20 +71,20 @@ use super::node::SignalHandling;
 #[cfg(feature = "host")]
 use super::shutdown;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
-use super::state::{EventLoopState, MeshSecrets};
-use super::{seed_job, timers};
+use super::state::{EventLoopState, FrameOverheads, MeshSecrets};
+use super::timers;
 use crate::daemon::setup::LiveCount;
+use crate::protocol::Channel;
 use ctx_parts::CtxParts;
 pub use event_loop_error::EventLoopError;
 use tick_gap::TickGap;
 
 use crate::daemon::state;
-use crate::protocol::messages;
 #[cfg(feature = "host")]
 use crate::transport::ipc;
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
-use crate::transport::{outbox, probe, webrtc};
+use crate::transport::{probe, webrtc};
 use crate::util::version;
 use tokio::sync::Notify;
 /// Never returns normally — exits the process on ctrl-c / SIGTERM.
@@ -159,11 +156,14 @@ async fn run_checked<Driver: NodeDriver>(
         },
         mesh.mint_mesh.take(),
         &transports,
-        runtime.per_peer_gate.take(),
         started,
         state_file,
+        FrameOverheads {
+            state: habilis_network_doc::frame_overhead(Channel::State, &mesh.mesh, &mesh.author),
+            meta: habilis_network_doc::frame_overhead(Channel::Meta, &mesh.mesh, &mesh.author),
+            page: habilis_network_doc::page_frame_overhead(&mesh.mesh, &mesh.author),
+        },
     );
-    seed_job::creator_has_nothing_to_sync(&mut state, mesh.is_creator);
     let owned = OwnedEndpoints {
         router: endpoints.router,
         owner: endpoints.endpoint_owner,
@@ -171,7 +171,7 @@ async fn run_checked<Driver: NodeDriver>(
         #[cfg(feature = "multihop")]
         multihop: transports.multihop.clone(),
     };
-    let (direct_rx, path_rx, flush_failed_rx) = wire_transports(
+    let (direct_rx, path_rx) = wire_transports(
         &mut state,
         &endpoints.endpoint,
         transports,
@@ -275,7 +275,6 @@ async fn run_checked<Driver: NodeDriver>(
         lan_contacts: endpoints.lan_contacts,
         direct_rx,
         path_rx,
-        flush_failed_rx,
         owned,
     }))
     .await
@@ -408,9 +407,9 @@ fn initial_state(
     secrets: MeshSecrets,
     mint_mesh: Option<Mesh>,
     transports: &TransportSet,
-    per_peer_gate: Option<SelfWriteGate>,
     started: Instant,
     state_file: StateFileSeed,
+    overheads: FrameOverheads,
 ) -> EventLoopState {
     #[cfg(not(feature = "host"))]
     drop(state_file);
@@ -420,7 +419,7 @@ fn initial_state(
             state_file,
             keys,
             secrets,
-            per_peer_gate,
+            overheads,
             // The *same* table the Router's signal acceptor holds, not a fresh
             // one: the cap only counts if both roles count against it together.
             webrtc_admission: transports.webrtc_admission.clone(),
@@ -444,7 +443,6 @@ fn wire_transports(
 ) -> (
     mpsc::UnboundedReceiver<probe::DirectOutcome>,
     mpsc::UnboundedReceiver<probe::PathChange>,
-    mpsc::UnboundedReceiver<(Verified, messages::WireFrame)>,
 ) {
     #[cfg(feature = "multihop")]
     {
@@ -490,9 +488,6 @@ fn wire_transports(
     let (path_tx, path_rx) = mpsc::unbounded_channel();
     state.webrtc_admission.set_path_sink(path_tx.clone());
     state.path_changes = path_tx;
-    // A flushed frame whose dial failed comes back here; the loop buffers it again.
-    let (flush_failed_tx, flush_failed_rx) = mpsc::unbounded_channel();
-    state.flush_failed = flush_failed_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
     if rendezvous_params.answers_jsep() {
         state.rendezvous_flags.insert(RendezvousFlag::AnswersJsep);
@@ -500,7 +495,7 @@ fn wire_transports(
         state.rendezvous_flags.remove(&RendezvousFlag::AnswersJsep);
     }
     state.write_peer_count();
-    (direct_rx, path_rx, flush_failed_rx)
+    (direct_rx, path_rx)
 }
 
 /// Starts the rendezvous: an eager member co-hosts from t=0, and everyone else defers to the heal
@@ -575,7 +570,7 @@ async fn start_rendezvous(
 }
 
 /// Joins the gossip topic and starts the tasks that carry its frames: the split of the receiver,
-/// and the drain of the digest answers, so that the loop never waits for the gossip actor.
+/// and the drain of the topic frames, so that the loop never waits for the gossip actor.
 fn join_gossip(
     state: &mut EventLoopState,
     topic: GossipTopic,
@@ -587,15 +582,6 @@ fn join_gossip(
     let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
 
     let sender = MeshSender::new(gossip_sender).counting(state.idle.wire_out.clone());
-    // The task that sends the digest answers, so that the loop never waits for
-    // the gossip actor to take them.
-    if let Some(resends) = state.resend_receiver.take() {
-        task::spawn(outbox::drain(
-            resends,
-            sender.clone(),
-            state.unicast_pool.clone(),
-        ));
-    }
     (sender, receiver)
 }
 
@@ -637,20 +623,21 @@ async fn alive_arm(
     }
 }
 
-/// The anti-entropy tick: note the gap, advertise the chat digest, then both
-/// channel digests, so peers can request anything we hold that they miss.
-async fn antientropy_arm(
+/// The backfill tick: note the gap, then send the backfill that a newcomer is still owed. Loss
+/// repair is not back yet, so the tick does not repair a lost frame.
+async fn backfill_arm(
     anchors: &mut TickAnchors,
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
     timers::note_tick_gap(
-        "antientropy",
-        &mut anchors.antientropy,
-        &mut anchors.antientropy_wall,
-        antientropy_interval(),
+        "backfill",
+        &mut anchors.backfill,
+        &mut anchors.backfill_wall,
+        backfill_interval(),
     );
-    gossip::antientropy::tick_digests(state, context).await;
+    gossip::backfill::settle(state, Instant::now()).await;
+    gossip::digest_round::send_roots(state, context).await;
 }
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
@@ -751,10 +738,7 @@ async fn advertise_links(
         return;
     };
     state.idle.broadcasts += 1;
-    // Not retained in the log, unlike a chat message: the next tick's vector
-    // replaces this one, and peers never log what they receive (see
-    // `is_loggable`), so a retained copy would be one that nobody else holds and
-    // that every digest asks us for again.
+    // The next tick's vector replaces this one, so nothing is kept of it.
     let vector_msg =
         protocol::Message::new_link_state(context.mesh, context.author, body).sign(&state.identity);
     gossip::broadcast_msg(context.sender, &vector_msg).await;
@@ -866,8 +850,6 @@ struct EventLoop<Driver: NodeDriver> {
     /// Path watcher reports (`transport::probe::on_path_change`). Never closes,
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
-    /// Flushed frames whose dial failed (`gossip::requeue_failed`). Never closes, like `direct_rx`.
-    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, messages::WireFrame)>,
     /// Closed with the rendezvous as the loop ends.
     owned: OwnedEndpoints,
 }
@@ -918,7 +900,6 @@ struct Loop<'node, Driver: NodeDriver> {
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
-    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, messages::WireFrame)>,
     anchors: TickAnchors,
     resubscribe_attempts: u32,
     owned: OwnedEndpoints,
@@ -942,6 +923,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             self.owned,
         )
         .await;
+        super::cohost_arm::wait_for_shed_close(&mut self.state).await;
         match outcome {
             Ok(exit_after_release) => {
                 if exit_after_release {
@@ -1081,12 +1063,6 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         );
     }
 
-    fn flush_failed(&mut self, (message, bytes): (Verified, messages::WireFrame)) {
-        self.state.idle.ext.other += 1;
-        let context = self.parts.handler_ctx(&self.sender);
-        gossip::requeue_failed(&mut self.state, &context, message, bytes);
-    }
-
     /// A lane slot freed: the offers that waited for it are made now.
     async fn top_up_lanes(&mut self) {
         self.state.idle.ext.other += 1;
@@ -1134,18 +1110,10 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     async fn unicast(&mut self, frame: transport::UnicastFrame) {
         self.state.idle.ext.unicast += 1;
         let context = self.parts.handler_ctx(&self.sender);
-        // The digest handlers answer a unicast digest on the plane it came by, to the endpoint of
-        // its connection.
-        self.state.state_digest_serves.unicast.arrived_from = Some(frame.from);
-        gossip::ingest_from(
-            Plane::Unicast,
-            frame.bytes,
-            &mut self.state,
-            &mut self.app,
-            &context,
-        )
-        .await;
-        self.state.state_digest_serves.unicast.arrived_from = None;
+        // The proof answer goes back on the plane it came by, to the endpoint of its connection.
+        self.state.unicast_arrival = Some(frame.from);
+        gossip::ingest_from(frame.bytes, &mut self.state, &mut self.app, &context).await;
+        self.state.unicast_arrival = None;
         // A frame on a unicast connection shows that a connection to its endpoint is up: the proof
         // requests that waited for one go now.
         let sign = Some(lifecycle::PathSign::Unicast(frame.from));
@@ -1155,28 +1123,11 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     fn prune(&mut self) {
         self.state.idle.prune += 1;
         timers::tick_prune(&mut self.state, self.parts.sink);
-        let context = self.parts.handler_ctx(&self.sender);
-        timers::tick_epoch(&mut self.state, &context.our_pubkey);
-        seed_job::tick(&mut self.state, context.author, context.mesh);
-        timers::tick_doc_census(&mut self.state, &context.our_pubkey);
         timers::tick_collection_census(&self.state);
     }
 
     /// The build of a seed of the state channel is done: sign the chain and send it, root first.
     /// A node that cannot reach the overlay keeps the frames for when it meshes.
-    async fn seed_built(&mut self, outcome: Result<seed_job::SeedOutcome, JoinError>) {
-        let context = self.parts.handler_ctx(&self.sender);
-        let frames = seed_job::finish(&mut self.state, outcome, context.author, context.mesh);
-        seed_job::send_frames(&mut self.state, &self.sender, frames, seed_job::Chain::Seed).await;
-    }
-
-    /// Send the replay of the writes that a seed lacks, and the restores that are due, which the
-    /// tick of the state channel queued.
-    async fn send_replays(&mut self) {
-        let context = self.parts.handler_ctx(&self.sender);
-        seed_job::send_replays(&mut self.state, &self.sender, context.author, context.mesh).await;
-    }
-
     async fn alive(&mut self) {
         self.state.idle.alive += 1;
         let context = self.parts.handler_ctx(&self.sender);
@@ -1211,27 +1162,19 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.sweep += 1;
         sweep_arm(&mut self.anchors, &mut self.state, self.parts.sink);
         let context = self.parts.handler_ctx(&self.sender);
-        // The sweep can end a nickname clash, and a directed frame waits in the buffer for that.
+        // The sweep is one more retry for a buffered broadcast that failed to send.
         if self.state.standing.contains(&Standing::Meshed)
             && !self.state.pending_outbound.is_empty()
         {
             gossip::flush_pending(&mut self.state, &context, "silence sweep").await;
         }
-        // A `PeerInfo` that a member missed is repaired by no digest: send it again by period.
+        // A `PeerInfo` that a member missed is repaired by no frame, only by the flood of its sender: send it again by period.
         if self.state.peerinfo_refresh_due(Instant::now()) {
             gossip::broadcast_peer_info(&mut self.state, &context).await;
             self.state.last_sent_at = Instant::now();
         }
-        probe::prove_routed_pairs(&mut self.state, &context).await;
+        probe::prove_routed_pairs(&mut self.state, &context);
         self.app.on_tick(&mut self.state, &context).await;
-        let write = gossip::MergeCtx {
-            mesh: context.mesh,
-            author: context.author,
-            sender: context.sender,
-            sink: context.sink,
-        };
-        gossip::write_entry_again(&mut self.state, &write).await;
-        seed_job::sync_deadline(&mut self.state);
         // The proof requests that waited for a warm path and got none from a unicast frame: once more.
         lifecycle::retry_deferred_asks(&mut self.state, &context, None).await;
     }
@@ -1483,18 +1426,22 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         }
         probe::regraft_due(&mut self.state, &context).await;
         probe::refill_isolated(&mut self.state, &context).await;
-        webrtc::session_policy::detach_sessions_under_udp(&mut self.state, &context).await;
-        gossip::antientropy::resume_fast_rounds(&mut self.state, &context).await;
+        webrtc::session_policy::detach_sessions_under_udp(&mut self.state, &context);
     }
 
-    async fn antientropy(&mut self) {
-        self.state.idle.antientropy += 1;
+    async fn backfill(&mut self) {
+        self.state.idle.backfill += 1;
         let context = self.parts.handler_ctx(&self.sender);
-        antientropy_arm(&mut self.anchors, &mut self.state, &context).await;
+        backfill_arm(&mut self.anchors, &mut self.state, &context).await;
     }
 
     // Counted before the census reads them, so the tick that reports an
     // interval is itself in that interval's numbers.
+    async fn digest_round(&mut self) {
+        let context = self.parts.handler_ctx(&self.sender);
+        gossip::digest_round::advance(&mut self.state, &context, Instant::now()).await;
+    }
+
     async fn state_refresh(&mut self) {
         self.state.idle.state_refresh += 1;
         timers::tick_state_refresh(&mut self.state, self.parts.endpoint, &self.gossip).await;
@@ -1585,7 +1532,6 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         lan_contacts,
         direct_rx,
         path_rx,
-        flush_failed_rx,
         owned,
     } = loop_state;
 
@@ -1663,7 +1609,6 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         lan_contacts,
         direct_rx,
         path_rx,
-        flush_failed_rx,
         anchors,
         resubscribe_attempts,
         owned,
@@ -1712,7 +1657,6 @@ async fn run_loop<Driver: NodeDriver>(
                 lp.gossip_event(event).await;
             }
             Some(outcome) = lp.direct_rx.recv() => { lp.direct_outcome(outcome).await; },
-            Some(failed) = lp.flush_failed_rx.recv() => { lp.flush_failed(failed); },
             () = slot_freed.notified() => { lp.top_up_lanes().await; },
             () = underlay_slot_freed.notified() => {
                 lp.state.idle.ext.other += 1;
@@ -1740,11 +1684,6 @@ async fn run_loop<Driver: NodeDriver>(
             _ = lp.intervals.prune.tick() => {
                 lp.prune();
                 lifecycle::end_pending_endpoints(&mut lp.state).await;
-                lp.send_replays().await;
-            },
-            outcome = seed_job::seed_job_done(&mut lp.state.seed_job) => {
-                lp.state.idle.seed_built += 1;
-                lp.seed_built(outcome).await;
             },
             _ = lp.intervals.alive.tick() => { lp.alive().await; },
             _ = lp.intervals.sweep.tick() => {
@@ -1752,12 +1691,13 @@ async fn run_loop<Driver: NodeDriver>(
                 lifecycle::end_pending_endpoints(&mut lp.state).await;
             },
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
+            _ = lp.intervals.digest_round.tick() => { lp.digest_round().await; },
             Ok(()) = lp.rung_rx.changed() => { lp.rung_change(); },
             found_rival = beacon::probe_verdict(&mut lp.rival_probe) => { lp.probe_verdict(found_rival).await; },
             Some(report) = lp.rung_reports.recv() => { lp.rung_report(report).await; },
             () = closed_opt(&mut lp.state.beacon_closing) => { lp.beacon_closed().await; },
             _ = lp.intervals.reclaim.tick() => { lp.reclaim().await; },
-            _ = lp.intervals.antientropy.tick() => { lp.antientropy().await; },
+            _ = lp.intervals.backfill.tick() => { lp.backfill().await; },
             _ = lp.intervals.state_refresh.tick() => { lp.state_refresh().await; },
             _ = lp.intervals.linkstate.tick() => { lp.linkstate().await; },
             _ = recv_opt(&mut lp.external_quit_rx) => {
@@ -1929,11 +1869,11 @@ struct TickAnchors {
     alive: Instant,
     sweep: Instant,
     heal: Instant,
-    antientropy: Instant,
+    backfill: Instant,
     alive_wall: UnixSecs,
     sweep_wall: UnixSecs,
     heal_wall: UnixSecs,
-    antientropy_wall: UnixSecs,
+    backfill_wall: UnixSecs,
 }
 
 impl TickAnchors {
@@ -1944,11 +1884,11 @@ impl TickAnchors {
             alive: mono,
             sweep: mono,
             heal: mono,
-            antientropy: mono,
+            backfill: mono,
             alive_wall: wall,
             sweep_wall: wall,
             heal_wall: wall,
-            antientropy_wall: wall,
+            backfill_wall: wall,
         }
     }
 }
@@ -1962,9 +1902,11 @@ struct MaintenanceIntervals {
     /// Fast event-driven failover burst; only does work while
     /// `state.reclaim_until` is open (armed on `NeighborDown`).
     reclaim: time::Interval,
-    /// Periodic anti-entropy digest broadcast (recover messages missed
+    /// Periodic backfill check (recover slices missed
     /// while partitioned/asleep).
-    antientropy: time::Interval,
+    backfill: time::Interval,
+    /// The digest round: the settle ends and the page requests are sent on this tick.
+    digest_round: time::Interval,
     state_refresh: time::Interval,
     /// Periodic relay link-state re-broadcast (our own measured links), so peers
     /// keep a fresh routing graph.
@@ -1976,7 +1918,7 @@ struct MaintenanceIntervals {
 ///
 /// Every ticker uses `MissedTickBehavior::Skip`: after the monotonic clock
 /// jumps (an App Nap throttle, a SIGSTOP freeze), a default `Burst` ticker
-/// fires a catch-up salvo — several anti-entropy digests back-to-back, a
+/// fires a catch-up salvo — several backfill checks back-to-back, a
 /// heal immediately after the hard re-bootstrap it just ran, a prune replaying
 /// its backlog — and poisons the tick-gap telemetry (the burst ticks report a
 /// ~0 gap). Each tick here means "do the maintenance now", so a skipped tick is
@@ -1998,9 +1940,12 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
     let mut reclaim = time::interval(RECLAIM_INTERVAL);
     reclaim.set_missed_tick_behavior(Skip);
     reclaim.tick().await;
-    let mut antientropy = time::interval(antientropy_interval());
-    antientropy.set_missed_tick_behavior(Skip);
-    antientropy.tick().await;
+    let mut backfill = time::interval(backfill_interval());
+    backfill.set_missed_tick_behavior(Skip);
+    backfill.tick().await;
+    let mut digest_round = time::interval(DIGEST_ROUND_TICK);
+    digest_round.set_missed_tick_behavior(Skip);
+    digest_round.tick().await;
     let mut state_refresh = time::interval(STATE_REFRESH);
     state_refresh.set_missed_tick_behavior(Skip);
     state_refresh.tick().await;
@@ -2013,7 +1958,8 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
         sweep,
         heal,
         reclaim,
-        antientropy,
+        backfill,
+        digest_round,
         state_refresh,
         linkstate,
     }

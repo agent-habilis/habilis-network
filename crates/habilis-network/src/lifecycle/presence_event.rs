@@ -1,5 +1,5 @@
 use crate::daemon::handler_ctx::HandlerCtx;
-use crate::daemon::state::{EventLoopState, Standing};
+use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
 use crate::logging::messages;
@@ -133,19 +133,12 @@ pub(crate) async fn end_session(
     if state.key_said_goodbye(key) {
         return false;
     }
-    // A session that lost its nickname said no goodbye, and no other node drops its frames: a peer that
-    // holds them would resend them to this node at every digest round while the holder keeps the name.
-    if !matches!(goodbye, Goodbye::Refused(_)) {
-        state.drop_departed_presence(&key);
-    }
     // The roster is keyed by author key, so a goodbye ends that key and no other: another key
     // under the same nickname stays a peer. Any key can sign a goodbye under any nickname, and
     // the goodbye of a key that is not in the roster removes nothing. It is kept apart from
     // the goodbyes of peers, so a flood of them cannot evict those. A key that outlived the
     // quiet TTL is still in the roster: it keeps its name and its dial hint.
-    let was_peer = state.peers.contains(&key)
-        || state.quiet.contains(&key)
-        || state.clock_evidence.lapsed_quiet.contains(&key);
+    let was_peer = state.in_roster(&key);
     if !was_peer {
         state.note_stranger_left(key);
         // A `PeerInfo` can bind a hint before the roster admits its key, and the hint of a
@@ -176,6 +169,12 @@ pub(crate) async fn end_session(
     // down, unless a nickname still binds it. `forget_key` drops the trust, so read it first.
     let proved = state.proven_endpoints.trusted(&key);
     let left_hints = state.forget_key(key);
+    // The slices of the key leave with it. A key that lost its nickname can return, so its slices wait.
+    if matches!(goodbye, Goodbye::Refused(_)) {
+        state.docs.park(&key, Instant::now());
+    } else {
+        state.docs.forget(&key, Instant::now());
+    }
     let hinted = left_hints.iter().map(|hint| hint.id);
     let left_endpoints: Vec<_> = hinted.chain(proved).collect();
     end_unbound_endpoints(state, left_endpoints).await;
@@ -191,11 +190,6 @@ pub(crate) async fn end_session(
         tracing::info!(target: "habilis_network::lifecycle", nickname = %departed, "peer left");
     }
     state.write_peer_count();
-    // A departure is a flush edge: the frames to the key that left are gone from the buffer
-    // (`forget_key`), and the rest go now.
-    if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
-        gossip::flush_pending(state, context, "peer left").await;
-    }
     // App cleanup last, with the roster already consistent. The app hears of every key that
     // leaves, whoever else holds its nickname. Not gated on `surfaceable`: the key was in the
     // roster, so a goodbye ends it whatever the clock of its sender says. The join horizon

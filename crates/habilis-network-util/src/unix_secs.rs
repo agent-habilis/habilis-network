@@ -8,7 +8,7 @@ use crate::clock::SystemTime;
 
 use std::{fmt, ops};
 /// A point in time as whole seconds since the Unix epoch: the unit of a message timestamp, of
-/// the join time, of a digest window bound and of an invite expiry.
+/// the join time, of a window bound and of an invite expiry.
 ///
 /// It is a count, so it does not take a number of seconds where a point is meant: a raw
 /// `i64` does not compare with it, and the sum of a point and a [`Duration`] is a point.
@@ -38,7 +38,7 @@ impl From<[u8; 8]> for UnixSecs {
 impl UnixSecs {
     /// The epoch. An invite uses it for "never expires".
     pub const ZERO: Self = Self(0);
-    /// The latest point: the open end of a digest window, and the expiry that nothing reaches.
+    /// The latest point: the open end of a window, and the expiry that nothing reaches.
     pub const MAX: Self = Self(i64::MAX);
 
     /// The seconds since the epoch, for a wire field or a log line.
