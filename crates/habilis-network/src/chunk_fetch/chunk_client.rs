@@ -11,7 +11,6 @@ use n0_future::time as n0future_time;
 
 use super::answer_check::{decode_chunk, decode_map};
 use super::{ChunkRequest, FetchError};
-use crate::daemon::state::MeshChunks;
 use crate::transport::CHUNKS_ALPN;
 use crate::util::tuning::CHUNK_STREAM_TIMEOUT;
 
@@ -49,8 +48,10 @@ impl ChunkClient {
         self
     }
 
-    /// The value that `pointer` names, asked of `sources` in order, and kept in `chunks` so that this node can serve
-    /// it in turn. A source that fails is skipped for the rest of the fetch, and the next one is asked.
+    /// The bytes of the value that `pointer` names as the chunks keep them (the seal of a passworded mesh is still on
+    /// them), asked of `sources` in order. `stored_size` is their length: the size of the pointer, and the seal. The
+    /// bytes are not kept here: the loop that asked keeps them, opens them and resolves the slice in one step, so no
+    /// sweep can come between. A source that fails is skipped for the rest of the fetch, and the next one is asked.
     ///
     /// # Errors
     ///
@@ -60,7 +61,7 @@ impl ChunkClient {
         &self,
         sources: &[EndpointAddr],
         pointer: ChunkPointer,
-        chunks: &MeshChunks,
+        stored_size: u64,
     ) -> Result<Vec<u8>, FetchError> {
         let mut holders: Vec<Source> = sources
             .iter()
@@ -71,21 +72,13 @@ impl ChunkClient {
             })
             .collect();
         let root = pointer.root();
-        let stored_size = chunks.stored_size(pointer);
         let map = self.map_from_any(&mut holders, root, stored_size).await?;
         let mut stored = Vec::with_capacity(usize::try_from(stored_size).unwrap_or(0));
         for index in 0..map.len() {
             let chunk = self.chunk_from_any(&mut holders, &map, index).await?;
             stored.extend_from_slice(&chunk);
         }
-        let kept: Root = chunks
-            .put_stored(&stored)
-            .await
-            .map_err(|_| FetchError::Store)?;
-        if kept != root {
-            return Err(FetchError::RootMismatch);
-        }
-        chunks.open_value(&stored).map_err(|_| FetchError::Seal)
+        Ok(stored)
     }
 
     /// The map of `root` from the first source that gives one that checks. The answer is read up to the bytes
@@ -344,17 +337,16 @@ mod tests {
         let author = serve_state(Box::new(state)).await;
         let chunks = MeshChunks::open(None).expect("an in-memory store");
         let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
-            .fetch(slice::from_ref(&author.address), pointer, &chunks)
+            .fetch(
+                slice::from_ref(&author.address),
+                pointer,
+                chunks.stored_size(pointer),
+            )
             .await;
         assert_eq!(
             fetched,
             Ok(value),
             "the fetched value must be the bytes that were put"
-        );
-        assert_eq!(
-            chunks.stored_chunks(),
-            4,
-            "the fetched chunks must be kept, so this node can serve them"
         );
         client.close().await;
         author.close().await;
@@ -371,24 +363,20 @@ mod tests {
         }))
         .await;
         let alone: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
-            .fetch(slice::from_ref(&corrupt.address), pointer, &chunks)
+            .fetch(
+                slice::from_ref(&corrupt.address),
+                pointer,
+                chunks.stored_size(pointer),
+            )
             .await;
         assert!(
             matches!(alone, Err(FetchError::CorruptChunk { .. })),
             "a corrupt chunk must be refused, got {alone:?}"
         );
-        assert_eq!(
-            chunks.stored_chunks(),
-            0,
-            "a refused value must leave no chunk"
-        );
         let honest_node = serve_with(honest(&value, |answer| answer)).await;
+        let sources: [EndpointAddr; 2] = [corrupt.address.clone(), honest_node.address.clone()];
         let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
-            .fetch(
-                &[corrupt.address.clone(), honest_node.address.clone()],
-                pointer,
-                &chunks,
-            )
+            .fetch(&sources, pointer, chunks.stored_size(pointer))
             .await;
         assert_eq!(fetched, Ok(value), "the next source must give the value");
         client.close().await;
@@ -413,7 +401,11 @@ mod tests {
         })
         .await;
         let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
-            .fetch(slice::from_ref(&liar.address), pointer, &chunks)
+            .fetch(
+                slice::from_ref(&liar.address),
+                pointer,
+                chunks.stored_size(pointer),
+            )
             .await;
         client.close().await;
         liar.close().await;
@@ -460,7 +452,11 @@ mod tests {
         .await;
         let started = Instant::now();
         let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
-            .fetch(slice::from_ref(&flood.address), pointer, &chunks)
+            .fetch(
+                slice::from_ref(&flood.address),
+                pointer,
+                chunks.stored_size(pointer),
+            )
             .await;
         assert_eq!(
             fetched,
@@ -492,16 +488,31 @@ mod tests {
             .expect("an in-memory store")
             .key(Some(key.derive(b"chunks")));
         let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
-            .fetch(slice::from_ref(&author.address), pointer, &keyed)
+            .fetch(
+                slice::from_ref(&author.address),
+                pointer,
+                keyed.stored_size(pointer),
+            )
             .await;
+        let sealed = fetched.expect("the member with the key must fetch the sealed bytes");
+        assert_ne!(
+            sealed, value,
+            "the bytes that travel and rest in the chunks must be sealed"
+        );
         assert_eq!(
-            fetched,
-            Ok(value.clone()),
+            keyed
+                .open_value(&sealed)
+                .expect("the key of the mesh opens them"),
+            value,
             "the member with the key must get the value"
         );
         let without = MeshChunks::open(None).expect("an in-memory store");
         let refused: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
-            .fetch(slice::from_ref(&author.address), pointer, &without)
+            .fetch(
+                slice::from_ref(&author.address),
+                pointer,
+                without.stored_size(pointer),
+            )
             .await;
         assert!(
             refused.is_err(),
@@ -510,12 +521,17 @@ mod tests {
         let other = MeshChunks::open(None)
             .expect("an in-memory store")
             .key(Some(SymmetricKey::from([6u8; 32])));
-        let wrong_key: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
-            .fetch(slice::from_ref(&author.address), pointer, &other)
+        let with_other_key: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
+            .fetch(
+                slice::from_ref(&author.address),
+                pointer,
+                other.stored_size(pointer),
+            )
             .await;
-        assert_eq!(
-            wrong_key,
-            Err(FetchError::Seal),
+        let fetched_sealed =
+            with_other_key.expect("the chunks check against their root whatever the key");
+        assert!(
+            other.open_value(&fetched_sealed).is_err(),
             "a node with another key must not open the value"
         );
         client.close().await;
@@ -535,13 +551,21 @@ mod tests {
         // The relay fetches from the author, and keeps the chunks, and a slice of the peer names the root there.
         let relay_chunks = MeshChunks::open(None).expect("an in-memory store");
         let from_author: Result<Vec<u8>, FetchError> = ChunkClient::new(relay_client.clone())
-            .fetch(slice::from_ref(&author.address), pointer, &relay_chunks)
+            .fetch(
+                slice::from_ref(&author.address),
+                pointer,
+                relay_chunks.stored_size(pointer),
+            )
             .await;
+        let stored = from_author.expect("the relay must fetch from the author");
         assert_eq!(
-            from_author,
-            Ok(value.clone()),
-            "the relay must fetch from the author"
+            stored, value,
+            "the relay must fetch the bytes of the author"
         );
+        relay_chunks
+            .put_stored(&stored)
+            .await
+            .expect("the relay keeps what it fetched");
         let mut relay_state = state_trusting(late_client.id());
         relay_state.chunks = relay_chunks;
         name_root(&mut relay_state, &peer, pointer, 1);
@@ -549,9 +573,10 @@ mod tests {
         let author_address = author.address.clone();
         author.close().await;
         let chunks = MeshChunks::open(None).expect("an in-memory store");
+        let sources: [EndpointAddr; 2] = [author_address, relay.address.clone()];
         let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(late_client.clone())
             .deadline(Duration::from_secs(2))
-            .fetch(&[author_address, relay.address.clone()], pointer, &chunks)
+            .fetch(&sources, pointer, chunks.stored_size(pointer))
             .await;
         assert_eq!(
             fetched,
@@ -573,7 +598,7 @@ mod tests {
         let sources: [EndpointAddr; 2] = [stalled.address.clone(), honest_node.address.clone()];
         let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
             .deadline(Duration::from_millis(1500))
-            .fetch(&sources, pointer, &chunks)
+            .fetch(&sources, pointer, chunks.stored_size(pointer))
             .await;
         assert_eq!(
             fetched,

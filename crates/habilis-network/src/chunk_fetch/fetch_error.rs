@@ -25,10 +25,6 @@ pub(crate) enum FetchError {
     Stalled,
     /// No holder was left to ask, or the list of holders was empty.
     NoSource,
-    /// The chunk store could not keep the value.
-    Store,
-    /// The value does not open with the key of the mesh.
-    Seal,
 }
 
 impl fmt::Display for FetchError {
@@ -53,11 +49,6 @@ impl fmt::Display for FetchError {
             Self::Unreachable => write!(formatter, "the holder cannot be reached"),
             Self::Stalled => write!(formatter, "the holder did not answer in time"),
             Self::NoSource => write!(formatter, "no holder is left to ask"),
-            Self::Store => write!(formatter, "the chunk store cannot keep the value"),
-            Self::Seal => write!(
-                formatter,
-                "the value does not open with the key of the mesh"
-            ),
         }
     }
 }
