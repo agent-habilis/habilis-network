@@ -1336,6 +1336,13 @@ pub(crate) fn default_state_path(base: &Path, mesh: &MeshId, author: &Nickname) 
     util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.state.json"))
 }
 
+/// The chunk folder of a node: `<runtime base>/<mesh folder>/<nickname>.chunks`. A run clears it when it starts.
+#[cfg(feature = "host")]
+pub(crate) fn default_chunks_path(base: &Path, mesh: &MeshId, author: &Nickname) -> PathBuf {
+    use crate::util;
+    util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.chunks"))
+}
+
 /// The keys of this run, under the state path that [`keys_state_path`] gives. `mesh` is the mesh id and the
 /// nickname of this member.
 async fn run_keys_for(

@@ -40,7 +40,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::protocol::meshes::{Mesh, MeshName};
+use crate::protocol::meshes::MeshName;
 use crate::protocol::messages::Authored;
 use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};
@@ -71,7 +71,7 @@ use super::node::SignalHandling;
 #[cfg(feature = "host")]
 use super::shutdown;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
-use super::state::{EventLoopState, FrameOverheads, MeshSecrets};
+use super::state::{EventLoopState, FrameOverheads, MeshChunks, MeshSecrets};
 use super::timers;
 use crate::daemon::setup::LiveCount;
 use crate::protocol::Channel;
@@ -148,13 +148,13 @@ async fn run_checked<Driver: NodeDriver>(
     let external_req_rx = session_rx;
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
+    let chunks = open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author)?;
     let mut state: EventLoopState = initial_state(
         mesh.keys,
         MeshSecrets {
             password: mesh.mesh_password.take(),
             key: mesh.mesh_key.take(),
         },
-        mesh.mint_mesh.take(),
         &transports,
         started,
         state_file,
@@ -163,7 +163,9 @@ async fn run_checked<Driver: NodeDriver>(
             meta: habilis_network_doc::frame_overhead(Channel::Meta, &mesh.mesh, &mesh.author),
             page: habilis_network_doc::page_frame_overhead(&mesh.mesh, &mesh.author),
         },
+        chunks,
     );
+    state.mint_mesh = mesh.mint_mesh.take(); // creator-only: backs the `invite` command
     let owned = OwnedEndpoints {
         router: endpoints.router,
         owner: endpoints.endpoint_owner,
@@ -393,6 +395,32 @@ fn leave_label(mesh: &MeshSpec) -> String {
     )
 }
 
+/// The chunk store of this run: in the folder of the node under the runtime base, and in memory when there is no
+/// runtime base.
+#[cfg_attr(
+    not(feature = "host"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as the version for a target with files"
+    )
+)]
+fn open_chunks(
+    runtime_base: Option<&path::Path>,
+    mesh: &MeshId,
+    author: &Nickname,
+) -> Result<MeshChunks> {
+    #[cfg(feature = "host")]
+    if let Some(base) = runtime_base {
+        use crate::util;
+        util::ensure_mesh_runtime_dir(base, mesh.as_str())?;
+        let folder = setup::default_chunks_path(base, mesh, author);
+        return Ok(MeshChunks::open(Some(&folder))?);
+    }
+    #[cfg(not(feature = "host"))]
+    let _ = (runtime_base, mesh, author);
+    Ok(MeshChunks::open(None)?)
+}
+
 /// The state file a daemon seeds its state with: a host daemon has one, and a browser keeps its path.
 #[cfg(feature = "host")]
 type StateFileSeed = Option<StateFile>;
@@ -405,21 +433,22 @@ fn initial_state(
     // The loop holds the keys across `&mut state`, so it keeps shared handles.
     keys: state::RunKeys,
     secrets: MeshSecrets,
-    mint_mesh: Option<Mesh>,
     transports: &TransportSet,
     started: Instant,
     state_file: StateFileSeed,
     overheads: FrameOverheads,
+    chunks: MeshChunks,
 ) -> EventLoopState {
     #[cfg(not(feature = "host"))]
     drop(state_file);
-    let mut state: EventLoopState = EventLoopState::new(
+    EventLoopState::new(
         state::StateInit {
             #[cfg(feature = "host")]
             state_file,
             keys,
             secrets,
             overheads,
+            chunks,
             // The *same* table the Router's signal acceptor holds, not a fresh
             // one: the cap only counts if both roles count against it together.
             webrtc_admission: transports.webrtc_admission.clone(),
@@ -427,9 +456,7 @@ fn initial_state(
             webrtc_ice: transports.webrtc_ice,
         },
         started,
-    );
-    state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
-    state
+    )
 }
 
 /// Wires the transports into the state, and returns the receivers of the three channels that

@@ -6,8 +6,9 @@ use super::TestDrop;
 use super::TestHold;
 use super::peer_info_flood::PeerInfoFlood;
 use super::{
-    BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshSecrets, PingRound,
-    Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
+    BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshChunks,
+    MeshSecrets, PingRound, Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot,
+    Standing, StateInit,
 };
 use crate::daemon::cohost_arm;
 use crate::daemon::probe_backoff::ProbeBackoff;
@@ -821,6 +822,12 @@ pub struct EventLoopState {
     pub(crate) shard_cache: ShardCache,
     /// The shared documents of the `state` and `meta` channels.
     pub(crate) docs: ChannelDocs,
+    /// The chunks of the values that are too large for a slice, held for this run.
+    #[expect(
+        dead_code,
+        reason = "the write path of a large value reads it in the next step"
+    )]
+    chunks: MeshChunks,
     /// This member's signing identity (Ed25519). Shared with the
     /// send path so messages we author are signed before broadcast.
     /// The public key is the durable identity; the nickname is a
@@ -1028,6 +1035,7 @@ impl EventLoopState {
             receive_memory: ReceiveMemory::default(),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
+            chunks: init.chunks,
             docs: ChannelDocs {
                 state: SliceStore::new(
                     protocol::Channel::State,

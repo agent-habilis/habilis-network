@@ -18,7 +18,9 @@ use std::sync::Arc;
 use iroh::{EndpointId, SecretKey};
 use sha2::{Digest as _, Sha256};
 
-use crate::daemon::state::{EventLoopState, FrameOverheads, MeshSecrets, RunKeys, StateInit};
+use crate::daemon::state::{
+    EventLoopState, FrameOverheads, MeshChunks, MeshSecrets, RunKeys, StateInit,
+};
 use crate::protocol::identity::Identity;
 use crate::protocol::{AuthorKey, Channel, MeshId, Nickname, peer_addr_error};
 use crate::util::clock::Instant;
@@ -60,6 +62,7 @@ fn fresh_state_that_waits_with_book_and_member(
         StateInit {
             #[cfg(feature = "host")]
             state_file: None,
+            chunks: MeshChunks::open(None).expect("a store in memory"),
             overheads: FrameOverheads {
                 state: habilis_network_doc::frame_overhead(
                     Channel::State,

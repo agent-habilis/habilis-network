@@ -5,6 +5,11 @@ mod gossip_msgs;
 mod idle_counters;
 mod key_of_error;
 mod latch;
+#[expect(
+    dead_code,
+    reason = "the write path of a large value reads the store in the next step"
+)]
+mod mesh_chunks;
 mod mesh_secrets;
 mod ping_round;
 mod proof_book;
@@ -49,6 +54,7 @@ pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
 pub(crate) use idle_counters::note_ppid_wake;
 pub(crate) use idle_counters::{IdleCounters, note_sampler_wake};
 pub(crate) use latch::Latch;
+pub(crate) use mesh_chunks::MeshChunks;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
 pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};

@@ -301,7 +301,7 @@ Issue #29 records each decision.
 
 ### Remaining `#[expect]` attributes
 
-Sixteen `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C ABI of the ffi crate and its test, and libc calls that have no safe wrapper), one that suppresses `deprecated`, six that suppress a `clippy` lint, and one that suppresses `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
+Eighteen `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C ABI of the ffi crate and its test, and libc calls that have no safe wrapper), one that suppresses `deprecated`, six that suppress a `clippy` lint, and three that suppress `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -321,6 +321,8 @@ Sixteen `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the
 | `habilis-network/src/daemon/setup.rs` (`member_key`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
 | `habilis-network/src/daemon/setup.rs` (`setup_mesh_inner`) | `clippy::too_many_lines` | the setup is one assembly of the mesh, in the order that its parts need |
 | `habilis-network/src/daemon/state/event_loop_state.rs` (field `key_lock`) | `dead_code` | the field is held for the lock it carries, and it is never read |
+| `habilis-network/src/daemon/state.rs` (module `mesh_chunks`) | `dead_code` | the chunk store of a run has no reader until the write path of a large value lands |
+| `habilis-network/src/daemon/state/event_loop_state.rs` (field `chunks`) | `dead_code` | the same store, held by the state and read by the write path of a large value in the next step |
 
 ### Rules of the guide that do not apply
 
