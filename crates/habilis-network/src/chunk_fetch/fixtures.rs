@@ -13,21 +13,21 @@ use crate::protocol::{Channel, MeshId, Message, MessageBody, SymmetricKey};
 use crate::testing::{fresh_state, nick, test_key};
 
 /// Bytes that no two chunks of share, `len` long.
-pub(super) fn bytes(len: usize) -> Vec<u8> {
+pub(crate) fn bytes(len: usize) -> Vec<u8> {
     (0..len)
         .map(|index| u8::try_from((index * 31 + index / 7) % 251).expect("a byte"))
         .collect()
 }
 
 /// A state that trusts `member` as the endpoint of a member.
-pub(super) fn state_trusting(member: EndpointId) -> EventLoopState {
+pub(crate) fn state_trusting(member: EndpointId) -> EventLoopState {
     let mut state = fresh_state();
     state.proven_endpoints.trust(test_key("member"), member);
     state
 }
 
 /// Holds `value` as chunks, and a slice of `peer` that names them. Returns the root and the map.
-pub(super) async fn hold_named_value(
+pub(crate) async fn hold_named_value(
     state: &mut EventLoopState,
     peer: &Identity,
     value: &[u8],
@@ -45,7 +45,7 @@ pub(super) async fn hold_named_value(
 }
 
 /// Ingests a slice of a peer, with `version`, that names `pointer`.
-pub(super) fn name_root(
+pub(crate) fn name_root(
     state: &mut EventLoopState,
     peer: &Identity,
     pointer: ChunkPointer,
@@ -56,7 +56,7 @@ pub(super) fn name_root(
 }
 
 /// Ingests a slice of `peer` that names `pointer`, sealed with the key that the mesh key gives the `state` channel.
-pub(super) fn name_root_sealed(
+pub(crate) fn name_root_sealed(
     state: &mut EventLoopState,
     peer: &Identity,
     pointer: ChunkPointer,
@@ -71,7 +71,7 @@ pub(super) fn name_root_sealed(
 
 /// Holds `value` as chunks of a passworded mesh, and a slice of `peer` that names them, sealed with the key that
 /// the mesh key gives the `state` channel. Returns the root.
-pub(super) async fn hold_named_value_sealed(
+pub(crate) async fn hold_named_value_sealed(
     state: &mut EventLoopState,
     peer: &Identity,
     value: &[u8],
@@ -88,7 +88,7 @@ pub(super) async fn hold_named_value_sealed(
 }
 
 /// Ingests a slice of a peer, with the body `text`.
-pub(super) fn slice_of_peer(state: &mut EventLoopState, peer: &Identity, text: &str, version: u64) {
+pub(crate) fn slice_of_peer(state: &mut EventLoopState, peer: &Identity, text: &str, version: u64) {
     ingest_body(
         state,
         peer,

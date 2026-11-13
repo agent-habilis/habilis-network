@@ -8,7 +8,7 @@ mod chunk_serve_budget;
 mod fetch_error;
 mod fetches;
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 mod holder;
 mod keep_held;
 

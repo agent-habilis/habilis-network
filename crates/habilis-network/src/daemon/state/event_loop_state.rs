@@ -8,7 +8,7 @@ use super::peer_info_flood::PeerInfoFlood;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshChunks,
     MeshSecrets, PingRound, Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot,
-    Standing, StateInit,
+    Standing, StateInit, Syncing,
 };
 use crate::daemon::cohost_arm;
 use crate::daemon::probe_backoff::ProbeBackoff;
@@ -41,7 +41,7 @@ use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
-use habilis_network_chunks::Root;
+use habilis_network_chunks::{Root, chunk_count};
 use habilis_network_doc::{ChunkPointer, SliceError, SliceIngest, SliceLimits, SliceStore};
 use habilis_network_protocol::ContentHash;
 use habilis_network_protocol::digest::{DigestPage, DigestRoot};
@@ -156,6 +156,11 @@ impl ChannelDocs {
     /// The JSON view of `channel`: each author's slice under the lowercase hex of its key.
     pub(crate) fn to_json(&self, channel: protocol::Channel) -> serde_json::Value {
         serde_json::Value::Object(self.get(channel).view())
+    }
+
+    /// The JSON view of `channel` as the slices were signed: the value of a chunked slice is its pointer.
+    pub(crate) fn to_raw_json(&self, channel: protocol::Channel) -> serde_json::Value {
+        serde_json::Value::Object(self.get(channel).raw_view())
     }
 
     /// The value of the slice that `key` holds on `channel`, or an empty object.
@@ -1007,6 +1012,49 @@ impl EventLoopState {
     #[must_use]
     pub fn view(&self, channel: protocol::Channel) -> serde_json::Value {
         self.docs.to_json(channel)
+    }
+
+    /// The shared state of `channel` as the slices were signed: the value of a chunked slice is its pointer. It shows what
+    /// travels, to debug the sync. The `view` shows the whole values.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use habilis_network::embed::EventLoopState;
+    /// use habilis_network::protocol::Channel;
+    ///
+    /// # fn demo(state: &EventLoopState) {
+    /// let _signed = state.raw_view(Channel::State);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn raw_view(&self, channel: protocol::Channel) -> serde_json::Value {
+        self.docs.to_raw_json(channel)
+    }
+
+    /// The authors of `channel` whose new version is not whole yet, for the `syncing` list of a state read.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use habilis_network::embed::EventLoopState;
+    /// use habilis_network::protocol::Channel;
+    ///
+    /// # fn demo(state: &EventLoopState) {
+    /// let _waiting = state.syncing(Channel::State);
+    /// # }
+    /// ```
+    pub fn syncing(&self, channel: protocol::Channel) -> impl Iterator<Item = Syncing> + '_ {
+        let in_channel = self
+            .docs
+            .unresolved()
+            .into_iter()
+            .filter(move |(waiting_channel, ..)| *waiting_channel == channel);
+        in_channel.map(|(_, author, pointer)| {
+            let key = String::from_utf8_lossy(&author.hex()).into_owned();
+            let chunks = chunk_count(self.chunks.stored_size(pointer));
+            Syncing::new(key, pointer.root().to_hex(), 0, chunks)
+        })
     }
 
     /// Build a fresh event-loop state. `now` is passed explicitly so

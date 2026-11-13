@@ -26,6 +26,7 @@ mod rival_flag;
 mod roster_entry;
 mod roster_snapshot;
 mod standing;
+mod syncing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 mod test_drop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -74,6 +75,7 @@ pub(crate) use rival_flag::RivalFlag;
 pub use roster_entry::RosterEntry;
 pub use roster_snapshot::RosterSnapshot;
 pub(crate) use standing::Standing;
+pub use syncing::Syncing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use test_drop::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
