@@ -1806,4 +1806,50 @@ mod tests {
             "the burst must reach the rate limit at the boundary"
         );
     }
+    #[tokio::test]
+    async fn the_surfaced_body_of_a_chunked_own_write_is_the_pointer_and_not_the_value() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        write_own(&mut state, channel, big_value('x', 700_000))
+            .await
+            .expect("a chunked write");
+        let own = state.identity.author_key();
+        let body = state
+            .docs
+            .plain_body(channel, &own)
+            .expect("a body for a held slice");
+        let text: &[u8] = body.as_ref();
+        assert!(
+            text.len() < 400,
+            "the surfaced body must stay small for a value of 700000 bytes, got {} bytes",
+            text.len()
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(text).expect("a JSON body");
+        assert!(
+            parsed["value"].get("$chunks").is_some(),
+            "the surfaced body must name the chunks, got {parsed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_surfaced_body_of_an_inline_own_write_is_the_value() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        let value = big_value('x', 100);
+        write_own(&mut state, channel, value.clone())
+            .await
+            .expect("an inline write");
+        let own = state.identity.author_key();
+        let body = state
+            .docs
+            .plain_body(channel, &own)
+            .expect("a body for a held slice");
+        let text: &[u8] = body.as_ref();
+        let parsed: serde_json::Value = serde_json::from_slice(text).expect("a JSON body");
+        assert_eq!(
+            parsed["value"],
+            serde_json::Value::Object(value),
+            "the surfaced body of an inline write must carry the value"
+        );
+    }
 }

@@ -241,15 +241,19 @@ impl ChannelDocs {
         self.get(channel).frame(key)?.serialize().ok()
     }
 
-    /// The plaintext body of the slice that `key` holds on `channel`, in the shape of a frame body.
+    /// The plaintext body of the slice that `key` holds on `channel`, in the shape of a frame body. A
+    /// chunked slice has the pointer as its value, as the signed frame has, so the body stays one frame long.
     pub(crate) fn plain_body(
         &self,
         channel: protocol::Channel,
         key: &AuthorKey,
     ) -> Option<protocol::MessageBody> {
         let store = self.get(channel);
-        let body =
-            serde_json::json!({ "version": store.version(key)?, "value": store.value(key)? });
+        let value: serde_json::Value = match store.pointer(key) {
+            Some(pointer) => pointer.to_value(),
+            None => store.value(key)?.clone(),
+        };
+        let body = serde_json::json!({ "version": store.version(key)?, "value": value });
         protocol::MessageBody::try_new(&body.to_string()).ok()
     }
 
