@@ -923,6 +923,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             self.owned,
         )
         .await;
+        super::cohost_arm::wait_for_shed_close(&mut self.state).await;
         match outcome {
             Ok(exit_after_release) => {
                 if exit_after_release {
