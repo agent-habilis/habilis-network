@@ -1737,7 +1737,8 @@ fn maybe_push_inbound(
 ) {
     // Short-circuit the cheap structural guards first: no live inbound subscriber
     // (always so for CLI/MCP, where the field is `None`), a pre-join or
-    // third-party frame, or an infra kind.
+    // third-party frame, or a kind of the engine's own plumbing: the shared state and its
+    // digest round, the proof exchange, the link state, the address cards, and the ping rounds.
     let Some(tx) = context.external_msg_tx else {
         return;
     };
@@ -1746,7 +1747,17 @@ fn maybe_push_inbound(
         || !addressed_to_us(message, &context.our_pubkey)
         || matches!(
             message.kind,
-            MessageKind::State | MessageKind::Meta | MessageKind::Ping | MessageKind::Pong { .. }
+            MessageKind::State
+                | MessageKind::Meta
+                | MessageKind::Ping
+                | MessageKind::Pong { .. }
+                | MessageKind::PeerInfo
+                | MessageKind::ProofRequest { .. }
+                | MessageKind::LinkState
+                | MessageKind::SliceRoot { .. }
+                | MessageKind::SlicePull { .. }
+                | MessageKind::SlicePageRequest { .. }
+                | MessageKind::SlicePage { .. }
         )
     {
         return;
@@ -2162,7 +2173,7 @@ mod first_contact_tests {
 
     use super::{
         ChannelEvent, Gated, dispatch_channel, dispatch_infra, gate_and_decrypt,
-        handle_gossip_event, ingest, pong_for, promote_pending,
+        handle_gossip_event, ingest, maybe_push_inbound, pong_for, promote_pending,
     };
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::{EventLoopState, PingRound};
@@ -2203,7 +2214,7 @@ mod first_contact_tests {
     use std::sync::{Arc, Mutex, atomic};
     use std::time::{Duration, Instant as std_Instant};
     use std::{future, net};
-    use tokio::sync::mpsc;
+    use tokio::sync::{broadcast, mpsc};
     use tokio::{task as tokio_task, time as tokio_time};
     struct Inert;
 
@@ -4437,6 +4448,71 @@ mod first_contact_tests {
     }
 
     /// The four slice kinds name one addressee, so a node that is not the addressee does not take them.
+    /// **The engine plumbing does not reach a push subscriber.** A frame that the engine sends to
+    /// itself for the digest round, the proof exchange and the link state has no app tag, and the
+    /// push gate let any such frame through. A subscriber of the push channel got the raw frames of
+    /// the sync of its node, one round for each neighbor and each backfill tick. The control is a
+    /// `joined`, which is a presence the subscriber wants.
+    #[test]
+    fn engine_plumbing_addressed_to_us_is_not_pushed_and_a_joined_is() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let (tx, mut pushed) = broadcast::channel(16);
+            let context = HandlerCtx {
+                external_msg_tx: Some(&tx),
+                ..node.context()
+            };
+            let us = context.our_pubkey;
+            let root = || DigestRoot::new(ContentHash::of(b"root"), 1).expect("one page");
+            let entries = vec![DigestEntry::new(us, 1, ContentHash::of(b"row"))];
+            let kinds = vec![
+                MessageKind::SliceRoot {
+                    to: us,
+                    state: root(),
+                    meta: root(),
+                },
+                MessageKind::SlicePull {
+                    to: us,
+                    channel: Channel::State,
+                    keys: vec![],
+                },
+                MessageKind::SlicePageRequest {
+                    to: us,
+                    channel: Channel::Meta,
+                    index: 0,
+                },
+                MessageKind::SlicePage {
+                    to: us,
+                    channel: Channel::State,
+                    page: DigestPage::build(&entries, 1, 0, 1).expect("a page of one row"),
+                },
+                MessageKind::ProofRequest { to: us },
+                MessageKind::LinkState,
+                MessageKind::PeerInfo,
+            ];
+            let signer = Identity::generate();
+            for kind in kinds {
+                let shown = format!("{kind}");
+                let frame =
+                    Message::new_frame(&node.mesh, &nick("alice"), kind, MessageBody::from(""))
+                        .sign(&signer);
+                maybe_push_inbound(&context, &frame.authored(), true, None);
+                assert!(
+                    pushed.try_recv().is_err(),
+                    "a {shown} frame addressed to us reached the push subscriber"
+                );
+            }
+
+            let joined = Message::new_joined(&node.mesh, &nick("alice")).sign(&signer);
+            maybe_push_inbound(&context, &joined.authored(), true, None);
+            assert!(
+                pushed.try_recv().is_ok(),
+                "a joined frame did not reach the push subscriber"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     #[test]
     fn a_slice_kind_is_for_its_addressee_only() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {

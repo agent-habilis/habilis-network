@@ -172,7 +172,7 @@ Code: `habilis-network/src/gossip/backfill.rs`.
 
 Layer: state. Keyed by author key.
 
-The place where a slice waits when the store keeps no slice of its key: a key that is not in the roster, and a lapsed key. The set holds as many keys as the author cap of the channel (1024 by default). When the set is full, the key that arrived first goes. A pending slice expires after 90 s, and a newer version of its key restarts the wait. It is applied when its key joins the roster or returns to it. A pending slice is in no view and in no backfill.
+The place where a slice waits when the store keeps no slice of its key: a key that is not in the roster, and a lapsed key. The set holds as many keys as the author cap of the channel (1024 by default). When the set is full, the keys that waited for 90 s go first, and then the key that arrived first. A pending slice expires after 90 s, and a newer version of its key restarts the wait, not its place in the order. It is applied when its key joins the roster or returns to it. A pending slice is in no view and in no backfill.
 
 Code: `PendingSlices` in `crates/habilis-network-doc/src/pending_slices.rs`.
 

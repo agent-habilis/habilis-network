@@ -76,12 +76,19 @@ pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBo
 #[must_use]
 pub fn sealed_body_len_bound(plain_len: usize) -> usize {
     // The blob is the 12-byte nonce, the ciphertext, and the 16-byte tag. Base58 takes at most
-    // 1.3657 characters per byte, and 138 percent is the bound used here.
+    // 1.3657 characters per byte, and 138 percent is the bound used here. A Base58 text has no
+    // character to escape, so the escaped length is the one of the body with an empty text plus the
+    // length of the text. The sums saturate: a count of bytes that passes the width of a 32-bit
+    // target gives the largest bound, not a wrapped one.
     const NONCE_AND_TAG: usize = 12 + 16;
-    let blob_len = plain_len + NONCE_AND_TAG;
-    let longest_text = "1".repeat(blob_len * 138 / 100 + 1);
-    let body = serde_json::to_string(&SealedBody::Enc { data: longest_text }).unwrap_or_default();
-    serde_json::to_string(&body).map_or(usize::MAX, |escaped| escaped.len())
+    let blob_len = plain_len.saturating_add(NONCE_AND_TAG);
+    let text_len = blob_len.saturating_mul(138) / 100 + 1;
+    let empty = serde_json::to_string(&SealedBody::Enc {
+        data: String::new(),
+    })
+    .unwrap_or_default();
+    let fixed = serde_json::to_string(&empty).map_or(usize::MAX, |escaped| escaped.len());
+    fixed.saturating_add(text_len)
 }
 
 /// Recover the plaintext body string. With a `key` (passworded mesh) the body
@@ -126,11 +133,35 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decrypt_body, encrypt_body};
+    use super::{SealedBody, decrypt_body, encrypt_body, sealed_body_len_bound};
     use habilis_network_protocol::{MessageBody, SymmetricKey};
 
     fn key(byte: u8) -> SymmetricKey {
         SymmetricKey::from([byte; 32])
+    }
+
+    /// The bound of the sealed length does not overflow, whatever the plain length, and it is the
+    /// length of the text that it stands for, for every length that a string can be built for.
+    #[test]
+    fn the_mesh_key_length_bound_does_not_overflow_and_equals_the_built_text() {
+        let built = |plain_len: usize| {
+            let blob_len = plain_len + 12 + 16;
+            let data = "1".repeat(blob_len * 138 / 100 + 1);
+            let body = serde_json::to_string(&SealedBody::Enc { data }).expect("a body");
+            serde_json::to_string(&body).expect("a string").len()
+        };
+        for plain_len in [0usize, 1, 2, 31, 32, 33, 100, 1000, 3000, 70_000] {
+            assert_eq!(
+                sealed_body_len_bound(plain_len),
+                built(plain_len),
+                "the bound for {plain_len} plain bytes is not the length of the built text"
+            );
+        }
+        let huge = sealed_body_len_bound(usize::MAX);
+        assert!(
+            huge >= sealed_body_len_bound(70_000),
+            "the bound fell for a longer plain body"
+        );
     }
 
     /// A plain slice body, as the store writes it.

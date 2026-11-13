@@ -42,8 +42,9 @@ impl PendingSlices {
 
     /// Holds `frame` at `version` unless a version at least as new is already held.
     ///
-    /// A full set evicts its oldest key to make room, and logs the eviction. A newer version
-    /// restarts the wait of its key, so the cap bounds the number of keys, not how long each one
+    /// A full set drops the keys that waited for the TTL first. If it is still full, it evicts the
+    /// key that arrived first, and logs the eviction. A newer version restarts the wait of its key
+    /// but not its place in the order, so the cap bounds the number of keys, not how long each one
     /// waits. Returns `true` when the frame is held.
     pub(crate) fn hold(&mut self, frame: &Verified, version: u64, now: Instant) -> bool {
         let key = frame.key();
@@ -56,6 +57,7 @@ impl PendingSlices {
             held.since = now;
             return true;
         }
+        self.expire(now);
         if self.held.len() >= self.cap
             && let Some(oldest) = self.order.pop_front()
         {
@@ -201,6 +203,38 @@ mod tests {
             Some(1),
             "the newest key is held"
         );
+    }
+
+    /// A key that is replaced keeps the place of its first arrival, and its wait restarts. A full set
+    /// must drop the keys that waited too long before it evicts one, or it throws away a fresh slice
+    /// while an expired key holds a place: A arrives, B arrives a second later, A is replaced at 80 s,
+    /// and C arrives at 92 s, when B has expired and A has not.
+    #[test]
+    fn a_full_set_drops_the_expired_keys_before_it_evicts_a_fresh_one() {
+        let mut held = PendingSlices::new(2, Duration::from_secs(90));
+        let t0 = Instant::now();
+        assert!(held.hold(&frame(key(1), 1), 1, t0), "A is held");
+        assert!(
+            held.hold(&frame(key(2), 1), 1, t0 + Duration::from_secs(1)),
+            "B is held"
+        );
+        assert!(
+            held.hold(&frame(key(1), 2), 2, t0 + Duration::from_secs(80)),
+            "A is replaced, and its wait restarts"
+        );
+
+        assert!(
+            held.hold(&frame(key(3), 1), 1, t0 + Duration::from_secs(92)),
+            "C is held"
+        );
+
+        assert_eq!(
+            held.held_version(&key(1)),
+            Some(2),
+            "the fresh slice of A was evicted while the expired B held a place"
+        );
+        assert_eq!(held.held_version(&key(2)), None, "the expired B is gone");
+        assert_eq!(held.held_version(&key(3)), Some(1), "C is held");
     }
 
     #[test]

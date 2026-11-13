@@ -615,7 +615,7 @@ A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still re
 A slice of any other key waits in the **pending set**: a key that is not in the roster, and a lapsed key.
 The pending set holds the newest slice of each key.
 It holds as many keys as the author cap of the channel, 1024 by default.
-When the set is full, the key that arrived first goes.
+When the set is full, the keys that waited for 90 s go first, and then the key that arrived first.
 A pending slice expires after 90 s, the alive timeout. A newer version of the same key restarts the wait.
 The sweep tick expires the pending slices.
 When the key joins the roster or returns to it, the engine applies the pending slice, and the rate limit charges it then.
