@@ -7,7 +7,6 @@ use std::sync::Mutex;
 use std::{fs, io::ErrorKind};
 
 use habilis_network_chunks::{ChunkError, ChunkHash, ChunkMap, ChunkStore, InMemoryStore, Root};
-#[cfg(test)]
 use habilis_network_doc::ChunkPointer;
 
 use crate::protocol::{SymmetricKey, seal_error};
@@ -164,7 +163,6 @@ impl MeshChunks {
 
     /// The bytes that the chunks of a value of `pointer` hold: the size of the value, and the seal of a passworded
     /// mesh. An asker expects this size from the map of a root, and reads no more bytes than it.
-    #[cfg(test)]
     pub(crate) fn stored_size(&self, pointer: ChunkPointer) -> u64 {
         let seal = self.key.as_ref().map_or(0, |_| {
             u64::try_from(seal_error::SEAL_SYMMETRIC_OVERHEAD).unwrap_or(u64::MAX)
@@ -177,7 +175,6 @@ impl MeshChunks {
     /// # Errors
     ///
     /// The seal does not open: the bytes are not a value of this mesh.
-    #[cfg(test)]
     pub(crate) fn open_value(&self, stored: &[u8]) -> Result<Vec<u8>, ChunkError> {
         match &self.key {
             Some(key) => seal_error::open_symmetric(key, stored)

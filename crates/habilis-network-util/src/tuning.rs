@@ -1210,6 +1210,19 @@ pub const CHUNK_STREAMS_PER_PEER: usize = 4;
 /// How many chunk requests wait for the event loop. A request over the cap gets the absent answer.
 pub const CHUNK_INBOX_CAP: usize = 64;
 
+/// How many values this node fetches at once. A pointer past the cap waits for a fetch to end.
+pub const CHUNK_FETCHES_MAX: usize = 4;
+
+/// How many holders one fetch can ask: the author first, then the members that this node knows.
+pub const CHUNK_SOURCES_MAX: usize = 4;
+
+/// How long this node waits before it asks again for a value that no holder gave.
+pub const CHUNK_FETCH_RETRY: Duration = Duration::from_secs(5);
+
+/// How long this node waits before it asks again for a value that came whole but that it refused: it does not open,
+/// is not an object, or holds the reserved key. The author is wrong, so the wait is long.
+pub const CHUNK_FETCH_REFUSED_RETRY: Duration = Duration::from_secs(60);
+
 /// How long a node waits after it sees a digest that differs from its own, before it asks for the pages.
 /// The live frames in flight land during this delay, so most differences end with no request.
 pub const DIGEST_SETTLE: Duration = Duration::from_secs(1);

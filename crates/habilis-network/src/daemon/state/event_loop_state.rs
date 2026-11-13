@@ -27,7 +27,7 @@ use std::time::Duration;
 use iroh::{EndpointAddr, EndpointId};
 
 use super::proof_exchange::ProofExchange;
-use crate::chunk_fetch::ChunkServeBudget;
+use crate::chunk_fetch::{ChunkServeBudget, Fetches};
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::digest_round::DigestRound;
@@ -239,7 +239,6 @@ impl ChannelDocs {
     /// # Errors
     ///
     /// The value is not an object, or holds the reserved key.
-    #[cfg(test)]
     pub(crate) fn resolve_pointer(
         &mut self,
         channel: protocol::Channel,
@@ -248,6 +247,31 @@ impl ChannelDocs {
         value: serde_json::Value,
     ) -> Result<bool, SliceError> {
         self.get_mut(channel).resolve_pointer(key, pointer, value)
+    }
+
+    /// The pointers that wait for their chunks, in both channels, with the channel and the author of each.
+    pub(crate) fn unresolved(&self) -> Vec<(protocol::Channel, AuthorKey, ChunkPointer)> {
+        let mut waiting = Vec::new();
+        for channel in [protocol::Channel::State, protocol::Channel::Meta] {
+            for (key, pointer) in self.get(channel).unresolved() {
+                waiting.push((channel, key, pointer));
+            }
+        }
+        waiting
+    }
+
+    /// Whether the held version of `key` on `channel` is a pointer that waits for its chunks.
+    pub(crate) fn is_unresolved(&self, channel: protocol::Channel, key: &AuthorKey) -> bool {
+        self.get(channel).is_unresolved(key)
+    }
+
+    /// The signed frame that `key` holds on `channel`.
+    pub(crate) fn held_frame(
+        &self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+    ) -> Option<&Verified> {
+        self.get(channel).frame(key)
     }
 
     /// The roots of the chunked values that the slices of every author hold whole, in both channels. A sweep of the
@@ -895,6 +919,8 @@ pub struct EventLoopState {
     pub(crate) unicast_arrival: Option<EndpointId>,
     /// The chunk answers that this node gave in the current window.
     pub(crate) chunk_budget: ChunkServeBudget,
+    /// The fetches of the values that the pointers of other members name.
+    pub(crate) fetches: Fetches,
     /// The slice pulls that wait for an answer, by holder, channel and author.
     pub(crate) outstanding_pulls: OutstandingPulls,
     /// The digests that differ from ours, until their pages are read.
@@ -1121,6 +1147,8 @@ impl EventLoopState {
             drop_left_from: None,
             serve_budget: ServeBudget::default(),
             chunk_budget: ChunkServeBudget::default(),
+            // the event loop replaces the sender with one whose receiver it reads
+            fetches: Fetches::new(mpsc::unbounded_channel().0),
             teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             proofs: ProofExchange::with_cap(QUIET_CAP),
             own_answer: None,

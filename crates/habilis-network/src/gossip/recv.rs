@@ -21,7 +21,7 @@ use crate::protocol::{
     AuthorKey, Channel, MeshId, Message, MessageKind, Nickname, PresenceSubtype,
 };
 use crate::util::clock::Instant;
-use crate::{lifecycle, lookup};
+use crate::{chunk_fetch, lifecycle, lookup};
 use habilis_network_doc::SliceIngest;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
@@ -1479,6 +1479,10 @@ fn dispatch_channel(
         return None;
     }
     let outcome = ingest_channel_event(event, &mut state.docs, Instant::now(), context);
+    if matches!(outcome, SliceIngest::Applied) && state.docs.is_unresolved(channel, &message.key())
+    {
+        chunk_fetch::start(state, context, Instant::now());
+    }
     if matches!(outcome, SliceIngest::Applied) && channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
@@ -1528,7 +1532,7 @@ fn promote_pending(
 /// the wire body (a decrypted `enc` body), a clone with the body replaced; else
 /// the original borrowed unchanged. The output helpers read `event.body` for the
 /// `m` delta, so they must see plaintext.
-fn surface_view(frame: &Verified, plain: Option<MessageBody>) -> Authored {
+pub(crate) fn surface_view(frame: &Verified, plain: Option<MessageBody>) -> Authored {
     match plain {
         Some(body) => frame.copy_with_body(body),
         None => frame.authored(),
@@ -1553,7 +1557,8 @@ fn ingest_channel_event(
     } = event;
     let outcome = docs.ingest(channel, message, live, now);
     let applied = matches!(outcome, SliceIngest::Applied);
-    if applied && surfaceable {
+    // A version that is only a pointer is shown when its value is whole, and not before.
+    if applied && surfaceable && !docs.is_unresolved(channel, &message.key()) {
         let surfaced = surface_view(message, docs.plain_body(channel, &message.key()));
         context.sink.emit(NodeEvent::StateChanged {
             channel,
@@ -5137,6 +5142,73 @@ mod first_contact_tests {
                     .take_pending(Channel::Meta, &key, clock::Instant::now())
                     .is_none(),
                 "a frame of a key that said goodbye waits nowhere, not even in the pending set"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A signed slice of `identity` that is only a pointer to a chunked value.
+    fn pointer_slice(node: &Node, identity: &Identity, version: u64) -> Verified {
+        let pointer = habilis_network_doc::ChunkPointer::new(
+            habilis_network_chunks::Root::from_bytes([7; 32]),
+            100_000,
+        );
+        let body = MessageBody::try_new(
+            &serde_json::json!({"version": version, "value": pointer.to_value()}).to_string(),
+        )
+        .expect("a slice body");
+        Message::new_channel_event(&node.mesh, &nick("twin"), body, Channel::State).sign(identity)
+    }
+
+    #[test]
+    fn a_slice_that_is_only_a_pointer_is_not_shown_and_starts_a_fetch() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let member = Identity::generate();
+            state.peers.insert(member.author_key());
+            let sink = StateChanges::default();
+            let context = HandlerCtx {
+                sender: &node.sender,
+                endpoint: &node.endpoint,
+                mesh: &node.mesh,
+                author: &node.author,
+                identity: &node.identity,
+                our_pubkey: node.our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let frame = pointer_slice(&node, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::State,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            let outcome = dispatch_channel(event, &mut state, &mut app, &context);
+            assert_eq!(
+                outcome,
+                Some(SliceIngest::Applied),
+                "the store takes the pointer slice"
+            );
+            assert_eq!(
+                sink.count(),
+                0,
+                "a pointer is not shown: the change comes when the value is whole"
+            );
+            assert!(
+                state
+                    .docs
+                    .is_unresolved(Channel::State, &member.author_key()),
+                "the pointer waits for its chunks"
+            );
+            assert_eq!(
+                state.fetches.running(),
+                1,
+                "the pointer must start the fetch of its value"
             );
             node.endpoint.close().await;
         });

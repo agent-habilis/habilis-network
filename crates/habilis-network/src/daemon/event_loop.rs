@@ -173,6 +173,8 @@ async fn run_checked<Driver: NodeDriver>(
         #[cfg(feature = "multihop")]
         multihop: transports.multihop.clone(),
     };
+    let (fetch_tx, fetch_rx) = mpsc::unbounded_channel();
+    state.fetches = chunk_fetch::Fetches::new(fetch_tx);
     let (direct_rx, path_rx) = wire_transports(
         &mut state,
         &endpoints.endpoint,
@@ -275,6 +277,7 @@ async fn run_checked<Driver: NodeDriver>(
         http_rx,
         unicast_rx: Some(endpoints.unicast_rx),
         chunk_rx: Some(endpoints.chunk_rx),
+        fetch_rx,
         lan_contacts: endpoints.lan_contacts,
         direct_rx,
         path_rx,
@@ -872,6 +875,9 @@ struct EventLoop<Driver: NodeDriver> {
     /// Inbound chunk requests from the `CHUNKS_ALPN` acceptor, answered from the state. `Option` so the `select!`
     /// arm can disable itself if the channel ever closes.
     chunk_rx: Option<mpsc::Receiver<transport::ChunkAsk>>,
+    /// The fetches of the values that pointers name, when one ends. Never closes: `state` holds a sender for the
+    /// loop's lifetime.
+    fetch_rx: mpsc::UnboundedReceiver<chunk_fetch::FetchDone>,
     /// The members of this mesh that the LAN announces (`gossip::lan`). `Option` so the arm is
     /// off without an mDNS handle and when the channel closes.
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
@@ -931,6 +937,7 @@ struct Loop<'node, Driver: NodeDriver> {
     /// Inbound chunk requests from the `CHUNKS_ALPN` acceptor, answered from the state. `Option` so the `select!`
     /// arm can disable itself if the channel ever closes.
     chunk_rx: Option<mpsc::Receiver<transport::ChunkAsk>>,
+    fetch_rx: mpsc::UnboundedReceiver<chunk_fetch::FetchDone>,
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
@@ -1154,6 +1161,20 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         lifecycle::retry_deferred_asks(&mut self.state, &context, sign).await;
     }
 
+    /// Takes in the value that a fetch brought, or notes that the fetch failed.
+    async fn fetch_done(&mut self, done: chunk_fetch::FetchDone) {
+        self.state.idle.ext.chunk += 1;
+        let context = self.parts.handler_ctx(&self.sender);
+        chunk_fetch::finish(
+            &mut self.state,
+            &mut self.app,
+            &context,
+            done,
+            Instant::now(),
+        )
+        .await;
+    }
+
     /// Answers one chunk request from the state, to the stream that waits for it.
     async fn chunk_ask(&mut self, ask: transport::ChunkAsk) {
         self.state.idle.ext.chunk += 1;
@@ -1214,6 +1235,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             self.state.last_sent_at = Instant::now();
         }
         probe::prove_routed_pairs(&mut self.state, &context);
+        // A pointer whose fetch failed, or that found no holder, is fetched again once its wait is over.
+        chunk_fetch::start(&mut self.state, &context, Instant::now());
         self.app.on_tick(&mut self.state, &context).await;
         // The proof requests that waited for a warm path and got none from a unicast frame: once more.
         lifecycle::retry_deferred_asks(&mut self.state, &context, None).await;
@@ -1570,6 +1593,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         http_rx,
         unicast_rx,
         chunk_rx,
+        fetch_rx,
         lan_contacts,
         direct_rx,
         path_rx,
@@ -1648,6 +1672,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         http_rx,
         unicast_rx,
         chunk_rx,
+        fetch_rx,
         lan_contacts,
         direct_rx,
         path_rx,
@@ -1723,6 +1748,7 @@ async fn run_loop<Driver: NodeDriver>(
                 Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },
             },
+            Some(done) = lp.fetch_rx.recv() => { lp.fetch_done(done).await; },
             ask = recv_opt(&mut lp.chunk_rx) => match ask {
                 Some(ask) => { lp.chunk_ask(ask).await; },
                 None => { lp.chunk_rx = None; },

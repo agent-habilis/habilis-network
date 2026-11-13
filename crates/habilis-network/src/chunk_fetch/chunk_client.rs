@@ -43,6 +43,7 @@ impl ChunkClient {
     }
 
     /// Sets how long one request can take.
+    #[cfg(test)]
     pub(crate) fn deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
         self

@@ -15,7 +15,6 @@ pub(crate) enum ChunkRequest {
 
 impl ChunkRequest {
     /// The bytes of the request.
-    #[cfg(test)]
     pub(crate) fn encode(self) -> Vec<u8> {
         match self {
             Self::Map(root) => {

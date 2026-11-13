@@ -55,6 +55,20 @@ pub(super) fn name_root(
     slice_of_peer(state, peer, &body.to_string(), version);
 }
 
+/// Ingests a slice of `peer` that names `pointer`, sealed with the key that the mesh key gives the `state` channel.
+pub(super) fn name_root_sealed(
+    state: &mut EventLoopState,
+    peer: &Identity,
+    pointer: ChunkPointer,
+    version: u64,
+    mesh_key: &SymmetricKey,
+) {
+    let text = serde_json::json!({"version": version, "value": pointer.to_value()}).to_string();
+    let plain = MessageBody::try_new(&text).expect("a body");
+    let sealed = wire::encrypt_body(&plain, &mesh_key.derive(b"state-doc")).expect("a sealed body");
+    ingest_body(state, peer, sealed, version);
+}
+
 /// Holds `value` as chunks of a passworded mesh, and a slice of `peer` that names them, sealed with the key that
 /// the mesh key gives the `state` channel. Returns the root.
 pub(super) async fn hold_named_value_sealed(
