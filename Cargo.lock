@@ -1683,6 +1683,7 @@ version = "0.6.0"
 dependencies = [
  "bs58",
  "chacha20poly1305",
+ "habilis-network-chunks",
  "habilis-network-protocol",
  "habilis-network-test-tracing",
  "habilis-network-util",

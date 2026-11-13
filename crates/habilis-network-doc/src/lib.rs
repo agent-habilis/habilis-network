@@ -18,13 +18,18 @@
 
 pub mod wire;
 
+mod chunk_pointer;
+
 mod doc_error;
 
+pub use chunk_pointer::ChunkPointer;
 pub use doc_error::DocError;
 
 mod pending_slices;
 
 mod slice_store;
+
+mod slice_value;
 
 pub use slice_store::{
     LocalDraft, SliceError, SliceIngest, SliceLimits, SliceStore, frame_overhead,

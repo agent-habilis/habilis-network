@@ -30,16 +30,15 @@ use habilis_network_util::consts::MAX_MESSAGE_SIZE;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::chunk_pointer::{CHUNKS_KEY, ChunkPointer};
 use crate::pending_slices::PendingSlices;
+use crate::slice_value::SliceValue;
 use crate::wire;
 
 /// The default time a key stays gone, after a signed goodbye or a replaced run. It must cover
 /// `QUIET_TTL` plus `ALIVE_TIMEOUT`: a peer that missed the goodbye keeps the old slice until it
 /// drops the key. The engine test `the_gone_ttl_outlasts_the_quiet_ttl_and_the_alive_timeout` pins it.
 const DEFAULT_GONE_TTL: Duration = Duration::from_hours(2);
-
-/// The key that only a chunk pointer may carry at the top of a slice value.
-const CHUNKS_KEY: &str = "$chunks";
 
 /// The escaped length of the empty body, `""`. A frame with no body still carries it, so the probe takes it off.
 const EMPTY_BODY_ESCAPED: usize = 2;
@@ -412,7 +411,7 @@ struct Slice {
     frame: Verified,
     version: u64,
     hash: ContentHash,
-    value: Value,
+    value: SliceValue,
     since: Instant,
 }
 
@@ -482,7 +481,19 @@ impl SliceStore {
     /// The value of the slice of `key`, when the store holds one.
     #[must_use]
     pub fn value(&self, key: &AuthorKey) -> Option<&Value> {
-        self.slices.get(key).map(|slice| &slice.value)
+        self.slices.get(key).and_then(|slice| match &slice.value {
+            SliceValue::Inline(value) => Some(value),
+            SliceValue::Pointer(_) => None,
+        })
+    }
+
+    /// The pointer that the slice of `key` holds, when it holds one in place of a value.
+    #[must_use]
+    pub fn pointer(&self, key: &AuthorKey) -> Option<&ChunkPointer> {
+        self.slices.get(key).and_then(|slice| match &slice.value {
+            SliceValue::Inline(_) => None,
+            SliceValue::Pointer(pointer) => Some(pointer),
+        })
     }
 
     /// Returns the signed frame held for `key`, which a resend sends. No caller yet.
@@ -503,16 +514,16 @@ impl SliceStore {
     pub fn view(&self) -> Map<String, Value> {
         self.slices
             .iter()
-            .filter(|(_, slice)| !slice.value.is_null())
+            .filter(|(_, slice)| !slice.value.is_tombstone())
             .map(|(key, slice)| {
                 let hex = String::from_utf8_lossy(&key.hex()).into_owned();
-                (hex, slice.value.clone())
+                (hex, slice.value.to_value())
             })
             .collect()
     }
 
-    /// Checks a frame the way [`SliceStore::ingest`] does, and returns its slice body.
-    fn read(&self, frame: &Verified) -> Result<SliceBody, SliceError> {
+    /// Checks a frame the way [`SliceStore::ingest`] does, and returns its version and value.
+    fn read(&self, frame: &Verified) -> Result<(u64, SliceValue), SliceError> {
         if frame.kind != self.channel.event_kind() {
             return Err(SliceError::WrongChannel);
         }
@@ -529,10 +540,18 @@ impl SliceStore {
         if !(body.value.is_object() || body.value.is_null()) {
             return Err(SliceError::Malformed);
         }
-        if body.value.get(CHUNKS_KEY).is_some() {
+        if body.value.get(CHUNKS_KEY).is_none() {
+            return Ok((body.version, SliceValue::Inline(body.value)));
+        }
+        if body
+            .value
+            .as_object()
+            .is_some_and(|object| object.len() > 1)
+        {
             return Err(SliceError::Reserved);
         }
-        Ok(body)
+        let pointer = ChunkPointer::parse(&body.value).ok_or(SliceError::Malformed)?;
+        Ok((body.version, SliceValue::Pointer(pointer)))
     }
 
     /// Holds a frame of an author that is not in the roster yet, until [`SliceStore::take_pending`]
@@ -558,12 +577,12 @@ impl SliceStore {
     /// assert!(store.view().is_empty());
     /// ```
     pub fn hold(&mut self, frame: &Verified, now: Instant) -> Result<(), SliceError> {
-        let body = self.read(frame)?;
+        let (version, _) = self.read(frame)?;
         let key = frame.key();
         if self.is_gone(&key) {
             return Err(SliceError::GoneKey);
         }
-        self.pending.hold(frame, body.version, now);
+        self.pending.hold(frame, version, now);
         Ok(())
     }
 
@@ -596,8 +615,8 @@ impl SliceStore {
         live: bool,
         now: Instant,
     ) -> SliceIngest {
-        let body = match self.read(frame) {
-            Ok(body) => body,
+        let (version, value) = match self.read(frame) {
+            Ok(read) => read,
             Err(error) => return SliceIngest::Refused(error),
         };
         let key = frame.key();
@@ -607,7 +626,7 @@ impl SliceStore {
         let hash = frame.content_hash();
         let is_new = match self.slices.get(&key) {
             None => true,
-            Some(held) => match body.version.cmp(&held.version) {
+            Some(held) => match version.cmp(&held.version) {
                 Ordering::Greater => true,
                 Ordering::Less => return SliceIngest::Stale,
                 Ordering::Equal if hash == held.hash => return SliceIngest::Duplicate,
@@ -625,9 +644,9 @@ impl SliceStore {
         }
         let incoming = Slice {
             frame: frame.clone(),
-            version: body.version,
+            version,
             hash,
-            value: body.value,
+            value,
             since: now,
         };
         self.slices.insert(key, incoming);
@@ -762,7 +781,7 @@ impl SliceStore {
             .slices
             .iter()
             .filter(|(_, slice)| {
-                slice.value.is_null() && now.saturating_duration_since(slice.since) >= ttl
+                slice.value.is_tombstone() && now.saturating_duration_since(slice.since) >= ttl
             })
             .map(|(key, _)| *key)
             .collect();
@@ -1106,6 +1125,8 @@ mod tests {
         LocalDraft, PAGE_OVERHEAD_UNPROBED, SliceError, SliceIngest, SliceLimits, SliceStore,
         WORST_FRAME_OVERHEAD, wire,
     };
+    use crate::ChunkPointer;
+    use habilis_network_chunks::Root;
     use habilis_network_protocol::digest::{DigestEntry, DigestPage};
     use habilis_network_protocol::messages::{MessageError, Verified};
     use habilis_network_protocol::{
@@ -1327,6 +1348,62 @@ mod tests {
             Err(SliceError::Reserved),
             "a write with the chunks key must be refused as reserved"
         );
+    }
+
+    fn pointer_value() -> (ChunkPointer, Value) {
+        let pointer = ChunkPointer::new(Root::from_bytes([7; 32]), 100_000);
+        let value = pointer.to_value();
+        (pointer, value)
+    }
+
+    #[test]
+    fn ingest_applies_a_pointer_slice_and_keeps_the_pointer() {
+        let mut store = store();
+        let (pointer, value) = pointer_value();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, value)),
+            SliceIngest::Applied,
+            "a slice that is exactly one pointer must apply"
+        );
+        assert_eq!(
+            store.pointer(&key(1)),
+            Some(&pointer),
+            "the store must keep the pointer"
+        );
+        assert_eq!(
+            store.value(&key(1)),
+            None,
+            "a pointer slice holds no inline value"
+        );
+    }
+
+    #[test]
+    fn view_reads_a_pointer_slice_as_its_pointer_value() {
+        let mut store = store();
+        let (_, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 1, value.clone()));
+        let hex = String::from_utf8_lossy(&key(1).hex()).into_owned();
+        assert_eq!(
+            store.view().get(&hex),
+            Some(&value),
+            "the view must show the pointer, not drop the slice"
+        );
+    }
+
+    #[test]
+    fn ingest_refuses_a_chunks_key_that_is_not_a_pointer() {
+        let mut store = store();
+        for value in [
+            json!({"$chunks": 1}),
+            json!({"$chunks": {"root": "zz", "size": 1}}),
+            json!({"$chunks": {"root": "00", "size": 1, "extra": 1}}),
+        ] {
+            assert_eq!(
+                apply(&mut store, &frame(key(1), 1, value.clone())),
+                SliceIngest::Refused(SliceError::Malformed),
+                "a lone chunks key that is no pointer must be malformed: {value}"
+            );
+        }
     }
 
     #[test]
