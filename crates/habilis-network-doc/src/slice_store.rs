@@ -188,6 +188,9 @@ pub struct SliceLimits {
     /// The most authors one store holds. The default is 1024, the cap of the live roster. The
     /// pending set holds as many keys.
     pub max_authors: usize,
+    /// The most bytes that the encoded value of one slice can take. A write past it is refused before
+    /// any chunk is made, and a pointer that names more is refused before any chunk is fetched.
+    pub max_value_bytes: usize,
     /// The writes one author can make at once.
     pub burst: u32,
     /// The time a tombstone keeps its author slot before the key goes to the gone set.
@@ -219,10 +222,18 @@ impl SliceLimits {
             slice_bytes,
             write_interval,
             max_authors,
+            max_value_bytes: tuning::SLICE_VALUE_MAX_BYTES,
             burst,
             tombstone_ttl: Duration::from_mins(10),
             gone_ttl: DEFAULT_GONE_TTL,
         }
+    }
+
+    /// Sets the most bytes that the encoded value of one slice can take.
+    #[must_use]
+    pub fn max_value_bytes(mut self, bytes: usize) -> Self {
+        self.max_value_bytes = bytes;
+        self
     }
 
     /// Sets the time a tombstone keeps its author slot.
@@ -242,7 +253,12 @@ impl SliceLimits {
 
 impl Default for SliceLimits {
     fn default() -> Self {
-        Self::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 1024, 5)
+        Self::new(
+            MAX_MESSAGE_SIZE,
+            Duration::from_secs(1),
+            tuning::SLICE_AUTHORS_MAX,
+            5,
+        )
     }
 }
 
@@ -288,6 +304,13 @@ pub enum SliceError {
     StaleDraft,
     /// The body could not be sealed with the channel key.
     Seal,
+    /// The encoded value is larger than the value cap.
+    ValueTooLarge {
+        /// The size of the encoded value in bytes.
+        bytes: usize,
+        /// The cap in bytes.
+        limit: usize,
+    },
     /// The value holds the reserved `$chunks` key, which only a chunk pointer may carry.
     Reserved,
 }
@@ -308,6 +331,10 @@ impl fmt::Display for SliceError {
             Self::DraftMismatch => write!(f, "the frame is not the draft it claims"),
             Self::StaleDraft => write!(f, "the slice moved on after the draft"),
             Self::Seal => write!(f, "the body could not be sealed"),
+            Self::ValueTooLarge { bytes, limit } => write!(
+                f,
+                "the value has {bytes} bytes, past the cap of {limit} bytes: store the data as a blob and put the ticket in the value"
+            ),
             Self::Reserved => write!(f, "the value holds the reserved \"$chunks\" key"),
         }
     }
@@ -660,7 +687,7 @@ impl SliceStore {
     ///
     /// # Errors
     ///
-    /// [`SliceError::Malformed`] when the body does not build, [`SliceError::Reserved`] when the value holds the `$chunks` key, [`SliceError::Seal`] when the
+    /// [`SliceError::Malformed`] when the body does not build,  when the encoded value is past the value cap, [`SliceError::Seal`] when the
     /// channel key does not seal it, [`SliceError::TooLarge`] when the body is past the cap, and
     /// [`SliceError::RateLimited`] when `own` has no token left.
     pub fn prepare_local(
@@ -1013,6 +1040,13 @@ impl SliceStore {
         own: &AuthorKey,
         value: Value,
     ) -> Result<(u64, MessageBody, usize), SliceError> {
+        let encoded = value.to_string().len();
+        if encoded > self.limits.max_value_bytes {
+            return Err(SliceError::ValueTooLarge {
+                bytes: encoded,
+                limit: self.limits.max_value_bytes,
+            });
+        }
         if value.get(CHUNKS_KEY).is_some() {
             return Err(SliceError::Reserved);
         }
@@ -1134,6 +1168,7 @@ mod tests {
         Message, MessageBody, Nickname, RelayLadder, Seed, SymmetricKey,
     };
     use habilis_network_util::consts::MAX_MESSAGE_SIZE;
+    use habilis_network_util::tuning;
     use serde_json::{Map, Value, json};
     use std::time::{Duration, Instant};
 
@@ -1404,6 +1439,237 @@ mod tests {
                 "a lone chunks key that is no pointer must be malformed: {value}"
             );
         }
+    }
+
+    /// A store whose slice cap is wide, so only the value cap refuses a write.
+    fn value_capped_store(cap: usize) -> SliceStore {
+        let limits = SliceLimits::default().max_value_bytes(cap);
+        small_store(SliceLimits {
+            slice_bytes: 1 << 20,
+            ..limits
+        })
+    }
+
+    #[test]
+    fn prepare_local_refuses_a_value_past_the_value_cap_and_says_what_to_do() {
+        let mut store = value_capped_store(64);
+        let error: SliceError = store
+            .prepare_local(
+                &key(1),
+                object(json!({"k": "x".repeat(100)})),
+                Instant::now(),
+            )
+            .map(|_| ())
+            .expect_err("a value past the cap must be refused");
+        assert_eq!(
+            error,
+            SliceError::ValueTooLarge {
+                bytes: 108,
+                limit: 64
+            },
+            "the error must carry the encoded size and the cap"
+        );
+        assert_eq!(
+            error.to_string(),
+            "the value has 108 bytes, past the cap of 64 bytes: store the data as a blob and put the ticket in the value",
+            "the error text must name the cap and say to use a blob"
+        );
+    }
+
+    #[test]
+    fn prepare_local_takes_a_value_at_the_value_cap_and_spends_nothing_past_it() {
+        let mut store = value_capped_store(16);
+        let at_cap = object(json!({"k": "x".repeat(8)}));
+        assert!(
+            store.prepare_local(&key(1), at_cap, Instant::now()).is_ok(),
+            "a value of exactly the cap must be taken"
+        );
+        let past_cap = object(json!({"k": "x".repeat(9)}));
+        assert!(
+            store
+                .prepare_local(&key(1), past_cap, Instant::now())
+                .is_err(),
+            "one byte past the cap must be refused"
+        );
+        assert_eq!(
+            store.limits().max_value_bytes,
+            16,
+            "the cap is the limit of the store"
+        );
+    }
+
+    #[test]
+    fn the_value_cap_counts_encoded_bytes_not_characters() {
+        let mut store = value_capped_store(12);
+        for (name, text) in [("multi-byte", "éé"), ("escaped", "\n\n")] {
+            let at_cap = object(json!({"k": text}));
+            assert!(
+                store.prepare_local(&key(1), at_cap, Instant::now()).is_ok(),
+                "a {name} value of 12 encoded bytes must fit a cap of 12"
+            );
+            let past_cap = object(json!({"k": format!("{text}x")}));
+            assert_eq!(
+                store
+                    .prepare_local(&key(1), past_cap, Instant::now())
+                    .map(|_| ()),
+                Err(SliceError::ValueTooLarge {
+                    bytes: 13,
+                    limit: 12
+                }),
+                "a {name} value of 13 encoded bytes must be past a cap of 12"
+            );
+        }
+    }
+
+    #[test]
+    fn state_and_meta_have_the_same_value_cap() {
+        for channel in [Channel::State, Channel::Meta] {
+            let limits = SliceLimits::default().max_value_bytes(16);
+            let mut store = SliceStore::new(
+                channel,
+                SliceLimits {
+                    slice_bytes: 1 << 20,
+                    ..limits
+                },
+                WORST_FRAME_OVERHEAD,
+            );
+            let past_cap = object(json!({"k": "x".repeat(9)}));
+            assert!(
+                matches!(
+                    store.prepare_local(&key(1), past_cap, Instant::now()),
+                    Err(SliceError::ValueTooLarge { limit: 16, .. })
+                ),
+                "the {channel:?} channel must refuse a value past the cap"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_write_leaves_the_version_and_the_store_as_they_were() {
+        let mut store = value_capped_store(16);
+        let past_cap = object(json!({"k": "x".repeat(50)}));
+        assert!(
+            store
+                .prepare_local(&key(1), past_cap, Instant::now())
+                .is_err(),
+            "a value past the cap must be refused"
+        );
+        assert_eq!(
+            store.version(&key(1)),
+            None,
+            "a refused write must not make a version"
+        );
+        assert_eq!(
+            store.authors(),
+            0,
+            "a refused write must not make an author"
+        );
+    }
+
+    #[test]
+    fn an_inline_value_that_fits_one_frame_is_never_refused_by_the_default_cap() {
+        let mut store = store();
+        let inline = object(json!({"k": "x".repeat(1000)}));
+        assert!(
+            store.prepare_local(&key(1), inline, Instant::now()).is_ok(),
+            "a value of 1000 bytes must fit the default cap and one frame"
+        );
+    }
+
+    #[test]
+    fn the_default_value_cap_is_the_tuning_constant_and_the_field_changes_the_check() {
+        assert_eq!(
+            SliceLimits::default().max_value_bytes,
+            tuning::SLICE_VALUE_MAX_BYTES,
+            "the default cap must be the tuning constant"
+        );
+        assert_eq!(tuning::SLICE_VALUE_MAX_BYTES, 1_048_576, "the cap is 1 MiB");
+        let wide = SliceLimits {
+            slice_bytes: 1 << 22,
+            ..SliceLimits::default()
+        };
+        let value = |len: usize| object(json!({"k": "x".repeat(len)}));
+        let mut at_default = small_store(wide);
+        assert!(
+            at_default
+                .prepare_local(&key(1), value(1_048_576 - 8), Instant::now())
+                .is_ok(),
+            "a value of exactly 1 MiB must be taken at the default cap"
+        );
+        assert_eq!(
+            at_default
+                .prepare_local(&key(1), value(1_048_576 - 7), Instant::now())
+                .map(|_| ()),
+            Err(SliceError::ValueTooLarge {
+                bytes: 1_048_577,
+                limit: 1_048_576
+            }),
+            "one byte past 1 MiB must be refused at the default cap"
+        );
+        let mut raised = small_store(wide.max_value_bytes(1_048_577));
+        assert!(
+            raised
+                .prepare_local(&key(1), value(1_048_576 - 7), Instant::now())
+                .is_ok(),
+            "a raised field must raise the check"
+        );
+    }
+
+    #[test]
+    fn a_value_past_the_cap_costs_no_write_token() {
+        let limits = SliceLimits::default().max_value_bytes(16);
+        let mut store = small_store(SliceLimits {
+            burst: 1,
+            slice_bytes: 1 << 20,
+            ..limits
+        });
+        let now = Instant::now();
+        let past_cap = object(json!({"k": "x".repeat(50)}));
+        assert!(
+            store.prepare_local(&key(1), past_cap, now).is_err(),
+            "a value past the cap must be refused"
+        );
+        assert!(
+            store
+                .prepare_local(&key(1), object(json!({"k": 1})), now)
+                .is_ok(),
+            "a refused value must leave the one token of the burst"
+        );
+    }
+
+    #[test]
+    fn a_smaller_value_replaces_a_held_one_after_a_refused_write() {
+        let mut store = value_capped_store(64);
+        let now = Instant::now();
+        let held = store
+            .prepare_local(&key(1), object(json!({"k": "x".repeat(40)})), now)
+            .expect("a value under the cap");
+        let frame = frame_of(&held, key(1));
+        store
+            .commit_local(held, &frame, now)
+            .expect("the first write");
+        let before = store.value(&key(1)).cloned();
+        assert!(
+            store
+                .prepare_local(&key(1), object(json!({"k": "x".repeat(80)})), now)
+                .is_err(),
+            "a value past the cap must be refused"
+        );
+        assert_eq!(
+            store.value(&key(1)).cloned(),
+            before,
+            "a refused write must leave the held value as it was"
+        );
+        assert!(
+            store
+                .prepare_local(&key(1), object(json!({"k": "x"})), now)
+                .is_ok(),
+            "a smaller value must be taken right after a refused write"
+        );
+        assert!(
+            store.prepare_leave(&key(1), now).is_ok(),
+            "a tombstone must be taken whatever the held value is"
+        );
     }
 
     #[test]

@@ -1180,6 +1180,13 @@ pub const DIGEST_SERVES_GLOBAL: usize = 32;
 /// fits, so a round never needs more.
 pub const DIGEST_PULLS_OPEN: usize = 1024;
 
+/// The most authors that one channel of the shared state holds. It is the cap of the live roster.
+pub const SLICE_AUTHORS_MAX: usize = 1024;
+
+/// The most bytes that the encoded value of one slice can take, in `state` and in `meta` alike. The cap is low
+/// on purpose: a member that needs more stores the data as a blob and puts the ticket in the value.
+pub const SLICE_VALUE_MAX_BYTES: usize = 1024 * 1024;
+
 /// The length of the window of the serve budget.
 pub const DIGEST_SERVE_WINDOW: Duration = Duration::from_secs(5);
 
