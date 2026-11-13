@@ -1213,6 +1213,11 @@ pub const CHUNK_INBOX_CAP: usize = 64;
 /// How many values this node fetches at once. A pointer past the cap waits for a fetch to end.
 pub const CHUNK_FETCHES_MAX: usize = 4;
 
+/// The bytes of chunks that this node holds for the slices of all members, in both channels. A value that would take
+/// the held bytes past it is not fetched, and its author keeps showing the last complete version. The chunks that no
+/// slice names are swept at once, so they never count.
+pub const CHUNK_STORE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
 /// How many holders one fetch can ask: the author first, then the members that this node knows.
 pub const CHUNK_SOURCES_MAX: usize = 4;
 

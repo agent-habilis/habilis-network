@@ -279,6 +279,14 @@ impl ChannelDocs {
         self.get(channel).frame(key)
     }
 
+    /// The pointers of the chunked values that the slices of every author hold whole, in both channels.
+    pub(crate) fn resolved_pointers(&self) -> impl Iterator<Item = ChunkPointer> + '_ {
+        let in_channel = |channel| self.get(channel).resolved_pointers().copied();
+        [protocol::Channel::State, protocol::Channel::Meta]
+            .into_iter()
+            .flat_map(in_channel)
+    }
+
     /// The roots of the chunked values that the slices of every author hold whole, in both channels. A sweep of the
     /// chunk store keeps the chunks of these roots. A pointer that waits for its chunks is not one of them.
     pub(crate) fn resolved_roots(&self) -> impl Iterator<Item = Root> + '_ {
@@ -1030,6 +1038,14 @@ impl EventLoopState {
     #[must_use]
     pub fn raw_view(&self, channel: protocol::Channel) -> serde_json::Value {
         self.docs.to_raw_json(channel)
+    }
+
+    /// The bytes that the chunks of the values held whole take, as the chunk store keeps them.
+    pub(crate) fn held_chunk_bytes(&self) -> u64 {
+        let pointers = self.docs.resolved_pointers();
+        pointers
+            .map(|pointer| self.chunks.stored_size(pointer))
+            .sum()
     }
 
     /// The authors of `channel` whose new version is not whole yet, for the `syncing` list of a state read.

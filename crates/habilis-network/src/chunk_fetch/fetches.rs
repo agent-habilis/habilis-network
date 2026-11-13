@@ -8,6 +8,7 @@ use habilis_network_doc::ChunkPointer;
 use habilis_network_util::clock::Instant;
 use habilis_network_util::tuning::{
     CHUNK_FETCH_REFUSED_RETRY, CHUNK_FETCH_RETRY, CHUNK_FETCHES_MAX, CHUNK_SOURCES_MAX,
+    CHUNK_STORE_BUDGET_BYTES,
 };
 use iroh::EndpointAddr;
 use n0_future::task;
@@ -38,7 +39,8 @@ pub(crate) struct FetchDone {
 #[derive(Debug)]
 pub(crate) struct Fetches {
     done: mpsc::UnboundedSender<FetchDone>,
-    running: HashSet<Wanted>,
+    /// The fetches in flight, with the bytes that each one will keep.
+    running: HashMap<Wanted, u64>,
     retry_after: HashMap<Wanted, Instant>,
 }
 
@@ -47,7 +49,7 @@ impl Fetches {
     pub(crate) fn new(done: mpsc::UnboundedSender<FetchDone>) -> Self {
         Self {
             done,
-            running: HashSet::new(),
+            running: HashMap::new(),
             retry_after: HashMap::new(),
         }
     }
@@ -58,12 +60,21 @@ impl Fetches {
         self.running.len()
     }
 
-    /// The pointers to fetch now: they wait for chunks, no fetch runs for them, and their wait after a failure is
-    /// over. At most as many as the cap leaves room for.
+    /// The bytes that this node can still take for the chunks of fetched values: the budget, less what it holds
+    /// whole and what the fetches in flight will keep.
+    fn byte_room(&self, held: u64, budget: u64) -> u64 {
+        let in_flight: u64 = self.running.values().sum();
+        budget.saturating_sub(held).saturating_sub(in_flight)
+    }
+
+    /// The pointers to fetch now: they wait for chunks, no fetch runs for them, their wait after a failure is over,
+    /// and their bytes fit in `byte_room`. At most as many as the cap leaves room for.
     fn due(
         &mut self,
         waiting: Vec<(Channel, AuthorKey, ChunkPointer)>,
         now: Instant,
+        byte_room: u64,
+        size_of: impl Fn(&ChunkPointer) -> u64,
     ) -> Vec<(Channel, AuthorKey, ChunkPointer)> {
         let wanted: HashSet<Wanted> = waiting
             .iter()
@@ -71,6 +82,7 @@ impl Fetches {
             .collect();
         self.retry_after.retain(|name, _| wanted.contains(name));
         let room = CHUNK_FETCHES_MAX.saturating_sub(self.running.len());
+        let mut byte_room_left = byte_room;
         let mut due = Vec::new();
         for (channel, author, pointer) in waiting {
             let name = (channel, author, pointer.root());
@@ -78,7 +90,13 @@ impl Fetches {
                 .retry_after
                 .get(&name)
                 .is_some_and(|after| now < *after);
-            if due.len() < room && !self.running.contains(&name) && !waits {
+            if due.len() >= room || self.running.contains_key(&name) || waits {
+                continue;
+            }
+            // A value that does not fit is not fetched now, and the next that fits is. It waits for room.
+            let size = size_of(&pointer);
+            if size <= byte_room_left {
+                byte_room_left -= size;
                 due.push((channel, author, pointer));
             }
         }
@@ -104,7 +122,14 @@ fn sources_of(state: &EventLoopState, author: &AuthorKey) -> Vec<EndpointAddr> {
 /// that holds no state of the node: it gets the holders and the size, and reports the bytes to the event loop.
 pub(crate) fn start(state: &mut EventLoopState, context: &HandlerCtx<'_>, now: Instant) {
     let waiting = state.docs.unresolved();
-    for (channel, author, pointer) in state.fetches.due(waiting, now) {
+    let room = state
+        .fetches
+        .byte_room(state.held_chunk_bytes(), CHUNK_STORE_BUDGET_BYTES);
+    let chunks = &state.chunks;
+    let due = state
+        .fetches
+        .due(waiting, now, room, |pointer| chunks.stored_size(*pointer));
+    for (channel, author, pointer) in due {
         let sources = sources_of(state, &author);
         let stored_size = state.chunks.stored_size(pointer);
         let client = ChunkClient::new(context.endpoint.clone());
@@ -112,7 +137,7 @@ pub(crate) fn start(state: &mut EventLoopState, context: &HandlerCtx<'_>, now: I
         state
             .fetches
             .running
-            .insert((channel, author, pointer.root()));
+            .insert((channel, author, pointer.root()), stored_size);
         task::spawn(async move {
             let result = client.fetch(&sources, pointer, stored_size).await;
             drop(done.send(FetchDone {
@@ -477,7 +502,10 @@ mod tests {
         let now = Instant::now();
         let waiting = state.docs.unresolved();
         assert_eq!(
-            state.fetches.due(waiting.clone(), now).len(),
+            state
+                .fetches
+                .due(waiting.clone(), now, u64::MAX, ChunkPointer::size)
+                .len(),
             1,
             "a pointer that waits is due"
         );
@@ -493,11 +521,22 @@ mod tests {
             "a failure shows nothing"
         );
         assert!(
-            state.fetches.due(waiting.clone(), now).is_empty(),
+            state
+                .fetches
+                .due(waiting.clone(), now, u64::MAX, ChunkPointer::size)
+                .is_empty(),
             "a fetch that failed waits before it starts again"
         );
         assert_eq!(
-            state.fetches.due(waiting, now + CHUNK_FETCH_RETRY).len(),
+            state
+                .fetches
+                .due(
+                    waiting,
+                    now + CHUNK_FETCH_RETRY,
+                    u64::MAX,
+                    ChunkPointer::size
+                )
+                .len(),
             1,
             "the fetch starts again when the wait is over"
         );
@@ -541,14 +580,24 @@ mod tests {
             assert!(
                 state
                     .fetches
-                    .due(waiting.clone(), now + CHUNK_FETCH_RETRY)
+                    .due(
+                        waiting.clone(),
+                        now + CHUNK_FETCH_RETRY,
+                        u64::MAX,
+                        ChunkPointer::size
+                    )
                     .is_empty(),
                 "the author is wrong, so the wait is longer than for a failed fetch"
             );
             assert_eq!(
                 state
                     .fetches
-                    .due(waiting, now + CHUNK_FETCH_REFUSED_RETRY)
+                    .due(
+                        waiting,
+                        now + CHUNK_FETCH_REFUSED_RETRY,
+                        u64::MAX,
+                        ChunkPointer::size
+                    )
                     .len(),
                 1,
                 "the fetch starts again when the long wait is over"
@@ -605,23 +654,29 @@ mod tests {
             })
             .collect();
         let now = Instant::now();
-        let first = fetches.due(waiting.clone(), now);
+        let first = fetches.due(waiting.clone(), now, u64::MAX, ChunkPointer::size);
         assert_eq!(
             first.len(),
             CHUNK_FETCHES_MAX,
             "no more than the cap at once"
         );
         for (channel, author, pointer) in &first {
-            fetches.running.insert((*channel, *author, pointer.root()));
+            fetches
+                .running
+                .insert((*channel, *author, pointer.root()), pointer.size());
         }
         assert!(
-            fetches.due(waiting.clone(), now).is_empty(),
+            fetches
+                .due(waiting.clone(), now, u64::MAX, ChunkPointer::size)
+                .is_empty(),
             "while the cap is full, no other fetch starts"
         );
         let (channel, author, pointer) = first[0];
         fetches.running.remove(&(channel, author, pointer.root()));
         assert_eq!(
-            fetches.due(waiting, now).len(),
+            fetches
+                .due(waiting, now, u64::MAX, ChunkPointer::size)
+                .len(),
             1,
             "one place is free, so one fetch starts"
         );
@@ -655,5 +710,111 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), ids.len(), "each holder once");
+    }
+    /// `count` pointers of `size` bytes each, of authors that differ.
+    fn waiting_of(count: u8, size: u64) -> Vec<(Channel, AuthorKey, ChunkPointer)> {
+        (0..count)
+            .map(|number| {
+                (
+                    Channel::State,
+                    testing::test_key(&format!("author{number}")),
+                    ChunkPointer::new(Root::from_bytes([number; 32]), size),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_value_that_would_take_the_held_bytes_past_the_budget_is_not_fetched() {
+        let (mut fetches, _received) = fetches();
+        let now = Instant::now();
+        let three = waiting_of(3, 100_000);
+        let two_fit = fetches.due(three.clone(), now, 250_000, ChunkPointer::size);
+        assert_eq!(
+            two_fit.len(),
+            2,
+            "the room of 250000 bytes takes two values of 100000"
+        );
+        let none_fit = fetches.due(three, now, 99_999, ChunkPointer::size);
+        assert!(
+            none_fit.is_empty(),
+            "no value fits in a room that is one byte short"
+        );
+        let mut mixed = waiting_of(2, 100_000);
+        mixed.insert(
+            0,
+            (
+                Channel::State,
+                testing::test_key("small"),
+                ChunkPointer::new(Root::from_bytes([200; 32]), 10),
+            ),
+        );
+        let big_skipped = fetches.due(mixed, now, 100_050, ChunkPointer::size);
+        assert_eq!(
+            big_skipped.len(),
+            2,
+            "a value that does not fit is skipped, and the next that fits is fetched"
+        );
+    }
+
+    #[test]
+    fn the_room_is_the_budget_less_the_bytes_held_whole_and_the_bytes_in_flight() {
+        let (mut fetches, _received) = fetches();
+        assert_eq!(
+            fetches.byte_room(0, 1_000),
+            1_000,
+            "an empty node has the whole budget"
+        );
+        assert_eq!(
+            fetches.byte_room(300, 1_000),
+            700,
+            "the bytes held whole are not room"
+        );
+        let name = (
+            Channel::State,
+            testing::test_key("author"),
+            Root::from_bytes([1; 32]),
+        );
+        fetches.running.insert(name, 200);
+        assert_eq!(
+            fetches.byte_room(300, 1_000),
+            500,
+            "the bytes that a running fetch will keep are not room either"
+        );
+        assert_eq!(
+            fetches.byte_room(2_000, 1_000),
+            0,
+            "a node past its budget has no room"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_held_bytes_are_those_of_the_values_held_whole_of_every_author_and_channel() {
+        let mut state = testing::fresh_state();
+        let first = Identity::generate();
+        let second = Identity::generate();
+        let waiting = ChunkPointer::new(Root::from_bytes([3; 32]), 70_000);
+        let whole = ChunkPointer::new(Root::from_bytes([4; 32]), 90_000);
+        fixtures::name_root(&mut state, &first, waiting, 1);
+        fixtures::name_root(&mut state, &second, whole, 1);
+        assert_eq!(
+            state.held_chunk_bytes(),
+            0,
+            "a pointer that waits holds nothing"
+        );
+        state
+            .docs
+            .resolve_pointer(
+                Channel::State,
+                &second.author_key(),
+                whole,
+                serde_json::json!({"a": 1}),
+            )
+            .expect("an object");
+        assert_eq!(
+            state.held_chunk_bytes(),
+            90_000,
+            "the value held whole counts, as the store keeps it"
+        );
     }
 }
