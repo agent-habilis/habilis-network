@@ -1483,6 +1483,48 @@ fn shed_then_resolves_when_the_endpoint_is_closed() {
     });
 }
 
+/// A relay that stopped answering leaves the close of the endpoint with no end. The receiver of a
+/// shed resolves at the bound all the same, so that the end of the run waits for it at most that
+/// long, and the handles that the close held go with it.
+#[test]
+fn a_shed_close_that_does_not_end_is_abandoned_at_the_bound() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (held, held_watch): (oneshot::Sender<()>, _) = oneshot::channel();
+        let closed =
+            super::rendezvous::spawn_bounded_close(std_Duration::from_millis(50), async move {
+                let _held = held;
+                let never: future::Pending<()> = future::pending();
+                never.await;
+            });
+
+        let resolved = time::timeout(std_Duration::from_secs(5), closed).await;
+
+        assert!(
+            matches!(resolved, Ok(Ok(()))),
+            "the receiver did not resolve at the bound of a close that never ends: {resolved:?}"
+        );
+        assert!(
+            matches!(held_watch.await, Err(oneshot::error::RecvError { .. })),
+            "the handle that the abandoned close held was not dropped"
+        );
+    });
+}
+
+/// A close that ends in time resolves the receiver at its end, and the bound adds nothing.
+#[test]
+fn a_shed_close_that_ends_in_time_resolves_at_its_end() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let closed = super::rendezvous::spawn_bounded_close(std_Duration::from_secs(60), async {});
+
+        let resolved = time::timeout(std_Duration::from_secs(5), closed).await;
+
+        assert!(
+            matches!(resolved, Ok(Ok(()))),
+            "a close that ended did not resolve the receiver: {resolved:?}"
+        );
+    });
+}
+
 #[test]
 fn shed_and_wait_closes_before_it_returns() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
