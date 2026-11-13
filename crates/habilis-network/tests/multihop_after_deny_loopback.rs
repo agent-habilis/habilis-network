@@ -11,9 +11,11 @@
 //! run on the multihop data path after a deny.
 //!
 //! What the run does and does not show:
-//! - Bob and carol are IP pairs to the engine. The climb to multihop comes from the
-//!   `Multihop` branch of `on_path_change`, and not from the sweep rule, so a green run says
-//!   nothing about the sweep, and a red run is below the engine.
+//! - Bob and carol are IP pairs to the engine. Only the lower id of a pair has a path watcher.
+//!   The lower id climbs to multihop through the `Multihop` branch of `on_path_change`. The
+//!   higher id has no watcher, and the send proves it by the proof rule of the sweep
+//!   (`prove_addressee`), so no send is held until the next sweep tick. A green run says
+//!   nothing about the sweep tick itself, and a red run is below the engine.
 //! - The IP cuts only take IP away from selection: the IP paths exist and cannot be
 //!   selected. A browser pair has no IP path at all.
 //! - `before`, the count of the cells that alice forwarded, is read right before the payload

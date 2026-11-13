@@ -161,7 +161,7 @@ fn two_members_meet_when_a_foreign_endpoint_holds_the_first_rung() {
     // one in 30 s warns once, by design.
     guard.allow_warn(
         "habilis_network::gossip",
-        "no peer answered the digest of the state channel within the time limit",
+        "no peer answered the state channel within the time limit",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (met, ladder) = meet(&[0]).await;

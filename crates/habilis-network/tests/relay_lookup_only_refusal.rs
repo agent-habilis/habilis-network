@@ -177,7 +177,7 @@ fn relay_only_pair_links_only_when_the_relay_may_carry_payload() {
     // the 30 s of the first-sync wait: a joiner that met no one in 30 s warns once, by design.
     guard.allow_warn(
         "habilis_network::gossip",
-        "no peer answered the digest of the state channel within the time limit",
+        "no peer answered the state channel within the time limit",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         // Plain HTTP, the same relay flavour the browser matrix uses.

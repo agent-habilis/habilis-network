@@ -137,7 +137,7 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
     // host: a joiner that met no one in 30 s warns once, by design.
     guard.allow_warn(
         "habilis_network::gossip",
-        "no peer answered the digest of the state channel within the time limit",
+        "no peer answered the state channel within the time limit",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 8, async {
         let _serial = serial().lock().await;
@@ -189,7 +189,7 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
     // host: a joiner that met no one in 30 s warns once, by design.
     guard.allow_warn(
         "habilis_network::gossip",
-        "no peer answered the digest of the state channel within the time limit",
+        "no peer answered the state channel within the time limit",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 8, async {
         let _serial = serial().lock().await;

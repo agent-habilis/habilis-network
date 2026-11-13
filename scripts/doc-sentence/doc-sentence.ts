@@ -11,7 +11,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const DOC_LINE = /^\s*\/\/[\/!](?: (.*))?$/;
 const ABBREVIATION = /(?:^|[\s(])(?:e\.g|i\.e|etc|vs|approx|a\.k\.a)$/i;
 // Brand, crate and product names that are written in lowercase, so a sentence may start with them.
-const BRANDS = new Set(["iroh", "noq", "str0m", "mDNS", "macOS", "postcard", "tracing", "automerge", "v1"]);
+const BRANDS = new Set(["iroh", "noq", "str0m", "mDNS", "macOS", "postcard", "tracing", "v1"]);
 
 // The doc paragraphs of a file, as [first line number, text]. A fenced code block is not prose.
 export function paragraphs(src: string): [number, string][] {

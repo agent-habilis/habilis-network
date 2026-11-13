@@ -1,9 +1,9 @@
 //! A message that the gossip layer delivered but the app never read still reaches the app.
 //!
-//! The gossip layer drops a message id it has already seen for 90 s, so an anti-entropy resend
-//! of the same bytes cannot repair what the app missed. The case here: the topic is swapped
+//! The gossip layer drops a message id it has already seen for 90 s, so a repeat of the same bytes
+//! cannot repair what the app missed. The case here: the topic is swapped
 //! while the old subscription holds queued messages (the heal tick resubscribes, and the old
-//! queue must reach the app before it is dropped). `resend_dedup_loopback.rs` holds the other.
+//! queue must reach the app before it is dropped).
 //!
 //! Two members on a local relay, the default transport list.
 
@@ -20,7 +20,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
 use tokio::time;
-/// One heal tick (15 s) to resubscribe, the re-graft, and an anti-entropy cycle, with margin.
+/// One heal tick (15 s) to resubscribe and the re-graft, with margin.
 /// Less than the 90 s dedup of the gossip layer: a message that waits for the dedup is a failure.
 const RECOVERY: Duration = Duration::from_secs(75);
 const FORMATION: Duration = Duration::from_mins(1);
@@ -32,15 +32,9 @@ fn trace() -> String {
     let lines: Vec<_> = text
         .lines()
         .filter(|line| {
-            [
-                "restored",
-                "drained",
-                "anti-entropy",
-                "dropped",
-                "failed to parse",
-            ]
-            .iter()
-            .any(|needle| line.contains(needle))
+            ["restored", "drained", "dropped", "failed to parse"]
+                .iter()
+                .any(|needle| line.contains(needle))
         })
         .collect();
     lines.join("\n")
@@ -155,7 +149,7 @@ async fn meshed_pair(relay: &RelayUrl) -> (Member, Member) {
 
 /// A message sent while the topic of the receiver is severed waits in the queue of the old
 /// subscription. The swap must hand it to the app before the queue is dropped: the gossip layer
-/// counted it as delivered, so neither the overlay nor an anti-entropy resend of the same bytes
+/// counted it as delivered, so neither the overlay nor a repeat of the same bytes
 /// brings it again inside the 90 s dedup.
 #[test]
 fn a_message_that_waited_in_the_old_subscription_reaches_the_app_after_the_swap() {
