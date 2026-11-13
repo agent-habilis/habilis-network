@@ -51,7 +51,9 @@ impl fmt::Display for DigestError {
             Self::IndexPastTotal => "the index is past the total",
             Self::Unsorted => "the entries are not sorted and unique",
             Self::OutsideRange => "an entry is outside the page range",
-            Self::BadRange => "the first page starts at the zero key and the last has no end key",
+            Self::BadRange => {
+                "the page range breaks the contract of its place: the first page starts at the zero key, and the last page has no end key"
+            }
         };
         formatter.write_str(text)
     }

@@ -1737,35 +1737,27 @@ fn maybe_push_inbound(
 ) {
     // Short-circuit the cheap structural guards first: no live inbound subscriber
     // (always so for CLI/MCP, where the field is `None`), a pre-join or
-    // third-party frame, or a kind of the engine's own plumbing: the shared state and its
-    // digest round, the proof exchange, the link state, the address cards, and the ping rounds.
+    // third-party frame, or a kind that a subscriber does not get. Only an app frame and a presence
+    // go to a subscriber. Every other kind is the engine's own plumbing (the shared state and its
+    // digest round, the proof exchange, the link state, the address cards, the ping rounds), and a
+    // kind that is new stays out until someone adds it here.
     let Some(tx) = context.external_msg_tx else {
         return;
     };
     if tx.receiver_count() == 0
         || !surfaceable
         || !addressed_to_us(message, &context.our_pubkey)
-        || matches!(
+        || !matches!(
             message.kind,
-            MessageKind::State
-                | MessageKind::Meta
-                | MessageKind::Ping
-                | MessageKind::Pong { .. }
-                | MessageKind::PeerInfo
-                | MessageKind::ProofRequest { .. }
-                | MessageKind::LinkState
-                | MessageKind::SliceRoot { .. }
-                | MessageKind::SlicePull { .. }
-                | MessageKind::SlicePageRequest { .. }
-                | MessageKind::SlicePage { .. }
+            MessageKind::App { .. } | MessageKind::Presence { .. }
         )
     {
         return;
     }
     // An App frame reaches an in-process consumer only when its class says PUSH (not RPC
     // plumbing) and it is not a liveness beat — the app's per-tag policy, threaded in
-    // from the caller's single classification. An infra frame (`class == None`,
-    // `app_tag` also `None`) is always pushable past the structural guards above.
+    // from the caller's single classification. A presence (`class == None`, `app_tag` also
+    // `None`) is always pushable past the structural guards above.
     let kind_tag = message.kind.app_tag();
     let app_pushable = match kind_tag {
         Some(_) => class.is_some_and(|cls| cls.pushable() && !cls.beat()),
@@ -4447,7 +4439,6 @@ mod first_contact_tests {
         });
     }
 
-    /// The four slice kinds name one addressee, so a node that is not the addressee does not take them.
     /// **The engine plumbing does not reach a push subscriber.** A frame that the engine sends to
     /// itself for the digest round, the proof exchange and the link state has no app tag, and the
     /// push gate let any such frame through. A subscriber of the push channel got the raw frames of
@@ -4513,6 +4504,7 @@ mod first_contact_tests {
         });
     }
 
+    /// The four slice kinds name one addressee, so a node that is not the addressee does not take them.
     #[test]
     fn a_slice_kind_is_for_its_addressee_only() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {

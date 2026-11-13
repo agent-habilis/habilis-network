@@ -79,8 +79,9 @@ pub fn page_frame_overhead(mesh: &MeshId, nickname: &Nickname) -> usize {
     one.saturating_sub(two.saturating_sub(one))
 }
 
-/// The length of a signed `SlicePage` frame of `rows` rows, at the worst shape of the page: index 998
-/// of 999 pages, so both numbers take 3 digits, and the page has an end key.
+/// The length of a signed `SlicePage` frame of `rows` rows, at the worst shape of the page: index 997
+/// of 999 pages, so both numbers take 3 digits, and the page has an end key. It is a middle page: the
+/// last page has no end key, and a frame that the wire refuses sizes nothing.
 fn page_frame_len(mesh: &MeshId, nickname: &Nickname, rows: usize) -> usize {
     let entries: Vec<DigestEntry> = (0..2000u64)
         .map(|index| {
@@ -93,7 +94,7 @@ fn page_frame_len(mesh: &MeshId, nickname: &Nickname, rows: usize) -> usize {
             )
         })
         .collect();
-    let Ok(page) = DigestPage::build(&entries, rows, 998, 999) else {
+    let Ok(page) = DigestPage::build(&entries, rows, 997, 999) else {
         return usize::MAX;
     };
     let kind = MessageKind::SlicePage {
@@ -2237,7 +2238,7 @@ mod tests {
     /// One row of a page with its comma: `["<64 hex>",18446744073709551615,"<64 hex>"],`, 157 bytes.
     const ROW_WITH_COMMA: usize = 157;
 
-    /// A signed `SlicePage` of the worst shape (index 998 of 999, an end key, `state`) is the page probe
+    /// A signed `SlicePage` of the worst shape (index 997 of 999, an end key, `state`) is the page probe
     /// plus exactly one row for each row. The frame is built here, independently of the probe, so a probe
     /// a few bytes short fails this test.
     #[test]
@@ -2258,7 +2259,7 @@ mod tests {
             .collect();
         for rows in [1usize, 16] {
             let page =
-                DigestPage::build(&sorted, rows, 998, 999).expect("a page of the worst shape");
+                DigestPage::build(&sorted, rows, 997, 999).expect("a page of the worst shape");
             let kind = habilis_network_protocol::MessageKind::SlicePage {
                 to: key(9),
                 channel: Channel::State,
@@ -2269,6 +2270,11 @@ mod tests {
                 Message::new_frame(&mesh, &nickname, kind, body).sign(&Identity::generate());
             let frame = signed.serialize().expect("a worst-shape page serializes");
             let frame_len = frame.into_bytes().len();
+            let wire = signed.serialize().expect("a worst-shape page serializes");
+            assert!(
+                Message::parse(wire.as_bytes()).is_ok(),
+                "a worst-shape page of {rows} rows does not parse: a frame that the wire refuses sizes nothing"
+            );
             assert_eq!(
                 frame_len,
                 overhead + rows * ROW_WITH_COMMA,
