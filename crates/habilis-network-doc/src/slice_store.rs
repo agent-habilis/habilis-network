@@ -538,6 +538,60 @@ impl SliceStore {
             .filter_map(|slice| slice.value.pointer())
     }
 
+    /// The authors whose held version is a pointer that has not been fetched, with the pointer. The engine asks
+    /// the holders of the chunks of each one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert_eq!(store.unresolved().count(), 0);
+    /// ```
+    pub fn unresolved(&self) -> impl Iterator<Item = (AuthorKey, ChunkPointer)> {
+        self.slices
+            .iter()
+            .filter_map(|(key, slice)| match &slice.value {
+                SliceValue::Pointer { pointer, .. } => Some((*key, *pointer)),
+                SliceValue::Inline(_) | SliceValue::Chunked { .. } => None,
+            })
+    }
+
+    /// Keeps `value`, the whole value that `pointer` names, with the slice of `key`, and says whether it did. It
+    /// does not when the slice no longer holds `pointer`: a newer version replaced it, or the author left.
+    ///
+    /// # Errors
+    ///
+    /// [`SliceError::Malformed`] when `value` is not an object, and [`SliceError::Reserved`] when it holds the
+    /// `$chunks` key. The slice keeps its pointer and its last complete value.
+    pub fn resolve_pointer(
+        &mut self,
+        key: &AuthorKey,
+        pointer: ChunkPointer,
+        value: Value,
+    ) -> Result<bool, SliceError> {
+        if !value.is_object() {
+            return Err(SliceError::Malformed);
+        }
+        if value.get(CHUNKS_KEY).is_some() {
+            return Err(SliceError::Reserved);
+        }
+        let Some(slice) = self.slices.get_mut(key) else {
+            return Ok(false);
+        };
+        match &slice.value {
+            SliceValue::Pointer { pointer: held, .. } if *held == pointer => {
+                slice.value = SliceValue::Chunked { pointer, value };
+                Ok(true)
+            }
+            SliceValue::Pointer { .. } | SliceValue::Inline(_) | SliceValue::Chunked { .. } => {
+                Ok(false)
+            }
+        }
+    }
+
     /// Returns the signed frame held for `key`, which a resend sends. No caller yet.
     #[must_use]
     pub fn frame(&self, key: &AuthorKey) -> Option<&Verified> {
@@ -557,9 +611,9 @@ impl SliceStore {
         self.slices
             .iter()
             .filter(|(_, slice)| !slice.value.is_tombstone())
-            .map(|(key, slice)| {
+            .filter_map(|(key, slice)| {
                 let hex = String::from_utf8_lossy(&key.hex()).into_owned();
-                (hex, slice.value.to_value())
+                slice.value.to_value().map(|value| (hex, value))
             })
             .collect()
     }
@@ -594,7 +648,13 @@ impl SliceStore {
         }
         let pointer = ChunkPointer::parse(&body.value).ok_or(SliceError::Malformed)?;
         self.check_pointer_size(pointer)?;
-        Ok((body.version, SliceValue::Pointer(pointer)))
+        Ok((
+            body.version,
+            SliceValue::Pointer {
+                pointer,
+                last: None,
+            },
+        ))
     }
 
     /// Refuses a pointer that names more bytes than the value cap. The check comes before any chunk is asked for.
@@ -694,6 +754,13 @@ impl SliceStore {
         }
         if live && is_new && !self.take_token(&key, now, self.receive_burst()) {
             return SliceIngest::Refused(SliceError::RateLimited);
+        }
+        let mut value = value;
+        if let SliceValue::Pointer { last, .. } = &mut value {
+            *last = self
+                .slices
+                .get_mut(&key)
+                .and_then(|held| held.value.take_complete());
         }
         let incoming = Slice {
             frame: frame.clone(),
@@ -854,7 +921,7 @@ impl SliceStore {
         let Some(slice) = self.slices.get_mut(key) else {
             return;
         };
-        if let SliceValue::Pointer(pointer) = slice.value {
+        if let SliceValue::Pointer { pointer, .. } = slice.value {
             slice.value = SliceValue::Chunked { pointer, value };
         }
     }
@@ -1086,7 +1153,7 @@ impl SliceStore {
             .values()
             .filter_map(|slice| match &slice.value {
                 SliceValue::Chunked { value, .. } => Some(value.to_string().len()),
-                SliceValue::Inline(_) | SliceValue::Pointer(_) => None,
+                SliceValue::Inline(_) | SliceValue::Pointer { .. } => None,
             })
             .fold((0, 0), |(bytes, count), len| (bytes + len, count + 1))
     }
@@ -1508,16 +1575,151 @@ mod tests {
         );
     }
 
+    fn hex_of(key: &AuthorKey) -> String {
+        String::from_utf8_lossy(&key.hex()).into_owned()
+    }
+
     #[test]
-    fn view_reads_a_pointer_slice_as_its_pointer_value() {
+    fn view_leaves_out_an_author_whose_first_version_is_a_pointer_that_is_not_fetched() {
         let mut store = store();
-        let (_, value) = pointer_value();
-        apply(&mut store, &frame(key(1), 1, value.clone()));
-        let hex = String::from_utf8_lossy(&key(1).hex()).into_owned();
+        let (pointer, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 1, value));
         assert_eq!(
-            store.view().get(&hex),
-            Some(&value),
-            "the view must show the pointer, not drop the slice"
+            store.view().get(&hex_of(&key(1))),
+            None,
+            "a reader must not see the raw pointer, nor a half of a value"
+        );
+        let unresolved: Vec<(AuthorKey, ChunkPointer)> = store.unresolved().collect();
+        assert_eq!(
+            unresolved,
+            vec![(key(1), pointer)],
+            "the engine must be told that the pointer is not fetched"
+        );
+    }
+
+    #[test]
+    fn view_keeps_the_last_complete_value_while_the_next_version_is_fetched() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"old": true})));
+        let (_, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 2, value));
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&json!({"old": true})),
+            "the view must keep the last complete version until the new one is fetched"
+        );
+        let newer = ChunkPointer::new(Root::from_bytes([8; 32]), 200_000).to_value();
+        apply(&mut store, &frame(key(1), 3, newer));
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&json!({"old": true})),
+            "a second pointer version must not lose the last complete value"
+        );
+    }
+
+    #[test]
+    fn a_fetched_value_replaces_the_last_complete_one_and_the_pointer_is_resolved() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"old": true})));
+        let (pointer, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 2, value));
+        let fetched = json!({"new": "value"});
+        assert_eq!(
+            store.resolve_pointer(&key(1), pointer, fetched.clone()),
+            Ok(true),
+            "a value that the held pointer names must be kept"
+        );
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&fetched),
+            "the view must show the fetched value"
+        );
+        assert_eq!(
+            store.value(&key(1)),
+            Some(&fetched),
+            "the slice holds it whole"
+        );
+        assert_eq!(
+            store.unresolved().count(),
+            0,
+            "a resolved pointer is no longer waiting for chunks"
+        );
+        assert_eq!(
+            store.chunked_held(),
+            (fetched.to_string().len(), 1),
+            "the old value must be dropped, and the new one held once"
+        );
+    }
+
+    #[test]
+    fn a_fetched_value_of_a_pointer_that_a_newer_version_replaced_is_not_kept() {
+        let mut store = store();
+        let (old, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 1, value));
+        apply(&mut store, &frame(key(1), 2, json!({"newer": 1})));
+        assert_eq!(
+            store.resolve_pointer(&key(1), old, json!({"late": true})),
+            Ok(false),
+            "a value of a replaced pointer must not be kept"
+        );
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&json!({"newer": 1})),
+            "the newer version must stay"
+        );
+        assert_eq!(
+            store.resolve_pointer(&key(2), old, json!({"nobody": true})),
+            Ok(false),
+            "an author with no slice has nothing to resolve"
+        );
+    }
+
+    #[test]
+    fn a_fetched_value_that_is_not_an_object_or_holds_the_reserved_key_is_refused() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"old": true})));
+        let (pointer, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 2, value));
+        assert_eq!(
+            store.resolve_pointer(&key(1), pointer, json!([1, 2])),
+            Err(SliceError::Malformed),
+            "a value that is not an object must be refused"
+        );
+        assert_eq!(
+            store.resolve_pointer(&key(1), pointer, json!({"$chunks": 1})),
+            Err(SliceError::Reserved),
+            "a value with the reserved key must be refused"
+        );
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&json!({"old": true})),
+            "a refused value must leave the last complete version"
+        );
+        assert_eq!(store.unresolved().count(), 1, "the pointer must still wait");
+    }
+
+    #[test]
+    fn a_chunked_value_that_a_pointer_version_follows_is_kept_as_the_last_complete_one() {
+        let mut store = value_capped_store(1 << 20);
+        let (first, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 1, value));
+        let fetched = json!({"first": "value"});
+        assert_eq!(
+            store.resolve_pointer(&key(1), first, fetched.clone()),
+            Ok(true),
+            "the first value is fetched"
+        );
+        let next = ChunkPointer::new(Root::from_bytes([9; 32]), 150_000);
+        apply(&mut store, &frame(key(1), 2, next.to_value()));
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&fetched),
+            "the chunked value must stay in the view until the next one is fetched"
+        );
+        assert_eq!(
+            store.chunked_held(),
+            (0, 0),
+            "the last complete value is held once, as the last value of the pointer, and not twice"
         );
     }
 
