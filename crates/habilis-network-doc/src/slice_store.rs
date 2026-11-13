@@ -1126,23 +1126,24 @@ impl SliceStore {
         body_json["value"] = value;
         let json = body_json.to_string();
         let plain = MessageBody::try_new(&json).map_err(|_| SliceError::Malformed)?;
-        let (body, measured) = if let Some(key) = self.key.as_ref() {
-            (
-                wire::encrypt_body(&plain, key).map_err(|_| SliceError::Seal)?,
-                wire::sealed_body_len_bound(plain.as_str().len()),
-            )
+        let measured: usize = if self.key.is_some() {
+            wire::sealed_body_len_bound(plain.as_str().len())
         } else {
-            let escaped =
-                serde_json::to_string(plain.as_str()).map_or(usize::MAX, |text| text.len());
-            (plain, escaped)
+            serde_json::to_string(plain.as_str()).map_or(usize::MAX, |text| text.len())
         };
         let limit = self.limits.slice_bytes.saturating_sub(self.frame_overhead);
+        // The check comes before the seal: sealing encodes the whole body in base 58, which costs more than
+        // the square of its length, so a value that is too large for a frame must not be sealed.
         if measured > limit {
             return Err(SliceError::TooLarge {
                 bytes: measured,
                 limit,
             });
         }
+        let body = match self.key.as_ref() {
+            Some(key) => wire::encrypt_body(&plain, key).map_err(|_| SliceError::Seal)?,
+            None => plain,
+        };
         Ok((version, body, measured))
     }
 
@@ -1963,6 +1964,23 @@ mod tests {
             "a body sealed under another key must be malformed"
         );
         assert_eq!(store.authors(), 0, "an unopened body must leave no author");
+    }
+
+    #[test]
+    fn a_value_too_large_for_one_frame_is_refused_before_it_is_sealed() {
+        let mut store = store().with_key(Some(SymmetricKey::from([3u8; 32])));
+        let value = object(json!({"k": "x".repeat(300_000)}));
+        let started = Instant::now();
+        let refused = store.prepare_local(&key(1), value, started);
+        assert!(
+            matches!(refused, Err(SliceError::TooLarge { .. })),
+            "a value past one frame must be TooLarge on a keyed store, got {refused:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the refusal must not seal the body first: it took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
