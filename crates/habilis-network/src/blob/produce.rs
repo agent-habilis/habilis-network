@@ -319,7 +319,7 @@ async fn serve_connection(
     let (send, recv) = time::timeout_at(deadline, connection.accept_bi())
         .await
         .context("no fetch request within the pre-authentication deadline")??;
-    let result = serve_stream(&connection, send, recv, store, deadline).await;
+    let result = serve_stream(&connection, send, recv, store, deadline, limits.ack_stall).await;
     tracing::debug!(target: "habilis_network::blob", failed = result.is_err(), close = ?connection.close_reason(), "blob serve ended");
     result
 }
@@ -334,6 +334,7 @@ async fn serve_stream(
     mut recv: RecvStream,
     store: &Mutex<BlobStore>,
     deadline: Instant,
+    ack_stall: Duration,
 ) -> Result<()> {
     let mut request = Zeroizing::new([0u8; HASH_LEN + SECRET_LEN]);
     // Still inside the pre-auth deadline: a peer that opens a stream and then
@@ -371,10 +372,32 @@ async fn serve_stream(
     send.write_all(&size.to_le_bytes()).await?;
     stream_file(&path, &mut send).await?;
     let _ = send.finish();
-    // Let the consumer read the tail before CONNECTION_CLOSE races it on a fast link.
-    let _ = time::timeout(Duration::from_secs(2), send.stopped()).await;
+    // Let the consumer receive the tail before CONNECTION_CLOSE races it.
+    wait_acknowledged(connection, &send, ack_stall).await;
     connection.close(DONE.into(), b"done");
     Ok(())
+}
+
+/// Wait until the consumer has acknowledged every byte of the stream, or the connection ends, or a
+/// window of `stall` passes with no acknowledgement. The whole file sits in the send buffer, so
+/// the time that this takes is the time that the link needs, and a cap on that time cuts a file
+/// that a slow link carries. A window with an acknowledgement in it starts the next window.
+async fn wait_acknowledged(connection: &Connection, send: &SendStream, stall: Duration) {
+    loop {
+        let before = acknowledgements(connection);
+        if time::timeout(stall, send.stopped()).await.is_ok() {
+            return;
+        }
+        if acknowledgements(connection) == before {
+            return;
+        }
+    }
+}
+
+/// The count of acknowledgement frames that the consumer has sent on this connection.
+fn acknowledgements(connection: &Connection) -> u64 {
+    let frames = connection.stats().frame_rx;
+    frames.acks + frames.path_acks
 }
 
 /// Stream `path` to `send` in bounded chunks — constant memory.

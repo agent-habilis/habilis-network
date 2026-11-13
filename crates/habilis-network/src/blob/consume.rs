@@ -24,7 +24,7 @@ use super::close_on_drop::CloseOnDrop;
 use super::dialed::Dialed;
 use super::error::BlobError;
 use super::ticket::BlobTicket;
-use super::{BLOB_ALPN, HASH_LEN, SECRET_LEN};
+use super::{BLOB_ALPN, DONE, HASH_LEN, SECRET_LEN};
 
 use crate::transport;
 use tokio::time;
@@ -374,6 +374,9 @@ where
     if let Err(error) = &result {
         let cause = format!("{error:#}");
         tracing::debug!(target: "habilis_network::blob", %cause, close = ?connection.close_reason(), "blob transfer failed");
+    } else {
+        // The producer waits for the end of the data, so a clean close tells it at once.
+        connection.close(DONE.into(), b"done");
     }
     result
 }

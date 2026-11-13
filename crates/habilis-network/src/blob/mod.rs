@@ -419,6 +419,7 @@ mod tests {
                 let limits = ServeLimits {
                     pre_auth: Duration::from_millis(300),
                     max_inflight: 4,
+                    ..ServeLimits::DEFAULT
                 };
                 let server = BlobServer::start_with_limits(
                     LookupOpts::loopback(),
@@ -823,6 +824,66 @@ mod tests {
         address
     }
 
+    /// A UDP relay on loopback that passes every datagram of the consumer at once and paces the
+    /// datagrams of the producer to `bytes_per_second`. A queue holds what the pace does not pass,
+    /// so nothing is lost: the link is slow, not lossy. With `deaf_after`, the relay drops every
+    /// datagram of the consumer from that time after the first one, so the producer gets no more
+    /// acknowledgement.
+    async fn slow_link_proxy(
+        upstream: SocketAddr,
+        bytes_per_second: u64,
+        deaf_after: Option<Duration>,
+    ) -> SocketAddr {
+        let front = UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+        let address = front.local_addr().expect("proxy address");
+        // The reply tasks send through the front socket, so they share it with the loop.
+        let front = Arc::new(front);
+        tokio::spawn(async move {
+            // One socket per client, shared by its reply task and the loop.
+            let mut routes: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
+            let mut buffer = vec![0u8; 2048];
+            let mut first_seen: Option<time::Instant> = None;
+            loop {
+                let Ok((read, client)) = front.recv_from(&mut buffer).await else {
+                    return;
+                };
+                let first = *first_seen.get_or_insert_with(time::Instant::now);
+                if deaf_after.is_some_and(|after| first.elapsed() >= after) {
+                    continue;
+                }
+                let route = if let Some(route) = routes.get(&client) {
+                    Arc::clone(route)
+                } else {
+                    let route = UdpSocket::bind("127.0.0.1:0").await.expect("bind route");
+                    route.connect(upstream).await.expect("connect route");
+                    // One socket per client, read by a task and written by this loop.
+                    let route = Arc::new(route);
+                    let (reply, front) = (Arc::clone(&route), Arc::clone(&front));
+                    tokio::spawn(async move {
+                        let mut reply_buffer = vec![0u8; 2048];
+                        let mut free_at = time::Instant::now();
+                        while let Ok(replied) = reply.recv(&mut reply_buffer).await {
+                            let datagram = reply_buffer[..replied].to_vec();
+                            let cost = Duration::from_micros(
+                                replied as u64 * 1_000_000 / bytes_per_second,
+                            );
+                            free_at = free_at.max(time::Instant::now()) + cost;
+                            let (front, send_at) = (Arc::clone(&front), free_at);
+                            tokio::spawn(async move {
+                                time::sleep_until(send_at).await;
+                                let _ = front.send_to(&datagram, client).await;
+                            });
+                        }
+                    });
+                    routes.insert(client, Arc::clone(&route));
+                    route
+                };
+                let _ = route.send(&buffer[..read]).await;
+            }
+        });
+        address
+    }
+
     /// **A handshake that stalls is retried on a new endpoint, not waited out.**
     ///
     /// On a LAN with two interfaces, the reply flight of the producer to one consumer endpoint is
@@ -988,6 +1049,124 @@ mod tests {
                     out, b"bytes behind a slow path",
                     "the fetch returns the registered bytes"
                 );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A blob that the link needs more than 2 s to carry is fetched whole.**
+    ///
+    /// The producer buffers the whole file at once, finishes the stream, and used to wait 2 s for
+    /// the consumer to acknowledge all of it before it closed the connection. On a link that
+    /// carries less than the file in 2 s, that close cut the transfer, and the consumer read
+    /// "connection lost" on every attempt. Here the link carries 1 MB/s and the file is 4 MB, so
+    /// the transfer takes about 4 s.
+    #[test]
+    fn a_blob_that_the_link_needs_more_than_2_s_to_carry_is_fetched_whole() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let bytes: Vec<u8> = (0..4_000_000u32).map(|index| (index % 251) as u8).collect();
+                let src = temp_file(&bytes);
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-slow-link"))
+                    .await
+                    .expect("register");
+                let upstream = only_ip_address(&ticket.address);
+                let proxy = slow_link_proxy(upstream, 1_000_000, None).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(60),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &super::consume::DIAL_CAPS,
+                        None,
+                        fresh_endpoint,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes over a 1 MB/s link: {fetched:?}"
+                );
+                assert_eq!(out, bytes, "the fetch returns every byte of the file");
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A consumer that stops acknowledging does not hold the serve for ever.**
+    ///
+    /// The producer waits for the acknowledgement of the tail with no cap on the total time, so a
+    /// silent consumer must be bounded some other way: by a window with no acknowledgement in it.
+    /// Here the link carries 1 MB/s, and the consumer goes deaf 500 ms after its first datagram,
+    /// with most of the file still in flight. With a stall window of 1 s, the serve must end
+    /// within a few seconds. A wait with no stall window holds it until the idle timeout of the
+    /// connection, 30 s.
+    #[test]
+    fn a_consumer_that_stops_acknowledging_does_not_hold_the_serve() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use super::produce::ServeLimits;
+
+                let limits = ServeLimits {
+                    ack_stall: Duration::from_secs(1),
+                    ..ServeLimits::DEFAULT
+                };
+                let server = BlobServer::start_with_limits(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                    limits,
+                )
+                .await
+                .expect("start producer");
+                let bytes: Vec<u8> = (0..4_000_000u32).map(|index| (index % 251) as u8).collect();
+                let src = temp_file(&bytes);
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-deaf-consumer"))
+                    .await
+                    .expect("register");
+                let upstream = only_ip_address(&ticket.address);
+                let deaf_after = Some(Duration::from_millis(500));
+                let proxy = slow_link_proxy(upstream, 1_000_000, deaf_after).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let consumer = tokio::spawn(async move {
+                    let mut out = Vec::new();
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &super::consume::DIAL_CAPS,
+                        None,
+                        fresh_endpoint,
+                    )
+                    .await
+                });
+                time::sleep(Duration::from_secs(10)).await;
+                assert_eq!(
+                    server.inflight(),
+                    0,
+                    "a consumer that sent no acknowledgement for 9 s still holds the serve"
+                );
+                consumer.abort();
                 fs::remove_file(&src).ok();
                 server.shutdown().await;
             },
