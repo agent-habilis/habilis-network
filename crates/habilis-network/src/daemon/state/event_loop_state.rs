@@ -234,15 +234,33 @@ impl ChannelDocs {
             })
     }
 
-    /// The roots of the chunked values that the slices of `key` hold, in both channels.
-    pub(crate) fn chunk_roots<'docs>(
-        &'docs self,
-        key: &'docs AuthorKey,
-    ) -> impl Iterator<Item = Root> + 'docs {
-        let root_of = |channel| self.get(channel).pointer(key).map(ChunkPointer::root);
+    /// Keeps the fetched `value` of `pointer` with the slice of `key` on `channel`, and says whether it did.
+    ///
+    /// # Errors
+    ///
+    /// The value is not an object, or holds the reserved key.
+    #[cfg(test)]
+    pub(crate) fn resolve_pointer(
+        &mut self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+        pointer: ChunkPointer,
+        value: serde_json::Value,
+    ) -> Result<bool, SliceError> {
+        self.get_mut(channel).resolve_pointer(key, pointer, value)
+    }
+
+    /// The roots of the chunked values that the slices of every author hold whole, in both channels. A sweep of the
+    /// chunk store keeps the chunks of these roots. A pointer that waits for its chunks is not one of them.
+    pub(crate) fn resolved_roots(&self) -> impl Iterator<Item = Root> + '_ {
+        let in_channel = |channel| {
+            self.get(channel)
+                .resolved_pointers()
+                .map(ChunkPointer::root)
+        };
         [protocol::Channel::State, protocol::Channel::Meta]
             .into_iter()
-            .filter_map(root_of)
+            .flat_map(in_channel)
     }
 
     /// The signed frame of the slice that `key` holds on `channel`, as a wire frame.

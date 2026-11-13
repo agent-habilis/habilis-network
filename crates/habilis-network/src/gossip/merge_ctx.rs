@@ -10,6 +10,7 @@ use std::fmt;
 
 use crate::transport::MeshSender;
 
+use crate::chunk_fetch;
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
 use crate::doc::wire;
@@ -573,18 +574,9 @@ pub(crate) async fn draft_own_write(
         .docs
         .prepare_pointer(channel, &own, ChunkPointer::new(root, size), next, now);
     if draft.is_err() {
-        keep_own_chunks(state).await;
+        chunk_fetch::keep_held(state).await;
     }
     draft.map_err(transport::SendError::State)
-}
-
-/// Drops the chunks that no own slice names. Called when the own slices change, so the chunks of an old version
-/// do not stay.
-async fn keep_own_chunks(state: &EventLoopState) {
-    let own = state.identity.author_key();
-    if let Err(error) = state.chunks.keep_only(state.docs.chunk_roots(&own)).await {
-        tracing::warn!(target: "habilis_network::gossip", %error, "the chunks of an old version were not dropped");
-    }
 }
 
 /// Signs the body of `draft`, and commits the frame as the own slice. Returns the frame and its wire form.
@@ -607,7 +599,7 @@ pub(crate) async fn sign_and_commit(
         .docs
         .commit_local(channel, draft, &signed, now)
         .map_err(transport::SendError::State)?;
-    keep_own_chunks(state).await;
+    chunk_fetch::keep_held(state).await;
     Ok((signed, bytes))
 }
 
@@ -1465,7 +1457,7 @@ mod tests {
             "a value of 70000 bytes must be kept as 2 chunks of 64 KiB"
         );
         assert_eq!(
-            state.docs.chunk_roots(&own).count(),
+            state.docs.resolved_roots().count(),
             1,
             "the slice must name one root"
         );
@@ -1504,14 +1496,13 @@ mod tests {
         write_own(&mut state, channel, big_value('y', 10))
             .await
             .expect("an inline write");
-        let own = state.identity.author_key();
         assert_eq!(
             state.chunks.stored_chunks(),
             0,
             "an inline version must drop the chunks of the old value"
         );
         assert_eq!(
-            state.docs.chunk_roots(&own).count(),
+            state.docs.resolved_roots().count(),
             0,
             "an inline version must name no root"
         );
@@ -1871,7 +1862,7 @@ mod tests {
         );
         let root = state
             .docs
-            .chunk_roots(&own)
+            .resolved_roots()
             .next()
             .expect("the slice names one root");
         let stored = state.chunks.stored_bytes(root).await;

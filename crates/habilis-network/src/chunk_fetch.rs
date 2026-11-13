@@ -12,10 +12,12 @@ mod fetch_error;
 #[cfg(test)]
 mod fixtures;
 mod holder;
+mod keep_held;
 
 pub(crate) use chunk_request::ChunkRequest;
 pub(crate) use chunk_serve_budget::ChunkServeBudget;
 pub(crate) use holder::Holder;
+pub(crate) use keep_held::keep_held;
 
 pub(crate) use chunk_answer::ABSENT;
 #[cfg(test)]
