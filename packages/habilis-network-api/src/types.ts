@@ -138,8 +138,10 @@ export type MeshEvent =
 
 export interface StateDoc {
   /**
-   * The shared state: one slice per member, keyed by the lowercase hex of the member's key (64
-   * digits). Each member writes only its own slice, and every member reads every slice.
+   * The shared state: one slice per member, keyed by the lowercase hex of the author key (64
+   * digits): the session key of the member, the same key as `Peer.key` and `Message.key`, not the
+   * persistent member key that signs the proof of a session. Each member writes only its own slice,
+   * and every member reads every slice.
    */
   readonly value: Record<string, Record<string, unknown>>
   /** Apply an RFC 7386 merge patch: set present keys, delete null keys, leave the rest. */
