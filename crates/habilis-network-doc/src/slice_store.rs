@@ -559,6 +559,43 @@ impl SliceStore {
             })
     }
 
+    /// Whether the held version of `key` is a pointer that has not been fetched.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::{AuthorKey, Channel};
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert!(!store.is_unresolved(&AuthorKey::from([1u8; 32])));
+    /// ```
+    #[must_use]
+    pub fn is_unresolved(&self, key: &AuthorKey) -> bool {
+        self.slices
+            .get(key)
+            .is_some_and(|slice| matches!(slice.value, SliceValue::Pointer { .. }))
+    }
+
+    /// The pointers of the slices whose chunked value is fetched and held whole. The chunks of these roots are in the
+    /// chunk store, and a sweep keeps them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert_eq!(store.resolved_pointers().count(), 0);
+    /// ```
+    pub fn resolved_pointers(&self) -> impl Iterator<Item = &ChunkPointer> {
+        self.slices.values().filter_map(|slice| match &slice.value {
+            SliceValue::Chunked { pointer, .. } => Some(pointer),
+            SliceValue::Inline(_) | SliceValue::Pointer { .. } => None,
+        })
+    }
+
     /// Keeps `value`, the whole value that `pointer` names, with the slice of `key`, and says whether it did. It
     /// does not when the slice no longer holds `pointer`: a newer version replaced it, or the author left.
     ///
@@ -1648,6 +1685,47 @@ mod tests {
             store.chunked_held(),
             (fetched.to_string().len(), 1),
             "the old value must be dropped, and the new one held once"
+        );
+    }
+
+    #[test]
+    fn a_pointer_is_unresolved_until_its_value_is_fetched_and_only_then_resolved() {
+        let mut store = store();
+        let (pointer, value) = pointer_value();
+        assert!(
+            !store.is_unresolved(&key(1)),
+            "an author with no slice has none"
+        );
+        apply(&mut store, &frame(key(1), 1, value));
+        assert!(
+            store.is_unresolved(&key(1)),
+            "a pointer that nobody fetched waits"
+        );
+        assert_eq!(
+            store.resolved_pointers().count(),
+            0,
+            "a pointer that waits has no chunks to keep"
+        );
+        assert_eq!(
+            store.resolve_pointer(&key(1), pointer, json!({"a": 1})),
+            Ok(true),
+            "the fetched value is kept"
+        );
+        assert!(
+            !store.is_unresolved(&key(1)),
+            "a resolved pointer does not wait"
+        );
+        let resolved: Vec<ChunkPointer> = store.resolved_pointers().copied().collect();
+        assert_eq!(
+            resolved,
+            vec![pointer],
+            "the chunks of a resolved pointer are kept"
+        );
+        apply(&mut store, &frame(key(1), 2, json!({"inline": 1})));
+        assert_eq!(
+            store.resolved_pointers().count(),
+            0,
+            "a newer inline version unpins the old root"
         );
     }
 
