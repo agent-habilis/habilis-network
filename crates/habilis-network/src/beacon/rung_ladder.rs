@@ -1,9 +1,9 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use iroh::address_lookup::memory;
-use iroh::{Endpoint, EndpointAddr};
+use iroh::{Endpoint, EndpointAddr, RelayUrl};
 
-use crate::lookup::{add_peer_addr, replace_peer_addr};
+use crate::lookup::{add_peer_addr, relay_ladder, replace_peer_addr};
 use crate::util::clock::Instant;
 
 use super::{RendezvousParams, RungRead, RungWatch, rung_is_busy};
@@ -18,10 +18,21 @@ use super::{RendezvousParams, RungRead, RungWatch, rung_is_busy};
 ///
 /// - Private (a non-empty ladder): every loopback rung, because iroh's
 ///   node-id dial reaches whichever rung our beacon actually bound.
-/// - Public: `bootstrap_relay`, the single rung the beacon homes on
-///   (`beacon_lookups`) — a relay-direct dial with no lookup round-trip.
+/// - Public: every rung of the relay choice of the member, and `bootstrap_relay`. The beacon homes
+///   on one rung of the ladder (`beacon_lookups`), and a dial reaches it by the relay it homes
+///   on. The rung that a member reads as the first reachable one is the outcome of a walk with a
+///   10 s probe per rung. A member on a loaded host loses that race on rung 0, and a peer on a quiet
+///   host does not, so two members can read two rungs, and an address with one rung makes each
+///   dial a rung where the other is not. An address with every rung reaches the beacon on
+///   whichever rung it homes. A dial opens at most one relay connection per rung, and does not wait
+///   for the slowest rung.
 /// - `None`: relay disabled and no ladder, so there is nothing to name and
 ///   only mDNS/DHT can resolve the id.
+///
+/// Two causes of the split are open: the probe of 10 s per rung (a retry of rung 0 before the walk
+/// skips it would keep a loaded host on rung 0), and the move of a peer endpoint back and forth
+/// between rungs (about once a minute in the logs of a loaded host). This address does not depend on
+/// either.
 pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr> {
     let mut address = EndpointAddr::new(params.id);
     if !params.bind_ports.is_empty() {
@@ -30,7 +41,15 @@ pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr>
         }
         return Some(address);
     }
-    Some(address.with_relay_url(params.bootstrap_relay.clone()?))
+    let mut rungs: Vec<RelayUrl> = relay_ladder(&params.lookups.relay_lookup).collect();
+    rungs.extend(params.bootstrap_relay.clone());
+    if rungs.is_empty() {
+        return None;
+    }
+    for rung in rungs {
+        address = address.with_relay_url(rung);
+    }
+    Some(address)
 }
 
 /// [`rendezvous_addr`] without the rungs of `withheld`: the address that a member registers for the
