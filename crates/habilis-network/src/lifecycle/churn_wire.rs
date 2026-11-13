@@ -263,8 +263,8 @@ fn wire_cost_of_one_minute_with_5_peers() {
 /// 5 `PeerInfo` frames. The first 4 carry an address with a port of 5 digits and a seal key of 44
 /// characters (32 bytes of 0xff). The last carries a port of 4 digits and a seal key of 43 (a 1 in
 /// the first byte), as when the host changes its address between two frames and another run draws
-/// another key. The count follows each frame: the
-/// numbers of the first frame, taken for all 5, are 2 bytes too many.
+/// another key. The count follows each frame: the numbers of the first frame, taken for all 5, are 2
+/// bytes too many.
 #[test]
 fn the_announce_bytes_follow_the_address_and_the_seal_key_that_each_frame_carries() {
     let _guard = ::habilis_network_test_tracing::init();

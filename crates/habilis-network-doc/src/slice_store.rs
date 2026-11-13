@@ -2268,9 +2268,8 @@ mod tests {
             let body = MessageBody::try_new("{}").expect("a body");
             let signed =
                 Message::new_frame(&mesh, &nickname, kind, body).sign(&Identity::generate());
-            let frame = signed.serialize().expect("a worst-shape page serializes");
-            let frame_len = frame.into_bytes().len();
             let wire = signed.serialize().expect("a worst-shape page serializes");
+            let frame_len = wire.as_bytes().len();
             assert!(
                 Message::parse(wire.as_bytes()).is_ok(),
                 "a worst-shape page of {rows} rows does not parse: a frame that the wire refuses sizes nothing"
