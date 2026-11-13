@@ -58,6 +58,20 @@ fn subnet_of(nic: &Nic) -> (u32, u8) {
     (u32::from(nic.address) & mask, nic.prefix_len)
 }
 
+/// The prefix that routes to the peers of an interface. A point-to-point interface has a `/32`
+/// address, and a `/32` contains no peer: a flow to a peer would leave from the default socket
+/// with the source of another interface. Tailscale is such an interface, and its peers are in the
+/// CGNAT range `100.64.0.0/10`.
+fn route_prefix_len(address: Ipv4Addr, prefix_len: u8) -> u8 {
+    const CGNAT_PREFIX_LEN: u8 = 10;
+    let is_cgnat = address.octets()[0] == 100 && (address.octets()[1] & 0b1100_0000) == 0b0100_0000;
+    if prefix_len == 32 && is_cgnat {
+        CGNAT_PREFIX_LEN
+    } else {
+        prefix_len
+    }
+}
+
 /// The `IPv4` addresses of the interfaces of this host that carry traffic: up, not loopback, and
 /// not link-local.
 fn local_nics() -> Vec<Nic> {
@@ -77,7 +91,7 @@ fn local_nics() -> Vec<Nic> {
                 name: interface.name.clone(),
                 index: interface.index,
                 address: net.addr(),
-                prefix_len: net.prefix_len(),
+                prefix_len: route_prefix_len(net.addr(), net.prefix_len()),
                 on_default_route: default_route == Some(interface.index),
             });
         }
@@ -88,8 +102,9 @@ fn local_nics() -> Vec<Nic> {
 /// Binds `builder` to one address per subnet when two interfaces share a subnet, and leaves it
 /// on the wildcard socket otherwise.
 ///
-/// Known limit: an interface that comes up after the bind has no socket, so a peer on a new
-/// subnet reaches this endpoint only over the relay until the endpoint is built again.
+/// Known limit: the sockets are bound once. An interface that comes up after the bind has no
+/// socket, and an address that changes (DHCP, sleep and wake) leaves its socket on a dead
+/// address. The relay still carries the traffic until the endpoint is built again.
 pub(super) fn bind_one_address_per_subnet(builder: Builder) -> Result<Builder> {
     bind_nics(builder, &local_nics())
 }
@@ -106,7 +121,12 @@ fn bind_nics(builder: Builder, nics: &[Nic]) -> Result<Builder> {
         "two interfaces share a subnet: one address per subnet"
     );
     let mut builder = builder.clear_ip_transports();
-    for nic in &binds {
+    // iroh refuses any `IPv4` bind after the default one, so the default address binds last.
+    // The order does not change the routing: iroh sorts the sockets by prefix length.
+    let (default, others): (Vec<&Nic>, Vec<&Nic>) =
+        binds.iter().partition(|nic| nic.on_default_route);
+    let in_bind_order: Vec<&Nic> = others.into_iter().chain(default).collect();
+    for nic in in_bind_order {
         let options = BindOpts::default()
             .set_prefix_len(nic.prefix_len)
             .set_is_default_route(nic.on_default_route);
@@ -126,7 +146,7 @@ mod tests {
     use iroh::endpoint::presets;
     use iroh::{Endpoint, RelayMode};
 
-    use super::{Nic, bind_nics, one_address_per_subnet};
+    use super::{Nic, bind_nics, one_address_per_subnet, route_prefix_len};
 
     fn nic(
         name: &str,
@@ -257,6 +277,64 @@ mod tests {
             binds[0].on_default_route,
             "the only address is the default route"
         );
+    }
+
+    /// iroh refuses any `IPv4` bind after the default one, so the default address binds last.
+    /// On the table of the mini the default route has the lowest index.
+    #[test]
+    fn the_table_of_the_mini_gives_a_bind_list_that_iroh_accepts() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+        let bound = bind_nics(builder, &macmini());
+        assert!(
+            bound.is_ok(),
+            "the bind list of the mini is refused: {:?}",
+            bound.err()
+        );
+    }
+
+    #[test]
+    fn a_tailscale_address_routes_with_the_prefix_of_the_cgnat_range() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            route_prefix_len(Ipv4Addr::new(100, 99, 190, 117), 32),
+            10,
+            "a point-to-point address in 100.64.0.0/10"
+        );
+        assert_eq!(
+            route_prefix_len(Ipv4Addr::new(100, 128, 0, 1), 32),
+            32,
+            "100.128.0.0 is outside the CGNAT range"
+        );
+        assert_eq!(
+            route_prefix_len(Ipv4Addr::new(100, 99, 190, 117), 24),
+            24,
+            "an address with a real mask keeps it"
+        );
+    }
+
+    /// Two chosen addresses bind for real, with the default one first in the list.
+    #[tokio::test]
+    async fn an_endpoint_binds_every_chosen_address_with_the_default_first_in_the_list() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let nics = vec![
+            nic("lo-a", 1, [127, 0, 0, 1], 8, true),
+            nic("lo-b", 2, [127, 0, 0, 1], 16, false),
+            nic("lo-c", 3, [127, 0, 0, 1], 8, false),
+        ];
+        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+        let endpoint = bind_nics(builder, &nics)
+            .expect("the bind list is valid")
+            .bind()
+            .await
+            .expect("bind the endpoint");
+        let v4: Vec<SocketAddr> = endpoint
+            .bound_sockets()
+            .into_iter()
+            .filter(SocketAddr::is_ipv4)
+            .collect();
+        assert_eq!(v4.len(), 2, "two IPv4 sockets, got {v4:?}");
+        endpoint.close().await;
     }
 
     /// The wiring: two interfaces in one subnet give an endpoint one bound `IPv4` socket.
