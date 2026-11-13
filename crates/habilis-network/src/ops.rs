@@ -19,7 +19,7 @@ pub use crate::transport::{
 pub mod blob {
     pub use crate::blob::{
         BlobDigest, BlobError, BlobServer, BlobTicket, ContentId, HASH_LEN, OffloadRequest,
-        SECRET_LEN, fetch, offload,
+        SECRET_LEN, fetch, fetch_hedged, fetch_with_endpoint, offload,
     };
 }
 

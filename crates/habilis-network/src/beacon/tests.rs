@@ -1338,6 +1338,238 @@ fn a_public_rendezvous_is_named_at_its_relay_rung() {
     );
 }
 
+/// The rungs of a ladder, as URLs that nothing serves.
+fn unserved_rungs(names: &[&str]) -> Vec<iroh::RelayUrl> {
+    names
+        .iter()
+        .map(|name| {
+            format!("https://{name}.example/")
+                .parse()
+                .expect("a rung URL")
+        })
+        .collect()
+}
+
+/// **The rendezvous is named at every rung of the ladder of the member, not at the one rung that
+/// its own walk chose.**
+///
+/// The walk gives each rung 10 s. A member on a loaded host loses that race on rung 0 and moves to
+/// rung 1, and its peer on a quiet host stays on rung 0. Each then dials the rung of its own walk,
+/// the beacon of the other is somewhere else, and the two never meet. The rung that a beacon homes
+/// on is always a rung of the ladder, so an address that names them all reaches it.
+#[test]
+fn the_rendezvous_address_names_every_rung_of_the_choice_of_the_member() {
+    use crate::protocol::meshes::RelayChoice;
+    use std::collections::BTreeSet;
+
+    let _guard = ::habilis_network_test_tracing::init();
+    let ladder = unserved_rungs(&["a", "b", "c"]);
+    let mut params = public_params();
+    params.lookups = LookupOpts::new(RelayChoice::Custom(ladder.clone()));
+    params.bootstrap_relay = ladder.get(2).cloned();
+
+    let address = rendezvous_addr(&params).expect("a ladder is nameable");
+
+    let named: BTreeSet<iroh::RelayUrl> = address.relay_urls().cloned().collect();
+    let wanted: BTreeSet<iroh::RelayUrl> = ladder.into_iter().collect();
+    assert_eq!(
+        named, wanted,
+        "the address names the rung of the walk and no other"
+    );
+}
+
+/// The default choice names the whole default ladder, and a member with no relay names none.
+#[test]
+fn the_rendezvous_address_follows_the_relay_choice() {
+    use crate::protocol::meshes::RelayChoice;
+    use std::collections::BTreeSet;
+
+    let _guard = ::habilis_network_test_tracing::init();
+    let mut pinned = public_params();
+    pinned.lookups = LookupOpts::new(RelayChoice::Pinned);
+    pinned.bootstrap_relay = lookup::relay_ladder(&RelayChoice::Pinned).nth(1);
+    let named: BTreeSet<iroh::RelayUrl> = rendezvous_addr(&pinned)
+        .expect("the default ladder is nameable")
+        .relay_urls()
+        .cloned()
+        .collect();
+    let wanted: BTreeSet<iroh::RelayUrl> = lookup::relay_ladder(&RelayChoice::Pinned).collect();
+    assert_eq!(
+        named, wanted,
+        "the default choice names the whole default ladder"
+    );
+
+    let mut disabled = public_params();
+    disabled.lookups = LookupOpts::new(RelayChoice::Disabled);
+    assert!(
+        rendezvous_addr(&disabled).is_none(),
+        "a member with no relay has no relay to name"
+    );
+}
+
+/// **A joiner whose rung is not the home of the beacon still dials the beacon.**
+///
+/// The beacon homes on relay B and the joiner on relay A. The joiner dials the address that the
+/// rendezvous registration builds. It names every rung of the member, so the dial reaches B. The
+/// ladder holds 2 more relays: one that answers and one that takes the connection and says
+/// nothing. The dial must not wait for the rung that is silent, and it opens at most one relay
+/// connection to each of the other rungs.
+#[test]
+fn a_joiner_whose_rung_is_not_the_home_of_the_beacon_still_dials_the_beacon() {
+    use crate::lookup::test_relay;
+    use crate::protocol::meshes::RelayChoice;
+    use iroh::endpoint::{Builder, presets};
+    use iroh::{RelayMode, RelayUrl};
+    use iroh_relay::server::Server;
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        const ALPN: &[u8] = b"habilis-network/test-rung-dial";
+        let (relay_a, server_a) = test_relay::spawn_plain().await.expect("relay A");
+        let (relay_b, server_b) = test_relay::spawn_plain().await.expect("relay B");
+        let (relay_c, server_c) = test_relay::spawn_plain().await.expect("relay C");
+        // Takes the connection and never answers: the kernel completes the handshake, nothing
+        // reads the request.
+        let silent = net::TcpListener::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a silent rung");
+        let silent_rung: RelayUrl =
+            format!("http://{}/", silent.local_addr().expect("its address"))
+                .parse()
+                .expect("the URL of the silent rung");
+
+        let beacon_builder: Builder = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::custom([relay_b.clone()]))
+            .alpns(vec![ALPN.to_vec()]);
+        let beacon = beacon_builder.bind().await.expect("bind the beacon");
+        let joiner_builder: Builder =
+            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([relay_a.clone()]));
+        let joiner = joiner_builder.bind().await.expect("bind the joiner");
+        beacon.online().await;
+        joiner.online().await;
+        let accepting = beacon.clone();
+        let accept = n0future_task::spawn(async move {
+            if let Some(incoming) = accepting.accept().await
+                && let Ok(connection) = incoming.await
+            {
+                connection.closed().await;
+            }
+        });
+
+        let mut params = public_params();
+        params.id = beacon.id();
+        let ladder = vec![
+            silent_rung,
+            relay_a.clone(),
+            relay_b.clone(),
+            relay_c.clone(),
+        ];
+        params.lookups = LookupOpts::new(RelayChoice::Custom(ladder));
+        params.bootstrap_relay = Some(relay_a);
+        let address = rendezvous_addr(&params).expect("an address");
+        let accepts = |server: &Server| server.metrics().server.accepts.get();
+        let before = [&server_a, &server_b, &server_c].map(accepts);
+
+        let started = Instant::now();
+        let dialed =
+            n0future_time::timeout(std_Duration::from_secs(10), joiner.connect(address, ALPN))
+                .await;
+        let took = started.elapsed();
+        let after = [&server_a, &server_b, &server_c].map(accepts);
+
+        joiner.close().await;
+        beacon.close().await;
+        accept.abort();
+        drop(silent);
+        assert!(
+            matches!(dialed, Ok(Ok(_))),
+            "the dial to a beacon on another rung failed: {dialed:?}"
+        );
+        assert!(
+            took < std_Duration::from_secs(5),
+            "the dial waited for the silent rung: {took:?}"
+        );
+        eprintln!(
+            "relay connections opened by the dial (A, B, C): {before:?} -> {after:?}, {took:?}"
+        );
+        let opened: [u64; 3] =
+            [0, 1, 2].map(|rung: usize| after[rung].saturating_sub(before[rung]));
+        assert!(
+            opened.iter().all(|count| *count <= 1),
+            "the dial opened more than one connection to a rung: {opened:?}"
+        );
+    });
+}
+
+/// **A rival probe from another rung finds the beacon, so the two beacons yield.**
+///
+/// The probe dials the same address as the registration. With one rung, a member whose walk read
+/// rung A asked "does anyone serve this id?" on A, heard nothing from the beacon on B, read "free",
+/// and claimed a second beacon of the same id. With every rung named, the probe reaches B and
+/// reads "a rival is there", and the claim waits for the contest that already decides it.
+#[test]
+fn a_rival_probe_from_another_rung_finds_the_beacon() {
+    use crate::lookup::test_relay;
+    use crate::protocol::meshes::RelayChoice;
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (relay_a, _server_a) = test_relay::spawn_plain().await.expect("relay A");
+        let (relay_b, _server_b) = test_relay::spawn_plain().await.expect("relay B");
+        let mut on_b = public_params();
+        on_b.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay_b.clone()]));
+        on_b.bootstrap_relay = Some(relay_b.clone());
+        let peer = loopback_endpoint().await;
+        let book = lookup::address_book(&peer);
+        let mut beacon = None;
+        let claimed = claim::claim(&on_b, &peer, &book, &mut beacon).await;
+        assert!(claimed, "the beacon on rung B stands up");
+
+        let mut on_a = public_params();
+        on_a.id = on_b.id;
+        on_a.secret = on_b.secret.clone();
+        on_a.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay_a.clone(), relay_b]));
+        on_a.bootstrap_relay = Some(relay_a);
+        let node = SecretKey::generate().public();
+        let mut probe = spawn_rival_probe(&on_a, node).await;
+        let verdict =
+            n0future_time::timeout(std_Duration::from_secs(20), probe_verdict(&mut probe)).await;
+
+        drop(beacon);
+        peer.close().await;
+        assert!(
+            matches!(verdict, Ok(true)),
+            "the probe from rung A did not find the beacon on rung B: {verdict:?}"
+        );
+    });
+}
+
+/// **A member with no reachable rung reads the rendezvous as held, not as free.**
+///
+/// The walk found no rung, so `bootstrap_relay` is `None` while the ladder is not empty. The beacon
+/// and the prober of such a member have no relay (`beacon_lookups` maps no rung to no relay). An
+/// address that named the ladder would send a prober with no relay to dial relays, and the dial
+/// would run out and read "free". The member would claim a beacon with no relay. With mDNS and DHT
+/// off nothing can resolve the id, so the probe must not dial, and reads "held".
+#[test]
+fn a_member_with_no_reachable_rung_reads_the_rendezvous_as_held() {
+    use crate::protocol::meshes::RelayChoice;
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let mut params = public_params();
+        params.lookups = LookupOpts::new(RelayChoice::Custom(unserved_rungs(&["a", "b"])))
+            .mdns(false)
+            .dht(false);
+        params.bootstrap_relay = None;
+        let node = SecretKey::generate().public();
+
+        let mut probe = spawn_rival_probe(&params, node).await;
+        let verdict =
+            n0future_time::timeout(std_Duration::from_secs(20), probe_verdict(&mut probe)).await;
+
+        assert!(
+            matches!(verdict, Ok(true)),
+            "a member with no reachable rung and no lookup read the rendezvous as free: {verdict:?}"
+        );
+    });
+}
+
 #[test]
 fn a_private_rendezvous_is_named_at_every_ladder_rung() {
     let _guard = ::habilis_network_test_tracing::init();

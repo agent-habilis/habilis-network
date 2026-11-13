@@ -207,6 +207,9 @@ iroh = { workspace = true, features = [
     "unstable-net-report",
 ] }
 iroh-gossip.workspace = true
+# The interface table, for one bind address per subnet (`lookup::subnet_binds`). The version of
+# the copy that `iroh` already pulls in through `netwatch`, so the graph has no second one.
+netdev = "0.45.0"
 # Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
 # the copy already in the graph, not a second one.
 iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "e970dd25148386850feaffbac044bba64765fe73", default-features = false, optional = true }

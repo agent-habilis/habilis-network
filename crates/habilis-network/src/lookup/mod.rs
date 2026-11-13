@@ -17,6 +17,8 @@ mod probe_answer;
 mod lan;
 mod lan_event;
 mod mdns_handle;
+mod nic;
+mod subnet_binds;
 
 mod endpoint;
 

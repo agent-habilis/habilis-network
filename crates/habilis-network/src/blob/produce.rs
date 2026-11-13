@@ -35,7 +35,7 @@ use crate::util::consts::MAX_BLOB_BYTES;
 use super::store::BlobStore;
 use super::ticket::BlobTicket;
 use super::{
-    BAD_SECRET, BlobDigest, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN,
+    BAD_SECRET, BlobDigest, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN, TOO_SLOW,
     UNKNOWN_BLOB, wait_online,
 };
 use std::fs::File;
@@ -130,6 +130,24 @@ impl BlobServer {
     #[cfg(test)]
     pub(crate) fn address(&self) -> iroh::EndpointAddr {
         self.endpoint.addr()
+    }
+
+    /// The address of the serving endpoint as it changes: the IP addresses and the home relay.
+    /// A ticket holds the address at the time of [`Self::register`], so a caller that keeps
+    /// the server for a long time reads this to learn of a later change.
+    ///
+    /// `register` of a blob that is already spooled takes the dedup path and mints a ticket with
+    /// the current address of the endpoint, so the cheap refresh loop is: the address changed,
+    /// `register` again, publish the new ticket.
+    #[must_use]
+    pub fn watch_addr(&self) -> impl iroh::Watcher<Value = iroh::EndpointAddr> + use<> {
+        self.endpoint.watch_addr()
+    }
+
+    /// Waits until the serving endpoint is connected to a home relay. It has no time limit: a
+    /// server with the relay disabled never returns, so a caller bounds it with a timeout.
+    pub async fn online(&self) {
+        self.endpoint.online().await;
     }
 
     /// Serves in flight right now.
@@ -267,7 +285,8 @@ async fn handle_incoming(
     relay_transport: PayloadPath,
 ) {
     if let Err(error) = serve_connection(incoming, &store, limits, relay_transport).await {
-        tracing::debug!(%error, "blob serve connection ended");
+        let cause = format!("{error:#}");
+        tracing::debug!(target: "habilis_network::blob", %cause, "blob serve connection ended");
     }
     inflight.fetch_sub(1, Ordering::Relaxed);
 }
@@ -300,7 +319,9 @@ async fn serve_connection(
     let (send, recv) = time::timeout_at(deadline, connection.accept_bi())
         .await
         .context("no fetch request within the pre-authentication deadline")??;
-    serve_stream(&connection, send, recv, store, deadline).await
+    let result = serve_stream(&connection, send, recv, store, deadline, limits).await;
+    tracing::debug!(target: "habilis_network::blob", failed = result.is_err(), close = ?connection.close_reason(), "blob serve ended");
+    result
 }
 
 /// The fetch protocol, producer side. Reads the fixed 64-byte request
@@ -313,6 +334,7 @@ async fn serve_stream(
     mut recv: RecvStream,
     store: &Mutex<BlobStore>,
     deadline: Instant,
+    limits: ServeLimits,
 ) -> Result<()> {
     let mut request = Zeroizing::new([0u8; HASH_LEN + SECRET_LEN]);
     // Still inside the pre-auth deadline: a peer that opens a stream and then
@@ -347,13 +369,53 @@ async fn serve_stream(
         return Ok(());
     };
 
-    send.write_all(&size.to_le_bytes()).await?;
-    stream_file(&path, &mut send).await?;
-    let _ = send.finish();
-    // Let the consumer read the tail before CONNECTION_CLOSE races it on a fast link.
-    let _ = time::timeout(Duration::from_secs(2), send.stopped()).await;
-    connection.close(DONE.into(), b"done");
+    let transfer = async {
+        send.write_all(&size.to_le_bytes()).await?;
+        stream_file(&path, &mut send).await?;
+        let _ = send.finish();
+        // Let the consumer receive the tail before CONNECTION_CLOSE races it.
+        wait_acknowledged(connection, &send, limits.ack_stall).await;
+        anyhow::Ok(())
+    };
+    let finished = time::timeout(serve_budget(size, limits), transfer).await;
+    let (code, reason): (u32, &[u8]) = if let Ok(outcome) = finished {
+        outcome?;
+        (DONE, b"done")
+    } else {
+        tracing::debug!(target: "habilis_network::blob", size, "blob serve ran past its time budget");
+        (TOO_SLOW, b"serve budget")
+    };
+    connection.close(code.into(), reason);
     Ok(())
+}
+
+/// The longest that the send of a file of `size` bytes may take: the stall window plus the time
+/// that the file needs at the slowest rate that a serve accepts.
+pub(super) fn serve_budget(size: u64, limits: ServeLimits) -> Duration {
+    let slowest = Duration::from_secs(size / limits.min_bytes_per_second.max(1));
+    limits.ack_stall.saturating_add(slowest)
+}
+
+/// Wait until the consumer has acknowledged every byte of the stream, or the connection ends, or a
+/// window of `stall` passes with no acknowledgement. The whole file sits in the send buffer, so
+/// the time that this takes is the time that the link needs, and a cap on that time cuts a file
+/// that a slow link carries. A window with an acknowledgement in it starts the next window.
+async fn wait_acknowledged(connection: &Connection, send: &SendStream, stall: Duration) {
+    loop {
+        let before = acknowledgements(connection);
+        if time::timeout(stall, send.stopped()).await.is_ok() {
+            return;
+        }
+        if acknowledgements(connection) == before {
+            return;
+        }
+    }
+}
+
+/// The count of acknowledgement frames that the consumer has sent on this connection.
+fn acknowledgements(connection: &Connection) -> u64 {
+    let frames = connection.stats().frame_rx;
+    frames.acks + frames.path_acks
 }
 
 /// Stream `path` to `send` in bounded chunks — constant memory.

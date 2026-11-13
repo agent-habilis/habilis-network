@@ -22,3 +22,7 @@ pub(crate) const RELAY_REFUSED_CODE: u32 = 3;
 
 /// Fetch stream close code: an orderly done from the producer.
 pub(crate) const DONE: u32 = 0;
+
+/// Fetch stream close code: the producer cut the serve because it ran past its time budget. The
+/// consumer holds part of the file, so this is not a success and not a refusal.
+pub(crate) const TOO_SLOW: u32 = 4;

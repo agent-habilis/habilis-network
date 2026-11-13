@@ -135,9 +135,11 @@ fn spawn_startup_rung_confirmation(
 /// - **loopback-only**: every loopback ladder rung (iroh's node-id dial
 ///   reaches whichever rung our beacon bound; see `crate::beacon`).
 /// - **reachable across machines**: the seed-derived `rendezvous_id` at
-///   the chosen relay **rung** (`params.bootstrap_relay` — the first
-///   reachable rung of the ladder) — the beacon homes there
-///   (`beacon::beacon_lookups`), so this is a real relay-direct dial, no
+///   **every rung** of the relay choice, and at the rung of the walk
+///   (`params.bootstrap_relay`). The beacon homes on one rung of the ladder
+///   (`beacon::beacon_lookups`), the rung that its own walk read, and a
+///   peer's walk can read another one. An address with every rung reaches
+///   the beacon on whichever it is, so this is a real relay-direct dial, no
 ///   DNS/DHT/mDNS round-trip. DHT/mDNS stay wired as the eternal/LAN
 ///   backstop if every rung is ever unreachable.
 ///
