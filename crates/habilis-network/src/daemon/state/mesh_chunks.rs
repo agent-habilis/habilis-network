@@ -6,9 +6,7 @@ use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs, io::ErrorKind};
 
-#[cfg(test)]
-use habilis_network_chunks::ChunkHash;
-use habilis_network_chunks::{ChunkError, ChunkMap, ChunkStore, InMemoryStore, Root};
+use habilis_network_chunks::{ChunkError, ChunkHash, ChunkMap, ChunkStore, InMemoryStore, Root};
 
 use crate::protocol::{SymmetricKey, seal_error};
 
@@ -156,7 +154,6 @@ impl MeshChunks {
     /// # Errors
     ///
     /// The store cannot read the map.
-    #[cfg(test)]
     pub(crate) async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         use habilis_network_chunks::ChunkSource as _;
 
@@ -172,7 +169,6 @@ impl MeshChunks {
     /// # Errors
     ///
     /// The store cannot read the chunk.
-    #[cfg(test)]
     pub(crate) async fn chunk(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
         use habilis_network_chunks::ChunkSource as _;
 

@@ -131,6 +131,7 @@ pub(crate) async fn tick_state_refresh(
         idle_ext_lagged = ext.lagged,
         idle_ext_gossip_end = ext.gossip_end,
         idle_ext_unicast = ext.unicast,
+        idle_ext_chunk = ext.chunk,
         idle_ext_path_rx = ext.path_rx,
         idle_ext_address = ext.address,
         idle_ext_direct_rx = ext.direct_rx,

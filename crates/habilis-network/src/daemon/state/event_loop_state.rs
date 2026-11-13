@@ -27,6 +27,7 @@ use std::time::Duration;
 use iroh::{EndpointAddr, EndpointId};
 
 use super::proof_exchange::ProofExchange;
+use crate::chunk_fetch::ChunkServeBudget;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::digest_round::DigestRound;
@@ -223,7 +224,6 @@ impl ChannelDocs {
 
     /// Whether a slice of any author, in either channel, names `root`. A member serves the chunks of such a root and
     /// of no other.
-    #[cfg(test)]
     pub(crate) fn names_root(&self, root: Root) -> bool {
         [protocol::Channel::State, protocol::Channel::Meta]
             .into_iter()
@@ -875,6 +875,8 @@ pub struct EventLoopState {
     /// The endpoint that the unicast frame being handled arrived on, while it is handled. Set only
     /// around the handling of a unicast frame, so a proof answer can go back on the same connection.
     pub(crate) unicast_arrival: Option<EndpointId>,
+    /// The chunk answers that this node gave in the current window.
+    pub(crate) chunk_budget: ChunkServeBudget,
     /// The slice pulls that wait for an answer, by holder, channel and author.
     pub(crate) outstanding_pulls: OutstandingPulls,
     /// The digests that differ from ours, until their pages are read.
@@ -1100,6 +1102,7 @@ impl EventLoopState {
             #[cfg(feature = "iroh-test-utils")]
             drop_left_from: None,
             serve_budget: ServeBudget::default(),
+            chunk_budget: ChunkServeBudget::default(),
             teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             proofs: ProofExchange::with_cap(QUIET_CAP),
             own_answer: None,

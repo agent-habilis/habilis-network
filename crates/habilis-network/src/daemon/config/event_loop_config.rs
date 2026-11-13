@@ -7,7 +7,7 @@ use crate::daemon::setup::LiveCount;
 #[cfg(feature = "host")]
 use crate::daemon::shutdown::{Owner, OwnerPidError};
 
-use crate::transport::{UdpTransport, UnicastFrame};
+use crate::transport::{ChunkAsk, UdpTransport, UnicastFrame};
 #[cfg(feature = "host")]
 use crate::util::process;
 use std::path::PathBuf;
@@ -163,6 +163,9 @@ pub(crate) struct Endpoints {
     /// drains this into `gossip::ingest` (the same path as gossip), so both
     /// transports share signature-verify + dedup. Built in `setup_mesh`.
     pub(crate) unicast_rx: mpsc::Receiver<UnicastFrame>,
+    /// Inbound chunk requests from the `CHUNKS_ALPN` acceptor. The event loop answers each one from its state: it
+    /// alone knows the members, the live slices and the chunk store.
+    pub(crate) chunk_rx: mpsc::Receiver<ChunkAsk>,
     /// The members of this mesh that the LAN announces, read by the event loop. `None` when the
     /// endpoint has no mDNS handle: there is no LAN arm then.
     pub(crate) lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,

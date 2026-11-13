@@ -1,7 +1,5 @@
 use habilis_network_chunks::Root;
 
-use super::FetchError;
-
 const TAG_MAP: u8 = 1;
 const TAG_CHUNK: u8 = 2;
 const ROOT_BYTES: usize = 32;
@@ -17,6 +15,7 @@ pub(crate) enum ChunkRequest {
 
 impl ChunkRequest {
     /// The bytes of the request.
+    #[cfg(test)]
     pub(crate) fn encode(self) -> Vec<u8> {
         match self {
             Self::Map(root) => {
@@ -33,34 +32,22 @@ impl ChunkRequest {
         }
     }
 
-    /// The request that `bytes` hold.
-    ///
-    /// # Errors
-    ///
-    /// The bytes are not exactly one request.
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, FetchError> {
-        let (&tag, rest) = bytes
-            .split_first()
-            .ok_or(FetchError::Malformed("an empty request"))?;
-        let (root_bytes, index_bytes) = rest
-            .split_at_checked(ROOT_BYTES)
-            .ok_or(FetchError::Malformed("a request with no root"))?;
-        let root_array: [u8; ROOT_BYTES] = root_bytes
-            .try_into()
-            .map_err(|_| FetchError::Malformed("a request with no root"))?;
+    /// The request that `bytes` hold, or `None` when the bytes are not exactly one request.
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        let (&tag, rest) = bytes.split_first()?;
+        let (root_bytes, index_bytes) = rest.split_at_checked(ROOT_BYTES)?;
+        let root_array: [u8; ROOT_BYTES] = root_bytes.try_into().ok()?;
         let root = Root::from_bytes(root_array);
         match (tag, index_bytes) {
-            (TAG_MAP, []) => Ok(Self::Map(root)),
+            (TAG_MAP, []) => Some(Self::Map(root)),
             (TAG_CHUNK, index) => {
-                let index_array: [u8; 4] = index
-                    .try_into()
-                    .map_err(|_| FetchError::Malformed("a chunk request with no index"))?;
-                Ok(Self::Chunk {
+                let index_array: [u8; 4] = index.try_into().ok()?;
+                Some(Self::Chunk {
                     root,
                     index: u32::from_le_bytes(index_array),
                 })
             }
-            _ => Err(FetchError::Malformed("an unknown request")),
+            _ => None,
         }
     }
 }
@@ -70,7 +57,6 @@ mod tests {
     use habilis_network_chunks::Root;
 
     use super::ChunkRequest;
-    use crate::chunk_fetch::FetchError;
 
     fn root() -> Root {
         Root::from_bytes([7; 32])
@@ -91,7 +77,7 @@ mod tests {
         ] {
             assert_eq!(
                 ChunkRequest::decode(&request.encode()),
-                Ok(request),
+                Some(request),
                 "a request must round trip"
             );
         }
@@ -138,10 +124,7 @@ mod tests {
             ),
             ("an unknown tag", unknown_tag),
         ] {
-            assert!(
-                matches!(ChunkRequest::decode(&bytes), Err(FetchError::Malformed(_))),
-                "{name} must be refused as malformed"
-            );
+            assert_eq!(ChunkRequest::decode(&bytes), None, "{name} must be refused");
         }
     }
 }

@@ -15,7 +15,7 @@ use crate::daemon::state::TestHold;
 use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 #[cfg(feature = "multihop")]
 use crate::protocol;
-use crate::{lookup, transport};
+use crate::{chunk_fetch, lookup, transport};
 use iroh_gossip::net;
 use n0_future::time;
 #[cfg(feature = "host")]
@@ -274,6 +274,7 @@ async fn run_checked<Driver: NodeDriver>(
         exit_on_quit,
         http_rx,
         unicast_rx: Some(endpoints.unicast_rx),
+        chunk_rx: Some(endpoints.chunk_rx),
         lan_contacts: endpoints.lan_contacts,
         direct_rx,
         path_rx,
@@ -868,6 +869,9 @@ struct EventLoop<Driver: NodeDriver> {
     /// `gossip::ingest` (same validation + dedup path as gossip). `Option` so
     /// the `select!` arm can disable itself if the channel ever closes.
     unicast_rx: Option<mpsc::Receiver<transport::UnicastFrame>>,
+    /// Inbound chunk requests from the `CHUNKS_ALPN` acceptor, answered from the state. `Option` so the `select!`
+    /// arm can disable itself if the channel ever closes.
+    chunk_rx: Option<mpsc::Receiver<transport::ChunkAsk>>,
     /// The members of this mesh that the LAN announces (`gossip::lan`). `Option` so the arm is
     /// off without an mDNS handle and when the channel closes.
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
@@ -924,6 +928,9 @@ struct Loop<'node, Driver: NodeDriver> {
     exit_on_quit: bool,
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
     unicast_rx: Option<mpsc::Receiver<transport::UnicastFrame>>,
+    /// Inbound chunk requests from the `CHUNKS_ALPN` acceptor, answered from the state. `Option` so the `select!`
+    /// arm can disable itself if the channel ever closes.
+    chunk_rx: Option<mpsc::Receiver<transport::ChunkAsk>>,
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
@@ -1145,6 +1152,12 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         // requests that waited for one go now.
         let sign = Some(lifecycle::PathSign::Unicast(frame.from));
         lifecycle::retry_deferred_asks(&mut self.state, &context, sign).await;
+    }
+
+    /// Answers one chunk request from the state, to the stream that waits for it.
+    async fn chunk_ask(&mut self, ask: transport::ChunkAsk) {
+        self.state.idle.ext.chunk += 1;
+        chunk_fetch::Holder::serve(&mut self.state, ask, Instant::now()).await;
     }
 
     fn prune(&mut self) {
@@ -1556,6 +1569,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         exit_on_quit,
         http_rx,
         unicast_rx,
+        chunk_rx,
         lan_contacts,
         direct_rx,
         path_rx,
@@ -1633,6 +1647,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         exit_on_quit,
         http_rx,
         unicast_rx,
+        chunk_rx,
         lan_contacts,
         direct_rx,
         path_rx,
@@ -1707,6 +1722,10 @@ async fn run_loop<Driver: NodeDriver>(
             frame = recv_opt(&mut lp.unicast_rx) => match frame {
                 Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },
+            },
+            ask = recv_opt(&mut lp.chunk_rx) => match ask {
+                Some(ask) => { lp.chunk_ask(ask).await; },
+                None => { lp.chunk_rx = None; },
             },
             _ = lp.intervals.prune.tick() => {
                 lp.prune();

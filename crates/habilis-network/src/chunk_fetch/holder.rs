@@ -6,7 +6,8 @@ use iroh::EndpointId;
 
 use super::chunk_answer::{ABSENT, encode_chunk, encode_map};
 use super::{ChunkRequest, ChunkServeBudget};
-use crate::daemon::state::{ChannelDocs, MeshChunks};
+use crate::daemon::state::{ChannelDocs, EventLoopState, MeshChunks};
+use crate::transport::ChunkAsk;
 use crate::transport::proven_endpoints::ProvenEndpoints;
 
 /// What this node holds, read to answer a request.
@@ -18,6 +19,20 @@ pub(crate) struct Holder<'state> {
 }
 
 impl Holder<'_> {
+    /// Answers `ask` from the state of the node, and gives the answer to the stream that waits for it.
+    pub(crate) async fn serve(state: &mut EventLoopState, ask: ChunkAsk, now: Instant) {
+        let holder = Holder {
+            chunks: &state.chunks,
+            docs: &state.docs,
+            proven: &state.proven_endpoints,
+        };
+        let answer = holder
+            .answer(&mut state.chunk_budget, ask.from, &ask.request, now)
+            .await;
+        // The stream may have ended at its deadline, and nobody reads the answer then.
+        drop(ask.reply.send(answer));
+    }
+
     /// The answer to the request in `request`, asked by the connection of `from`. Every case that gives nothing gives
     /// the same absent bytes: a probe cannot tell a root that no slice names from a chunk that is not held, or a
     /// request over the budget from either.
@@ -28,7 +43,7 @@ impl Holder<'_> {
         request: &[u8],
         now: Instant,
     ) -> Vec<u8> {
-        let Ok(request) = ChunkRequest::decode(request) else {
+        let Some(request) = ChunkRequest::decode(request) else {
             return ABSENT.to_vec();
         };
         // A stranger comes first, so it cannot use the budget of the members.
@@ -66,10 +81,11 @@ mod tests {
     use habilis_network_doc::{ChunkPointer, SliceIngest};
     use habilis_network_util::clock::Instant;
     use iroh::EndpointId;
+    use tokio::sync::oneshot;
 
-    use super::{ABSENT, ChunkServeBudget, Holder};
+    use super::{ABSENT, ChunkAsk, ChunkServeBudget, Holder};
     use crate::chunk_fetch::ChunkRequest;
-    use crate::chunk_fetch::chunk_answer::{decode_chunk, decode_map};
+    use crate::chunk_fetch::answer_check::{decode_chunk, decode_map};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::identity::Identity;
     use crate::protocol::{Channel, MeshId, Message, MessageBody};
@@ -302,5 +318,53 @@ mod tests {
             ABSENT,
             "another member must have its own share"
         );
+    }
+    /// The answer that the stream gets when the event loop serves a request of `from`.
+    async fn serve(state: &mut EventLoopState, from: EndpointId, request: &[u8]) -> Vec<u8> {
+        let (reply, answered) = oneshot::channel();
+        let ask = ChunkAsk {
+            from,
+            request: request.to_vec(),
+            reply,
+        };
+        Holder::serve(state, ask, Instant::now()).await;
+        answered.await.expect("the stream gets an answer")
+    }
+
+    #[tokio::test]
+    async fn the_loop_gives_the_stream_the_answer_and_spends_the_budget_of_the_node() {
+        let peer = Identity::generate();
+        let (mut state, member) = state_with_member();
+        let value = bytes(CHUNK_BYTES_USIZE + 100);
+        let (root, map) = hold_named_value(&mut state, &peer, &value).await;
+        let size = u64::try_from(value.len()).expect("a size");
+        let request = ChunkRequest::Map(root).encode();
+        let answer = serve(&mut state, member, &request).await;
+        assert_eq!(
+            decode_map(&answer, root, size),
+            Ok(map),
+            "the stream must get the map of a root that a slice names"
+        );
+        for _ in 1..CHUNK_SERVES_PER_WINDOW {
+            serve(&mut state, member, &request).await;
+        }
+        assert_eq!(
+            serve(&mut state, member, &request).await,
+            ABSENT,
+            "the budget of the state must be spent by the requests that the loop serves"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_ended_before_the_answer_is_no_error() {
+        let (mut state, member) = state_with_member();
+        let (reply, answered) = oneshot::channel();
+        drop(answered);
+        let ask = ChunkAsk {
+            from: member,
+            request: Vec::new(),
+            reply,
+        };
+        Holder::serve(&mut state, ask, Instant::now()).await;
     }
 }

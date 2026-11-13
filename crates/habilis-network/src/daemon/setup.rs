@@ -222,6 +222,22 @@ fn unicast_inbox(
     (rx, transport::UnicastAcceptor::new(tx, relay_transport))
 }
 
+/// The chunk request channel and its Router acceptor. The acceptor hands each request of `CHUNKS_ALPN` to the
+/// returned receiver, which the event loop answers from its state. Bounded, so a flooding peer cannot
+/// back-pressure the loop: a request over the cap gets the absent answer.
+fn chunk_inbox(
+    relay_transport: transport::PayloadPath,
+) -> (
+    mpsc::Receiver<transport::ChunkAsk>,
+    transport::ChunkAcceptor,
+) {
+    let (tx, rx): (
+        mpsc::Sender<transport::ChunkAsk>,
+        mpsc::Receiver<transport::ChunkAsk>,
+    ) = mpsc::channel(tuning::CHUNK_INBOX_CAP);
+    (rx, transport::ChunkAcceptor::new(tx, relay_transport))
+}
+
 /// The multihop handle that `build_member_endpoint` returns: the real one when the `multihop`
 /// feature is on, a placeholder that is always `None` when it is off.
 #[cfg(all(feature = "multihop", not(feature = "host")))]
@@ -497,6 +513,7 @@ struct SetupBuild<'build> {
     max_direct: usize,
     lookups: &'build LookupOpts,
     unicast_acceptor: &'build transport::UnicastAcceptor,
+    chunk_acceptor: &'build transport::ChunkAcceptor,
     /// The mesh policy's `multihop`: register the multi-hop transport on the
     /// peer endpoint.
     #[cfg_attr(
@@ -1519,6 +1536,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     let ladder: Vec<_> = relay_ladder(&lookups.relay_lookup).collect();
     let (rung_tx, rung_rx) = watch::channel(ladder.first().cloned());
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
+    let (chunk_rx, chunk_acceptor) = chunk_inbox(relay_transport);
 
     let build = SetupBuild {
         author: &author,
@@ -1527,6 +1545,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         max_direct,
         lookups: &lookups,
         unicast_acceptor: &unicast_acceptor,
+        chunk_acceptor: &chunk_acceptor,
         // The mesh policy's `multihop`, on a node that has a direct path for its underlay to
         // forward over: UDP, or a WebRTC data channel when IP is cleared. With neither there is
         // no direct path, and no handle.
@@ -1604,6 +1623,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             endpoint_owner,
             router,
             unicast_rx,
+            chunk_rx,
             lan_contacts,
         },
         rendezvous: RendezvousConfig {
@@ -1694,12 +1714,16 @@ fn build_overlay(
         .transports
         .webrtc
         .then(|| (webrtc.clone(), admission.clone(), ice));
+    let protocols: CallerProtocols = build.take_protocols().protocol(
+        transport::CHUNKS_ALPN.to_vec(),
+        build.chunk_acceptor.clone(),
+    );
     let (gossip, router, address_book) = build_mesh(
         endpoint.clone(),
         build.max_peers,
         Some(unicast),
         webrtc_lane,
-        build.take_protocols(),
+        protocols,
         build.relay_transport.relay_allowed(),
         webrtc::lane_needs::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),
     );

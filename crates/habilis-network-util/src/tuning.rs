@@ -1200,6 +1200,16 @@ pub const CHUNK_SERVES_PER_WINDOW: usize = 40;
 /// How many chunk answers this node gives in all, in one window, whoever asks.
 pub const CHUNK_SERVES_GLOBAL: usize = 160;
 
+/// How long one stream of the chunk protocol can take, from the request to the end of the answer. A stalled
+/// asker or a stalled event loop does not hold the stream longer.
+pub const CHUNK_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many streams of the chunk protocol one endpoint can have open at once.
+pub const CHUNK_STREAMS_PER_PEER: usize = 4;
+
+/// How many chunk requests wait for the event loop. A request over the cap gets the absent answer.
+pub const CHUNK_INBOX_CAP: usize = 64;
+
 /// How long a node waits after it sees a digest that differs from its own, before it asks for the pages.
 /// The live frames in flight land during this delay, so most differences end with no request.
 pub const DIGEST_SETTLE: Duration = Duration::from_secs(1);
