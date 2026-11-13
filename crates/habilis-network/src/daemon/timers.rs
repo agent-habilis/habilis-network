@@ -491,12 +491,6 @@ mod tests {
         assert!(!super::in_join_phase(joined, at(3_600)), "an hour later");
     }
 
-    /// The tick drains the dropped keys as a guard. No tick path pushes one today, and the receive
-    /// path drains after each frame, so this test fills the keys by hand: a candidate that a higher
-    /// one beat, with no frame between the two that would drain it.
-    /// Several event loops of one process run their censuses in a stable order. Each document gets a
-    /// heavy census every `DOC_HEAVY_EVERY` ticks of its own loop: a counter that the loops share would
-    /// give all the heavy ones to one loop, and none to the others.
     // The warn-only resident-memory leak signal: a threshold the live process
     // already exceeds (1 MiB) must fire exactly once and latch, never exit or
     // mutate anything else. A `0` threshold disables it entirely.

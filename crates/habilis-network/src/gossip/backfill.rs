@@ -2,7 +2,7 @@
 //! channel.
 //!
 //! A frame is the author's original signed frame, so the newcomer checks the author's signature on it.
-//! A newcomer is owed the frames until one of them goes out. A send that finds no path keeps the newcomer
+//! A newcomer is owed the frames until every one of them goes out. A send that finds no path keeps the newcomer
 //! owed. The tick sends again, and the entry expires after `ALIVE_TIMEOUT`. A proof answer to the newcomer
 //! sends at once, because that exchange opens the path.
 

@@ -5,7 +5,8 @@
 //! `PeerInfo` also carries a proof, a signature by the endpoint's own key over
 //! the mesh and the frame's signing key. Only the holder of both keys can make
 //! it, so a point-to-point backfill goes to the endpoint proven for
-//! the key of its receiver, and a key that proved none is sent the frame on gossip.
+//! the key of its receiver. A key that proved none is owed the frame: the backfill tick sends
+//! again, and the entry expires after the alive timeout.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
