@@ -641,6 +641,31 @@ impl SliceStore {
         self.slices.len()
     }
 
+    /// Returns the document as the slices were signed: `{<lowercase hex author key>: value}`, where the value of a
+    /// chunked slice is its pointer and not the value that the pointer names. It shows what travels, for a reader that
+    /// debugs the sync. A tombstone is left out.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert!(store.raw_view().is_empty());
+    /// ```
+    #[must_use]
+    pub fn raw_view(&self) -> Map<String, Value> {
+        self.slices
+            .iter()
+            .filter(|(_, slice)| !slice.value.is_tombstone())
+            .map(|(key, slice)| {
+                let hex = String::from_utf8_lossy(&key.hex()).into_owned();
+                (hex, slice.value.signed())
+            })
+            .collect()
+    }
+
     /// Returns the whole document as `{<lowercase hex author key>: value}`, without the gone
     /// authors.
     #[must_use]
@@ -1685,6 +1710,48 @@ mod tests {
             store.chunked_held(),
             (fetched.to_string().len(), 1),
             "the old value must be dropped, and the new one held once"
+        );
+    }
+
+    #[test]
+    fn the_raw_view_shows_the_pointer_where_the_view_shows_the_value() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"inline": true})));
+        let (pointer, value) = pointer_value();
+        apply(&mut store, &frame(key(2), 1, value.clone()));
+        apply(&mut store, &frame(key(3), 1, value.clone()));
+        let fetched = json!({"whole": "value"});
+        store
+            .resolve_pointer(&key(3), pointer, fetched.clone())
+            .expect("an object");
+        apply(&mut store, &frame(key(4), 1, Value::Null));
+        let raw = store.raw_view();
+        assert_eq!(
+            raw.get(&hex_of(&key(1))),
+            Some(&json!({"inline": true})),
+            "an inline value is its own raw value"
+        );
+        assert_eq!(
+            raw.get(&hex_of(&key(2))),
+            Some(&value),
+            "a pointer that waits is shown as the pointer"
+        );
+        assert_eq!(
+            raw.get(&hex_of(&key(3))),
+            Some(&value),
+            "a pointer that was fetched is still the pointer in the raw view"
+        );
+        assert_eq!(raw.get(&hex_of(&key(4))), None, "a tombstone is left out");
+        let view = store.view();
+        assert_eq!(
+            view.get(&hex_of(&key(3))),
+            Some(&fetched),
+            "the view shows the whole value of the same slice"
+        );
+        assert_eq!(
+            view.get(&hex_of(&key(2))),
+            None,
+            "the view leaves out a first version that is not fetched"
         );
     }
 

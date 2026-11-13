@@ -38,6 +38,14 @@ impl SliceValue {
         }
     }
 
+    /// The value as the slice was signed: the value of an inline slice, and the pointer of a chunked one.
+    pub(crate) fn signed(&self) -> Value {
+        match self {
+            Self::Inline(value) => value.clone(),
+            Self::Pointer { pointer, .. } | Self::Chunked { pointer, .. } => pointer.to_value(),
+        }
+    }
+
     /// The value, when the slice holds it whole.
     pub(crate) fn resolved(&self) -> Option<&Value> {
         match self {
