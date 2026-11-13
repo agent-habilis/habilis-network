@@ -1,7 +1,7 @@
 //! One line per mesh message (sent/received) on the
 //! `habilis_network::messages` tracing target, pinned always-on in
 //! the default filter (`src/main.rs`). Logging only, no control flow.
-//! Msg + presence joined/left at `info`; Alive/PeerInfo/Digest at
+//! Msg + presence joined/left at `info`; Alive/PeerInfo at
 //! `trace`.
 //!
 //! **Body redaction.** By default the `Msg` body is replaced with
@@ -137,7 +137,7 @@ fn log(direction: &'static str, message: &Message) {
             body = %logged_body(message),
             "state"
         ),
-        // Plumbing: presence alive, peer info, digests, ping and pong, proof request, link state,
+        // Plumbing: presence alive, peer info, ping and pong, proof request, link state,
         // and any kind added later. None of them logs a body. The named kinds sit in
         // the same arm as the wildcard, so a new kind stays visible to the omitted
         // patterns lint and no second arm repeats the body.
@@ -145,13 +145,14 @@ fn log(direction: &'static str, message: &Message) {
             subtype: PresenceSubtype::Alive,
         }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
         | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SlicePage { .. }
         | _ => plumbing(),
     }
 }

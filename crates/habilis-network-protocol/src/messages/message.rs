@@ -13,18 +13,17 @@ use crate::{AuthorKey, ContentHash, DedupKey};
 use super::{
     AppFrameParams, Channel, MAX_MESSAGE_SIZE, MessageBody, MessageError, MessageId, MessageKind,
     PresenceSubtype, Shard, Signer, VERSION, Verified, Wire, WireIn, default_ext, empty_body,
-    split_resend_trailer,
 };
 
 /// A protocol frame — serialized as JSON on the wire. The transport
 /// envelope beneath the app layer: for an app frame (e.g. chat, `app_msg`),
 /// `body` carries a whole serialized app payload opaque to this layer;
-/// plumbing kinds (presence, digests, ping/pong, state/meta) carry their own
+/// plumbing kinds (presence, peer info, ping/pong, state/meta) carry their own
 /// opaque bodies.
 ///
 /// Wire format (compact JSON, one line):
 /// ```json
-/// {"v":"14.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
+/// {"v":"18.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
 /// ```
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
@@ -51,23 +50,8 @@ pub struct Message {
     /// neither. `None` is the unsigned message: its key and signature are skipped on the wire,
     /// which is also the **canonical pre-signing form** that [`Message::canonical_bytes`] hashes
     /// (the signature cannot cover itself). Real outbound traffic is always signed on the
-    /// broadcast path, and the receive path drops anything that fails verification. See
-    /// `docs/history-integrity.md`.
+    /// broadcast path, and the receive path drops anything that fails verification.
     pub signer: Option<Signer>,
-    /// Per-author hash-linked log (Phase 2), set on `Msg` only: `seq` is
-    /// this author's monotonic counter and `prev` the content hash of their
-    /// previous `Msg` (`None` at `seq 0`). Both are signed. Plumbing /
-    /// presence kinds leave them `None`. The message's own content hash is
-    /// computed locally (`content_hash_hex`), never transmitted. See
-    /// `docs/history-integrity.md`.
-    pub seq: Option<u64>,
-    /// The hash of the previous message of the author.
-    pub previous: Option<ContentHash>,
-    /// Cross-author DAG (Phase 3), `Msg` only: content hashes of the DAG
-    /// tips this author had seen when authoring — the causal links. Signed.
-    /// Empty for the very first message / messages with no observed
-    /// predecessor. See `docs/history-integrity.md`.
-    pub parents: Vec<ContentHash>,
     /// Shard header: present only on a message that is one slice of a body
     /// too large for a single message (see [`Shard`]). `None` on an ordinary
     /// message, so its wire form is unchanged. Signed like every other field.
@@ -87,9 +71,6 @@ impl Message {
             timestamp: UnixSecs::now(),
             body,
             signer: None,
-            seq: None,
-            previous: None,
-            parents: Vec::new(),
             shard: None,
             ext: default_ext(),
         }
@@ -222,13 +203,6 @@ impl Message {
         Self::new(mesh, author, MessageKind::PeerInfo, addr_data)
     }
 
-    /// An anti-entropy digest carrying `ids_json` (a JSON array of the
-    /// recent message ids we hold) in the body.
-    #[must_use]
-    pub fn new_digest(mesh: &MeshId, author: &Nickname, ids_json: MessageBody) -> Self {
-        Self::new(mesh, author, MessageKind::Digest, ids_json)
-    }
-
     /// A multihop link-state advertisement; `vector_json` is a serialized
     /// `habilis_network_iroh_multihop_transport::LinkVector`.
     ///
@@ -240,7 +214,7 @@ impl Message {
     }
 
     /// A durable state event whose opaque payload is `body`. Routed to the
-    /// un-pruned `daemon::state_log`, not the chat message-log. Harness
+    /// un-pruned `daemon::state_log`. Harness
     /// constructor; production uses [`new_channel_event`](Self::new_channel_event).
     #[cfg(any(test, feature = "adversarial"))]
     #[must_use]
@@ -259,30 +233,8 @@ impl Message {
         Self::new(mesh, author, channel.event_kind(), body)
     }
 
-    /// An anti-entropy digest for the given channel.
-    #[must_use]
-    pub fn new_channel_digest(
-        mesh: &MeshId,
-        author: &Nickname,
-        body: MessageBody,
-        channel: Channel,
-    ) -> Self {
-        Self::new(mesh, author, channel.digest_kind(), body)
-    }
-
-    /// A state anti-entropy digest whose `body` is the windowed digest the
-    /// sender advertises (a `DigestBody` of `WireWindow`s over the `State`
-    /// events it holds — the unbounded analogue of the chat digest). Test-only;
-    /// production uses [`new_channel_digest`](Self::new_channel_digest).
-    #[cfg(any(test, feature = "test-fixtures"))]
-    #[must_use]
-    pub fn new_state_digest(mesh: &MeshId, author: &Nickname, body: MessageBody) -> Self {
-        Self::new(mesh, author, MessageKind::StateDigest, body)
-    }
-
     /// Serialize to compact JSON bytes for the gossip wire. Outside this crate only a [`Verified`]
     /// serializes, through [`Verified::serialize`]: an unverified or an authored view has no wire form.
-    /// # Errors
     /// # Errors
     /// A [`MessageError::Source`] when the JSON does not encode, or
     /// [`MessageError::Oversize`] when the bytes pass `MAX_MESSAGE_SIZE`.
@@ -296,7 +248,6 @@ impl Message {
     }
 
     /// Parse a message from JSON bytes.
-    /// # Errors
     /// # Errors
     /// A [`MessageError::TooLarge`] past `MAX_MESSAGE_SIZE`, a [`MessageError::Source`]
     /// when the JSON does not parse, [`MessageError::UnsupportedVersion`] for another
@@ -324,18 +275,6 @@ impl Message {
             return Err(MessageError::UnsupportedVersion(wire.version));
         }
         Message::try_from(wire).map_err(MessageError::Invalid)
-    }
-
-    /// Parse a gossip payload that may end in the trailer of a resend (see
-    /// [`WireFrame::copy_with_resend_nonce`](super::WireFrame::copy_with_resend_nonce)). Returns the message and the nonce, if any. The trailer is
-    /// outside the signature: it changes the gossip message id and nothing else.
-    ///
-    /// # Errors
-    /// # Errors
-    /// A [`MessageError`] as for [`Message::parse`].
-    pub fn parse_wire(data: &[u8]) -> Result<(Self, Option<u64>), MessageError> {
-        let (frame, nonce) = split_resend_trailer(data);
-        Ok((Self::parse(frame)?, nonce))
     }
 
     /// Deterministic, domain-separated, length-prefixed encoding of every
@@ -374,20 +313,6 @@ impl Message {
             Some(key) => field(&key.hex()),
             None => field(&[]),
         }
-        // `seq`/`prev` are signed too. `None` encodes as a zero-length field
-        // (distinct from `Some(0)`, which is 8 bytes), so a plumbing message
-        // and a `seq 0` message never collide.
-        match self.seq {
-            Some(value) => field(&value.to_le_bytes()),
-            None => field(&[]),
-        }
-        match &self.previous {
-            Some(value) => field(&value.hex()),
-            None => field(&[]),
-        }
-        // Parents (DAG causal links) are signed too. Serialized as their
-        // deterministic JSON array; empty for no-parent messages.
-        field(&serde_json::to_vec(&self.parents).unwrap_or_default());
         // The shard header is signed so a shard can't be re-grouped or
         // re-indexed by a relay. `None` (ordinary message) folds as `null`.
         field(&serde_json::to_vec(&self.shard).unwrap_or_default());
@@ -411,33 +336,13 @@ impl Message {
         self.signer.map(|signed| signed.key)
     }
 
-    /// The 16-byte dedup / anti-entropy key (`SHA-256(pubkey ‖ id)[..16]`).
-    /// Dedup, the message/state logs, and the digest all key on this rather
+    /// The 16-byte dedup key (`SHA-256(pubkey ‖ id)[..16]`).
+    /// Dedup keys on this rather
     /// than the sender-chosen id, so a forged message reusing a victim's id
     /// cannot suppress the genuine one. See `identity::dedup_key16`.
     #[must_use]
     pub fn dedup_key(&self) -> DedupKey {
         identity::dedup_key16(self.author_key().as_ref(), &self.id.as_uuid_bytes())
-    }
-
-    /// Stamp the per-author log fields before signing (`Msg` only). `seq`
-    /// is the author's monotonic counter, `prev` the hash of their previous
-    /// `Msg` (`None` at `seq 0`). Consuming-builder so it composes with
-    /// [`sign`](Self::sign): `Message::new_app(..).chain(..).sign(..)`.
-    #[must_use]
-    pub fn chain(mut self, seq: u64, previous: Option<ContentHash>) -> Self {
-        self.seq = Some(seq);
-        self.previous = previous;
-        self
-    }
-
-    /// Stamp the cross-author DAG `parents` (content hashes of the tips
-    /// seen when authoring) before signing. Consuming-builder, composes
-    /// with [`chain`](Self::chain) and [`sign`](Self::sign).
-    #[must_use]
-    pub fn parents(mut self, parents: impl IntoIterator<Item = ContentHash>) -> Self {
-        self.parents = parents.into_iter().collect();
-        self
     }
 
     /// Stamp the [`Shard`] header (which slice of a split body this
@@ -501,7 +406,7 @@ impl Message {
     /// ```compile_fail,E0624
     /// use habilis_network_protocol::messages::Message;
     ///
-    /// const SIGNED: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"7f640d1c198f65d7c272b7206ce3d7ed31c289eca9e09a1c8e28adf770ec02499a7a4b68d837c774a3b8d4bd9a6358e2bd67278f98dbac3ce5fe2e60e5f99006","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+    /// const SIGNED: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"be64c678c6336f65be3817c748ba07478c1723863a070d5a09e62a159e06dc6bc01af49a9a2c3e5a5e25fd90e145b46b87cd803915da07fca9453b7b64b4480a","ext":{}}"#;
     ///
     /// let message = Message::parse(SIGNED.as_bytes()).unwrap();
     /// let canonical = message.canonical_bytes();
@@ -582,9 +487,6 @@ impl Message {
             timestamp: UnixSecs::from(1_700_000_000),
             body: body.into(),
             signer: None,
-            seq: None,
-            previous: None,
-            parents: Vec::new(),
             shard: None,
             ext: serde_json::json!({}),
         }

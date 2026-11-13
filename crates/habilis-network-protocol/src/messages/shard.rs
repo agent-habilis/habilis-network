@@ -2,15 +2,10 @@
 //! wire cap ([`MAX_MESSAGE_SIZE`](habilis_network_util::consts::MAX_MESSAGE_SIZE)) is
 //! split by the sender into several ordinary signed messages, each carrying a
 //! [`Shard`] header. The receiver reassembles them; the split is invisible to
-//! agents on both ends. Each shard is a real message (own id/seq/signature);
-//! shards of a small group (`total <=`
-//! [`LOGGED_SHARD_GROUP_MAX_TOTAL`](habilis_network_util::consts::LOGGED_SHARD_GROUP_MAX_TOTAL))
-//! also live in the message log, so anti-entropy heals them exactly as it
-//! heals a missing message; a bigger group skips the log on both ends (one
-//! huge body must not evict the mesh's anti-entropy history) and heals via
-//! **shard repair** — the sender caches its outbound frames
-//! (`reassembly::ShardCache`) and a stalled receiver asks for the
-//! missing indexes over the `shard/repair` gossip RPC.
+//! agents on both ends. Each shard is a real message (own id/seq/signature).
+//! Every shard group is cached by the sender (`reassembly::ShardCache`), and a stalled receiver
+//! asks for the missing indexes over the `shard/repair` gossip RPC. No store keeps a shard,
+//! so this repair is the only heal for a shard that the transport lost.
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
@@ -18,49 +13,7 @@ use uuid::Uuid;
 
 use habilis_network_util::consts::MAX_SHARD_TOTAL;
 
-use habilis_network_util::consts;
 use serde::de::Error;
-/// Whether a frame belongs in the message log as far as sharding is
-/// concerned: unsharded frames and shards of a small group do; a big group's
-/// shards stay out on **both** ends. The gate must be two-sided — a sender
-/// that logs what receivers refuse to retain makes every anti-entropy digest
-/// advertise those shards as missing, and the sender re-floods them every
-/// round while the resend budget starves real gaps.
-///
-/// # Examples
-///
-/// A small message fits in the log. The shard module is private, so this is not compiled.
-///
-/// ```ignore
-/// use habilis_network_protocol::identity::Identity;
-/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
-/// use habilis_network_protocol::meshes::MeshId;
-/// use habilis_network_protocol::Nickname;
-///
-/// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
-///
-/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
-/// let mesh = Mesh::try_new(Seed::new([4u8; 32]), MeshName::try_new("chat").expect("a name"), config)
-///     .expect("a mesh");
-///
-/// let id = MeshId::try_new(&mesh.to_string()).expect("a valid id");
-/// let identity = Identity::generate();
-/// let author = Nickname::try_new("alice").expect("a nickname");
-/// let tag = AppTag::try_new("chat").expect("a tag");
-/// let body = MessageBody::try_new("hello").expect("a body");
-/// let params = BuildMsgParams::new(tag, &id, &author, body, ChainCtx::genesis());
-/// let (_frame, verified) = build_msg_bytes(params, &identity).expect("a message builds");
-///
-/// assert!(shard_fits_log(&verified));
-/// ```
-#[must_use]
-pub fn shard_fits_log(message: &super::Message) -> bool {
-    message
-        .shard
-        .as_ref()
-        .is_none_or(|shard| shard.total <= consts::LOGGED_SHARD_GROUP_MAX_TOTAL)
-}
-
 /// The correlation id shared by every shard of one logical body — a UUID v4
 /// string form, minted once by the sender when it splits a body. Like
 /// task id, deserialization is **validating**, so a

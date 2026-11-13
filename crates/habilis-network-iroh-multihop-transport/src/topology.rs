@@ -148,8 +148,8 @@ pub struct Topology {
     vectors: HashMap<AppId, Held>,
     /// Origins removed or expired, with the highest `seq` held for each. A vector
     /// at or below it is refused for one max age, so the last vector of a peer
-    /// that left cannot come back as if new (a late joiner gets it again through
-    /// anti-entropy).
+    /// that left cannot come back as if new (a late joiner gets it again at its
+    /// next advertisement).
     tombstones: HashMap<AppId, Tombstone>,
     max_age: Duration,
     /// When a vector last refused for its age was reported in the log.
@@ -627,7 +627,7 @@ mod tests {
     fn a_vector_that_was_expired_does_not_come_back() {
         let _guard = ::habilis_network_test_tracing::init();
         // The peer's last vector arrives again after the age-out, through
-        // anti-entropy: it must not read as new.
+        // a replay of an old frame: it must not read as new.
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();

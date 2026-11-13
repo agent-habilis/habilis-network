@@ -54,7 +54,7 @@ impl Ad {
     }
 
     /// Parse a directory message body as an ad. Returns `None` for any
-    /// non-ad body (presence, digests, junk) so the collector can feed
+    /// non-ad body (presence, state slices, junk) so the collector can feed
     /// every directory message through without pre-filtering.
     #[must_use]
     pub fn parse(body: &str) -> Option<Self> {

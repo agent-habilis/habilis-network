@@ -4,9 +4,9 @@ use serde::Serialize;
 use std::fmt;
 
 use super::{Message, MessageBody, MessageId, MessageKind, Shard};
+use crate::identity;
 use crate::meshes::MeshId;
 use crate::nickname_error::Nickname;
-use crate::{ContentHash, identity};
 
 /// A [`Message`] as the wire has it, written. The field order is the order of the JSON text.
 #[derive(Serialize, Clone)]
@@ -26,12 +26,6 @@ pub(super) struct WireOut<'message> {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "sig")]
     signature: Option<HexOut<'message>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    seq: Option<u64>,
-    #[serde(rename = "prev", skip_serializing_if = "Option::is_none")]
-    previous: &'message Option<ContentHash>,
-    #[serde(skip_serializing_if = "<[ContentHash]>::is_empty")]
-    parents: &'message [ContentHash],
     #[serde(skip_serializing_if = "Option::is_none")]
     shard: &'message Option<Shard>,
     ext: &'message serde_json::Value,
@@ -75,9 +69,6 @@ impl Serialize for Wire<'_> {
             body: &message.body,
             pubkey,
             signature: sig_bytes.as_ref().map(|bytes| HexOut(bytes)),
-            seq: message.seq,
-            previous: &message.previous,
-            parents: &message.parents,
             shard: &message.shard,
             ext: &message.ext,
         }

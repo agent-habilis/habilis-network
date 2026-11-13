@@ -8,10 +8,9 @@ use crate::messages::{Authored, Verified};
 use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, ShardGroup};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
-    LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
-    REASSEMBLY_MAX_GROUP_LIFETIME, REASSEMBLY_REPAIR_IDLE, REASSEMBLY_REPAIR_MAX_IDXS,
-    REASSEMBLY_SLOT_MIN_CHARGE_BYTES, REASSEMBLY_SLOT_OVERHEAD_BYTES, REASSEMBLY_STALE,
-    REASSEMBLY_TOTAL_BUDGET_BYTES,
+    REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES, REASSEMBLY_MAX_GROUP_LIFETIME,
+    REASSEMBLY_REPAIR_IDLE, REASSEMBLY_REPAIR_MAX_IDXS, REASSEMBLY_SLOT_MIN_CHARGE_BYTES,
+    REASSEMBLY_SLOT_OVERHEAD_BYTES, REASSEMBLY_STALE, REASSEMBLY_TOTAL_BUDGET_BYTES,
 };
 
 /// What one buffered shard costs against the byte budgets: its body plus the
@@ -65,14 +64,13 @@ impl PartialGroup {
     }
 }
 
-/// Groups are keyed by `(author key, group)` — the same security boundary
-/// the message-log reassembly had: only the signer fills its own slots, so a
+/// Groups are keyed by `(author key, group)`: only the signer fills its own slots, so a
 /// crafted shard carrying a victim's group id forms a separate,
 /// never-completing set and can't inject a slice into the victim's body.
 type GroupKey = (AuthorKey, ShardGroup);
 
 /// The dedicated buffer partial multipart bodies reassemble in — decoupled
-/// from the message log so log eviction can never break reassembly, and
+/// from the seen set so its eviction can never break reassembly, and
 /// bounded by **byte budgets** (per group, per author, global) plus a
 /// stale-group TTL instead of a shard-count cap. "Unbounded message size" is
 /// achieved by budgeted, evictable buffering, never an unbounded collection.
@@ -256,25 +254,13 @@ impl ReassemblyStore {
         )
     }
 
-    /// Drop the partial group that `shard_msg` belongs to (its author's group) and release
-    /// its budget — the log-backed completion path calls this after finishing a group the
-    /// store had only a fragment of (e.g. post-TTL, when dedup let just one healed shard
-    /// re-ingest). A message with no shard header or no author key names no group.
-    pub fn forget(&mut self, shard_msg: &Verified) {
-        if let Some(shard) = shard_msg.shard.as_ref() {
-            self.evict(&(shard_msg.key(), shard.group.clone()));
-        }
-    }
-
-    /// The big (unlogged) groups that stalled long enough to ask their author
-    /// for the missing shards, each at most once per
-    /// [`REASSEMBLY_REPAIR_IDLE`] window. Small groups are excluded —
-    /// their shards live in the message log and heal via anti-entropy, which
-    /// re-sends a directed shard point-to-point to its addressee.
+    /// The groups that stalled long enough to ask their author for the missing shards, each at most
+    /// once per [`REASSEMBLY_REPAIR_IDLE`] window. Every group qualifies, a small one included: no log
+    /// keeps its shards, so the repair is their only heal.
     pub fn repair_tickets(&mut self, now: Instant) -> impl Iterator<Item = RepairTicket> {
         let mut tickets = Vec::new();
         for ((author, group_id), group) in &mut self.groups {
-            if group.total <= LOGGED_SHARD_GROUP_MAX_TOTAL || group.is_complete() {
+            if group.is_complete() {
                 continue;
             }
             let idle = now.duration_since(group.last_seen);
@@ -318,8 +304,8 @@ impl ReassemblyStore {
 
 /// Build the logical-message surfacing view from a completed group: shard 0's
 /// envelope (kind/author/pubkey/mesh/ts), the concatenated body, the group as
-/// `id`, and no `shard`/chain (the view is neither a wire message nor a chain
-/// entry — the shards are). `None` only when the concatenated body fails
+/// `id`, and no `shard` (the view is not a wire message; the shards are).
+/// `None` only when the concatenated body fails
 /// validation — fail closed rather than surface a malformed body.
 fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Authored> {
     // Sized up front: this runs on every completed multipart body, and the
@@ -334,9 +320,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 }
 
 /// The shared synthesis step: `envelope` (a shard-0 frame) becomes the logical
-/// view with the concatenated `body`, the group as `id`, and no `shard`/chain.
-/// Also used by the message-log completion path (`EventLoopState::
-/// reassemble_from_log`) so the two paths can't drift.
+/// view with the concatenated `body`, the group as `id`, and no `shard`.
 #[must_use]
 /// # Panics
 /// If the envelope carries no shard header; callers only pass shard messages.
@@ -347,7 +331,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 ///
 /// ```ignore
 /// use habilis_network_protocol::identity::Identity;
-/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
+/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, MessageBody, build_msg_bytes};
 /// use habilis_network_protocol::meshes::MeshId;
 /// use habilis_network_protocol::Nickname;
 ///
@@ -362,7 +346,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 /// let author = Nickname::try_new("alice").expect("a nickname");
 /// let tag = AppTag::try_new("chat").expect("a tag");
 /// let body = MessageBody::try_new("hello").expect("a body");
-/// let params = BuildMsgParams::new(tag, &id, &author, body, ChainCtx::genesis());
+/// let params = BuildMsgParams::new(tag, &id, &author, body);
 /// let (_frame, verified) = build_msg_bytes(params, &identity).expect("a message builds");
 ///
 /// // The ShardGroup of the shard header.
@@ -374,8 +358,5 @@ pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGro
         MessageId::try_new(group_id.as_str()).expect("a shard group is a valid message id");
     envelope.body = body;
     envelope.shard = None;
-    envelope.seq = None;
-    envelope.previous = None;
-    envelope.parents = Vec::new();
     Authored::new(envelope, header.key())
 }
