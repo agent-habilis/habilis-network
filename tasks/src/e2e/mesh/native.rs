@@ -80,6 +80,7 @@ impl Native {
             membership::Request::Messaging(membership::Messaging::StateMerge { merge, reply })
         })
         .await?
+        .map_err(|error| error.to_string())
     }
 
     pub(super) async fn state_json(&self) -> String {

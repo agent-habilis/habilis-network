@@ -1,5 +1,6 @@
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
+use crate::gossip::backfill;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::identity::Identity;
 use crate::protocol::messages::Verified;
@@ -62,7 +63,7 @@ pub(crate) fn observe(
             }
         );
         // A frame that is not newer than the newest one that set the nickname is a stored copy (a
-        // relay, an anti-entropy answer): it carries the nickname the key had then, and it must
+        // relay, a backfill answer): it carries the nickname the key had then, and it must
         // not give a nickname back that the key left. The watermark is the one of the nickname
         // alone, since a frame that proves no presence moves no `peer_stamp`.
         let unnamed = !state.names.contains_key(&key);
@@ -124,6 +125,7 @@ pub(crate) fn observe(
         }
     }
     if update.returned || update.joined_new {
+        backfill::owe(state, key, Instant::now());
         // A key that enters the roster under a nickname whose dial hint was made by a key that is
         // not live (quiet, lapsed or pruned) does not inherit the hint: a directed send would
         // reach the old node.
@@ -137,12 +139,12 @@ pub(crate) fn observe(
     }
     membership_update::apply(&update, key, state);
 
-    // Join horizon: the node still relays/logs everything (anti-entropy
+    // Join horizon: the node still relays everything (the backfill
     // keeps the mesh's set uniform), but a message stamped before we
     // joined is never *surfaced* to the operator/agent. Computed here
     // (not just before the inbound push) because the arrival-surfacing
     // decisions below need it too.
-    let surfaceable = message.timestamp >= state.joined_at;
+    let surfaceable = state.is_surfaceable(message.timestamp);
     // The arrival of a peer is a fact about the peer, not about the content of one frame. A peer
     // with a slow clock stamps its frames before our join, and it is shown once a second live
     // frame proves that it sends now. A message is still shown only when its own stamp is past
@@ -279,7 +281,6 @@ mod churn_red {
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::setup::LiveCount;
     use crate::daemon::state::{EventLoopState, LiveRun};
-    use crate::gossip::antientropy;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::{NodeEvent, NodeSink};
     use crate::lifecycle::heartbeat::{tick_alive, tick_sweep};
@@ -354,7 +355,6 @@ mod churn_red {
                 NodeEvent::Ready { .. }
                 | NodeEvent::Info(_)
                 | NodeEvent::Error(_)
-                | NodeEvent::Fork { .. }
                 | NodeEvent::PingReport { .. }
                 | NodeEvent::StateChanged { .. } => return,
             };
@@ -462,26 +462,6 @@ mod churn_red {
         channel_event(mesh, who, by, at, Channel::Meta)
     }
 
-    fn channel_digest(
-        mesh: &MeshId,
-        who: &Nickname,
-        by: &Identity,
-        at: UnixSecs,
-        channel: Channel,
-    ) -> Verified {
-        let mut message = Message::new_channel_digest(mesh, who, MessageBody::from("{}"), channel);
-        message.timestamp = at;
-        message.sign(by)
-    }
-
-    fn state_digest(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
-        channel_digest(mesh, who, by, at, Channel::State)
-    }
-
-    fn meta_digest(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
-        channel_digest(mesh, who, by, at, Channel::Meta)
-    }
-
     /// The stamp of every frame that a peer sent before it died: far enough back that the dead
     /// peer had been silent for a full alive timeout when the sweep evicted it.
     fn long_ago() -> UnixSecs {
@@ -498,7 +478,7 @@ mod churn_red {
     }
 
     /// H1. A peer is killed by `SIGKILL`: it never sends `left`, so no guard of #34 covers its key. A frame
-    /// that it sent while alive and that is not in the message log (a keepalive, a `PeerInfo`)
+    /// that it sent while alive and that no one replays (a keepalive, a `PeerInfo`)
     /// dedups only through the `seen` set. When a busy room pushes it out of that set, a copy that
     /// a relay still holds is new again, and it revives the dead peer.
     async fn a_replayed_frame_must_not_revive_a_sigkilled_peer(
@@ -591,20 +571,6 @@ mod churn_red {
         });
     }
 
-    #[test]
-    fn h1_a_replayed_state_digest_revives_a_sigkilled_peer() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            a_replayed_frame_must_not_revive_a_sigkilled_peer(state_digest).await;
-        });
-    }
-
-    #[test]
-    fn h1_a_replayed_meta_digest_revives_a_sigkilled_peer() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            a_replayed_frame_must_not_revive_a_sigkilled_peer(meta_digest).await;
-        });
-    }
-
     /// H4. The `joined` that a node mints for a peer's first frame gets a new id on every call, so
     /// the app cannot fold two of them into one. The same peer arrival must name the same id.
     #[test]
@@ -625,49 +591,6 @@ mod churn_red {
             first, second,
             "two synthetic joined for one peer have two ids"
         );
-    }
-
-    /// H4. Each `joined_new` makes this node announce its own `joined` again, and retain it.
-    /// Five peers that join make five new `joined` frames, each one a message that every other
-    /// peer receives, and the cost of a burst of joiners grows with the square of the roster.
-    #[test]
-    fn h4_every_new_peer_makes_us_announce_again() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let rig = Rig::new().await;
-            let context = rig.context();
-            let mut state = fresh_state();
-            let mut app = Inert;
-            assert_eq!(state.message_log.len(), 0, "the log starts empty");
-            for name in [
-                "swift-cedar",
-                "lost-heron",
-                "calm-otter",
-                "bold-finch",
-                "wild-crane",
-            ] {
-                let who = nick(name);
-                let joined = Message::new_joined(&rig.mesh, &who).sign(&Identity::generate());
-                let observed = observe(&joined, &mut state, &context);
-                handle_presence(
-                    PresenceEvent {
-                        message: &joined,
-                        subtype: PresenceSubtype::Joined,
-                        update: &observed.update,
-                        surfaceable: observed.surfaceable,
-                    },
-                    &mut state,
-                    &mut app,
-                    &context,
-                )
-                .await;
-            }
-            let own_joined = state.message_log.len();
-            assert!(
-                own_joined <= 1,
-                "five arrivals made {own_joined} new frames of ours (one re-announced joined each)"
-            );
-            rig.endpoint.close().await;
-        });
     }
 
     /// H4, receive side. The same peer announces itself four times in one second, each frame with a
@@ -874,7 +797,7 @@ mod churn_red {
         });
     }
 
-    /// A replay of an old durable frame (a relay or an anti-entropy answer re-sends it) does not
+    /// A replay of an old durable frame (a relay or a backfill answer re-sends it) does not
     /// move the last-heard mark of a peer, so it cannot keep a dead peer from its eviction.
     #[test]
     fn a_replayed_old_frame_does_not_keep_a_dead_peer_alive() {
@@ -989,7 +912,7 @@ mod churn_red {
             let mut state = fresh_state();
             state.joined_at = UnixSecs::now() - Duration::from_hours(3);
             let old = UnixSecs::now() - Duration::from_hours(2);
-            for make in [peer_info, state_digest, meta_digest, state_change] {
+            for make in [peer_info, state_change] {
                 let replay = make(&rig.mesh, &who, &peer, old);
                 assert!(
                     receive(&replay, &mut state, &context),
@@ -2936,7 +2859,7 @@ mod churn_red {
         });
     }
 
-    /// A relay or an anti-entropy answer re-sends a stored frame of a key. The frame carries the
+    /// A relay or a backfill answer re-sends a stored frame of a key. The frame carries the
     /// nickname the key had when it made the frame, so an older frame must not give the key back a
     /// nickname that it left.
     #[test]
@@ -3335,108 +3258,5 @@ mod churn_red {
             !update.stale && update.joined_new,
             "the first frame of a new key in the second of the old goodbye is stale: {update:?}"
         );
-    }
-
-    /// H1, route A, in one process. A late joiner sends a meta digest with no heads. A node that
-    /// holds the signed change of a dead peer answers it with that frame (the answer is
-    /// `handle_state_digest`, which serves the frames of any author). The frame reaches a live
-    /// node that has the dead peer in `quiet` and whose seen set forgot the frame. The live node
-    /// must not report the dead peer as back.
-    #[test]
-    fn h1_route_a_a_late_joiners_digest_revives_a_sigkilled_peer() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let rig = Rig::new().await;
-            let context = rig.context();
-            let dead = nick("swift-cedar");
-
-            // The dead peer wrote one meta change, signed with its key.
-            let writer = fresh_state();
-            let seed = *writer.identity.public().as_bytes();
-            let merged = writer
-                .doc(Channel::Meta)
-                .build_change(&serde_json::json!({ "status": "busy" }), &seed)
-                .expect("a JSON object merges");
-            let change = merged.expect("a non-empty merge yields a change");
-            let (wire, _plain) = writer
-                .doc(Channel::Meta)
-                .compose_wire_body(&change, None)
-                .expect("compose the wire body");
-            let mut change_frame =
-                Message::new_channel_event(&rig.mesh, &dead, wire, Channel::Meta);
-            change_frame.timestamp = long_ago();
-            let change_frame = change_frame.sign(&writer.identity);
-
-            // The live node saw the peer alive and its change, then the peer was killed by `SIGKILL`.
-            let mut live = fresh_state();
-            live.joined_at = long_ago() - Duration::from_secs(10);
-            let hello = chat(&rig.mesh, &dead, &writer.identity, long_ago());
-            assert!(
-                receive(&hello, &mut live, &context),
-                "the frame is new to the seen set"
-            );
-            assert!(
-                receive(&change_frame, &mut live, &context),
-                "the frame is new to the seen set"
-            );
-            let silent = Instant::now()
-                .checked_sub(alive_timeout() + Duration::from_secs(10))
-                .expect("the monotonic clock has run past the alive timeout since boot");
-            live.last_seen_for_test(dead.as_str(), silent);
-            tick_sweep(&mut live, &rig.sink);
-            assert!(
-                live.quiet.contains(&live.key_named(dead.as_str())),
-                "the peer is quiet"
-            );
-            let talker = Identity::generate();
-            for _ in 0..SEEN_IDS_CAP {
-                live.mark_seen(&alive(
-                    &rig.mesh,
-                    &nick("busy-room"),
-                    &talker,
-                    UnixSecs::now(),
-                ));
-            }
-
-            // Another node holds the change of the dead peer and gets a digest from a late joiner.
-            let mut holder = fresh_state();
-            let _ = holder.doc_mut(Channel::Meta).ingest(&change_frame);
-            assert!(
-                holder
-                    .doc(Channel::Meta)
-                    .changes_since(&[], 10)
-                    .any(|frame| frame.key() == victim_key(&writer)),
-                "precondition: the holder has the change of the dead peer"
-            );
-            let joiner = Identity::generate();
-            let digest = Message::new_channel_digest(
-                &rig.mesh,
-                &nick("late-joiner"),
-                MessageBody::from(r#"{"heads":[]}"#),
-                Channel::Meta,
-            )
-            .sign(&joiner);
-            let answered =
-                antientropy::handle_state_digest(Channel::Meta, &digest, &mut holder, &context)
-                    .await;
-            assert!(
-                answered.broadcast + answered.unicast > 0,
-                "precondition: the holder answers the digest with the frame of the dead peer"
-            );
-
-            // The answer reaches the live node.
-            for frame in holder.doc(Channel::Meta).changes_since(&[], 10) {
-                receive(&frame, &mut live, &context);
-            }
-            let lines = rig.sink.lines();
-            assert!(
-                !lines.iter().any(|line| line == "return swift-cedar"),
-                "a late joiner digest made a live node report the dead peer as back: {lines:?}"
-            );
-            rig.endpoint.close().await;
-        });
-    }
-
-    fn victim_key(writer: &EventLoopState) -> AuthorKey {
-        writer.identity.author_key()
     }
 }

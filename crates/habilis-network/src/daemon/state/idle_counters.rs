@@ -2,7 +2,6 @@
 //! the wakes of the two tickers that run off the loop, and the CPU time the
 //! process used. All of it is reported as a delta on each `mesh census` line.
 
-use std::collections::HashMap;
 use std::mem;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -12,12 +11,7 @@ use iroh_gossip::api::{ApiError, Event};
 use super::gossip_msgs::GossipMsgs;
 use super::socket_bytes::{GossipPathBytes, SocketBytes};
 use super::wire_out_tally::{WireIn, WireOut, WireOutTally};
-use crate::protocol::Nickname;
 use crate::util::process_usage;
-
-/// The most requesters that `resent_by` names in one interval. The census line names 3, so 32 is
-/// ample, and a map of 32 nicknames stays small. A requester past it is refused.
-const MAX_REQUESTERS: usize = 32;
 
 /// Wakes of the orphan watch (`daemon::shutdown`). It is a task of its own, so
 /// it cannot reach the event loop's `&mut` counters.
@@ -56,7 +50,7 @@ pub(crate) struct IdleCounters {
     pub sweep: u64,
     pub heal: u64,
     pub reclaim: u64,
-    pub antientropy: u64,
+    pub backfill: u64,
     pub state_refresh: u64,
     pub linkstate: u64,
     /// The arm of a build of a seed that ended. It is no timer and no inbound frame: the tick of a
@@ -69,35 +63,13 @@ pub(crate) struct IdleCounters {
     /// driver behind `user` CPU: each one is an Ed25519 signature plus a
     /// serialization.
     pub broadcasts: u64,
-    /// Messages a digest answer put in the resend outbox.
-    pub resent: u64,
-    /// Messages a digest answer could not put there because it was full: the
-    /// next digest asks for them again.
-    pub resend_dropped: u64,
     /// Authenticated frames that the app dedup dropped as already seen.
     pub duplicates: u64,
     /// Authenticated frames that the app dedup kept as first sightings. With `duplicates`, it
     /// gives the frames per interval that reached the dedup.
     pub fresh: u64,
-    /// Digests of ours that a fast round sent to one peer (`ask`), the retries included.
-    pub fr_asks: u64,
-    /// The asks that the reclaim tick sent without a digest arriving (`resume_fast_rounds`).
-    pub fr_retries: u64,
-    /// State and meta digest answers that went out, on either plane.
-    pub state_answers: u64,
-    /// The frames of those answers that went to one peer.
-    pub state_frames_unicast: u64,
-    /// The frames of those answers that went out on gossip.
-    pub state_frames_broadcast: u64,
-    /// State and meta frames that the document refused or ignored: a forged entry, a repeated
-    /// `(actor, seq)` with other content, or a body that is no change.
-    pub state_rejected: u64,
     /// The frames received in the interval, by kind and by what became of them.
     pub wire_in: WireIn,
-    /// The anti-entropy resends queued, by the author of the digest that asked. At most
-    /// [`MAX_REQUESTERS`] authors: a digest names any author, so a requester past the cap is not
-    /// counted here. `take` empties the map each interval; the total of resends is `resent`.
-    pub resent_by: HashMap<Nickname, u64>,
     /// The process CPU time at the last census. It is not reset by `take`.
     cpu_mark: Duration,
     /// The readings of the socket, the gossip transport and the gossip actor at the last census.
@@ -207,82 +179,26 @@ impl IdleCounters {
             cpu: cpu_now.map(|now| now.saturating_sub(mark)),
         }
     }
-
-    /// Count one resend queued for the digest of `requester`.
-    pub(crate) fn note_resend_for(&mut self, requester: &Nickname) {
-        if self.resent_by.len() >= MAX_REQUESTERS && !self.resent_by.contains_key(requester) {
-            return;
-        }
-        *self.resent_by.entry(requester.clone()).or_default() += 1;
-    }
-}
-
-/// The 3 requesters that got the most resends, as `nick:count` joined by `,`.
-/// Empty when nobody got one. Ties go by nickname, so the line is stable.
-pub(crate) fn top_requesters(resent_by: &HashMap<Nickname, u64>) -> String {
-    let mut rows: Vec<(&Nickname, u64)> = resent_by
-        .iter()
-        .map(|(nick, count)| (nick, *count))
-        .collect();
-    rows.sort_unstable_by(|(left_nick, left_count), (right_nick, right_count)| {
-        let by_nick = left_nick.as_str().cmp(right_nick.as_str());
-        right_count.cmp(left_count).then(by_nick)
-    });
-    let top: Vec<String> = rows
-        .iter()
-        .take(3)
-        .map(|(nick, count)| format!("{nick}:{count}"))
-        .collect();
-    top.join(",")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::hint::black_box;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     use iroh_gossip::api::Event;
 
-    use super::{IdleCounters, MAX_REQUESTERS, note_ppid_wake, note_sampler_wake, top_requesters};
-    use crate::testing;
+    use super::{IdleCounters, note_ppid_wake, note_sampler_wake};
 
     /// `take` drains process-wide statics, so the tests that call it run one at a time.
     static TAKES: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn resent_by_names_at_most_the_cap_of_requesters_however_many_ask() {
-        let mut counters = IdleCounters::default();
-
-        for index in 0..10 * MAX_REQUESTERS {
-            counters.note_resend_for(&testing::nick(&format!("peer-{index}")));
-        }
-        counters.note_resend_for(&testing::nick("peer-0"));
-
-        assert_eq!(
-            counters.resent_by.len(),
-            MAX_REQUESTERS,
-            "a requester past the cap is not named"
-        );
-        assert_eq!(
-            counters.resent_by[&testing::nick("peer-0")],
-            2,
-            "a requester that is named keeps counting"
-        );
-        assert!(
-            !counters
-                .resent_by
-                .contains_key(&testing::nick(&format!("peer-{MAX_REQUESTERS}"))),
-            "the requester past the cap is not counted",
-        );
-    }
-
-    #[test]
     fn two_loops_take_only_the_frames_that_their_own_senders_sent() {
         let _one_at_a_time = TAKES.lock().expect("another census test panicked");
         let (mut first, mut second) = (IdleCounters::default(), IdleCounters::default());
-        let frame = br#"{"v":"14.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{}}"#;
+        let frame = br#"{"v":"18.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{}}"#;
         let handle_of_first = first.wire_out.clone();
 
         handle_of_first.note(frame);
@@ -319,19 +235,12 @@ mod tests {
             reclaim: 3,
             duplicates: 4,
             fresh: 6,
-            fr_asks: 7,
-            fr_retries: 2,
-            state_answers: 3,
-            state_frames_unicast: 5,
-            state_frames_broadcast: 9,
-            state_rejected: 1,
             ..IdleCounters::default()
         };
         counters.ext.note_gossip(Some(&Ok(Event::Lagged)));
         counters.ext.note_gossip(None);
         counters.ext.unicast += 2;
         counters.ext.deadlines += 1;
-        counters.note_resend_for(&testing::nick("ant-bee"));
         counters.wire_in.frames = 5;
 
         let reading = counters.take();
@@ -344,30 +253,6 @@ mod tests {
             "duplicates is read as it was set"
         );
         assert_eq!(reading.loop_arms.fresh, 6, "fresh is read as it was set");
-        assert_eq!(
-            reading.loop_arms.fr_asks, 7,
-            "fr_asks is read as it was set"
-        );
-        assert_eq!(
-            reading.loop_arms.fr_retries, 2,
-            "fr_retries is read as it was set"
-        );
-        assert_eq!(
-            reading.loop_arms.state_answers, 3,
-            "state_answers is read as it was set"
-        );
-        assert_eq!(
-            reading.loop_arms.state_frames_unicast, 5,
-            "state_frames_unicast is read as it was set"
-        );
-        assert_eq!(
-            reading.loop_arms.state_frames_broadcast, 9,
-            "state_frames_broadcast is read as it was set"
-        );
-        assert_eq!(
-            reading.loop_arms.state_rejected, 1,
-            "state_rejected is read as it was set"
-        );
         assert_eq!(
             reading.loop_arms.ext.lagged, 1,
             "ext lagged is read as it was set"
@@ -382,11 +267,6 @@ mod tests {
             "ext total is read as it was set"
         );
         assert_eq!(
-            reading.loop_arms.resent_by.len(),
-            1,
-            "resent_by len is read as it was set"
-        );
-        assert_eq!(
             reading.loop_arms.wire_in.frames, 5,
             "wire_in frames is read as it was set"
         );
@@ -395,46 +275,11 @@ mod tests {
         assert_eq!(next.loop_arms.reclaim, 0, "take resets the arms");
         assert_eq!(next.loop_arms.duplicates, 0, "take resets the duplicates");
         assert_eq!(next.loop_arms.fresh, 0, "take resets the first sightings");
-        assert_eq!(
-            next.loop_arms.fr_asks
-                + next.loop_arms.fr_retries
-                + next.loop_arms.state_answers
-                + next.loop_arms.state_frames_unicast
-                + next.loop_arms.state_frames_broadcast
-                + next.loop_arms.state_rejected,
-            0,
-            "take resets the fast-round and answer counters"
-        );
         assert_eq!(next.loop_arms.ext.total(), 0, "take resets the split");
         assert_eq!(
             next.loop_arms.wire_in.frames, 0,
             "take resets the received frames"
         );
-        assert!(
-            next.loop_arms.resent_by.is_empty(),
-            "take resets the requesters"
-        );
-    }
-
-    #[test]
-    fn top_requesters_keeps_the_3_largest_in_a_stable_order() {
-        let mut counters = IdleCounters::default();
-        for (name, count) in [
-            ("ant-bee", 2),
-            ("cat-dog", 5),
-            ("elk-fox", 2),
-            ("gnu-hen", 1),
-        ] {
-            for _ in 0..count {
-                counters.note_resend_for(&testing::nick(name));
-            }
-        }
-        assert_eq!(
-            top_requesters(&counters.resent_by),
-            "cat-dog:5,ant-bee:2,elk-fox:2",
-            "the 3 largest counts, and a tie goes by nickname",
-        );
-        assert_eq!(top_requesters(&HashMap::new()), "", "no requester, no text");
     }
 
     #[test]

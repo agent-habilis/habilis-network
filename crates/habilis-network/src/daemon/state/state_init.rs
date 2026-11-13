@@ -9,9 +9,9 @@ use crate::protocol::identity::Identity;
 
 use iroh::address_lookup::memory;
 
-use crate::{doc, transport};
-/// The two keys of one run. The session key is made fresh each run: it signs every frame, it is the
-/// automerge actor, and it is the seal key. The member key lives in a file and survives a restart: it
+use crate::transport;
+/// The two keys of one run. The session key is made fresh each run: it signs every frame, and it is the
+/// seal key. The member key lives in a file and survives a restart: it
 /// signs only the proof that the session speaks as the member.
 #[derive(Debug, Clone)]
 pub(crate) struct RunKeys {
@@ -47,15 +47,24 @@ pub(crate) struct RunKeys {
 /// Everything `EventLoopState::new` needs beyond the clock, grouped for the
 /// same reason [`MeshSecrets`] is: the argument budget. `now` stays separate
 /// because tests pin it to a deterministic instant.
+/// The overheads of this session, each a probe of a real frame: the body cap of the `state` store, the body cap
+/// of the `meta` store, and the rows of a digest page.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FrameOverheads {
+    pub(crate) state: usize,
+    pub(crate) meta: usize,
+    pub(crate) page: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct StateInit {
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
     // the keys are shared with the loop and its handlers, which hold clones
     pub(crate) keys: RunKeys,
+    /// The overheads of this session, which set the body caps and the page rows.
+    pub(crate) overheads: FrameOverheads,
     pub secrets: MeshSecrets,
-    /// The `meta` channel's per-peer write gate; `None` leaves it free-form.
-    pub per_peer_gate: Option<doc::SelfWriteGate>,
     /// The negotiation-slot table the Router's signal acceptor was built with.
     ///
     /// Taken at construction rather than assigned afterwards, because the cap

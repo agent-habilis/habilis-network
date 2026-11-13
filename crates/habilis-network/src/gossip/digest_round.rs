@@ -1,0 +1,736 @@
+//! The digest round. Each backfill tick a node sends its digests to its linked neighbours. A holder whose digest
+//! differs from ours waits the settle delay, then compares again. If it still differs, this node reads the
+//! holder's digest one page at a time, on one channel at a time, and pulls the slices that it wants and keeps.
+//!
+//! The round takes only what arrived by unicast from a roster peer. A page is taken only when this node asked
+//! for it, from the same connection, within a deadline.
+
+use std::collections::HashMap;
+use std::mem;
+use std::time::Duration;
+
+use habilis_network_protocol::digest::{DigestPage, DigestRoot};
+use habilis_network_protocol::{
+    AuthorKey, Channel, ContentHash, Message, MessageBody, MessageKind,
+};
+use habilis_network_util::clock::Instant;
+use habilis_network_util::tuning::{
+    DIGEST_PULL_TTL, DIGEST_SERVE_WINDOW, DIGEST_SERVES_PER_WINDOW, DIGEST_SETTLE,
+    DIGEST_SETTLE_JITTER,
+};
+use iroh::EndpointId;
+
+use crate::daemon::handler_ctx::HandlerCtx;
+use crate::daemon::state::EventLoopState;
+use crate::transport;
+
+/// A holder's digest that differs from ours, while its settle delay runs.
+#[derive(Debug, Clone, Copy)]
+struct Difference {
+    endpoint: EndpointId,
+    root: ContentHash,
+    total: usize,
+    due: Instant,
+}
+
+/// A holder's digest that this node reads on one channel: the page that is asked for next, when that page was
+/// asked for, and when it may be asked for.
+#[derive(Debug, Clone, Copy)]
+struct Reading {
+    holder: AuthorKey,
+    endpoint: EndpointId,
+    total: usize,
+    index: usize,
+    asked: Option<Instant>,
+    next_at: Instant,
+}
+
+/// A page request that the round sends this tick.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Request {
+    holder: AuthorKey,
+    endpoint: EndpointId,
+    channel: Channel,
+    index: usize,
+}
+
+/// The digests that differ from ours, and the holder read on each channel.
+#[derive(Debug, Default)]
+pub(crate) struct DigestRound {
+    differences: HashMap<(AuthorKey, Channel), Difference>,
+    reading: HashMap<Channel, Reading>,
+}
+
+impl DigestRound {
+    /// Notes the root of `holder` on `channel`, which came from `endpoint`. A root that agrees with ours cancels
+    /// a difference that is noted. A root that differs is noted with its settle due time, and a later root of the
+    /// same holder replaces the root that was noted.
+    pub(crate) fn note_root(
+        &mut self,
+        holder: AuthorKey,
+        endpoint: EndpointId,
+        channel: Channel,
+        root: &DigestRoot,
+        matches: bool,
+        due: Instant,
+    ) {
+        if matches {
+            self.differences.remove(&(holder, channel));
+            return;
+        }
+        self.differences
+            .entry((holder, channel))
+            .and_modify(|difference| {
+                difference.endpoint = endpoint;
+                difference.root = root.root();
+                difference.total = root.total();
+            })
+            .or_insert(Difference {
+                endpoint,
+                root: root.root(),
+                total: root.total(),
+                due,
+            });
+    }
+
+    /// Advances the round to `now`. A holder that left the roster is dropped, and so is a reading whose page
+    /// request got no answer within [`DIGEST_PULL_TTL`]: a new difference of that holder is then noted again. A
+    /// difference whose settle delay has ended is compared again: if it agrees, it is cancelled; if it still
+    /// differs, and no holder is read on its channel, it is read. Returns the page requests that are due.
+    ///
+    /// The check for a reading on the channel comes before the compare: a compare sorts and hashes every key of the
+    /// store, and a difference that waits for a busy channel would pay it on every tick of the round.
+    pub(crate) fn advance(
+        &mut self,
+        now: Instant,
+        in_roster: impl Fn(&AuthorKey) -> bool,
+        matches: impl Fn(Channel, &ContentHash) -> bool,
+    ) -> Vec<Request> {
+        self.reading.retain(|_, reading| {
+            let answered_late = reading
+                .asked
+                .is_some_and(|asked| now.duration_since(asked) >= DIGEST_PULL_TTL);
+            in_roster(&reading.holder) && !answered_late
+        });
+        self.differences.retain(|(holder, _), _| in_roster(holder));
+        let due: Vec<(AuthorKey, Channel)> = self
+            .differences
+            .iter()
+            .filter(|(_, difference)| difference.due <= now)
+            .map(|(&key, _)| key)
+            .collect();
+        for (holder, channel) in due {
+            let Some(difference) = self.differences.get(&(holder, channel)).copied() else {
+                continue;
+            };
+            if self.reading.contains_key(&channel) {
+                continue;
+            }
+            if matches(channel, &difference.root) {
+                self.differences.remove(&(holder, channel));
+                continue;
+            }
+            self.differences.remove(&(holder, channel));
+            self.reading.insert(
+                channel,
+                Reading {
+                    holder,
+                    endpoint: difference.endpoint,
+                    total: difference.total,
+                    index: 0,
+                    asked: None,
+                    next_at: now,
+                },
+            );
+        }
+        let mut requests = Vec::new();
+        for (&channel, reading) in &mut self.reading {
+            if reading.asked.is_none() && reading.next_at <= now {
+                reading.asked = Some(now);
+                requests.push(Request {
+                    holder: reading.holder,
+                    endpoint: reading.endpoint,
+                    channel,
+                    index: reading.index,
+                });
+            }
+        }
+        requests
+    }
+
+    /// Whether a page is one that this node asked for: the holder, the connection, the channel and the index
+    /// match the request in flight, and the request is within its deadline.
+    pub(crate) fn accepts(
+        &self,
+        holder: AuthorKey,
+        endpoint: EndpointId,
+        channel: Channel,
+        index: usize,
+        now: Instant,
+    ) -> bool {
+        self.reading.get(&channel).is_some_and(|reading| {
+            reading.holder == holder
+                && reading.endpoint == endpoint
+                && reading.index == index
+                && reading
+                    .asked
+                    .is_some_and(|asked| now.duration_since(asked) < DIGEST_PULL_TTL)
+        })
+    }
+
+    /// Notes that the page of `channel` that was asked for has been read. The next page may be asked for after a
+    /// quarter of [`DIGEST_SERVE_WINDOW`]: a page costs the holder two answers, so four pages fill one window's
+    /// budget. After the last page the reading ends.
+    pub(crate) fn page_read(&mut self, channel: Channel, now: Instant) {
+        let Some(reading) = self.reading.get_mut(&channel) else {
+            return;
+        };
+        let next = reading.index + 1;
+        if next >= reading.total {
+            self.reading.remove(&channel);
+            return;
+        }
+        reading.index = next;
+        reading.asked = None;
+        reading.next_at = now + DIGEST_SERVE_WINDOW / 4;
+    }
+
+    /// The number of channels that a holder is read on, for the tests.
+    #[cfg(test)]
+    pub(crate) fn reading_count(&self) -> usize {
+        self.reading.len()
+    }
+}
+
+impl DigestRound {
+    /// The keys of `page` that this node wants and keeps, for the one pull of the page. A key that the store keeps
+    /// no slice of is not pulled: the store would hold its slice only as a pending one.
+    pub(crate) fn pull_plan(
+        state: &EventLoopState,
+        channel: Channel,
+        page: &DigestPage,
+    ) -> Vec<AuthorKey> {
+        let listed: Vec<AuthorKey> = state.docs.wanted(channel, page);
+        listed
+            .into_iter()
+            .filter(|key| state.keeps_slice(key))
+            .collect()
+    }
+}
+
+/// The settle jitter of one mismatch: uniform from zero to `DIGEST_SETTLE_JITTER`, so the peers that see the same
+/// difference do not all ask at once.
+pub(crate) fn settle_jitter() -> Duration {
+    let millis = rand::Rng::random_range(&mut rand::rng(), 0..=DIGEST_SETTLE_JITTER.as_millis());
+    Duration::from_millis(u64::try_from(millis).unwrap_or(0))
+}
+
+/// The linked neighbours of this node: the roster keys whose endpoint is in the linked set, with that endpoint.
+fn neighbours(state: &EventLoopState) -> Vec<(AuthorKey, EndpointId)> {
+    state
+        .peers
+        .iter()
+        .filter_map(|key| {
+            let eid = state.address_of(key)?.id;
+            state.linked_endpoints.contains(&eid).then_some((*key, eid))
+        })
+        .collect()
+}
+
+/// Sends `kind` to `eid` as a signed frame of this node.
+async fn send_kind(
+    state: &EventLoopState,
+    context: &HandlerCtx<'_>,
+    eid: EndpointId,
+    kind: MessageKind,
+) {
+    let Ok(body) = MessageBody::try_new("{}") else {
+        return;
+    };
+    let frame = Message::new_frame(context.mesh, context.author, kind, body).sign(&state.identity);
+    let Ok(bytes) = frame.serialize() else {
+        tracing::debug!(target: "habilis_network::gossip", "a digest frame did not serialize, so it is not sent");
+        return;
+    };
+    transport::send_best_effort(eid, bytes, state).await;
+}
+
+/// The backfill tick: this node sends its two digests to each linked neighbour. Each digest is computed once.
+pub(crate) async fn send_roots(state: &EventLoopState, context: &HandlerCtx<'_>) {
+    let own_state = state.docs.digest(Channel::State);
+    let own_meta = state.docs.digest(Channel::Meta);
+    for (key, eid) in neighbours(state) {
+        let root = MessageKind::SliceRoot {
+            to: key,
+            state: own_state.clone(),
+            meta: own_meta.clone(),
+        };
+        send_kind(state, context, eid, root).await;
+    }
+}
+
+/// The round tick: each difference whose settle has ended is compared again, and each page request that is due is
+/// sent on the holder's connection.
+pub(crate) async fn advance(state: &mut EventLoopState, context: &HandlerCtx<'_>, now: Instant) {
+    let mut round = mem::take(&mut state.digest_round);
+    let requests = round.advance(
+        now,
+        |key| state.in_roster(key),
+        |channel, root| state.docs.matches(channel, root),
+    );
+    state.digest_round = round;
+    for request in requests {
+        let page = MessageKind::SlicePageRequest {
+            to: request.holder,
+            channel: request.channel,
+            index: request.index,
+        };
+        send_kind(state, context, request.endpoint, page).await;
+    }
+}
+
+/// A holder's roots arrived by unicast from `endpoint`. Each channel whose root differs from ours is noted for the
+/// round. A root of a key that is not in the roster is not noted.
+pub(crate) fn on_root(
+    state: &mut EventLoopState,
+    holder: AuthorKey,
+    endpoint: EndpointId,
+    roots: [(Channel, &DigestRoot); 2],
+    now: Instant,
+    jitter: Duration,
+) {
+    if !state.in_roster(&holder) {
+        return;
+    }
+    let due = now + DIGEST_SETTLE + jitter;
+    for (channel, root) in roots {
+        let matches = state.docs.matches(channel, &root.root());
+        state
+            .digest_round
+            .note_root(holder, endpoint, channel, root, matches, due);
+    }
+}
+
+/// A page of a holder's digest arrived by unicast from `endpoint`. It is taken only when this node asked for it.
+/// This node then pulls the keys of the page that it wants, in one pull. The next page is asked for by the round
+/// tick, a quarter of the serve window after this page.
+pub(crate) async fn on_page(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    holder: AuthorKey,
+    endpoint: EndpointId,
+    channel: Channel,
+    page: &DigestPage,
+    now: Instant,
+) {
+    if !state
+        .digest_round
+        .accepts(holder, endpoint, channel, page.index(), now)
+    {
+        return;
+    }
+    let rows = state.docs.pull_rows(channel);
+    let cap = DIGEST_SERVES_PER_WINDOW * rows;
+    let mut accepted = Vec::new();
+    for key in DigestRound::pull_plan(state, channel, page) {
+        if state
+            .outstanding_pulls
+            .register(endpoint, channel, key, now, cap)
+        {
+            accepted.push(key);
+        } else {
+            tracing::debug!(target: "habilis_network::gossip", "a pull over the holder's open cap is not sent");
+        }
+    }
+    if !accepted.is_empty() {
+        let pull = MessageKind::SlicePull {
+            to: holder,
+            channel,
+            keys: accepted,
+        };
+        send_kind(state, context, endpoint, pull).await;
+    }
+    state.digest_round.page_read(channel, now);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DigestRound;
+    use crate::protocol::MeshId;
+    use crate::testing::{self, longest_mesh_id};
+    use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
+    use habilis_network_protocol::{AuthorKey, Channel, ContentHash};
+    use habilis_network_util::clock::Instant;
+    use habilis_network_util::tuning::{DIGEST_PULL_TTL, DIGEST_SERVE_WINDOW, DIGEST_SETTLE};
+    use std::time::Duration;
+
+    fn entry(seed: u8) -> DigestEntry {
+        DigestEntry::new(AuthorKey::from([seed; 32]), 1, ContentHash::of(&[seed]))
+    }
+
+    fn root(text: &[u8], total: usize) -> DigestRoot {
+        DigestRoot::new(ContentHash::of(text), total).expect("a root of at least one page")
+    }
+
+    fn holder(seed: u8) -> AuthorKey {
+        AuthorKey::from([seed; 32])
+    }
+
+    /// Notes a differing root of `holder` on `channel`, due after the settle delay from `now`.
+    fn note(
+        round: &mut DigestRound,
+        holder: AuthorKey,
+        seed: u8,
+        channel: Channel,
+        now: Instant,
+        total: usize,
+    ) {
+        let endpoint = testing::endpoint_id(seed);
+        let digest = root(&[seed], total);
+        round.note_root(
+            holder,
+            endpoint,
+            channel,
+            &digest,
+            false,
+            now + DIGEST_SETTLE,
+        );
+    }
+
+    /// A differing root is read only after the settle delay.
+    #[test]
+    fn a_mismatch_waits_the_settle_before_it_asks() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 1);
+        let early = round.advance(now, |_| true, |_, _| false);
+        assert!(
+            early.is_empty(),
+            "a difference is not asked for before the settle delay ends"
+        );
+        let due = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert_eq!(
+            due.len(),
+            1,
+            "the first page is asked for once the settle delay has ended"
+        );
+    }
+
+    /// A root that agrees with ours during the settle cancels the difference: no page is asked for.
+    #[test]
+    fn a_root_that_agrees_during_the_settle_cancels_the_request() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 1);
+        round.note_root(
+            holder(1),
+            testing::endpoint_id(81),
+            Channel::State,
+            &root(&[81], 1),
+            true,
+            now,
+        );
+        let due = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert!(due.is_empty(), "an agreeing root cancels the difference");
+    }
+
+    /// A page request that gets no answer does not block the holder: its deadline ends the reading, and a new
+    /// difference of the holder is read again.
+    #[test]
+    fn an_unanswered_request_does_not_block_the_next_difference() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 1);
+        let asked = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert_eq!(asked.len(), 1, "the first page is asked for");
+        let late = now + DIGEST_SETTLE + DIGEST_PULL_TTL;
+        round.advance(late, |_| true, |_, _| false);
+        assert_eq!(
+            round.reading_count(),
+            0,
+            "a request past its deadline ends the reading"
+        );
+        note(&mut round, holder(1), 82, Channel::State, late, 1);
+        let retry = round.advance(late + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert_eq!(retry.len(), 1, "a new difference is read again");
+    }
+
+    /// One holder is read on a channel at a time: the other holders wait for it.
+    #[test]
+    fn one_holder_per_channel_at_a_time() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        for seed in [1, 2, 3] {
+            note(&mut round, holder(seed), 80 + seed, Channel::State, now, 1);
+        }
+        let asked = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert_eq!(
+            asked.len(),
+            1,
+            "one holder is read on the channel at a time"
+        );
+    }
+
+    /// A page is taken only when it was asked for, from the same connection, for the same index.
+    #[test]
+    fn a_page_is_taken_only_when_it_was_asked_for() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 3);
+        assert!(
+            !round.accepts(holder(1), testing::endpoint_id(81), Channel::State, 0, now),
+            "nothing was asked for yet"
+        );
+        let asked_at = now + DIGEST_SETTLE;
+        round.advance(asked_at, |_| true, |_, _| false);
+        assert!(
+            round.accepts(
+                holder(1),
+                testing::endpoint_id(81),
+                Channel::State,
+                0,
+                asked_at
+            ),
+            "the page that was asked for is accepted"
+        );
+        assert!(
+            !round.accepts(
+                holder(1),
+                testing::endpoint_id(82),
+                Channel::State,
+                0,
+                asked_at
+            ),
+            "another connection"
+        );
+        assert!(
+            !round.accepts(
+                holder(1),
+                testing::endpoint_id(81),
+                Channel::State,
+                1,
+                asked_at
+            ),
+            "another index"
+        );
+    }
+
+    /// After a page, the next one waits a quarter window: four pages of two answers each fill one window's budget.
+    #[test]
+    fn the_next_page_is_paced_to_a_quarter_window() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 6);
+        round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        round.page_read(Channel::State, now + DIGEST_SETTLE);
+        let quarter = DIGEST_SERVE_WINDOW / 4;
+        let just_before = quarter
+            .checked_sub(Duration::from_millis(10))
+            .expect("a quarter window is longer than 10 ms");
+        let soon = round.advance(now + DIGEST_SETTLE + just_before, |_| true, |_, _| false);
+        assert!(soon.is_empty(), "the next page waits a quarter window");
+        let due = round.advance(now + DIGEST_SETTLE + quarter, |_| true, |_, _| false);
+        assert_eq!(
+            due.len(),
+            1,
+            "the next page is asked after a quarter window"
+        );
+        assert_eq!(due[0].index, 1, "and it is page 1");
+    }
+
+    /// A difference is compared again when its settle ends: a store that agrees by then asks for nothing.
+    #[test]
+    fn a_store_that_agrees_at_the_due_time_asks_for_nothing() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 1);
+        let due = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| true);
+        assert!(
+            due.is_empty(),
+            "a store that agrees at the due time asks for nothing"
+        );
+    }
+
+    /// A holder that leaves the roster loses its difference and its reading, so nothing is asked of it.
+    #[test]
+    fn a_holder_that_leaves_the_roster_is_dropped() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 1);
+        note(&mut round, holder(2), 82, Channel::Meta, now, 1);
+        round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert_eq!(
+            round.reading_count(),
+            2,
+            "both holders are read, one per channel"
+        );
+        let asked = round.advance(now + DIGEST_SETTLE, |key| *key != holder(1), |_, _| false);
+        assert!(
+            asked.iter().all(|request| request.holder != holder(1)),
+            "a holder that left is not asked"
+        );
+        assert_eq!(
+            round.reading_count(),
+            1,
+            "the reading of the holder that left is dropped"
+        );
+    }
+
+    /// While one holder is read on a channel, a second holder that is due does not replace its reading.
+    #[test]
+    fn a_due_holder_does_not_replace_a_reading_in_progress() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 3);
+        round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        note(&mut round, holder(2), 82, Channel::State, now, 3);
+        let during = round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert!(
+            during.is_empty(),
+            "the second holder waits while the first is read"
+        );
+        assert!(
+            round.accepts(
+                holder(1),
+                testing::endpoint_id(81),
+                Channel::State,
+                0,
+                now + DIGEST_SETTLE
+            ),
+            "the reading of the first holder is kept"
+        );
+    }
+
+    /// A page is pulled in one pull, with all its wanted keys, whatever the row count of the asker.
+    #[test]
+    fn a_page_is_pulled_in_one_pull() {
+        let mut state = testing::fresh_state();
+        let mut rows = Vec::new();
+        for seed in 1..=19u8 {
+            let member = AuthorKey::from([seed; 32]);
+            state.peers.insert(member);
+            rows.push(entry(seed));
+        }
+        let page = DigestPage::build(&rows, 19, 0, 1).expect("a page of nineteen rows");
+        let keys = DigestRound::pull_plan(&state, Channel::State, &page);
+        assert_eq!(
+            keys.len(),
+            19,
+            "every wanted key of the page is in its one pull"
+        );
+    }
+
+    /// A reading that has ended leaves nothing that blocks its holder: the next differing root is noted and read, so a
+    /// page that the pull table refused is asked again.
+    #[test]
+    fn a_holder_whose_reading_ended_is_read_again_on_its_next_differing_root() {
+        let now = Instant::now();
+        let mut round = DigestRound::default();
+        note(&mut round, holder(1), 81, Channel::State, now, 1);
+        round.advance(now + DIGEST_SETTLE, |_| true, |_, _| false);
+        round.page_read(Channel::State, now + DIGEST_SETTLE);
+        note(
+            &mut round,
+            holder(1),
+            81,
+            Channel::State,
+            now + DIGEST_SETTLE,
+            1,
+        );
+        let again = round.advance(now + DIGEST_SETTLE + DIGEST_SETTLE, |_| true, |_, _| false);
+        assert_eq!(
+            again.len(),
+            1,
+            "a differing root reads the holder again after its reading ended"
+        );
+    }
+
+    /// The id of a real mesh with a 1-char name and the loopback config: the shortest id that a mesh makes.
+    fn shortest_mesh_id() -> MeshId {
+        use crate::protocol::{Mesh, MeshConfig, MeshName, Seed};
+
+        let name = MeshName::try_new("a").expect("a 1-char name");
+        let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback config");
+        let mesh = Mesh::try_new(Seed::new([4u8; 32]), name, config).expect("a mesh");
+        MeshId::try_new(&mesh.to_string()).expect("the id of a real mesh")
+    }
+
+    /// The pull of one full page fits one frame at the longest mesh id and nickname: the most keys that a holder can
+    /// list on a page (the rows of the shortest real mesh id), in the signed frame of the worst session, serialize
+    /// within the wire limit. `serialize` is the check: it refuses a frame over the limit.
+    #[test]
+    fn a_pull_of_one_full_page_fits_one_frame_at_the_worst_overhead() {
+        use crate::protocol::identity::Identity;
+        use crate::protocol::{Message, MessageBody, MessageKind, Nickname};
+        use habilis_network_doc::{SliceLimits, SliceStore};
+
+        let shortest_overhead =
+            habilis_network_doc::page_frame_overhead(&shortest_mesh_id(), &Nickname::from("a"));
+        let store = SliceStore::new(
+            Channel::State,
+            SliceLimits::default(),
+            habilis_network_doc::worst_frame_overhead(),
+        )
+        .with_page_overhead(shortest_overhead);
+        let rows = store.page_rows();
+        let keys: Vec<AuthorKey> = (0..rows)
+            .map(|index| {
+                let mut bytes = [0xffu8; 32];
+                bytes[0] = u8::try_from(index).unwrap_or(0);
+                AuthorKey::from(bytes)
+            })
+            .collect();
+        let count = keys.len();
+        let mesh = longest_mesh_id();
+        assert!(
+            mesh.as_str().len() >= 500,
+            "the mesh id is a real longest id, not {} bytes",
+            mesh.as_str().len()
+        );
+        let nickname = Nickname::from("😀".repeat(32).as_str());
+        let pull = MessageKind::SlicePull {
+            to: AuthorKey::from([0xff; 32]),
+            channel: Channel::State,
+            keys,
+        };
+        let signed = Message::new_frame(&mesh, &nickname, pull, MessageBody::from("{}"))
+            .sign(&Identity::generate());
+        let frame = signed.serialize();
+        assert!(
+            frame.is_ok(),
+            "a pull of {count} keys does not fit one frame: {:?}",
+            frame.as_ref().err()
+        );
+    }
+
+    /// A lapsed key keeps no slice, so the round does not pull it.
+    #[test]
+    fn a_lapsed_key_is_not_pulled() {
+        let mut state = testing::fresh_state();
+        let lapsed = AuthorKey::from([3; 32]);
+        state.clock_evidence.lapsed_quiet.insert(lapsed);
+        let page = DigestPage::build(
+            &[DigestEntry::new(lapsed, 2, ContentHash::of(b"row"))],
+            1,
+            0,
+            1,
+        )
+        .expect("a page of one row");
+        let planned: Vec<AuthorKey> = DigestRound::pull_plan(&state, Channel::State, &page);
+        assert!(!planned.contains(&lapsed), "a lapsed key is not pulled");
+    }
+
+    /// A page lists a key that is not in the roster. The pull plan keeps the roster key only.
+    #[test]
+    fn a_key_outside_the_roster_is_not_pulled() {
+        let mut state = testing::fresh_state();
+        let member = AuthorKey::from([1; 32]);
+        let stranger = AuthorKey::from([2; 32]);
+        state.peers.insert(member);
+        let page =
+            DigestPage::build(&[entry(1), entry(2)], 2, 0, 1).expect("a page of two sorted rows");
+        let planned: Vec<AuthorKey> = DigestRound::pull_plan(&state, Channel::State, &page);
+        assert_eq!(planned, vec![member], "only the roster key is pulled");
+        assert!(!planned.contains(&stranger), "a stranger is not pulled");
+    }
+}

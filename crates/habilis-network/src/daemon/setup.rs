@@ -206,7 +206,7 @@ pub(crate) fn register_rendezvous(
 /// The unicast inbound channel + its Router acceptor. The acceptor forwards
 /// received `UNICAST_ALPN` frames to the returned receiver, which the event
 /// loop drains into `gossip::ingest`. Bounded so a flooding peer can't
-/// back-pressure the loop (a dropped frame heals via anti-entropy).
+/// back-pressure the loop (a dropped frame is not repaired until the loss repair lands).
 fn unicast_inbox(
     relay_transport: transport::PayloadPath,
 ) -> (
@@ -560,8 +560,6 @@ struct Assembled {
     /// The invite-only creator's mesh (with its in-memory issuer key + root),
     /// retained so `invite` can mint. `Some` only on an invite-only creator.
     mint_mesh: Option<Mesh>,
-    /// True for the node that created the mesh: it has no peer to sync its state with.
-    is_creator: bool,
     /// The multi-hop transport handle when the mesh policy has `multihop`, threaded
     /// into `EventLoopState` so the link-state tick can feed its routing table.
     /// Present with the `multihop` feature; the native underlay builder that fills
@@ -1429,8 +1427,8 @@ fn early_keys_state_path(
 }
 
 /// The keys of this run. The member key comes from the state file. The session key is the one that
-/// signs frames and names the automerge actor, so it must be new each run: a restart that reused it
-/// would start the same actor again at sequence 1.
+/// signs frames and is the seal key, so it must be new each run: a restart that reused it would sign
+/// as the old run.
 fn run_keys(state: Option<&Path>, cancel: &AtomicBool) -> Result<RunKeys> {
     run_keys_holding(state, hold_member_key_once(state)?, cancel)
 }
@@ -1483,7 +1481,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         endpoint: injected,
         protocols,
         transports,
-        per_peer_gate,
     } = params;
     // The member key is taken first, before an endpoint is bound or a topic joined: a start that another
     // daemon holds the key of fails with nothing left behind.
@@ -1544,7 +1541,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         mesh_password,
         mesh_key,
         mint_mesh,
-        is_creator,
         #[cfg(feature = "multihop")]
             multihop: multihop_handle,
         #[cfg(feature = "multihop")]
@@ -1573,7 +1569,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             name: mesh_name,
             topic_string,
             mint_mesh,
-            is_creator,
             author,
             // The mesh spec and the loop state both hold the keys, so they are shared.
             keys,
@@ -1616,7 +1611,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             max_peers,
             runtime_base,
             state_file,
-            per_peer_gate,
             live_count,
             // Default to the CLI driver; the in-process sessions
             // overwrite `cfg.runtime.driver` before handing it to `daemon::run`.
@@ -1834,7 +1828,6 @@ async fn setup_create(
         mesh_password,
         mesh_key,
         mint_mesh,
-        is_creator: true,
         #[cfg(feature = "multihop")]
         multihop,
         #[cfg(feature = "multihop")]
@@ -1944,7 +1937,6 @@ async fn setup_join(
         // A joiner holds no issuer key, so it can never mint — even after
         // redeeming an invite-only mesh.
         mint_mesh: None,
-        is_creator: false,
         #[cfg(feature = "multihop")]
         multihop,
         #[cfg(feature = "multihop")]
@@ -3057,8 +3049,8 @@ mod tests {
         );
     }
 
-    /// The member key survives a restart and the session key does not: the session key is the
-    /// automerge actor, and a restart that kept it would start the same actor again.
+    /// The member key survives a restart and the session key does not: the session key signs the
+    /// frames of the run, and a restart that kept it would sign as the old run.
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_restart_keeps_the_member_key_and_changes_the_session_key() {
@@ -3184,47 +3176,50 @@ mod tests {
         );
     }
 
-    /// The failure this prevents: after a restart the session starts a new document at sequence 1.
-    /// Under the old actor, a replica that holds the first run refuses that change as a duplicate
-    /// sequence number, and every write of the restarted member is lost.
+    /// The failure this prevents: a restarted session starts its slices again at version 1. Each
+    /// run signs with its own session key, so its slice is a new slot, and a replica that holds
+    /// the first run takes the restarted run too.
     #[test]
-    fn a_restarted_session_writes_under_a_new_actor() {
+    fn a_restarted_session_writes_its_slice_under_its_session_key() {
         use crate::daemon::state::RunKeys;
-        use crate::doc::{Ingested, MeshDoc};
-        use crate::protocol::{Channel, MeshId, Message};
+        use crate::doc::{SliceIngest, SliceLimits, SliceStore, worst_frame_overhead};
+        use crate::protocol::{Channel, MeshId, Message, MessageBody};
         use crate::testing;
+        use crate::util::clock::Instant;
         let dir = env::temp_dir().join(format!("habilis-restart-actor-{}", process::id()));
         fs::create_dir_all(&dir).expect("a temp dir");
         let state = dir.join("session.json");
         let mesh = MeshId::from("💬test");
         let author = testing::nick("alice");
-        let write = |keys: &RunKeys, value: u8| {
-            let doc = MeshDoc::new_ungated();
-            let seed = *keys.session.public().as_bytes();
-            let change = doc
-                .build_change(&serde_json::json!({ "k": value }), &seed)
-                .expect("a JSON object merges")
-                .expect("a non-empty merge yields a change");
-            let (wire, _plain) = doc.compose_wire_body(&change, None).expect("wire body");
-            Message::new_channel_event(&mesh, &author, wire, Channel::State).sign(&keys.session)
+        let write = |keys: &RunKeys, version: u8| {
+            let body = MessageBody::try_new(&format!(r#"{{"version":{version},"value":{{}}}}"#))
+                .expect("a slice body");
+            Message::new_channel_event(&mesh, &author, body, Channel::State).sign(&keys.session)
         };
         let before = write(
             &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
-            1,
+            5,
         );
         let after = write(
             &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart"),
-            2,
+            1,
         );
-        let mut replica = MeshDoc::new_ungated();
+        let mut replica = SliceStore::new(
+            Channel::State,
+            SliceLimits::default(),
+            worst_frame_overhead(),
+        );
         assert!(
-            matches!(replica.ingest(&before), Ingested::Applied { .. }),
+            matches!(
+                replica.ingest(&before, true, Instant::now()),
+                SliceIngest::Applied
+            ),
             "the replica takes the first run"
         );
-        let outcome = replica.ingest(&after);
+        let outcome = replica.ingest(&after, true, Instant::now());
         assert!(
-            matches!(outcome, Ingested::Applied { .. }),
-            "the replica takes the restarted run, got {outcome:?}: the actor is new"
+            matches!(outcome, SliceIngest::Applied),
+            "the replica takes the restarted run, got {outcome:?}: the session key is new"
         );
     }
 

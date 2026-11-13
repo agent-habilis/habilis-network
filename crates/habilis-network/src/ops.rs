@@ -6,40 +6,12 @@
 
 pub use crate::gossip::{
     Farewell, MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge,
-    send_app, start_ping_round, unicast_farewell,
+    seal_broadcast_body, sealed_body_len_bound, send_app, start_ping_round, unicast_farewell,
 };
-pub use crate::transport::{Delivered, MeshSender, PendingSend, deliver, deliver_in_background};
-
-use crate::daemon::seed_job;
-use crate::embed::{EventLoopState, HandlerCtx};
-use crate::transport::SendError;
-
-/// Cut the state channel now and send the seed, on the calling thread: the plan, the build, the
-/// signing and the send of a cut in one call, so a test can measure the send of a chain. The loop
-/// itself cuts in pieces, with the build on another thread. Returns the number of frames sent.
-///
-/// # Errors
-/// When the state document holds a candidate, or the seed does not build.
-pub async fn state_cut_now(
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-) -> Result<usize, SendError> {
-    seed_job::cut_now(state, context.author, context.mesh, context.sender)
-        .await
-        .map_err(SendError::internal)
-}
-
-/// The CRDT-backed `state` / `meta` channels.
-pub mod doc {
-    pub use crate::doc::MeshDoc;
-    /// Only the adversarial suite builds a bare merge frame; production writes
-    /// go through [`change_body`]. Gated on the feature alone: `doc` is its own
-    /// crate now, so this crate being under `cfg(test)` says nothing about
-    /// whether the item exists over there.
-    #[cfg(feature = "adversarial")]
-    pub use crate::doc::wire::merge_body;
-    pub use crate::doc::wire::{change_body, encrypt_body};
-}
+pub use crate::transport::{
+    Delivered, MeshSender, PendingSend, deliver, deliver_in_background, deliver_to,
+    deliver_to_in_background,
+};
 
 /// Handing a peer a payload too large for a gossip frame: offload it to a
 /// local store, send the ticket, let the peer fetch it over the blob ALPN.

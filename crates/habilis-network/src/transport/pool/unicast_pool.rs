@@ -1,6 +1,5 @@
 //! The dial side of the unicast plane: the per-peer connection pool.
 
-use super::batch_slots::BatchSlots;
 use super::in_flight_dial::InFlightDial;
 use super::registration::Registration;
 use super::timeouts::{
@@ -31,7 +30,6 @@ use crate::util::cooldown::Cooldown;
 use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 
 use crate::daemon::state::WireOutTally;
-use crate::protocol::messages;
 
 use n0_future::{task, time};
 use std::sync::{Mutex as std_Mutex, OnceLock, OnceLock as std_OnceLock};
@@ -49,6 +47,10 @@ impl fmt::Debug for UnicastPool {
         f.debug_struct("UnicastPool").finish_non_exhaustive()
     }
 }
+
+/// The dial locks of the peers that are being dialed.
+// shared: the map and the turn of each dial hold the lock of a peer
+type DialLocks = HashMap<EndpointId, Arc<Mutex<()>>>;
 
 /// Why a pooled connection is held, which decides when it closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,21 +97,27 @@ pub(in crate::transport::pool) struct PoolInner {
     /// a graceful `Left`; expired ones are pruned on the next `note`.
     pub(in crate::transport::pool) dial_failures: Mutex<Cooldown<EndpointId>>,
     /// The answer batches in flight: a peer cannot draw more of them than its share, however many
-    /// author keys it signs its digests with.
-    pub(in crate::transport::pool) batch_slots: BatchSlots,
     /// Times the inline-dial path was entered. Counted on entry rather than at
     /// the dial itself, because the question a caller on the event loop needs
     /// answered is whether it *could* have waited here — a detached pool bails
     /// before dialing, and a warm hit inside never dials, but both mean the
     /// caller was willing to.
     pub(in crate::transport::pool) dial_attempts: AtomicU64,
-    /// Endpoints with a dial in flight, each with the receiver of the outcome that its dialer
-    /// publishes, so that concurrent cold sends to one peer share one dial instead of racing their
-    /// own: the first is the dialer, the others wait on the receiver. Read by
-    /// [`UnicastPool::send_registered`] and [`UnicastPool::send_batch_in_background`]: an inline
-    /// dial through [`UnicastPool::warm_or_dial`] does not.
+    /// Tests only: the dials that reached the endpoint, where `dial_attempts` counts the calls.
+    #[cfg(test)]
+    pub(in crate::transport::pool) dials_started: AtomicU64,
+    /// Endpoints with a dial or a path wait in flight, each with the receiver of the outcome that
+    /// its dialer publishes, so that concurrent sends to one peer that has no usable connection
+    /// yet share one dial or one wait instead of racing their own: the first is the dialer, the
+    /// others wait on the receiver. Read by [`UnicastPool::send_registered`] and
+    /// [`UnicastPool::dial_and_send_in_background`]. An inline dial through
+    /// [`UnicastPool::warm_or_dial`] waits on the peer lock of `dial_locks` instead.
     pub(in crate::transport::pool) dialing:
         parking_lot::Mutex<HashMap<EndpointId, watch::Receiver<DialOutcome>>>,
+    /// One lock for each peer that is being dialed by [`UnicastPool::dial_pooled`]: a second dial waits for the first
+    /// one, then finds its connection pooled. An entry is removed when its last waiter has gone.
+    // shared: the dialer and every waiter for one peer hold the same lock
+    pub(in crate::transport::pool) dial_locks: parking_lot::Mutex<DialLocks>,
     /// Tests only: the next dial waits on this before it connects, so a test can queue a send
     /// behind it.
     #[cfg(test)]
@@ -167,9 +175,11 @@ impl UnicastPool {
                 probe_hold,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
-                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
+                #[cfg(test)]
+                dials_started: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
+                dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
@@ -192,7 +202,7 @@ impl UnicastPool {
     }
 
     /// [`send_one`], marked busy in the ledger for as long as it runs.
-    async fn send_marked(
+    pub(in crate::transport::pool) async fn send_marked(
         &self,
         eid: EndpointId,
         connection: &Connection,
@@ -234,9 +244,11 @@ impl UnicastPool {
                 probe_hold: PROBE_HOLD,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
-                batch_slots: BatchSlots::default(),
                 dial_attempts: AtomicU64::new(0),
+                #[cfg(test)]
+                dials_started: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
+                dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
@@ -256,8 +268,7 @@ impl UnicastPool {
     /// a half-dead pooled connection evicts it and redials-and-resends once in
     /// the background, so the detectable failure mode recovers instead of
     /// silently losing the frame; a path that dies *after* buffering remains
-    /// at-most-once (an app-level concern: waiter timeouts, and anti-entropy,
-    /// which re-sends a directed frame point-to-point to its addressee).
+    /// at-most-once (an app-level concern: waiter timeouts, and the app's own retry).
     pub(crate) async fn send_if_warm(&self, eid: EndpointId, bytes: Bytes) -> WarmSend {
         let Some(connection) = self.warm(eid).await else {
             return WarmSend::Cold;
@@ -306,6 +317,12 @@ impl UnicastPool {
             .addrs
             .lock()
             .is_ok_and(|addrs| addrs.get(&address.id) == Some(address))
+    }
+
+    /// Tests only: whether a dial to `eid` is in flight.
+    #[cfg(test)]
+    pub(crate) fn is_dialing(&self, eid: EndpointId) -> bool {
+        self.inner.dialing.lock().contains_key(&eid)
     }
 
     /// The dial address remembered for `eid`, if any.
@@ -507,105 +524,8 @@ impl UnicastPool {
             .on_cooldown(&eid, Instant::now())
     }
 
-    /// Send `frames` to `eid` in order, from one spawned task: one stream per
-    /// frame, in sequence. [`Self::dial_and_send_in_background`] takes one
-    /// frame, and while its dial is in flight every further call for the same
-    /// peer is refused, so a batch sent that way loses all but its first frame
-    /// to a cold peer. A warm connection takes a batch at once, even with
-    /// another batch to the same peer still going: a node sends its state and
-    /// meta digests back to back, so a holder answers it twice at once. A cold
-    /// peer is dialed first, and only one dial to it runs at a time. Returns
-    /// `false`, sending nothing, when the warm connection's path may not carry
-    /// payload, or `eid` is cold and on the dial-failure cooldown or already
-    /// being dialed. `true` means handed off, not delivered: a dial, path or
-    /// write failure after it is only logged, and a write can succeed into a
-    /// connection that died silently.
-    pub(crate) async fn send_batch_in_background(
-        &self,
-        eid: EndpointId,
-        frames: Vec<messages::WireFrame>,
-    ) -> bool {
-        // A batch holds its frames until the last one is written, and a peer that does not read keeps
-        // them there: a peer has its share of batches in flight, and the table has its total.
-        let Some(slot) = self.inner.batch_slots.take(eid) else {
-            return false;
-        };
-        let frames: Vec<Bytes> = frames
-            .into_iter()
-            .map(messages::WireFrame::into_bytes)
-            .collect();
-        if let Some(connection) = self.warm(eid).await {
-            if !payload_allowed_on(&connection, self.inner.relay_transport) {
-                return false;
-            }
-            let pool = self.clone();
-            task::spawn(async move {
-                let _slot = slot;
-                pool.send_batch(eid, &connection, &frames).await;
-            });
-            return true;
-        }
-        if self
-            .inner
-            .dial_failures
-            .lock()
-            .await
-            .on_cooldown(&eid, Instant::now())
-        {
-            return false;
-        }
-        let Registration::Dialer(in_flight) = self.register_dial(eid) else {
-            return false;
-        };
-        task::spawn(async move {
-            let _slot = slot;
-            let pool = &in_flight.pool;
-            let connection = match pool.warm_or_dial(eid).await {
-                Ok(connection) => connection,
-                Err(error) => {
-                    in_flight.publish(Err(error.to_string()));
-                    tracing::debug!(target: LOG_TARGET, %eid, %error, "batch not delivered: no connection");
-                    return;
-                }
-            };
-            if !pool.inner.relay_transport
-                && !payload_path::wait_direct(&connection, PATH_SELECT_TIMEOUT).await
-            {
-                in_flight.publish(Err(RELAY_REFUSED.to_owned()));
-                tracing::debug!(target: LOG_TARGET, %eid, "batch not delivered: {RELAY_REFUSED}");
-                return;
-            }
-            in_flight.publish(Ok(()));
-            pool.send_batch(eid, &connection, &frames).await;
-        });
-        true
-    }
-
-    /// Write `frames` to `conn` one stream at a time, in order, stopping and
-    /// dropping the connection at the first write error.
-    pub(in crate::transport::pool) async fn send_batch(
-        &self,
-        eid: EndpointId,
-        connection: &Connection,
-        frames: &[Bytes],
-    ) {
-        for bytes in frames {
-            if let Err(error) = self.send_marked(eid, connection, bytes).await {
-                tracing::debug!(target: LOG_TARGET, %eid, %error, "batch cut short; dropping the connection");
-                self.evict_if_same(eid, connection).await;
-                return;
-            }
-        }
-    }
-
-    /// A slot of the answer batches to `eid`, held by a test to fill them.
-    #[cfg(test)]
-    pub(crate) fn take_batch_slot(&self, eid: EndpointId) -> Option<super::batch_slots::Slot> {
-        self.inner.batch_slots.take(eid)
-    }
-
     /// Put `eid` on the dial-failure cooldown, as a failed dial does.
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
     pub(crate) async fn note_dial_failure(&self, eid: EndpointId) {
         self.inner
             .dial_failures
@@ -698,8 +618,8 @@ impl UnicastPool {
         }
     }
 
-    /// Make this caller the dialer of `eid`, or the waiter of the dial that is in flight. Taken by
-    /// the caller itself, synchronously, before the task that sends is spawned.
+    /// Make this caller the dialer of `eid`, or the waiter of the dial or the path wait that is in
+    /// flight. Taken by the caller itself, synchronously, before the task that sends is spawned.
     pub(crate) fn register_dial(&self, eid: EndpointId) -> Registration {
         let mut dialing = self.inner.dialing.lock();
         if let Some(outcome) = dialing.get(&eid) {
@@ -772,8 +692,50 @@ impl UnicastPool {
         }
     }
 
-    /// Dial `eid` and pool the connection under `hold`.
+    /// Dial `eid` and pool the connection under `hold`. One dial runs for each peer at a time, and a dial starts only
+    /// when no connection of the peer is open, so an insert never replaces a live connection. A replaced connection
+    /// must be closed with `close()`, not dropped: an unacknowledged frame on a dropped connection is lost.
     async fn dial_pooled(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
+        let turn = DialTurn::new(self, eid);
+        let permit = turn.lock.lock().await;
+        let result = self.dial_pooled_turn(eid, hold).await;
+        drop(permit);
+        result
+    }
+
+    /// The lock of `eid` for one dial. It is created on first use.
+    // shared: the turn of each dial of the peer holds a handle
+    fn dial_lock(&self, eid: EndpointId) -> Arc<Mutex<()>> {
+        let mut locks = self.inner.dial_locks.lock();
+        // shared: the dialer and every waiter for the peer hold the same lock
+        let lock = locks.entry(eid).or_insert_with(|| Arc::new(Mutex::new(())));
+        Arc::clone(lock)
+    }
+
+    /// The open pooled connection of `eid`, if there is one. A caller that sends with it (`hold` is `Used`) takes it as
+    /// [`warm`](Self::warm) does: the hold of the connection becomes `Used`. A probe leaves the hold the connection has, so a probe
+    /// dial that finds a connection of a send does not turn it into a probe hold.
+    ///
+    /// The `Probing` hold matters here: the sweeper closes a connection that is `Probed` for longer than the probe
+    /// hold, and a connection is `Probed` only if its hold was `Probing` when the probe ended. A send that takes a
+    /// `Probing` connection without marking it `Used` would let the sweeper close a connection in use.
+    async fn open_pooled(&self, eid: EndpointId, hold: Hold) -> Option<Connection> {
+        let mut conns = self.inner.conns.lock().await;
+        let pooled: &mut Pooled = conns
+            .get_mut(&eid)
+            .filter(|pooled| pooled.connection.close_reason().is_none())?;
+        if matches!(hold, Hold::Used) {
+            pooled.last_used = PoolInstant::now();
+            pooled.hold = Hold::Used;
+        }
+        Some(pooled.connection.clone())
+    }
+
+    /// The body of [`Self::dial_pooled`], run under the lock of the peer.
+    async fn dial_pooled_turn(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
+        if let Some(connection) = self.open_pooled(eid, hold).await {
+            return Ok(connection);
+        }
         let Some(endpoint) = self.inner.endpoint.clone() else {
             bail!("unicast pool has no endpoint");
         };
@@ -802,10 +764,19 @@ impl UnicastPool {
                 gate.notified().await;
             }
         }
+        #[cfg(test)]
+        self.inner.dials_started.fetch_add(1, Ordering::Relaxed);
         match dial(&endpoint, address).await {
             Ok(connection) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
-                self.inner.conns.lock().await.insert(
+                let mut conns = self.inner.conns.lock().await;
+                debug_assert!(
+                    conns
+                        .get(&eid)
+                        .is_none_or(|pooled| pooled.connection.close_reason().is_some()),
+                    "a dial must not replace an open pooled connection"
+                );
+                conns.insert(
                     eid,
                     Pooled {
                         connection: connection.clone(),
@@ -813,6 +784,7 @@ impl UnicastPool {
                         hold,
                     },
                 );
+                drop(conns);
                 self.ensure_sweeper();
                 Ok(connection)
             }
@@ -841,6 +813,35 @@ impl UnicastPool {
         // A rejoin may come back at another address; its `PeerInfo` notes it.
         if let Ok(mut addrs) = self.inner.addrs.lock() {
             addrs.remove(&eid);
+        }
+    }
+}
+
+/// The lock of one peer for one dial. Dropping it, when the dial ends, returns early, is cancelled or panics, gives
+/// the lock back and removes its entry from the map when no other dial waits for it.
+struct DialTurn<'pool> {
+    pool: &'pool UnicastPool,
+    eid: EndpointId,
+    // shared: the dialer and every waiter for the peer hold the same lock
+    lock: Arc<Mutex<()>>,
+}
+
+impl<'pool> DialTurn<'pool> {
+    fn new(pool: &'pool UnicastPool, eid: EndpointId) -> Self {
+        let lock = pool.dial_lock(eid);
+        Self { pool, eid, lock }
+    }
+}
+
+impl Drop for DialTurn<'_> {
+    fn drop(&mut self) {
+        let mut locks = self.pool.inner.dial_locks.lock();
+        // two handles: the map and this turn
+        if locks
+            .get(&self.eid)
+            .is_some_and(|lock| Arc::strong_count(lock) == 2)
+        {
+            locks.remove(&self.eid);
         }
     }
 }
@@ -913,4 +914,38 @@ pub(super) async fn send_one(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DialTurn, UnicastPool};
+    use crate::testing;
+    use std::sync::Arc;
+
+    /// Two dial turns of one peer share one lock. When the first turn ends, the map still holds the lock for the
+    /// second one; when the last turn ends, the map is empty.
+    #[test]
+    fn the_last_turn_of_a_peer_removes_its_lock() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let pool = UnicastPool::disconnected();
+        let peer = testing::endpoint_id(7);
+        let first = DialTurn::new(&pool, peer);
+        let second = DialTurn::new(&pool, peer);
+        drop(first);
+        let second_keeps_it = pool
+            .inner
+            .dial_locks
+            .lock()
+            .get(&peer)
+            .is_some_and(|lock| Arc::ptr_eq(lock, &second.lock));
+        assert!(
+            second_keeps_it,
+            "the map still holds the lock that the second turn waits on"
+        );
+        drop(second);
+        assert!(
+            pool.inner.dial_locks.lock().is_empty(),
+            "the last turn of the peer removes its lock"
+        );
+    }
 }

@@ -13,8 +13,7 @@ use crate::protocol::messages::WireFrame;
 /// so the ~ten existing `.broadcast()` call sites hold a stable handle across
 /// the swap.
 ///
-/// A clone shares the handle, so the task that sends the digest answers (see
-/// `ResendOutbox`) follows a resubscribe too.
+/// A clone shares the handle.
 ///
 /// # Examples
 ///

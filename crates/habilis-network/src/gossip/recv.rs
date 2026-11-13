@@ -1,36 +1,37 @@
 //! Gossip **inbound plane**: the gossip-event pump (`Received` /
 //! `NeighborUp` / `NeighborDown` / `Lagged` / stream end), neighbor
 //! up/down bookkeeping, the per-message router (parse → self-echo drop →
-//! rate-check → lifecycle observe → dispatch by kind → message-log), and
+//! rate-check → lifecycle observe → dispatch by kind), and
 //! `PeerInfo` linking. Outbound/send lives in `super::broadcast`; this
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use crate::daemon::state::{Arrival, FrameShape, RendezvousFlag, Standing};
+use crate::daemon::state::{FrameShape, RendezvousFlag, Standing};
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
 use crate::daemon::handler_ctx::HandlerCtx;
-use crate::daemon::seed_job;
-use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
+use crate::daemon::state::{ChannelDocs, DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::{self, MembershipUpdate};
-use crate::protocol::messages::{
-    Authored, MessageBody, MessageError, Proof, Verified, WireFrame, shard_fits_log, sole_addressee,
+use crate::protocol::messages::{Authored, MessageBody, MessageError, Proof, Verified, WireFrame};
+use crate::protocol::{
+    AuthorKey, Channel, MeshId, Message, MessageKind, Nickname, PresenceSubtype,
 };
-use crate::protocol::{AuthorKey, Channel, ContentHash, Message, MessageKind, PresenceSubtype};
 use crate::util::clock::Instant;
 use crate::{lifecycle, lookup};
+use habilis_network_doc::SliceIngest;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
 use n0_future::time::Instant as TokioInstant;
 
-use super::antientropy::{self, Plane};
 use super::app::{AppClass, InboundApp, NodeApp};
-use super::merge_ctx::{announce_arrival, broadcast_peer_info};
+use super::merge_ctx::{announce_arrival, broadcast_peer_info, peer_info_seal_key};
+use super::{backfill, digest_round};
 use crate::net;
+use habilis_network_protocol::digest::{DigestPage, DigestRoot};
 
 #[cfg(feature = "multihop")]
 use crate::daemon::event_loop;
@@ -40,10 +41,9 @@ use crate::protocol::{peer_addr_error, seal_error};
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 use crate::transport::{probe, proven_endpoints, webrtc};
-use tokio::sync::mpsc;
 
+use crate::transport;
 use crate::transport::Delivered;
-use crate::{doc, transport};
 use iroh_gossip::api;
 use n0_future::task as n0future_task;
 use std::ops;
@@ -57,23 +57,6 @@ async fn mesh_on_first_link(
     state.standing.insert(Standing::Meshed);
     state.standing.remove(&Standing::Degraded);
     flush_pending(state, context, "first real-peer link up").await;
-    // Our first digests may have gone out over the rendezvous
-    // alone, and their answers re-send frames every hop there
-    // already saw: iroh-gossip drops a message id it has seen,
-    // so none of it reaches us. Ask again over a link that can
-    // carry the answer. The chat log asks too: a broadcast sent
-    // before this link could not reach us, and the tick that
-    // would ask for it can be an interval away.
-    tracing::debug!(target: "habilis_network::gossip", "asked for state and chat again on the first real-peer link");
-    antientropy::broadcast_state_digests(
-        state,
-        context.sender,
-        context.mesh,
-        context.author,
-        antientropy::DigestTrigger::Event,
-    )
-    .await;
-    antientropy::broadcast_digest(state, context.sender, context.mesh, context.author).await;
     // Re-publish anything whose value depends on being meshed
     // (the app's card dial hint); see `NodeApp::on_meshed`.
     app.on_meshed(state, context).await;
@@ -179,9 +162,9 @@ pub(crate) async fn handle_gossip_event(
                     // proof; `conn_path` cannot see which path is selected.
                     state.direct.insert(node_id, DirectState::Direct);
                 }
-                // A frame parked across a gap in the links waits for the next link:
-                // `meshed` stays set through the gap, so the first-link edge below
-                // does not come again, and a `PeerInfo` may not either.
+                // A broadcast that failed to send across a gap in the links waits for the next
+                // link: `meshed` stays set through the gap, so the first-link edge below does not
+                // come again, and a `PeerInfo` may not either.
                 if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty()
                 {
                     flush_pending(state, context, "link up").await;
@@ -349,7 +332,7 @@ fn arms_reclaim(
 /// Drain the message payloads a dead subscription buffered before its
 /// stream ended, so they reach the app instead of vanishing. The gossip
 /// actor already counts them as delivered — its overlay dedup will
-/// *not* re-push them, and anti-entropy resends of them are likewise
+/// *not* re-push them, and repeats of them are likewise
 /// dropped below the app — so the buffer is the only copy this node
 /// will ever see. Only `Received` payloads are processed: neighbor
 /// up/down from a dead subscription is stale link state the fresh
@@ -392,8 +375,7 @@ pub(crate) async fn drain_dead_receiver(
 /// the resubscribe drops that queue. The loop does not read the queue while the topic is marked
 /// closed, yet the old splitter keeps filling it until its receiver is dropped, and the gossip
 /// layer has counted each message as delivered: the queue holds the only copy. A message that
-/// arrives after this drain and before the drop is the residue; the resend repairs it (see
-/// `transport::outbox` and the nonce of the resend).
+/// arrives after this drain and before the drop is lost; no resend repairs it yet.
 pub(crate) async fn drain_queued<S>(
     receiver: &mut super::split::MeshReceiver<S>,
     state: &mut EventLoopState,
@@ -414,13 +396,16 @@ pub(crate) async fn drain_queued<S>(
     );
 }
 
-/// Drain `pending_outbound` onto the wire, in order. Runs on the meshed
-/// edges — the first real-peer `NeighborUp`, and a degraded node's first
-/// inbound message after a fault (starvation recovery / resume) — and again
-/// on every later `NeighborUp` and `PeerInfo` arrival while frames remain buffered: a frame that
-/// fails to deliver (typically a directed frame whose addressee's endpoint
-/// isn't known yet at the first flush) is re-buffered for that retry, not
-/// dropped.
+/// Drain `pending_outbound` onto the wire, in order. The buffer holds broadcast frames only. A
+/// broadcast fails to send only when the gossip sender refuses it, and then the frame is
+/// re-buffered for the next flush. These edges run a flush:
+/// - the first real-peer `NeighborUp`;
+/// - a `NeighborUp` on a meshed node (`link up`);
+/// - the first inbound message after a fault (`inbound traffic resumed`);
+/// - the silence sweep (`silence sweep`, in `daemon::event_loop`).
+///
+/// A `PeerInfo` arrival, a departure, and a direct path do not flush: none of them can change
+/// whether the gossip sender accepts a broadcast.
 pub(crate) async fn flush_pending(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
@@ -429,17 +414,17 @@ pub(crate) async fn flush_pending(
     let mut delivered = 0usize;
     let mut requeued = 0usize;
     for (message, bytes) in state.pending_outbound.take() {
-        // Re-route each frame through the send decision rather than blanket-
-        // broadcasting: a directed frame buffered while unmeshed must still
-        // take unicast, never the gossip flood.
+        // Each buffered frame is a broadcast: it goes through the send decision, which sends it on
+        // the gossip flood.
         match transport::deliver(&message, bytes.clone(), state, context.sender).await {
             Ok(Delivered::Done) => delivered += 1,
-            Ok(Delivered::Pending(handle)) => {
+            // Only a directed frame dials, and a directed frame is never buffered.
+            Ok(Delivered::Pending(_)) => {
+                debug_assert!(false, "a buffered broadcast frame dialed");
                 delivered += 1;
-                watch_flush(handle, message, bytes, state.flush_failed.clone());
             }
             Err(error) => {
-                if requeue(state, context, message, bytes) {
+                if requeue(state, message, bytes) {
                     requeued += 1;
                     tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not deliverable yet; requeued");
                 } else {
@@ -456,61 +441,8 @@ pub(crate) async fn flush_pending(
     );
 }
 
-/// A flushed frame whose unicast leg runs on a task. If the dial or the write fails, the frame goes
-/// back to the loop through `failed`, which buffers it again as a flush does for a frame that cannot
-/// be delivered yet: a failed dial never loses a buffered frame.
-fn watch_flush(
-    handle: transport::PendingSend,
-    message: Verified,
-    bytes: WireFrame,
-    failed: mpsc::UnboundedSender<(Verified, WireFrame)>,
-) {
-    n0future_task::spawn(async move {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not delivered; requeued");
-                let _ = failed.send((message, bytes));
-            }
-            Err(_) => {
-                let _ = failed.send((message, bytes));
-            }
-        }
-    });
-}
-
-/// A frame of a flush whose dial failed, back on the loop: put it in `pending_outbound` again.
-pub(crate) fn requeue_failed(
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-    message: Verified,
-    bytes: WireFrame,
-) {
-    // A send can fail after its recipient ended: a goodbye or a newer run of its member marks the key as
-    // departed, and drops the frames that waited for it. The frame of a late failure is not parked again for a
-    // session that never comes back. A frame for a key that is not known yet stays (it waits for the peer).
-    let departed =
-        sole_addressee(&message.kind).is_some_and(|recipient| state.key_said_goodbye(*recipient));
-    if departed {
-        tracing::debug!(target: "habilis_network::gossip", "a failed send to a session that ended is not buffered again");
-        return;
-    }
-    if !requeue(state, context, message, bytes) {
-        tracing::warn!(target: "habilis_network::gossip", "buffered outbound message undeliverable and the buffer is full; dropped");
-    }
-}
-
-/// Put a frame that failed to deliver back in `pending_outbound`. A frame that is held for a lane
-/// peer asks for its session, at every flush: a frame that was parked before the peer was known has
-/// no other chance to ask, and without the session the lane pair never links. Returns whether the
-/// frame was kept.
-fn requeue(
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-    message: Verified,
-    bytes: WireFrame,
-) -> bool {
-    super::merge_ctx::park_and_offer(state, context, &message, &bytes);
+/// Put a frame that failed to deliver back in `pending_outbound`. Returns whether the frame was kept.
+fn requeue(state: &mut EventLoopState, message: Verified, bytes: WireFrame) -> bool {
     state.pending_outbound.push((message, bytes))
 }
 
@@ -588,12 +520,48 @@ pub(crate) async fn ingest(
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
-    ingest_from(Plane::Gossip, frame, state, app, context).await;
+    ingest_from(frame, state, app, context).await;
 }
 
-/// [`ingest`] for a frame that came on `plane`: the census counts a repeat by it.
+/// Whether `verified` answers a slice pull of this node. It is a State or Meta frame that came by unicast
+/// from the holder that the pull named, for the author that it named. The pull is spent by the answer.
+fn take_pulled_answer(verified: &Verified, state: &mut EventLoopState, now: Instant) -> bool {
+    let Some(holder) = state.unicast_arrival else {
+        return false;
+    };
+    let channel = if matches!(&verified.kind, MessageKind::State) {
+        Channel::State
+    } else if matches!(&verified.kind, MessageKind::Meta) {
+        Channel::Meta
+    } else {
+        return false;
+    };
+    state
+        .outstanding_pulls
+        .take(holder, channel, verified.key(), now)
+}
+
+/// [`ingest`] for a frame that came on a unicast connection: the census counts a repeat by it.
+/// The test door of the loss tests: a State or Meta frame of the author of `drop_slices_from`, and a Left of the
+/// author of `drop_left_from`, are dropped after the dedup gate.
+#[cfg(feature = "iroh-test-utils")]
+fn test_hook_drops(state: &EventLoopState, verified: &Verified) -> bool {
+    let slice = state.drop_slices_from == Some(verified.key())
+        && matches!(verified.kind, MessageKind::State | MessageKind::Meta);
+    let left = state.drop_left_from == Some(verified.key())
+        && matches!(
+            verified.kind,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Left,
+            }
+        );
+    if slice || left {
+        tracing::debug!(target: "habilis_network::gossip", "test hook: dropped a frame after the dedup gate");
+    }
+    slice || left
+}
+
 pub(crate) async fn ingest_from(
-    plane: Plane,
     frame: Bytes,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
@@ -601,7 +569,7 @@ pub(crate) async fn ingest_from(
 ) {
     let shape = FrameShape::of(&frame);
     state.idle.wire_in.note_received(&shape);
-    let (message, resend_nonce) = match Message::parse_wire(&frame) {
+    let message = match Message::parse(&frame) {
         Ok(parsed) => parsed,
         Err(error) => {
             report_unparsed(&error, state, context);
@@ -611,10 +579,9 @@ pub(crate) async fn ingest_from(
     // Authenticity gate, **before** the self-echo drop, dedup, and every other step: every inbound
     // message must carry a valid signature over its canonical bytes. Verifying before `mark_seen`
     // stops a forged/unsigned message from poisoning the dedup window with a replayed id and
-    // suppressing the genuine signed copy. Relayed and anti-entropy copies keep their original
-    // author's signature, so they verify here too. Canonical bytes are computed once and reused for
-    // the verify, the content hash at the log site, and the shard/retain steps below.
-    let (verified, canonical) = match message.verify_canonical() {
+    // suppressing the genuine signed copy. Relayed copies keep their original
+    // author's signature, so they verify here too.
+    let verified = match message.verify() {
         Ok(checked) => checked,
         Err(message) => {
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, "dropping message with missing/invalid signature");
@@ -654,14 +621,28 @@ pub(crate) async fn ingest_from(
     // signing its own message under a **victim's** id gets a different key and
     // cannot suppress the victim's genuine message. Re-broadcasts of
     // `joined`/`Alive` mint fresh ids so they are never falsely suppressed
-    // here. Only authenticated messages reach this gate.
-    if state.mark_seen(&verified) {
+    // here. Only authenticated messages reach this gate. A shard stays out of the set: the
+    // reassembly store dedups its own slots, and a reaped group must complete when a shard is served again.
+    // A slice that answers a pull skips this gate, because the store is idempotent and takes it once.
+    let pulled = take_pulled_answer(&verified, state, Instant::now());
+    if verified.shard.is_none() && !pulled && state.mark_seen(&verified) {
         state.idle.duplicates += 1;
-        state
-            .idle
-            .wire_in
-            .note_dup(&shape, Arrival::of(plane, resend_nonce));
         restore_lost_proof(&verified, state, app, context).await;
+        return;
+    }
+    #[cfg(feature = "iroh-test-utils")]
+    if test_hook_drops(state, &verified) {
+        return;
+    }
+    // A shard of a group already surfaced is a repeat, and it is not a sighting of its author. A repeat
+    // of a partial shard still counts as a sighting and reaches the lifecycle. That is accepted, because
+    // a partial group lives at most one reassembly TTL.
+    if verified.shard.as_ref().is_some_and(|shard| {
+        state
+            .receive_memory
+            .reassembled_groups
+            .contains(&(verified.key(), shard.group.clone()))
+    }) {
         return;
     }
     state.idle.fresh += 1;
@@ -671,9 +652,6 @@ pub(crate) async fn ingest_from(
     // non-unique display label and is deliberately **not** pinned/claimed,
     // so a nickname is never "burned" by a restart on a long-lived mesh.
     // Identities are distinguished by their key fingerprint, not the name.
-    // Fork (equivocation) detection and DAG folding happen at the log-push
-    // site below, coupled to retention so their indexes stay bounded by the
-    // log window.
 
     // Heartbeat + membership + surfacing + join horizon. The lifecycle
     // layer owns every roster/presentation side effect; the gossip
@@ -693,7 +671,6 @@ pub(crate) async fn ingest_from(
         handle_shard(
             InboundFrame {
                 message: &verified,
-                canonical: &canonical,
                 surfaceable,
             },
             state,
@@ -722,13 +699,10 @@ pub(crate) async fn ingest_from(
 
     maybe_push_inbound(context, &view, surfaceable, app_class.as_ref());
 
-    // `true` means the kind is fully handled and never reaches retention.
-    let stop = match &view.kind {
+    match &view.kind {
         // The app-payload seam: dispatch RPC legs / chat / task frames.
-        // `false` means the frame is plumbing or addressed elsewhere —
-        // stop before retention.
         MessageKind::App { .. } => {
-            !app.on_app_frame(
+            app.on_app_frame(
                 InboundApp {
                     message: &view,
                     surfaceable,
@@ -736,51 +710,200 @@ pub(crate) async fn ingest_from(
                 state,
                 context,
             )
-            .await
+            .await;
         }
         // Everything the engine owns itself. Spelled out rather than `_` so
         // a new kind has to be routed deliberately.
         MessageKind::Presence { .. }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
         | MessageKind::ProofRequest { .. }
         | MessageKind::State
-        | MessageKind::StateDigest
         | MessageKind::Meta
-        | MessageKind::MetaDigest
-        | MessageKind::LinkState => dispatch_infra(
-            &verified,
-            surfaceable,
-            &observed.update,
-            state,
-            app,
-            context,
-        )
-        .await
-        .is_break(),
-        _ => false,
-    };
-    if stop {
-        return;
-    }
-
-    if retained_after_lifecycle(&observed.update, &verified.kind) {
-        retain_and_index(
-            verified,
-            RetainMeta {
-                canonical: &canonical,
-                class: app_class.as_ref(),
-                wire_len: None,
-            },
-            state,
-            context,
-        );
+        | MessageKind::LinkState
+        | MessageKind::SlicePull { .. }
+        | MessageKind::SlicePageRequest { .. }
+        | MessageKind::SliceRoot { .. }
+        | MessageKind::SlicePage { .. } => {
+            let _ = dispatch_infra(
+                &verified,
+                surfaceable,
+                &observed.update,
+                state,
+                app,
+                context,
+                !pulled,
+            )
+            .await;
+        }
+        _ => {}
     }
 }
 
-/// The engine's own message kinds: presence, peer info, digests, ping/pong,
+/// The peer that asked for a slice: the endpoint of its connection, which the answer goes to, and the
+/// author key, which the answer names. The budget counts the endpoint, because TLS proves it.
+#[derive(Clone, Copy)]
+struct Asker {
+    endpoint: iroh::EndpointId,
+    key: AuthorKey,
+}
+
+/// A holder's root is for this node when it names this node: the roots that differ are noted for the round.
+fn note_digest_root(
+    message: &Verified,
+    to: &AuthorKey,
+    root_state: &DigestRoot,
+    root_meta: &DigestRoot,
+    state: &mut EventLoopState,
+) {
+    let Some(endpoint) = state.unicast_arrival else {
+        return;
+    };
+    if *to != state.identity.author_key() {
+        return;
+    }
+    let roots = [(Channel::State, root_state), (Channel::Meta, root_meta)];
+    digest_round::on_root(
+        state,
+        message.key(),
+        endpoint,
+        roots,
+        Instant::now(),
+        digest_round::settle_jitter(),
+    );
+}
+
+/// A page of a holder's digest is for this node when it names this node: the round pulls and asks on.
+async fn answer_digest_page(
+    message: &Verified,
+    to: AuthorKey,
+    channel: Channel,
+    page: &DigestPage,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
+    let Some(endpoint) = state.unicast_arrival else {
+        return;
+    };
+    if to != state.identity.author_key() {
+        return;
+    }
+    digest_round::on_page(
+        state,
+        context,
+        message.key(),
+        endpoint,
+        channel,
+        page,
+        Instant::now(),
+    )
+    .await;
+}
+
+/// The signed frames that answer a pull of `keys` on `channel` from `asker`: the held ones, at most a page.
+/// A pull over the serve budget gets none.
+fn slice_pull_answer(
+    asker: Asker,
+    channel: Channel,
+    keys: &[AuthorKey],
+    state: &mut EventLoopState,
+    now: Instant,
+) -> Vec<Verified> {
+    if !state.serve_budget.admit(asker.endpoint, channel, now) {
+        tracing::debug!(target: "habilis_network::gossip", "a slice pull over the serve budget gets no answer");
+        return Vec::new();
+    }
+    state.docs.serve(channel, keys)
+}
+
+/// The signed page that answers a page request of `channel` from `asker`. A request over the serve budget,
+/// or past the last page, gets none.
+fn page_request_answer(
+    asker: Asker,
+    channel: Channel,
+    index: usize,
+    mesh: &MeshId,
+    own: &Nickname,
+    state: &mut EventLoopState,
+    now: Instant,
+) -> Option<Verified> {
+    let page = state.docs.page(channel, index)?;
+    if !state.serve_budget.admit(asker.endpoint, channel, now) {
+        tracing::debug!(target: "habilis_network::gossip", "a page request over the serve budget gets no answer");
+        return None;
+    }
+    let kind = MessageKind::SlicePage {
+        to: asker.key,
+        channel,
+        page,
+    };
+    let Ok(body) = MessageBody::try_new("{}") else {
+        return None;
+    };
+    Some(Message::new_frame(mesh, own, kind, body).sign(&state.identity))
+}
+
+/// Sends the slice frames that answer a pull, on the connection that the pull came on.
+async fn answer_slice_pull(
+    message: &Verified,
+    channel: Channel,
+    keys: &[AuthorKey],
+    state: &mut EventLoopState,
+) {
+    let Some(eid) = state.unicast_arrival else {
+        tracing::debug!(target: "habilis_network::gossip", "a slice pull that did not come by unicast gets no answer");
+        return;
+    };
+    let asker = Asker {
+        endpoint: eid,
+        key: message.key(),
+    };
+    for frame in slice_pull_answer(asker, channel, keys, state, Instant::now()) {
+        let Ok(bytes) = frame.serialize() else {
+            tracing::debug!(target: "habilis_network::gossip", "a slice frame of a pull did not serialize, so it is not sent");
+            continue;
+        };
+        transport::send_best_effort(eid, bytes, state).await;
+    }
+}
+
+/// Sends the page that answers a page request, on the connection that the request came on.
+async fn answer_page_request(
+    message: &Verified,
+    channel: Channel,
+    index: usize,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
+    let Some(eid) = state.unicast_arrival else {
+        tracing::debug!(target: "habilis_network::gossip", "a page request that did not come by unicast gets no answer");
+        return;
+    };
+    let asker = Asker {
+        endpoint: eid,
+        key: message.key(),
+    };
+    let answer = page_request_answer(
+        asker,
+        channel,
+        index,
+        context.mesh,
+        context.author,
+        state,
+        Instant::now(),
+    );
+    let Some(answer) = answer else {
+        return;
+    };
+    let Ok(bytes) = answer.serialize() else {
+        tracing::debug!(target: "habilis_network::gossip", "a page answer did not serialize, so it is not sent");
+        return;
+    };
+    transport::send_best_effort(eid, bytes, state).await;
+}
+
+/// The engine's own message kinds: presence, peer info, ping/pong,
 /// channel events, link state.
 ///
 /// [`ControlFlow::Break`] means the kind is fully handled here and must not
@@ -795,6 +918,7 @@ async fn dispatch_infra(
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
+    live: bool,
 ) -> ControlFlow<()> {
     match &message.kind {
         MessageKind::PeerInfo => {
@@ -802,10 +926,6 @@ async fn dispatch_infra(
             if !update.stale {
                 handle_peer_info(message, state, context).await;
             }
-            return ControlFlow::Break(());
-        }
-        MessageKind::Digest => {
-            antientropy::handle_digest(message, state, &context.our_pubkey);
             return ControlFlow::Break(());
         }
         MessageKind::Ping => {
@@ -840,15 +960,12 @@ async fn dispatch_infra(
                     channel: Channel::State,
                     message,
                     surfaceable,
+                    live,
                 },
                 state,
                 app,
                 context,
             );
-            return ControlFlow::Break(());
-        }
-        MessageKind::StateDigest => {
-            antientropy::handle_state_digest(Channel::State, message, state, context).await;
             return ControlFlow::Break(());
         }
         MessageKind::Meta => {
@@ -857,15 +974,12 @@ async fn dispatch_infra(
                     channel: Channel::Meta,
                     message,
                     surfaceable,
+                    live,
                 },
                 state,
                 app,
                 context,
             );
-            return ControlFlow::Break(());
-        }
-        MessageKind::MetaDigest => {
-            antientropy::handle_state_digest(Channel::Meta, message, state, context).await;
             return ControlFlow::Break(());
         }
         MessageKind::LinkState => {
@@ -891,6 +1005,30 @@ async fn dispatch_infra(
         MessageKind::App { .. } => unreachable!("the app seam is handled by `ingest`"),
         MessageKind::ProofRequest { to } => {
             answer_proof_request(to, message, state, context).await;
+            return ControlFlow::Break(());
+        }
+        MessageKind::SlicePull { to, channel, keys } => {
+            if *to == state.identity.author_key() {
+                answer_slice_pull(message, *channel, keys, state).await;
+            }
+            return ControlFlow::Break(());
+        }
+        MessageKind::SlicePageRequest { to, channel, index } => {
+            if *to == state.identity.author_key() {
+                answer_page_request(message, *channel, *index, state, context).await;
+            }
+            return ControlFlow::Break(());
+        }
+        MessageKind::SliceRoot {
+            to,
+            state: root_state,
+            meta: root_meta,
+        } => {
+            note_digest_root(message, to, root_state, root_meta, state);
+            return ControlFlow::Break(());
+        }
+        MessageKind::SlicePage { to, channel, page } => {
+            answer_digest_page(message, *to, *channel, page, state, context).await;
             return ControlFlow::Break(());
         }
         _ => {}
@@ -943,6 +1081,9 @@ async fn roster_gate(
             context.sink.emit(NodeEvent::Error(line));
         }
         let observed = lifecycle::observe(verified, state, context);
+        if observed.update.returned || observed.update.joined_new {
+            promote_pending(verified.key(), Instant::now(), state, app, context);
+        }
         // The check before `observe` is pure. A quiet peer whose clock stepped back returns when `observe` completes
         // its run of rising frames, and that check read the last frame of the run as stale: the peer is in the
         // roster now with its proof still pending, so it is activated here (one frame late).
@@ -1000,44 +1141,6 @@ fn report_nickname_held(context: &HandlerCtx<'_>) {
     context.sink.emit(NodeEvent::Error(line));
 }
 
-/// A copy of a `joined` frame gives back the proof that its session lost, and nothing else. A member signs its
-/// answer to a proof request once for each run, so an asker that dropped the proof of that session (the session left
-/// the roster and came back, or its pending proof was dropped at a cap) gets the same frame again, and the frame is a
-/// duplicate there. A session that is live gets its proof back as an active proof. Any other session (a quiet one, or
-/// one that the nickname gate refused and so is not in the roster) gets it back as a PENDING proof: valid and
-/// inactive, it binds nothing and replaces nothing, so a flood of old copies cannot move a binding, and it is
-/// activated when the session proves presence. A session that said goodbye gets nothing. The copy is no arrival and
-/// no heartbeat.
-async fn restore_lost_proof(
-    verified: &Verified,
-    state: &mut EventLoopState,
-    app: &mut dyn NodeApp,
-    context: &HandlerCtx<'_>,
-) {
-    let joined = matches!(
-        verified.kind,
-        MessageKind::Presence {
-            subtype: PresenceSubtype::Joined
-        }
-    );
-    let key = verified.key();
-    if !joined || verified.joined_proof().is_none() || state.key_said_goodbye(key) {
-        return;
-    }
-    if state.proofs.proof_of(&key).is_some() || state.proofs.has_pending(&key) {
-        return;
-    }
-    let live = state.peers.contains(&key);
-    // The first proof that shows our own nickname bound to another member is the held error: the copy that reads it
-    // first raises it, as the first arrival does, or the signal (`tell_once`) is spent with no line.
-    if state.note_joined_proof(verified, context.mesh, context.author, live) {
-        report_nickname_held(context);
-    }
-    if live {
-        end_displaced_sessions(verified, state, app, context).await;
-    }
-}
-
 /// End the sessions that a proof displaced: the sessions of other members under a nickname that the proof bound
 /// (with no `left` line for a session that was never shown), and the older sessions of a member whose newer run
 /// came: a restart leaves no ghost until the timeout.
@@ -1065,7 +1168,7 @@ async fn end_displaced_sessions(
 /// Whether a frame of this kind changes the roster or the routes of a peer. The gate refuses these
 /// from a session that claims a nickname that another member holds. A `PeerInfo` is not one of
 /// them: it only gives an address, and a session that asks for a proof needs one. The frames that
-/// carry data (app, state, meta, digests) are never refused here; they are stored and relayed, and
+/// carry data (app, state, meta) are never refused here; they are stored and relayed, and
 /// they change no roster entry.
 fn is_membership_kind(kind: &MessageKind) -> bool {
     matches!(
@@ -1081,7 +1184,7 @@ fn is_membership_kind(kind: &MessageKind) -> bool {
 /// author's own measured links + underlay address (`body` = a serialized
 /// `LinkVector`) supersede the last vector we held for that origin. Dropped
 /// silently when the multihop transport is off or the body is malformed —
-/// plumbing like the digests, never logged or surfaced. Returns whether the topology changed.
+/// plumbing like presence, never surfaced. Returns whether the topology changed.
 fn handle_link_state(message: &Verified, state: &mut EventLoopState) -> bool {
     #[cfg(not(feature = "multihop"))]
     {
@@ -1179,11 +1282,13 @@ async fn auto_pong(message: &Verified, state: &EventLoopState, context: &Handler
 }
 
 /// Answer a proof request that names this node with a `joined` frame that carries the proof of
-/// this session, sent to the asker alone over a warm path. The path is checked before the answer
-/// takes a slot of the per-minute cap, so an answer that cannot go out costs no slot. No warm path
-/// means no answer, and the asker asks again by the retry rule of the proof exchange. A send that
-/// fails after the slot was taken keeps the slot and the 60 s window of the asker, so the first retry
-/// that can work is the one at 90 s: the one at 30 s is refused.
+/// this session, sent to the asker alone. The answer goes to the endpoint the asker is known by, or
+/// back on the connection of the request when that is an unlinked arrival (a dial back, to that
+/// authenticated arrival only). The path is checked before the answer takes a slot of the per-minute
+/// cap, so an answer that cannot go out costs no slot. No path means no answer, and the asker asks
+/// again by the retry rule of the proof exchange. A send that fails after the slot was taken keeps
+/// the slot and the 60 s window of the asker, so the first retry that can work is the one at 90 s:
+/// the one at 30 s is refused.
 async fn answer_proof_request(
     to: &AuthorKey,
     message: &Verified,
@@ -1191,7 +1296,7 @@ async fn answer_proof_request(
     context: &HandlerCtx<'_>,
 ) {
     let Some(eid) = return_path(state, &message.key()) else {
-        tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no warm path");
+        tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: no path");
         return;
     };
     let Some(answer) = state.proof_answer(
@@ -1207,7 +1312,7 @@ async fn answer_proof_request(
     // The connection that the request came on is authenticated by the transport: when the answer goes to that
     // endpoint, a dial back in the background is allowed, as for the ask (an asker that only dialed us has no
     // gossip link and no connection of ours). One answer for each asker and window, and the cap, stay.
-    let came_on_it = state.state_digest_serves.unicast.arrived_from == Some(eid);
+    let came_on_it = state.unicast_arrival == Some(eid);
     let sent = match answer.serialize() {
         Ok(bytes) if came_on_it => transport::send_dialing_back(eid, bytes, state).await,
         Ok(bytes) => transport::send_best_effort(eid, bytes, state).await,
@@ -1215,9 +1320,13 @@ async fn answer_proof_request(
     };
     if !sent {
         tracing::debug!(target: "habilis_network::gossip", asker = %message.author, "proof answer skipped: the send failed");
-        return;
     }
-    keep_the_answer(state);
+    // The proof exchange opens the path to the asker, so the own slices go out now, not on the tick.
+    let asker = message.key();
+    backfill::owe(state, asker, Instant::now());
+    if backfill::send_to(state, eid, came_on_it).await {
+        state.owed_backfill.remove(&asker);
+    }
 }
 
 /// The endpoint that the answer to a proof request from `asker` goes to.
@@ -1235,22 +1344,10 @@ fn return_path(state: &EventLoopState, asker: &AuthorKey) -> Option<iroh::Endpoi
     // A request can come before the `PeerInfo` of its sender: then the connection that it arrived on is
     // the return path, if a unicast can start on it.
     let arrival: Option<iroh::EndpointId> = state
-        .state_digest_serves
-        .unicast
-        .arrived_from
+        .unicast_arrival
         .filter(not_rendezvous)
         .filter(|eid| transport::can_unicast(*eid, state));
     known.or(arrival)
-}
-
-/// Keep the proof answer of this run in the log of its author, once. The answer is a signed `joined` frame
-/// that every asker holds from now on, and the same frame for every asker: a peer that holds a frame of its
-/// author that the author never kept resends it to her at every digest round, forever, and a fresh frame
-/// for each asker would spread through the mesh by anti-entropy, one for each asker.
-fn keep_the_answer(state: &mut EventLoopState) {
-    if let Some(answer) = state.take_answer_to_keep() {
-        retain_own_broadcast(state, answer);
-    }
 }
 
 /// The pong that answers `ping`, and where it goes: the endpoint that the signer of the ping proved
@@ -1278,12 +1375,11 @@ fn pong_for(
 
 struct InboundFrame<'message> {
     message: &'message Verified,
-    canonical: &'message [u8],
     surfaceable: bool,
 }
 
-/// One shard of a split body: retain it for anti-entropy (so a missing shard
-/// heals like any message) and, when its group completes, gate the
+/// One shard of a split body: retain it (so a missing shard
+/// is kept like any message) and, when its group completes, gate the
 /// reassembled logical message through the application boundary and surface it once —
 /// pushed and dispatched exactly like an ordinary inbound message.
 async fn handle_shard(
@@ -1294,8 +1390,8 @@ async fn handle_shard(
 ) {
     let InboundFrame {
         message,
-        canonical,
         surfaceable,
+        ..
     } = frame;
     // A directed shard (task leg / RPC) not addressed to us is relayed at the
     // gossip layer but never retained or reassembled here — a third party must
@@ -1303,29 +1399,6 @@ async fn handle_shard(
     // single-frame path hands such a frame to the app, which decides.
     if !addressed_to_us(message, &context.our_pubkey) {
         return;
-    }
-    // The raw shard's own per-tag policy (loggability/chain) — computed from its
-    // fragment body, matching the pre-thread behavior of the internal classify.
-    let kind_tag = message.kind.app_tag();
-    let shard_class = kind_tag.map(|_| app.classify(&message.authored()));
-    // Only a small group's shards enter the message log (anti-entropy heals
-    // them like any message — point-to-point when the shard is directed, so
-    // the addressee still recovers); a big group would evict the mesh's whole
-    // anti-entropy history, so its shards stay out of the log — on the send
-    // side too (`shard_fits_log`) — and the group heals via shard repair.
-    // (RPC shards are plumbing — `retain_and_index` skips them by kind
-    // either way.)
-    if shard_fits_log(message) {
-        retain_and_index(
-            message.clone(),
-            RetainMeta {
-                canonical,
-                class: shard_class.as_ref(),
-                wire_len: None,
-            },
-            state,
-            context,
-        );
     }
     if let Some(logical) = state.reassemble(message) {
         // The same gate the single-frame path runs, now on the reassembled body:
@@ -1355,146 +1428,6 @@ async fn handle_shard(
     }
 }
 
-/// Fork detection, cross-author DAG folding, and chat-log retention for a
-/// surviving inbound message. Coupled to logging on purpose: only a message we
-/// actually **retain** is folded into the indexes, so `by_hash`/`dag_heads`/
-/// `author_seqs` stay bounded by the log window (pruned on eviction). A
-/// rate-dropped chat frame, one addressed to another peer, or a `State` event
-/// returned earlier and never reaches here. Only a **broadcast chat** `app_msg`
-/// carries `seq`/parents; task-related `app_msg` frames (offer/context/change)
-/// are presence-like — `broadcast_task` stamps them without a chain, so they
-/// must stay out of the fork/DAG indexes (see the `task` glossary invariant).
-/// Presence is loggable but not indexed.
-#[derive(Clone, Copy)]
-struct RetainMeta<'meta> {
-    canonical: &'meta [u8],
-    class: Option<&'meta AppClass>,
-    // the wire length of the frame, when the caller holds the bytes it came in
-    wire_len: Option<usize>,
-}
-
-/// Whether a frame that membership read goes into the log. A stale presence frame does not: it is
-/// a copy of a departed key's `joined` or `alive`, which `drop_departed_presence` took out of the
-/// log on the goodbye, and `seen` may have forgotten it since. Retained again, it would be a
-/// resend subject again. A stale chat frame stays retainable: the departed key's chat is kept.
-fn retained_after_lifecycle(update: &MembershipUpdate, kind: &MessageKind) -> bool {
-    !(update.stale
-        && matches!(
-            kind,
-            MessageKind::Presence {
-                subtype: PresenceSubtype::Joined | PresenceSubtype::Alive
-            }
-        ))
-}
-
-fn retain_and_index(
-    message: Verified,
-    meta: RetainMeta<'_>,
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-) {
-    let RetainMeta {
-        canonical,
-        class,
-        wire_len,
-    } = meta;
-    // App frames carry the app's per-tag policy (`classify`, computed once by the
-    // caller and threaded in here); infra kinds (`class == None`) use the engine's
-    // own rule. A beat is plumbing — never retained/indexed.
-    let loggable = class.map_or_else(|| is_loggable(&message.kind), |cls| cls.loggable());
-    let beat = class.is_some_and(|cls| cls.beat());
-    if !loggable || beat {
-        return;
-    }
-    if class.is_some_and(|cls| cls.chained()) {
-        let hash = ContentHash::of(canonical);
-        // A second, *different* content hash at an already-seen `(author, seq)`
-        // is cryptographic proof of equivocation — surface a `fork` once per
-        // offending key (order-independent; we keep both).
-        if let Some(seq) = message.seq
-            && state.note_msg_seq(&message.key(), seq, hash)
-        {
-            context.sink.emit(NodeEvent::Fork {
-                nickname: message.author.clone(),
-                pubkey: message.key().to_string(),
-                seq,
-            });
-            tracing::warn!(target: "habilis_network::gossip", author = %message.author, seq, "fork detected: conflicting messages at same seq");
-        }
-        // Fold into the DAG tip set; flag a backdated timestamp.
-        if state.note_dag(hash, &message.parents, message.timestamp) {
-            tracing::warn!(target: "habilis_network::gossip", author = %message.author, "message timestamp precedes a referenced parent; possible backdating");
-        }
-    }
-    push_to_log(state, message, wire_len);
-}
-
-/// Push a retained message into the anti-entropy log, keeping the DAG + fork
-/// indexes bounded with the log window as the push evicts.
-pub(super) fn push_to_log(state: &mut EventLoopState, message: Verified, wire_len: Option<usize>) {
-    let evicted = match wire_len {
-        Some(len) => state.message_log.push_sized(message, len),
-        None => state.message_log.push(message),
-    };
-    if let Some(evicted) = evicted {
-        let evicted_hash = evicted.content_hash();
-        state.forget_hash(&evicted_hash);
-        if let Some(seq) = evicted.seq {
-            state.forget_msg_seq(&evicted.key(), seq, &evicted_hash);
-        }
-    }
-}
-
-/// Retain a message **this node just broadcast** in its own anti-entropy log.
-///
-/// Gossip never echoes a node's own publications back to it, so a message we
-/// author reaches every peer's [`ingest`] but never our own. Without this our
-/// `message_log` — and so the digest we advertise — omits everything we wrote,
-/// with two consequences:
-///
-/// * We cannot serve our own `joined` to a peer that missed it, which is the
-///   one repair anti-entropy exists to make.
-/// * Worse, every peer that *does* hold it reads the omission as a gap and
-///   re-sends it to us on **every** digest round, forever: we can never
-///   acknowledge it, because we can never receive it. Each such message is a
-///   permanent per-round broadcast to the whole mesh, and since a re-announced
-///   `joined` mints a fresh id, the unconvergeable set ratchets upward — the
-///   mesh-wide CPU/traffic runaway this guards against.
-///
-/// The state/meta channel already retains its own writes for exactly this
-/// reason; see [`super::broadcast_state_merge`].
-pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: Verified) {
-    if !is_loggable(&message.kind) {
-        return;
-    }
-    // Ours by construction, so it can never arrive again — but mark it seen so
-    // a peer still running the old resend behaviour is deduped at the gate
-    // rather than double-pushed here.
-    state.mark_seen(&message);
-    push_to_log(state, message, None);
-}
-
-/// Keep an app broadcast that this node sent, when the app's class says it is loggable. The same
-/// reason as for [`retain_own_broadcast`]: a peer that holds the frame resends it to its author
-/// on every digest round, forever, if the author's digest never lists it, and the author cannot
-/// serve it to a peer that missed it. The class comes from the app, as at the ingest of a frame
-/// (`retain_and_index`), so an app that does not log its frames keeps none. A directed frame is
-/// not kept: its body is sealed on the way out and only its addressee may be served.
-pub(crate) fn retain_own_app_broadcast(
-    state: &mut EventLoopState,
-    message: &Verified,
-    class: AppClass,
-) {
-    if !class.loggable()
-        || class.beat()
-        || !matches!(message.kind, MessageKind::App { to: None, .. })
-    {
-        return;
-    }
-    state.mark_seen(message);
-    push_to_log(state, message.clone(), None);
-}
-
 /// Route a received `State`/`Meta` event to its channel doc, then — for `meta` —
 /// adopt the author's endpoint hint into the dial book. Selects the disjoint doc
 /// field so the borrow released by [`ingest_channel_event`] frees `state` for the
@@ -1504,18 +1437,8 @@ struct ChannelEvent<'message> {
     channel: Channel,
     message: &'message Verified,
     surfaceable: bool,
-}
-
-/// A node that holds no frame of another author adopts at once the epoch that a frame started: it
-/// has nothing to lose. The sweep writes its entry again. A node that holds the frames of others
-/// waits for [`crate::util::consts::DOC_EPOCH_ADOPT_WAIT_TICKS`] ticks of the minute timer.
-fn adopt_new_epoch(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    let adopted = state
-        .doc_mut(Channel::Meta)
-        .adopt_if_alone(&context.our_pubkey);
-    if let Some(switch) = adopted {
-        state.note_epoch_switch(switch);
-    }
+    // False for a slice that answers a pull of this node: the store takes it with no token.
+    live: bool,
 }
 
 fn dispatch_channel(
@@ -1527,29 +1450,47 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
-    let count_before = state.doc(channel).change_count();
-    let far_ok = seed_job::far_jump_allowed(state, channel);
-    match ingest_channel_event(event, state.doc_mut(channel), context, far_ok) {
-        ChannelOutcome::Refused => state.idle.state_rejected += 1,
-        ChannelOutcome::Repeat => state.idle.wire_in.note_content_dup(),
-        ChannelOutcome::Taken => {}
+    if state.key_said_goodbye(message.key()) {
+        // A key that said goodbye does not rejoin, so its frame would wait in the pending set for nothing.
+        tracing::debug!(target: "habilis_network::gossip", "a slice of a key that said goodbye is dropped");
+        return;
     }
-    if channel == Channel::Meta {
-        adopt_new_epoch(state, context);
-    } else {
-        seed_job::adopt_far(state);
+    if !state.keeps_slice(&message.key()) {
+        // The slice waits until its author joins or returns, so a stranger cannot fill the store.
+        if let Err(error) = state.docs.hold(channel, message, Instant::now()) {
+            tracing::debug!(target: "habilis_network::gossip", %error, "a slice of an author outside the roster is refused");
+        }
+        return;
     }
-    let changed = state.doc(channel).change_count() > count_before;
-    if changed {
-        state.fast_rounds.note_change(channel, Instant::now());
-    }
-    for key in state.doc_mut(channel).take_dropped() {
-        state.seen.remove(&key);
-    }
-    if channel == Channel::Meta {
+    let applied = ingest_channel_event(event, &mut state.docs, Instant::now(), context);
+    if applied && channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
         app.on_meta_applied(&message.key(), state, context);
+    }
+}
+
+/// Applies the held slices of `key` on both channels, once `key` joined or returned. Each one runs
+/// through [`dispatch_channel`], so it takes its token now and reaches the app as an arrival.
+fn promote_pending(
+    key: AuthorKey,
+    now: Instant,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) {
+    for channel in [Channel::State, Channel::Meta] {
+        if let Some(frame) = state.docs.take_pending(channel, &key, now) {
+            // The join horizon judges a held frame by its own timestamp, as it judges an arrival.
+            let surfaceable = state.is_surfaceable(frame.timestamp);
+            let event = ChannelEvent {
+                channel,
+                message: &frame,
+                surfaceable,
+                live: true,
+            };
+            dispatch_channel(event, state, app, context);
+        }
     }
 }
 
@@ -1557,84 +1498,43 @@ fn dispatch_channel(
 /// the wire body (a decrypted `enc` body), a clone with the body replaced; else
 /// the original borrowed unchanged. The output helpers read `event.body` for the
 /// `m` delta, so they must see plaintext.
-fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
-    let changed = plain.filter(|text| text != frame.body.as_str());
-    let body = changed.and_then(|text| MessageBody::try_new(&text).ok());
-    match body {
+fn surface_view(frame: &Verified, plain: Option<MessageBody>) -> Authored {
+    match plain {
         Some(body) => frame.copy_with_body(body),
         None => frame.authored(),
     }
 }
 
-/// Ingest a durable channel event (`State`/`Meta`) into its `log`: dedup-insert,
-/// then surface a `StateChanged` for `channel` only when the derived doc changed
-/// and we're past the join horizon (a backfilling joiner updates its doc silently
-/// instead of reacting to replayed intermediate states). A received event is
-/// never our own (`is_self = false`). Both channels share this path verbatim.
-///
-/// Returns what the document made of the change.
+/// Ingest a durable channel event (`State`/`Meta`) into its slice store, and say whether the store took
+/// it. A `StateChanged` is surfaced for `channel` only when the store took the frame and we're past the
+/// join horizon (a backfilling joiner updates its slice silently). A received event is never our own
+/// (`is_self = false`). Both channels share this path verbatim.
 fn ingest_channel_event(
     event: ChannelEvent<'_>,
-    doc: &mut doc::MeshDoc,
+    docs: &mut ChannelDocs,
+    now: Instant,
     context: &HandlerCtx<'_>,
-    // Whether the frame may make a far jump of epoch: the answer of the first request.
-    far_ok: bool,
-) -> ChannelOutcome {
-    use crate::doc::Ingested;
-
+) -> bool {
     let ChannelEvent {
         channel,
         message,
         surfaceable,
+        live,
     } = event;
-    // The doc dedups by change hash, buffers out-of-order changes until their
-    // deps land, retains the signed frame for re-serve, and gates card forgery
-    // (the card carries the peer's cryptographic identity) — every recipient
-    // applies the same gate, so a forgery converges nowhere.
-    let ingested = if far_ok {
-        doc.ingest_far_ok(message)
-    } else {
-        doc.ingest(message)
-    };
-    match ingested {
-        Ingested::Applied {
-            changed: true,
-            doc: after,
-        } if surfaceable => {
-            // On a passworded mesh the received body is ciphertext; surface a
-            // plaintext-bodied view so the human/JSON `m` delta still renders.
-            // The frame retained for re-serve (inside `ingest`) stays ciphertext.
-            let surfaced = surface_view(message, doc.surface_body(message));
-            context.sink.emit(NodeEvent::StateChanged {
-                channel,
-                event: Box::new(surfaced),
-                document: after,
-                is_self: false,
-            });
-        }
-        Ingested::Rejected => {
-            tracing::warn!(target: "habilis_network::gossip",
-                author = %message.author,
-                "dropping a {} change that forges another peer's agent card",
-                channel.label()
-            );
-            return ChannelOutcome::Refused;
-        }
-        Ingested::Ignored => return ChannelOutcome::Refused,
-        Ingested::Duplicate => return ChannelOutcome::Repeat,
-        // A root of a higher epoch is kept as the candidate: `adopt_new_epoch` reads it next.
-        Ingested::Buffered | Ingested::NewEpoch { .. } | _ => {}
+    let applied = matches!(
+        docs.ingest(channel, message, live, now),
+        SliceIngest::Applied
+    );
+    if applied && surfaceable {
+        let surfaced = surface_view(message, docs.plain_body(channel, &message.key()));
+        context.sink.emit(NodeEvent::StateChanged {
+            channel,
+            event: Box::new(surfaced),
+            document: docs.to_json(channel),
+            is_self: false,
+        });
     }
-    ChannelOutcome::Taken
-}
-
-/// What the document made of a channel event.
-enum ChannelOutcome {
-    /// The document refused or ignored the change.
-    Refused,
-    /// The document had applied this change already.
-    Repeat,
-    Taken,
+    applied
 }
 
 /// A directed leg (a directed `app_msg` or a `Task`) is surfaced **only by
@@ -1646,7 +1546,7 @@ enum ChannelOutcome {
 /// applies in `lifecycle::{handle_msg, handle_task}`.
 /// A structurally **directed** app frame — one with an addressee (`to:
 /// Some(_)`). Whether its body is *sealed* (encrypted to that addressee) is a
-/// separate, app-driven decision ([`super::app::AppClass::sealed`]): an app's
+/// separate, app-driven decision ([`super::app::NodeApp::seals`]): an app's
 /// directed tags arrive sealed, a plaintext-directed consumer's do not. `Pong`
 /// is directed for routing but a distinct infra kind, so it is not covered here.
 fn is_directed_content(kind: &MessageKind) -> bool {
@@ -1695,7 +1595,7 @@ fn gate_and_decrypt<F: Proof>(
         if !addressed_to_us(frame, &context.our_pubkey) {
             // Relay: an opaque directed frame — forwarded, never validated, surfaced or
             // retained. The engine cannot open it, so it has no classification, and an
-            // `App` kind without one is not loggable (see `is_loggable`).
+            // `App` kind without one is not pushed to the consumer.
             return Gated::Pass {
                 class: None,
                 view: frame.authored(),
@@ -1739,13 +1639,14 @@ fn gate_and_decrypt<F: Proof>(
 /// Validate + decrypt a directed frame that's addressed to us (as opposed to
 /// one we're only relaying).
 fn gate_directed_to_us<F: Proof>(frame: &F, state: &EventLoopState, app: &dyn NodeApp) -> Gated {
-    // Whether the directed body is sealed is the app's call, not a
-    // structural given: an app's directed tags may arrive encrypted, but a
+    // Whether the directed body is sealed is the app's call, by the tag, through the one rule that
+    // `app_frame` seals by (`NodeApp::seals`): an app's directed tags may arrive encrypted, but a
     // consumer with its own data model may send plaintext directed bytes. The frame is
-    // signature-authenticated either way; `sealed=false` only means "not
-    // additionally encrypted".
+    // signature-authenticated either way; a tag that does not seal means "not additionally
+    // encrypted". A directed frame of another kind has no tag and no seal.
     let wire = frame.authored();
-    if !app.classify(&wire).sealed() {
+    let seals = matches!(&frame.kind, MessageKind::App { tag, .. } if app.seals(tag));
+    if !seals {
         // Plaintext directed body: the wire body is already the final body.
         let Some(class) = gate_app_payload(&wire, app) else {
             return Gated::Drop;
@@ -1809,47 +1710,23 @@ fn decrypt_directed<F: ops::Deref<Target = Message>>(
 
 fn addressed_to_us(message: &Message, us: &AuthorKey) -> bool {
     match &message.kind {
-        MessageKind::App { to: Some(to), .. } => to == us,
+        MessageKind::App { to: Some(to), .. }
+        | MessageKind::SliceRoot { to, .. }
+        | MessageKind::SlicePull { to, .. }
+        | MessageKind::SlicePageRequest { to, .. }
+        | MessageKind::SlicePage { to, .. } => to == us,
         // Broadcast app frames (chat) and infra kinds are delivered to everyone.
         MessageKind::App { to: None, .. }
         | MessageKind::Presence { .. }
         | MessageKind::PeerInfo
-        | MessageKind::Digest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
         | MessageKind::State
-        | MessageKind::StateDigest
         | MessageKind::Meta
-        | MessageKind::MetaDigest
         | MessageKind::ProofRequest { .. }
         | MessageKind::LinkState
         | _ => true,
     }
-}
-
-/// Hand a surviving inbound message to the in-process driver before kind
-/// routing, so the consumer sees `msg` / `presence` / `peer_info` /
-/// `task` alike. Non-blocking by construction (bounded broadcast); a send error
-/// or full ring is intentionally dropped so a slow consumer never stalls
-/// the gossip loop. The `receiver_count` gate skips the per-message clone while
-/// nobody has subscribed yet; a consumer that never wants the fan-out passes no
-/// sender at all, so the field is `None` and even that gate is skipped.
-/// `surfaceable` keeps pre-join backlog off the inbound push channel too; plumbing
-/// kinds (digest/ping/pong) are excluded. `class` is the caller's once-computed
-/// classification (`None` for an infra frame).
-/// The kinds that infrastructure dispatch consumes and no application subscriber is told about.
-fn is_plumbing(kind: &MessageKind) -> bool {
-    matches!(
-        kind,
-        MessageKind::Digest
-            | MessageKind::StateDigest
-            | MessageKind::MetaDigest
-            | MessageKind::State
-            | MessageKind::Meta
-            | MessageKind::Ping
-            | MessageKind::Pong { .. }
-            | MessageKind::ProofRequest { .. }
-    )
 }
 
 fn maybe_push_inbound(
@@ -1867,17 +1744,20 @@ fn maybe_push_inbound(
     if tx.receiver_count() == 0
         || !surfaceable
         || !addressed_to_us(message, &context.our_pubkey)
-        || is_plumbing(&message.kind)
+        || matches!(
+            message.kind,
+            MessageKind::State | MessageKind::Meta | MessageKind::Ping | MessageKind::Pong { .. }
+        )
     {
         return;
     }
-    // An App frame reaches an in-process consumer only when it is loggable (not RPC
-    // plumbing) and not a liveness beat — the app's per-tag policy, threaded in
+    // An App frame reaches an in-process consumer only when its class says PUSH (not RPC
+    // plumbing) and it is not a liveness beat — the app's per-tag policy, threaded in
     // from the caller's single classification. An infra frame (`class == None`,
     // `app_tag` also `None`) is always pushable past the structural guards above.
     let kind_tag = message.kind.app_tag();
     let app_pushable = match kind_tag {
-        Some(_) => class.is_some_and(|cls| cls.loggable() && !cls.beat()),
+        Some(_) => class.is_some_and(|cls| cls.pushable() && !cls.beat()),
         None => true,
     };
     if app_pushable {
@@ -1885,21 +1765,16 @@ fn maybe_push_inbound(
     }
 }
 
-/// Our heads and our address go out on the first frame from any new peer, not
-/// only on its `joined`: a digest is how a newcomer gets backfilled, a
-/// newcomer behind the rendezvous learns our address only from this flood,
-/// and which frame a peer sends first depends on its version and its links.
+/// Our address goes out on the first frame from any new peer, not only on its
+/// `joined`: a newcomer behind the rendezvous learns our address only from this
+/// flood, and which frame a peer sends first depends on its version and its links.
+/// The backfill of the newcomer is owed here too (see [`super::backfill`]).
 /// If the newcomer has the lower endpoint id we wait for it to dial. A first
 /// frame that is its `joined` floods our address in `handle_presence` instead.
 async fn greet_new_peer(message: &Verified, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    antientropy::broadcast_state_digests(
-        state,
-        context.sender,
-        context.mesh,
-        context.author,
-        antientropy::DigestTrigger::Event,
-    )
-    .await;
+    let now = Instant::now();
+    backfill::owe(state, message.key(), now);
+    backfill::settle(state, now).await;
     if !matches!(
         message.kind,
         MessageKind::Presence {
@@ -1951,6 +1826,44 @@ fn retain_refused_peer_info_address(message: &Verified, state: &mut EventLoopSta
     }
 }
 
+/// A copy of a `joined` frame gives back the proof that its session lost, and nothing else. A member signs its
+/// answer to a proof request once for each run, so an asker that dropped the proof of that session (the session left
+/// the roster and came back, or its pending proof was dropped at a cap) gets the same frame again, and the frame is a
+/// duplicate there. A session that is live gets its proof back as an active proof. Any other session (a quiet one, or
+/// one that the nickname gate refused and so is not in the roster) gets it back as a PENDING proof: valid and
+/// inactive, it binds nothing and replaces nothing, so a flood of old copies cannot move a binding, and it is
+/// activated when the session proves presence. A session that said goodbye gets nothing. The copy is no arrival and
+/// no heartbeat.
+async fn restore_lost_proof(
+    verified: &Verified,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) {
+    let joined = matches!(
+        verified.kind,
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Joined
+        }
+    );
+    let key = verified.key();
+    if !joined || verified.joined_proof().is_none() || state.key_said_goodbye(key) {
+        return;
+    }
+    if state.proofs.proof_of(&key).is_some() || state.proofs.has_pending(&key) {
+        return;
+    }
+    let live = state.peers.contains(&key);
+    // The first proof that shows our own nickname bound to another member is the held error: the copy that reads it
+    // first raises it, as the first arrival does, or the signal (`tell_once`) is spent with no line.
+    if state.note_joined_proof(verified, context.mesh, context.author, live) {
+        report_nickname_held(context);
+    }
+    if live {
+        end_displaced_sessions(verified, state, app, context).await;
+    }
+}
+
 async fn handle_peer_info(
     message: &Verified,
     state: &mut EventLoopState,
@@ -1962,6 +1875,11 @@ async fn handle_peer_info(
         return;
     };
     let Ok((peer_id, peer_addr)) = peer_addr_error::endpoint_addr_from_json(&parsed) else {
+        return;
+    };
+    // The seal key is part of the body: a `PeerInfo` that names none, or a text that is not a key,
+    // is not a `PeerInfo` of this wire version, and it binds nothing.
+    let Some(seal) = peer_info_seal_key(&parsed) else {
         return;
     };
     if peer_id == context.endpoint.id() {
@@ -1984,13 +1902,16 @@ async fn handle_peer_info(
     // path to its node.
     let changed = !state.unicast_pool.remembers_address(&peer_addr);
     state.place_endpoint(hinter, &message.author, peer_addr.clone());
+    // The same signature binds the seal key to the author: a directed body for this key is sealed
+    // to it. The key of a signer that is not known yet waits for its join.
+    state.note_seal_key(hinter, seal, Instant::now());
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.
     if peer_id == context.rendezvous_id {
         return;
     }
-    // The only binding a digest's answer may follow: this signer proved it
+    // The only binding a backfill answer may follow: this signer proved it
     // owns `peer_id`. A `PeerInfo` arrives many times, so a pair that the roster trusts is not
     // checked again. A proof that the table holds for a signer not yet in the roster is checked
     // again, so the trust follows the roster.
@@ -2060,12 +1981,6 @@ async fn handle_peer_info(
     // request was waiting for: ask now, and not at its next alive frame, 30 s or more away. The ask comes
     // after the address is registered, because the dial that it can start uses the address of the pool.
     lifecycle::ask_for_proof(message, state, context).await;
-    // A buffered directed frame addressed to this author may just have become
-    // deliverable — its endpoint binding and dial address are now registered.
-    // Only while meshed: the pre-mesh backlog waits for the meshed edge.
-    if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
-        flush_pending(state, context, "peer info arrival").await;
-    }
     let now = Instant::now();
     // Simultaneous-open tie-break: on a peer's *first* sighting, only the
     // numerically lower endpoint id dials.
@@ -2139,47 +2054,6 @@ async fn handle_peer_info(
             "dialing peer from PeerInfo"
         );
     }
-}
-
-/// `Alive` keepalives, `PeerInfo` endpoint plumbing, anti-entropy `Digest`s,
-/// and ping/pong probes are infrastructure; everything else (real chat frames
-/// and `joined`/`left` presence) goes in the log (and so to `poll`/`fetch`).
-/// App-frame loggability is the app's own per-tag policy ([`NodeApp::classify`]);
-/// this predicate covers only the engine's infra kinds.
-///
-/// `PeerInfo` is classified as non-loggable here so the rule is encoded in one
-/// place rather than relying on its match arm's early `return`: a future code
-/// path that reaches the log gate must not start persisting endpoint-address
-/// plumbing into the poll/fetch buffer.
-fn is_loggable(kind: &MessageKind) -> bool {
-    !matches!(
-        kind,
-        MessageKind::Presence {
-            subtype: PresenceSubtype::Alive
-        } | MessageKind::PeerInfo
-            | MessageKind::Digest | MessageKind::StateDigest | MessageKind::MetaDigest
-            // A newer vector replaces this one, and a peer never logs it (its
-            // handler ends before retention), so a copy kept here is one no peer
-            // holds and every digest asks this node for again.
-            | MessageKind::LinkState
-            | MessageKind::Ping
-            | MessageKind::Pong { .. }
-            // A proof request is addressed plumbing with an empty body. It reaches here only
-            // sharded, because `ingest` hands a frame with a shard header to `handle_shard`
-            // before the arm that dispatches an infra kind. Its addressee reads it and answers,
-            // so a copy in the log is one that a digest of that addressee asks for again, on the
-            // resend budget. `is_plumbing` already lists it.
-            | MessageKind::ProofRequest { .. }
-            // Durable state lives in its own un-pruned log, never the chat
-            // message-log / poll-fetch buffer (it also returns before reaching
-            // here; this keeps the predicate honest if that changes).
-            | MessageKind::State
-            | MessageKind::Meta
-            // App-frame loggability is decided by the app's `classify`, never
-            // this infra predicate. An App kind that reaches here has no class: it is the
-            // opaque directed frame of a relay, which is not kept.
-            | MessageKind::App { .. }
-    )
 }
 
 #[cfg(test)]
@@ -2277,280 +2151,60 @@ mod arms_reclaim_tests {
 }
 
 #[cfg(test)]
-mod is_loggable_tests {
-    use super::{is_loggable, retained_after_lifecycle};
-    use crate::lifecycle::membership_update::MembershipUpdate;
-    use crate::protocol::identity::Identity;
-    use crate::protocol::{AuthorKey, MessageKind, PresenceSubtype};
-
-    /// A stale `joined` or `alive` is a copy of a departed key's presence: it stays out of the
-    /// log. A stale chat frame and a fresh presence frame go in.
-    #[test]
-    fn a_stale_presence_frame_is_not_retained() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let stale = MembershipUpdate {
-            returned: false,
-            joined_new: false,
-            stale: true,
-        };
-        let fresh = MembershipUpdate {
-            returned: false,
-            joined_new: true,
-            stale: false,
-        };
-        let joined = MessageKind::Presence {
-            subtype: PresenceSubtype::Joined,
-        };
-        let alive = MessageKind::Presence {
-            subtype: PresenceSubtype::Alive,
-        };
-        assert!(
-            !retained_after_lifecycle(&stale, &joined),
-            "a stale presence frame is not retained beside a joined frame"
-        );
-        assert!(
-            !retained_after_lifecycle(&stale, &alive),
-            "a stale presence frame is not retained beside an alive frame"
-        );
-        assert!(
-            retained_after_lifecycle(&stale, &MessageKind::app_broadcast("app_msg")),
-            "a stale presence frame is still retained beside an app broadcast"
-        );
-        assert!(
-            retained_after_lifecycle(&fresh, &joined),
-            "a fresh presence frame is retained beside a joined frame"
-        );
-    }
-
-    #[test]
-    fn alive_presence_is_not_loggable() {
-        let _guard = ::habilis_network_test_tracing::init();
-        assert!(
-            !is_loggable(&MessageKind::Presence {
-                subtype: PresenceSubtype::Alive
-            }),
-            "alive presence is not loggable"
-        );
-    }
-
-    #[test]
-    fn joined_and_left_presence_are_loggable() {
-        let _guard = ::habilis_network_test_tracing::init();
-        assert!(
-            is_loggable(&MessageKind::Presence {
-                subtype: PresenceSubtype::Joined
-            }),
-            "joined presence is loggable"
-        );
-        assert!(
-            is_loggable(&MessageKind::Presence {
-                subtype: PresenceSubtype::Left
-            }),
-            "left presence is loggable"
-        );
-    }
-
-    #[test]
-    fn peerinfo_is_not_loggable() {
-        // PeerInfo is endpoint plumbing — never logged/surfaced, and the
-        // classifier (not just its early-return) says so.
-        let _guard = ::habilis_network_test_tracing::init();
-        assert!(
-            !is_loggable(&MessageKind::PeerInfo),
-            "peer info is not loggable"
-        );
-    }
-
-    /// A proof request reaches this predicate only when it is sharded: `ingest` hands a frame with
-    /// a shard header to `handle_shard` before the arm that dispatches an infra kind. A request
-    /// that the log keeps is one that a digest of its addressee asks for again.
-    #[test]
-    fn a_proof_request_is_not_loggable() {
-        let _guard = ::habilis_network_test_tracing::init();
-        assert!(
-            !is_loggable(&MessageKind::ProofRequest {
-                to: AuthorKey::from(*Identity::generate().public())
-            }),
-            "a proof request is not loggable"
-        );
-    }
-}
-
-/// Replicates the second mesh-wide CPU runaway at its mechanism: a node that
-/// does not retain its **own** broadcasts advertises a digest that omits them,
-/// and since gossip never echoes a node's publications back to it, it can never
-/// acknowledge them — so every peer re-sends them on every anti-entropy round,
-/// forever. Measured at 6 peers: 180 resend events/minute steady-state and
-/// ~108% total CPU, against 12 (join-window only, then silent) and ~54% once
-/// the author retains its own presence.
-#[cfg(test)]
-mod retain_own_broadcast_tests {
-    use crate::testing;
-    use std::collections::HashSet;
-
-    use crate::daemon::message_log::{MissingQuery, WindowRange};
-    use crate::daemon::state::EventLoopState;
-    use crate::protocol::messages::Verified;
-    use crate::protocol::{DedupKey, MeshId, Message, Nickname};
-
-    use crate::gossip::app;
-    use crate::protocol;
-    use crate::protocol::messages::AppFrameParams;
-    fn joined(state: &EventLoopState, author: &str) -> Verified {
-        Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author)).sign(&state.identity)
-    }
-
-    /// The invariant: our own `joined` is in our log, so the digest we
-    /// advertise names it.
-    #[test]
-    fn own_presence_lands_in_the_local_log() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = testing::fresh_state();
-        let mine = joined(&state, "me");
-        assert_eq!(state.message_log.len(), 0, "log starts empty");
-        super::retain_own_broadcast(&mut state, mine);
-        assert_eq!(
-            state.message_log.len(),
-            1,
-            "a node must hold the presence it just broadcast — it is the only source for it"
-        );
-    }
-
-    /// Plumbing we broadcast but never log stays out, so retaining our own
-    /// sends does not quietly widen what anti-entropy replays.
-    #[test]
-    fn own_unloggable_plumbing_is_not_retained() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = testing::fresh_state();
-        let body = protocol::MessageBody::try_new("{}").expect("valid body");
-        let peer_info =
-            Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
-                .sign(&state.identity);
-        super::retain_own_broadcast(&mut state, peer_info);
-        assert_eq!(
-            state.message_log.len(),
-            0,
-            "PeerInfo is never logged inbound, so it must not be logged outbound either"
-        );
-    }
-
-    fn app_frame(state: &EventLoopState, to: Option<&str>) -> Verified {
-        Message::new_app(
-            &MeshId::from("💬test"),
-            &Nickname::from("me"),
-            AppFrameParams::new(
-                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                to.map(testing::test_key),
-                None,
-                protocol::MessageBody::from("hello"),
-            ),
-        )
-        .sign(&state.identity)
-    }
-
-    fn class(loggable: bool) -> app::AppClass {
-        app::AppClass::NONE
-            .plus_if(app::AppClass::LOGGABLE, loggable)
-            .union(app::AppClass::VALID)
-    }
-
-    /// An app broadcast that the app logs is held by its author, as at the ingest of a peer: the
-    /// author can serve it to a peer that missed it, and the peers that hold it do not resend it
-    /// to her on every round.
-    #[test]
-    fn an_own_app_broadcast_that_the_app_logs_is_retained() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = testing::fresh_state();
-        let frame = app_frame(&state, None);
-        super::retain_own_app_broadcast(&mut state, &frame, class(true));
-        assert_eq!(
-            state.message_log.len(),
-            1,
-            "an own app broadcast that the app logs is retained"
-        );
-    }
-
-    /// The class is the app's, not the kind's: an app that does not log its frames keeps none, and a
-    /// directed frame is never kept (its body is sealed on the way out, and only its addressee may
-    /// be served).
-    #[test]
-    fn an_own_app_frame_that_the_app_does_not_log_or_that_is_directed_is_not_retained() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = testing::fresh_state();
-        let broadcast = app_frame(&state, None);
-        super::retain_own_app_broadcast(&mut state, &broadcast, class(false));
-        let directed = app_frame(&state, Some("you"));
-        super::retain_own_app_broadcast(&mut state, &directed, class(true));
-        assert_eq!(
-            state.message_log.len(),
-            0,
-            "an own frame that is directed or unlogged is not retained"
-        );
-    }
-
-    /// The end-to-end property, as the two peers actually exchange it: a holder
-    /// computing gaps against our digest must find **nothing** to re-send.
-    /// Before the fix this returned our own `joined` on every round, forever.
-    #[test]
-    fn a_peer_offers_nothing_back_against_our_digest() {
-        // Us: we broadcast our own `joined`, and receive the peer's.
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut us = testing::fresh_state();
-        let ours = joined(&us, "us");
-        super::retain_own_broadcast(&mut us, ours.clone());
-        let mut them = testing::fresh_state();
-        let theirs = joined(&them, "them");
-        super::retain_own_broadcast(&mut them, theirs.clone());
-        // Each side ingests the other's presence, as gossip delivers it.
-        super::push_to_log(&mut us, theirs, None);
-        super::push_to_log(&mut them, ours, None);
-
-        // We advertise what we hold; they compute what we are missing.
-        let window = us.message_log.recent_window(64).expect("non-empty log");
-        let have: HashSet<DedupKey> = window.ids.into_iter().collect();
-        let offered = them.message_log.missing_in_window(MissingQuery {
-            range: WindowRange {
-                lo: window.lo,
-                hi: window.hi,
-            },
-            have: &have,
-            max: 64,
-            // "us" is the peer whose digest advertised the window; presence is
-            // undirected, so the addressee gate passes it either way.
-            requester: &testing::test_key("us"),
-        });
-        assert!(
-            offered.is_empty(),
-            "two converged peers must have nothing to re-send; got {} message(s) — \
-             the anti-entropy loop is back",
-            offered.len()
-        );
-    }
-}
-
-/// A change the channel doc evicts from its orphan buffer is recovered when
-/// anti-entropy re-serves it. The re-served frame is the original signed one,
-/// so it carries the dedup key the receive path recorded on first arrival.
-#[cfg(test)]
-mod evicted_orphan_tests {
+mod first_contact_tests {
+    use crate::daemon::state::{RendezvousFlag, Standing};
+    use crate::lifecycle;
+    use crate::protocol::{Shard, ShardGroup, UnixSecs};
+    use crate::transport::UdpTransport;
     use iroh::endpoint::presets;
+    use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
-    use serde_json::json;
 
+    use super::{
+        ChannelEvent, Gated, dispatch_channel, dispatch_infra, gate_and_decrypt,
+        handle_gossip_event, ingest, pong_for, promote_pending,
+    };
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::EventLoopState;
-    use crate::doc::Ingested;
-    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::SilentSink;
+    use crate::daemon::state::{EventLoopState, PingRound};
+    use crate::gossip::app::{AppClass, AppFrameError, InboundApp, NodeApp};
+    use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
+    use crate::lifecycle::membership_update::MembershipUpdate;
+    use crate::ops;
     use crate::protocol::identity::Identity;
-    use crate::protocol::messages::{Authored, Verified};
-    use crate::protocol::{Channel, MeshId, Message, Nickname};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::protocol::messages::{Authored, MessageBody, Verified};
+    use crate::protocol::{
+        AuthorKey, Channel, ContentHash, MeshId, Message, MessageKind, Nickname,
+    };
+    use crate::testing::{address_json_with_seal, endpoint_id, fresh_state, nick, test_key};
     use crate::transport::MeshSender;
-    use habilis_network_util::consts::DOC_PENDING_AUTHOR_MAX;
+    use bytes::Bytes;
+    use habilis_network_protocol::digest::{DigestEntry, DigestPage, DigestRoot};
+    use habilis_network_util::tuning::{
+        DIGEST_PULL_TTL, DIGEST_PULLS_OPEN, DIGEST_SERVES_PER_WINDOW, DIGEST_SETTLE,
+        DIGEST_SETTLE_JITTER,
+    };
 
+    use crate::daemon::state::DirectState;
+    #[cfg(feature = "multihop")]
+    use crate::gossip;
+    use crate::gossip::{ingest_from, split};
+    use crate::lifecycle::heartbeat;
+    use crate::protocol::messages::AppFrameParams;
+    use crate::transport::outbox::Resend;
+    use crate::transport::proven_endpoints::ProvenEndpoints;
+    use crate::transport::{PayloadPath, webrtc};
+    use crate::util::{clock, consts, tuning};
+    use crate::{lookup, protocol, transport};
     use iroh_gossip::proto;
-    /// State frames never reach the app, so it only has to exist.
+    use n0_future::task;
+    use n0_future::time::Instant as TokioInstant;
+    use std::collections::HashSet;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex, atomic};
+    use std::time::{Duration, Instant as std_Instant};
+    use std::{future, net};
+    use tokio::sync::mpsc;
+    use tokio::{task as tokio_task, time as tokio_time};
     struct Inert;
 
     #[async_trait::async_trait]
@@ -2569,195 +2223,17 @@ mod evicted_orphan_tests {
         }
     }
 
-    /// `count` state changes by one author, each depending on the one before.
-    fn chain(
-        writer: &mut EventLoopState,
-        mesh: &MeshId,
-        author: &Nickname,
-        count: usize,
-    ) -> Vec<Verified> {
-        let seed = *writer.identity.public().as_bytes();
-        (0..count)
-            .map(|step| {
-                let state_doc = writer.doc(Channel::State);
-                let change = state_doc
-                    .build_change(&json!({ format!("k{step}"): step }), &seed)
-                    .expect("a JSON object merges")
-                    .expect("a non-empty merge yields a change");
-                let (wire, _plain) = writer
-                    .doc(Channel::State)
-                    .compose_wire_body(&change, None)
-                    .expect("compose the wire body");
-                let frame = Message::new_channel_event(mesh, author, wire, Channel::State)
-                    .sign(&writer.identity);
-                assert!(
-                    matches!(
-                        writer.doc_mut(Channel::State).ingest(&frame),
-                        Ingested::Applied { .. }
-                    ),
-                    "the state document applies the frame"
-                );
-                frame
-            })
-            .collect()
-    }
-
-    fn holds(state: &EventLoopState, step: usize) -> bool {
-        state
-            .doc(Channel::State)
-            .to_json()
-            .get(format!("k{step}"))
-            .is_some()
-    }
-
-    #[test]
-    fn an_evicted_orphan_is_recovered_when_its_frame_is_re_served() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            ::habilis_network_test_tracing::expect_warn(
-                "habilis_network::gossip",
-                "channel orphan buffer full for this author",
-            );
-            let mesh = MeshId::from("test");
-            let mut writer = fresh_state();
-            let frames = chain(
-                &mut writer,
-                &mesh,
-                &nick("writer"),
-                DOC_PENDING_AUTHOR_MAX + 32,
-            );
-
-            let endpoint = iroh::Endpoint::builder(presets::Minimal)
-                .bind()
-                .await
-                .expect("bind a local endpoint");
-            let gossip = Gossip::builder().spawn(endpoint.clone());
-            let topic = gossip
-                .subscribe(proto::TopicId::from_bytes([3u8; 32]), vec![])
-                .await
-                .expect("subscribe to a peerless topic");
-            let (gossip_sender, _receiver) = topic.split();
-            let sender = MeshSender::new(gossip_sender);
-            let identity = Identity::generate();
-            let our_pubkey = identity.author_key();
-            let reader_nick = nick("reader");
-            let sink = SilentSink;
-            let context = HandlerCtx {
-                sender: &sender,
-                endpoint: &endpoint,
-                mesh: &mesh,
-                author: &reader_nick,
-                identity: &identity,
-                our_pubkey,
-                max_peers: 16,
-                rendezvous_id: endpoint_id(9),
-                external_msg_tx: None,
-                sink: &sink,
-            };
-            let mut reader = fresh_state();
-            let mut app = Inert;
-            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
-
-            // Newest first: every frame but the root arrives as an orphan, so the
-            // per-author ceiling evicts the stalest of them before the root lands.
-            let newest_first: Vec<&Verified> = frames.iter().rev().collect();
-            for frame in newest_first {
-                super::ingest(wire(frame), &mut reader, &mut app, &context).await;
-            }
-            let missing: Vec<&Verified> = (0..frames.len())
-                .filter(|&step| !holds(&reader, step))
-                .map(|step| &frames[step])
-                .collect();
-            assert!(
-                !missing.is_empty(),
-                "nothing was evicted, so this test proves nothing"
-            );
-            let missing_refs = missing.iter();
-            let fresh = missing_refs.filter(|frame| reader.seen.contains(&frame.dedup_key()));
-            let already_seen: usize = fresh.count();
-            assert_eq!(
-                already_seen,
-                0,
-                "{already_seen} of the {} dropped frames are still in the seen set, so \
-                 their re-send will be discarded as a repeat",
-                missing.len()
-            );
-
-            // What anti-entropy does for a peer whose heads show the gap: re-serve
-            // the author's original signed frames.
-            for frame in &missing {
-                super::ingest(wire(frame), &mut reader, &mut app, &context).await;
-            }
-
-            let held = (0..frames.len())
-                .filter(|&step| holds(&reader, step))
-                .count();
-            assert_eq!(
-                held,
-                frames.len(),
-                "the reader holds {held} of {} changes after the {} evicted ones were \
-                 re-served; {already_seen} of those were already in the seen set, so \
-                 the receive path dropped them as duplicates",
-                frames.len(),
-                missing.len()
-            );
-            endpoint.close().await;
-        });
-    }
-}
-
-#[cfg(test)]
-mod first_contact_tests {
-    use crate::daemon::state::{RendezvousFlag, Standing};
-    use crate::protocol::UnixSecs;
-    use crate::transport::UdpTransport;
-    use iroh::endpoint::presets;
-    use iroh_gossip::api::Event;
-    use iroh_gossip::net::Gossip;
-
-    use super::{
-        ChannelEvent, dispatch_channel, dispatch_infra, handle_gossip_event, ingest, pong_for,
-    };
-    use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::message_log::{self, MissingQuery};
-    use crate::daemon::state::{EventLoopState, PingRound};
-    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
-    use crate::lifecycle::membership_update::MembershipUpdate;
-    use crate::ops;
-    use crate::protocol::identity::Identity;
-    use crate::protocol::messages::{Authored, MessageBody, Verified};
-    use crate::protocol::{AuthorKey, Channel, MeshId, Message, MessageKind, Nickname};
-    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
-    use crate::transport::MeshSender;
-    use bytes::Bytes;
-
-    use crate::daemon::state::DirectState;
-    #[cfg(feature = "multihop")]
-    use crate::gossip;
-    use crate::gossip::split;
-    use crate::lifecycle::heartbeat;
-    use crate::protocol::messages::{AppFrameParams, sole_addressee};
-    use crate::transport::outbox::Resend;
-    use crate::transport::proven_endpoints::ProvenEndpoints;
-    use crate::transport::{PayloadPath, webrtc};
-    use crate::util::{clock, tuning};
-    use crate::{lifecycle, lookup, protocol, transport};
-    use iroh_gossip::proto;
-    use n0_future::task;
-    use n0_future::time::Instant as TokioInstant;
-    use std::collections::HashSet;
-    use std::sync::atomic::Ordering;
-    use std::sync::{Arc, Mutex, atomic};
-    use std::time::{Duration as std_Duration, Instant as std_Instant};
-    use std::{future, net};
-    use tokio::sync::mpsc;
-    use tokio::{task as tokio_task, time as tokio_time};
-    struct Inert;
+    /// An app whose tag `sealed_tag` seals its directed body, and whose tag `plain_tag` does not.
+    struct Sealing;
 
     #[async_trait::async_trait]
-    impl NodeApp for Inert {
+    impl NodeApp for Sealing {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass::BEAT.union(AppClass::VALID)
+            AppClass::PUSH.union(AppClass::VALID)
+        }
+
+        fn seals(&self, tag: &protocol::AppTag) -> bool {
+            tag.as_str() == "sealed_tag"
         }
 
         async fn on_app_frame(
@@ -2824,34 +2300,518 @@ mod first_contact_tests {
         }
     }
 
-    /// A directed frame in the buffer, to a peer that nobody serves: the flush returns at once, the
-    /// dial fails on its task, and the frame comes back to the loop and is buffered again. It is
-    /// not lost, and the loop did not wait for the dial.
+    /// The frame of an app frame test: tag `tag`, to `to`, with the body `text`.
+    fn frame_params(tag: &str, to: Option<AuthorKey>, text: &str) -> AppFrameParams {
+        AppFrameParams::new(
+            protocol::AppTag::try_new(tag).expect("a valid app tag"),
+            to,
+            None,
+            MessageBody::try_new(text).expect("a body"),
+        )
+    }
+
+    /// **A directed frame of a tag that seals is sealed on the wire, and its addressee opens it.**
+    ///
+    /// The sender knows the seal key of the addressee from a `PeerInfo`. The signed body is the
+    /// envelope, which holds no byte of the text. The receiver gate reads the same rule of the app
+    /// (`NodeApp::seals`) and hands the app the plain body. A tag that does not seal goes in plain,
+    /// the control that keeps the rule to the tag.
     #[test]
-    fn a_pending_frame_whose_dial_fails_is_parked_again() {
+    fn a_directed_frame_of_a_sealing_tag_is_sealed_on_the_wire_and_its_addressee_opens_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let receiver = fresh_state();
+            let bob = receiver.identity.author_key();
+            let mut sender = fresh_state();
+            sender.peers.insert(bob);
+            sender.note_seal_key(bob, receiver.identity.seal_public(), clock::Instant::now());
+            let context = node.context();
+            let app = Sealing;
+
+            let sealed = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("sealed_tag", Some(bob), "the secret"),
+            )
+            .expect("the frame is built");
+            assert!(
+                !sealed.body.as_str().contains("the secret"),
+                "the signed body of a sealing tag holds the text: {}",
+                sealed.body.as_str()
+            );
+
+            let at_bob = HandlerCtx {
+                our_pubkey: bob,
+                ..node.context()
+            };
+            let Gated::Pass { view: opened, .. } =
+                gate_and_decrypt(&sealed, &receiver, &at_bob, &app)
+            else {
+                panic!("the addressee dropped the sealed frame");
+            };
+            assert_eq!(
+                opened.body.as_str(),
+                "the secret",
+                "the addressee does not read the plain body"
+            );
+
+            let plain = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("plain_tag", Some(bob), "the open text"),
+            )
+            .expect("the frame is built");
+            assert_eq!(
+                plain.body.as_str(),
+                "the open text",
+                "a tag that does not seal sent a sealed body"
+            );
+            let Gated::Pass {
+                view: unchanged, ..
+            } = gate_and_decrypt(&plain, &receiver, &at_bob, &app)
+            else {
+                panic!("the addressee dropped the plain frame");
+            };
+            assert_eq!(
+                unchanged.body.as_str(),
+                "the open text",
+                "a plain body changed on its way through the gate"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A tag that seals, to a key with no known seal key, is not built: the error names the key, and
+    /// a later call can succeed once the `PeerInfo` has come. A tag that does not seal needs no key.
+    #[test]
+    fn a_sealing_tag_to_a_key_with_no_seal_key_is_not_built() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut sender = fresh_state();
+            let bob = test_key("bob");
+            sender.peers.insert(bob);
+            let app = Sealing;
+
+            let refused = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("sealed_tag", Some(bob), "text"),
+            );
+            assert!(
+                matches!(refused, Err(AppFrameError::NoSealKey { to }) if to == bob),
+                "a sealing tag with no seal key was built"
+            );
+            let plain = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("plain_tag", Some(bob), "text"),
+            );
+            assert!(plain.is_ok(), "a tag that does not seal needs no seal key");
+
+            sender.note_seal_key(
+                bob,
+                x25519_dalek::PublicKey::from([4u8; 32]),
+                clock::Instant::now(),
+            );
+            let later = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("sealed_tag", Some(bob), "text"),
+            );
+            assert!(
+                later.is_ok(),
+                "the frame is not built once the key is known"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// **A broadcast body on a passworded mesh is sealed by the engine, and a peer reads it.**
+    ///
+    /// Receivers drop any other body on such a mesh, so no app can send a plain one. The tag does
+    /// not matter: the app does not seal a broadcast. On a mesh with no password the body goes as it
+    /// is.
+    #[test]
+    fn a_broadcast_on_a_passworded_mesh_is_sealed_by_the_engine_and_a_peer_reads_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let key = protocol::SymmetricKey::from([5u8; 32]);
+            let mut sender = fresh_state();
+            sender.broadcast_key = Some(key.clone());
+            let mut peer = fresh_state();
+            peer.broadcast_key = Some(key);
+            let app = Sealing;
+
+            let sealed = ops::app_frame(
+                &sender,
+                &context,
+                &app,
+                frame_params("plain_tag", None, "for everyone"),
+            )
+            .expect("the frame is built");
+            assert!(
+                !sealed.body.as_str().contains("for everyone"),
+                "a broadcast body on a passworded mesh went in plain: {}",
+                sealed.body.as_str()
+            );
+            let Gated::Pass { view, .. } = gate_and_decrypt(&sealed, &peer, &context, &app) else {
+                panic!("a peer dropped the sealed broadcast");
+            };
+            assert_eq!(
+                view.body.as_str(),
+                "for everyone",
+                "the peer does not read the plain body"
+            );
+
+            let open = ops::app_frame(
+                &fresh_state(),
+                &context,
+                &app,
+                frame_params("plain_tag", None, "for everyone"),
+            )
+            .expect("the frame is built");
+            assert_eq!(
+                open.body.as_str(),
+                "for everyone",
+                "a mesh with no password sealed a broadcast"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// **A sharded broadcast on a passworded mesh is sealed whole, then cut, and a peer opens it.**
+    ///
+    /// The receiver joins the shards and opens the joined body once, so a shard is a cut of one
+    /// ciphertext and not an envelope of its own. The test seals the whole body with
+    /// `seal_broadcast_body`, cuts the sealed text in two, signs the two shards, and a peer that
+    /// holds the mesh key hands its app the plain text. The control seals each cut on its own, as an
+    /// app would that sealed the shards: the joined text is no envelope, the peer drops it, and the
+    /// app hears nothing.
+    #[test]
+    fn a_sharded_broadcast_on_a_passworded_mesh_is_sealed_whole_then_cut_and_a_peer_opens_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let key = protocol::SymmetricKey::from([5u8; 32]);
+            let mut sender = fresh_state();
+            sender.broadcast_key = Some(key.clone());
+            let author = Identity::generate();
+            let plain = MessageBody::from("a body that is cut into two shards");
+            let shard = |group: &ShardGroup, index: u32, part: &str| {
+                let mut message = Message::new_app(
+                    &node.mesh,
+                    &nick("bob"),
+                    AppFrameParams::new(
+                        protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::try_new(part).expect("a body"),
+                    ),
+                );
+                message.shard = Some(Shard::new(group.clone(), 2).index(index));
+                message.sign(&author)
+            };
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+            let cut = |text: &str| {
+                let (first, second) = text.split_at(text.len() / 2);
+                (first.to_owned(), second.to_owned())
+            };
+
+            // The app and the test share the texts that it records.
+            let delivered = Arc::new(Mutex::new(Vec::new()));
+            let mut app = Recorded(Arc::clone(&delivered));
+            let mut peer = fresh_state();
+            peer.broadcast_key = Some(key.clone());
+
+            let whole = ops::seal_broadcast_body(&sender, &plain).expect("the body is sealed");
+            assert!(
+                !whole.as_str().contains("cut into two"),
+                "the sealed body holds the text"
+            );
+            let group = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440001")
+                .expect("a valid group");
+            let (first, second) = cut(whole.as_str());
+            ingest(
+                wire(&shard(&group, 0, &first)),
+                &mut peer,
+                &mut app,
+                &context,
+            )
+            .await;
+            ingest(
+                wire(&shard(&group, 1, &second)),
+                &mut peer,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                *delivered.lock().expect("no poison"),
+                [plain.as_str().to_owned()],
+                "the peer did not open the whole sealed body that was cut"
+            );
+
+            let each = |part: &str| {
+                let part = MessageBody::try_new(part).expect("a body");
+                ops::seal_broadcast_body(&sender, &part).expect("the part is sealed")
+            };
+            let (head, tail) = cut(plain.as_str());
+            let other = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440002")
+                .expect("a valid group");
+            let mut second_peer = fresh_state();
+            second_peer.broadcast_key = Some(key);
+            // The app and the test share the texts that it records.
+            let overheard = Arc::new(Mutex::new(Vec::new()));
+            let mut second_app = Recorded(Arc::clone(&overheard));
+            let sealed_head = each(&head);
+            let sealed_tail = each(&tail);
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "dropping a broadcast body that failed mesh-key decryption",
+            );
+            ingest(
+                wire(&shard(&other, 0, sealed_head.as_str())),
+                &mut second_peer,
+                &mut second_app,
+                &context,
+            )
+            .await;
+            ingest(
+                wire(&shard(&other, 1, sealed_tail.as_str())),
+                &mut second_peer,
+                &mut second_app,
+                &context,
+            )
+            .await;
+            assert!(
+                overheard.lock().expect("no poison").is_empty(),
+                "shards that were sealed one by one reached the app"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A meshed send to a relay-only peer whose direct path is not probed is refused at once. The
+    /// refusal asks for the lane session, so that the caller's retry can find it.
+    #[test]
+    fn a_meshed_directed_send_to_a_held_peer_is_refused_and_asks_for_the_lane_session() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.insert(Standing::Meshed);
+            state.relay_transport = PayloadPath::DirectOnly;
+            let (bob, eid) = (test_key("bob"), endpoint_id(7));
+            state.retain_refused_endpoint(bob, iroh::EndpointAddr::new(eid));
+            state.direct.insert(eid, DirectState::RelayOnly);
+            state
+                .path_kinds
+                .insert(eid, transport::probe::PathKind::Relay);
+            let frame = Message::new_pong(
+                &node.mesh,
+                &node.author,
+                bob,
+                &protocol::MessageId::random(),
+            )
+            .sign(&Identity::generate());
+
+            let refused = ops::send_app(&mut state, &context, frame).await;
+            let Err(error) = &refused else {
+                panic!("the send to a held peer was not refused: {refused:?}");
+            };
+            assert!(
+                matches!(error, transport::SendError::Held { .. }),
+                "the refusal is not Held: {error}"
+            );
+            assert!(
+                error.to_string().contains("a probe found only the relay")
+                    && error.to_string().contains("retry"),
+                "the refusal does not tell the caller to retry: {error}"
+            );
+            assert!(
+                state.lane_session_wanted(eid, clock::Instant::now()),
+                "the refused send did not ask for the lane session"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "a refused directed frame was buffered"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// **A directed send right after a join is not refused for want of a mesh or a probe.**
+    ///
+    /// The `PeerInfo` of a peer reaches the node a few milliseconds before its first real-peer link
+    /// sets `Meshed` and the first reading of `direct`. In that window the node holds the endpoint
+    /// of bob, is not meshed, and has read no path. The send must start: the dial waits for a direct
+    /// path, and the live path of the connection decides. The peer is a lane peer, so the send
+    /// asks for its session at once. Two controls keep the rule narrow: a pair
+    /// that a probe proved relay-only is still held, and a broadcast is still buffered.
+    #[test]
+    fn an_unmeshed_directed_send_to_an_unprobed_peer_is_started_and_not_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            state.standing.remove(&Standing::Meshed);
+            state.relay_transport = PayloadPath::DirectOnly;
+            state.local_udp_transport = UdpTransport::Present;
+            let (bob, eid) = (test_key("bob"), endpoint_id(7));
+            let lane_address = iroh::EndpointAddr::new(eid)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+            state.names.insert(bob, nick("bob"));
+            state.bind_peer_endpoint(bob, nick("bob"), lane_address);
+            let frame = || {
+                Message::new_pong(
+                    &node.mesh,
+                    &node.author,
+                    bob,
+                    &protocol::MessageId::random(),
+                )
+                .sign(&Identity::generate())
+            };
+
+            let sent = ops::send_app(&mut state, &context, frame()).await;
+            assert!(
+                matches!(sent, Ok(transport::Delivered::Pending(_))),
+                "the send to an unprobed peer on an unmeshed node did not start: {sent:?}"
+            );
+            assert!(
+                state.lane_session_wanted(eid, clock::Instant::now()),
+                "the send to an unprobed lane peer did not ask for its session"
+            );
+
+            state.direct.insert(eid, DirectState::RelayOnly);
+            let held = ops::send_app(&mut state, &context, frame()).await;
+            assert!(
+                matches!(held, Err(transport::SendError::Held { .. })),
+                "a pair that a probe proved relay-only was not held: {held:?}"
+            );
+
+            let broadcast = Message::new_app(
+                &node.mesh,
+                &node.author,
+                AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("hi"),
+                ),
+            )
+            .sign(&Identity::generate());
+            let buffered = ops::send_app(&mut state, &context, broadcast).await;
+            assert!(
+                matches!(buffered, Ok(transport::Delivered::Done)),
+                "the unmeshed broadcast was not accepted: {buffered:?}"
+            );
+            assert_eq!(
+                state.pending_outbound.len(),
+                1,
+                "the unmeshed broadcast was not buffered for the meshed edge"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A meshed send to a peer with no path watcher, whose selected path is a multihop route, is not
+    /// held: the send proves the peer by its route, and does not wait for the sweep tick. Only the
+    /// lower id of a pair has a watcher, so the higher id had no other source of the proof.
+    #[test]
+    fn a_meshed_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_not_held() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
             async {
                 let node = Node::spawn().await;
                 let context = node.context();
-                let silent = net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
-                let bob = iroh::SecretKey::generate().public();
-                let bob_addr = iroh::EndpointAddr::from_parts(
-                    bob,
-                    [iroh::TransportAddr::Ip(
-                        silent.local_addr().expect("silent addr"),
-                    )],
-                );
-                lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob_addr.clone());
                 let mut state = fresh_state();
                 state.standing.insert(Standing::Meshed);
-                state.unicast_pool = transport::UnicastPool::new(node.endpoint.clone(), false);
-                state.direct.insert(bob, DirectState::Direct);
+                state.relay_transport = PayloadPath::DirectOnly;
+                let (bob, eid) = (test_key("bob"), endpoint_id(7));
+                state.retain_refused_endpoint(bob, iroh::EndpointAddr::new(eid));
+                state.direct.insert(eid, DirectState::RelayOnly);
+                state
+                    .path_kinds
+                    .insert(eid, transport::probe::PathKind::Multihop);
+                let frame = Message::new_pong(
+                    &node.mesh,
+                    &node.author,
+                    bob,
+                    &protocol::MessageId::random(),
+                )
+                .sign(&Identity::generate());
+
+                let sent = ops::send_app(&mut state, &context, frame).await;
+
+                assert!(
+                    !matches!(sent, Err(transport::SendError::Held { .. })),
+                    "the send to a pair on a multihop route was held: {sent:?}"
+                );
+                assert_eq!(
+                    state.direct.get(&eid),
+                    Some(&DirectState::Direct),
+                    "the send did not prove the pair by its route"
+                );
+                assert!(
+                    state.lane_session_wanted(eid, clock::Instant::now()),
+                    "the proof at the send did not ask for the lane session"
+                );
+                node.endpoint.close().await;
+            },
+        );
+    }
+
+    /// A meshed send to a peer whose direct path is proven goes by unicast at once. The peer has no
+    /// gossip link in this test, so nothing waits for one: the frame reaches a real acceptor on the
+    /// peer's unicast endpoint.
+    #[test]
+    fn a_meshed_directed_send_to_a_proven_peer_arrives_by_unicast_at_once() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::Router;
+
+                use std::time::Duration;
+
+                use tokio::time;
+
+                use crate::transport::{UNICAST_ALPN, UnicastAcceptor, UnicastPool};
+
+                let node = Node::spawn().await;
+                let context = node.context();
+                let bob = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind bob");
+                let (inbox, mut frames) = mpsc::channel(8);
+                let router = Router::builder(bob.clone())
+                    .accept(
+                        UNICAST_ALPN,
+                        UnicastAcceptor::with_idle(
+                            inbox,
+                            PayloadPath::DirectOnly,
+                            Duration::from_mins(1),
+                        ),
+                    )
+                    .spawn();
+                lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob.addr());
+                let mut state = fresh_state();
+                state.standing.insert(Standing::Meshed);
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
                 state.names.insert(test_key("bob"), nick("bob"));
-                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob_addr);
-                let (failed_tx, mut failed_rx) = mpsc::unbounded_channel();
-                state.flush_failed = failed_tx;
+                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob.addr());
+                state.direct.insert(bob.id(), DirectState::Direct);
                 let frame = Message::new_pong(
                     &node.mesh,
                     &node.author,
@@ -2860,74 +2820,58 @@ mod first_contact_tests {
                 )
                 .sign(&Identity::generate());
                 let bytes = frame.serialize().expect("serialize");
-                assert!(
-                    state.pending_outbound.push((frame.clone(), bytes)),
-                    "a pending frame is parked again after a failed dial"
-                );
 
-                let started = std_Instant::now();
-                super::flush_pending(&mut state, &context, "test").await;
+                let sent = ops::send_app(&mut state, &context, frame).await;
                 assert!(
-                    started.elapsed() < std_Duration::from_millis(500),
-                    "the flush waited for the dial"
+                    sent.is_ok(),
+                    "the send across the gap was refused: {sent:?}"
                 );
                 assert!(
-                    state.pending_outbound.take().is_empty(),
-                    "the frame was handed to its task, so the buffer is empty until the dial fails"
+                    state.pending_outbound.is_empty(),
+                    "a directed frame was buffered across the gap"
                 );
-
-                let (failed, returned) =
-                    tokio_time::timeout(std_Duration::from_secs(10), failed_rx.recv())
-                        .await
-                        .expect("the failed dial reports back to the loop")
-                        .expect("the loop keeps its channel");
-                super::requeue_failed(&mut state, &context, failed.clone(), returned);
-
-                let parked = state.pending_outbound.take();
-                assert_eq!(parked.len(), 1, "the frame is in the buffer again");
-                assert_eq!(parked[0].0.id, frame.id, "and it is the same frame");
+                let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
+                assert_eq!(
+                    delivered.ok().flatten().map(|arrived| arrived.bytes),
+                    Some(bytes.into_bytes()),
+                    "bob never got the frame by unicast"
+                );
+                router.shutdown().await.expect("shut bob down");
                 node.endpoint.close().await;
             },
         );
     }
 
-    /// A send that was in flight when a newer run replaced its recipient fails later, and the frame comes back to
-    /// the loop. The buffered frames for the replaced session were dropped at its end, so the frame must not be
-    /// parked again: it would wait for a session that never comes back, and be retried at each flush.
+    /// A broadcast sent while unmeshed is still buffered for the meshed edge.
     #[test]
-    fn a_late_failed_send_to_a_replaced_session_is_not_parked_again() {
+    fn a_broadcast_while_unmeshed_is_buffered() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
             let mut state = fresh_state();
-            let replaced = test_key("replaced");
-            // a session that a newer run replaced is marked as departed, as a goodbye marks it
-            state.note_left(replaced);
-            let frame = Message::new_pong(
-                &node.mesh,
-                &node.author,
-                replaced,
-                &protocol::MessageId::random(),
-            )
-            .sign(&Identity::generate());
-            let bytes = frame.serialize().expect("serialize");
+            state.standing.remove(&Standing::Meshed);
+            let frame = Message::new_joined(&node.mesh, &node.author).sign(&Identity::generate());
 
-            super::requeue_failed(&mut state, &context, frame, bytes);
-
+            let sent = ops::send_app(&mut state, &context, frame).await;
             assert!(
-                state.pending_outbound.take().is_empty(),
-                "a late failure parked the frame of a replaced session again"
+                sent.is_ok(),
+                "the broadcast while unmeshed was refused: {sent:?}"
+            );
+            assert_eq!(
+                state.pending_outbound.take().len(),
+                1,
+                "the broadcast was not buffered for the meshed edge"
             );
             node.endpoint.close().await;
         });
     }
 
     /// A directed frame names a key, so a nickname that two live peers use does not make it
-    /// undeliverable: the frame to the second key of the nickname waits only for an endpoint of
-    /// that key. The flush keeps it until the key retains one, and then the send decision routes
-    /// it to that endpoint, not to the dial hint that the first key owns.
+    /// undeliverable. The second key of the nickname has no endpoint of its own yet, so a send to
+    /// it is refused and nothing is buffered. Once the key retains an endpoint, the send decision
+    /// routes the frame to that endpoint, not to the dial hint that the first key owns.
     #[test]
-    fn a_buffered_frame_to_the_second_key_of_a_nickname_waits_for_its_own_endpoint() {
+    fn a_directed_frame_to_the_second_key_of_a_nickname_routes_to_its_own_endpoint() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -2949,16 +2893,14 @@ mod first_contact_tests {
             )
             .sign(&Identity::generate());
             let bytes = frame.serialize().expect("serialize");
+            let refused = ops::send_app(&mut state, &context, frame.clone()).await;
             assert!(
-                state.pending_outbound.push((frame.clone(), bytes.clone())),
-                "the frame is parked before the flush"
+                matches!(refused, Err(transport::SendError::Undeliverable(_))),
+                "the send to the second key, with no endpoint of its own, was not refused: {refused:?}"
             );
-
-            super::flush_pending(&mut state, &context, "test").await;
-
             assert!(
-                !state.pending_outbound.is_empty(),
-                "the flush dropped a frame that a later flush can deliver"
+                state.pending_outbound.is_empty(),
+                "a refused directed frame was buffered"
             );
 
             state.retain_refused_endpoint(second, iroh::EndpointAddr::new(endpoint_id(6)));
@@ -2975,11 +2917,11 @@ mod first_contact_tests {
         });
     }
 
-    /// A directed frame to either of two live keys that use a nickname is accepted. An unmeshed
-    /// node buffers each frame with its own key as the recipient, in the order of the sends, and
-    /// tells the caller `Ok`.
+    /// A directed frame to either of two live keys that use a nickname is refused while unmeshed.
+    /// The refusal names the key, so the caller can tell the two keys apart, and nothing is
+    /// buffered.
     #[test]
-    fn an_unmeshed_send_to_either_key_of_a_nickname_is_buffered() {
+    fn an_unmeshed_send_to_either_key_of_a_nickname_is_refused() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -2996,33 +2938,31 @@ mod first_contact_tests {
                 let frame =
                     Message::new_pong(&node.mesh, &node.author, to, &protocol::MessageId::random())
                         .sign(&Identity::generate());
-                let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+                let refused = ops::send_app(&mut state, &context, frame).await;
                 assert!(
-                    sent.is_ok(),
-                    "the send to a key of the nickname was refused"
+                    matches!(
+                        &refused,
+                        Err(transport::SendError::Undeliverable(error)) if error.contains(&to.to_string())
+                    ),
+                    "the send to {to} was not refused while unmeshed: {refused:?}"
                 );
             }
 
-            let buffered = state.pending_outbound.take();
-            let recipients: Vec<AuthorKey> = buffered
-                .iter()
-                .filter_map(|(frame, _)| sole_addressee(&frame.kind).copied())
-                .collect();
-            assert_eq!(
-                recipients,
-                [second, first],
-                "the buffer lost a frame or the key of a recipient"
+            assert!(
+                state.pending_outbound.is_empty(),
+                "a refused directed frame was buffered"
             );
             node.endpoint.close().await;
         });
     }
 
-    /// An unmeshed node buffers a directed frame until the meshed edge. A key that no roster, quiet
-    /// set or address book holds is a key that nobody can deliver to, and the caller was told `Ok`
-    /// before. It is refused at once and the buffer stays empty. A quiet key, and a key that only
-    /// has a retained endpoint, can still return or be dialed, so their frames wait.
+    /// An unmeshed node routes a directed frame like a meshed one: it needs no gossip link. A key
+    /// that no roster, quiet set or address book holds is undeliverable, and so is a quiet key with
+    /// no endpoint, and the caller hears it at once. A key that has a retained endpoint is sent to
+    /// by a task. The buffer holds broadcast frames only.
     #[test]
-    fn an_unmeshed_send_to_a_key_outside_the_roster_is_refused() {
+    fn an_unmeshed_send_is_refused_for_a_key_with_no_endpoint_and_started_for_one_with_an_endpoint()
+    {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -3038,8 +2978,7 @@ mod first_contact_tests {
                     .sign(&Identity::generate())
             };
 
-            let refused =
-                ops::send_app(&mut state, &context, frame_to(stranger), AppClass::NONE).await;
+            let refused = ops::send_app(&mut state, &context, frame_to(stranger)).await;
             assert!(
                 matches!(refused, Err(transport::SendError::Undeliverable(_))),
                 "the unmeshed send to a stranger was not refused: {refused:?}"
@@ -3049,14 +2988,19 @@ mod first_contact_tests {
                 "the refused frame was buffered"
             );
 
-            for key in [quiet, hinted] {
-                let sent = ops::send_app(&mut state, &context, frame_to(key), AppClass::NONE).await;
-                assert!(sent.is_ok(), "the unmeshed send to {key} was refused");
-            }
-            assert_eq!(
-                state.pending_outbound.take().len(),
-                2,
-                "the frames of the quiet key and of the key with an endpoint wait"
+            let quiet_outcome = ops::send_app(&mut state, &context, frame_to(quiet)).await;
+            assert!(
+                matches!(quiet_outcome, Err(transport::SendError::Undeliverable(_))),
+                "the unmeshed send to a quiet key with no endpoint was not refused: {quiet_outcome:?}"
+            );
+            let hinted_outcome = ops::send_app(&mut state, &context, frame_to(hinted)).await;
+            assert!(
+                matches!(hinted_outcome, Ok(transport::Delivered::Pending(_))),
+                "the unmeshed send to a key with an endpoint did not start: {hinted_outcome:?}"
+            );
+            assert!(
+                state.pending_outbound.is_empty(),
+                "a directed frame was buffered"
             );
             node.endpoint.close().await;
         });
@@ -3231,7 +3175,7 @@ mod first_contact_tests {
             }
             let now = clock::Instant::now();
             let long_ago = now
-                .checked_sub(std_Duration::from_secs(31))
+                .checked_sub(Duration::from_secs(31))
                 .expect("a clock that runs for more than 31 s");
             state
                 .proofs
@@ -3274,7 +3218,7 @@ mod first_contact_tests {
             }
             let probe = Message::new_ping(&node.mesh, &node.author);
             let started = TokioInstant::now();
-            let window = started + std_Duration::from_secs(10);
+            let window = started + Duration::from_secs(10);
             state.arm_ping_round(PingRound::new(&probe, started, window, None));
             let update = MembershipUpdate {
                 returned: false,
@@ -3286,7 +3230,8 @@ mod first_contact_tests {
                 let pong =
                     Message::new_pong(&node.mesh, &twin, node.our_pubkey, &probe.id).sign(run);
                 let flow =
-                    dispatch_infra(&pong, true, &update, &mut state, &mut Inert, &context).await;
+                    dispatch_infra(&pong, true, &update, &mut state, &mut Inert, &context, true)
+                        .await;
                 assert!(flow.is_break(), "a pong is handled by the engine");
             }
 
@@ -3473,7 +3418,7 @@ mod first_contact_tests {
             let text = frame.serialize().expect("serialize").into_bytes();
             let old = String::from_utf8(text.to_vec())
                 .expect("a frame is text")
-                .replacen(r#""v":"14.0""#, r#""v":"12.0""#, 1);
+                .replacen(r#""v":"18.0""#, r#""v":"12.0""#, 1);
             assert!(old.contains("12.0"), "the test frame names version 12.0");
 
             ingest(Bytes::from(old.clone()), &mut state, &mut app, &context).await;
@@ -3614,51 +3559,6 @@ mod first_contact_tests {
         });
     }
 
-    /// The held error is raised where the first proof of another member under our nickname is read, and a copy of a
-    /// `joined` frame that goes through `restore_lost_proof` reads it too: the signal must not be spent there with no
-    /// line. By the order of the gate a copy follows its first arrival, so this is a guard of the signal, not of a
-    /// seen failure.
-    #[test]
-    fn a_copy_that_goes_through_the_restore_still_raises_the_held_event_once() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            ::habilis_network_test_tracing::expect_warn(
-                "habilis_network::lifecycle",
-                "our nickname is held by another member",
-            );
-            let node = Node::spawn().await;
-            let lines = ErrorLines::default();
-            let context = HandlerCtx {
-                sink: &lines,
-                ..node.context()
-            };
-            let mut state = fresh_state();
-            let mut app = Inert;
-            let (claimant, other_member) = (Identity::generate(), Identity::generate());
-            let (name, mesh_text): (&str, &str) = (node.author.as_ref(), node.mesh.as_ref());
-            let proof = other_member.prove(&claimant.author_key(), name, mesh_text, 1);
-            let joined: Verified =
-                Message::new_joined_with_proof(&node.mesh, &node.author, &proof).sign(&claimant);
-
-            super::restore_lost_proof(&joined, &mut state, &mut app, &context).await;
-            super::restore_lost_proof(&joined, &mut state, &mut app, &context).await;
-
-            let seen: Vec<String> = lines
-                .0
-                .lock()
-                .expect("the lines lock is not poisoned")
-                .clone();
-            let held: usize = seen
-                .iter()
-                .filter(|line| line.contains("is held by another member"))
-                .count();
-            assert_eq!(
-                held, 1,
-                "the copy spent the held signal without a line, or raised it twice: {seen:?}"
-            );
-            node.endpoint.close().await;
-        });
-    }
-
     /// A claimant of OUR nickname that is chatty sends no `Alive` (a node that broadcast something recently sends none):
     /// its frames are a `PeerInfo` and app frames, which the gate refuses as no membership kind. The first of them is
     /// asked for its proof too, once for each wait of the retry clock, and the answer raises the held event.
@@ -3675,11 +3575,8 @@ mod first_contact_tests {
             let address = iroh::EndpointAddr::new(endpoint);
             let info: Verified = {
                 use crate::protocol::messages::MessageBody;
-                use crate::protocol::peer_addr_error;
-                let body = MessageBody::try_new(
-                    &peer_addr_error::endpoint_addr_to_json(&address).to_string(),
-                )
-                .expect("an address body");
+                let body = MessageBody::try_new(&address_json_with_seal(&address).to_string())
+                    .expect("an address body");
                 Message::new_peer_info(&node.mesh, &node.author, body).sign(&claimant)
             };
             let chatter: Verified = Message::new_app(
@@ -3745,7 +3642,7 @@ mod first_contact_tests {
             let wire: Bytes = frame.serialize().expect("serialize").into_bytes();
             let text = String::from_utf8(wire.to_vec()).expect("a frame is text");
             let version = format!(r"\u0007\u001b[31m{}", "x".repeat(500));
-            let hostile = text.replacen(r#""v":"14.0""#, &format!(r#""v":"{version}""#), 1);
+            let hostile = text.replacen(r#""v":"18.0""#, &format!(r#""v":"{version}""#), 1);
 
             ingest(Bytes::from(hostile), &mut state, &mut app, &context).await;
 
@@ -3802,7 +3699,7 @@ mod first_contact_tests {
 
             // Two passes over `cap + 1` versions: an evicting set names every frame of both.
             for version in (0..=cap).chain(0..=cap) {
-                let other = text.replacen(r#""v":"14.0""#, &format!(r#""v":"v{version}""#), 1);
+                let other = text.replacen(r#""v":"18.0""#, &format!(r#""v":"v{version}""#), 1);
                 ingest(Bytes::from(other), &mut state, &mut app, &context).await;
             }
 
@@ -3828,92 +3725,6 @@ mod first_contact_tests {
             assert!(
                 last.contains("many unknown versions"),
                 "the last line says that many versions are unknown: {last:?}"
-            );
-            node.endpoint.close().await;
-        });
-    }
-
-    /// A relay forwards a directed frame of another key and keeps no copy, whatever the app
-    /// returns. The engine cannot open the body, and no app of the workspace asks to keep such a
-    /// frame, so a copy would be one that only the log cap bounds. The engine gives no repair for a
-    /// directed frame: the author keeps none, and a relay keeps none. A key that was away gets the
-    /// frame only if the app protocol sends it again.
-    #[test]
-    fn a_relayed_directed_frame_is_not_kept_whatever_the_app_returns() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let node = Node::spawn().await;
-            let context = node.context();
-            let mut state = fresh_state();
-            // the app and the test share the counter
-            let reads = Arc::new(atomic::AtomicUsize::new(0));
-            // `Counting` returns `true` for every frame, the answer that asked for a copy.
-            let mut app = Counting(Arc::clone(&reads));
-            let addressee = test_key("twin#addressee");
-            let params = AppFrameParams::new(
-                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                Some(addressee),
-                None,
-                MessageBody::from("for one key"),
-            );
-            let frame =
-                Message::new_app(&node.mesh, &nick("alice"), params).sign(&Identity::generate());
-            let wire = frame.serialize().expect("serialize");
-
-            ingest(wire.into_bytes(), &mut state, &mut app, &context).await;
-
-            assert_eq!(
-                reads.load(Ordering::Relaxed),
-                1,
-                "the app sees the frame of another key once"
-            );
-            let have = HashSet::new();
-            let query = MissingQuery {
-                range: message_log::seconds(UnixSecs::ZERO, UnixSecs::MAX),
-                have: &have,
-                max: 16,
-                requester: &addressee,
-            };
-            assert_eq!(
-                state.message_log.missing_in_window(query).len(),
-                0,
-                "a relay kept a directed frame of another key"
-            );
-            node.endpoint.close().await;
-        });
-    }
-
-    /// A resend of a message that the app already read has a new gossip payload, and the ingest
-    /// of the app still drops it by the id of the message inside: the app sees the frame once.
-    #[test]
-    fn a_resend_of_a_known_message_reaches_the_app_once() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let node = Node::spawn().await;
-            let context = node.context();
-            let mut state = fresh_state();
-            // the app and the test share the counter
-            let reads = Arc::new(atomic::AtomicUsize::new(0));
-            let mut app = Counting(Arc::clone(&reads));
-            let frame = Message::new_app(
-                &node.mesh,
-                &nick("alice"),
-                AppFrameParams::new(
-                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                    None,
-                    None,
-                    MessageBody::from("hello"),
-                ),
-            )
-            .sign(&Identity::generate());
-            let original = frame.serialize().expect("serialize");
-            let resend = original.copy_with_resend_nonce(42);
-
-            ingest(original.into_bytes(), &mut state, &mut app, &context).await;
-            ingest(resend.into_bytes(), &mut state, &mut app, &context).await;
-
-            assert_eq!(
-                reads.load(Ordering::Relaxed),
-                1,
-                "the first delivery reaches the app and the resend does not"
             );
             node.endpoint.close().await;
         });
@@ -3965,10 +3776,14 @@ mod first_contact_tests {
             let twin = nick("twin");
             let identities = [Identity::generate(), Identity::generate()];
             for identity in &identities {
+                state.peers.insert(identity.author_key());
+            }
+            for identity in &identities {
+                // A slice that the store takes: the hook runs only on an applied slice.
                 let frame = Message::new_channel_event(
                     &node.mesh,
                     &twin,
-                    MessageBody::from("{}"),
+                    MessageBody::from(r#"{"version":1,"value":{}}"#),
                     Channel::Meta,
                 )
                 .sign(identity);
@@ -3977,6 +3792,7 @@ mod first_contact_tests {
                         channel: Channel::Meta,
                         message: &frame,
                         surfaceable: true,
+                        live: true,
                     },
                     &mut state,
                     &mut app,
@@ -3989,6 +3805,1286 @@ mod first_contact_tests {
             assert_eq!(
                 heard, keys,
                 "the hook did not name the key of each author, in order"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// Two keys that use one nickname keep two slices: the meta view holds one slot for each key, and neither slice
+    /// replaces the other.
+    #[test]
+    fn two_keys_of_one_nickname_keep_two_slices_in_the_view() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let twin = nick("twin");
+            let identities = [Identity::generate(), Identity::generate()];
+            for identity in &identities {
+                state.peers.insert(identity.author_key());
+            }
+            let indexed: Vec<(usize, &Identity)> = identities.iter().enumerate().collect();
+            for &(index, identity) in &indexed {
+                let body = format!(r#"{{"version":1,"value":{{"a":{index}}}}}"#);
+                let frame = Message::new_channel_event(
+                    &node.mesh,
+                    &twin,
+                    MessageBody::from(body.as_str()),
+                    Channel::Meta,
+                )
+                .sign(identity);
+                dispatch_channel(
+                    ChannelEvent {
+                        channel: Channel::Meta,
+                        message: &frame,
+                        surfaceable: true,
+                        live: true,
+                    },
+                    &mut state,
+                    &mut app,
+                    &context,
+                );
+            }
+            let view = state.view(Channel::Meta);
+            assert_eq!(
+                view.as_object().map(serde_json::Map::len),
+                Some(2),
+                "two keys of one nickname keep one slot each in the view"
+            );
+            for &(index, identity) in &indexed {
+                let hex = String::from_utf8_lossy(&identity.author_key().hex()).into_owned();
+                assert_eq!(
+                    view[&hex]["a"], index,
+                    "the slot of each key holds the value that the key wrote"
+                );
+            }
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A meta slice that the store refuses does not reach the hook: the hook adopts the endpoint hint of a
+    /// slice the store took, so a stale version must not run it.
+    #[test]
+    fn a_refused_meta_slice_does_not_reach_the_meta_hook() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the record
+            let record = Arc::new(Mutex::new(Vec::new()));
+            let mut app = MetaRecorder(Arc::clone(&record));
+            let twin = nick("twin");
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            // Version 1 applies. A second frame with version 0 is stale, so the store refuses it.
+            for version in [1, 0] {
+                let frame = Message::new_channel_event(
+                    &node.mesh,
+                    &twin,
+                    MessageBody::try_new(&format!(r#"{{"version":{version},"value":{{}}}}"#))
+                        .expect("a slice body"),
+                    Channel::Meta,
+                )
+                .sign(&identity);
+                dispatch_channel(
+                    ChannelEvent {
+                        channel: Channel::Meta,
+                        message: &frame,
+                        surfaceable: true,
+                        live: true,
+                    },
+                    &mut state,
+                    &mut app,
+                    &context,
+                );
+            }
+
+            let heard = record.lock().expect("the record lock").clone();
+            assert_eq!(
+                heard,
+                vec![identity.author_key()],
+                "the hook ran for the applied slice only, not for the stale one"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A signed meta slice of `identity` at `version`, for the tests of the roster gate.
+    fn gate_slice(mesh: &MeshId, identity: &Identity, version: u64) -> Verified {
+        Message::new_channel_event(
+            mesh,
+            &nick("slice"),
+            MessageBody::try_new(&format!(r#"{{"version":{version},"value":{{}}}}"#))
+                .expect("a slice body"),
+            Channel::Meta,
+        )
+        .sign(identity)
+    }
+
+    /// A sink that counts the state changes it is told of.
+    #[derive(Default)]
+    struct StateChanges(atomic::AtomicUsize);
+
+    impl StateChanges {
+        fn count(&self) -> usize {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    impl NodeSink for StateChanges {
+        fn emit(&self, event: NodeEvent) {
+            if matches!(event, NodeEvent::StateChanged { .. }) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// A meta app with an empty record, for the tests of the roster gate.
+    fn meta_app() -> MetaRecorder {
+        // The app and the test share the record, so the record is behind an Arc.
+        MetaRecorder(Arc::new(Mutex::new(Vec::new())))
+    }
+
+    /// The meta slot of `key` in the view of `state`, or `None` when the view has no slot of it.
+    fn meta_slot(state: &EventLoopState, key: &AuthorKey) -> Option<serde_json::Value> {
+        let hex = String::from_utf8_lossy(&key.hex()).into_owned();
+        state.docs.to_json(Channel::Meta).get(&hex).cloned()
+    }
+
+    #[test]
+    fn fresh_keys_outside_the_roster_do_not_block_a_roster_author() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            for _ in 0..256 {
+                let stranger = Identity::generate();
+                let frame = gate_slice(&node.mesh, &stranger, 1);
+                let event = ChannelEvent {
+                    channel: Channel::Meta,
+                    message: &frame,
+                    surfaceable: true,
+                    live: true,
+                };
+                dispatch_channel(event, &mut state, &mut app, &context);
+            }
+            let member = Identity::generate();
+            state.peers.insert(member.author_key());
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &member.author_key()).is_some(),
+                "a roster author writes its slice while 256 strangers wait"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pull is spent by its answer, so the next frame of the same author from the same holder is live.
+    #[test]
+    fn a_spent_pull_does_not_open_the_gate_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            let holder = endpoint_id(81);
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+                usize::MAX,
+            );
+            state.unicast_arrival = Some(holder);
+            let answer = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest_from(answer, &mut state, &mut app, &context).await;
+            assert_eq!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "the answer to the pull applies"
+            );
+            let next = slice_bytes(&node, &identity, Channel::State, 101);
+            ingest_from(next, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "a frame after the spent pull is live, and the empty bucket refuses it"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An answer that comes after the pull TTL is live: it takes a token, and the empty bucket refuses it.
+    #[test]
+    fn an_answer_after_the_pull_ttl_is_charged() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            let holder = endpoint_id(81);
+            let asked = clock::Instant::now()
+                .checked_sub(DIGEST_PULL_TTL)
+                .expect("an instant one pull TTL back");
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                asked,
+                usize::MAX,
+            );
+            state.unicast_arrival = Some(holder);
+            let late = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest_from(late, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "a late answer is charged, so the empty bucket refuses it"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An addressed pull that arrives by unicast spends one answer of the serve budget, so the answer path
+    /// runs from the receive path, not only through the pure function.
+    #[test]
+    fn a_pull_that_arrives_is_answered_through_the_receive_path() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let pull: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePull {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    keys: vec![],
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed pull serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(pull, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers,
+                DIGEST_SERVES_PER_WINDOW - 1,
+                "the pull spent one slot, so 7 more answers fit in the window"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A page request for a page that this node does not hold gets no answer, so it spends no answer of the budget.
+    #[test]
+    fn a_page_request_for_a_missing_page_spends_no_answer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let request: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePageRequest {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    index: 99,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed page request serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(request, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers, DIGEST_SERVES_PER_WINDOW,
+                "a request for a missing page spends no answer of the budget"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pull addressed to another key is not this node's to answer, so it spends no answer of the budget.
+    #[test]
+    fn a_pull_to_another_key_leaves_the_budget_full() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let pull: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePull {
+                    to: Identity::generate().author_key(),
+                    channel: Channel::State,
+                    keys: vec![],
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed pull serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(pull, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers, DIGEST_SERVES_PER_WINDOW,
+                "a pull addressed to another key spends no answer, so all 8 fit"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An addressed page request that arrives by unicast spends one answer of the serve budget, as a pull does.
+    #[test]
+    fn a_page_request_that_arrives_is_answered_through_the_receive_path() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let page_request: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePageRequest {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    index: 0,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed page request serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(page_request, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers,
+                DIGEST_SERVES_PER_WINDOW - 1,
+                "the page request spent one slot, so 7 more answers fit in the window"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A page request addressed to another key is not this node's to answer, so it spends no answer of the budget.
+    #[test]
+    fn a_page_request_to_another_key_leaves_the_budget_full() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let asker = Identity::generate();
+            let request: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePageRequest {
+                    to: Identity::generate().author_key(),
+                    channel: Channel::State,
+                    index: 0,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&asker)
+            .serialize()
+            .expect("a signed page request serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(81));
+            ingest_from(request, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers, DIGEST_SERVES_PER_WINDOW,
+                "a pull addressed to another key spends no answer, so all 8 fit"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// One endpoint that signs its pulls with two keys spends two answers of its own budget, whatever the keys.
+    #[test]
+    fn one_endpoint_with_two_keys_spends_one_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            state.unicast_arrival = Some(endpoint_id(81));
+            for signer in [Identity::generate(), Identity::generate()] {
+                let pull: Bytes = Message::new_frame(
+                    &node.mesh,
+                    &nick("alice"),
+                    MessageKind::SlicePull {
+                        to: state.identity.author_key(),
+                        channel: Channel::State,
+                        keys: vec![],
+                    },
+                    MessageBody::from("{}"),
+                )
+                .sign(&signer)
+                .serialize()
+                .expect("a signed pull serializes")
+                .into_bytes();
+                ingest_from(pull, &mut state, &mut app, &context).await;
+            }
+            state.unicast_arrival = None;
+            let now = clock::Instant::now();
+            let answers: usize = (0..DIGEST_SERVES_PER_WINDOW)
+                .filter(|_| {
+                    state
+                        .serve_budget
+                        .admit(endpoint_id(81), Channel::State, now)
+                })
+                .count();
+            assert_eq!(
+                answers,
+                DIGEST_SERVES_PER_WINDOW - 2,
+                "two pulls from one endpoint spend two answers, whatever their keys"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pull is for one channel, so a meta frame of the author is live when the pull is for state.
+    #[test]
+    fn a_pull_of_one_channel_does_not_open_the_other() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let state_bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(state_bytes, &mut state, &mut app, &context).await;
+                let meta_bytes = slice_bytes(&node, &identity, Channel::Meta, version);
+                ingest(meta_bytes, &mut state, &mut app, &context).await;
+            }
+            let holder = endpoint_id(81);
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+                usize::MAX,
+            );
+            state.unicast_arrival = Some(holder);
+            let meta = slice_bytes(&node, &identity, Channel::Meta, 100);
+            ingest_from(meta, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::Meta), &identity),
+                Some(100),
+                "a meta frame is live when the pull is for state, so the empty bucket refuses it"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pull over the serve budget gets no frame, even for a slice that this node holds.
+    #[test]
+    fn a_refused_pull_gets_no_frames() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            let held = slice_bytes(&node, &identity, Channel::State, 1);
+            ingest(held, &mut state, &mut app, &context).await;
+            let asker = super::Asker {
+                endpoint: endpoint_id(81),
+                key: Identity::generate().author_key(),
+            };
+            for _ in 0..DIGEST_SERVES_PER_WINDOW {
+                state
+                    .serve_budget
+                    .admit(asker.endpoint, Channel::State, clock::Instant::now());
+            }
+            let answer = super::slice_pull_answer(
+                asker,
+                Channel::State,
+                &[identity.author_key()],
+                &mut state,
+                clock::Instant::now(),
+            );
+            assert!(
+                answer.is_empty(),
+                "a pull over the serve budget gets no frame"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An admitted pull gets the frames of the keys that this node holds, and none for the others.
+    #[test]
+    fn an_admitted_pull_gets_the_held_frames_of_its_keys() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            let held = slice_bytes(&node, &identity, Channel::State, 1);
+            ingest(held, &mut state, &mut app, &context).await;
+            let asker = super::Asker {
+                endpoint: endpoint_id(81),
+                key: Identity::generate().author_key(),
+            };
+            let stranger = Identity::generate().author_key();
+            let answer = super::slice_pull_answer(
+                asker,
+                Channel::State,
+                &[identity.author_key(), stranger],
+                &mut state,
+                clock::Instant::now(),
+            );
+            assert_eq!(
+                answer.len(),
+                1,
+                "the held key answers, and the stranger has no frame"
+            );
+            assert_eq!(
+                answer[0].key(),
+                identity.author_key(),
+                "the frame is the one of the held key"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The four slice kinds name one addressee, so a node that is not the addressee does not take them.
+    #[test]
+    fn a_slice_kind_is_for_its_addressee_only() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let addressee = Identity::generate().author_key();
+            let other = Identity::generate().author_key();
+            let kinds_to = |to: AuthorKey| {
+                let root = || DigestRoot::new(ContentHash::of(b"root"), 1).expect("one page");
+                let entries = vec![DigestEntry::new(to, 1, ContentHash::of(b"row"))];
+                vec![
+                    MessageKind::SliceRoot {
+                        to,
+                        state: root(),
+                        meta: root(),
+                    },
+                    MessageKind::SlicePull {
+                        to,
+                        channel: Channel::State,
+                        keys: vec![],
+                    },
+                    MessageKind::SlicePageRequest {
+                        to,
+                        channel: Channel::Meta,
+                        index: 0,
+                    },
+                    MessageKind::SlicePage {
+                        to,
+                        channel: Channel::State,
+                        page: DigestPage::build(&entries, 1, 0, 1).expect("a page of one row"),
+                    },
+                ]
+            };
+            for kind in kinds_to(addressee) {
+                let display = kind.to_string();
+                let message =
+                    Message::new_frame(&node.mesh, &nick("alice"), kind, MessageBody::from("{}"));
+                assert!(
+                    super::addressed_to_us(&message, &addressee),
+                    "the addressee does not take a {display}"
+                );
+                assert!(
+                    !super::addressed_to_us(&message, &other),
+                    "a key that is not the addressee takes a {display}"
+                );
+            }
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A signed slice frame of `identity` on `channel` at `version`, with the value `{"n": version}`.
+    fn slice_bytes(node: &Node, identity: &Identity, channel: Channel, version: u64) -> Bytes {
+        let body = MessageBody::try_new(&format!(
+            r#"{{"version":{version},"value":{{"n":{version}}}}}"#
+        ))
+        .expect("a slice body");
+        Message::new_channel_event(&node.mesh, &nick("twin"), body, channel)
+            .sign(identity)
+            .serialize()
+            .expect("serialize")
+            .into_bytes()
+    }
+
+    /// The `n` of the slice that `document` holds for `identity`, or `None` when it holds none.
+    fn held_n(document: &serde_json::Value, identity: &Identity) -> Option<u64> {
+        let hex = String::from_utf8_lossy(&identity.author_key().hex()).into_owned();
+        document.get(hex)?.get("n")?.as_u64()
+    }
+
+    /// A pulled slice takes no token, so it applies after the bucket of its author is empty.
+    #[test]
+    fn a_pulled_frame_takes_no_token() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            let live = slice_bytes(&node, &identity, Channel::State, 101);
+            ingest(live, &mut state, &mut app, &context).await;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(101),
+                "the bucket is empty, so a live frame is refused"
+            );
+
+            let holder = endpoint_id(81);
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+                usize::MAX,
+            );
+            state.unicast_arrival = Some(holder);
+            let pulled = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest_from(pulled, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "the pulled slice applies with no token"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A pulled slice is not a duplicate of a copy that the store refused before the pull.
+    #[test]
+    fn a_pulled_frame_skips_the_dedup() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            let refused = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest(refused.clone(), &mut state, &mut app, &context).await;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "the bucket is empty, so the first copy is refused"
+            );
+
+            let holder = endpoint_id(81);
+            state.outstanding_pulls.register(
+                holder,
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+                usize::MAX,
+            );
+            state.unicast_arrival = Some(holder);
+            ingest_from(refused, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "the answer to a pull is applied, not dropped as a duplicate"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A slice that a holder sends without a pull is live, so it takes a token and is refused.
+    #[test]
+    fn an_unasked_frame_is_charged() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let identity = Identity::generate();
+            state.peers.insert(identity.author_key());
+            for version in 1..=50 {
+                let bytes = slice_bytes(&node, &identity, Channel::State, version);
+                ingest(bytes, &mut state, &mut app, &context).await;
+            }
+            state.outstanding_pulls.register(
+                endpoint_id(81),
+                Channel::State,
+                identity.author_key(),
+                clock::Instant::now(),
+                usize::MAX,
+            );
+            state.unicast_arrival = Some(endpoint_id(82));
+            let unasked = slice_bytes(&node, &identity, Channel::State, 100);
+            ingest_from(unasked, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_ne!(
+                held_n(&state.docs.to_json(Channel::State), &identity),
+                Some(100),
+                "a holder with no pull is charged, and the empty bucket refuses the slice"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_slice_of_a_key_outside_the_roster_waits_for_its_joined() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the record
+            let record = Arc::new(Mutex::new(Vec::new()));
+            let mut app = MetaRecorder(Arc::clone(&record));
+            let stranger = Identity::generate();
+            let key = stranger.author_key();
+            let frame = gate_slice(&node.mesh, &stranger, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a slice of a key outside the roster is not in the view"
+            );
+            state.peers.insert(key);
+            promote_pending(key, clock::Instant::now(), &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_some(),
+                "the held slice reaches the view when its key joins"
+            );
+            let heard = record.lock().expect("the record lock").clone();
+            assert_eq!(
+                heard,
+                vec![key],
+                "the meta hook runs for the promoted slice"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_pending_slice_expires_after_the_alive_timeout() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let stranger = Identity::generate();
+            let key = stranger.author_key();
+            let frame = gate_slice(&node.mesh, &stranger, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a slice of a key outside the roster is held, not applied"
+            );
+            state.peers.insert(key);
+            let joined = clock::Instant::now() + Duration::from_secs(91);
+            promote_pending(key, joined, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a slice held past the alive timeout is gone when its key joins"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_peer_that_leaves_loses_its_slice_from_the_view() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_some(),
+                "the peer's slice is in the view"
+            );
+            let nickname = nick("member");
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Replaced(&nickname),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "the slice of a peer that left is out of the view"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn an_own_frame_is_not_held() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let own = Arc::clone(&state.identity);
+            let frame = gate_slice(&node.mesh, &own, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &own.author_key()).is_some(),
+                "an echo of an own frame is applied, not held as a stranger"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn the_sweep_expires_a_gone_key_after_the_gone_ttl() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let gone_ttl = habilis_network_doc::SliceLimits::default().gone_ttl;
+            let left_at = clock::Instant::now()
+                .checked_sub(gone_ttl + Duration::from_secs(1))
+                .expect("an instant past the gone TTL");
+            state.docs.forget(&key, left_at);
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a gone key is refused before the sweep expires it"
+            );
+            heartbeat::tick_sweep(&mut state, &SilentSink);
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_some(),
+                "the sweep drops the gone key after the gone TTL, and its slice applies again"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_lapsed_key_and_a_dropped_key_lose_their_slices() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let lapsed = Identity::generate();
+            let dropped = Identity::generate();
+            state.peers.insert(lapsed.author_key());
+            state.peers.insert(dropped.author_key());
+            for member in [&lapsed, &dropped] {
+                let frame = gate_slice(&node.mesh, member, 1);
+                let event = ChannelEvent {
+                    channel: Channel::Meta,
+                    message: &frame,
+                    surfaceable: true,
+                    live: true,
+                };
+                dispatch_channel(event, &mut state, &mut app, &context);
+            }
+            state.peers.remove(&lapsed.author_key());
+            state
+                .clock_evidence
+                .lapsed_quiet
+                .insert(lapsed.author_key());
+            state.peers.remove(&dropped.author_key());
+            heartbeat::tick_sweep(&mut state, &SilentSink);
+            assert!(
+                meta_slot(&state, &lapsed.author_key()).is_none(),
+                "a lapsed key keeps no slice: the sweep releases it, and it can still return"
+            );
+            assert!(
+                meta_slot(&state, &dropped.author_key()).is_none(),
+                "a key that left the roster loses its slice"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_new_run_of_a_member_leaves_one_slice_in_the_view() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let older = Identity::generate();
+            let newer = Identity::generate();
+            state.peers.insert(older.author_key());
+            state.peers.insert(newer.author_key());
+            for member in [&older, &newer] {
+                let frame = gate_slice(&node.mesh, member, 1);
+                let event = ChannelEvent {
+                    channel: Channel::Meta,
+                    message: &frame,
+                    surfaceable: true,
+                    live: true,
+                };
+                dispatch_channel(event, &mut state, &mut app, &context);
+            }
+            let nickname = nick("member");
+            lifecycle::end_session(
+                older.author_key(),
+                lifecycle::Goodbye::Replaced(&nickname),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            let view = state.docs.to_json(Channel::Meta);
+            assert_eq!(
+                view.as_object().map(serde_json::Map::len),
+                Some(1),
+                "a new run of a member leaves one slice in the view"
+            );
+            node.endpoint.close().await;
+        });
+    }
+    #[test]
+    fn a_slice_of_a_key_that_said_goodbye_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let first = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &first,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            let nickname = nick("member");
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Replaced(&nickname),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            // The store alone answers: the gate would drop the frame before the store sees it.
+            let later = gate_slice(&node.mesh, &member, 2);
+            let answer = state
+                .docs
+                .ingest(Channel::Meta, &later, true, clock::Instant::now());
+            assert!(
+                matches!(
+                    answer,
+                    habilis_network_doc::SliceIngest::Refused(
+                        habilis_network_doc::SliceError::GoneKey
+                    )
+                ),
+                "a replaced run's key is in the gone set, so its later slice is refused"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_slice_of_a_key_that_signed_goodbye_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let nickname = nick("member");
+            let goodbye = Message::new_left(&node.mesh, &nickname).sign(&member);
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Signed(&goodbye),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            let later = gate_slice(&node.mesh, &member, 2);
+            let answer = state
+                .docs
+                .ingest(Channel::Meta, &later, true, clock::Instant::now());
+            assert!(
+                matches!(
+                    answer,
+                    habilis_network_doc::SliceIngest::Refused(
+                        habilis_network_doc::SliceError::GoneKey
+                    )
+                ),
+                "a signed goodbye puts the key in the gone set, so its later slice is refused"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_frame_of_a_stranger_that_said_goodbye_is_dropped_not_held() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let stranger = Identity::generate();
+            let key = stranger.author_key();
+            let nickname = nick("stranger");
+            let goodbye = Message::new_left(&node.mesh, &nickname).sign(&stranger);
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Signed(&goodbye),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            let frame = gate_slice(&node.mesh, &stranger, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            assert!(
+                state
+                    .docs
+                    .take_pending(Channel::Meta, &key, clock::Instant::now())
+                    .is_none(),
+                "a frame of a key that said goodbye waits nowhere, not even in the pending set"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_held_frame_older_than_the_join_is_promoted_without_a_surface() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let mut state = fresh_state();
+            // The frame is older than the join, so the join horizon hides it.
+            state.joined_at = UnixSecs::from(4_000_000_000_i64);
+            // the app and the test share the record
+            let record = Arc::new(Mutex::new(Vec::new()));
+            let mut app = MetaRecorder(Arc::clone(&record));
+            let member = Identity::generate();
+            let key = member.author_key();
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let sink = StateChanges::default();
+            let context = HandlerCtx {
+                sender: &node.sender,
+                endpoint: &node.endpoint,
+                mesh: &node.mesh,
+                author: &node.author,
+                identity: &node.identity,
+                our_pubkey: node.our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            state.peers.insert(key);
+            promote_pending(key, clock::Instant::now(), &mut state, &mut app, &context);
+            assert!(
+                meta_slot(&state, &key).is_some(),
+                "the held slice reaches the view when its key joins"
+            );
+            let heard = record.lock().expect("the record lock").clone();
+            assert_eq!(
+                heard,
+                vec![key],
+                "the meta hook runs for the promoted slice"
+            );
+            assert_eq!(
+                sink.count(),
+                0,
+                "a promoted frame older than the join is not surfaced"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_key_that_loses_its_nickname_keeps_its_slice_pending() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = meta_app();
+            let member = Identity::generate();
+            let key = member.author_key();
+            state.peers.insert(key);
+            let frame = gate_slice(&node.mesh, &member, 1);
+            let event = ChannelEvent {
+                channel: Channel::Meta,
+                message: &frame,
+                surfaceable: true,
+                live: true,
+            };
+            dispatch_channel(event, &mut state, &mut app, &context);
+            let nickname = nick("member");
+            lifecycle::end_session(
+                key,
+                lifecycle::Goodbye::Refused(&nickname),
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(
+                meta_slot(&state, &key).is_none(),
+                "a key that lost its nickname is out of the view"
+            );
+            assert!(
+                state
+                    .docs
+                    .take_pending(Channel::Meta, &key, clock::Instant::now())
+                    .is_some(),
+                "its slice waits in the pending set, because the key can return"
             );
             node.endpoint.close().await;
         });
@@ -4044,80 +5140,6 @@ mod first_contact_tests {
             }
             node.endpoint.close().await;
         });
-    }
-
-    /// The frame of the field red: a directed frame parked across a gap in the links reaches
-    /// its addressee at the next `NeighborUp`, with no `PeerInfo`.
-    #[test]
-    fn a_directed_frame_parked_across_a_gap_in_the_links_is_delivered_at_the_next_neighbor_up() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            async {
-                use iroh::protocol::Router;
-
-                use crate::protocol::MessageId;
-                use crate::transport::{UNICAST_ALPN, UnicastAcceptor, UnicastPool};
-
-                let node = Node::spawn().await;
-                let context = node.context();
-                let bob = iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::Disabled)
-                    .bind()
-                    .await
-                    .expect("bind bob");
-                let (inbox, mut frames) = mpsc::channel(8);
-                let router = Router::builder(bob.clone())
-                    .accept(
-                        UNICAST_ALPN,
-                        UnicastAcceptor::with_idle(
-                            inbox,
-                            PayloadPath::DirectOnly,
-                            std_Duration::from_mins(1),
-                        ),
-                    )
-                    .spawn();
-                lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob.addr());
-                let mut state = fresh_state();
-                state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
-                state.names.insert(test_key("bob"), nick("bob"));
-                state.bind_peer_endpoint(test_key("bob"), nick("bob"), bob.addr());
-                feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
-                feed(Event::NeighborDown(bob.id()), &mut state, &context).await;
-                assert!(
-                    state.standing.contains(&Standing::Meshed),
-                    "the gap does not clear meshed"
-                );
-                let frame = Message::new_pong(
-                    &node.mesh,
-                    &node.author,
-                    test_key("bob"),
-                    &MessageId::random(),
-                )
-                .sign(&Identity::generate());
-                let bytes = frame.serialize().expect("serialize");
-                assert!(
-                    state.pending_outbound.push((frame, bytes.clone())),
-                    "a directed frame parked across a gap is queued"
-                );
-
-                feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
-
-                let delivered =
-                    tokio_time::timeout(std_Duration::from_secs(5), frames.recv()).await;
-                assert_eq!(
-                    delivered.ok().flatten().map(|inbound| inbound.bytes),
-                    Some(bytes.into_bytes()),
-                    "bob never got the parked frame"
-                );
-                assert!(
-                    state.pending_outbound.is_empty(),
-                    "the directed frame stays parked across a second gap"
-                );
-                router.shutdown().await.expect("shutdown");
-                node.endpoint.close().await;
-            },
-        );
     }
 
     /// A node that reaches the release count tells gossip to leave the
@@ -4378,6 +5400,190 @@ mod first_contact_tests {
         });
     }
 
+    /// The seal key of a `PeerInfo` belongs to its signer, and only a key that the node knows keeps
+    /// one: a member mints keys for free, so the roster bounds the map. A body with no seal key
+    /// changes nothing, and a newer `PeerInfo` of the key replaces the key.
+    #[test]
+    fn a_peer_info_binds_its_seal_key_to_its_signer_when_the_signer_is_known() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob = Identity::generate();
+            let stranger = Identity::generate();
+            let key_of = |who: &Identity| {
+                AuthorKey::decode_hex(&identity::encode_pubkey(&who.public()))
+                    .expect("a 32-byte key")
+            };
+            let (bob_key, stranger_key) = (key_of(&bob), key_of(&stranger));
+            let peer_info = |seal: Option<x25519_dalek::PublicKey>, signed_by: &Identity| {
+                let address = iroh::EndpointAddr::new(endpoint_id(61));
+                let mut json = address_json_with_seal(&address);
+                match seal {
+                    Some(seal) => {
+                        json["seal"] =
+                            serde_json::Value::String(bs58::encode(seal.as_bytes()).into_string());
+                    }
+                    None => {
+                        json.as_object_mut()
+                            .expect("the body is an object")
+                            .remove("seal");
+                    }
+                }
+                let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+                Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(signed_by)
+            };
+
+            let mut state = fresh_state();
+            state.peers.insert(bob_key);
+            state.names.insert(bob_key, nick("bob"));
+            super::handle_peer_info(
+                &peer_info(Some(bob.seal_public()), &bob),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                Some(&bob.seal_public()),
+                "the seal key of a known signer is kept"
+            );
+
+            super::handle_peer_info(
+                &peer_info(Some(bob.seal_public()), &stranger),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.seal_key_of(&stranger_key),
+                None,
+                "a key that the node does not know keeps no seal key"
+            );
+
+            super::handle_peer_info(&peer_info(None, &bob), &mut state, &context).await;
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                Some(&bob.seal_public()),
+                "a PeerInfo with no seal key is refused and leaves the kept key"
+            );
+
+            let newer = Identity::generate().seal_public();
+            super::handle_peer_info(&peer_info(Some(newer), &bob), &mut state, &context).await;
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                Some(&newer),
+                "a newer PeerInfo replaces the seal key"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// **A `PeerInfo` that comes before the `joined` frame of its signer keeps its seal key for the
+    /// join.** The next `PeerInfo` of the signer is a refresh period away, so the key that is
+    /// dropped on arrival leaves the first directed sealed send without a key. The key waits, and
+    /// the admission of its signer to the roster applies it.
+    #[test]
+    fn a_peer_info_before_the_join_of_its_signer_gives_its_seal_key_at_the_join() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::lifecycle::membership_update::{self, MembershipUpdate};
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob = Identity::generate();
+            let bob_key = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
+                .expect("a 32-byte key");
+            let mut json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint_id(62)));
+            json["seal"] =
+                serde_json::Value::String(bs58::encode(bob.seal_public().as_bytes()).into_string());
+            let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+            let info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
+
+            let mut state = fresh_state();
+            super::handle_peer_info(&info, &mut state, &context).await;
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                None,
+                "the key of an unknown signer was kept at once"
+            );
+            assert_eq!(
+                state.pending_seal_key_count(),
+                1,
+                "the key of an unknown signer did not wait for its join"
+            );
+
+            let joined = MembershipUpdate {
+                returned: false,
+                joined_new: true,
+                stale: false,
+            };
+            membership_update::apply(&joined, bob_key, &mut state);
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                Some(&bob.seal_public()),
+                "the join did not give the waiting seal key"
+            );
+            assert_eq!(
+                state.pending_seal_key_count(),
+                0,
+                "the key still waits after its join"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// **The old body of a `PeerInfo`, with no seal key, binds nothing.** Wire 18.0 is not released,
+    /// so the seal key is part of the body. The literal below is the body before the seal key: an
+    /// address and a proof. The frame is signed and its address is good, and the receiver still
+    /// refuses it: no endpoint, no proof, no key.
+    #[test]
+    fn a_peer_info_with_no_seal_key_binds_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::messages::MessageBody;
+            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let bob = Identity::generate();
+            let bob_key = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
+                .expect("a 32-byte key");
+            let mut old =
+                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint_id(63)));
+            old["proof"] = serde_json::Value::String("proof".to_owned());
+            assert!(
+                old.get("seal").is_none(),
+                "the premise: the body has no seal"
+            );
+            let body = MessageBody::try_new(&old.to_string()).expect("an address body");
+            let info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
+
+            let mut state = fresh_state();
+            state.peers.insert(bob_key);
+            state.names.insert(bob_key, nick("bob"));
+            super::handle_peer_info(&info, &mut state, &context).await;
+
+            assert_eq!(
+                state.seal_key_of(&bob_key),
+                None,
+                "a body with no seal kept a key"
+            );
+            assert_eq!(
+                state.pending_seal_key_count(),
+                0,
+                "a body with no seal left a key waiting"
+            );
+            assert!(
+                state.known_endpoints.is_empty() && state.peer_endpoints.is_empty(),
+                "a body with no seal bound an endpoint"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
     /// A `PeerInfo` binds its signer to its endpoint only with that endpoint's
     /// proof over that signer. Bob's proof is public on gossip, so a frame that
     /// carries it but is signed by another key must bind nothing.
@@ -4385,7 +5591,7 @@ mod first_contact_tests {
     fn a_peer_info_binds_its_signer_only_with_the_endpoints_proof() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+            use crate::protocol::{AuthorKey, identity};
             use crate::transport::proven_endpoints;
 
             let node = Node::spawn().await;
@@ -4397,8 +5603,7 @@ mod first_contact_tests {
             let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
                 .expect("a 32-byte key");
             let peer_info = |proof: Option<&str>, signed_by: &Identity| {
-                let mut json =
-                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+                let mut json = address_json_with_seal(&iroh::EndpointAddr::new(bob_endpoint));
                 if let Some(proof) = proof {
                     json["proof"] = serde_json::Value::String(proof.to_owned());
                 }
@@ -4450,7 +5655,7 @@ mod first_contact_tests {
             let to = state.identity.author_key();
             let request = Message::new_proof_request(&node.mesh, &nick("asker"), to).sign(&asker);
             state.direct.insert(endpoint_id(80), DirectState::Direct);
-            state.state_digest_serves.unicast.arrived_from = Some(endpoint_id(80));
+            state.unicast_arrival = Some(endpoint_id(80));
 
             super::answer_proof_request(&to, &request, &mut state, &context).await;
 
@@ -4483,7 +5688,7 @@ mod first_contact_tests {
         state.place_endpoint(asker, &nick("asker"), iroh::EndpointAddr::new(rendezvous));
         state.direct.insert(rendezvous, DirectState::Direct);
         state.direct.insert(arrival, DirectState::Direct);
-        state.state_digest_serves.unicast.arrived_from = Some(arrival);
+        state.unicast_arrival = Some(arrival);
 
         assert_eq!(
             super::return_path(&state, &asker),
@@ -4505,7 +5710,7 @@ mod first_contact_tests {
         state.names.insert(asker, nick("asker"));
         state.place_endpoint(asker, &nick("asker"), iroh::EndpointAddr::new(old));
         state.direct.insert(new, DirectState::Direct);
-        state.state_digest_serves.unicast.arrived_from = Some(new);
+        state.unicast_arrival = Some(new);
 
         assert_eq!(
             super::return_path(&state, &asker),
@@ -4521,33 +5726,6 @@ mod first_contact_tests {
         );
     }
 
-    /// A proof request that arrives on a unicast connection from an endpoint that is cold and not linked (the
-    /// asker only dialed us) is answered by a dial back in the background, as the ask is sent: `send_best_effort`
-    /// drops the answer for such an endpoint, after the answer took its slot of the cap, and the asker stays
-    /// unproved. The answer is kept in the log of its author only when it was sent, so that is the proof here.
-    #[test]
-    fn a_proof_request_from_a_cold_unlinked_arrival_is_answered_by_a_dial_back() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let node = Node::spawn().await;
-            let context = node.context();
-            let mut state = fresh_state();
-            let asker = Identity::generate();
-            let to = state.identity.author_key();
-            let request = Message::new_proof_request(&node.mesh, &nick("asker"), to).sign(&asker);
-            state.direct.insert(endpoint_id(82), DirectState::Direct);
-            state.state_digest_serves.unicast.arrived_from = Some(endpoint_id(82));
-
-            super::answer_proof_request(&to, &request, &mut state, &context).await;
-
-            let unkept = state.take_answer_to_keep();
-            assert!(
-                unkept.is_none(),
-                "the answer was made but not sent: the send to the cold unlinked arrival was dropped"
-            );
-            node.endpoint.close().await;
-        });
-    }
-
     /// Two live keys use one nickname, and the second binds no dial hint. When the first leaves,
     /// the second is the only key of the nickname, and its endpoint becomes the hint at once: a
     /// directed send does not wait for its next `PeerInfo`.
@@ -4555,7 +5733,6 @@ mod first_contact_tests {
     fn the_endpoint_a_rival_key_was_refused_becomes_the_hint_when_the_first_key_leaves() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -4566,8 +5743,7 @@ mod first_contact_tests {
             for (run, endpoint) in [(&first, first_endpoint), (&second, second_endpoint)] {
                 state.names.insert(run.author_key(), twin.clone());
                 state.peers.insert(run.author_key());
-                let json =
-                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+                let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint));
                 let body = MessageBody::try_new(&json.to_string()).expect("an address body");
                 let peer_info = Message::new_peer_info(&node.mesh, &twin, body).sign(run);
                 super::handle_peer_info(&peer_info, &mut state, &context).await;
@@ -4599,7 +5775,6 @@ mod first_contact_tests {
     fn a_refused_key_that_binds_releases_the_endpoint_it_had_retained() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -4612,8 +5787,7 @@ mod first_contact_tests {
                 state.peers.insert(run.author_key());
             }
             let advertise = |run: &Identity, endpoint| {
-                let json =
-                    peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+                let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint));
                 let body = MessageBody::try_new(&json.to_string()).expect("an address body");
                 Message::new_peer_info(&node.mesh, &twin, body).sign(run)
             };
@@ -4644,7 +5818,7 @@ mod first_contact_tests {
     fn the_beacon_flag_of_a_trusted_key_whose_proof_left_the_table_is_believed() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+            use crate::protocol::{AuthorKey, identity};
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -4652,8 +5826,7 @@ mod first_contact_tests {
             let bob = Identity::generate();
             let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
                 .expect("a 32-byte key");
-            let mut json =
-                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            let mut json = address_json_with_seal(&iroh::EndpointAddr::new(bob_endpoint));
             json["beacon"] = serde_json::Value::Bool(true);
             let body = MessageBody::try_new(&json.to_string()).expect("an address body");
             let peer_info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
@@ -4685,7 +5858,7 @@ mod first_contact_tests {
     fn a_proof_recorded_before_the_signer_joined_the_roster_is_trusted_by_the_next_peer_info() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::{AuthorKey, identity, peer_addr_error};
+            use crate::protocol::{AuthorKey, identity};
             use crate::transport::proven_endpoints;
 
             let node = Node::spawn().await;
@@ -4696,8 +5869,7 @@ mod first_contact_tests {
             let bob_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public()))
                 .expect("a 32-byte key");
             let proof = proven_endpoints::sign(&bob_endpoint_key, &node.mesh, &bob_signer);
-            let mut json =
-                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            let mut json = address_json_with_seal(&iroh::EndpointAddr::new(bob_endpoint));
             json["proof"] = serde_json::Value::String(proof);
             let body = MessageBody::try_new(&json.to_string()).expect("an address body");
             let peer_info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&bob);
@@ -4736,7 +5908,6 @@ mod first_contact_tests {
             use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
             use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
-            use crate::protocol::peer_addr_error;
             use crate::transport::proven_endpoints;
 
             async fn handle_for(secret: &SecretKey) -> MultihopHandle {
@@ -4779,8 +5950,7 @@ mod first_contact_tests {
                 "a node with no peers has no topology edges"
             );
 
-            let mut address =
-                peer_addr_error::endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
+            let mut address = address_json_with_seal(&EndpointAddr::new(author_key.public()));
             address["proof"] = serde_json::Value::String(proven_endpoints::sign(
                 &author_key,
                 &node.mesh,
@@ -4882,12 +6052,12 @@ mod first_contact_tests {
         F: FnMut() -> Fut,
         Fut: Future<Output = bool>,
     {
-        let deadline = std_Instant::now() + std_Duration::from_secs(5);
+        let deadline = std_Instant::now() + Duration::from_secs(5);
         while std_Instant::now() < deadline {
             if check().await {
                 return true;
             }
-            tokio_time::sleep(std_Duration::from_millis(10)).await;
+            tokio_time::sleep(Duration::from_millis(10)).await;
         }
         check().await
     }
@@ -4905,11 +6075,9 @@ mod first_contact_tests {
     /// A `PeerInfo` of the author `bob` that carries `addr`, signed by `by`.
     fn peer_info_signed_by(node: &Node, address: &iroh::EndpointAddr, by: &Identity) -> Verified {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
 
-        let body =
-            MessageBody::try_new(&peer_addr_error::endpoint_addr_to_json(address).to_string())
-                .expect("an address body");
+        let body = MessageBody::try_new(&address_json_with_seal(address).to_string())
+            .expect("an address body");
         Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(by)
     }
 
@@ -4921,11 +6089,9 @@ mod first_contact_tests {
         at: UnixSecs,
     ) -> Verified {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
         use crate::transport::proven_endpoints;
 
-        let mut address =
-            peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint_key.public()));
+        let mut address = address_json_with_seal(&iroh::EndpointAddr::new(endpoint_key.public()));
         address["proof"] = serde_json::Value::String(proven_endpoints::sign(
             endpoint_key,
             &node.mesh,
@@ -4939,7 +6105,7 @@ mod first_contact_tests {
 
     /// A crash restart keeps the key of the endpoint and makes a new signing key. A `PeerInfo` of
     /// the old key, replayed after the new key proved the endpoint, must not take the proof back:
-    /// the digests of the peer would be answered on gossip until its next `PeerInfo`.
+    /// the backfill requests of the peer would be answered on gossip until its next `PeerInfo`.
     #[test]
     fn a_replayed_old_peer_info_does_not_take_the_proof_of_the_new_signer() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -4951,7 +6117,7 @@ mod first_contact_tests {
             state.peers.insert(old.author_key());
             state.peers.insert(new.author_key());
             let now = UnixSecs::now();
-            let earlier = now - std_Duration::from_secs(60);
+            let earlier = now - Duration::from_secs(60);
 
             let first = proving_peer_info(&node, &endpoint_key, &old, earlier);
             super::handle_peer_info(&first, &mut state, &context).await;
@@ -5229,8 +6395,7 @@ mod first_contact_tests {
         .sign(&Identity::generate())
         .serialize()
         .expect("serialize");
-        let (parsed, nonce) = Message::parse_wire(inbound.as_bytes()).expect("parses");
-        assert!(nonce.is_none(), "a relayed peer info carries no nonce");
+        let parsed = Message::parse(inbound.as_bytes()).expect("parses");
         let verified_frame = parsed.verify().expect("verifies");
         let relayed = verified_frame.serialize().expect("serialize");
         assert_eq!(
@@ -5249,7 +6414,6 @@ mod first_contact_tests {
     fn a_second_peer_info_right_after_a_deferred_dial_does_not_dial() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -5261,8 +6425,7 @@ mod first_contact_tests {
                 }
             };
             let body = MessageBody::try_new(
-                &peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(lower))
-                    .to_string(),
+                &address_json_with_seal(&iroh::EndpointAddr::new(lower)).to_string(),
             )
             .expect("an address body");
             let peer_info = Message::new_peer_info(&node.mesh, &nick("lower"), body)
@@ -5299,7 +6462,6 @@ mod first_contact_tests {
     fn a_peer_info_leaves_one_slot_free_in_a_mesh_larger_than_g_plus_one() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use crate::protocol::messages::MessageBody;
-            use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
             let context = node.context();
@@ -5312,8 +6474,7 @@ mod first_contact_tests {
                 }
             };
             let body = MessageBody::try_new(
-                &peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer))
-                    .to_string(),
+                &address_json_with_seal(&iroh::EndpointAddr::new(newcomer)).to_string(),
             )
             .expect("an address body");
             let peer_info = Message::new_peer_info(&node.mesh, &nick("newcomer"), body)
@@ -5357,56 +6518,10 @@ mod first_contact_tests {
         });
     }
 
-    /// A node whose first digests went out over the rendezvous alone can have
-    /// every answer dropped on the way: each hop already saw those frames, and
-    /// iroh-gossip drops a message id it has seen. So it asks again on its
-    /// first real-peer link, and on no other link; the chat log asks there too.
-    /// `idle.broadcasts` counts digest broadcasts and nothing else a link-up
-    /// sends; the test sender cannot record frames, so the count stands in for
-    /// the three digests.
-    #[test]
-    fn only_the_first_real_peer_link_asks_for_state_again() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let node = Node::spawn().await;
-            let context = node.context();
-            let mut state = fresh_state();
-            let mut app = Inert;
-
-            let mut digests_on_link_up = async |peer| {
-                let before = state.idle.broadcasts;
-                handle_gossip_event(
-                    Some(Ok(Event::NeighborUp(peer))),
-                    &mut state,
-                    &mut app,
-                    &context,
-                )
-                .await;
-                state.idle.broadcasts - before
-            };
-
-            assert_eq!(
-                digests_on_link_up(context.rendezvous_id).await,
-                0,
-                "the rendezvous link"
-            );
-            assert_eq!(
-                digests_on_link_up(endpoint_id(1)).await,
-                3,
-                "the first real-peer link: one state, one meta and one chat digest"
-            );
-            assert_eq!(
-                digests_on_link_up(endpoint_id(2)).await,
-                0,
-                "a second real-peer link"
-            );
-            node.endpoint.close().await;
-        });
-    }
-
     /// A newcomer behind the rendezvous learns our address only from our
     /// `PeerInfo` flood, and the lower endpoint id is the one that dials. Its
     /// first frame to reach us is not always its `joined`: under load its
-    /// digest can overtake it. So the flood follows the first frame from a
+    /// `State` frame can overtake it. So the flood follows the first frame from a
     /// new peer, whatever its kind. A `State` frame does not mark a peer
     /// present, so it floods nothing. A `joined` first frame floods in
     /// `handle_presence`, which this test does not cover.
@@ -5418,26 +6533,203 @@ mod first_contact_tests {
             let mut app = Inert;
             let newcomer = Identity::generate();
             let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
-            let heads = || MessageBody::try_new(r#"{"heads":[]}"#).expect("a JSON body");
 
-            let mut digest_first = fresh_state();
-            let digest =
-                Message::new_channel_digest(&node.mesh, &nick("late"), heads(), Channel::State)
-                    .sign(&newcomer);
-            ingest(wire(&digest), &mut digest_first, &mut app, &context).await;
+            let mut peer_info_first = fresh_state();
+            let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint_id(7)));
+            let body = MessageBody::try_new(&json.to_string()).expect("an address body");
+            let first = Message::new_peer_info(&node.mesh, &nick("late"), body).sign(&newcomer);
+            ingest(wire(&first), &mut peer_info_first, &mut app, &context).await;
             assert!(
-                digest_first.peerinfo_flood.is_some(),
-                "a newcomer's digest arrived first, and we never told it our address"
+                peer_info_first.peerinfo_flood.is_some(),
+                "a newcomer's PeerInfo arrived first, and we never told it our address"
             );
 
             let mut change_first = fresh_state();
-            let change =
-                Message::new_channel_event(&node.mesh, &nick("late"), heads(), Channel::State)
-                    .sign(&newcomer);
+            let change = Message::new_channel_event(
+                &node.mesh,
+                &nick("late"),
+                MessageBody::try_new(r#"{"version":1,"value":{}}"#).expect("a JSON body"),
+                Channel::State,
+            )
+            .sign(&newcomer);
             ingest(wire(&change), &mut change_first, &mut app, &context).await;
             assert!(
                 change_first.peerinfo_flood.is_none(),
                 "a state frame does not mark its author present"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// An app that records the text of each app frame it is handed.
+    // The app and the test share the text of the frames it records.
+    struct Recorded(Arc<Mutex<Vec<String>>>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for Recorded {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            let text = frame.message.body.as_str().to_owned();
+            self.0.lock().expect("no poison").push(text);
+            true
+        }
+    }
+
+    /// A reaped group completes when its author serves the first shard again. The later shard arrived
+    /// after the reap, and the repeat of the first shard reaches the store, which completes the group.
+    #[test]
+    fn a_reaped_shard_group_completes_when_its_first_shard_is_served_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let author = Identity::generate();
+            let group = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440000")
+                .expect("a valid group");
+            let shard = |index: u32, text: &str| {
+                let mut message = Message::new_app(
+                    &node.mesh,
+                    &nick("bob"),
+                    AppFrameParams::new(
+                        protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::from(text),
+                    ),
+                );
+                message.shard = Some(Shard::new(group.clone(), 2).index(index));
+                message.sign(&author)
+            };
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+            // The app and the test share the frames it records.
+            let delivered = Arc::new(Mutex::new(Vec::new()));
+            let mut app = Recorded(Arc::clone(&delivered));
+            let mut state = fresh_state();
+
+            let first = shard(0, "hello ");
+            ingest(wire(&first), &mut state, &mut app, &context).await;
+            let reaped_at =
+                clock::Instant::now() + consts::REASSEMBLY_STALE + Duration::from_secs(1);
+            assert!(
+                state.reassembly.sweep_stale(reaped_at) > 0,
+                "the partial group was not reaped"
+            );
+            ingest(wire(&shard(1, "world")), &mut state, &mut app, &context).await;
+            ingest(wire(&first), &mut state, &mut app, &context).await;
+
+            assert_eq!(
+                *delivered.lock().expect("no poison"),
+                ["hello world".to_owned()],
+                "the reaped group did not complete when its first shard was served again"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A repeat of a shard whose group is already surfaced does not reach the lifecycle: it does not
+    /// refresh the sighting of its author, as a fresh frame would.
+    #[test]
+    fn a_shard_of_a_surfaced_group_does_not_refresh_its_author() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let author = Identity::generate();
+            let group = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440000")
+                .expect("a valid group");
+            let shard = |index: u32, text: &str| {
+                let mut message = Message::new_app(
+                    &node.mesh,
+                    &nick("bob"),
+                    AppFrameParams::new(
+                        protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::from(text),
+                    ),
+                );
+                message.shard = Some(Shard::new(group.clone(), 2).index(index));
+                message.sign(&author)
+            };
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+            let mut app = Inert;
+            let mut state = fresh_state();
+            let first = shard(0, "hello ");
+            let key = first.key();
+            ingest(wire(&first), &mut state, &mut app, &context).await;
+            ingest(wire(&shard(1, "world")), &mut state, &mut app, &context).await;
+            let surfaced = clock::Instant::now();
+            state.last_seen.insert(key, surfaced);
+            tokio_time::sleep(Duration::from_millis(5)).await;
+
+            ingest(wire(&first), &mut state, &mut app, &context).await;
+
+            assert_eq!(
+                state.last_seen.get(&key),
+                Some(&surfaced),
+                "a repeat of a surfaced shard refreshed the sighting of its author"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A group uuid is chosen by its author, so two authors can reuse one. A surfaced group of one
+    /// author does not hide the group of the other author.
+    #[test]
+    fn a_second_author_reusing_a_group_uuid_completes_its_own_group() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let group = ShardGroup::parse_uuid("550e8400-e29b-41d4-a716-446655440000")
+                .expect("a valid group");
+            let shard = |author: &Identity, index: u32, text: &str| {
+                let mut message = Message::new_app(
+                    &node.mesh,
+                    &nick("bob"),
+                    AppFrameParams::new(
+                        protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::from(text),
+                    ),
+                );
+                message.shard = Some(Shard::new(group.clone(), 2).index(index));
+                message.sign(author)
+            };
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+            // The app and the test share the frames it records.
+            let delivered = Arc::new(Mutex::new(Vec::new()));
+            let mut app = Recorded(Arc::clone(&delivered));
+            let mut state = fresh_state();
+            let (alice, bob) = (Identity::generate(), Identity::generate());
+
+            for (author, first, second) in [(&alice, "alice ", "one"), (&bob, "bob ", "two")] {
+                ingest(
+                    wire(&shard(author, 0, first)),
+                    &mut state,
+                    &mut app,
+                    &context,
+                )
+                .await;
+                ingest(
+                    wire(&shard(author, 1, second)),
+                    &mut state,
+                    &mut app,
+                    &context,
+                )
+                .await;
+            }
+
+            assert_eq!(
+                *delivered.lock().expect("no poison"),
+                ["alice one".to_owned(), "bob two".to_owned()],
+                "the second author's group was hidden by the first author's group uuid"
             );
             node.endpoint.close().await;
         });
@@ -5500,6 +6792,832 @@ mod first_contact_tests {
             node.endpoint.close().await;
         });
     }
+
+    #[test]
+    fn a_copy_that_goes_through_the_restore_still_raises_the_held_event_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::lifecycle",
+                "our nickname is held by another member",
+            );
+            let node = Node::spawn().await;
+            let lines = ErrorLines::default();
+            let context = HandlerCtx {
+                sink: &lines,
+                ..node.context()
+            };
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let (claimant, other_member) = (Identity::generate(), Identity::generate());
+            let (name, mesh_text): (&str, &str) = (node.author.as_ref(), node.mesh.as_ref());
+            let proof = other_member.prove(&claimant.author_key(), name, mesh_text, 1);
+            let joined: Verified =
+                Message::new_joined_with_proof(&node.mesh, &node.author, &proof).sign(&claimant);
+
+            super::restore_lost_proof(&joined, &mut state, &mut app, &context).await;
+            super::restore_lost_proof(&joined, &mut state, &mut app, &context).await;
+
+            let seen: Vec<String> = lines
+                .0
+                .lock()
+                .expect("the lines lock is not poisoned")
+                .clone();
+            let held: usize = seen
+                .iter()
+                .filter(|line| line.contains("is held by another member"))
+                .count();
+            assert_eq!(
+                held, 1,
+                "the copy spent the held signal without a line, or raised it twice: {seen:?}"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A proof request that came on a cold unlinked arrival is answered by a dial back: the answer
+    /// goes to the endpoint of that arrival, and the pool starts the dial to it at once.
+    #[test]
+    fn a_proof_request_from_a_cold_unlinked_arrival_is_answered_by_a_dial_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let asker = Identity::generate();
+            let to = state.identity.author_key();
+            let request = Message::new_proof_request(&node.mesh, &nick("asker"), to).sign(&asker);
+            state.direct.insert(endpoint_id(82), DirectState::Direct);
+            state.unicast_arrival = Some(endpoint_id(82));
+            let gate = state.unicast_pool.hold_next_dial();
+
+            super::answer_proof_request(&to, &request, &mut state, &context).await;
+
+            assert!(
+                state.unicast_pool.is_dialing(endpoint_id(82)),
+                "the answer went back by a dial to the cold arrival"
+            );
+            gate.notify_one();
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The control of the dial back: the asker has a known address that is not the arrival, and the
+    /// answer goes to that address by a plain send. The dial back is only to the authenticated
+    /// arrival, so nothing dials the known address.
+    #[test]
+    fn a_proof_request_is_not_dialed_back_to_an_address_that_is_not_the_arrival() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let asker = Identity::generate();
+            let to = state.identity.author_key();
+            let request = Message::new_proof_request(&node.mesh, &nick("asker"), to).sign(&asker);
+            state.direct.insert(endpoint_id(82), DirectState::Direct);
+            state.direct.insert(endpoint_id(83), DirectState::Direct);
+            state.retain_refused_endpoint(
+                asker.author_key(),
+                iroh::EndpointAddr::new(endpoint_id(83)),
+            );
+            state.unicast_arrival = Some(endpoint_id(82));
+
+            super::answer_proof_request(&to, &request, &mut state, &context).await;
+
+            assert!(
+                !state.unicast_pool.is_dialing(endpoint_id(83)),
+                "the answer goes to the known address by a plain send, not by a dial back"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A root that arrives by broadcast, with no unicast connection, notes nothing.
+    #[test]
+    fn a_root_that_arrives_by_broadcast_notes_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.peers.insert(alice.author_key());
+            state.names.insert(alice.author_key(), nick("alice"));
+            state.bind_peer_endpoint(
+                alice.author_key(),
+                nick("alice"),
+                iroh::EndpointAddr::new(endpoint_id(83)),
+            );
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = None;
+            ingest_from(root, &mut state, &mut app, &context).await;
+            assert_eq!(
+                requests_after_settle(&mut state),
+                0,
+                "a root that arrived by broadcast notes no difference"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A page that arrives by broadcast, with no unicast connection, registers no pull, even for a page asked for.
+    #[test]
+    fn a_page_that_arrives_by_broadcast_registers_no_pull() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            let carol = Identity::generate();
+            state.peers.insert(alice.author_key());
+            state.names.insert(alice.author_key(), nick("alice"));
+            state.bind_peer_endpoint(
+                alice.author_key(),
+                nick("alice"),
+                iroh::EndpointAddr::new(endpoint_id(83)),
+            );
+            state.peers.insert(carol.author_key());
+            let now = clock::Instant::now();
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            state.digest_round.note_root(
+                alice.author_key(),
+                endpoint_id(83),
+                Channel::State,
+                &elsewhere,
+                false,
+                now,
+            );
+            state.digest_round.advance(now, |_| true, |_, _| false);
+            let page = DigestPage::build(
+                &[DigestEntry::new(
+                    carol.author_key(),
+                    1,
+                    ContentHash::of(b"row"),
+                )],
+                1,
+                0,
+                1,
+            )
+            .expect("a page of one row");
+            let own = state.identity.author_key();
+            let signed = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePage {
+                    to: own,
+                    channel: Channel::State,
+                    page,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice);
+            let frame: Bytes = signed
+                .serialize()
+                .expect("a signed page serializes")
+                .into_bytes();
+            state.unicast_arrival = None;
+            ingest_from(frame, &mut state, &mut app, &context).await;
+            assert!(
+                !state.outstanding_pulls.take(
+                    endpoint_id(83),
+                    Channel::State,
+                    carol.author_key(),
+                    now
+                ),
+                "a page that arrived by broadcast registers no pull"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A key that the pull table refused is pulled on the next differing root. With the table full, a page that lists
+    /// the key opens no pull; once the table has room, a second root and the page again open it.
+    #[test]
+    fn a_key_refused_by_a_full_pull_table_is_pulled_on_the_next_root() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let holder = Identity::generate();
+            let wanted = Identity::generate();
+            state.peers.insert(holder.author_key());
+            state.peers.insert(wanted.author_key());
+            let filler = |index: usize| -> AuthorKey {
+                let mut bytes = [0u8; 32];
+                bytes[..8].copy_from_slice(
+                    &u64::try_from(index)
+                        .expect("an index fits 64 bits")
+                        .to_be_bytes(),
+                );
+                AuthorKey::from(bytes)
+            };
+            let own = state.identity.author_key();
+            let own_meta = state.docs.digest(Channel::Meta);
+            let in_roster = |_: &AuthorKey| true;
+            let matches_nothing = |_: Channel, _: &ContentHash| false;
+            let start = clock::Instant::now();
+            for index in 0..DIGEST_PULLS_OPEN {
+                assert!(
+                    state.outstanding_pulls.register(
+                        endpoint_id(90),
+                        Channel::State,
+                        filler(index),
+                        start,
+                        usize::MAX
+                    ),
+                    "the table takes pulls up to its total cap"
+                );
+            }
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root = || root_frame(&node.mesh, &holder, own, &elsewhere, &own_meta);
+            let page = DigestPage::build(
+                &[DigestEntry::new(
+                    wanted.author_key(),
+                    1,
+                    ContentHash::of(b"row"),
+                )],
+                1,
+                0,
+                1,
+            )
+            .expect("a page of one row");
+            let answer = || page_frame(&node.mesh, &holder, own, &page);
+            state.unicast_arrival = Some(endpoint_id(81));
+            let first_root = root();
+            ingest_from(first_root, &mut state, &mut app, &context).await;
+            let first_due = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+            state
+                .digest_round
+                .advance(first_due, in_roster, matches_nothing);
+            let first_page = answer();
+            ingest_from(first_page, &mut state, &mut app, &context).await;
+            assert_eq!(
+                state.digest_round.reading_count(),
+                0,
+                "the page ended the reading of the holder"
+            );
+            assert!(
+                !state.outstanding_pulls.take(
+                    endpoint_id(81),
+                    Channel::State,
+                    wanted.author_key(),
+                    first_due
+                ),
+                "a full table opens no pull for the listed key"
+            );
+            state
+                .outstanding_pulls
+                .expire(clock::Instant::now() + DIGEST_PULL_TTL);
+            let second_root = root();
+            ingest_from(second_root, &mut state, &mut app, &context).await;
+            let second_due = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+            state
+                .digest_round
+                .advance(second_due, in_roster, matches_nothing);
+            assert_eq!(
+                state.digest_round.reading_count(),
+                1,
+                "the next differing root reads the holder again"
+            );
+            let second_page = answer();
+            ingest_from(second_page, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert!(
+                state.outstanding_pulls.take(
+                    endpoint_id(81),
+                    Channel::State,
+                    wanted.author_key(),
+                    second_due
+                ),
+                "once the table has room, the next root and page open the pull of the key"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A lapsed key that returns: its waiting frame is applied when it is seen again, and a later version comes back
+    /// through the round. It is never in the gone set, because the sweep released it and did not forget it. The test
+    /// sets the lapse by hand, and `release_strangers` is the call that the sweep makes.
+    #[test]
+    fn a_lapsed_key_returns_and_its_slices_come_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            let key = alice.author_key();
+            state.peers.insert(key);
+            let slice = |version: u64, value: &str| -> Bytes {
+                let body = MessageBody::try_new(&format!(
+                    r#"{{"version":{version},"value":{{"a":{value}}}}}"#
+                ))
+                .expect("a slice body");
+                Message::new_channel_event(&node.mesh, &nick("alice"), body, Channel::State)
+                    .sign(&alice)
+                    .serialize()
+                    .expect("a signed slice serializes")
+                    .into_bytes()
+            };
+            ingest_from(slice(1, "1"), &mut state, &mut app, &context).await;
+            assert!(
+                state.docs.held_keys().contains(&key),
+                "alice's v1 slice is held while she is a peer"
+            );
+            state.peers.remove(&key);
+            state.clock_evidence.lapsed_quiet.insert(key);
+            state.release_strangers();
+            assert!(
+                !state.docs.held_keys().contains(&key),
+                "the sweep releases a lapsed key's slice"
+            );
+            assert!(
+                !state.docs.is_gone(Channel::State, &key),
+                "the sweep releases the key and does not forget it"
+            );
+            ingest_from(slice(2, "2"), &mut state, &mut app, &context).await;
+            assert!(
+                !state.docs.held_keys().contains(&key),
+                "a lapsed key's v2 frame waits in pending"
+            );
+            let presence: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::Presence {
+                    subtype: habilis_network_protocol::PresenceSubtype::Alive,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed presence serializes")
+            .into_bytes();
+            ingest_from(presence, &mut state, &mut app, &context).await;
+            assert!(
+                state.docs.held_keys().contains(&key),
+                "alice's return applies her waiting v2 frame"
+            );
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(83));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+            // every holder is in the roster, and no root matches the store
+            state.digest_round.advance(later, |_| true, |_, _| false);
+            let page =
+                DigestPage::build(&[DigestEntry::new(key, 3, ContentHash::of(b"v3"))], 1, 0, 1)
+                    .expect("a page of one row");
+            let answer: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePage {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    page,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed page serializes")
+            .into_bytes();
+            ingest_from(answer, &mut state, &mut app, &context).await;
+            assert!(
+                state
+                    .outstanding_pulls
+                    .is_open(endpoint_id(83), Channel::State, key),
+                "the round opened the pull of the returned key"
+            );
+            ingest_from(slice(3, "3"), &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert!(
+                !state
+                    .outstanding_pulls
+                    .take(endpoint_id(83), Channel::State, key, later),
+                "the v3 answer used the pull that the round opened"
+            );
+            let view = state.view(Channel::State);
+            let v3_held: bool = view
+                .as_object()
+                .is_some_and(|slices| slices.values().any(|slot| slot["a"] == 3));
+            assert!(v3_held, "the pulled v3 slice reaches the view");
+            assert!(
+                !state.docs.is_gone(Channel::State, &key),
+                "alice is not gone after her return"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A key that lapsed and returns gets its slice back by the digest round: its root differs, its page is read, and
+    /// the pull of its key is registered.
+    #[test]
+    fn a_returned_key_is_pulled_from_a_differing_page() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            let key = alice.author_key();
+            state.peers.insert(key);
+            state.clock_evidence.lapsed_quiet.insert(key);
+            state.peers.remove(&key);
+            state.release_strangers();
+            state.clock_evidence.lapsed_quiet.remove(&key);
+            state.peers.insert(key);
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(83));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+            let requests = state.digest_round.advance(later, |_| true, |_, _| false);
+            assert_eq!(
+                requests.len(),
+                2,
+                "the round asks for the first page of each channel of the returned key's digest"
+            );
+            let page = DigestPage::build(
+                &[DigestEntry::new(key, 2, ContentHash::of(b"row"))],
+                1,
+                0,
+                1,
+            )
+            .expect("a page of one row");
+            let answer: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SlicePage {
+                    to: state.identity.author_key(),
+                    channel: Channel::State,
+                    page,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed page serializes")
+            .into_bytes();
+            ingest_from(answer, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert!(
+                state
+                    .outstanding_pulls
+                    .take(endpoint_id(83), Channel::State, key, later),
+                "the pull of the returned key is registered"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A frame of a key that lapsed quiet waits in the pending set: it is not applied, so the view does not hold it.
+    #[test]
+    fn a_frame_of_a_lapsed_key_waits_in_the_pending_set() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.clock_evidence.lapsed_quiet.insert(alice.author_key());
+            let body = MessageBody::try_new(r#"{"version":1,"value":{"a":1}}"#).expect("a body");
+            let frame: Bytes =
+                Message::new_channel_event(&node.mesh, &nick("alice"), body, Channel::State)
+                    .sign(&alice)
+                    .serialize()
+                    .expect("a signed slice serializes")
+                    .into_bytes();
+            ingest_from(frame, &mut state, &mut app, &context).await;
+            assert!(
+                !state.docs.held_keys().contains(&alice.author_key()),
+                "a lapsed key's frame is not applied"
+            );
+            assert!(
+                state
+                    .docs
+                    .take_pending(Channel::State, &alice.author_key(), clock::Instant::now())
+                    .is_some(),
+                "a lapsed key's frame waits in the pending set"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A key that lapsed quiet keeps no slice: the sweep that lapses it releases the slice that it held.
+    #[test]
+    fn a_lapsed_key_keeps_no_slice() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.peers.insert(alice.author_key());
+            let body = MessageBody::try_new(r#"{"version":1,"value":{"a":1}}"#).expect("a body");
+            let frame: Bytes =
+                Message::new_channel_event(&node.mesh, &nick("alice"), body, Channel::State)
+                    .sign(&alice)
+                    .serialize()
+                    .expect("a signed slice serializes")
+                    .into_bytes();
+            ingest_from(frame, &mut state, &mut app, &context).await;
+            assert!(
+                state.docs.held_keys().contains(&alice.author_key()),
+                "alice's slice is held while she is in the roster"
+            );
+            state.peers.remove(&alice.author_key());
+            state.clock_evidence.lapsed_quiet.insert(alice.author_key());
+            state.release_strangers();
+            assert!(
+                !state.docs.held_keys().contains(&alice.author_key()),
+                "a lapsed key keeps no slice after the sweep"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The signed `SliceRoot` that `holder` sends to `to`, with its State and Meta digests.
+    fn root_frame(
+        mesh: &MeshId,
+        holder: &Identity,
+        to: AuthorKey,
+        state: &DigestRoot,
+        meta: &DigestRoot,
+    ) -> Bytes {
+        let kind = MessageKind::SliceRoot {
+            to,
+            state: state.clone(),
+            meta: meta.clone(),
+        };
+        let signed =
+            Message::new_frame(mesh, &nick("holder"), kind, MessageBody::from("{}")).sign(holder);
+        signed
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes()
+    }
+
+    /// The signed `SlicePage` of the State channel that `holder` sends to `to`.
+    fn page_frame(mesh: &MeshId, holder: &Identity, to: AuthorKey, page: &DigestPage) -> Bytes {
+        let kind = MessageKind::SlicePage {
+            to,
+            channel: Channel::State,
+            page: page.clone(),
+        };
+        let signed =
+            Message::new_frame(mesh, &nick("holder"), kind, MessageBody::from("{}")).sign(holder);
+        signed
+            .serialize()
+            .expect("a signed page serializes")
+            .into_bytes()
+    }
+
+    /// The differences that the round would read once the settle of the latest one has ended.
+    fn requests_after_settle(state: &mut EventLoopState) -> usize {
+        let later = clock::Instant::now() + DIGEST_SETTLE + DIGEST_SETTLE_JITTER;
+        state
+            .digest_round
+            .advance(later, |_| true, |_, _| false)
+            .len()
+    }
+
+    /// A root from a roster peer that names this node, sent by unicast, notes the difference of both channels.
+    #[test]
+    fn a_root_from_a_roster_peer_notes_a_difference() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.peers.insert(alice.author_key());
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(83));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                requests_after_settle(&mut state),
+                2,
+                "both channels of the roster peer's root are noted"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A root that names another key is not this node's to note: the round stays empty.
+    #[test]
+    fn a_root_for_another_key_notes_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            state.peers.insert(alice.author_key());
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("alice"),
+                MessageKind::SliceRoot {
+                    to: Identity::generate().author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&alice)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(83));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                requests_after_settle(&mut state),
+                0,
+                "a root for another key notes no difference"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A root from a key that is not in the roster notes nothing.
+    #[test]
+    fn a_root_from_a_stranger_notes_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let stranger = Identity::generate();
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            let root: Bytes = Message::new_frame(
+                &node.mesh,
+                &nick("stranger"),
+                MessageKind::SliceRoot {
+                    to: state.identity.author_key(),
+                    state: elsewhere.clone(),
+                    meta: elsewhere,
+                },
+                MessageBody::from("{}"),
+            )
+            .sign(&stranger)
+            .serialize()
+            .expect("a signed root serializes")
+            .into_bytes();
+            state.unicast_arrival = Some(endpoint_id(83));
+            ingest_from(root, &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert_eq!(
+                requests_after_settle(&mut state),
+                0,
+                "a root from a stranger notes no difference"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A page that this node asked for registers the pulls of its keys. A page that it did not ask for registers
+    /// none.
+    #[test]
+    fn a_page_is_pulled_only_when_it_was_asked_for() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let alice = Identity::generate();
+            let carol = Identity::generate();
+            state.peers.insert(alice.author_key());
+            state.peers.insert(carol.author_key());
+            let page = DigestPage::build(
+                &[DigestEntry::new(
+                    carol.author_key(),
+                    1,
+                    ContentHash::of(b"row"),
+                )],
+                1,
+                0,
+                1,
+            )
+            .expect("a page of one row");
+            let own = state.identity.author_key();
+            let frame = |digest: DigestPage| -> Bytes {
+                let signed = Message::new_frame(
+                    &node.mesh,
+                    &nick("alice"),
+                    MessageKind::SlicePage {
+                        to: own,
+                        channel: Channel::State,
+                        page: digest,
+                    },
+                    MessageBody::from("{}"),
+                )
+                .sign(&alice);
+                signed
+                    .serialize()
+                    .expect("a signed page serializes")
+                    .into_bytes()
+            };
+            let now = clock::Instant::now();
+            state.unicast_arrival = Some(endpoint_id(83));
+            ingest_from(frame(page.clone()), &mut state, &mut app, &context).await;
+            assert!(
+                !state.outstanding_pulls.take(
+                    endpoint_id(83),
+                    Channel::State,
+                    carol.author_key(),
+                    now
+                ),
+                "a page that was not asked for registers no pull"
+            );
+            let elsewhere =
+                DigestRoot::new(ContentHash::of(b"elsewhere"), 1).expect("a root of one page");
+            state.digest_round.note_root(
+                alice.author_key(),
+                endpoint_id(83),
+                Channel::State,
+                &elsewhere,
+                false,
+                now,
+            );
+            state.digest_round.advance(now, |_| true, |_, _| false);
+            ingest_from(frame(page), &mut state, &mut app, &context).await;
+            state.unicast_arrival = None;
+            assert!(
+                state.outstanding_pulls.take(
+                    endpoint_id(83),
+                    Channel::State,
+                    carol.author_key(),
+                    now
+                ),
+                "a page that was asked for registers the pull of its key"
+            );
+            node.endpoint.close().await;
+        });
+    }
 }
 
 #[cfg(all(test, feature = "host"))]
@@ -5527,25 +7645,6 @@ mod link_state_tests {
             lookup::multihop_handle_config(PayloadPath::DirectOnly),
         )
         .expect("underlay on the derived key")
-    }
-
-    // A link-state vector is replaced by the next one and is never logged by the
-    // peers that receive it. A node that kept its own would hold messages that no
-    // peer holds, and every digest would ask it for them again: measured at
-    // N = 33, 38% of the vectors a node received were repeats.
-    #[test]
-    fn a_link_vector_this_node_broadcast_is_not_retained_in_its_log() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let secret = SecretKey::from_bytes(&[53; 32]);
-            let handle = handle_for(&secret).await;
-            let mut state = fresh_state();
-            let body = gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
-            let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body)
-                .sign(&Identity::generate());
-            super::retain_own_broadcast(&mut state, message);
-            assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
-            handle.close().await;
-        });
     }
 
     // A signature proves who made a vector, not that the maker is a member, and
@@ -5843,75 +7942,6 @@ mod left_tests {
             endpoint.close().await;
             leaver_endpoint.close().await;
         });
-    }
-}
-
-#[cfg(all(test, feature = "host"))]
-mod requeue_tests {
-    use crate::daemon::state::Standing;
-
-    use crate::testing::{LaneNode, nick, test_key};
-
-    use crate::transport;
-    use crate::util::clock;
-    /// A frame is parked before its addressee is known. The peer becomes known with a relay-only
-    /// address, the flush delivers the frame again and it is held: the requeue asks for the session
-    /// and offers it at once, so that the frame does not wait for the next tick of the retry pass.
-    #[test]
-    fn a_frame_parked_before_its_peer_is_known_asks_for_the_session_at_the_flush() {
-        ::habilis_network_test_tracing::run_multi_thread(
-            ::habilis_network_test_tracing::init(),
-            2,
-            async {
-                let node = LaneNode::start().await;
-                let context = node.context();
-                let mut state = node.state();
-                state.standing.insert(Standing::Meshed);
-                let address = state
-                    .peer_endpoints
-                    .remove(&nick("bob"))
-                    .expect("the fixture knows bob");
-                let frame = node.frame_to_bob();
-                let bytes = frame.serialize().expect("serialize");
-                let now = clock::Instant::now();
-                drop(
-                    transport::resolve(&frame, bytes.clone(), &state)
-                        .expect_err("no endpoint is known for bob yet"),
-                );
-                assert!(
-                    super::requeue(&mut state, &context, frame.clone(), bytes.clone()),
-                    "a frame parked before its peer is known is requeued"
-                );
-                assert!(!state.lane_session_wanted(node.bob, now), "bob is unknown");
-                assert_eq!(
-                    state.webrtc_admission.in_flight(),
-                    0,
-                    "one admission slot is in flight after the requeue"
-                );
-
-                state.bind_peer_endpoint(test_key("bob"), nick("bob"), address);
-                drop(
-                    transport::resolve(&frame, bytes.clone(), &state)
-                        .expect_err("a lookup-only relay holds the frame"),
-                );
-                assert!(
-                    super::requeue(&mut state, &context, frame, bytes),
-                    "a second requeue is accepted"
-                );
-
-                assert!(
-                    state.lane_session_wanted(node.bob, now),
-                    "the requeued frame asks"
-                );
-                assert_eq!(
-                    state.webrtc_admission.in_flight(),
-                    1,
-                    "and the offer is in flight at once"
-                );
-                state.webrtc_admission.close();
-                node.endpoint.close().await;
-            },
-        );
     }
 }
 
@@ -6347,26 +8377,120 @@ mod parked_link_state_tests {
     }
 }
 
-/// The census counts each frame that reaches the dedup as a first sighting or a repeat.
+/// A repeated chat broadcast frame reaches the app once: the seen set drops the repeat.
+#[cfg(test)]
+mod repeat_tests {
+    use std::sync::{Arc, Mutex};
+
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::{AppFrameParams, Authored};
+    use crate::protocol::{AppTag, MeshId, Message, MessageBody};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+
+    /// Counts the chat frames the app is handed.
+    struct Counting(Arc<Mutex<usize>>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for Counting {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::PUSH.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            *self.0.lock().expect("the counter lock") += 1;
+            false
+        }
+    }
+
+    #[test]
+    fn a_repeated_chat_broadcast_is_surfaced_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mesh = MeshId::from("test");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let peer = Identity::generate();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey: identity.author_key(),
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let chat = Message::new_app(
+                &mesh,
+                &nick("peer"),
+                AppFrameParams::new(
+                    AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from("\"hello\""),
+                ),
+            )
+            .sign(&peer);
+            let bytes = chat.serialize().expect("serialize").into_bytes();
+            let mut state = fresh_state();
+            // Shared with the app, which counts the frames it is handed.
+            let surfaced = Arc::new(Mutex::new(0));
+            let mut app = Counting(Arc::clone(&surfaced));
+            super::ingest(bytes.clone(), &mut state, &mut app, &context).await;
+            super::ingest(bytes, &mut state, &mut app, &context).await;
+            let count = *surfaced.lock().expect("the counter lock");
+            assert_eq!(
+                count, 1,
+                "a repeated chat frame must reach the app once, got {count}"
+            );
+            endpoint.close().await;
+        });
+    }
+}
+
 #[cfg(test)]
 mod dedup_counter_tests {
     use iroh::endpoint::presets;
     use iroh_gossip::net::Gossip;
     use iroh_gossip::proto;
-    use serde_json::json;
 
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::{EventLoopState, by_arrival, by_class};
-    use crate::gossip::antientropy::Plane;
+    use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
     use crate::lifecycle;
     use crate::protocol::identity::Identity;
-    use crate::protocol::messages::{Authored, MessageBody, Verified};
-    use crate::protocol::{AuthorKey, Channel, MeshId, Message, MessageKind, PresenceSubtype};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::protocol::messages::{Authored, Verified};
+    use crate::protocol::{AuthorKey, MeshId, Message, MessageKind, PresenceSubtype};
+    use crate::testing::{address_json_with_seal, endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
-    use crate::util::clock::Instant;
     use bytes::Bytes;
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
@@ -6389,52 +8513,15 @@ mod dedup_counter_tests {
         }
     }
 
-    fn state_frame(writer: &EventLoopState, body: MessageBody) -> Verified {
-        Message::new_channel_event(&MeshId::from("test"), &nick("writer"), body, Channel::State)
-            .sign(&writer.identity)
-    }
-
-    /// A signed frame of the writer that carries `{"key": 1}` as one change.
-    fn change_body(writer: &EventLoopState) -> MessageBody {
-        let seed = *writer.identity.public().as_bytes();
-        let doc = writer.doc(Channel::State);
-        let change = doc
-            .build_change(&json!({ "key": 1 }), &seed)
-            .expect("a JSON object merges")
-            .expect("a non-empty merge yields a change");
-        let (body, _plain) = writer
-            .doc(Channel::State)
-            .compose_wire_body(&change, None)
-            .expect("compose the wire body");
-        body
-    }
-
-    fn reader_after(frames: &[&Verified]) -> EventLoopState {
-        let arrivals: Vec<(Plane, Bytes)> = frames
-            .iter()
-            .map(|frame| {
-                (
-                    Plane::Gossip,
-                    frame.serialize().expect("serialize").into_bytes(),
-                )
-            })
-            .collect();
-        reader_after_on(arrivals)
-    }
-
-    fn reader_after_on(arrivals: Vec<(Plane, Bytes)>) -> EventLoopState {
-        reader_with(fresh_state(), arrivals)
-    }
-
     /// [`reader_after_on`] for a reader that starts as `initial`.
-    fn reader_with(initial: EventLoopState, arrivals: Vec<(Plane, Bytes)>) -> EventLoopState {
+    fn reader_with(initial: EventLoopState, arrivals: Vec<Bytes>) -> EventLoopState {
         reader_with_sink(initial, arrivals, &SilentSink)
     }
 
     /// [`reader_with`] with the sink that receives the events of the arrivals.
     fn reader_with_sink(
         initial: EventLoopState,
-        arrivals: Vec<(Plane, Bytes)>,
+        arrivals: Vec<Bytes>,
         sink: &dyn NodeSink,
     ) -> EventLoopState {
         reader_full(initial, arrivals, sink, None)
@@ -6444,7 +8531,7 @@ mod dedup_counter_tests {
     /// from it is taken to have arrived on a unicast connection, so the asks that waited for a path are tried.
     fn reader_full(
         initial: EventLoopState,
-        arrivals: Vec<(Plane, Bytes)>,
+        arrivals: Vec<Bytes>,
         sink: &dyn NodeSink,
         path_up: Option<lifecycle::PathSign>,
     ) -> EventLoopState {
@@ -6454,7 +8541,7 @@ mod dedup_counter_tests {
     /// [`reader_with_sink`] for a test whose subject is a WARN: each `(target, text)` is expected from the run.
     fn reader_expecting(
         initial: EventLoopState,
-        arrivals: Vec<(Plane, Bytes)>,
+        arrivals: Vec<Bytes>,
         sink: &dyn NodeSink,
         expected: &[(&str, &str)],
     ) -> EventLoopState {
@@ -6463,7 +8550,7 @@ mod dedup_counter_tests {
 
     fn reader_run(
         initial: EventLoopState,
-        arrivals: Vec<(Plane, Bytes)>,
+        arrivals: Vec<Bytes>,
         sink: &dyn NodeSink,
         path_up: Option<lifecycle::PathSign>,
         expected: &[(&str, &str)],
@@ -6500,8 +8587,8 @@ mod dedup_counter_tests {
             };
             let mut reader = initial;
             let mut app = Inert;
-            for (plane, bytes) in arrivals {
-                super::ingest_from(plane, bytes, &mut reader, &mut app, &context).await;
+            for bytes in arrivals {
+                super::ingest_from(bytes, &mut reader, &mut app, &context).await;
             }
             if let Some(sign) = path_up {
                 if let lifecycle::PathSign::LinkUp(up) = sign {
@@ -6530,40 +8617,10 @@ mod dedup_counter_tests {
         }
     }
 
-    fn wire(frame: &Verified) -> u64 {
-        frame.serialize().expect("serialize").len() as u64
-    }
-
-    /// The receive path counts the bytes of a frame in the log from the bytes it came in as, and does
-    /// not serialize the message again. The count must be the length of the serialized frame, for a
-    /// frame as it was sent and for a resend, which carries a trailer outside the frame.
-    #[test]
-    fn the_log_counts_a_received_frame_by_the_length_it_came_in_with() {
-        let session = Identity::generate();
-        let frame = Message::new_joined(&MeshId::from("test"), &nick("alice")).sign(&session);
-        let wire = frame.serialize().expect("serialize");
-        let resent = wire.copy_with_resend_nonce(7);
-        let sent_len = wire.as_bytes().len();
-        for (bytes, how) in [(wire.into_bytes(), "sent"), (resent.into_bytes(), "resent")] {
-            let reader = reader_with(fresh_state(), vec![(Plane::Gossip, bytes)]);
-
-            let (held, held_bytes) = reader.message_log.size();
-
-            assert_eq!(held, 1, "a {how} frame is in the log");
-            assert_eq!(
-                held_bytes, sent_len,
-                "a {how} frame counts its serialized length"
-            );
-        }
-    }
-
-    /// An alive frame of a session, as the bytes that arrive on the gossip plane.
-    fn alive_of(session: &Identity, nickname: &str) -> (Plane, Bytes) {
+    /// An alive frame of a session, as the bytes that arrive.
+    fn alive_of(session: &Identity, nickname: &str) -> Bytes {
         let frame = Message::new_alive(&MeshId::from("test"), &nick(nickname)).sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// A state that holds the proof of the live session `bound`, which a member key made for
@@ -6605,31 +8662,6 @@ mod dedup_counter_tests {
         );
     }
 
-    /// The census counts the bytes of the frame that the log holds, which serialize gives, and not the bytes of
-    /// the frame as it arrived: a signed frame with JSON white space holds the same message.
-    #[test]
-    fn the_log_gauge_counts_the_serialized_frame_not_the_white_space_of_the_arrival() {
-        let sender = Identity::generate();
-        let frame = Message::new_joined(&MeshId::from("test"), &nick("bob")).sign(&sender);
-        let compact = frame.serialize().expect("serialize").into_bytes();
-        let value: serde_json::Value = serde_json::from_slice(&compact).expect("a JSON frame");
-        let pretty = serde_json::to_vec_pretty(&value).expect("pretty JSON");
-        assert!(
-            pretty.len() > compact.len(),
-            "the arrival must carry white space for the test to mean anything"
-        );
-
-        let reader = reader_with(fresh_state(), vec![(Plane::Gossip, Bytes::from(pretty))]);
-
-        let (held, bytes) = reader.message_log.size();
-        assert_eq!(held, 1, "the frame is retained");
-        assert_eq!(
-            bytes,
-            compact.len(),
-            "the census counted white space that the log does not hold"
-        );
-    }
-
     /// A goodbye is signed by the key that leaves, so the key is authenticated whatever nickname the frame
     /// names. A roster key that says goodbye under a nickname that another member binds still ends its own
     /// session: the gate refuses the nickname, not the departure of the key.
@@ -6641,10 +8673,7 @@ mod dedup_counter_tests {
         initial.peers.insert(leaver.author_key());
         initial.names.insert(leaver.author_key(), nick("carol"));
         let left = Message::new_left(&MeshId::from("test"), &nick("alice")).sign(&leaver);
-        let frame = (
-            Plane::Gossip,
-            left.serialize().expect("serialize").into_bytes(),
-        );
+        let frame = left.serialize().expect("serialize").into_bytes();
 
         let reader = reader_with(initial, vec![frame]);
 
@@ -6658,38 +8687,21 @@ mod dedup_counter_tests {
         );
     }
 
-    /// A proof request is consumed by the infrastructure dispatch: an application subscriber is never told
-    /// about it, like the digests and the pings.
-    #[test]
-    fn a_proof_request_is_not_pushed_to_application_subscribers() {
-        use crate::protocol::MessageKind;
-        let to = Identity::generate().author_key();
-        assert!(
-            super::is_plumbing(&MessageKind::ProofRequest { to }),
-            "an admitted peer's fresh proof request would reach the subscribers of the inbound push"
-        );
-    }
-
     /// The `PeerInfo` of a session that the roster gate refuses still gives its address: the session is
     /// asked for its proof over a warm path, and it has none without the address. The frame binds no
     /// hint and adds no roster entry.
     #[test]
     fn a_refused_session_peer_info_registers_the_address_for_the_proof_request() {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
 
         let bound = Identity::generate();
         let intruder = Identity::generate();
         let initial = state_with_bound_nickname(&bound, "alice");
-        let json =
-            peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint_id(61)));
+        let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint_id(61)));
         let body = MessageBody::try_new(&json.to_string()).expect("an address body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("test"), &nick("alice"), body).sign(&intruder);
-        let frame = (
-            Plane::Gossip,
-            peer_info.serialize().expect("serialize").into_bytes(),
-        );
+        let frame = peer_info.serialize().expect("serialize").into_bytes();
 
         let reader = reader_with(initial, vec![frame]);
 
@@ -6714,20 +8726,16 @@ mod dedup_counter_tests {
     #[test]
     fn the_address_of_a_peer_info_is_registered_in_the_pool_before_the_proof_request_goes() {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
 
         let session = Identity::generate();
         let address = iroh::EndpointAddr::new(endpoint_id(62));
         let mut initial = fresh_state();
         initial.linked_endpoints.insert(endpoint_id(62));
-        let json = peer_addr_error::endpoint_addr_to_json(&address);
+        let json = address_json_with_seal(&address);
         let body = MessageBody::try_new(&json.to_string()).expect("an address body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("test"), &nick("carol"), body).sign(&session);
-        let info = (
-            Plane::Gossip,
-            peer_info.serialize().expect("serialize").into_bytes(),
-        );
+        let info = peer_info.serialize().expect("serialize").into_bytes();
 
         let reader = reader_with(initial, vec![alive_of(&session, "carol"), info]);
 
@@ -6740,12 +8748,7 @@ mod dedup_counter_tests {
 
     /// A joined frame of a session, as the bytes that arrive on the gossip plane, with the proof of
     /// `member` for its `run`.
-    fn joined_of(
-        session: &Identity,
-        member: &Identity,
-        nickname: &str,
-        run: u64,
-    ) -> (Plane, Bytes) {
+    fn joined_of(session: &Identity, member: &Identity, nickname: &str, run: u64) -> Bytes {
         let proof = member.prove(
             &session.author_key(),
             nickname,
@@ -6754,10 +8757,7 @@ mod dedup_counter_tests {
         );
         let frame = Message::new_joined_with_proof(&MeshId::from("test"), &nick(nickname), &proof)
             .sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// A member restarts: the `joined` frame of its new session, with a higher run, replaces the old
@@ -6776,8 +8776,8 @@ mod dedup_counter_tests {
             .proofs
             .accept(&old.author_key(), &nick("alice"), &mesh, first, |_| true);
         assert!(held, "the proof of the old session is held");
-        let (_, second) = joined_of(&new, &member, "alice", 2);
-        let reader = reader_with(initial, vec![(Plane::Gossip, second)]);
+        let second = joined_of(&new, &member, "alice", 2);
+        let reader = reader_with(initial, vec![second]);
 
         assert!(
             reader.peers.contains(&new.author_key()),
@@ -6803,10 +8803,7 @@ mod dedup_counter_tests {
         old_run.member_identity = reader_state.member_identity.clone();
         let mesh = MeshId::from("test");
         let proved: Verified = old_run.own_joined(&mesh, &nick("reader"));
-        let joined = (
-            Plane::Gossip,
-            proved.serialize().expect("serialize").into_bytes(),
-        );
+        let joined = proved.serialize().expect("serialize").into_bytes();
 
         let reader = reader_with(reader_state, vec![alive_of(&intruder, "reader"), joined]);
 
@@ -6865,7 +8862,7 @@ mod dedup_counter_tests {
             for second in (0..4).filter(|index| *index != first) {
                 for third in (0..4).filter(|index| *index != first && *index != second) {
                     let fourth = 6 - first - second - third;
-                    let arrivals: Vec<(Plane, Bytes)> = [first, second, third, fourth]
+                    let arrivals: Vec<Bytes> = [first, second, third, fourth]
                         .iter()
                         .map(|index| frames[*index].clone())
                         .collect();
@@ -6914,13 +8911,13 @@ mod dedup_counter_tests {
     }
 
     /// A `joined` frame with the proof of `member`, stamped `age_secs` seconds ago: a stored copy that a relay
-    /// or an anti-entropy answer hands out long after its author spoke.
+    /// or a backfill answer hands out long after its author spoke.
     fn old_joined_of(
         session: &Identity,
         member: &Identity,
         nickname: &str,
         age_secs: i64,
-    ) -> (Plane, Bytes) {
+    ) -> Bytes {
         use crate::protocol::UnixSecs;
         let proof = member.prove(
             &session.author_key(),
@@ -6932,19 +8929,11 @@ mod dedup_counter_tests {
             Message::new_joined_with_proof(&MeshId::from("test"), &nick(nickname), &proof);
         message.timestamp = UnixSecs::from(UnixSecs::now().as_secs() - age_secs);
         let frame = message.sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// A `joined` frame of `member` for `run`, stamped `age_secs` seconds ago.
-    fn old_joined_run_of(
-        session: &Identity,
-        member: &Identity,
-        run: u64,
-        age_secs: i64,
-    ) -> (Plane, Bytes) {
+    fn old_joined_run_of(session: &Identity, member: &Identity, run: u64, age_secs: i64) -> Bytes {
         use crate::protocol::UnixSecs;
         let proof = member.prove(
             &session.author_key(),
@@ -6956,10 +8945,7 @@ mod dedup_counter_tests {
             Message::new_joined_with_proof(&MeshId::from("test"), &nick("alice"), &proof);
         message.timestamp = UnixSecs::from(UnixSecs::now().as_secs() - age_secs);
         let frame = message.sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// The end that waits for a claimant stays until a frame of that claimant under the PROVED nickname comes. A
@@ -7092,10 +9078,7 @@ mod dedup_counter_tests {
         let mut old = Message::new_joined_with_proof(&mesh, &nick("reader"), &proof);
         old.timestamp = UnixSecs::from(UnixSecs::now().as_secs() - 3 * 86_400);
         let signed: Verified = old.sign(&newer);
-        let old_answer = (
-            Plane::Gossip,
-            signed.serialize().expect("serialize").into_bytes(),
-        );
+        let old_answer = signed.serialize().expect("serialize").into_bytes();
         let alive = alive_of(&newer, "reader");
 
         let shown = reader_expecting(
@@ -7214,10 +9197,7 @@ mod dedup_counter_tests {
             let mut alive = Message::new_alive(&MeshId::from("test"), &nick("alice"));
             alive.timestamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 20);
             let signed: Verified = alive.sign(&session);
-            let frame = (
-                Plane::Gossip,
-                signed.serialize().expect("serialize").into_bytes(),
-            );
+            let frame = signed.serialize().expect("serialize").into_bytes();
             state = reader_with(state, vec![frame]);
             // the next frame comes one alive interval later on our clock
             if let Some(run) = state.clock_evidence.step_back.get_mut(&key) {
@@ -7671,12 +9651,9 @@ mod dedup_counter_tests {
     }
 
     /// A `left` frame of a session, as the bytes that arrive on the gossip plane.
-    fn left_of(session: &Identity, nickname: &str) -> (Plane, Bytes) {
+    fn left_of(session: &Identity, nickname: &str) -> Bytes {
         let frame = Message::new_left(&MeshId::from("test"), &nick(nickname)).sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
+        frame.serialize().expect("serialize").into_bytes()
     }
 
     /// The goodbye of a key that is not in the roster ends the endpoint that was retained for it, with the state
@@ -7801,42 +9778,6 @@ mod dedup_counter_tests {
         let _ = alice;
     }
 
-    /// A `joined` frame of a session that carries no proof, as the bytes that arrive on the gossip plane.
-    fn unproved_joined_of(session: &Identity, nickname: &str) -> (Plane, Bytes) {
-        let frame = Message::new_joined(&MeshId::from("test"), &nick(nickname)).sign(session);
-        (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        )
-    }
-
-    /// The end of an intruder is no goodbye, and no other node drops the frames of the session: this node
-    /// keeps them too. A peer that holds them would resend them at every digest round, while the holder
-    /// keeps the name, if this node dropped them.
-    #[test]
-    fn the_end_of_an_intruder_keeps_its_presence_frames_in_the_log() {
-        let (alice, intruder_session) = (Identity::generate(), Identity::generate());
-        let alice_session = Identity::generate();
-
-        let reader = reader_with(
-            fresh_state(),
-            vec![
-                unproved_joined_of(&intruder_session, "alice"),
-                joined_of(&alice_session, &alice, "alice", 1),
-            ],
-        );
-
-        assert!(
-            !reader.peers.contains(&intruder_session.author_key()),
-            "the intruder is ended"
-        );
-        assert_eq!(
-            reader.message_log.size().0,
-            2,
-            "the log holds the joined frame of the intruder and the one of the member"
-        );
-    }
-
     /// An address with no warm path to it asks for nothing and signs nothing, however many frames of that
     /// session come: a frame of the session costs a lookup.
     #[test]
@@ -7850,7 +9791,7 @@ mod dedup_counter_tests {
             &nick("alice"),
             iroh::EndpointAddr::new(endpoint_id(7)),
         );
-        let frames: Vec<(Plane, Bytes)> = (0..50).map(|_| alive_of(&session, "alice")).collect();
+        let frames: Vec<Bytes> = (0..50).map(|_| alive_of(&session, "alice")).collect();
 
         let reader = reader_with(initial, frames);
 
@@ -7858,37 +9799,6 @@ mod dedup_counter_tests {
             reader.proof_requests_signed.load(Ordering::Relaxed),
             0,
             "no request was signed for an address that no warm path reaches"
-        );
-    }
-
-    /// Twenty sessions ask one member for its proof: they all get the same frame, and the log of that
-    /// member keeps one entry, not twenty. A fresh frame for each asker is a frame that its author keeps
-    /// and offers in her digest, so anti-entropy would spread each one to every peer.
-    #[test]
-    fn twenty_askers_get_the_same_answer_and_the_log_keeps_one_entry() {
-        let mesh = MeshId::from("test");
-        let me = nick("alice");
-        let mut state = fresh_state();
-        let own = state.identity.author_key();
-        let mut ids = Vec::new();
-
-        for _ in 0..20 {
-            let asker = Identity::generate().author_key();
-            let answer = state
-                .proof_answer(&own, &asker, &me, &mesh, Instant::now())
-                .expect("an answer within the cap");
-            ids.push(answer.dedup_key());
-            super::keep_the_answer(&mut state);
-        }
-
-        assert!(
-            ids.iter().all(|id| *id == ids[0]),
-            "every asker got the same frame"
-        );
-        assert_eq!(
-            state.message_log.size().0,
-            1,
-            "the log of the author holds one entry for the run"
         );
     }
 
@@ -8081,19 +9991,15 @@ mod dedup_counter_tests {
     #[test]
     fn an_ask_for_a_refused_session_that_waited_goes_when_the_path_comes_up() {
         use crate::protocol::messages::MessageBody;
-        use crate::protocol::peer_addr_error;
 
         let bound = Identity::generate();
         let session = Identity::generate();
         let endpoint = endpoint_id(65);
-        let json = peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(endpoint));
+        let json = address_json_with_seal(&iroh::EndpointAddr::new(endpoint));
         let body = MessageBody::try_new(&json.to_string()).expect("an address body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("test"), &nick("alice"), body).sign(&session);
-        let info = (
-            Plane::Gossip,
-            peer_info.serialize().expect("serialize").into_bytes(),
-        );
+        let info = peer_info.serialize().expect("serialize").into_bytes();
         let frames = || vec![info.clone(), alive_of(&session, "alice")];
 
         let before = reader_full(
@@ -8133,7 +10039,7 @@ mod dedup_counter_tests {
         let mut initial = fresh_state();
         initial.linked_endpoints.insert(flooder);
         initial.linked_endpoints.insert(calm);
-        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        let mut arrivals: Vec<Bytes> = Vec::new();
         for (count, endpoint, prefix) in [(20, flooder, "flood"), (3, calm, "calm")] {
             for index in 0..count {
                 let session = Identity::generate();
@@ -8171,7 +10077,7 @@ mod dedup_counter_tests {
     #[test]
     fn twenty_endpoints_with_eight_fresh_sessions_each_sign_the_budget_in_all_and_each_first_ask() {
         let mut initial = fresh_state();
-        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        let mut arrivals: Vec<Bytes> = Vec::new();
         for endpoint_index in 0..20u8 {
             let endpoint = endpoint_id(100 + endpoint_index);
             initial.linked_endpoints.insert(endpoint);
@@ -8205,7 +10111,7 @@ mod dedup_counter_tests {
     #[test]
     fn eighty_endpoints_with_one_fresh_session_each_are_all_asked() {
         let mut initial = fresh_state();
-        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        let mut arrivals: Vec<Bytes> = Vec::new();
         for index in 0..80u8 {
             let (session, endpoint) = (Identity::generate(), endpoint_id(100 + index));
             let name = format!("spread-{index}");
@@ -8241,7 +10147,7 @@ mod dedup_counter_tests {
     #[test]
     fn an_honest_session_is_asked_while_one_attacker_with_eight_endpoints_uses_the_budget_in_all() {
         let mut initial = fresh_state();
-        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
+        let mut arrivals: Vec<Bytes> = Vec::new();
         for endpoint_index in 0..8u8 {
             let endpoint = endpoint_id(110 + endpoint_index);
             initial.linked_endpoints.insert(endpoint);
@@ -8279,11 +10185,7 @@ mod dedup_counter_tests {
     }
 
     /// A `joined` frame whose proof is refused for a held nickname, as the verified frame and its bytes.
-    fn proof_frame_of(
-        session: &Identity,
-        member: &Identity,
-        forged: bool,
-    ) -> (Verified, (Plane, Bytes)) {
+    fn proof_frame_of(session: &Identity, member: &Identity, forged: bool) -> (Verified, Bytes) {
         let mesh = MeshId::from("test");
         let mut proof = member.prove(&session.author_key(), "alice", mesh.as_ref(), 1);
         if forged {
@@ -8291,10 +10193,7 @@ mod dedup_counter_tests {
             proof.run += 1;
         }
         let frame = Message::new_joined_with_proof(&mesh, &nick("alice"), &proof).sign(session);
-        let bytes = (
-            Plane::Gossip,
-            frame.serialize().expect("serialize").into_bytes(),
-        );
+        let bytes = frame.serialize().expect("serialize").into_bytes();
         (frame, bytes)
     }
 
@@ -8375,210 +10274,6 @@ mod dedup_counter_tests {
             *events.0.lock().expect("the count lock is not poisoned"),
             1,
             "the old session ended as replaced, which writes its left line (the eviction writes none)"
-        );
-    }
-
-    /// A node that holds nothing from others adopts at once the epoch that a received frame
-    /// starts, and keeps the switch for the sweep to write its entry again.
-    #[test]
-    fn a_node_that_holds_nothing_from_others_adopts_the_epoch_of_a_received_frame() {
-        use crate::doc::{MeshDoc, SelfWriteGate};
-
-        let gate = SelfWriteGate::new("peers".to_owned(), "card");
-        let sender_identity = Identity::generate();
-        let sender_nick = nick("sender");
-        // A document that went through 1 reset: its first write is a root of epoch 1.
-        let mut writer = MeshDoc::new_gated(gate.clone()).epoch_cap(0);
-        assert!(
-            writer.tick_epoch(&sender_identity.author_key()).is_some(),
-            "the reset"
-        );
-        let seed = *sender_identity.public().as_bytes();
-        let slot = sender_identity.author_key().to_string();
-        let merge = json!({"peers": {(slot.clone()): {"card": "from epoch 1"}}});
-        let change = writer
-            .build_change(&merge, &seed)
-            .expect("a JSON object merges")
-            .expect("a non-empty merge yields a change");
-        let (body, _plain) = writer
-            .compose_wire_body(&change, None)
-            .expect("compose the wire body");
-        let root =
-            Message::new_channel_event(&MeshId::from("test"), &sender_nick, body, Channel::Meta)
-                .sign(&sender_identity);
-        let bytes = root.serialize().expect("serialize").into_bytes();
-
-        let mut initial = fresh_state();
-        initial.meta_doc = MeshDoc::new_gated(gate);
-        let reader = reader_with(initial, vec![(Plane::Gossip, bytes)]);
-
-        let doc = reader.doc(Channel::Meta);
-        assert_eq!(doc.epoch(), 1, "the reader adopted the epoch");
-        assert_eq!(
-            doc.to_json(),
-            json!({"peers": {(slot): {"card": "from epoch 1"}}}),
-            "the document holds the root frame of the new epoch"
-        );
-        assert!(
-            reader.epoch_write.switch.is_some(),
-            "the sweep writes the entry again"
-        );
-    }
-
-    #[test]
-    fn a_frame_delivered_3_times_counts_1_first_sighting_and_2_repeats() {
-        let writer = fresh_state();
-        let frame = state_frame(&writer, change_body(&writer));
-        let reader = reader_after(&[&frame, &frame, &frame]);
-
-        assert_eq!(
-            reader.idle.fresh, 1,
-            "the first delivery is a first sighting"
-        );
-        assert_eq!(reader.idle.duplicates, 2, "the 2 repeats are duplicates");
-    }
-
-    /// The census reads each received frame by kind: its wire bytes, and whether it was new or a
-    /// repeat. The expected numbers are 1 frame of `wire` bytes new, and 2 of the same repeated.
-    #[test]
-    fn the_received_bytes_are_counted_by_kind_and_by_what_became_of_the_frame() {
-        let writer = fresh_state();
-        let body = change_body(&writer);
-        // The body is a JSON string in the frame: its text, and 1 more byte for the backslash of
-        // each of its quotes. Counted from the text, not with the reader that is under test.
-        let quotes = body.as_str().matches('"').count();
-        let body_on_the_wire = (body.as_str().len() + quotes) as u64;
-        let frame = state_frame(&writer, body);
-        let reader = reader_after(&[&frame, &frame, &frame]);
-        let one = wire(&frame);
-
-        let received = &reader.idle.wire_in;
-        assert_eq!(received.frames, 3, "every frame that reached ingest");
-        assert_eq!(received.wire, 3 * one, "the wire bytes are 3 frames");
-        assert_eq!(
-            by_class(&received.fresh),
-            format!("state:{one}"),
-            "the first sighting is counted once"
-        );
-        assert_eq!(
-            by_class(&received.dup),
-            format!("state:{}", 2 * one),
-            "the 2 repeats are counted as repeats"
-        );
-        assert_eq!(
-            received.body,
-            3 * body_on_the_wire,
-            "the body of each of the 3 frames, without the envelope"
-        );
-    }
-
-    /// One first sighting of `frame`, then repeats that give each arrival its own count: 2 on
-    /// gossip, 1 on gossip with a resend nonce, 1 on unicast, 2 on unicast with a resend nonce. A
-    /// swap of two planes or of two names then moves bytes between cells of unequal value.
-    fn arrivals_of(frame: &Verified) -> Vec<(Plane, Bytes)> {
-        let plain = || frame.serialize().expect("serialize").into_bytes();
-        let resent = |nonce: u64| {
-            let wire = frame.serialize().expect("serialize");
-            wire.copy_with_resend_nonce(nonce).into_bytes()
-        };
-        vec![
-            (Plane::Gossip, plain()),
-            (Plane::Gossip, plain()),
-            (Plane::Gossip, plain()),
-            (Plane::Gossip, resent(1)),
-            (Plane::Unicast, plain()),
-            (Plane::Unicast, resent(2)),
-            (Plane::Unicast, resent(3)),
-        ]
-    }
-
-    /// A repeat is counted by its kind and by how it arrived: on which plane, and with a resend
-    /// nonce or without. Each of 2 kinds has one first sighting, then 2 repeats on gossip, 1 on
-    /// gossip with a nonce, 1 on unicast, and 2 on unicast with a nonce, so no 2 cells are equal.
-    #[test]
-    fn a_repeat_is_counted_by_kind_and_by_the_plane_and_the_resend_it_came_on() {
-        let writer = fresh_state();
-        let body = change_body(&writer);
-        let mesh = MeshId::from("test");
-        let state = state_frame(&writer, body.clone());
-        let meta = Message::new_channel_event(&mesh, &nick("writer"), body, Channel::Meta)
-            .sign(&writer.identity);
-        let mut arrivals: Vec<(Plane, Bytes)> = Vec::new();
-        for frame in [&state, &meta] {
-            arrivals.extend(arrivals_of(frame));
-        }
-        let reader = reader_after_on(arrivals);
-
-        let (one_state, one_meta) = (wire(&state), wire(&meta));
-        // The resend trailer is on the wire, so a resend counts its bytes.
-        let resent = state
-            .serialize()
-            .expect("serialize")
-            .copy_with_resend_nonce(1);
-        let trailer: u64 = resent.len() as u64 - one_state;
-        let expected = [
-            format!("gossip.state:{}", 2 * one_state),
-            format!("gossip.meta:{}", 2 * one_meta),
-            format!("gossip_resend.state:{}", one_state + trailer),
-            format!("gossip_resend.meta:{}", one_meta + trailer),
-            format!("unicast.state:{one_state}"),
-            format!("unicast.meta:{one_meta}"),
-            format!("unicast_resend.state:{}", 2 * (one_state + trailer)),
-            format!("unicast_resend.meta:{}", 2 * (one_meta + trailer)),
-        ]
-        .join(",");
-        assert_eq!(
-            by_arrival(&reader.idle.wire_in.dup_by_arrival),
-            expected,
-            "each repeat is in the cell of its arrival and kind"
-        );
-    }
-
-    /// A frame can be new by id and carry a change that the document applied already: the same
-    /// signed change in another frame. The census counts its bytes as content that came back.
-    #[test]
-    fn a_new_frame_with_a_change_the_document_holds_counts_as_content_that_came_back() {
-        let writer = fresh_state();
-        let body = change_body(&writer);
-        let (first, again) = (
-            state_frame(&writer, body.clone()),
-            state_frame(&writer, body),
-        );
-        assert_ne!(first.dedup_key(), again.dedup_key(), "two frames, two ids");
-
-        let reader = reader_after(&[&first, &again]);
-
-        let received = &reader.idle.wire_in;
-        assert_eq!(
-            by_class(&received.fresh),
-            format!("state:{}", wire(&first) + wire(&again)),
-            "both frames are new by id"
-        );
-        assert_eq!(by_class(&received.dup), "-", "the dedup caught nothing");
-        assert_eq!(
-            by_class(&received.cdup),
-            format!("state:{}", wire(&again)),
-            "the second carries a change that was applied"
-        );
-    }
-
-    /// A frame whose body is no change is ignored by the document, and the census counts it.
-    #[test]
-    fn a_state_frame_that_the_document_ignores_is_counted_as_rejected() {
-        let writer = fresh_state();
-        let junk = state_frame(&writer, "not a change".into());
-        let real = state_frame(&writer, change_body(&writer));
-
-        let reader = reader_after(&[&junk, &real]);
-
-        assert_eq!(
-            reader.idle.state_rejected, 1,
-            "only the junk frame is refused"
-        );
-        assert_eq!(
-            reader.doc(Channel::State).to_json(),
-            json!({ "key": 1 }),
-            "the real change is applied"
         );
     }
 }

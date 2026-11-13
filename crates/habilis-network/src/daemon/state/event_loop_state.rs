@@ -4,22 +4,17 @@ use super::ParkedLinkStates;
 use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
-use super::chat_continuations::ChatContinuations;
 use super::peer_info_flood::PeerInfoFlood;
-use super::proof_exchange::ProofExchange;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshSecrets, PingRound,
     Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
 };
 use crate::daemon::cohost_arm;
-use crate::daemon::doc::MeshDoc;
 use crate::daemon::probe_backoff::ProbeBackoff;
-use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
+use crate::daemon::reassembly::{ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
-use crate::doc;
-use crate::doc::StampedPaths;
 
-use crate::transport::{ResendOutbox, UdpTransport};
+use crate::transport::UdpTransport;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::sync::Arc;
@@ -30,28 +25,31 @@ use std::time::Duration;
 
 use iroh::{EndpointAddr, EndpointId};
 
-use crate::daemon::message_log::MessageLog;
+use super::proof_exchange::ProofExchange;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
+use crate::gossip::digest_round::DigestRound;
+use crate::gossip::outstanding_pulls::OutstandingPulls;
+use crate::gossip::serve_budget::ServeBudget;
 use crate::protocol::identity::{Identity, IdentityProof, verify_proof};
 use crate::protocol::meshes::Mesh;
-use crate::protocol::messages::{Authored, Verified, WireFrame, sole_addressee};
-use crate::protocol::{
-    AuthorKey, ContentHash, DedupKey, MeshId, Message, Nickname, ShardGroup, SymmetricKey, UnixSecs,
-};
+use crate::protocol::messages::{Authored, Message, Verified, WireFrame};
+use crate::protocol::{AuthorKey, DedupKey, MeshId, Nickname, ShardGroup, SymmetricKey, UnixSecs};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
-use crate::util::consts::DOC_EPOCH_WRITE_ATTEMPTS;
 use crate::util::cooldown::Cooldown;
+use habilis_network_doc::{SliceError, SliceIngest, SliceLimits, SliceStore};
+use habilis_network_protocol::ContentHash;
+use habilis_network_protocol::digest::{DigestPage, DigestRoot};
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, LANE_WANTED, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
+    KNOWN_ENDPOINTS_CAP, LANE_WANTED, PENDING_OUTBOUND_CAP, QUIET_CAP, REASSEMBLED_GROUPS_CAP,
     RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED, UNSUPPORTED_VERSION_CAP,
 };
 
-use crate::gossip::{antientropy, apply_merge_patch, lan};
-use crate::protocol::{crypto, messages};
+use crate::gossip::lan;
+use crate::protocol::crypto;
 #[cfg(test)]
 use crate::testing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -61,10 +59,7 @@ use crate::transport::underlay_webrtc;
 use crate::transport::{graft_backoff, probe, proven_endpoints};
 use crate::util::tuning;
 use iroh::address_lookup::memory;
-use n0_future::task::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
-
-use crate::daemon::seed_job::SeedOutcome;
 
 /// A run of live frames of one key, counted for a stamp that proves nothing alone: a stamp before
 /// our join (`live_run`) or a stamp at or below the newest on record of a quiet peer (`step_back`). `last` is the stamp of the latest
@@ -85,13 +80,6 @@ pub(crate) struct PendingSuspend {
     pub(crate) at: Instant,
 }
 
-/// The proof answer of this run and whether the log of its author holds it yet.
-#[derive(Debug, Clone)]
-pub(crate) struct OwnAnswer {
-    frame: Verified,
-    kept: bool,
-}
-
 /// The keys that said goodbye, in two bounded sets. Any key can sign a goodbye, so the goodbyes of
 /// keys that were never peers of ours fill at the pace of the senders. They live apart from the
 /// goodbyes of peers, or a flood of them would push the tombstone of a real leaver out of its set.
@@ -103,11 +91,30 @@ pub(crate) struct Goodbyes {
 }
 
 impl Goodbyes {
-    /// The goodbyes held, of peers and of strangers.
+    /// The keys held in both sets.
     pub(crate) fn len(&self) -> usize {
         self.peers.len() + self.strangers.len()
     }
 }
+
+/// How many keys have an endpoint retained in `refused_endpoints`. The map takes the address of any signed
+/// `PeerInfo` whose key is not the holder of its nickname, and a member mints keys for free, so a flood of them
+/// would fill it until the next sweep. The map holds refused keys only, not the roster, so its cap does not
+/// follow the live roster, which can reach `QUIET_CAP` (1024). At the cap the oldest key goes and its endpoint
+/// state with it.
+pub(crate) const REFUSED_ENDPOINTS_CAP: usize = 256;
+/// The seal keys of unknown signers that wait for a join: 64 at most, and the oldest goes. A member
+/// mints keys for free, so the number is small: a real join follows its `PeerInfo` within a second.
+/// The cap does not follow `max_authors` on purpose. A mass join of more than 64 keys before their
+/// `joined` frames drops the oldest key, and its peer has no seal key until its next `PeerInfo`: a
+/// delay of one refresh period, not a leak.
+pub(crate) const PENDING_SEAL_KEYS_CAP: usize = 64;
+/// How long the seal key of an unknown signer waits for its join, as long as a pending slice.
+pub(crate) const PENDING_SEAL_KEY_TTL: Duration = Duration::from_secs(90);
+/// The released endpoints that wait for the teardown of the pool: 256 at most.
+const TEARDOWN_PENDING_MAX: usize = 256;
+/// The orphan endpoints: 1024 at most.
+pub(crate) const ORPHANED_ENDPOINTS_MAX: usize = 1024;
 
 impl Default for Goodbyes {
     fn default() -> Self {
@@ -118,13 +125,208 @@ impl Default for Goodbyes {
     }
 }
 
+/// The slice stores of the two shared-state channels, behind one type so that the store is changed
+/// in one place. Each author writes its own slice; a slice is a signed frame.
+#[derive(Debug)]
+pub(crate) struct ChannelDocs {
+    state: SliceStore,
+    meta: SliceStore,
+}
+
+impl ChannelDocs {
+    fn get(&self, channel: protocol::Channel) -> &SliceStore {
+        match channel {
+            protocol::Channel::State => &self.state,
+            protocol::Channel::Meta => &self.meta,
+            _ => unreachable!("a channel added later needs its own store"),
+        }
+    }
+
+    fn get_mut(&mut self, channel: protocol::Channel) -> &mut SliceStore {
+        match channel {
+            protocol::Channel::State => &mut self.state,
+            protocol::Channel::Meta => &mut self.meta,
+            _ => unreachable!("a channel added later needs its own store"),
+        }
+    }
+
+    /// The JSON view of `channel`: each author's slice under the lowercase hex of its key.
+    pub(crate) fn to_json(&self, channel: protocol::Channel) -> serde_json::Value {
+        serde_json::Value::Object(self.get(channel).view())
+    }
+
+    /// The value of the slice that `key` holds on `channel`, or an empty object.
+    pub(crate) fn own_value(
+        &self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        match self.get(channel).value(key) {
+            Some(serde_json::Value::Object(map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        }
+    }
+
+    /// Makes the draft of the next write of the own slice `own` on `channel`.
+    pub(crate) fn prepare_local(
+        &mut self,
+        channel: protocol::Channel,
+        own: &AuthorKey,
+        value: serde_json::Map<String, serde_json::Value>,
+        now: Instant,
+    ) -> Result<habilis_network_doc::LocalDraft, SliceError> {
+        self.get_mut(channel).prepare_local(own, value, now)
+    }
+
+    /// Makes the draft of the farewell of `own` on `channel`: a tombstone, which spends no token.
+    pub(crate) fn prepare_leave(
+        &mut self,
+        channel: protocol::Channel,
+        own: &AuthorKey,
+        now: Instant,
+    ) -> Result<habilis_network_doc::LocalDraft, SliceError> {
+        self.get_mut(channel).prepare_leave(own, now)
+    }
+
+    /// Keeps the signed frame of `draft` on `channel`, once the frame is built from the draft body.
+    pub(crate) fn commit_local(
+        &mut self,
+        channel: protocol::Channel,
+        draft: habilis_network_doc::LocalDraft,
+        frame: &Verified,
+        now: Instant,
+    ) -> Result<(), SliceError> {
+        self.get_mut(channel).commit_local(draft, frame, now)
+    }
+
+    /// Whether `key` is in the gone set of `channel`, for the tests that check a release does not forget.
+    #[cfg(test)]
+    pub(crate) fn is_gone(&self, channel: protocol::Channel, key: &AuthorKey) -> bool {
+        self.get(channel).is_gone(key)
+    }
+
+    /// The signed frame of the slice that `key` holds on `channel`, as a wire frame.
+    pub(crate) fn own_frame(
+        &self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+    ) -> Option<WireFrame> {
+        self.get(channel).frame(key)?.serialize().ok()
+    }
+
+    /// The plaintext body of the slice that `key` holds on `channel`, in the shape of a frame body.
+    pub(crate) fn plain_body(
+        &self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+    ) -> Option<protocol::MessageBody> {
+        let store = self.get(channel);
+        let body =
+            serde_json::json!({ "version": store.version(key)?, "value": store.value(key)? });
+        protocol::MessageBody::try_new(&body.to_string()).ok()
+    }
+
+    /// Takes a signed slice frame of `channel` into the store.
+    pub(crate) fn ingest(
+        &mut self,
+        channel: protocol::Channel,
+        frame: &Verified,
+        live: bool,
+        now: Instant,
+    ) -> SliceIngest {
+        self.get_mut(channel).ingest(frame, live, now)
+    }
+
+    /// Holds a signed slice frame of `channel` for an author that is not in the roster yet.
+    pub(crate) fn hold(
+        &mut self,
+        channel: protocol::Channel,
+        frame: &Verified,
+        now: Instant,
+    ) -> Result<(), SliceError> {
+        self.get_mut(channel).hold(frame, now)
+    }
+
+    /// Drops the slice of `key` on both channels, and puts the key in the gone set.
+    pub(crate) fn forget(&mut self, key: &AuthorKey, now: Instant) {
+        self.state.forget(key, now);
+        self.meta.forget(key, now);
+    }
+
+    /// Moves the slice of `key` on both channels into the pending set.
+    pub(crate) fn park(&mut self, key: &AuthorKey, now: Instant) {
+        self.state.park(key, now);
+        self.meta.park(key, now);
+    }
+
+    /// Drops the slice of `key` on both channels, and its pending frame. Unlike `forget`, the key is not gone.
+    pub(crate) fn release(&mut self, key: &AuthorKey) {
+        self.state.release(key);
+        self.meta.release(key);
+    }
+
+    /// The digest of `channel`.
+    pub(crate) fn digest(&self, channel: protocol::Channel) -> DigestRoot {
+        self.get(channel).digest()
+    }
+
+    /// Whether `root` is the digest of `channel`.
+    pub(crate) fn matches(&self, channel: protocol::Channel, root: &ContentHash) -> bool {
+        self.get(channel).matches(root)
+    }
+
+    /// The keys that `page` lists and `channel` would take.
+    pub(crate) fn wanted(&self, channel: protocol::Channel, page: &DigestPage) -> Vec<AuthorKey> {
+        self.get(channel).wanted_from(page).collect()
+    }
+
+    /// The number of keys that one pull of `channel` carries.
+    pub(crate) fn pull_rows(&self, channel: protocol::Channel) -> usize {
+        self.get(channel).page_rows()
+    }
+
+    /// The signed slice frames of `keys` that `channel` holds, at most one page of them.
+    pub(crate) fn serve(&self, channel: protocol::Channel, keys: &[AuthorKey]) -> Vec<Verified> {
+        self.get(channel).serve(keys).collect()
+    }
+
+    /// The page `index` of the digest of `channel`, when the page exists.
+    pub(crate) fn page(&self, channel: protocol::Channel, index: usize) -> Option<DigestPage> {
+        self.get(channel).page(index)
+    }
+
+    /// The keys that hold a slice on either channel.
+    pub(crate) fn held_keys(&self) -> Vec<AuthorKey> {
+        self.state
+            .held_keys()
+            .chain(self.meta.held_keys())
+            .collect()
+    }
+
+    /// Expires the tombstones, the gone keys and the held frames of both channels at `now`.
+    pub(crate) fn expire(&mut self, now: Instant) {
+        self.state.expire(now);
+        self.meta.expire(now);
+    }
+
+    /// Takes the held frame of `key` on `channel` out of the pending set.
+    pub(crate) fn take_pending(
+        &mut self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+        now: Instant,
+    ) -> Option<Verified> {
+        self.get_mut(channel).take_pending(key, now)
+    }
+}
+
 /// What the receive path remembers about frames it handled or refused. Each set is bounded.
 #[derive(Debug)]
 pub(crate) struct ReceiveMemory {
-    /// Shard groups already reassembled + surfaced, so a body is surfaced once even if a shard
-    /// is re-fetched (via anti-entropy) after its id aged out of [`EventLoopState::seen`].
-    /// Groups are rare and short-lived.
-    pub(crate) reassembled_groups: BoundedFifoSet<ShardGroup>,
+    /// Shard groups already reassembled and surfaced, keyed by their author as the store keys them:
+    /// a group uuid is chosen by its author, so another author may reuse it. A body is surfaced once
+    /// even if its shard is served again.
+    pub(crate) reassembled_groups: BoundedFifoSet<(AuthorKey, ShardGroup)>,
     /// The protocol versions of frames that did not parse, each one named once in an error line.
     /// The set stops at [`UNSUPPORTED_VERSION_CAP`] and evicts nothing, so a sender that makes up
     /// versions cannot get a line for each frame.
@@ -157,7 +359,7 @@ impl ReceiveMemory {
 impl Default for ReceiveMemory {
     fn default() -> Self {
         Self {
-            reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
+            reassembled_groups: BoundedFifoSet::new(REASSEMBLED_GROUPS_CAP),
             refused_versions: HashSet::new(),
             many_versions_told: false,
         }
@@ -256,9 +458,8 @@ pub struct EventLoopState {
     pub(crate) linked_endpoints: HashSet<EndpointId>,
     /// Endpoints whose dial hint the sweep pruned while they still had a link. The state of such
     /// an endpoint stays for the regraft that follows the link loss. A later sweep drops it once
-    /// the link is gone and no nickname binds the endpoint. It also holds the endpoints that found the queue of the
-    /// teardown full. `ORPHANED_ENDPOINTS_MAX` at most. A full set drops an orphan that is not linked (its state is
-    /// forgotten already, and its pool state falls back to the idle sweep), never a linked one: see `insert_orphan`.
+    /// the link is gone and no nickname binds the endpoint. Bounded by `linked_endpoints`: an entry
+    /// leaves at the first sweep that sees no link.
     pub(crate) orphaned_endpoints: BoundedFifoSet<EndpointId>,
     /// When `linked_endpoints` last became empty, `None` while it holds a link. The census warns
     /// of a silent partition only when this gap outlasts a heal: see
@@ -284,9 +485,6 @@ pub struct EventLoopState {
     /// Where a path watcher reports a change of the selected path to a peer
     /// the race covers (`transport::probe::on_path_change`).
     pub(crate) path_changes: mpsc::UnboundedSender<probe::PathChange>,
-    /// Where a flushed frame whose dial failed comes back to the loop, to be buffered again
-    /// (`gossip::requeue_failed`). A detached sender until the real loop installs its channel.
-    pub(crate) flush_failed: mpsc::UnboundedSender<(Verified, WireFrame)>,
     /// The pooled connection each watched peer's watcher follows, by stable
     /// id (`None` while its dial runs), so a replaced connection gets a fresh
     /// watcher and a stale one's reports are dropped.
@@ -306,7 +504,7 @@ pub struct EventLoopState {
     /// Bounded FIFO (cap `KNOWN_ENDPOINTS_CAP`) so it can't grow without limit.
     pub(crate) known_endpoints: BoundedFifoSet<EndpointId>,
     /// The endpoint each signing key proved in its `PeerInfo`: the only
-    /// point-to-point target an anti-entropy answer may take, since a
+    /// point-to-point target a backfill answer may take, since a
     /// nickname is a label any signer can claim.
     pub(crate) proven_endpoints: proven_endpoints::ProvenEndpoints,
     /// Our own `PeerInfo` proof, made once: it is the same for the session.
@@ -337,33 +535,11 @@ pub struct EventLoopState {
     pub(crate) join_fallback_at: Option<Instant>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
-    /// How many doc censuses this loop has run: one in `DOC_HEAVY_EVERY` is heavy. The count is of
-    /// this loop, so that each document of a process that runs several loops gets its heavy census.
-    pub(crate) doc_census_runs: u64,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
     /// session although nothing was sent over a connection yet.
     lane_wanted: HashMap<EndpointId, Instant>,
     /// The proven peers whose gossip link went down, with the time of their quick re-graft.
     regraft_at: HashMap<EndpointId, Instant>,
-    /// When each author's digest was last served. Keyed on the author key rather
-    /// than the nickname, which an author picks freely. The key is an `Option`
-    /// because a digest built with no signature is a valid input of the tests: `None`
-    /// is its own bucket, as the empty string was.
-    digest_serves: Cooldown<AuthorKey>,
-    /// The chat continuations that an author gets inside its cooldown. Bounded: a run lives for one
-    /// cooldown window, at most `CHAT_CONTINUATION_AUTHORS_MAX` authors hold one, and a new author
-    /// is refused when the table is full (see `ChatContinuations`).
-    chat_continuations: ChatContinuations,
-    /// When we last reported an author whose digest we could not read. An `Option` key
-    /// for the same reason as `digest_serves`.
-    digest_unreadable: Cooldown<AuthorKey>,
-    /// Where a digest answer goes, so that the loop never waits to send it. The
-    /// task that drains it takes `resend_receiver` when the loop starts.
-    pub(crate) resend_outbox: ResendOutbox,
-    /// Tests only: the next ask of a fast round fails to start, once, as a send does when the
-    /// connection cannot be opened. A default build has no such field.
-    #[cfg(test)]
-    fail_next_ask: bool,
     /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
     /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -371,15 +547,6 @@ pub struct EventLoopState {
     /// Tests only: how many frames the hook dropped.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) test_drops_fired: u32,
-    pub(crate) resend_receiver: Option<mpsc::Receiver<transport::Resend>>,
-    /// When each asker's state or meta digest was last served, per plane. A
-    /// new node sends a digest pair for every peer it sees, all with the same
-    /// heads, and every holder hears each one; the plane is in the key so the
-    /// asker's re-ask at its first real-peer link, answered point-to-point,
-    /// is not refused by the gossip answer before it.
-    pub(crate) state_digest_serves: antientropy::ServeBudget,
-    /// This node's own fast rounds of state digests while it backfills.
-    pub(crate) fast_rounds: antientropy::FastRounds,
     /// Membership layer: the peer roster. Set of the author keys of
     /// other peers, feeding the state file's `peer_count`
     /// (`peers.len() + 1`). Excludes self. Driven by
@@ -403,14 +570,17 @@ pub struct EventLoopState {
     /// The endpoint of a `PeerInfo` that bound no dial hint, because another live key holds the
     /// nickname of its signer. It waits here: the signer takes the nickname over when the other
     /// key leaves, and the sweep releases the endpoint of a signer that left the roster.
-    ///
-    /// Bounded by [`REFUSED_ENDPOINTS_CAP`]: when a new key arrives at the cap, the oldest key goes and
-    /// its endpoint state with it.
     pub(crate) refused_endpoints: HashMap<AuthorKey, EndpointAddr>,
-    /// The endpoints that sync code released, waiting for the teardown of the pool (its pooled connection and its
-    /// dial cooldown), which the loop does where it can be async: `TEARDOWN_PENDING_MAX` at most. An endpoint that
-    /// finds it full waits in `orphaned_endpoints` and is queued again by the next sweep.
-    teardown_pending: BoundedFifoSet<EndpointId>,
+    /// The x25519 key that each known key published in its signed `PeerInfo`. A directed body for
+    /// the key is sealed to it. The map holds a key that is a peer, quiet or named, so the roster
+    /// bounds it, and the key leaves with `forget_key`.
+    pub(crate) seal_keys: HashMap<AuthorKey, x25519_dalek::PublicKey>,
+    /// The seal key of a `PeerInfo` whose signer is not known yet, with the time that it came, oldest
+    /// first. A `PeerInfo` can come before the `joined` frame of its key, and the next one is a
+    /// refresh period away. The key waits here for the join of its signer, `PENDING_SEAL_KEYS_CAP`
+    /// at most, and a key older than `PENDING_SEAL_KEY_TTL` is dropped when a join looks for its key.
+    /// With no join, a stale key stays until the cap pushes it out: the memory is bounded by the cap.
+    pending_seal_keys: VecDeque<(AuthorKey, x25519_dalek::PublicKey, Instant)>,
     /// The keys of `refused_endpoints` in the order that they were retained, oldest first. It may hold a key
     /// that left the map; it is cut to the keys of the map when it grows past twice the cap.
     refused_order: VecDeque<AuthorKey>,
@@ -439,6 +609,8 @@ pub struct EventLoopState {
     /// joiner's only link to it is that pseudo-node link (kept out of
     /// `linked_endpoints` by design). `None` until the loop learns it.
     pub(crate) rendezvous_id: Option<EndpointId>,
+    /// The newcomers that wait for this node's own slices, with the time each one was owed them.
+    pub(crate) owed_backfill: HashMap<AuthorKey, Instant>,
     /// Heartbeat layer: peers we've evicted as quiet (silent
     /// past `ALIVE_TIMEOUT`) but who may still reappear. Any
     /// message from a nickname in this set triggers a symmetric
@@ -464,37 +636,12 @@ pub struct EventLoopState {
     /// more than `QUIET_CAP` departures ago, that this node never held, counts as an arrival
     /// until its author goes quiet.
     pub(crate) left_keys: Goodbyes,
-    /// The identity proofs of the sessions this node verified, and the sessions it asked for one.
-    /// Bounded by `QUIET_CAP`: a full book drops its oldest dead session, and refuses a new proof
-    /// when every held session is live.
-    pub(crate) proofs: ProofExchange,
-    /// The proof answer of this run, signed once: every asker gets this same frame, so the log of this
-    /// node keeps one entry for the run and every repeat is a duplicate at the peers. A restart is a new
-    /// run, with a new state and a new answer. One frame at most.
-    own_answer: Option<OwnAnswer>,
-    /// The proof requests that this node signed, to show that a path-less ask signs none.
-    #[cfg(test)]
-    pub(crate) proof_requests_signed: AtomicU64,
-    /// For each proof request that was sent: the dial address that the pool remembered for its endpoint at
-    /// that moment, to show that the address was registered before the request went.
-    #[cfg(test)]
-    pub(crate) ask_dial_addrs: Vec<Option<EndpointAddr>>,
-    /// The run number of this start, which the proof of this session names.
-    run: u64,
-    /// The lock on the member key of this start: it lives as long as this node runs, so a second start of
-    /// the same state path is refused for as long as this one lives. Held, never read.
-    #[expect(dead_code, reason = "held for the lock it carries, never read")]
-    // shared with the clones of the keys that the setup still holds: the lock goes when the last drops
-    key_lock: Option<Arc<File>>,
-    /// The highest run above ours that a session of our own member proved: a newer run of this member is
-    /// active elsewhere, and this node is superseded. One number, so the memory is bounded.
-    newest_own_run_seen: u64,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
     /// join we never showed never produces a `went quiet` / `has left`
     /// line — keeps the join-horizon view symmetric. The roster (`peers`)
-    /// stays complete for anti-entropy/membership; `surfaced ⊆ peers`
+    /// stays complete for the backfill and membership; `surfaced ⊆ peers`
     /// governs what the operator/agent is shown: the rows of the roster
     /// snapshot hold the peers in `surfaced` and the quiet peers, and
     /// `member_count` counts only the peers in `surfaced`.
@@ -504,7 +651,7 @@ pub struct EventLoopState {
     pub(crate) last_sent_at: Instant,
     /// Wall-clock unix seconds when this daemon started — its join
     /// instant. The node still receives & relays older messages
-    /// (anti-entropy keeps the mesh's set uniform), but messages
+    /// (the backfill keeps the mesh's set uniform), but messages
     /// stamped before this are never *surfaced* (printed / `poll` /
     /// `fetch` / library API): the operator/agent view starts at join.
     pub(crate) joined_at: UnixSecs,
@@ -638,11 +785,10 @@ pub struct EventLoopState {
     /// re-probes the id at once, instead of at the next reclaim tick. `None` when no shed runs.
     pub(crate) beacon_closing: Option<oneshot::Receiver<()>>,
     /// Recently-seen message ids, for duplicate suppression. Gossip
-    /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
-    /// re-sends, the rendezvous double-path) can deliver the same message
-    /// twice; `mark_seen` drops the repeat before it reaches the log /
-    /// inbound push channel / agent. Bounded (`SEEN_IDS_CAP`, 2× the message log)
-    /// so it always covers the retention window.
+    /// (GRAFT/repair, topology churn, our own re-broadcasts, the rendezvous
+    /// double-path) can deliver the same message twice; `mark_seen` drops the
+    /// repeat before it reaches the inbound push channel / agent. Bounded
+    /// (`SEEN_IDS_CAP`).
     pub(crate) seen: BoundedFifoSet<DedupKey>,
     /// User messages sent before we had a real-peer link (no gossip
     /// path yet — a bare `broadcast` would be a lost one-shot). Drained in
@@ -653,102 +799,68 @@ pub struct EventLoopState {
     pub(crate) pending_outbound: BoundedQueue<(Verified, WireFrame)>,
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
+    /// The lock on the member key of this start, held as long as this node runs. Its state file
+    /// holds it too (see [`state_file_holding_the_key_lock`]).
+    #[expect(dead_code, reason = "held for the lock it carries, never read")]
+    // shared with the loop state's state file, which holds the same lock
+    key_lock: Option<Arc<File>>,
     /// When advertising (`create --advertise`), the directory's
     /// re-broadcast task reads the live peer count from here.
     /// Mirrors `peer_count` (`peers.len() + 1`), refreshed
     /// alongside every `write_peer_count`. `None` for the common
     /// non-advertising case (no shared counter to maintain).
     pub(crate) live_count: Option<LiveCount>,
-    pub(crate) message_log: MessageLog,
     /// What the receive path remembers about frames it handled or refused, each in a bounded set.
     pub(crate) receive_memory: ReceiveMemory,
     /// Partial multipart bodies buffering toward reassembly — dedicated and
-    /// byte-budgeted, decoupled from the message log so log eviction can
-    /// never break reassembly. Swept for stale groups on the prune tick.
+    /// byte-budgeted, decoupled from the seen set so its eviction can never
+    /// break reassembly. Swept for stale groups on the prune tick.
     pub(crate) reassembly: ReassemblyStore,
-    /// Serialized frames of our recent big (unlogged) outbound shard groups —
-    /// the re-serve source for peers' `shard/repair` requests (big groups
-    /// skip the message log, so anti-entropy can't heal them).
+    /// Serialized frames of our recent big outbound shard groups —
+    /// the only re-serve source for peers' `shard/repair` requests.
     pub(crate) shard_cache: ShardCache,
-    /// The `state` channel: an automerge CRDT plus the signed change frames that
-    /// carried it (the re-serve store). Convergence and card authorization live
-    /// in [`crate::daemon::doc`]; reconciliation is heads-based anti-entropy. This is the
-    /// document a consumer's `state get` surface reads.
-    pub(crate) state_doc: MeshDoc,
-    /// The key that seals the bodies of the state channel (`None` on a mesh with no password): the
-    /// build of a seed on another thread seals the frames that it measures with it.
-    pub(crate) state_seal: Option<Arc<SymmetricKey>>,
-    /// The build of the seed of a cut that runs on a blocking thread, one at a time. The event loop
-    /// waits for it in its `select!` and then signs and sends the chain.
-    pub(crate) seed_job: Option<JoinHandle<SeedOutcome>>,
-    /// The values that the state channel must write again after an epoch switch (the replay of
-    /// the writes that the seed lacks) or as a restore: a merge and the stamp of each path. The
-    /// loop drains it after each tick and sends the frames. Bounded by `REPLAY_QUEUE_CAP`: when it
-    /// is full the new item is refused and counted, and the node warns.
-    pub(crate) replay_queue: BoundedQueue<(serde_json::Value, StampedPaths)>,
-    /// The cuts of the state channel that this node made (a seed built, signed and sent), and the
-    /// cuts that failed, since the node started: one integer each, for the census line.
-    pub(crate) state_cuts: u64,
-    pub(crate) state_cuts_failed: u64,
-    /// When the state document stops waiting for its first sync and writes with the clock that it
-    /// has (see `tuning::STATE_SYNC_WAIT`): counted from the start of the node, so a node with no peer
-    /// is not held for ever.
-    pub(crate) state_sync_deadline: Instant,
-    /// When this node last sent a request for the first sync of the state channel (a digest with
-    /// the flag `first`, on gossip or point-to-point). A closing digest ends the wait only for a
-    /// short time after it (see `seed_job::closing_digest_seen`): a closing digest that arrives
-    /// when this node asked nobody is the answer of no request, and any member can send one.
-    pub(crate) first_asked_at: Option<Instant>,
-    /// When this node sent its FIRST request for the first sync, set once. It is not renewed by a
-    /// later digest or ask: the far jump of an epoch is allowed only within a few seconds of it (see
-    /// `seed_job::far_jump_allowed`), so it does not stay open for the whole wait.
-    pub(crate) first_request_at: Option<Instant>,
-    /// The same for the meta channel: when this node sent its first meta request, set once, while
-    /// the meta document awaits a far root.
-    pub(crate) meta_first_request_at: Option<Instant>,
-    /// The `meta` channel's document — a second, independent shared-state channel.
-    /// Gates foreign-card writes (unlike `state`), since a `meta` card carries a
-    /// peer's cryptographic identity.
-    pub(crate) meta_doc: MeshDoc,
-    /// Rolling start index for the **chat** anti-entropy digest window: each
-    /// round advertises `message_log[digest_cursor ..]` (up to
-    /// `ANTIENTROPY_DIGEST_MAX_IDS`), then advances/wraps so a log larger
-    /// than one digest is swept over several rounds. (State/meta reconcile by
-    /// automerge heads and need no cursor.)
-    ///
-    /// A position in the log in bound order, and the log changes between rounds:
-    /// an insert before the cursor moves every later position by one, so a sweep
-    /// can skip a slice or list one twice. Each window is still right by
-    /// itself, and the next sweep covers a skipped slice, so it only delays.
-    pub(crate) digest_cursor: usize,
+    /// The shared documents of the `state` and `meta` channels.
+    pub(crate) docs: ChannelDocs,
     /// This member's signing identity (Ed25519). Shared with the
     /// send path so messages we author are signed before broadcast.
     /// The public key is the durable identity; the nickname is a
-    /// non-unique display label (see `docs/history-integrity.md`).
+    /// non-unique display label.
     pub(crate) identity: Arc<Identity>,
+    /// The endpoint that the unicast frame being handled arrived on, while it is handled. Set only
+    /// around the handling of a unicast frame, so a proof answer can go back on the same connection.
+    pub(crate) unicast_arrival: Option<EndpointId>,
+    /// The slice pulls that wait for an answer, by holder, channel and author.
+    pub(crate) outstanding_pulls: OutstandingPulls,
+    /// The digests that differ from ours, until their pages are read.
+    pub(crate) digest_round: DigestRound,
+    /// The author whose State and Meta frames this node drops after the dedup gate, for the loss tests.
+    #[cfg(feature = "iroh-test-utils")]
+    pub(crate) drop_slices_from: Option<AuthorKey>,
+    /// The author whose Left this node drops after the dedup gate, for the farewell tests.
+    #[cfg(feature = "iroh-test-utils")]
+    pub(crate) drop_left_from: Option<AuthorKey>,
+    /// The answers that this node gives to slice pulls and page requests, per window.
+    pub(crate) serve_budget: ServeBudget,
+    /// The released endpoints that wait for the teardown of the pool: `TEARDOWN_PENDING_MAX` at most.
+    teardown_pending: BoundedFifoSet<EndpointId>,
+    /// The identity proofs of the sessions this node verified, and the sessions it asked for one.
+    /// Bounded by `QUIET_CAP`: a full book drops its oldest dead session, and refuses a new proof
+    /// when every held session is live.
+    pub(crate) proofs: ProofExchange,
+    /// The proof answer of this run, signed once: every asker gets this same frame.
+    own_answer: Option<Verified>,
+    /// The proof requests that this node signed, to show that a path-less ask signs none.
+    #[cfg(test)]
+    pub(crate) proof_requests_signed: AtomicU64,
+    /// For each proof request that was sent: the dial address that the pool remembered for its endpoint.
+    #[cfg(test)]
+    pub(crate) ask_dial_addrs: Vec<Option<EndpointAddr>>,
+    /// The run number of this start, which the proof of this session names.
+    run: u64,
+    /// The newest run of our own member that this node has reported as superseding it.
+    newest_own_run_seen: u64,
     /// The key that survives a restart. It signs the proof of this session and nothing else.
     pub(crate) member_identity: Option<Arc<Identity>>,
-    /// Our own per-author log cursor (Phase 2): `self_seq` is the next
-    /// `Msg` sequence number to emit, `self_prev` the content hash of our
-    /// last sent `Msg` (`None` until the first). Advanced on every send so
-    /// our `Msg` stream is a `seq`+`prev` hash chain.
-    pub(crate) self_seq: u64,
-    pub(crate) self_prev: Option<ContentHash>,
-    /// Phase 2 fork detection: per author key, the content hash
-    /// seen at each `Msg` `seq`. A *different* hash at an already-seen
-    /// `(author, seq)` is cryptographic proof of equivocation → a `fork`
-    /// event. Order-independent (gossip delivers out of order).
-    pub(crate) author_seqs: HashMap<AuthorKey, HashMap<u64, ContentHash>>,
-    /// Author keys already flagged as forked, so one `fork` event fires
-    /// per offending key rather than per message.
-    pub(crate) forked: HashSet<AuthorKey>,
-    /// Cross-author DAG (Phase 3): `by_hash` maps each known `Msg`'s content
-    /// hash to its timestamp (for the `ts ≥ max(parents.ts)` backdating
-    /// rule); `dag_heads` is the current tip set (hashes with no observed
-    /// child) — the `parents` stamped on the next `Msg` we author. Both are
-    /// pruned alongside the message-log eviction.
-    pub(crate) by_hash: HashMap<ContentHash, UnixSecs>,
-    pub(crate) dag_heads: HashSet<ContentHash>,
     /// When the last *verified* inbound gossip message arrived — the
     /// starvation watchdog's signal. Keyed on messages, not neighbor
     /// events: the roster-collapse showed links can look alive (or flap)
@@ -782,23 +894,8 @@ pub struct EventLoopState {
     /// mesh, `derive_secret(mesh_key, "broadcast")` — domain-separated from
     /// the state/meta doc keys. `None` ⇒ chat stays plaintext. Wiped on drop.
     pub(crate) broadcast_key: Option<SymmetricKey>,
-    /// The switch of the meta document to a new epoch whose entry of this node is not written
-    /// again yet, and the sweeps that failed to write it. One slot, so it is bounded.
-    pub(crate) epoch_write: EpochWrite,
     /// Where the event loop's wakeups went since the last census.
     pub(crate) idle: IdleCounters,
-}
-
-/// The write of the entry of this node after the meta document moved to a new epoch. The sweep tick
-/// writes the entry and empties the slot. A second switch before that keeps the entry of the first. A
-/// failed write puts the switch back, and at `DOC_EPOCH_WRITE_ATTEMPTS` failures the switch is given
-/// up, so a send that never works cannot keep the slot for ever.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct EpochWrite {
-    /// The switch whose entry waits to be written.
-    pub(crate) switch: Option<doc::EpochSwitch>,
-    /// How many sweeps failed to write it.
-    pub(crate) attempts: u8,
 }
 
 /// The state file of this start, holding the lock on the member key: the cleanup of that file
@@ -814,20 +911,25 @@ fn state_file_holding_the_key_lock(
 }
 
 impl EventLoopState {
+    /// The shared state of `channel` as JSON.
+    #[must_use]
+    pub fn view(&self, channel: protocol::Channel) -> serde_json::Value {
+        self.docs.to_json(channel)
+    }
+
     /// Build a fresh event-loop state. `now` is passed explicitly so
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
     /// per-channel keys are derived, rather than lingering in the caller.
     #[expect(
         clippy::too_many_lines,
-        reason = "the member key is one field over the limit; the constructor is split in a later commit"
+        reason = "the proof and the member-key lock are four fields over the limit; the constructor is split later"
     )]
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
         let MeshSecrets {
             password: mesh_password,
             key: mesh_key,
         } = init.secrets;
-        let (resend_outbox, resend_receiver) = ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
         // Per-channel keys, domain-separated from each other and from every other seed-derived
         // secret. `None` (passwordless): the docs and the broadcast chat stay plaintext.
         let [state_key, meta_key, broadcast_key] = Self::channel_keys(mesh_key.as_ref());
@@ -840,7 +942,6 @@ impl EventLoopState {
             direct_proven: mpsc::unbounded_channel().0,
             gossip_handle: None,
             path_changes: mpsc::unbounded_channel().0,
-            flush_failed: mpsc::unbounded_channel().0,
             path_watchers: HashMap::new(),
             path_kinds: HashMap::new(),
             route_dialed: HashMap::new(),
@@ -856,45 +957,28 @@ impl EventLoopState {
             redials: redial::Redials::default(),
             join_fallback_at: None,
             graft_backoff: graft_backoff::GraftBackoff::default(),
-            doc_census_runs: 0,
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
-            digest_serves: Cooldown::new(tuning::ANTIENTROPY_SERVE_COOLDOWN),
-            chat_continuations: ChatContinuations::default(),
-            digest_unreadable: Cooldown::new(super::UNREADABLE_DIGEST_LOG_WINDOW),
-            resend_outbox,
-            #[cfg(test)]
-            fail_next_ask: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drop: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drops_fired: 0,
-            resend_receiver: Some(resend_receiver),
-            state_digest_serves: antientropy::ServeBudget::default(),
-            fast_rounds: antientropy::FastRounds::default(),
             peers: HashSet::new(),
             last_seen: HashMap::new(),
             peer_endpoints: HashMap::new(),
             rendezvous_id: None,
+            owed_backfill: HashMap::new(),
             quiet: BoundedFifoSet::new(QUIET_CAP),
             quiet_since: HashMap::new(),
             names: HashMap::new(),
             hint_owner: HashMap::new(),
             refused_endpoints: HashMap::new(),
+            seal_keys: HashMap::new(),
+            pending_seal_keys: VecDeque::new(),
             refused_order: VecDeque::new(),
-            teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             peer_stamp: HashMap::new(),
             clock_evidence: ClockEvidence::default(),
             left_keys: Goodbyes::default(),
-            proofs: ProofExchange::with_cap(QUIET_CAP),
-            own_answer: None,
-            #[cfg(test)]
-            proof_requests_signed: AtomicU64::new(0),
-            #[cfg(test)]
-            ask_dial_addrs: Vec::new(),
-            run: init.keys.run,
-            key_lock: init.keys.key_lock.as_ref().map(Arc::clone),
-            newest_own_run_seen: 0,
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
@@ -935,37 +1019,50 @@ impl EventLoopState {
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
-            // The lock goes to the state file as well: its cleanup deletes the member key, so the
-            // lock must outlive that cleanup (see `StateFile::key_lock`).
-            state_file: state_file_holding_the_key_lock(init.state_file, init.keys.key_lock),
+            state_file: state_file_holding_the_key_lock(
+                init.state_file,
+                init.keys.key_lock.clone(),
+            ),
+            key_lock: init.keys.key_lock,
             live_count: None,
-            message_log: MessageLog::new(MESSAGE_LOG_SIZE),
             receive_memory: ReceiveMemory::default(),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
-            state_doc: MeshDoc::new_state(state_key),
-            state_seal: mesh_key.as_ref().map(|key| {
-                // Shared with the job that builds a seed on a blocking thread.
-                Arc::new(key.derive(b"state-doc"))
-            }),
-            seed_job: None,
-            replay_queue: BoundedQueue::new(REPLAY_QUEUE_CAP),
-            state_cuts: 0,
-            state_cuts_failed: 0,
-            state_sync_deadline: Instant::now() + tuning::state_sync_wait(),
-            first_asked_at: None,
-            first_request_at: None,
-            meta_first_request_at: None,
-            meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
-            digest_cursor: 0,
+            docs: ChannelDocs {
+                state: SliceStore::new(
+                    protocol::Channel::State,
+                    SliceLimits::default(),
+                    init.overheads.state,
+                )
+                .with_page_overhead(init.overheads.page)
+                .with_key(state_key),
+                meta: SliceStore::new(
+                    protocol::Channel::Meta,
+                    SliceLimits::default(),
+                    init.overheads.meta,
+                )
+                .with_page_overhead(init.overheads.page)
+                .with_key(meta_key),
+            },
             identity: init.keys.session,
+            unicast_arrival: None,
+            outstanding_pulls: OutstandingPulls::default(),
+            digest_round: DigestRound::default(),
+            #[cfg(feature = "iroh-test-utils")]
+            drop_slices_from: None,
+            #[cfg(feature = "iroh-test-utils")]
+            drop_left_from: None,
+            serve_budget: ServeBudget::default(),
+            teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
+            proofs: ProofExchange::with_cap(QUIET_CAP),
+            own_answer: None,
+            #[cfg(test)]
+            proof_requests_signed: AtomicU64::new(0),
+            #[cfg(test)]
+            ask_dial_addrs: Vec::new(),
+            run: init.keys.run,
+            newest_own_run_seen: 0,
             member_identity: init.keys.member,
-            self_seq: 0,
-            self_prev: None,
-            author_seqs: HashMap::new(),
-            forked: HashSet::new(),
-            by_hash: HashMap::new(),
-            dag_heads: HashSet::new(),
             last_inbound_at: now,
             last_recovery_at: None,
             recovery_trips: 0,
@@ -973,7 +1070,6 @@ impl EventLoopState {
             mesh_password,
             mint_mesh: None,
             broadcast_key,
-            epoch_write: EpochWrite::default(),
             idle: IdleCounters::default(),
         }
     }
@@ -984,55 +1080,9 @@ impl EventLoopState {
             .map(|label| mesh_key.map(|key| key.derive(label)))
     }
 
-    /// The `meta` channel: gated by the application's per-peer map when it keeps one, free-form otherwise.
-    /// Keep `switch` until the sweep writes the entry of this node again. If a switch is waiting
-    /// already, its entry is kept: the document holds no entry of ours since the first switch except
-    /// the writes made after it, so the new entry is partial. The two merge, the newer fields win
-    /// (a deletion was applied to the waiting entry when it was made, see `follow_own_write`).
-    pub(crate) fn note_epoch_switch(&mut self, mut switch: doc::EpochSwitch) {
-        self.epoch_write.attempts = 0;
-        let waiting = self
-            .epoch_write
-            .switch
-            .take()
-            .and_then(|held| held.own_entry);
-        switch.own_entry = match (waiting, switch.own_entry.take()) {
-            (Some(mut older), Some(newer)) => {
-                apply_merge_patch(&mut older, &newer);
-                Some(older)
-            }
-            (older, newer) => newer.or(older),
-        };
-        self.epoch_write.switch = Some(switch);
-    }
-
-    /// Put `switch` back in the slot after a failed write, for the next sweep to try again, unless
-    /// it failed `DOC_EPOCH_WRITE_ATTEMPTS` times. Returns whether the switch waits.
-    pub(crate) fn retry_epoch_switch(&mut self, switch: doc::EpochSwitch) -> bool {
-        self.epoch_write.attempts = self.epoch_write.attempts.saturating_add(1);
-        if self.epoch_write.attempts >= DOC_EPOCH_WRITE_ATTEMPTS {
-            self.epoch_write.attempts = 0;
-            return false;
-        }
-        self.epoch_write.switch = Some(switch);
-        true
-    }
-
-    fn meta_channel(
-        per_peer_gate: Option<doc::SelfWriteGate>,
-        key: Option<SymmetricKey>,
-    ) -> MeshDoc {
-        match per_peer_gate {
-            Some(gate) => MeshDoc::new_gated(gate),
-            None => MeshDoc::new_ungated(),
-        }
-        .key(key)
-        .awaiting_far_root()
-    }
-
     /// The number of members of the mesh as this node counts them: the peers whose arrival was
     /// shown, and this node. A peer known only from a frame older than our join is in the roster
-    /// for anti-entropy, but it is not counted: it can be a ghost that never surfaced. Every
+    /// for the backfill, but it is not counted: it can be a ghost that never surfaced. Every
     /// surface that shows a count (the state file, the live counter, the roster snapshot) reads it
     /// here.
     #[must_use]
@@ -1354,9 +1404,8 @@ impl EventLoopState {
     /// Whether our `PeerInfo` is due for a refresh at `now`. It is due for a meshed node that has
     /// flooded before, when the refresh period has passed since the last flood, whatever caused
     /// that flood. The period is [`tuning::peerinfo_refresh_period`] for the live members,
-    /// lengthened by the spread that the last flood drew. A `PeerInfo` is not in the message log,
-    /// so no digest repairs one that a member missed, and the flood of its sender is the only
-    /// repair.
+    /// lengthened by the spread that the last flood drew. No frame repairs a missed `PeerInfo`;
+    /// only the flood of its sender does.
     pub(crate) fn peerinfo_refresh_due(&self, now: Instant) -> bool {
         if !self.standing.contains(&Standing::Meshed) {
             return false;
@@ -1403,25 +1452,26 @@ impl EventLoopState {
         hinted.chain(retained).any(|address| address.id == endpoint)
     }
 
+    /// Drop the state of an endpoint that no nickname binds any more. A linked endpoint keeps its
+    /// proof, direct path and backoff for the regraft after the link loss. The path watch goes:
+    /// nothing names this endpoint, and a stale entry nudges it on each tick. A later sweep drops
+    /// the rest.
+    pub(crate) fn release_unbound_endpoint(&mut self, endpoint: EndpointId) {
+        if self.linked_endpoints.contains(&endpoint) {
+            self.path_kinds.remove(&endpoint);
+            self.path_watchers.remove(&endpoint);
+            self.insert_orphan(endpoint);
+        } else {
+            self.forget_endpoint_state(endpoint);
+        }
+    }
+
     /// The endpoints that were released since the last call, for the teardown of the pool: the loop passes them on
     /// to `end_unbound_endpoints`, which keeps the shared-binding check.
     pub(crate) fn take_teardown_pending(&mut self) -> Vec<EndpointId> {
         let released: Vec<EndpointId> = self.teardown_pending.iter().copied().collect();
         self.teardown_pending = BoundedFifoSet::new(TEARDOWN_PENDING_MAX);
         released
-    }
-
-    /// The state of `endpoint` that sync code can drop: its address, backoff, proof, rival flag, direct path, path
-    /// watch and kind, and its address in the pool. It queues no teardown of the pool.
-    fn drop_endpoint_state(&mut self, endpoint: EndpointId) {
-        self.address_book.remove_endpoint_info(endpoint);
-        self.graft_backoff.reset(endpoint);
-        self.proven_endpoints.forget_endpoint(endpoint);
-        self.forget_rival_holder(endpoint);
-        self.direct.remove(&endpoint);
-        self.path_watchers.remove(&endpoint);
-        self.path_kinds.remove(&endpoint);
-        self.unicast_pool.forget_addr(endpoint);
     }
 
     /// Put `endpoint` in the orphan set. A full set drops one orphan, an orphan that is NOT linked if there is one (the
@@ -1463,29 +1513,6 @@ impl EventLoopState {
         self.orphaned_endpoints.insert(endpoint);
     }
 
-    /// Drop the state of an endpoint that no nickname binds any more. A linked endpoint keeps its
-    /// proof, direct path and backoff for the regraft after the link loss. The path watch goes:
-    /// nothing names this endpoint, and a stale entry nudges it on each tick. A later sweep drops
-    /// the rest.
-    ///
-    /// The one exception is the eviction of a full orphan set: it takes an unlinked orphan where
-    /// there is one, and a linked orphan only when every one of the
-    /// [`ORPHANED_ENDPOINTS_MAX`] orphans is linked. That orphan loses its direct path, and so the
-    /// regraft of [`plan_regraft_on_link_loss`](Self::plan_regraft_on_link_loss) when its link
-    /// later falls. The state must go with it: nothing sweeps an endpoint that left the set, and
-    /// the link loss does not either ([`unlink`](Self::unlink) keeps the maps), so a path kept here
-    /// would stay for the life of the process. One slower relink, among 1024 linked endpoints that
-    /// no nickname binds, costs less than a map that grows with no bound.
-    pub(crate) fn release_unbound_endpoint(&mut self, endpoint: EndpointId) {
-        if self.linked_endpoints.contains(&endpoint) {
-            self.path_kinds.remove(&endpoint);
-            self.path_watchers.remove(&endpoint);
-            self.insert_orphan(endpoint);
-        } else {
-            self.forget_endpoint_state(endpoint);
-        }
-    }
-
     /// Drop every state that is keyed by `endpoint`: the backoff, the proof, the rival flag, the
     /// direct state, the path state and the address of the endpoint, in the pool and in the book.
     pub(crate) fn forget_endpoint_state(&mut self, endpoint: EndpointId) {
@@ -1505,12 +1532,31 @@ impl EventLoopState {
         }
     }
 
+    /// The state of `endpoint` that sync code can drop: its address, backoff, proof, rival flag, direct path, path
+    /// watch and kind, and its address in the pool. It queues no teardown of the pool.
+    fn drop_endpoint_state(&mut self, endpoint: EndpointId) {
+        self.address_book.remove_endpoint_info(endpoint);
+        self.graft_backoff.reset(endpoint);
+        self.proven_endpoints.forget_endpoint(endpoint);
+        self.forget_rival_holder(endpoint);
+        self.direct.remove(&endpoint);
+        self.path_watchers.remove(&endpoint);
+        self.path_kinds.remove(&endpoint);
+        self.unicast_pool.forget_addr(endpoint);
+    }
+
     /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
     /// stamps and runs, its claim to the rendezvous, its name, and every dial hint that its
-    /// `PeerInfo` made, under each nickname it used. Returns the address of each hint that went, and the endpoint that
-    /// was retained for the key, if there was one.
+    /// `PeerInfo` made, under each nickname it used. Returns the address of each hint that went.
+    /// Tests only: the gap of zero links began at `since`, so a test need not wait for a heal.
+    #[cfg(test)]
+    pub(crate) fn start_zero_links_gap_at(&mut self, since: Instant) {
+        self.zero_links_since = Some(since);
+    }
+
     pub(crate) fn forget_key(&mut self, key: AuthorKey) -> Vec<EndpointAddr> {
         self.peers.remove(&key);
+        self.proofs.forget(&key);
         self.last_seen.remove(&key);
         self.peer_stamp.remove(&key);
         self.quiet.remove(&key);
@@ -1522,8 +1568,10 @@ impl EventLoopState {
         self.clock_evidence.heard.remove(&key);
         self.clock_evidence.returned_unshown.remove(&key);
         self.clock_evidence.lapsed_quiet.remove(&key);
-        self.proofs.forget(&key);
         self.proven_endpoints.forget_trust(&key);
+        self.seal_keys.remove(&key);
+        self.pending_seal_keys
+            .retain(|(waiting, _, _)| *waiting != key);
         self.rival_holders.remove(&key);
         self.names.remove(&key);
         self.clock_evidence.name_stamp.remove(&key);
@@ -1531,28 +1579,10 @@ impl EventLoopState {
         // tears the endpoints down, and `end_unbound_endpoints` keeps the shared-binding check.
         let retained: Option<EndpointAddr> = self.refused_endpoints.get(&key).cloned();
         self.release_refused_endpoint(&key);
-        self.drop_buffered_frames_to(&key);
         let mut left_hints = self.forget_hints_of(key);
         left_hints.extend(retained);
         self.rebind_refused_endpoints();
         left_hints
-    }
-
-    /// Drop the buffered directed frames whose recipient is `key`, and keep the others in order.
-    /// A key that left the roster, or that cannot return (a ghost, a key quiet past the quiet
-    /// TTL), has no endpoint to wait for, so a frame to it would be requeued at every flush until
-    /// the buffer is full.
-    /// Returns how many frames went.
-    pub(crate) fn drop_buffered_frames_to(&mut self, key: &AuthorKey) -> usize {
-        let mut dropped = 0;
-        for entry in self.pending_outbound.take() {
-            if sole_addressee(&entry.0.kind) == Some(key) {
-                dropped += 1;
-            } else {
-                self.pending_outbound.push(entry);
-            }
-        }
-        dropped
     }
 
     /// Drop every dial hint that `key` made, under each nickname it used, and return the address
@@ -1583,6 +1613,19 @@ impl EventLoopState {
     /// - the endpoint of a `PeerInfo` of `key` that bound no hint, because another live key holds
     ///   the nickname.
     ///
+    /// Sets the author whose State and Meta frames this node drops after the dedup gate, or none. A test of
+    /// the repair of a lost frame sets it, so that the frame is seen by the dedup gate and then lost.
+    #[cfg(feature = "iroh-test-utils")]
+    pub fn drop_slices_from(&mut self, author: Option<AuthorKey>) {
+        self.drop_slices_from = author;
+    }
+
+    /// Sets the author whose Left this node drops after the dedup gate, or none.
+    #[cfg(feature = "iroh-test-utils")]
+    pub fn drop_left_from(&mut self, author: Option<AuthorKey>) {
+        self.drop_left_from = author;
+    }
+
     /// A quiet key keeps its address, so a peer that returns keeps its route. A key that left the
     /// roster has none. An endpoint that another key proved is not an address of `key`: a process
     /// that restarts keeps its endpoint and makes a new key, and until the old key times out, its
@@ -1769,15 +1812,39 @@ impl EventLoopState {
         self.left_keys.peers.contains(&key) || self.left_keys.strangers.contains(&key)
     }
 
-    /// Drop a departed key's presence frames from the log and from the indexes kept beside it,
-    /// as an eviction would (see `gossip::recv::push_to_log`).
-    pub(crate) fn drop_departed_presence(&mut self, key: &AuthorKey) {
-        for gone in self.message_log.drop_presence_of(key) {
-            let hash = gone.content_hash();
-            self.forget_hash(&hash);
-            if let Some(seq) = gone.seq {
-                self.forget_msg_seq(&gone.key(), seq, &hash);
-            }
+    /// Whether `key` is in the roster: a live peer, a quiet peer, or a key that lapsed quiet and may
+    /// return.
+    pub(crate) fn in_roster(&self, key: &AuthorKey) -> bool {
+        self.peers.contains(key)
+            || self.quiet.contains(key)
+            || self.clock_evidence.lapsed_quiet.contains(key)
+    }
+
+    /// Whether a frame at `at` is past the join horizon, so the app shows it.
+    pub(crate) fn is_surfaceable(&self, at: UnixSecs) -> bool {
+        at >= self.joined_at
+    }
+
+    /// Whether the store keeps the slice of `key`: the own key, a live peer, and a quiet peer. A key that lapsed
+    /// quiet can return, but it keeps no slice: its frames wait in the pending set, and its slice comes back by the
+    /// digest round when it returns.
+    pub(crate) fn keeps_slice(&self, key: &AuthorKey) -> bool {
+        *key == self.identity.author_key() || self.peers.contains(key) || self.quiet.contains(key)
+    }
+
+    /// Drops the slices of every key that is out of the slice gate, so a key that lapsed quiet loses its slice here.
+    /// While one node holds a slice that another has released, their roots differ and the digest round reads pages and
+    /// pulls nothing, which costs answers only. This happens for up to one sweep interval, because nodes lapse a key at
+    /// different times, and for longer in an asymmetric partition, until the holder that still hears the key lapses it
+    /// too.
+    pub(crate) fn release_strangers(&mut self) {
+        let held = self.docs.held_keys();
+        let strangers: Vec<AuthorKey> = held
+            .into_iter()
+            .filter(|key| !self.keeps_slice(key))
+            .collect();
+        for key in &strangers {
+            self.docs.release(key);
         }
     }
 
@@ -1804,12 +1871,6 @@ impl EventLoopState {
             && self.zero_links_since.is_some_and(|since| {
                 now.saturating_duration_since(since) >= tuning::silent_partition_after()
             })
-    }
-
-    /// Tests only: the gap of zero links began at `since`, so a test need not wait for a heal.
-    #[cfg(test)]
-    pub(crate) fn start_zero_links_gap_at(&mut self, since: Instant) {
-        self.zero_links_since = Some(since);
     }
 
     /// Whether a reclaim tick asks another known peer for a link: the fast reclaim window is
@@ -2089,12 +2150,10 @@ impl EventLoopState {
     /// message. Delegates to the bounded [`BoundedFifoSet`], inverting its
     /// "was newly inserted" answer into "was a duplicate".
     ///
-    /// A frame still in the message log is a duplicate too. The log keeps a frame as long as
-    /// anti-entropy may re-send it, while `seen` is fed by every kind, most of which the log
-    /// never keeps, so under enough of that traffic it forgets a retained frame first.
+    /// The seen set alone is the dedup: a frame that the bounded set has forgotten is delivered again.
     pub(crate) fn mark_seen(&mut self, message: &Verified) -> bool {
         let key = message.dedup_key();
-        self.message_log.contains(&key) || !self.seen.insert(key)
+        !self.seen.insert(key)
     }
 
     /// Try to reassemble the sharded body the `trigger` shard belongs to:
@@ -2102,68 +2161,18 @@ impl EventLoopState {
     /// when it completes its group (and the group has not been surfaced
     /// before), return the synthesized logical `Message` — a surfacing view
     /// whose `id` is the group, so sender and receivers name it alike.
-    ///
-    /// Small (logged) groups get a second completion path off the message
-    /// log: their shards are all retained there, so a shard healed by
-    /// anti-entropy *after* the store's stale-group TTL reaped the partial
-    /// buffer still completes the body — dedup (`seen`) means the healed
-    /// shard is the only one re-ingested, and the store alone would sit on
-    /// 1-of-N forever.
     pub(crate) fn reassemble(&mut self, trigger: &Verified) -> Option<Authored> {
         let shard = trigger.shard.as_ref()?;
-        if self
-            .receive_memory
-            .reassembled_groups
-            .contains(&shard.group)
-        {
+        let group = (trigger.key(), shard.group.clone());
+        // A guard for a caller that did not check the gate in recv.rs: a completed group is not surfaced twice.
+        if self.receive_memory.reassembled_groups.contains(&group) {
             return None;
         }
-        match self.reassembly.ingest(trigger, Instant::now()) {
-            ShardIngest::Complete(logical) => {
-                self.receive_memory
-                    .reassembled_groups
-                    .insert(shard.group.clone());
-                Some(*logical)
-            }
-            ShardIngest::Buffered | ShardIngest::Dropped => {
-                let logical = self.reassemble_from_log(trigger)?;
-                // The store may still hold a partial buffer for this group
-                // (e.g. just the trigger, post-TTL) — release its budget.
-                self.reassembly.forget(trigger);
-                self.receive_memory
-                    .reassembled_groups
-                    .insert(shard.group.clone());
-                Some(logical)
-            }
-            _ => None,
-        }
-    }
-
-    /// The log-backed completion path for a **small** (logged) group: scan
-    /// the message log for this author's shards and synthesize when every
-    /// slot is present. Mirrors the store's synthesis exactly.
-    fn reassemble_from_log(&self, trigger: &Verified) -> Option<Authored> {
-        let shard = trigger.shard.as_ref()?;
-        // A verified shard always has its author key.
-        let author = trigger.key();
-        if !messages::shard_fits_log(trigger) {
+        let ShardIngest::Complete(logical) = self.reassembly.ingest(trigger, Instant::now()) else {
             return None;
-        }
-        let slots = self
-            .message_log
-            .collect_shards(&shard.group, &author, shard.total);
-        if slots.iter().any(Option::is_none) {
-            return None; // a shard is still missing
-        }
-        let mut body = String::new();
-        for slot in &slots {
-            body.push_str(slot.expect("every slot filled above").body.as_str());
-        }
-        // The concatenation of valid bodies is itself valid (no new control
-        // chars), but fail closed rather than surface a malformed body.
-        let body = protocol::MessageBody::try_new(&body).ok()?;
-        let header = slots[0].expect("shard 0 present");
-        Some(reassembly::synthesize_from(header, body, &shard.group))
+        };
+        self.receive_memory.reassembled_groups.insert(group);
+        Some(*logical)
     }
 
     /// Record a `conn_path` reading for `peer`; a reading that proves nothing
@@ -2201,9 +2210,8 @@ impl EventLoopState {
     /// strict answer (a real-peer link), but it is stricter than the overlay:
     /// a node whose only neighbor is the rendezvous relay already exchanges
     /// presence over that link, and a peer behind the same relay (a browser
-    /// tab, say) may never form a direct link at all. Document plumbing —
-    /// heads digests, change frames — is small and reconciled by anti-entropy,
-    /// so it rides the relay link too. User content keeps waiting on `meshed`.
+    /// tab, say) may never form a direct link at all. The slice frames of the shared state
+    /// are small and sent by the backfill, so they ride the relay link too. User content keeps waiting on `meshed`.
     /// A degraded node is excluded: its overlay is suspected dead, and the
     /// relay link alone is no proof it recovered.
     pub(crate) fn overlay_reachable(&self) -> bool {
@@ -2273,109 +2281,7 @@ impl EventLoopState {
         self.recovery_trips = self.recovery_trips.saturating_add(1);
         self.last_recovery_at = Some(now);
     }
-
-    /// Record a `Msg`'s `(author, seq, content-hash)` for fork detection.
-    /// Returns `true` **exactly once** per offending key — when a *different*
-    /// content hash is first seen at an already-recorded `(author, seq)`,
-    /// which is cryptographic proof the author equivocated (signed two
-    /// conflicting messages at one seq). Order-independent. The caller emits
-    /// a `fork` event on `true`; the message itself is still processed.
-    pub(crate) fn note_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: ContentHash) -> bool {
-        let seen = self.author_seqs.entry(*author).or_default();
-        match seen.get(&seq) {
-            Some(existing) if *existing != hash => {} // conflict → fall through
-            Some(_) => return false,                  // same message, already recorded
-            None => {
-                seen.insert(seq, hash);
-                return false;
-            }
-        }
-        // Equivocation: flag the key, returning true only on first detection.
-        self.forked.insert(*author)
-    }
-
-    /// The `parents` to stamp on the next `Msg` we author: the current DAG
-    /// tips, sorted (deterministic) and capped to `MAX_DAG_PARENTS` to
-    /// bound message size. Usually a single head on a quiet mesh.
-    pub fn dag_parents(&self) -> impl Iterator<Item = ContentHash> {
-        let mut heads: Vec<ContentHash> = self.dag_heads.iter().copied().collect();
-        heads.sort_unstable();
-        heads.truncate(MAX_DAG_PARENTS);
-        heads.into_iter()
-    }
-
-    /// Fold a content `Msg` (hash `hash`, `parents`, timestamp `ts`) into the
-    /// DAG — for messages we receive *and* ones we author. Returns `true` if
-    /// `ts` is **before** a known parent's timestamp (a backdating violation
-    /// to flag). Updates `by_hash` and moves the tip set: the named parents
-    /// are no longer tips, and `hash` becomes one. Unknown parents are left
-    /// alone (the set converges via anti-entropy).
-    pub fn note_dag(&mut self, hash: ContentHash, parents: &[ContentHash], ts: UnixSecs) -> bool {
-        let mut backdated = false;
-        for parent in parents {
-            if let Some(&parent_ts) = self.by_hash.get(parent)
-                && ts < parent_ts
-            {
-                backdated = true;
-            }
-            self.dag_heads.remove(parent);
-        }
-        self.by_hash.insert(hash, ts);
-        self.dag_heads.insert(hash);
-        backdated
-    }
-
-    /// Prune an evicted message's content hash from the DAG indexes, keeping
-    /// `by_hash`/`dag_heads` bounded alongside the message-log `VecDeque`.
-    pub fn forget_hash(&mut self, hash: &ContentHash) {
-        self.by_hash.remove(hash);
-        self.dag_heads.remove(hash);
-    }
-
-    /// Prune an evicted `Msg`'s `(author, seq)` from the fork-detection
-    /// index, bounding `author_seqs`/`forked` to the message-log window: an
-    /// identity whose messages have all aged out drops off both maps (so a
-    /// sybil that fires once and vanishes is forgotten).
-    ///
-    /// Only drops the slot when `hash` is the one we recorded for that
-    /// `(author, seq)`. A fork retains *two* messages at one `(author, seq)`;
-    /// evicting the twin we did **not** record must not clear the recorded
-    /// evidence, or a later anti-entropy resend of the still-retained twin
-    /// would re-detect the equivocation as a fresh first sighting.
-    pub fn forget_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: &ContentHash) {
-        if let Some(seqs) = self.author_seqs.get_mut(author)
-            && seqs.get(&seq).is_some_and(|recorded| recorded == hash)
-        {
-            seqs.remove(&seq);
-            if seqs.is_empty() {
-                self.author_seqs.remove(author);
-                self.forked.remove(author);
-            }
-        }
-    }
 }
-
-/// Max `parents` stamped on a `Msg` — bounds the wire size of the causal
-/// links. A quiet mesh has one head; this only bites under heavy concurrency.
-const MAX_DAG_PARENTS: usize = 16;
-
-/// How many replays and restores of the state channel wait for the loop to send them. A tick adds
-/// at most 2 (the replay of a switch and the restores that are due), and the loop sends them after
-/// the tick, so 8 is room for 4 ticks of a loop that is slow.
-const REPLAY_QUEUE_CAP: usize = 8;
-
-/// How many keys have an endpoint retained in `refused_endpoints`. The map takes the address of any signed
-/// `PeerInfo` whose key is not the holder of its nickname, and a member mints keys for free, so a flood of them
-/// would fill it until the next sweep. 256 is more than the live roster of a mesh of the size that one node
-/// serves (the beacon limit is far below it), so a real peer is not pushed out; at the cap the oldest key goes
-/// and its endpoint state with it.
-pub(crate) const REFUSED_ENDPOINTS_CAP: usize = 256;
-/// The released endpoints that wait for the teardown of the pool: 256 at most.
-const TEARDOWN_PENDING_MAX: usize = 256;
-/// The orphan endpoints: 1024 at most, 4 times the queue of the teardown, which each sweep (10 s) takes up to 256 of
-/// out of the set, so a full set drains in 4 sweeps. It is far above the link cap (the linked endpoints that lose
-/// their hint). At the cap the oldest is dropped, and its pool state goes with the idle sweep.
-pub(crate) const ORPHANED_ENDPOINTS_MAX: usize = 1024;
 
 // ── Consumer surface ───────────────────────────────────────────────────────
 //
@@ -2385,29 +2291,9 @@ pub(crate) const ORPHANED_ENDPOINTS_MAX: usize = 1024;
 // Two reasons. The types are the smaller one — several fields are
 // `pub(crate)` collections in private modules, so a consumer could touch the
 // field but never name it. The larger one is that a bare field says nothing
-// about the invariant around it, and the doc pair below is the example: every
-// consumer that wanted one wrote the same `match channel` first.
+// about the invariant around it, and the channel store below is the example:
+// every consumer that wanted a document wrote the same `match channel` first.
 impl EventLoopState {
-    /// The shared document for `channel`. Replaces a `match` on
-    /// [`Channel`](crate::protocol::Channel) at every call site.
-    #[must_use]
-    pub fn doc(&self, channel: protocol::Channel) -> &MeshDoc {
-        match channel {
-            protocol::Channel::State => &self.state_doc,
-            protocol::Channel::Meta => &self.meta_doc,
-            _ => unreachable!("a channel added later needs its own document"),
-        }
-    }
-
-    /// Mutable [`Self::doc`], for applying a local change before broadcast.
-    pub fn doc_mut(&mut self, channel: protocol::Channel) -> &mut MeshDoc {
-        match channel {
-            protocol::Channel::State => &mut self.state_doc,
-            protocol::Channel::Meta => &mut self.meta_doc,
-            _ => unreachable!("a channel added later needs its own document"),
-        }
-    }
-
     /// This member's signing identity.
     #[must_use]
     pub fn identity(&self) -> &Identity {
@@ -2478,6 +2364,439 @@ impl EventLoopState {
         self.mint_mesh.as_ref()
     }
 
+    /// Arm a ping round, replacing any already in flight.
+    pub(crate) fn arm_ping_round(&mut self, round: PingRound) {
+        self.ping_round = Some(Box::new(round));
+    }
+
+    /// Sender-side cache of serialized shard frames, for answering repair
+    /// requests.
+    pub fn shard_cache_mut(&mut self) -> &mut ShardCache {
+        &mut self.shard_cache
+    }
+
+    /// Receiver-side partial-body store.
+    pub fn reassembly_mut(&mut self) -> &mut ReassemblyStore {
+        &mut self.reassembly
+    }
+
+    /// The selected path of a pair: the path watcher's last report if it has one,
+    /// else any live connection of the admission table (see
+    /// [`crate::transport::probe::pair_kind`]).
+    pub(crate) fn pair_path_kind(&self, peer: EndpointId) -> Option<probe::PathKind> {
+        probe::pair_kind(
+            self.path_kinds.get(&peer).copied(),
+            self.webrtc_admission.selected_kind(peer),
+        )
+    }
+
+    /// Whether the selected path of `peer` is the gossip rung. The recursion rule closes a gossip
+    /// link on that path, so a graft only makes the gossip layer dial a link that dies at once.
+    /// Not while a session is attached: it carries the pair whatever one connection reads, and the
+    /// link rides it once iroh moves the connection.
+    pub(crate) fn rides_gossip_rung(&self, peer: EndpointId) -> bool {
+        self.pair_path_kind(peer) == Some(probe::PathKind::Gossip)
+            && !self
+                .webrtc
+                .as_ref()
+                .is_some_and(|handle| handle.has_session(&peer))
+    }
+
+    /// Record a peer's endpoint address, learned from its published card.
+    ///
+    /// The whole address, not just the id: the retry pass has to know whether a
+    /// peer advertises IP, and rebuilding a bare address from the id there made
+    /// every native peer look like a browser.
+    ///
+    /// The card names a nickname and no key. The hint belongs to the one key that answers to the
+    /// nickname; with no such key yet it has no owner; with two live keys the card does not say
+    /// which one it is, so it binds no hint.
+    pub fn note_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
+        let (live, quiet): (Vec<AuthorKey>, Vec<AuthorKey>) = self
+            .keys_named(&nickname)
+            .into_iter()
+            .partition(|key| self.peers.contains(key));
+        let owner = match (live.as_slice(), quiet.as_slice()) {
+            ([only], _) | ([], [only]) => Some(*only),
+            ([], []) => None,
+            _ambiguous => return,
+        };
+        let id = endpoint.id;
+        let changed = self
+            .peer_endpoints
+            .get(&nickname)
+            .is_some_and(|before| *before != endpoint);
+        self.store_peer_endpoint(owner, nickname, endpoint);
+        // A peer at a new address is not the peer that refused.
+        if changed {
+            self.graft_backoff.reset(id);
+            if self.rendezvous_id == Some(id) {
+                self.probe_backoff.reset();
+            }
+        }
+    }
+
+    /// Keep the endpoint of a `PeerInfo` of `key` that bound no dial hint, for the day `key` is
+    /// the only live key of its nickname.
+    pub(crate) fn retain_refused_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
+        let id = endpoint.id;
+        if !self.refused_endpoints.contains_key(&key) {
+            // The place that this key left in the queue when its endpoint was released is stale: at the cap
+            // it would be popped first and would release the endpoint that the key gets now. The queue is
+            // longer than the map only when some place is stale.
+            if self.refused_order.len() > self.refused_endpoints.len() {
+                self.refused_order.retain(|queued| *queued != key);
+            }
+            while self.refused_endpoints.len() >= REFUSED_ENDPOINTS_CAP {
+                let Some(oldest) = self.refused_order.pop_front() else {
+                    break;
+                };
+                self.release_refused_endpoint(&oldest);
+            }
+            self.refused_order.push_back(key);
+            if self.refused_order.len() > 2 * REFUSED_ENDPOINTS_CAP {
+                let held = &self.refused_endpoints;
+                self.refused_order
+                    .retain(|queued| held.contains_key(queued) || *queued == key);
+            }
+        }
+        let displaced = self.refused_endpoints.insert(key, endpoint);
+        if let Some(old) = displaced
+            && old.id != id
+        {
+            self.release_if_unowned(old.id);
+        }
+    }
+
+    /// Give up the retained endpoint of `key`. Its state goes with it, unless a nickname binds the
+    /// endpoint or another retained endpoint names it.
+    pub(crate) fn release_refused_endpoint(&mut self, key: &AuthorKey) -> Option<EndpointId> {
+        let address = self.refused_endpoints.remove(key)?;
+        self.release_if_unowned(address.id);
+        Some(address.id)
+    }
+
+    /// Drop the state of `endpoint` unless a dial hint or a retained endpoint names it.
+    fn release_if_unowned(&mut self, endpoint: EndpointId) {
+        if !self.endpoint_is_bound(endpoint) {
+            self.release_unbound_endpoint(endpoint);
+        }
+    }
+
+    /// Place the endpoint that `key` published under `nickname`: as the dial hint of the nickname,
+    /// or, when another key holds it, as the endpoint retained for `key`. A key that said
+    /// goodbye never speaks again, so what it published is a replay and binds nothing. Another
+    /// key under the same nickname binds no hint while the key that made the hint is in the
+    /// roster, or while another live key holds the nickname: a directed send must not reach a
+    /// node that only borrowed the label. One rule for a `PeerInfo` and for a meta card.
+    pub(crate) fn place_endpoint(
+        &mut self,
+        key: AuthorKey,
+        nickname: &Nickname,
+        endpoint: EndpointAddr,
+    ) {
+        if self.key_said_goodbye(key) {
+            return;
+        }
+        let held = self.hint_is_held_by_other(nickname, key)
+            || self.nickname_is_taken_by_live_other(nickname, key);
+        if held {
+            self.retain_refused_endpoint(key, endpoint);
+        } else {
+            self.bind_peer_endpoint(key, nickname.clone(), endpoint);
+            self.release_refused_endpoint(&key);
+        }
+    }
+
+    /// The x25519 key that `key` published in its `PeerInfo`, which a directed body for `key` is
+    /// sealed to. `None` before the first `PeerInfo` of the key, for a node of an older version, and
+    /// for a key that left.
+    #[must_use]
+    pub fn seal_key_of(&self, key: &AuthorKey) -> Option<&x25519_dalek::PublicKey> {
+        self.seal_keys.get(key)
+    }
+
+    /// Keep the seal key that the signed `PeerInfo` of `key` names. A key that said goodbye never
+    /// speaks again, so its `PeerInfo` is a replay and binds nothing. A member mints keys for free,
+    /// so only a key that is a peer, quiet or named is kept: the roster bounds the map. The key of an
+    /// unknown signer waits in a small queue for the join of its signer
+    /// ([`Self::apply_pending_seal_key`]). A newer `PeerInfo` of a key replaces its key.
+    pub(crate) fn note_seal_key(
+        &mut self,
+        key: AuthorKey,
+        seal: x25519_dalek::PublicKey,
+        now: Instant,
+    ) {
+        if self.key_said_goodbye(key) {
+            return;
+        }
+        self.pending_seal_keys
+            .retain(|(waiting, _, _)| *waiting != key);
+        let known =
+            self.peers.contains(&key) || self.quiet.contains(&key) || self.names.contains_key(&key);
+        if known {
+            self.seal_keys.insert(key, seal);
+            return;
+        }
+        while self.pending_seal_keys.len() >= PENDING_SEAL_KEYS_CAP {
+            self.pending_seal_keys.pop_front();
+        }
+        self.pending_seal_keys.push_back((key, seal, now));
+    }
+
+    /// Keep the seal key that waited for `key` to join, if it is still fresh at `now`. The admission
+    /// of a key to the roster calls this. A key that waited longer than the TTL is dropped, and so
+    /// is every other that did.
+    pub(crate) fn apply_pending_seal_key(&mut self, key: AuthorKey, now: Instant) {
+        self.pending_seal_keys
+            .retain(|(_, _, came)| now.saturating_duration_since(*came) <= PENDING_SEAL_KEY_TTL);
+        let waiting = self
+            .pending_seal_keys
+            .iter()
+            .position(|(held, _, _)| *held == key);
+        if let Some(place) = waiting
+            && let Some((_, seal, _)) = self.pending_seal_keys.remove(place)
+        {
+            self.seal_keys.insert(key, seal);
+        }
+    }
+
+    /// How many seal keys wait for the join of their signer.
+    pub(crate) fn pending_seal_key_count(&self) -> usize {
+        self.pending_seal_keys.len()
+    }
+
+    /// Bind the endpoint that the meta card of `key` names as its dial hint, as the `PeerInfo` of
+    /// the key does, so a send to the key is deliverable before the `PeerInfo` comes. The rule is
+    /// the one of a `PeerInfo`: a second live key of a nickname gets the endpoint retained for it,
+    /// and a send to that key dials it. A key with no name in the roster, and a key that said
+    /// goodbye, bind nothing.
+    pub fn note_key_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
+        let Some(nickname) = self.names.get(&key).cloned() else {
+            return;
+        };
+        self.place_endpoint(key, &nickname, endpoint);
+    }
+
+    /// Bind the retained endpoint of each key that is now the only live key of its nickname, with
+    /// the flow of a `PeerInfo`, and drop the retained value.
+    pub(crate) fn rebind_refused_endpoints(&mut self) {
+        let refused = self.refused_endpoints.keys();
+        let live = refused.filter(|key| self.peers.contains(*key));
+        let waiting: Vec<(AuthorKey, Nickname)> = live
+            .filter_map(|key| Some((*key, self.names.get(key)?.clone())))
+            .collect();
+        for (key, nickname) in waiting {
+            if self.nickname_is_ambiguous(&nickname) || self.hint_is_held_by_other(&nickname, key) {
+                continue;
+            }
+            if let Some(address) = self.refused_endpoints.remove(&key) {
+                self.bind_peer_endpoint(key, nickname, address);
+            }
+        }
+    }
+
+    /// Write the binding of `nickname` to its endpoint, made by `key`: a `PeerInfo`
+    /// (`handle_peer_info`) comes here.
+    pub(crate) fn bind_peer_endpoint(
+        &mut self,
+        key: AuthorKey,
+        nickname: Nickname,
+        endpoint: EndpointAddr,
+    ) {
+        self.store_peer_endpoint(Some(key), nickname, endpoint);
+    }
+
+    /// The one place that writes a dial hint. `owner` is the key that made it, if known.
+    fn store_peer_endpoint(
+        &mut self,
+        owner: Option<AuthorKey>,
+        nickname: Nickname,
+        endpoint: EndpointAddr,
+    ) {
+        let bound_id = endpoint.id;
+        match owner {
+            Some(key) => self.hint_owner.insert(nickname.clone(), key),
+            None => self.hint_owner.remove(&nickname),
+        };
+        let replaced = self.peer_endpoints.insert(nickname, endpoint);
+        // The endpoint that the nickname left has no name now, unless another nickname binds it.
+        // The sweep drops only the bindings that it removes, so it never sees this one.
+        if let Some(old) = replaced
+            && old.id != bound_id
+            && !self.endpoint_is_bound(old.id)
+        {
+            self.release_unbound_endpoint(old.id);
+        }
+    }
+
+    /// Record that `signer` proved `endpoint`, and feed the vector of `signer` that waited for the
+    /// proof, now and not at the next tick.
+    pub(crate) fn note_proven_endpoint(
+        &mut self,
+        signer: AuthorKey,
+        endpoint: EndpointId,
+        stamp: UnixSecs,
+    ) {
+        let linked = self.linked_endpoints.clone();
+        let roster = &self.peers;
+        self.proven_endpoints
+            .insert(signer, endpoint, stamp, &linked, |holder| {
+                roster.contains(holder)
+            });
+        // The table can refuse a replay of an older stamp, so the trust follows what it holds.
+        self.promote_stored_proof(signer);
+    }
+
+    /// Trust the proof that the table holds for `signer`, if `signer` is in the roster, and feed
+    /// the vector that waited for it. A proof can come before its signer is admitted, and then no
+    /// further `PeerInfo` is due: the admission calls this. Anyone can mint keys, so only a key of
+    /// the roster is trusted, and the roster bounds the map.
+    pub(crate) fn promote_stored_proof(&mut self, signer: AuthorKey) {
+        let in_roster = self.peers.contains(&signer) || self.quiet.contains(&signer);
+        if in_roster && let Some(endpoint) = self.proven_endpoints.get(&signer) {
+            self.proven_endpoints.trust(signer, endpoint);
+        }
+        #[cfg(feature = "multihop")]
+        self.feed_parked_link_state(&signer);
+    }
+
+    /// Feed the link vector that waited for the proof of `signer`, with the check that a vector
+    /// that arrives after its proof goes through: the origin must be the proven endpoint. The
+    /// underlay is ticked when the vector changed the topology, as at any other receipt.
+    #[cfg(feature = "multihop")]
+    fn feed_parked_link_state(&mut self, signer: &AuthorKey) {
+        // The vector stays parked until the signer is trusted: a proof can come before the roster.
+        let Some(proven) = self.proven_endpoints.trusted(signer) else {
+            return;
+        };
+        let Some(vector) = self.parked_link_states.take(signer) else {
+            return;
+        };
+        if vector.origin().get() != proven {
+            tracing::debug!(target: "habilis_network::gossip",
+                "dropping parked multihop link-state: its origin is not the endpoint its signer proved"
+            );
+            return;
+        }
+        let Some(handle) = self.multihop.as_ref() else {
+            return;
+        };
+        let updated = handle.feed_topology(vector);
+        tracing::debug!(target: "habilis_network::gossip",
+            updated,
+            "multihop link-state received after its binding"
+        );
+        if updated {
+            underlay_webrtc::tick_now(self);
+        }
+    }
+
+    /// Mark the gossip topic closed without a real stream end — how the
+    /// adversarial suite makes the heal arm's resubscribe path observable.
+    /// Feature-gated: no production caller may forge this.
+    #[cfg(feature = "adversarial")]
+    pub fn sever_gossip(&mut self) {
+        self.standing.remove(&Standing::GossipOpen);
+    }
+
+    /// Tests only: drop the next inbound frame that `what` names, once, before the app reads it.
+    /// The frame is named, not counted, so that no other frame can take the drop.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub fn drop_inbound(&mut self, what: TestDrop) {
+        self.test_drop = Some(what);
+    }
+
+    /// Tests only: how many frames [`Self::drop_inbound`] has dropped.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn inbound_drops_fired(&self) -> u32 {
+        self.test_drops_fired
+    }
+
+    /// Tests only: whether the roster trusts the endpoint that `peer` proved in its `PeerInfo`.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn endpoint_is_proven(&self, peer: &Nickname) -> bool {
+        let named = self.names.iter().find(|(_, name)| *name == peer);
+        named.is_some_and(|(key, _)| self.proven_endpoints.trusted(key).is_some())
+    }
+
+    /// Tests only: forget the proof that `peer` signs for its endpoint (the `PeerInfo` proof of
+    /// `transport::proven_endpoints`). A backfill request of an asker whose endpoint is not proven is
+    /// answered on gossip, as it is for a late joiner before its `PeerInfo` arrives.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub fn forget_endpoint_proof(&mut self, peer: &Nickname) {
+        if let Some(endpoint) = self.peer_endpoints.get(peer).map(|address| address.id) {
+            self.proven_endpoints.forget_endpoint(endpoint);
+        }
+    }
+
+    /// Frames queued for send while the topic was closed.
+    pub fn pending_outbound_mut(&mut self) -> &mut BoundedQueue<(Verified, WireFrame)> {
+        &mut self.pending_outbound
+    }
+}
+
+/// A build with the `multihop` feature and no `host` (a browser) holds the multihop handle in its
+/// state, as a host build does. This item does not compile without it.
+#[cfg(all(feature = "multihop", not(feature = "host")))]
+const _: fn(&EventLoopState) -> Option<&habilis_network_iroh_multihop_transport::MultihopHandle> =
+    EventLoopState::multihop;
+
+/// Roster fixtures for the tests. A nickname names one key: the key that a frame of the test
+/// already registered under it, or else the key of [`crate::testing::test_key`].
+#[cfg(test)]
+impl EventLoopState {
+    /// The key that `nickname` names in this state.
+    pub(crate) fn key_named(&self, nickname: &str) -> AuthorKey {
+        let named = self
+            .names
+            .iter()
+            .find(|(_, name)| name.as_str() == nickname);
+        named.map_or_else(|| testing::test_key(nickname), |(key, _)| *key)
+    }
+
+    /// [`Self::key_named`], and record the name of the key.
+    pub(crate) fn name_key(&mut self, nickname: &str) -> AuthorKey {
+        let key = self.key_named(nickname);
+        let name = Nickname::try_new(nickname).expect("a test nickname is valid");
+        self.names.insert(key, name);
+        key
+    }
+
+    pub(crate) fn peer_for_test(&mut self, nickname: &str) {
+        let key = self.name_key(nickname);
+        self.peers.insert(key);
+    }
+
+    pub(crate) fn surfaced_for_test(&mut self, nickname: &str) {
+        let key = self.name_key(nickname);
+        self.surfaced.insert(key);
+    }
+
+    pub(crate) fn quiet_for_test(&mut self, nickname: &str) {
+        let key = self.name_key(nickname);
+        self.quiet.insert(key);
+    }
+
+    pub(crate) fn last_seen_for_test(&mut self, nickname: &str, at: Instant) {
+        let key = self.name_key(nickname);
+        self.last_seen.insert(key, at);
+    }
+
+    pub(crate) fn quiet_since_for_test(&mut self, nickname: &str, at: Instant) {
+        let key = self.name_key(nickname);
+        self.quiet_since.insert(key, at);
+    }
+
+    pub(crate) fn peer_stamp_for_test(&mut self, nickname: &str, stamp: UnixSecs) {
+        let key = self.name_key(nickname);
+        self.peer_stamp.insert(key, stamp);
+    }
+}
+
+impl EventLoopState {
     /// The proof that this session speaks as `nickname` on `mesh` in run `run`. A node with no
     /// member key has none.
     #[must_use]
@@ -2629,23 +2948,12 @@ impl EventLoopState {
             return None;
         }
         if let Some(held) = &self.own_answer {
-            return Some(held.frame.clone());
+            return Some(held.clone());
         }
         let proof = self.own_proof(own, mesh, self.run)?;
         let frame = Message::new_joined_with_proof(mesh, own, &proof).sign(&self.identity);
-        self.own_answer = Some(OwnAnswer {
-            frame: frame.clone(),
-            kept: false,
-        });
+        self.own_answer = Some(frame.clone());
         Some(frame)
-    }
-
-    /// The proof answer of this run, once, for the caller that keeps it in the log: it is the same frame
-    /// for every asker, and only the first send of it is kept.
-    pub(crate) fn take_answer_to_keep(&mut self) -> Option<Verified> {
-        let held = self.own_answer.as_mut().filter(|held| !held.kept)?;
-        held.kept = true;
-        Some(held.frame.clone())
     }
 
     /// Whether `session`, which is not a live peer, claims a nickname that a member of the roster holds by its proof
@@ -2829,472 +3137,59 @@ impl EventLoopState {
             peers.contains(session) || quiet.contains(session)
         })
     }
-
-    /// Stamp the next position on this author's hash chain, advancing it.
-    /// `prev` is the content hash of the message just authored.
-    pub fn advance_chain(&mut self, previous: ContentHash) {
-        self.self_seq += 1;
-        self.self_prev = Some(previous);
-    }
-
-    /// This author's current chain position — the `seq` the next message takes
-    /// and the hash it points back to.
-    #[must_use]
-    pub fn chain_head(&self) -> (u64, Option<ContentHash>) {
-        (self.self_seq, self.self_prev)
-    }
-
-    /// Arm a ping round, replacing any already in flight.
-    pub(crate) fn arm_ping_round(&mut self, round: PingRound) {
-        self.ping_round = Some(Box::new(round));
-    }
-
-    /// Sender-side cache of serialized shard frames, for answering repair
-    /// requests.
-    pub fn shard_cache_mut(&mut self) -> &mut ShardCache {
-        &mut self.shard_cache
-    }
-
-    /// Receiver-side partial-body store.
-    pub fn reassembly_mut(&mut self) -> &mut ReassemblyStore {
-        &mut self.reassembly
-    }
-
-    /// The anti-entropy message log — the retained window a reconnecting peer
-    /// recovers from. Returns any message evicted by the push.
-    pub fn message_log_mut(&mut self) -> &mut MessageLog {
-        &mut self.message_log
-    }
-
-    /// How many messages the anti-entropy log holds. Tests only.
-    #[cfg(feature = "iroh-test-utils")]
-    #[must_use]
-    pub fn message_log_len(&self) -> usize {
-        self.message_log.len()
-    }
-
-    /// Whether this author's digest may be served now.
-    ///
-    /// Answering one costs up to `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts,
-    /// so without a per-peer gate a single crafted digest buys that from every
-    /// member — an amplifier that grows with the mesh. Serving at most one per
-    /// window per author bounds it to the honest cadence.
-    pub fn admit_digest(&mut self, author: AuthorKey, now: Instant) -> bool {
-        if self.digest_serves.on_cooldown(&author, now) {
-            return false;
-        }
-        self.digest_serves.note(author, now);
-        self.chat_continuations
-            .begin(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN);
-        true
-    }
-
-    /// Whether a digest of `author` that came by unicast, inside the cooldown that `admit_digest`
-    /// refused it for, is a continuation of its chat ask to serve now: at the pace of the asker, and
-    /// up to its count. Only an author that was served has one. Bounded (see `ChatContinuations`).
-    pub fn admit_chat_continuation(&mut self, author: AuthorKey, now: Instant) -> bool {
-        self.digest_serves.on_cooldown(&author, now)
-            && self
-                .chat_continuations
-                .admit(author, now, tuning::ANTIENTROPY_SERVE_COOLDOWN)
-    }
-
-    /// How many authors hold a run of chat continuations: the size gauge of the bound.
-    #[cfg(test)]
-    pub(crate) fn chat_continuations_len(&self) -> usize {
-        self.chat_continuations.len()
-    }
-
-    /// The selected path of a pair: the path watcher's last report if it has one,
-    /// else any live connection of the admission table (see
-    /// [`crate::transport::probe::pair_kind`]).
-    pub(crate) fn pair_path_kind(&self, peer: EndpointId) -> Option<probe::PathKind> {
-        probe::pair_kind(
-            self.path_kinds.get(&peer).copied(),
-            self.webrtc_admission.selected_kind(peer),
-        )
-    }
-
-    /// Whether the selected path of `peer` is the gossip rung. The recursion rule closes a gossip
-    /// link on that path, so a graft only makes the gossip layer dial a link that dies at once.
-    /// Not while a session is attached: it carries the pair whatever one connection reads, and the
-    /// link rides it once iroh moves the connection.
-    pub(crate) fn rides_gossip_rung(&self, peer: EndpointId) -> bool {
-        self.pair_path_kind(peer) == Some(probe::PathKind::Gossip)
-            && !self
-                .webrtc
-                .as_ref()
-                .is_some_and(|handle| handle.has_session(&peer))
-    }
-
-    /// Whether to report that this author's digest could not be read: once per
-    /// author per window. The author runs a build with another digest format, or
-    /// sends garbage; either way the two never repair each other's gaps.
-    pub fn report_unreadable_digest(&mut self, author: AuthorKey, now: Instant) -> bool {
-        if self.digest_unreadable.on_cooldown(&author, now) {
-            return false;
-        }
-        self.digest_unreadable.note(author, now);
-        true
-    }
-
-    /// Record a peer's endpoint address, learned from its published card.
-    ///
-    /// The whole address, not just the id: the retry pass has to know whether a
-    /// peer advertises IP, and rebuilding a bare address from the id there made
-    /// every native peer look like a browser.
-    ///
-    /// The card names a nickname and no key. The hint belongs to the one key that answers to the
-    /// nickname; with no such key yet it has no owner; with two live keys the card does not say
-    /// which one it is, so it binds no hint.
-    pub fn note_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
-        let (live, quiet): (Vec<AuthorKey>, Vec<AuthorKey>) = self
-            .keys_named(&nickname)
-            .into_iter()
-            .partition(|key| self.peers.contains(key));
-        let owner = match (live.as_slice(), quiet.as_slice()) {
-            ([only], _) | ([], [only]) => Some(*only),
-            ([], []) => None,
-            _ambiguous => return,
-        };
-        let id = endpoint.id;
-        let changed = self
-            .peer_endpoints
-            .get(&nickname)
-            .is_some_and(|before| *before != endpoint);
-        self.store_peer_endpoint(owner, nickname, endpoint);
-        // A peer at a new address is not the peer that refused.
-        if changed {
-            self.graft_backoff.reset(id);
-            if self.rendezvous_id == Some(id) {
-                self.probe_backoff.reset();
-            }
-        }
-    }
-
-    /// Keep the endpoint of a `PeerInfo` of `key` that bound no dial hint, for the day `key` is
-    /// the only live key of its nickname.
-    pub(crate) fn retain_refused_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
-        let id = endpoint.id;
-        if !self.refused_endpoints.contains_key(&key) {
-            // The place that this key left in the queue when its endpoint was released is stale: at the cap
-            // it would be popped first and would release the endpoint that the key gets now. The queue is
-            // longer than the map only when some place is stale.
-            if self.refused_order.len() > self.refused_endpoints.len() {
-                self.refused_order.retain(|queued| *queued != key);
-            }
-            while self.refused_endpoints.len() >= REFUSED_ENDPOINTS_CAP {
-                let Some(oldest) = self.refused_order.pop_front() else {
-                    break;
-                };
-                self.release_refused_endpoint(&oldest);
-            }
-            self.refused_order.push_back(key);
-            if self.refused_order.len() > 2 * REFUSED_ENDPOINTS_CAP {
-                let held = &self.refused_endpoints;
-                self.refused_order
-                    .retain(|queued| held.contains_key(queued) || *queued == key);
-            }
-        }
-        let displaced = self.refused_endpoints.insert(key, endpoint);
-        if let Some(old) = displaced
-            && old.id != id
-        {
-            self.release_if_unowned(old.id);
-        }
-    }
-
-    /// Give up the retained endpoint of `key`, and return it. Its state goes with it, unless a nickname binds
-    /// the endpoint or another retained endpoint names it. The caller that tears an endpoint down also
-    /// closes the connection of the pool, and passes the returned endpoint on.
-    pub(crate) fn release_refused_endpoint(&mut self, key: &AuthorKey) -> Option<EndpointId> {
-        let address = self.refused_endpoints.remove(key)?;
-        self.release_if_unowned(address.id);
-        Some(address.id)
-    }
-
-    /// Drop the state of `endpoint` unless a dial hint or a retained endpoint names it.
-    fn release_if_unowned(&mut self, endpoint: EndpointId) {
-        if !self.endpoint_is_bound(endpoint) {
-            self.release_unbound_endpoint(endpoint);
-        }
-    }
-
-    /// Place the endpoint that `key` published under `nickname`: as the dial hint of the nickname,
-    /// or, when another key holds it, as the endpoint retained for `key`. A key that said
-    /// goodbye never speaks again, so what it published is a replay and binds nothing. Another
-    /// key under the same nickname binds no hint while the key that made the hint is in the
-    /// roster, or while another live key holds the nickname: a directed send must not reach a
-    /// node that only borrowed the label. One rule for a `PeerInfo` and for a meta card.
-    pub(crate) fn place_endpoint(
-        &mut self,
-        key: AuthorKey,
-        nickname: &Nickname,
-        endpoint: EndpointAddr,
-    ) {
-        if self.key_said_goodbye(key) {
-            return;
-        }
-        let held = self.hint_is_held_by_other(nickname, key)
-            || self.nickname_is_taken_by_live_other(nickname, key);
-        if held {
-            self.retain_refused_endpoint(key, endpoint);
-        } else {
-            self.bind_peer_endpoint(key, nickname.clone(), endpoint);
-            self.release_refused_endpoint(&key);
-        }
-    }
-
-    /// Bind the endpoint that the meta card of `key` names as its dial hint, as the `PeerInfo` of
-    /// the key does, so a send to the key is deliverable before the `PeerInfo` comes. The rule is
-    /// the one of a `PeerInfo`: a second live key of a nickname gets the endpoint retained for it,
-    /// and a send to that key dials it. A key with no name in the roster, and a key that said
-    /// goodbye, bind nothing.
-    pub fn note_key_endpoint(&mut self, key: AuthorKey, endpoint: EndpointAddr) {
-        let Some(nickname) = self.names.get(&key).cloned() else {
-            return;
-        };
-        self.place_endpoint(key, &nickname, endpoint);
-    }
-
-    /// Bind the retained endpoint of each key that is now the only live key of its nickname, with
-    /// the flow of a `PeerInfo`, and drop the retained value.
-    pub(crate) fn rebind_refused_endpoints(&mut self) {
-        let refused = self.refused_endpoints.keys();
-        let live = refused.filter(|key| self.peers.contains(*key));
-        let waiting: Vec<(AuthorKey, Nickname)> = live
-            .filter_map(|key| Some((*key, self.names.get(key)?.clone())))
-            .collect();
-        for (key, nickname) in waiting {
-            if self.nickname_is_ambiguous(&nickname) || self.hint_is_held_by_other(&nickname, key) {
-                continue;
-            }
-            if let Some(address) = self.refused_endpoints.remove(&key) {
-                self.bind_peer_endpoint(key, nickname, address);
-            }
-        }
-    }
-
-    /// Write the binding of `nickname` to its endpoint, made by `key`: a `PeerInfo`
-    /// (`handle_peer_info`) comes here.
-    pub(crate) fn bind_peer_endpoint(
-        &mut self,
-        key: AuthorKey,
-        nickname: Nickname,
-        endpoint: EndpointAddr,
-    ) {
-        self.store_peer_endpoint(Some(key), nickname, endpoint);
-    }
-
-    /// The one place that writes a dial hint. `owner` is the key that made it, if known.
-    fn store_peer_endpoint(
-        &mut self,
-        owner: Option<AuthorKey>,
-        nickname: Nickname,
-        endpoint: EndpointAddr,
-    ) {
-        let bound_id = endpoint.id;
-        match owner {
-            Some(key) => self.hint_owner.insert(nickname.clone(), key),
-            None => self.hint_owner.remove(&nickname),
-        };
-        let replaced = self.peer_endpoints.insert(nickname, endpoint);
-        // The endpoint that the nickname left has no name now, unless another nickname binds it.
-        // The sweep drops only the bindings that it removes, so it never sees this one.
-        if let Some(old) = replaced
-            && old.id != bound_id
-            && !self.endpoint_is_bound(old.id)
-        {
-            self.release_unbound_endpoint(old.id);
-        }
-    }
-
-    /// Record that `signer` proved `endpoint`, and feed the vector of `signer` that waited for the
-    /// proof, now and not at the next tick.
-    pub(crate) fn note_proven_endpoint(
-        &mut self,
-        signer: AuthorKey,
-        endpoint: EndpointId,
-        stamp: UnixSecs,
-    ) {
-        let linked = self.linked_endpoints.clone();
-        let roster = &self.peers;
-        self.proven_endpoints
-            .insert(signer, endpoint, stamp, &linked, |holder| {
-                roster.contains(holder)
-            });
-        // The table can refuse a replay of an older stamp, so the trust follows what it holds.
-        self.promote_stored_proof(signer);
-    }
-
-    /// Trust the proof that the table holds for `signer`, if `signer` is in the roster, and feed
-    /// the vector that waited for it. A proof can come before its signer is admitted, and then no
-    /// further `PeerInfo` is due: the admission calls this. Anyone can mint keys, so only a key of
-    /// the roster is trusted, and the roster bounds the map.
-    pub(crate) fn promote_stored_proof(&mut self, signer: AuthorKey) {
-        let in_roster = self.peers.contains(&signer) || self.quiet.contains(&signer);
-        if in_roster && let Some(endpoint) = self.proven_endpoints.get(&signer) {
-            self.proven_endpoints.trust(signer, endpoint);
-        }
-        #[cfg(feature = "multihop")]
-        self.feed_parked_link_state(&signer);
-    }
-
-    /// Feed the link vector that waited for the proof of `signer`, with the check that a vector
-    /// that arrives after its proof goes through: the origin must be the proven endpoint. The
-    /// underlay is ticked when the vector changed the topology, as at any other receipt.
-    #[cfg(feature = "multihop")]
-    fn feed_parked_link_state(&mut self, signer: &AuthorKey) {
-        // The vector stays parked until the signer is trusted: a proof can come before the roster.
-        let Some(proven) = self.proven_endpoints.trusted(signer) else {
-            return;
-        };
-        let Some(vector) = self.parked_link_states.take(signer) else {
-            return;
-        };
-        if vector.origin().get() != proven {
-            tracing::debug!(target: "habilis_network::gossip",
-                "dropping parked multihop link-state: its origin is not the endpoint its signer proved"
-            );
-            return;
-        }
-        let Some(handle) = self.multihop.as_ref() else {
-            return;
-        };
-        let updated = handle.feed_topology(vector);
-        tracing::debug!(target: "habilis_network::gossip",
-            updated,
-            "multihop link-state received after its binding"
-        );
-        if updated {
-            underlay_webrtc::tick_now(self);
-        }
-    }
-
-    /// Mark the gossip topic closed without a real stream end — how the
-    /// adversarial suite makes the heal arm's resubscribe path observable.
-    /// Feature-gated: no production caller may forge this.
-    #[cfg(feature = "adversarial")]
-    pub fn sever_gossip(&mut self) {
-        self.standing.remove(&Standing::GossipOpen);
-    }
-
-    /// Test only: adversarial feature. Put the document of `channel` in `epoch` at once, as an
-    /// adoption does after its wait, and queue the write of the own entry. The Op that calls it
-    /// exists only in an app build with the feature on: no frame and no CLI reaches it.
-    #[cfg(feature = "adversarial")]
-    pub fn force_epoch(&mut self, channel: protocol::Channel, epoch: u64) {
-        let own = self.identity.author_key();
-        let switch = self.doc_mut(channel).restart_at_epoch(epoch, &own);
-        self.note_epoch_switch(switch);
-    }
-
-    /// Tests only: the next ask of a fast round fails to start, once.
-    #[cfg(test)]
-    pub(crate) fn fail_the_next_ask(&mut self) {
-        self.fail_next_ask = true;
-    }
-
-    /// Tests only: whether the injected failure of an ask is due now. It is spent when it is read.
-    #[cfg(test)]
-    pub(crate) fn take_injected_ask_failure(&mut self) -> bool {
-        let due = self.fail_next_ask;
-        self.fail_next_ask = false;
-        due
-    }
-
-    /// Tests only: drop the next inbound frame that `what` names, once, before the app reads it.
-    /// The frame is named, not counted, so that no other frame can take the drop.
-    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    pub fn drop_inbound(&mut self, what: TestDrop) {
-        self.test_drop = Some(what);
-    }
-
-    /// Tests only: how many frames [`Self::drop_inbound`] has dropped.
-    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    #[must_use]
-    pub fn inbound_drops_fired(&self) -> u32 {
-        self.test_drops_fired
-    }
-
-    /// Tests only: whether the roster trusts the endpoint that `peer` proved in its `PeerInfo`.
-    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    #[must_use]
-    pub fn endpoint_is_proven(&self, peer: &Nickname) -> bool {
-        let named = self.names.iter().find(|(_, name)| *name == peer);
-        named.is_some_and(|(key, _)| self.proven_endpoints.trusted(key).is_some())
-    }
-
-    /// Tests only: forget the proof that `peer` signs for its endpoint (the `PeerInfo` proof of
-    /// `transport::proven_endpoints`). A state digest of an asker whose endpoint is not proven is
-    /// answered on gossip, as it is for a late joiner before its `PeerInfo` arrives.
-    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    pub fn forget_endpoint_proof(&mut self, peer: &Nickname) {
-        if let Some(endpoint) = self.peer_endpoints.get(peer).map(|address| address.id) {
-            self.proven_endpoints.forget_endpoint(endpoint);
-        }
-    }
-
-    /// Frames queued for send while the topic was closed.
-    pub fn pending_outbound_mut(&mut self) -> &mut BoundedQueue<(Verified, WireFrame)> {
-        &mut self.pending_outbound
-    }
 }
 
-/// A build with the `multihop` feature and no `host` (a browser) holds the multihop handle in its
-/// state, as a host build does. This item does not compile without it.
-#[cfg(all(feature = "multihop", not(feature = "host")))]
-const _: fn(&EventLoopState) -> Option<&habilis_network_iroh_multihop_transport::MultihopHandle> =
-    EventLoopState::multihop;
-
-/// Roster fixtures for the tests. A nickname names one key: the key that a frame of the test
-/// already registered under it, or else the key of [`crate::testing::test_key`].
 #[cfg(test)]
-impl EventLoopState {
-    /// The key that `nickname` names in this state.
-    pub(crate) fn key_named(&self, nickname: &str) -> AuthorKey {
-        let named = self
-            .names
-            .iter()
-            .find(|(_, name)| name.as_str() == nickname);
-        named.map_or_else(|| testing::test_key(nickname), |(key, _)| *key)
+mod slice_surface_tests {
+    use super::ChannelDocs;
+    use crate::protocol::{Channel, Identity, MeshId, Message, Nickname, SymmetricKey};
+    use crate::util::clock::Instant;
+    use habilis_network_doc::{SliceLimits, SliceStore};
+
+    fn keyed_store(channel: Channel) -> SliceStore {
+        SliceStore::new(
+            channel,
+            SliceLimits::default(),
+            habilis_network_doc::frame_overhead(
+                channel,
+                &MeshId::from("test"),
+                &Nickname::from("alice"),
+            ),
+        )
+        .with_key(Some(SymmetricKey::from([3u8; 32])))
     }
 
-    /// [`Self::key_named`], and record the name of the key.
-    pub(crate) fn name_key(&mut self, nickname: &str) -> AuthorKey {
-        let key = self.key_named(nickname);
-        let name = Nickname::try_new(nickname).expect("a test nickname is valid");
-        self.names.insert(key, name);
-        key
-    }
+    /// A sealed meta write is stored sealed, and its plain body is the value that was written.
+    #[test]
+    fn a_sealed_slice_reads_back_as_plain_text() {
+        let mut docs = ChannelDocs {
+            state: keyed_store(Channel::State),
+            meta: keyed_store(Channel::Meta),
+        };
+        let identity = Identity::generate();
+        let mesh = MeshId::from("test");
+        let alice = Nickname::try_new("alice").expect("a valid nickname");
+        let own = identity.author_key();
+        let now = Instant::now();
+        let value = serde_json::json!({"status": "busy"})
+            .as_object()
+            .cloned()
+            .expect("an object");
+        let draft = docs
+            .prepare_local(Channel::Meta, &own, value, now)
+            .expect("a draft that fits");
+        let frame = Message::new_channel_event(&mesh, &alice, draft.body().clone(), Channel::Meta)
+            .sign(&identity);
+        docs.commit_local(Channel::Meta, draft, &frame, now)
+            .expect("the sealed slice is committed");
 
-    pub(crate) fn peer_for_test(&mut self, nickname: &str) {
-        let key = self.name_key(nickname);
-        self.peers.insert(key);
-    }
-
-    pub(crate) fn surfaced_for_test(&mut self, nickname: &str) {
-        let key = self.name_key(nickname);
-        self.surfaced.insert(key);
-    }
-
-    pub(crate) fn quiet_for_test(&mut self, nickname: &str) {
-        let key = self.name_key(nickname);
-        self.quiet.insert(key);
-    }
-
-    pub(crate) fn last_seen_for_test(&mut self, nickname: &str, at: Instant) {
-        let key = self.name_key(nickname);
-        self.last_seen.insert(key, at);
-    }
-
-    pub(crate) fn quiet_since_for_test(&mut self, nickname: &str, at: Instant) {
-        let key = self.name_key(nickname);
-        self.quiet_since.insert(key, at);
-    }
-
-    pub(crate) fn peer_stamp_for_test(&mut self, nickname: &str, stamp: UnixSecs) {
-        let key = self.name_key(nickname);
-        self.peer_stamp.insert(key, stamp);
+        let plain = docs
+            .plain_body(Channel::Meta, &own)
+            .expect("the slice has a plain body");
+        assert!(
+            plain.as_str().contains(r#""status":"busy""#),
+            "the surfaced body is the plain value, not the ciphertext: {}",
+            plain.as_str()
+        );
     }
 }

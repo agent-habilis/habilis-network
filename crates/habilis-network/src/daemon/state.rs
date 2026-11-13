@@ -1,4 +1,3 @@
-mod chat_continuations;
 mod collection_sizes;
 mod event_loop_state;
 
@@ -40,21 +39,23 @@ use crate::util::clock;
 use crate::util::tuning;
 
 pub use event_loop_state::EventLoopState;
-pub(crate) use event_loop_state::{LiveRun, PendingSuspend};
+pub(crate) use event_loop_state::{ChannelDocs, LiveRun, PendingSuspend};
+#[cfg(test)]
+pub(crate) use event_loop_state::{PENDING_SEAL_KEY_TTL, PENDING_SEAL_KEYS_CAP};
 
 pub(crate) use collection_sizes::CollectionSizes;
 pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
 #[cfg(all(unix, feature = "host"))]
 pub(crate) use idle_counters::note_ppid_wake;
-pub(crate) use idle_counters::{IdleCounters, note_sampler_wake, top_requesters};
+pub(crate) use idle_counters::{IdleCounters, note_sampler_wake};
 pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
 pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
-pub(crate) use state_init::{RunKeys, StateInit};
+pub(crate) use state_init::{FrameOverheads, RunKeys, StateInit};
 #[cfg(test)]
 pub(crate) use wire_out_tally::app_frame_with_tag;
-pub(crate) use wire_out_tally::{Arrival, FrameShape, WireOut, WireOutTally, by_arrival, by_class};
+pub(crate) use wire_out_tally::{FrameShape, WireOut, WireOutTally, by_arrival, by_class};
 
 pub(crate) use beacon_note::BeaconNote;
 pub(crate) use direct_counts::DirectCounts;
@@ -84,11 +85,6 @@ fn rendezvous_return_after(local: EndpointId) -> Duration {
     period + Duration::from_millis(share_ms)
 }
 
-/// How long an author whose digest we could not read stays unreported. A build
-/// that does not know the window format sends one every round, and one line per
-/// author per window says it without filling the log.
-const UNREADABLE_DIGEST_LOG_WINDOW: Duration = Duration::from_mins(10);
-
 /// The most link vectors that wait for the binding of their author: one per author, and a mesh
 /// holds fewer members than this. A flood of authors that never bind cannot grow the park.
 #[cfg(feature = "multihop")]
@@ -102,13 +98,113 @@ mod tests {
     };
     use crate::daemon::state::{BeaconNote, PeerInfoFlood, RendezvousFlag, Standing};
     use crate::protocol::{
-        AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, Nickname,
-        UnixSecs,
+        AppFrameParams, AuthorKey, MeshId, Message, MessageBody, MessageId, Nickname, UnixSecs,
     };
     use crate::testing::{
-        author_of, endpoint_id, fresh_state, fresh_state_with_book, fresh_state_without_member_key,
-        nick, test_key,
+        endpoint_id, fresh_state, fresh_state_with_book, fresh_state_without_member_key, nick,
+        test_key,
     };
+
+    /// The seal key of a key is kept only for a key that is a peer, quiet or named, so the roster
+    /// bounds the map. The accessor reads it, and the key leaves with the roster entry.
+    #[test]
+    fn a_seal_key_is_kept_for_a_known_key_only_and_leaves_with_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (peer, quiet, named, stranger) = (
+            test_key("peer"),
+            test_key("quiet"),
+            test_key("named"),
+            test_key("stranger"),
+        );
+        state.peers.insert(peer);
+        state.quiet.insert(quiet);
+        state.names.insert(named, nick("named"));
+        let seal = x25519_dalek::PublicKey::from([3u8; 32]);
+
+        for key in [peer, quiet, named, stranger] {
+            state.note_seal_key(key, seal, Instant::now());
+        }
+
+        for kept in [peer, quiet, named] {
+            assert_eq!(
+                state.seal_key_of(&kept),
+                Some(&seal),
+                "a known key keeps its seal key"
+            );
+        }
+        assert_eq!(
+            state.seal_key_of(&stranger),
+            None,
+            "a key that nobody knows keeps none"
+        );
+        assert_eq!(
+            state.seal_keys.len(),
+            3,
+            "the map holds the known keys only"
+        );
+
+        state.forget_key(peer);
+        assert_eq!(
+            state.seal_key_of(&peer),
+            None,
+            "the seal key leaves with its key"
+        );
+    }
+
+    /// The queue of the seal keys that wait for a join is bounded and short-lived: it holds 64 keys,
+    /// the oldest goes first, and a key older than 90 s is dropped. A key that said goodbye is a
+    /// replay, so it does not wait.
+    #[test]
+    fn the_seal_keys_that_wait_for_a_join_are_few_and_fresh_and_never_a_goodbye() {
+        use super::{PENDING_SEAL_KEY_TTL, PENDING_SEAL_KEYS_CAP};
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let now = Instant::now();
+        let seal = x25519_dalek::PublicKey::from([2u8; 32]);
+        let keys: Vec<AuthorKey> = (0..=PENDING_SEAL_KEYS_CAP)
+            .map(|number| test_key(&format!("waiting {number}")))
+            .collect();
+
+        for key in &keys {
+            state.note_seal_key(*key, seal, now);
+        }
+        assert_eq!(
+            state.pending_seal_key_count(),
+            PENDING_SEAL_KEYS_CAP,
+            "the queue passed its cap"
+        );
+        state.apply_pending_seal_key(keys[0], now);
+        assert_eq!(
+            state.seal_key_of(&keys[0]),
+            None,
+            "the oldest key stayed when the queue was full"
+        );
+        state.apply_pending_seal_key(keys[1], now + PENDING_SEAL_KEY_TTL);
+        assert_eq!(
+            state.seal_key_of(&keys[1]),
+            Some(&seal),
+            "a key at the age of the TTL was dropped"
+        );
+        let late = keys[2];
+        state.apply_pending_seal_key(late, now + PENDING_SEAL_KEY_TTL + Duration::from_secs(1));
+        assert_eq!(
+            state.seal_key_of(&late),
+            None,
+            "a key past the TTL was applied"
+        );
+
+        let gone = test_key("goodbye");
+        state.note_stranger_left(gone);
+        state.note_seal_key(gone, seal, now);
+        state.peers.insert(gone);
+        state.apply_pending_seal_key(gone, now);
+        assert_eq!(
+            state.seal_key_of(&gone),
+            None,
+            "a key that said goodbye kept a seal key"
+        );
+    }
 
     /// The proof of a session is signed by the member key, over the session key, the nickname and
     /// the mesh. The session key signs frames, so a proof signed by it would prove nothing.
@@ -1478,49 +1574,6 @@ mod tests {
         );
     }
 
-    /// A directed frame waits in the buffer for the endpoint of its key. When that key leaves the
-    /// roster nothing can deliver it, and it would be requeued at every flush until the buffer
-    /// is full. It goes with the key. The frames of other keys and the broadcasts stay, in order.
-    #[test]
-    fn a_buffered_frame_to_a_key_that_left_goes_with_the_key() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let (gone, stays) = (test_key("gone"), test_key("stays"));
-        let mesh = MeshId::from("test");
-        let identity = protocol::Identity::generate();
-        let directed = |to: AuthorKey| {
-            Message::new_pong(&mesh, &nick("us"), to, &MessageId::random()).sign(&identity)
-        };
-        let broadcast = Message::new_ping(&mesh, &nick("us")).sign(&identity);
-        let queued = [
-            directed(stays),
-            directed(gone),
-            broadcast,
-            directed(gone),
-            directed(stays),
-        ];
-        let expected_ids: Vec<_> = [&queued[0], &queued[2], &queued[4]]
-            .iter()
-            .map(|frame| frame.id.clone())
-            .collect();
-        for frame in queued {
-            let bytes = frame.serialize().expect("serialize");
-            assert!(state.pending_outbound.push((frame, bytes)), "room");
-        }
-
-        state.forget_key(gone);
-
-        let left_in_buffer = state.pending_outbound.take();
-        let kept: Vec<_> = left_in_buffer
-            .into_iter()
-            .map(|(frame, _)| frame.id.clone())
-            .collect();
-        assert_eq!(
-            kept, expected_ids,
-            "the buffer must keep the other frames, in order, and lose those of the key that left"
-        );
-    }
-
     /// The roster keeps the name of a quiet key, because a quiet peer may return and a line about
     /// it still prints its name. A key that left the roster has no name: `forget_key` drops it.
     #[test]
@@ -2671,190 +2724,6 @@ mod tests {
         message
     }
 
-    /// A content hash for a test: the hash of the name.
-    fn hash_of(name: &str) -> ContentHash {
-        ContentHash::of(name.as_bytes())
-    }
-
-    #[test]
-    fn note_msg_seq_detects_equivocation_once() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let key = author_of("alice-key");
-        // First sighting at a seq → recorded, no fork.
-        assert!(
-            !state.note_msg_seq(&key, 0, hash_of("hashA")),
-            "the same hash at seq 0 is no equivocation"
-        );
-        // Same message again (same hash) → no fork.
-        assert!(
-            !state.note_msg_seq(&key, 0, hash_of("hashA")),
-            "repeating the same hash at seq 0 is still no equivocation"
-        );
-        // Different hash at the SAME seq → fork, reported exactly once.
-        assert!(
-            state.note_msg_seq(&key, 0, hash_of("hashB")),
-            "conflict is a fork"
-        );
-        assert!(
-            !state.note_msg_seq(&key, 0, hash_of("hashC")),
-            "already flagged: one event per key"
-        );
-    }
-
-    #[test]
-    fn note_msg_seq_is_per_key_and_per_seq() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        assert!(
-            !state.note_msg_seq(&author_of("alice"), 0, hash_of("h0")),
-            "alice's first message at seq 0 is no equivocation"
-        );
-        // A new seq for the same author is just the next entry, not a fork.
-        assert!(
-            !state.note_msg_seq(&author_of("alice"), 1, hash_of("h1")),
-            "alice's first message at seq 1 is no equivocation"
-        );
-        // A different key reusing seq 0 with its own hash is independent.
-        assert!(
-            !state.note_msg_seq(&author_of("bob"), 0, hash_of("other")),
-            "bob's seq 0 is not alice's equivocation"
-        );
-        // But a conflict on alice's seq 0 still fires.
-        assert!(
-            state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")),
-            "a second hash at alice's seq 0 is equivocation"
-        );
-    }
-
-    #[test]
-    fn forget_msg_seq_prunes_author_and_fork_flag() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_msg_seq(&author_of("alice"), 0, hash_of("h0"));
-        assert!(
-            state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")),
-            "fork"
-        );
-        assert!(
-            state.forked.contains(&author_of("alice")),
-            "alice is flagged as a fork"
-        );
-        // Evicting the *recorded* twin (hash "h0") drops alice from both maps.
-        state.forget_msg_seq(&author_of("alice"), 0, &hash_of("h0"));
-        assert!(
-            !state.author_seqs.contains_key(&author_of("alice")),
-            "forgetting alice drops her sequence state"
-        );
-        assert!(
-            !state.forked.contains(&author_of("alice")),
-            "fork flag pruned with author"
-        );
-    }
-
-    #[test]
-    fn forget_msg_seq_keeps_evidence_when_other_twin_evicted() {
-        // A fork keeps two twins at one (author, seq). Evicting the twin we did
-        // NOT record must not clear the recorded slot / fork flag — otherwise a
-        // later resend of the still-retained twin re-detects the fork as new.
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_msg_seq(&author_of("alice"), 0, hash_of("recorded"));
-        assert!(
-            state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")),
-            "fork fires"
-        );
-        assert!(
-            state.forked.contains(&author_of("alice")),
-            "alice stays flagged as a fork after one twin is evicted"
-        );
-        // Evict the non-recorded twin ("twin"): the slot for "recorded" stays.
-        state.forget_msg_seq(&author_of("alice"), 0, &hash_of("twin"));
-        assert!(
-            state.author_seqs.contains_key(&author_of("alice")),
-            "recorded slot retained"
-        );
-        assert!(
-            state.forked.contains(&author_of("alice")),
-            "fork flag retained"
-        );
-        // A resend of the recorded twin does not re-fire the fork (already
-        // flagged), proving the evidence survived the eviction.
-        assert!(
-            !state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")),
-            "the evicted twin is not seen as a new equivocation"
-        );
-    }
-
-    #[test]
-    fn note_dag_moves_tip_set() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        // First message (no parents) becomes the sole tip.
-        assert!(
-            !state.note_dag(hash_of("h1"), &[], UnixSecs::from(100)),
-            "a root node with no parents is not flagged"
-        );
-        let tips_h1: Vec<_> = state.dag_parents().collect();
-        assert_eq!(
-            tips_h1,
-            vec![hash_of("h1")],
-            "h1 is the only tip after its first note"
-        );
-        // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
-        assert!(
-            !state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from(101)),
-            "a child of h1 is not flagged"
-        );
-        let tips_h2: Vec<_> = state.dag_parents().collect();
-        assert_eq!(
-            tips_h2,
-            vec![hash_of("h2")],
-            "h2 replaces h1 as the only tip"
-        );
-    }
-
-    #[test]
-    fn note_dag_keeps_concurrent_tips() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_dag(hash_of("a"), &[], UnixSecs::from(1));
-        state.note_dag(hash_of("b"), &[], UnixSecs::from(1)); // concurrent: no shared parent
-        let mut both = vec![hash_of("a"), hash_of("b")];
-        both.sort();
-        let tips: Vec<_> = state.dag_parents().collect();
-        assert_eq!(tips, both, "both tips, in hash order");
-    }
-
-    #[test]
-    fn note_dag_flags_backdating() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_dag(hash_of("parent"), &[], UnixSecs::from(200));
-        // Child claims an earlier timestamp than a parent it references.
-        assert!(
-            state.note_dag(hash_of("child"), &[hash_of("parent")], UnixSecs::from(100)),
-            "a child stamped before its parent is flagged as backdated"
-        );
-        // A forward timestamp is fine.
-        assert!(
-            !state.note_dag(hash_of("ok"), &[hash_of("parent")], UnixSecs::from(300)),
-            "a child stamped after its parent is not flagged"
-        );
-    }
-
-    #[test]
-    fn forget_hash_prunes_dag() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state.note_dag(hash_of("h"), &[], UnixSecs::from(1));
-        state.forget_hash(&hash_of("h"));
-        assert!(
-            state.dag_parents().next().is_none(),
-            "forgetting the hash leaves no parents in the DAG"
-        );
-    }
-
     /// A valid (curve-point) `EndpointId` derived deterministically from
     /// a seed — `EndpointId::from_bytes` rejects arbitrary bytes.
     // The `known_endpoints` / `quiet` fields are `BoundedFifoSet`s wired with
@@ -3606,187 +3475,6 @@ mod tests {
         );
     }
 
-    /// A frame still in the message log has been processed. Anti-entropy re-sends any frame a
-    /// peer holds, and `seen` alone forgets one under enough traffic of the kinds the log never
-    /// keeps; the re-send would then be reprocessed and re-surfaced.
-    #[test]
-    fn a_retained_frame_stays_a_duplicate_after_seen_forgets_it() {
-        use crate::util::tuning::SEEN_IDS_CAP;
-
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let message = msg_with_id(&MessageId::random());
-        assert!(
-            !state.mark_seen(&message),
-            "first sighting is not a duplicate"
-        );
-        state.message_log.push(message.clone());
-        for _ in 0..SEEN_IDS_CAP {
-            state.mark_seen(&msg_with_id(&MessageId::random()));
-        }
-        assert!(
-            state.mark_seen(&message),
-            "a re-send of a frame still in the log is a duplicate"
-        );
-    }
-
-    /// **One digest per peer per window.**
-    ///
-    /// Serving a digest costs up to `ANTIENTROPY_MAX_RESEND` mesh-wide
-    /// broadcasts. With the budget counted per digest and nothing per peer, one
-    /// small crafted frame bought 64 floods from every member that received it,
-    /// so the cost grew with the mesh rather than with the attacker.
-    #[test]
-    fn an_unreadable_digest_is_reported_once_per_author_and_window() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let now = Instant::now();
-        assert!(
-            state.report_unreadable_digest(author_of("aa"), now),
-            "the first is reported"
-        );
-        assert!(
-            !state.report_unreadable_digest(author_of("aa"), now + Duration::from_secs(10)),
-            "the same author every round is one line, not one line per round"
-        );
-        assert!(
-            state.report_unreadable_digest(author_of("bb"), now),
-            "another author is reported on its own"
-        );
-        assert!(
-            state.report_unreadable_digest(
-                author_of("aa"),
-                now + super::UNREADABLE_DIGEST_LOG_WINDOW + Duration::from_secs(1)
-            ),
-            "the author is reported again after the window"
-        );
-    }
-
-    /// A chat gap longer than one answer is closed by the repeats of the asker, by unicast, at its
-    /// pace and up to its count: the cooldown of the holder lets those through and nothing else.
-    #[test]
-    fn a_unicast_continuation_is_served_inside_the_cooldown_at_the_pace_of_the_asker() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let t0 = Instant::now();
-        let pace = tuning::FAST_ROUND_MIN_INTERVAL;
-        let aa = author_of("aa");
-        assert!(state.admit_digest(aa, t0), "the first is served as always");
-
-        assert!(
-            !state.admit_chat_continuation(author_of("never-served"), t0 + pace),
-            "an author that was not served has no continuation: its digest is a first one"
-        );
-        assert!(
-            state.admit_chat_continuation(aa, t0 + pace),
-            "the first repeat, inside the cooldown, by unicast"
-        );
-        assert!(
-            !state.admit_chat_continuation(aa, t0 + pace + pace / 2),
-            "a repeat sooner than the pace of the asker is a flood"
-        );
-        let mut served = 1;
-        let mut at = t0 + pace;
-        while served < tuning::CHAT_RETRIES_MAX + 1 {
-            at += pace;
-            if !state.admit_chat_continuation(aa, at) {
-                break;
-            }
-            served += 1;
-        }
-        assert_eq!(
-            served,
-            tuning::CHAT_RETRIES_MAX,
-            "the repeats stop at the count of the asker"
-        );
-        assert!(
-            !state.admit_chat_continuation(aa, at + pace),
-            "one repeat more than the count is refused"
-        );
-
-        let later = t0 + tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_millis(1);
-        assert!(state.admit_digest(aa, later), "the cadence resumes");
-        assert!(
-            state.admit_chat_continuation(aa, later + pace),
-            "and a new run of repeats is allowed in the new window"
-        );
-    }
-
-    /// The table of the continuations has a cap: ten times the cap of authors, all served in one
-    /// window, leave exactly the cap of runs, the first authors keep theirs, and the rest meet the
-    /// cooldown as before. A window later the table is empty.
-    #[test]
-    fn the_continuations_stay_inside_their_cap_when_ten_times_the_cap_of_authors_ask() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let t0 = Instant::now();
-        let pace = tuning::FAST_ROUND_MIN_INTERVAL;
-        let cap = tuning::CHAT_CONTINUATION_AUTHORS_MAX;
-        let mut admitted = 0;
-        for index in 0..10 * cap {
-            let author = author_of(&format!("author-{index}"));
-            assert!(state.admit_digest(author, t0), "the first digest of each");
-            if state.admit_chat_continuation(author, t0 + pace) {
-                admitted += 1;
-            }
-        }
-        assert_eq!(admitted, cap, "only the cap of authors got a continuation");
-        assert_eq!(
-            state.chat_continuations_len(),
-            cap,
-            "the table holds the cap"
-        );
-        assert!(
-            state.admit_chat_continuation(author_of("author-0"), t0 + pace * 2),
-            "an author that holds a run goes on"
-        );
-        assert!(
-            !state
-                .admit_chat_continuation(author_of(&format!("author-{}", 10 * cap - 1)), t0 + pace),
-            "an author that came when the table was full is refused"
-        );
-
-        let later = t0 + tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_millis(1);
-        assert!(
-            state.admit_digest(author_of("fresh"), later),
-            "a new window opens for a new author"
-        );
-        assert!(
-            state.admit_chat_continuation(author_of("fresh"), later + pace),
-            "and it gets a continuation: the table has room again"
-        );
-        assert_eq!(
-            state.chat_continuations_len(),
-            1,
-            "a window later the runs of the others are gone"
-        );
-    }
-
-    #[test]
-    fn a_peer_is_served_one_digest_per_window() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let now = Instant::now();
-        let window = tuning::ANTIENTROPY_SERVE_COOLDOWN;
-
-        assert!(
-            state.admit_digest(author_of("aa"), now),
-            "the first is served"
-        );
-        assert!(
-            !state.admit_digest(author_of("aa"), now),
-            "a second digest inside the window must not buy another round of resends"
-        );
-        assert!(
-            state.admit_digest(author_of("bb"), now),
-            "one peer's flood must not deny another peer service"
-        );
-        assert!(
-            state.admit_digest(author_of("aa"), now + window + Duration::from_millis(1)),
-            "the honest cadence resumes after the window"
-        );
-    }
-
     #[test]
     fn mark_seen_keys_on_pubkey_not_id() {
         // Two messages sharing an id but signed by different keys must NOT
@@ -4535,32 +4223,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dedup_window_covers_the_retention_window() {
-        use crate::util::tuning::MESSAGE_LOG_SIZE;
-
-        // The cap relationship itself is asserted at compile time where both
-        // consts live; this covers the behaviour it exists for.
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let earliest = msg_with_id(&MessageId::random());
-        assert!(
-            !state.mark_seen(&earliest),
-            "the earliest retained message is still remembered as seen"
-        );
-        // Mark a full buffer's worth of later messages.
-        for _ in 1..MESSAGE_LOG_SIZE {
-            state.mark_seen(&msg_with_id(&MessageId::random()));
-        }
-        // The earliest is still within the dedup window, so an anti-entropy
-        // resend of it (while it is still retained in the log) is dropped as
-        // a duplicate rather than surfaced a second time.
-        assert!(
-            state.mark_seen(&earliest),
-            "a resend of a still-retained message must be deduped, not re-surfaced"
-        );
-    }
-
     const STARVE: Duration = Duration::from_secs(10);
 
     // The watchdog must only ever fire for a node that (a) was part of a
@@ -4832,7 +4494,7 @@ mod tests {
         );
     }
 
-    /// A `PeerInfo` is in no message log, so a member that missed one is repaired by no digest. A
+    /// No frame repairs a member that missed a `PeerInfo`; only the flood of its sender does. A
     /// meshed node floods its own again once the refresh period has passed since its last flood:
     /// at least 5 min, and 5 s for each live member, spread by a factor drawn with each flood.
     #[test]

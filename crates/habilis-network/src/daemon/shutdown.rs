@@ -25,6 +25,7 @@ use super::app::NodeDriver;
 use super::handler_ctx::HandlerCtx;
 use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
+use crate::gossip::{MergeCtx, send_tombstones};
 use crate::protocol::Message;
 #[cfg(all(unix, feature = "host"))]
 use crate::util::tuning;
@@ -71,6 +72,8 @@ pub(super) async fn shutdown<Driver: NodeDriver>(
     context
         .sink
         .emit(NodeEvent::Info(format!("left {}", quit.leave_label)));
+    let merge_ctx: MergeCtx<'_> = context.into();
+    send_tombstones(state, &merge_ctx).await;
     // The `Left` rides gossip only — deliberately NOT mirrored over unicast
     // (unlike the meta retraction in `on_shutdown`): presence drives the
     // survivors' rendezvous fast-reclaim, and a `Left` that lands while a

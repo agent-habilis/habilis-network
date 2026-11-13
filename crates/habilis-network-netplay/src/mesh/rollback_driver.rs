@@ -109,9 +109,9 @@ pub(crate) fn encode<S: Serialize>(value: &S) -> Option<String> {
 impl<T: Config> NodeApp for RollbackDriver<T> {
     /// Every flag off but `valid`.
     ///
-    /// `loggable: false` is a correctness requirement, not a preference:
-    /// a `true` here would enter every input frame into the engine's message
-    /// log and its anti-entropy repair. A frame of this crate is also always
+    /// `PUSH` is off: this is a correctness requirement, not a preference.
+    /// A `PUSH` here would hand every input frame to the inbound channel of the
+    /// engine's consumer. A frame of this crate is also always
     /// directed, and `send_app` keeps only a broadcast frame of its own.
     /// It lives in the library so a consumer cannot get it wrong.
     fn classify(&self, message: &Authored) -> AppClass {
@@ -202,27 +202,26 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
             Outbound::Rollback { to, payload } => {
                 // The engine routes by key and answers a key that is not live with an error, which
                 // `send` swallows: a peer that left mid-match is a lost packet, as on any other loss.
-                let Some(frame) = frame_for(context, ROLLBACK_TAG, Some(to), &payload) else {
+                let Some(frame) = frame_for(state, context, self, ROLLBACK_TAG, Some(to), &payload)
+                else {
                     return false;
                 };
-                let class = self.classify(&frame.authored());
-                send(state, context, frame, class).await
+                send(state, context, frame).await
             }
             Outbound::Lobby { payload } => {
                 // Addressed to every roster member individually — never a
-                // gossip broadcast. Besides the resend hazard, `send_app`'s
-                // broadcast bodies are not mesh-key-sealed, so on a
-                // passworded mesh receivers drop them outright.
+                // gossip broadcast, because of the resend hazard.
                 // A quiet member has a dead endpoint, so it is not a roster member to address.
                 let roster = state.roster_snapshot();
                 let peers: Vec<AuthorKey> = roster.addressee_keys().copied().collect();
                 let mut delivered = false;
                 for peer in peers {
-                    let Some(frame) = frame_for(context, LOBBY_TAG, Some(peer), &payload) else {
+                    let Some(frame) =
+                        frame_for(state, context, self, LOBBY_TAG, Some(peer), &payload)
+                    else {
                         continue;
                     };
-                    let class = self.classify(&frame.authored());
-                    delivered |= send(state, context, frame, class).await;
+                    delivered |= send(state, context, frame).await;
                 }
                 delivered
             }
@@ -230,9 +229,12 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
     }
 }
 
-/// The frame of one `send_app`, or `None` for a tag or a payload the wire refuses.
+/// The frame of one `send_app`, or `None` for a tag or a payload the wire refuses, or a body that
+/// cannot be sealed. A lost frame is a lost packet to this layer, so the cause is not kept.
 fn frame_for(
+    state: &EventLoopState,
     context: &HandlerCtx<'_>,
+    app: &impl NodeApp,
     tag: &str,
     to: Option<AuthorKey>,
     payload: &str,
@@ -240,10 +242,13 @@ fn frame_for(
     let (Ok(tag), Ok(body)) = (AppTag::try_new(tag), MessageBody::try_new(payload)) else {
         return None;
     };
-    Some(ops::app_frame(
+    ops::app_frame(
+        state,
         context,
+        app,
         AppFrameParams::new(tag, to, None, body),
-    ))
+    )
+    .ok()
 }
 
 /// One `send_app`, with the failure swallowed.
@@ -251,11 +256,6 @@ fn frame_for(
 /// Failure is genuinely uninteresting here: this layer assumes a lossy
 /// transport and recovers by resending, so a caller could not act on the
 /// error even if it had it.
-async fn send(
-    state: &mut EventLoopState,
-    context: &HandlerCtx<'_>,
-    frame: Verified,
-    class: AppClass,
-) -> bool {
-    ops::send_app(state, context, frame, class).await.is_ok()
+async fn send(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: Verified) -> bool {
+    ops::send_app(state, context, frame).await.is_ok()
 }

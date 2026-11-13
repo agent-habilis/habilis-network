@@ -62,8 +62,8 @@ fn data_frame(mesh: &MeshId, us: &protocol::Nickname, identity: &Identity, len: 
 }
 
 /// The bytes of one `PeerInfo` frame that do not depend on the address of the node: the envelope,
-/// the nickname, the stamp, the proof and the signature.
-const ANNOUNCE_FIXED_BYTES: usize = 549;
+/// the nickname, the stamp, the proof, the seal key (58 bytes escaped) and the signature.
+const ANNOUNCE_FIXED_BYTES: usize = 607;
 
 /// The bytes that the address of the node adds to a `PeerInfo` frame. The body holds the address
 /// as a JSON string inside a JSON string, so the count is that of the escaped text. A port of 4
@@ -113,7 +113,7 @@ fn assert_no_other_frame_and_exact_bytes(counter: &WireCounter, address_bytes: u
 /// 5 peers join, this node sends 5 data frames of 512 bytes, then 60 s pass with nothing to send
 /// but the keepalive. Every broadcast byte that is not in a data frame is metadata. The fixture is
 /// not meshed and the idle loop calls only `heartbeat::tick_alive`: the minute excludes the
-/// link-state vector and the anti-entropy digests that a meshed node broadcasts while idle, so it
+/// link-state vector that a meshed node broadcasts while idle, so it
 /// is a lower bound for that node. Directed (point-to-point) sends are not measured: the unicast
 /// pool of the fixture is detached and writes no frame. The numbers go to stderr, one line, for
 /// the table of the report.
@@ -197,13 +197,9 @@ fn wire_cost_of_one_minute_with_5_peers() {
 
         let frames = sender.broadcast_frames();
         let counter = WireCounter::of(&frames);
-        let parsed = frames
-            .iter()
-            .filter_map(|bytes| Message::parse_wire(bytes).ok());
-        let data = parsed.filter(|(message, _)| FrameClass::of(&message.kind) == FrameClass::Data);
-        let data_bodies: Vec<usize> = data
-            .map(|(message, _)| message.body.as_str().len())
-            .collect();
+        let parsed = frames.iter().filter_map(|bytes| Message::parse(bytes).ok());
+        let data = parsed.filter(|message| FrameClass::of(&message.kind) == FrameClass::Data);
+        let data_bodies: Vec<usize> = data.map(|message| message.body.as_str().len()).collect();
         eprintln!("WIRE one minute, 5 peers: {counter}");
         assert_eq!(
             counter.frames(FrameClass::Joined),

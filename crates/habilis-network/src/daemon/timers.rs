@@ -4,7 +4,6 @@
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
 use crate::daemon::state::{CollectionSizes, Latch, Standing};
-use std::collections::HashSet;
 use std::time::Duration;
 
 use iroh::Endpoint;
@@ -12,7 +11,7 @@ use iroh_gossip::net::Gossip;
 
 use super::state::{
     EventLoopState, GossipMsgs, GossipPathBytes, IdleCounters, SocketBytes, WireOut, by_arrival,
-    by_class, by_variant, gossip_msgs_delta, gossip_path_delta, socket_delta, top_requesters,
+    by_class, by_variant, gossip_msgs_delta, gossip_path_delta, socket_delta,
 };
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
@@ -20,7 +19,6 @@ use crate::util::{resident_memory, tuning, unix_secs};
 
 use crate::gossip::PathSummary;
 use crate::net;
-use crate::protocol::{AuthorKey, Channel};
 use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -37,38 +35,6 @@ pub(crate) fn tick_prune(state: &mut EventLoopState, sink: &dyn NodeSink) {
             evicted,
             "stale partial shard groups evicted from the reassembly store"
         );
-    }
-}
-
-/// One-shot leak-visibility signal: if resident memory has crossed
-/// `threshold_mb` (`consts::RESIDENT_MEMORY_WARN_MB`), emit a `warn` (file sink)
-/// plus a JSON `info` event (`--output json` stream) exactly once. Warn-only —
-/// never exits or alters behavior; the distributed soak that crashed a host had
-/// no such in-process signal. `threshold_mb` is passed in (not read here) so the
-/// threshold stays a single source of truth and the latch is unit-testable.
-fn warn_on_high_resident_memory(
-    state: &mut EventLoopState,
-    sink: &dyn NodeSink,
-    threshold_mb: u64,
-) {
-    if threshold_mb == 0 || state.latches.contains(&Latch::ResidentMemoryWarned) {
-        return;
-    }
-    let Some(resident_bytes) = resident_memory::peak_resident_memory_bytes() else {
-        return;
-    };
-    let resident_mb = resident_bytes / (1024 * 1024);
-    if resident_mb >= threshold_mb {
-        state.latches.insert(Latch::ResidentMemoryWarned);
-        tracing::warn!(
-            target: "habilis_network::lifecycle",
-            resident_mb,
-            threshold_mb,
-            "resident memory crossed the warn threshold (possible leak); not exiting — see consts::RESIDENT_MEMORY_WARN_MB"
-        );
-        sink.emit(NodeEvent::Info(format!(
-            "resident memory {resident_mb} MiB crossed warn threshold {threshold_mb} MiB (possible memory leak)"
-        )));
     }
 }
 
@@ -154,7 +120,7 @@ pub(crate) async fn tick_state_refresh(
         idle_sweep = idle.sweep,
         idle_heal = idle.heal,
         idle_reclaim = idle.reclaim,
-        idle_antientropy = idle.antientropy,
+        idle_backfill = idle.backfill,
         idle_state_refresh = idle.state_refresh,
         idle_linkstate = idle.linkstate,
         idle_seed_built = idle.seed_built,
@@ -183,18 +149,7 @@ pub(crate) async fn tick_state_refresh(
         cpu_ms = millis_saturating(cpu),
         idle_duplicates = idle.duplicates,
         idle_fresh = idle.fresh,
-        idle_fr_asks = idle.fr_asks,
-        idle_fr_retries = idle.fr_retries,
-        idle_state_answers = idle.state_answers,
-        idle_state_frames_unicast = idle.state_frames_unicast,
-        idle_state_frames_broadcast = idle.state_frames_broadcast,
-        idle_state_rejected = idle.state_rejected,
-        // A gauge, not a delta: the peers that a fast round still counts as ahead of us.
-        idle_ahead_peers = state.fast_rounds.ahead_count(),
-        idle_resent_top = %top_requesters(&idle.resent_by),
         idle_broadcasts = idle.broadcasts,
-        idle_resent = idle.resent,
-        idle_resend_dropped = idle.resend_dropped,
         // A total since the process started, unlike the idle fields above, which are per interval.
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
@@ -308,30 +263,6 @@ fn in_join_phase(joined_at: unix_secs::UnixSecs, now: unix_secs::UnixSecs) -> bo
     now.since(joined_at) < JOIN_PHASE
 }
 
-/// The entries of the per-peer map that belong to nobody on the roster and are not ours: members
-/// that left and whose entry stays in the document for good. An entry is named by the lowercase hex
-/// of the key of its owner.
-fn absent_entries(slots: &[String], roster: &HashSet<AuthorKey>, me: &AuthorKey) -> usize {
-    let on_roster = |slot: &str| roster.iter().any(|key| key.matches_hex(slot));
-    let absent = |slot: &&String| !me.matches_hex(slot) && !on_roster(slot);
-    slots.iter().filter(absent).count()
-}
-
-/// Every how many doc censuses the heavy part runs: the JSON, the save and the per-peer map cost
-/// CPU in proportion to the document, and their size moves slowly. The light part is O(1).
-const DOC_HEAVY_EVERY: u64 = 15;
-
-fn is_heavy_run(run: u64) -> bool {
-    run.is_multiple_of(DOC_HEAVY_EVERY)
-}
-
-/// The number of this doc census, counted for this loop.
-fn census_run(state: &mut EventLoopState) -> u64 {
-    let run = state.doc_census_runs;
-    state.doc_census_runs += 1;
-    run
-}
-
 /// What the socket, the gossip transport and the gossip actor of this loop moved since the last
 /// census.
 fn read_deltas(
@@ -357,70 +288,6 @@ fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: us
     );
 }
 
-/// One tick of the minute timer for the epoch of the meta document: it adopts a higher epoch after
-/// its wait, or starts a new one when its frames reach the threshold. The sweep tick writes the
-/// entry of this node again.
-pub(crate) fn tick_epoch(state: &mut EventLoopState, own: &AuthorKey) {
-    let doc = state.doc_mut(Channel::Meta);
-    let switch = doc.tick_epoch(own);
-    for key in doc.take_dropped() {
-        state.seen.remove(&key);
-    }
-    if let Some(switch) = switch {
-        state.note_epoch_switch(switch);
-    }
-}
-
-/// The sizes of the meta and the state document, on a line of their own, once per call (the
-/// 1-minute tick): the changes and frames that the node keeps for good, their bytes, the JSON, the
-/// save, and the entries of the per-peer map of members that are gone, every
-/// [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read `None`. A reader of the numbers can
-/// tell what a keyframe scheme would save.
-pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &AuthorKey) {
-    let run = census_run(state);
-    let heavy = is_heavy_run(run);
-    let meta = state.doc_mut(Channel::Meta).census(heavy);
-    let shared = state.doc_mut(Channel::State).census(heavy);
-    // A light run measures none of these, and a 0 on the line would read as a measurement: the
-    // keys of a light run say `None`, so an operator cannot take the gap for an empty document.
-    let peer_slots: Option<&[String]> = meta.peer_slots.as_deref();
-    let absent: Option<usize> = peer_slots.map(|slots| absent_entries(slots, &state.peers, me));
-    let peer_entries: Option<usize> = peer_slots.map(<[String]>::len);
-    let replay_waiting = state.replay_queue.len();
-    tracing::info!(
-        target: "habilis_network::lifecycle",
-        doc_meta_epoch = meta.epoch,
-        doc_meta_changes = meta.changes,
-        doc_meta_frames = meta.frames,
-        doc_meta_frame_bytes = meta.frame_bytes,
-        doc_meta_save_bytes = ?meta.save_bytes,
-        doc_meta_json_bytes = ?meta.json_bytes,
-        doc_meta_peer_entries = ?peer_entries,
-        doc_meta_absent_entries = ?absent,
-        doc_state_changes = shared.changes,
-        doc_state_frames = shared.frames,
-        doc_state_frame_bytes = shared.frame_bytes,
-        doc_state_save_bytes = ?shared.save_bytes,
-        doc_state_json_bytes = ?shared.json_bytes,
-        doc_state_refused_time = shared.refused_time,
-        doc_state_unstamped_paths = shared.unstamped_paths,
-        doc_state_seed_left_out = shared.seed_left_out,
-        doc_state_dropped_restores = shared.dropped_restores,
-        doc_state_replay_unsettled = shared.replay_unsettled,
-        doc_state_ops = shared.ops_held,
-        doc_state_seed_bytes = shared.seed_bytes,
-        doc_state_seed_ops = shared.seed_ops,
-        doc_state_remote_refused = shared.refused_remote,
-        doc_state_full_refused = shared.refused_local,
-        doc_state_held_writes = shared.held_writes,
-        doc_state_cuts = state.state_cuts,
-        doc_state_cuts_failed = state.state_cuts_failed,
-        doc_state_replay_queue = replay_waiting,
-        doc_save_taken = heavy,
-        "doc census"
-    );
-}
-
 /// The size of each long-lived collection, on a line of their own, once per call (the 1-minute
 /// tick). The keys are `col_<name>` and `col_<name>_bytes`.
 pub(crate) fn tick_collection_census(state: &EventLoopState) {
@@ -439,17 +306,10 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_proofs_gate_refused = sizes.proofs_gate_refused,
         col_reassembled_groups = sizes.reassembled_groups,
         col_pending_outbound = sizes.pending_outbound,
-        col_message_log = sizes.message_log,
-        col_message_log_bytes = sizes.message_log_bytes,
         col_reassembly = sizes.reassembly,
         col_reassembly_bytes = sizes.reassembly_bytes,
         col_shard_cache = sizes.shard_cache,
         col_shard_cache_bytes = sizes.shard_cache_bytes,
-        col_author_seqs = sizes.author_seqs,
-        col_author_seq_entries = sizes.author_seq_entries,
-        col_forked = sizes.forked,
-        col_by_hash = sizes.by_hash,
-        col_dag_heads = sizes.dag_heads,
         col_peers = sizes.peers,
         col_last_seen = sizes.last_seen,
         col_peer_endpoints = sizes.peer_endpoints,
@@ -459,6 +319,8 @@ pub(crate) fn tick_collection_census(state: &EventLoopState) {
         col_linked_endpoints = sizes.linked_endpoints,
         col_graft_backoff = sizes.graft_backoff,
         col_refused_endpoints = sizes.refused_endpoints,
+        col_seal_keys = sizes.seal_keys,
+        col_pending_seal_keys = sizes.pending_seal_keys,
         col_orphaned_endpoints = sizes.orphaned_endpoints,
         "collection census"
     );
@@ -534,13 +396,43 @@ fn log_wire_census(
     );
 }
 
+/// One-shot leak-visibility signal: if resident memory has crossed
+/// `threshold_mb` (`consts::RESIDENT_MEMORY_WARN_MB`), emit a `warn` (file sink)
+/// plus a JSON `info` event (`--output json` stream) exactly once. Warn-only —
+/// never exits or alters behavior; the distributed soak that crashed a host had
+/// no such in-process signal. `threshold_mb` is passed in (not read here) so the
+/// threshold stays a single source of truth and the latch is unit-testable.
+fn warn_on_high_resident_memory(
+    state: &mut EventLoopState,
+    sink: &dyn NodeSink,
+    threshold_mb: u64,
+) {
+    if threshold_mb == 0 || state.latches.contains(&Latch::ResidentMemoryWarned) {
+        return;
+    }
+    let Some(resident_bytes) = resident_memory::peak_resident_memory_bytes() else {
+        return;
+    };
+    let resident_mb = resident_bytes / (1024 * 1024);
+    if resident_mb >= threshold_mb {
+        state.latches.insert(Latch::ResidentMemoryWarned);
+        tracing::warn!(
+            target: "habilis_network::lifecycle",
+            resident_mb,
+            threshold_mb,
+            "resident memory crossed the warn threshold (possible leak); not exiting — see consts::RESIDENT_MEMORY_WARN_MB"
+        );
+        sink.emit(NodeEvent::Info(format!(
+            "resident memory {resident_mb} MiB crossed warn threshold {threshold_mb} MiB (possible memory leak)"
+        )));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::daemon::state::Latch;
-    use crate::protocol::messages::Verified;
     use crate::testing;
     use crate::util::unix_secs::UnixSecs;
-    use std::collections::HashSet;
 
     use crate::gossip::event::CountingSink;
 
@@ -599,116 +491,12 @@ mod tests {
         assert!(!super::in_join_phase(joined, at(3_600)), "an hour later");
     }
 
-    /// An entry of the per-peer map is absent when its owner is neither on the roster nor us.
-    #[test]
-    fn an_entry_of_a_member_off_the_roster_is_absent() {
-        let me = testing::test_key("me");
-        let roster: HashSet<_> = [testing::test_key("alice")].into_iter().collect();
-        let entries: Vec<String> = ["me", "alice", "bob", "carol"]
-            .map(|name| String::from_utf8_lossy(&testing::test_key(name).hex()).into_owned())
-            .into();
-
-        assert_eq!(
-            super::absent_entries(&entries, &roster, &me),
-            2,
-            "bob and carol"
-        );
-        assert_eq!(
-            super::absent_entries(&[], &roster, &me),
-            0,
-            "no entry, none absent"
-        );
-    }
-
-    /// The heavy part of the doc census runs on the first call and then once in
-    /// `DOC_HEAVY_EVERY`, so that its cost is spread over many ticks.
-    /// A root frame of `epoch`, as a node that went through `epoch` resets sends it.
-    fn root_frame(epoch: u64, name: &str) -> Verified {
-        use crate::doc::{MeshDoc, SelfWriteGate};
-        use crate::protocol::identity::Identity;
-        use crate::protocol::{Channel, MeshId, Message};
-
-        let author = testing::nick(name);
-        let identity = Identity::generate();
-        let gate = SelfWriteGate::new("peers".to_owned(), "card");
-        let mut writer = MeshDoc::new_gated(gate).epoch_cap(0);
-        for _ in 0..epoch {
-            assert!(
-                writer.tick_epoch(&identity.author_key()).is_some(),
-                "a reset"
-            );
-        }
-        let seed = *identity.public().as_bytes();
-        let slot = identity.author_key().to_string();
-        let merge = serde_json::json!({"peers": {slot: {"card": "mine"}}});
-        let change = writer
-            .build_change(&merge, &seed)
-            .expect("a JSON object merges")
-            .expect("a non-empty merge yields a change");
-        let (body, _plain) = writer
-            .compose_wire_body(&change, None)
-            .expect("compose the wire body");
-        Message::new_channel_event(&MeshId::from("test"), &author, body, Channel::Meta)
-            .sign(&identity)
-    }
-
     /// The tick drains the dropped keys as a guard. No tick path pushes one today, and the receive
     /// path drains after each frame, so this test fills the keys by hand: a candidate that a higher
     /// one beat, with no frame between the two that would drain it.
-    #[test]
-    fn a_tick_of_the_epoch_forgets_the_keys_that_the_document_dropped() {
-        use crate::doc::{MeshDoc, SelfWriteGate};
-        use crate::protocol::Channel;
-
-        let mut state = testing::fresh_state();
-        state.meta_doc = MeshDoc::new_gated(SelfWriteGate::new("peers".to_owned(), "card"));
-        let first = root_frame(1, "alice");
-        let second = root_frame(2, "bob");
-        state.doc_mut(Channel::Meta).ingest(&first);
-        state.doc_mut(Channel::Meta).ingest(&second);
-        state.seen.insert(first.dedup_key());
-
-        super::tick_epoch(&mut state, &testing::test_key("me"));
-
-        assert!(
-            !state.seen.contains(&first.dedup_key()),
-            "the key of the beaten candidate is forgotten"
-        );
-    }
-
     /// Several event loops of one process run their censuses in a stable order. Each document gets a
     /// heavy census every `DOC_HEAVY_EVERY` ticks of its own loop: a counter that the loops share would
     /// give all the heavy ones to one loop, and none to the others.
-    #[test]
-    fn each_event_loop_counts_its_own_doc_censuses() {
-        let mut loops: Vec<_> = (0..15).map(|_| testing::fresh_state()).collect();
-        let mut heavy = vec![0usize; loops.len()];
-        for _tick in 0..30 {
-            for (index, state) in loops.iter_mut().enumerate() {
-                if super::is_heavy_run(super::census_run(state)) {
-                    heavy[index] += 1;
-                }
-            }
-        }
-
-        assert_eq!(
-            heavy,
-            vec![2usize; 15],
-            "each of the 15 loops has a heavy census in 30 ticks, twice"
-        );
-    }
-
-    #[test]
-    fn the_heavy_doc_census_runs_once_in_fifteen_ticks() {
-        let heavy: Vec<u64> = (0..31).filter(|run| super::is_heavy_run(*run)).collect();
-
-        assert_eq!(
-            heavy,
-            [0, 15, 30],
-            "the heavy census runs on the first call and then every 15th"
-        );
-    }
-
     // The warn-only resident-memory leak signal: a threshold the live process
     // already exceeds (1 MiB) must fire exactly once and latch, never exit or
     // mutate anything else. A `0` threshold disables it entirely.

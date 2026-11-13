@@ -164,7 +164,7 @@ pub(super) async fn run_heal(
 /// resubscribe and, on success, swap in the fresh sender/receiver,
 /// drain the dead subscription's buffer (the actor counts those
 /// messages as delivered — overlay dedup will never re-push them, and
-/// anti-entropy resends of them are deduped too, so the buffer is the
+/// repeats of them are deduped too, so the buffer is the
 /// only copy), then re-enter the overlay via the starvation-recovery
 /// primitive (degraded mesh, throttles cleared, known peers re-dialed,
 /// arrival re-announced). On `Fatal` (the actor itself is gone) the

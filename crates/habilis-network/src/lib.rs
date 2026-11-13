@@ -41,7 +41,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod lookup;
 
 // Extracted leaf crates. Each owns one dependency the engine would otherwise
-// carry unconditionally — automerge, tracing-subscriber — and each depends only
+// carry unconditionally, such as tracing-subscriber, and each depends only
 // on `habilis-network-protocol`/`-util`, never back on this crate. Aliased so
 // engine code keeps its `crate::doc::…` paths.
 pub(crate) use habilis_network_doc as doc;
@@ -71,7 +71,7 @@ pub mod protocol {
         sole_addressee, validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
-    pub use habilis_network_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};
+    pub use habilis_network_protocol::{BuildMsgParams, build_msg_bytes};
 }
 
 /// Creator-minted invites. The redeem + decode primitives back

@@ -41,15 +41,6 @@ pub enum NodeEvent {
     Info(String),
     /// An error line.
     Error(String),
-    /// The author forked its chain.
-    Fork {
-        /// The nickname of the member.
-        nickname: Nickname,
-        /// The public key of the member, in hex.
-        pubkey: String,
-        /// The sequence number of the message.
-        seq: u64,
-    },
     /// A member went quiet.
     PeerTimeout {
         /// The nickname of the member. A label: two keys can use one.

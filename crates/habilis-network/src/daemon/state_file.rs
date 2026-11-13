@@ -114,6 +114,15 @@ const ENGINE_KEYS: [&str; 10] = [
 ];
 
 impl StateFile {
+    /// Attach the pid of the process the daemon lives for, so every write
+    /// publishes it as `owner_pid`. A no-op `None`, as for [`Self::topic`].
+    /// Hold the lock on the member key until this file is cleaned up (see the field of the same
+    /// name).
+    pub(crate) fn key_lock(mut self, key_lock: Option<sync::Arc<fs::File>>) -> Self {
+        self.key_lock = key_lock;
+        self
+    }
+
     pub(crate) fn new(
         path: PathBuf,
         mesh: &MeshId,
@@ -153,15 +162,6 @@ impl StateFile {
     /// construction site unconditional.
     pub(crate) fn topic(mut self, topic: Option<&str>) -> Self {
         self.topic = topic.map(str::to_owned);
-        self
-    }
-
-    /// Attach the pid of the process the daemon lives for, so every write
-    /// publishes it as `owner_pid`. A no-op `None`, as for [`Self::topic`].
-    /// Hold the lock on the member key until this file is cleaned up (see the field of the same
-    /// name).
-    pub(crate) fn key_lock(mut self, key_lock: Option<sync::Arc<fs::File>>) -> Self {
-        self.key_lock = key_lock;
         self
     }
 
