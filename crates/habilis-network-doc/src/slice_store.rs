@@ -576,7 +576,18 @@ impl SliceStore {
             return Err(SliceError::Reserved);
         }
         let pointer = ChunkPointer::parse(&body.value).ok_or(SliceError::Malformed)?;
+        self.check_pointer_size(pointer)?;
         Ok((body.version, SliceValue::Pointer(pointer)))
+    }
+
+    /// Refuses a pointer that names more bytes than the value cap. The check comes before any chunk is asked for.
+    fn check_pointer_size(&self, pointer: ChunkPointer) -> Result<(), SliceError> {
+        let limit = self.limits.max_value_bytes;
+        let bytes = usize::try_from(pointer.size()).unwrap_or(usize::MAX);
+        if bytes > limit {
+            return Err(SliceError::ValueTooLarge { bytes, limit });
+        }
+        Ok(())
     }
 
     /// Holds a frame of an author that is not in the roster yet, until [`SliceStore::take_pending`]
@@ -713,11 +724,7 @@ impl SliceStore {
         value: Map<String, Value>,
         now: Instant,
     ) -> Result<LocalDraft, SliceError> {
-        let limit = self.limits.max_value_bytes;
-        let bytes = usize::try_from(pointer.size()).unwrap_or(usize::MAX);
-        if bytes > limit {
-            return Err(SliceError::ValueTooLarge { bytes, limit });
-        }
+        self.check_pointer_size(pointer)?;
         let (version, body, _) = self.seal_body(own, pointer.to_value())?;
         if !self.take_token(own, now, self.limits.burst) {
             return Err(SliceError::RateLimited);
@@ -1520,6 +1527,37 @@ mod tests {
             slice_bytes: 1 << 20,
             ..limits
         })
+    }
+
+    #[test]
+    fn ingest_refuses_a_pointer_that_names_more_than_the_value_cap_and_keeps_the_held_version() {
+        let mut store = value_capped_store(64);
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, json!({"a": 1}))),
+            SliceIngest::Applied,
+            "an inline version must apply first"
+        );
+        let over = ChunkPointer::new(Root::from_bytes([7; 32]), 65).to_value();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 2, over)),
+            SliceIngest::Refused(SliceError::ValueTooLarge {
+                bytes: 65,
+                limit: 64
+            }),
+            "a pointer past the cap must be refused before any chunk is asked for"
+        );
+        assert_eq!(
+            store.version(&key(1)),
+            Some(1),
+            "a refused pointer must keep the last complete version"
+        );
+        assert_eq!(store.pointer(&key(1)), None, "no pointer may be held");
+        let at_cap = ChunkPointer::new(Root::from_bytes([7; 32]), 64).to_value();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 2, at_cap)),
+            SliceIngest::Applied,
+            "a pointer at the cap must apply"
+        );
     }
 
     #[test]
