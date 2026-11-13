@@ -241,12 +241,12 @@ fn key_count(document: &serde_json::Value) -> usize {
     count
 }
 
-/// Alice's log is held by Carol once Carol has all of its keys, or the bound runs out.
-async fn held_within(node: &Node<Store>, bound: Duration) -> usize {
+/// A node holds the log of the keys that it should once it has `want` of them, or the bound runs out.
+async fn held_within(node: &Node<Store>, want: usize, bound: Duration) -> usize {
     let started = Instant::now();
     loop {
         let held = key_count(&read(node).await);
-        if held >= WRITES || started.elapsed() > bound {
+        if held >= want || started.elapsed() > bound {
             return held;
         }
         time::sleep(Duration::from_millis(250)).await;
@@ -283,7 +283,7 @@ fn a_member_that_missed_a_write_pulls_it_from_a_neighbor() {
         time::sleep(Duration::from_secs(3)).await;
         drop_frames_from(&carol, None).await;
 
-        let held = held_within(&carol, REPAIR_BOUND).await;
+        let held = held_within(&carol, WRITES, REPAIR_BOUND).await;
         assert!(
             held >= WRITES,
             "carol holds {held} of alice's {WRITES} keys within the repair bound"
@@ -344,12 +344,12 @@ fn a_member_that_misses_the_left_drops_the_slice_by_the_tombstone() {
         let alice_key = key_of(&alice).await;
         drop_left_from(&bob, Some(alice_key)).await;
         write_log(&alice, WRITES).await;
-        let bob_held = held_within(&bob, REPAIR_BOUND).await;
+        let bob_held = held_within(&bob, WRITES, REPAIR_BOUND).await;
         assert!(
             bob_held >= WRITES,
             "bob holds {bob_held} of alice's {WRITES} keys before she leaves"
         );
-        let carol_held = held_within(&carol, REPAIR_BOUND).await;
+        let carol_held = held_within(&carol, WRITES, REPAIR_BOUND).await;
         assert!(
             carol_held >= WRITES,
             "carol holds {carol_held} of alice's {WRITES} keys before she leaves"
@@ -397,7 +397,7 @@ fn a_tombstone_after_a_write_burst_still_drops_the_slice() {
         for _ in 0..5 {
             write_log(&alice, 1).await;
         }
-        let bob_held = held_within(&bob, REPAIR_BOUND).await;
+        let bob_held = held_within(&bob, 1, REPAIR_BOUND).await;
         assert!(
             bob_held >= 1,
             "bob holds {bob_held} keys of alice before she leaves"

@@ -113,8 +113,10 @@ fn the_first_directed_send_of_each_member_after_the_join_is_accepted_and_arrives
 
         alice.until_knows("bob").await;
         bob.until_knows("alice").await;
-        let to_bob = alice.send("bob", "to bob").await;
-        let to_alice = bob.send("alice", "to alice").await;
+        // Both sends start before either ends, so neither is sent on a pair that the other
+        // send has already warmed: each is a first send on a cold pair.
+        let (to_bob, to_alice) =
+            tokio::join!(alice.send("bob", "to bob"), bob.send("alice", "to alice"));
         let bob_got = to_bob.is_ok() && bob.receives("to bob").await;
         let alice_got = to_alice.is_ok() && alice.receives("to alice").await;
 
