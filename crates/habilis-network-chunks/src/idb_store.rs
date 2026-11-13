@@ -634,6 +634,10 @@ impl ChunkStore for IdbStore {
         self.write(CHUNKS, &hash.to_hex(), bytes).await
     }
 
+    async fn drop_map(&self, root: Root) -> Result<(), ChunkError> {
+        self.erase(META, &[map_key(root)]).await
+    }
+
     async fn put_map(&self, map: &ChunkMap) -> Result<(), ChunkError> {
         self.write(META, &map_key(map.root()), &encode_map(map))
             .await
