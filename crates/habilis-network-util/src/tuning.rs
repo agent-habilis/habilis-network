@@ -1190,6 +1190,16 @@ pub const SLICE_VALUE_MAX_BYTES: usize = 1024 * 1024;
 /// The length of the window of the serve budget.
 pub const DIGEST_SERVE_WINDOW: Duration = Duration::from_secs(5);
 
+/// The length of the window of the chunk serve budget.
+pub const CHUNK_SERVE_WINDOW: Duration = Duration::from_secs(5);
+
+/// How many chunk answers this node gives one asker in one window. A map and a chunk both count. A value at
+/// the cap has 16 chunks and a map, so one asker takes about 2 such values in a window.
+pub const CHUNK_SERVES_PER_WINDOW: usize = 40;
+
+/// How many chunk answers this node gives in all, in one window, whoever asks.
+pub const CHUNK_SERVES_GLOBAL: usize = 160;
+
 /// How long a node waits after it sees a digest that differs from its own, before it asks for the pages.
 /// The live frames in flight land during this delay, so most differences end with no request.
 pub const DIGEST_SETTLE: Duration = Duration::from_secs(1);

@@ -6,6 +6,8 @@ use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs, io::ErrorKind};
 
+#[cfg(test)]
+use habilis_network_chunks::ChunkHash;
 use habilis_network_chunks::{ChunkError, ChunkMap, ChunkStore, InMemoryStore, Root};
 
 use crate::protocol::{SymmetricKey, seal_error};
@@ -147,6 +149,38 @@ impl MeshChunks {
             mapped.remove(root);
         }
         Ok(())
+    }
+
+    /// The chunk map of `root`, when the store holds it.
+    ///
+    /// # Errors
+    ///
+    /// The store cannot read the map.
+    #[cfg(test)]
+    pub(crate) async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
+        use habilis_network_chunks::ChunkSource as _;
+
+        match &self.store {
+            Store::Memory(store) => store.map(root).await,
+            #[cfg(not(target_arch = "wasm32"))]
+            Store::Disk(store) => store.map(root).await,
+        }
+    }
+
+    /// The bytes of the chunk with `hash`, when the store holds it.
+    ///
+    /// # Errors
+    ///
+    /// The store cannot read the chunk.
+    #[cfg(test)]
+    pub(crate) async fn chunk(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
+        use habilis_network_chunks::ChunkSource as _;
+
+        match &self.store {
+            Store::Memory(store) => store.get(hash).await,
+            #[cfg(not(target_arch = "wasm32"))]
+            Store::Disk(store) => store.get(hash).await,
+        }
     }
 
     /// Whether the store holds the chunk map of `root`.

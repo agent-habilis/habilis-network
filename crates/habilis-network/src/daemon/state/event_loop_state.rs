@@ -221,6 +221,19 @@ impl ChannelDocs {
         self.get(channel).is_gone(key)
     }
 
+    /// Whether a slice of any author, in either channel, names `root`. A member serves the chunks of such a root and
+    /// of no other.
+    #[cfg(test)]
+    pub(crate) fn names_root(&self, root: Root) -> bool {
+        [protocol::Channel::State, protocol::Channel::Meta]
+            .into_iter()
+            .any(|channel| {
+                self.get(channel)
+                    .pointers()
+                    .any(|pointer| pointer.root() == root)
+            })
+    }
+
     /// The roots of the chunked values that the slices of `key` hold, in both channels.
     pub(crate) fn chunk_roots<'docs>(
         &'docs self,

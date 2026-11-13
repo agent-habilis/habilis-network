@@ -521,6 +521,23 @@ impl SliceStore {
         self.slices.get(key).and_then(|slice| slice.value.pointer())
     }
 
+    /// The pointers that the slices of this store hold, one for each author whose value is chunked.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert_eq!(store.pointers().count(), 0);
+    /// ```
+    pub fn pointers(&self) -> impl Iterator<Item = &ChunkPointer> {
+        self.slices
+            .values()
+            .filter_map(|slice| slice.value.pointer())
+    }
+
     /// Returns the signed frame held for `key`, which a resend sends. No caller yet.
     #[must_use]
     pub fn frame(&self, key: &AuthorKey) -> Option<&Verified> {
