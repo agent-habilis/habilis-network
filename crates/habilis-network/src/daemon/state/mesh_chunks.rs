@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs, io::ErrorKind};
 
-use habilis_network_chunks::{ChunkError, ChunkMap, ChunkStore as _, InMemoryStore, Root};
+use habilis_network_chunks::{ChunkError, ChunkMap, ChunkStore, InMemoryStore, Root};
 
 #[cfg(not(target_arch = "wasm32"))]
 use habilis_network_chunks::DiskStore;
@@ -14,6 +16,9 @@ use habilis_network_chunks::DiskStore;
 #[derive(Debug)]
 pub(crate) struct MeshChunks {
     store: Store,
+    /// The roots whose map this run put and has not dropped. A run starts with an empty store, so no
+    /// other map can be there.
+    mapped: Mutex<HashSet<Root>>,
 }
 
 #[derive(Debug)]
@@ -51,12 +56,14 @@ impl MeshChunks {
             }
             return Ok(Self {
                 store: Store::Disk(DiskStore::open(folder)?),
+                mapped: Mutex::default(),
             });
         }
         #[cfg(target_arch = "wasm32")]
         let _ = folder;
         Ok(Self {
             store: Store::Memory(InMemoryStore::new()),
+            mapped: Mutex::default(),
         })
     }
 
@@ -85,36 +92,57 @@ impl MeshChunks {
             #[cfg(not(target_arch = "wasm32"))]
             Store::Disk(store) => store.put_map(&map).await?,
         }
+        self.mapped
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("mapped"))?
+            .insert(map.root());
         Ok(map.root())
     }
 
-    /// Drops every chunk that no root of `roots` names.
+    /// Drops every chunk that no root of `roots` names, and the map of each root that this run put and
+    /// `roots` does not name.
     ///
     /// # Errors
     ///
-    /// A root has no stored map, or the store cannot sweep.
+    /// A root has no stored map, or the store cannot sweep or drop a map.
     pub(crate) async fn keep_only(
         &self,
         roots: impl IntoIterator<Item = Root>,
     ) -> Result<(), ChunkError> {
+        let kept: HashSet<Root> = roots.into_iter().collect();
+        let stale: Vec<Root> = {
+            let mapped = self
+                .mapped
+                .lock()
+                .map_err(|_| ChunkError::Poisoned("mapped"))?;
+            mapped.difference(&kept).copied().collect()
+        };
         match &self.store {
-            Store::Memory(store) => {
-                store.start_marking().await?;
-                for root in roots {
-                    store.mark(root).await?;
-                }
-                store.sweep().await?;
-            }
+            Store::Memory(store) => sweep_except(store, &kept, &stale).await?,
             #[cfg(not(target_arch = "wasm32"))]
-            Store::Disk(store) => {
-                store.start_marking().await?;
-                for root in roots {
-                    store.mark(root).await?;
-                }
-                store.sweep().await?;
-            }
+            Store::Disk(store) => sweep_except(store, &kept, &stale).await?,
+        }
+        let mut mapped = self
+            .mapped
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("mapped"))?;
+        for root in &stale {
+            mapped.remove(root);
         }
         Ok(())
+    }
+
+    /// Whether the store holds the chunk map of `root`.
+    #[cfg(test)]
+    pub(crate) async fn has_map(&self, root: Root) -> bool {
+        use habilis_network_chunks::ChunkSource as _;
+
+        let map = match &self.store {
+            Store::Memory(store) => store.map(root).await,
+            #[cfg(not(target_arch = "wasm32"))]
+            Store::Disk(store) => store.map(root).await,
+        };
+        map.expect("a map lookup").is_some()
     }
 
     /// How many chunks the store holds, when it is in memory.
@@ -126,6 +154,23 @@ impl MeshChunks {
             Store::Disk(_) => usize::MAX,
         }
     }
+}
+
+/// Sweeps every chunk that no root of `kept` names, then drops the map of each root of `stale`.
+async fn sweep_except(
+    store: &impl ChunkStore,
+    kept: &HashSet<Root>,
+    stale: &[Root],
+) -> Result<(), ChunkError> {
+    store.start_marking().await?;
+    for root in kept {
+        store.mark(*root).await?;
+    }
+    store.sweep().await?;
+    for root in stale {
+        store.drop_map(*root).await?;
+    }
+    Ok(())
 }
 
 /// The bytes of `bytes` in `range`, when the range lies inside them.
@@ -168,6 +213,27 @@ mod tests {
         assert!(
             matches!(chunks.store, Store::Memory(_)),
             "no folder must give a store in memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn keeping_only_some_roots_drops_the_map_of_each_other_root() {
+        let chunks = MeshChunks::open(None).expect("an in-memory store");
+        let old = chunks.put_value(b"the old value").await.expect("a value");
+        let kept = chunks.put_value(b"the kept value").await.expect("a value");
+        chunks.keep_only([kept]).await.expect("a sweep");
+        assert!(
+            !chunks.has_map(old).await,
+            "the map of a root that is not kept must be dropped"
+        );
+        assert!(
+            chunks.has_map(kept).await,
+            "the map of a kept root must stay"
+        );
+        assert_eq!(
+            chunks.stored_chunks(),
+            1,
+            "the chunk of the old value must be swept"
         );
     }
 
