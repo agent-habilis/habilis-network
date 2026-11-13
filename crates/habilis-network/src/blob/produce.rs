@@ -35,7 +35,7 @@ use crate::util::consts::MAX_BLOB_BYTES;
 use super::store::BlobStore;
 use super::ticket::BlobTicket;
 use super::{
-    BAD_SECRET, BlobDigest, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN,
+    BAD_SECRET, BlobDigest, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN, TOO_SLOW,
     UNKNOWN_BLOB, wait_online,
 };
 use std::fs::File;
@@ -377,13 +377,15 @@ async fn serve_stream(
         wait_acknowledged(connection, &send, limits.ack_stall).await;
         anyhow::Ok(())
     };
-    match time::timeout(serve_budget(size, limits), transfer).await {
-        Ok(sent) => sent?,
-        Err(_) => {
-            tracing::debug!(target: "habilis_network::blob", size, "blob serve ran past its time budget");
-        }
-    }
-    connection.close(DONE.into(), b"done");
+    let finished = time::timeout(serve_budget(size, limits), transfer).await;
+    let (code, reason): (u32, &[u8]) = if let Ok(outcome) = finished {
+        outcome?;
+        (DONE, b"done")
+    } else {
+        tracing::debug!(target: "habilis_network::blob", size, "blob serve ran past its time budget");
+        (TOO_SLOW, b"serve budget")
+    };
+    connection.close(code.into(), reason);
     Ok(())
 }
 

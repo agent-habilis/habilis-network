@@ -39,7 +39,7 @@ mod store;
 mod ticket;
 
 pub use blob_digest::BlobDigest;
-pub(crate) use consts::{BAD_SECRET, BLOB_ALPN, DONE, RELAY_REFUSED_CODE, UNKNOWN_BLOB};
+pub(crate) use consts::{BAD_SECRET, BLOB_ALPN, DONE, RELAY_REFUSED_CODE, TOO_SLOW, UNKNOWN_BLOB};
 pub use consts::{HASH_LEN, SECRET_LEN};
 pub use consume::{fetch, fetch_hedged, fetch_with_endpoint};
 pub use content_id::ContentId;
@@ -61,12 +61,15 @@ mod tests {
 
     use crate::lookup;
     use crate::protocol::crypto;
-    use iroh::endpoint::presets;
+    use iroh::endpoint::{
+        Connection, ConnectionError, QuicTransportConfig, RecvStream, SendStream, VarInt, presets,
+    };
     use std::collections::HashMap;
-    use std::env;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
+    use std::{env, thread};
     use tokio::net::UdpSocket;
+    use tokio::runtime::Builder;
     use tokio::time;
     /// A secret that is already in a wiped buffer (the blob salt, the token read off
     /// the wire) moves into its type whole, through the constructor that takes the
@@ -1113,7 +1116,7 @@ mod tests {
             "an empty file gets the stall window only"
         );
         assert_eq!(
-            serve_budget(64 * 1024 * 100, limits),
+            serve_budget(limits.min_bytes_per_second * 100, limits),
             limits.ack_stall + Duration::from_secs(100),
             "100 times the floor rate adds 100 s"
         );
@@ -1134,18 +1137,13 @@ mod tests {
         server: &BlobServer,
         ticket: &BlobTicket,
         window: Option<u32>,
-    ) -> (
-        iroh::Endpoint,
-        iroh::endpoint::Connection,
-        iroh::endpoint::SendStream,
-        iroh::endpoint::RecvStream,
-    ) {
+    ) -> (iroh::Endpoint, Connection, SendStream, RecvStream) {
         let mut builder =
             iroh::Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled);
         if let Some(window) = window {
-            let window = iroh::endpoint::VarInt::from_u32(window);
+            let window = VarInt::from_u32(window);
             builder = builder.transport_config(
-                iroh::endpoint::QuicTransportConfig::builder()
+                QuicTransportConfig::builder()
                     .stream_receive_window(window)
                     .receive_window(window)
                     .build(),
@@ -1168,7 +1166,7 @@ mod tests {
 
     /// **A consumer that stops reading does not hold the serve for ever.**
     ///
-    /// The consumer accepts 64 KiB of the stream and then reads nothing. It stays alive and answers
+    /// The consumer accepts `64 KiB` of the stream and then reads nothing. It stays alive and answers
     /// the packets of the producer, so its connection never idles out, and the stall rule has
     /// nothing to count. The write of the producer blocks on the flow-control window, so only the
     /// time budget of the serve can end it. The budget of this serve is 1 s plus 4 MB at 1 MB/s,
@@ -1209,6 +1207,15 @@ mod tests {
                     0,
                     "a consumer that read nothing for 9 s still holds the serve, past its 5 s budget"
                 );
+                let reason = connection.close_reason();
+                assert!(
+                    matches!(
+                        &reason,
+                        Some(ConnectionError::ApplicationClosed(close))
+                            if close.error_code == VarInt::from_u32(super::TOO_SLOW)
+                    ),
+                    "the cut serve closes with TOO_SLOW, not with DONE: {reason:?}"
+                );
                 connection.close(0u32.into(), b"done");
                 client.close().await;
                 fs::remove_file(&src).ok();
@@ -1225,8 +1232,8 @@ mod tests {
     /// right after the size header of the answer, so it cannot answer another packet. The file of 1 MB
     /// fits in the first flow-control window, so the producer reaches the wait for the
     /// acknowledgement. With a stall window of 1 s, the serve must end within a few seconds. A wait
-    /// with no stall window holds it until the budget of the serve, 1 s plus 1 MB at 64 KiB/s,
-    /// about 16 s.
+    /// with no stall window holds it until the budget of the serve, 1 s plus 1 MB at 16 KiB/s,
+    /// about 62 s.
     #[test]
     fn a_consumer_that_stops_acknowledging_does_not_hold_the_serve() {
         ::habilis_network_test_tracing::run_multi_thread(
@@ -1260,8 +1267,8 @@ mod tests {
                     ticket.secret.as_bytes(),
                 ]
                 .concat();
-                let frozen = std::thread::spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
+                let frozen = thread::spawn(move || {
+                    let runtime = Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .expect("consumer runtime");
@@ -1281,10 +1288,13 @@ mod tests {
                         let mut size = [0u8; 8];
                         recv.read_exact(&mut size).await.expect("read the size");
                         // No await until the sleep ends: nothing on this thread can answer a packet.
-                        std::thread::sleep(Duration::from_secs(9));
+                        thread::sleep(Duration::from_secs(9));
                         client.close().await;
                     });
                 });
+                // The stall window is 1 s and the serve ends within 2 windows, so 6 s leaves the
+                // margin of a slow machine. The thread of the consumer sleeps 9 s, longer than this
+                // wait, so the consumer is still frozen when the assert runs.
                 time::sleep(Duration::from_secs(6)).await;
                 assert_eq!(
                     server.inflight(),

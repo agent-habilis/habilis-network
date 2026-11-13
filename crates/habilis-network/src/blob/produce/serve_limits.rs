@@ -25,7 +25,10 @@ pub(crate) struct ServeLimits {
     /// writes and the wait for the last acknowledgement, gets `ack_stall` plus the file size divided
     /// by this rate, and no more. The stall rule counts acknowledgement frames, so it cannot see a
     /// live peer that acknowledges a packet now and then, or one that stops reading and holds the
-    /// flow-control window shut. This cap ends such a serve.
+    /// flow-control window shut. This cap ends such a serve, and the producer closes with
+    /// `TOO_SLOW`. A consumer on a link below this rate cannot fetch a file that needs more than
+    /// the budget: each retry starts again at byte 0, so the same cut follows. At 16 KiB/s a 5 MB
+    /// file gets 30 s plus 320 s.
     pub(crate) min_bytes_per_second: u64,
 }
 
@@ -36,6 +39,6 @@ impl ServeLimits {
         pre_auth: Duration::from_secs(10),
         max_inflight: 64,
         ack_stall: Duration::from_secs(30),
-        min_bytes_per_second: 64 * 1024,
+        min_bytes_per_second: 16 * 1024,
     };
 }
