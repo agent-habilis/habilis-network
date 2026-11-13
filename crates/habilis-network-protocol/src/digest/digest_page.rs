@@ -30,7 +30,8 @@ impl DigestPage {
     /// # Errors
     ///
     /// The refusals of the parser: no row, an index past the total, entries that are not sorted, and
-    /// an entry outside the page range.
+    /// an entry outside the page range. The parser refuses a first page that does not start at the
+    /// zero key and a last page that has an end key too, a page that this function never builds.
     ///
     /// # Examples
     ///
@@ -193,6 +194,14 @@ impl TryFrom<PageWire> for DigestPage {
         if wire.index >= wire.total {
             return Err(DigestError::IndexPastTotal);
         }
+        // The range has a contract by place: the first page starts at the zero key, and the last
+        // page runs to the end of the key space. A store builds no other page.
+        let zero = AuthorKey::from([0; 32]);
+        let first_starts_wrong = wire.index == 0 && first_key.as_bytes() != zero.as_bytes();
+        let last_ends_wrong = wire.index + 1 == wire.total && end_key.is_some();
+        if first_starts_wrong || last_ends_wrong {
+            return Err(DigestError::BadRange);
+        }
         if entries.windows(2).any(|pair| {
             let (below, above) = (pair[0].key(), pair[1].key());
             below.as_bytes() >= above.as_bytes()
@@ -300,6 +309,70 @@ mod tests {
             .reverse();
         let parsed: Result<DigestPage, _> = serde_json::from_value(value);
         assert!(parsed.is_err(), "entries out of key order must be refused");
+    }
+
+    /// Two pages of one row each: the first starts at the zero key, and the last has no end key.
+    fn two_pages() -> (Value, Value) {
+        let rows = vec![entry(1), entry(2)];
+        let first = DigestPage::build(&rows, 1, 0, 2).expect("the first page");
+        let last = DigestPage::build(&rows, 1, 1, 2).expect("the last page");
+        (
+            serde_json::to_value(&first).expect("a page must serialize"),
+            serde_json::to_value(&last).expect("a page must serialize"),
+        )
+    }
+
+    fn hex(byte: u8) -> Value {
+        json!(String::from_utf8(key(byte).hex().to_vec()).expect("hex is text"))
+    }
+
+    /// The contract of a range: the first page starts at the zero key, and the last page has no end
+    /// key. A page that a store would not build is refused on the wire, whatever its entries.
+    #[test]
+    fn a_first_page_that_does_not_start_at_the_zero_key_is_refused() {
+        let (mut first, _) = two_pages();
+        let good: Result<DigestPage, _> = serde_json::from_value(first.clone());
+        assert!(
+            good.is_ok(),
+            "the control: the page that a store builds parses"
+        );
+
+        first["first_key"] = hex(1);
+        let parsed: Result<DigestPage, _> = serde_json::from_value(first);
+
+        assert!(
+            parsed.is_err(),
+            "a first page with a first key above the zero key was accepted"
+        );
+    }
+
+    #[test]
+    fn a_last_page_with_an_end_key_is_refused() {
+        let (_, mut last) = two_pages();
+        let good: Result<DigestPage, _> = serde_json::from_value(last.clone());
+        assert!(
+            good.is_ok(),
+            "the control: the page that a store builds parses"
+        );
+
+        last["end_key"] = hex(9);
+        let parsed: Result<DigestPage, _> = serde_json::from_value(last);
+
+        assert!(parsed.is_err(), "a last page with an end key was accepted");
+    }
+
+    #[test]
+    fn a_page_that_breaks_the_range_contract_names_the_bad_range() {
+        let (mut first, _) = two_pages();
+        first["first_key"] = hex(1);
+
+        let parsed: Result<DigestPage, _> = serde_json::from_value(first);
+        let message = parsed.expect_err("the page is refused").to_string();
+
+        assert!(
+            message.contains(&DigestError::BadRange.to_string()),
+            "the refusal does not name the range: {message}"
+        );
     }
 
     #[test]

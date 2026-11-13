@@ -35,6 +35,9 @@ pub enum DigestError {
     Unsorted,
     /// An entry is outside the range of its page.
     OutsideRange,
+    /// The range of the page breaks the contract of its place: the first page starts at the zero
+    /// key, and the last page has no end key.
+    BadRange,
 }
 
 impl fmt::Display for DigestError {
@@ -48,6 +51,7 @@ impl fmt::Display for DigestError {
             Self::IndexPastTotal => "the index is past the total",
             Self::Unsorted => "the entries are not sorted and unique",
             Self::OutsideRange => "an entry is outside the page range",
+            Self::BadRange => "the first page starts at the zero key and the last has no end key",
         };
         formatter.write_str(text)
     }

@@ -2,7 +2,7 @@
 //! wire cap ([`MAX_MESSAGE_SIZE`](habilis_network_util::consts::MAX_MESSAGE_SIZE)) is
 //! split by the sender into several ordinary signed messages, each carrying a
 //! [`Shard`] header. The receiver reassembles them; the split is invisible to
-//! agents on both ends. Each shard is a real message (own id/seq/signature).
+//! agents on both ends. Each shard is a real message (own id and signature).
 //! Every shard group is cached by the sender (`reassembly::ShardCache`), and a stalled receiver
 //! asks for the missing indexes over the `shard/repair` gossip RPC. No store keeps a shard,
 //! so this repair is the only heal for a shard that the transport lost.

@@ -49,9 +49,9 @@ impl TryFrom<WireIn> for Message {
     /// Shape-check the integrity fields (`pubkey`, `sig`) at the boundary, so a crafted
     /// value never reaches signature verification. An empty `pubkey` and an empty `sig`
     /// is the canonical unsigned form — the receive path drops anything that
-    /// then fails verification; a *present* key/sig/hash must be well-formed
-    /// lowercase hex of the right length (Ed25519 pubkey 32B, signature 64B,
-    /// SHA-256 hash 32B). A key with no signature, and a signature with no key, are errors:
+    /// then fails verification; a *present* key or signature must be well-formed
+    /// lowercase hex of the right length (Ed25519 pubkey 32B, signature 64B).
+    /// A key with no signature, and a signature with no key, are errors:
     /// no sender emits either, and a message cannot hold one.
     fn try_from(wire: WireIn) -> Result<Self, Self::Error> {
         let key: Option<AuthorKey> = (!wire.pubkey.is_empty())
@@ -86,7 +86,7 @@ impl TryFrom<WireIn> for Message {
 }
 
 /// Is `value` exactly `bytes * 2` lowercase-hex characters — the canonical
-/// wire form of a fixed-width binary field (pubkey / signature / hash)?
+/// wire form of a fixed-width binary field (pubkey / signature)?
 fn is_lower_hex(value: &str, bytes: usize) -> bool {
     let lower: bool = value
         .bytes()

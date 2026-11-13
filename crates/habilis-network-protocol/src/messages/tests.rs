@@ -693,10 +693,10 @@ mod snapshots {
     #[test]
     fn snap_wire_state_merge() {
         let _guard = ::habilis_network_test_tracing::init();
-        // A shared-state change rides `MessageKind::State`; its body is the
-        // tagged merge envelope (`k:"merge"`) the reducer parses. Pinning the
-        // wire bytes guards the discriminator + RFC 7386 merge shape.
-        let message = Message::fixture(MessageKind::State, r#"{"k":"merge","merge":{"turn":"b"}}"#);
+        // A shared-state change rides `MessageKind::State`; its body is the signed slice of its
+        // author: a `version` and a `value`. Pinning the wire bytes guards the discriminator and
+        // the shape of the slice.
+        let message = Message::fixture(MessageKind::State, r#"{"version":2,"value":{"turn":"b"}}"#);
         let bytes = message
             .serialize()
             .expect("the fixture message is well formed, so it serializes");
