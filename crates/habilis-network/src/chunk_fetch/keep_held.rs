@@ -15,6 +15,7 @@ pub(crate) async fn keep_held(state: &EventLoopState) {
 mod tests {
     use habilis_network_chunks::{CHUNK_BYTES_USIZE, Root};
     use habilis_network_doc::ChunkPointer;
+    use habilis_network_util::clock::Instant;
 
     use crate::chunk_fetch::fixtures;
     use crate::daemon::state::EventLoopState;
@@ -95,6 +96,27 @@ mod tests {
             "a root of a slice that was cleared by a tombstone must go"
         );
         assert_eq!(state.chunks.stored_chunks(), 0, "its chunks must go too");
+    }
+
+    #[tokio::test]
+    async fn a_member_that_left_or_lapsed_unpins_its_root_and_a_sweep_frees_it() {
+        let mut state = testing::fresh_state();
+        let leaver = Identity::generate();
+        let lapsed = Identity::generate();
+        let gone_root = hold_fetched_value(&mut state, &leaver, 4).await;
+        let parked_root = hold_fetched_value(&mut state, &lapsed, 5).await;
+        state.docs.forget(&leaver.author_key(), Instant::now());
+        state.docs.park(&lapsed.author_key(), Instant::now());
+        super::keep_held(&state).await;
+        assert!(
+            !state.chunks.has_map(gone_root).await,
+            "the root of a key that is gone must be unpinned"
+        );
+        assert!(
+            !state.chunks.has_map(parked_root).await,
+            "the root of a key that lapsed, and keeps no slice, must be unpinned"
+        );
+        assert_eq!(state.chunks.stored_chunks(), 0, "the chunks of both go");
     }
 
     #[tokio::test]

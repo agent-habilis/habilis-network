@@ -1235,6 +1235,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             self.state.last_sent_at = Instant::now();
         }
         probe::prove_routed_pairs(&mut self.state, &context);
+        // A member that left, or lapsed, took its slice: the chunks that only it named go.
+        chunk_fetch::keep_held(&self.state).await;
         // A pointer whose fetch failed, or that found no holder, is fetched again once its wait is over.
         chunk_fetch::start(&mut self.state, &context, Instant::now());
         self.app.on_tick(&mut self.state, &context).await;
