@@ -17,8 +17,16 @@ pub(crate) struct ServeLimits {
     /// acknowledgement arrives. The producer buffers the whole file and closes the connection only
     /// after the consumer has all of it, so a slow link is never cut. A fixed total time cut a file
     /// that the link needed more than that time to carry. A silent consumer still frees the serve
-    /// after this time.
+    /// after this time. The rule counts acknowledgement frames, so it cannot see a live peer that
+    /// sends one now and then, and it does not run while the write waits on the flow-control
+    /// window. `min_bytes_per_second` bounds both.
     pub(crate) ack_stall: Duration,
+    /// The slowest rate, in bytes per second, at which a serve may send a file. The whole send, the
+    /// writes and the wait for the last acknowledgement, gets `ack_stall` plus the file size divided
+    /// by this rate, and no more. The stall rule counts acknowledgement frames, so it cannot see a
+    /// live peer that acknowledges a packet now and then, or one that stops reading and holds the
+    /// flow-control window shut. This cap ends such a serve.
+    pub(crate) min_bytes_per_second: u64,
 }
 
 impl ServeLimits {
@@ -28,5 +36,6 @@ impl ServeLimits {
         pre_auth: Duration::from_secs(10),
         max_inflight: 64,
         ack_stall: Duration::from_secs(30),
+        min_bytes_per_second: 64 * 1024,
     };
 }

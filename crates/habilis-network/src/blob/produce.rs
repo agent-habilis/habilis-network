@@ -319,7 +319,7 @@ async fn serve_connection(
     let (send, recv) = time::timeout_at(deadline, connection.accept_bi())
         .await
         .context("no fetch request within the pre-authentication deadline")??;
-    let result = serve_stream(&connection, send, recv, store, deadline, limits.ack_stall).await;
+    let result = serve_stream(&connection, send, recv, store, deadline, limits).await;
     tracing::debug!(target: "habilis_network::blob", failed = result.is_err(), close = ?connection.close_reason(), "blob serve ended");
     result
 }
@@ -334,7 +334,7 @@ async fn serve_stream(
     mut recv: RecvStream,
     store: &Mutex<BlobStore>,
     deadline: Instant,
-    ack_stall: Duration,
+    limits: ServeLimits,
 ) -> Result<()> {
     let mut request = Zeroizing::new([0u8; HASH_LEN + SECRET_LEN]);
     // Still inside the pre-auth deadline: a peer that opens a stream and then
@@ -369,13 +369,29 @@ async fn serve_stream(
         return Ok(());
     };
 
-    send.write_all(&size.to_le_bytes()).await?;
-    stream_file(&path, &mut send).await?;
-    let _ = send.finish();
-    // Let the consumer receive the tail before CONNECTION_CLOSE races it.
-    wait_acknowledged(connection, &send, ack_stall).await;
+    let transfer = async {
+        send.write_all(&size.to_le_bytes()).await?;
+        stream_file(&path, &mut send).await?;
+        let _ = send.finish();
+        // Let the consumer receive the tail before CONNECTION_CLOSE races it.
+        wait_acknowledged(connection, &send, limits.ack_stall).await;
+        anyhow::Ok(())
+    };
+    match time::timeout(serve_budget(size, limits), transfer).await {
+        Ok(sent) => sent?,
+        Err(_) => {
+            tracing::debug!(target: "habilis_network::blob", size, "blob serve ran past its time budget");
+        }
+    }
     connection.close(DONE.into(), b"done");
     Ok(())
+}
+
+/// The longest that the send of a file of `size` bytes may take: the stall window plus the time
+/// that the file needs at the slowest rate that a serve accepts.
+pub(super) fn serve_budget(size: u64, limits: ServeLimits) -> Duration {
+    let slowest = Duration::from_secs(size / limits.min_bytes_per_second.max(1));
+    limits.ack_stall.saturating_add(slowest)
 }
 
 /// Wait until the consumer has acknowledged every byte of the stream, or the connection ends, or a

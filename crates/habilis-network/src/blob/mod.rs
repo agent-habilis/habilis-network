@@ -826,14 +826,8 @@ mod tests {
 
     /// A UDP relay on loopback that passes every datagram of the consumer at once and paces the
     /// datagrams of the producer to `bytes_per_second`. A queue holds what the pace does not pass,
-    /// so nothing is lost: the link is slow, not lossy. With `deaf_after`, the relay drops every
-    /// datagram of the consumer from that time after the first one, so the producer gets no more
-    /// acknowledgement.
-    async fn slow_link_proxy(
-        upstream: SocketAddr,
-        bytes_per_second: u64,
-        deaf_after: Option<Duration>,
-    ) -> SocketAddr {
+    /// so nothing is lost: the link is slow, not lossy.
+    async fn slow_link_proxy(upstream: SocketAddr, bytes_per_second: u64) -> SocketAddr {
         let front = UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
         let address = front.local_addr().expect("proxy address");
         // The reply tasks send through the front socket, so they share it with the loop.
@@ -842,15 +836,10 @@ mod tests {
             // One socket per client, shared by its reply task and the loop.
             let mut routes: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
             let mut buffer = vec![0u8; 2048];
-            let mut first_seen: Option<time::Instant> = None;
             loop {
                 let Ok((read, client)) = front.recv_from(&mut buffer).await else {
                     return;
                 };
-                let first = *first_seen.get_or_insert_with(time::Instant::now);
-                if deaf_after.is_some_and(|after| first.elapsed() >= after) {
-                    continue;
-                }
                 let route = if let Some(route) = routes.get(&client) {
                     Arc::clone(route)
                 } else {
@@ -1083,7 +1072,7 @@ mod tests {
                     .await
                     .expect("register");
                 let upstream = only_ip_address(&ticket.address);
-                let proxy = slow_link_proxy(upstream, 1_000_000, None).await;
+                let proxy = slow_link_proxy(upstream, 1_000_000).await;
                 ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
                 let mut out = Vec::new();
                 let fetched = time::timeout(
@@ -1109,14 +1098,135 @@ mod tests {
         );
     }
 
+    /// **The budget of a serve grows with the file.**
+    ///
+    /// A fixed total time would cut a big file on a slow link, as the 2 s cap did. The budget is
+    /// the stall window plus the time that the file needs at the slowest accepted rate.
+    #[test]
+    fn the_serve_budget_grows_with_the_size_of_the_file() {
+        use super::produce::{ServeLimits, serve_budget};
+
+        let limits = ServeLimits::DEFAULT;
+        assert_eq!(
+            serve_budget(0, limits),
+            limits.ack_stall,
+            "an empty file gets the stall window only"
+        );
+        assert_eq!(
+            serve_budget(64 * 1024 * 100, limits),
+            limits.ack_stall + Duration::from_secs(100),
+            "100 times the floor rate adds 100 s"
+        );
+        let zero_rate = ServeLimits {
+            min_bytes_per_second: 0,
+            ..limits
+        };
+        assert_eq!(
+            serve_budget(10, zero_rate),
+            limits.ack_stall + Duration::from_secs(10),
+            "a rate of 0 counts as 1 byte per second, not as a division by zero"
+        );
+    }
+
+    /// A client that sends the fetch request for `ticket` over a connection of its own.
+    /// With `window`, the client accepts at most that many bytes of the stream before it reads.
+    async fn request_without_reading(
+        server: &BlobServer,
+        ticket: &BlobTicket,
+        window: Option<u32>,
+    ) -> (
+        iroh::Endpoint,
+        iroh::endpoint::Connection,
+        iroh::endpoint::SendStream,
+        iroh::endpoint::RecvStream,
+    ) {
+        let mut builder =
+            iroh::Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled);
+        if let Some(window) = window {
+            let window = iroh::endpoint::VarInt::from_u32(window);
+            builder = builder.transport_config(
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .stream_receive_window(window)
+                    .receive_window(window)
+                    .build(),
+            );
+        }
+        let client = builder.bind().await.expect("bind client");
+        let connection = client
+            .connect(server.address(), super::BLOB_ALPN)
+            .await
+            .expect("connect");
+        let (mut send, recv) = connection.open_bi().await.expect("open stream");
+        send.write_all(ticket.sha256.as_bytes())
+            .await
+            .expect("send hash");
+        send.write_all(ticket.secret.as_bytes())
+            .await
+            .expect("send secret");
+        (client, connection, send, recv)
+    }
+
+    /// **A consumer that stops reading does not hold the serve for ever.**
+    ///
+    /// The consumer accepts 64 KiB of the stream and then reads nothing. It stays alive and answers
+    /// the packets of the producer, so its connection never idles out, and the stall rule has
+    /// nothing to count. The write of the producer blocks on the flow-control window, so only the
+    /// time budget of the serve can end it. The budget of this serve is 1 s plus 4 MB at 1 MB/s,
+    /// 5 s. A serve with no budget stays for the whole test.
+    #[test]
+    fn a_consumer_that_stops_reading_does_not_hold_the_serve() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use super::produce::ServeLimits;
+
+                let limits = ServeLimits {
+                    ack_stall: Duration::from_secs(1),
+                    min_bytes_per_second: 1_000_000,
+                    ..ServeLimits::DEFAULT
+                };
+                let server = BlobServer::start_with_limits(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                    limits,
+                )
+                .await
+                .expect("start producer");
+                let bytes: Vec<u8> = (0..4_000_000u32).map(|index| (index % 251) as u8).collect();
+                let src = temp_file(&bytes);
+                let ticket = server
+                    .register(&src, ContentId::new("blob-test-silent-reader"))
+                    .await
+                    .expect("register");
+                let (client, connection, _send, _recv) =
+                    request_without_reading(&server, &ticket, Some(64 * 1024)).await;
+                time::sleep(Duration::from_secs(9)).await;
+                assert_eq!(
+                    server.inflight(),
+                    0,
+                    "a consumer that read nothing for 9 s still holds the serve, past its 5 s budget"
+                );
+                connection.close(0u32.into(), b"done");
+                client.close().await;
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
     /// **A consumer that stops acknowledging does not hold the serve for ever.**
     ///
-    /// The producer waits for the acknowledgement of the tail with no cap on the total time, so a
-    /// silent consumer must be bounded some other way: by a window with no acknowledgement in it.
-    /// Here the link carries 1 MB/s, and the consumer goes deaf 500 ms after its first datagram,
-    /// with most of the file still in flight. With a stall window of 1 s, the serve must end
-    /// within a few seconds. A wait with no stall window holds it until the idle timeout of the
-    /// connection, 30 s.
+    /// The producer waits for the acknowledgement of the tail with no cap on the time that the
+    /// link needs, so a silent consumer must be bounded some other way: by a window with no
+    /// acknowledgement in it. Here the consumer runs on a runtime of its own that blocks its thread
+    /// right after the size header of the answer, so it cannot answer another packet. The file of 1 MB
+    /// fits in the first flow-control window, so the producer reaches the wait for the
+    /// acknowledgement. With a stall window of 1 s, the serve must end within a few seconds. A wait
+    /// with no stall window holds it until the budget of the serve, 1 s plus 1 MB at 64 KiB/s,
+    /// about 16 s.
     #[test]
     fn a_consumer_that_stops_acknowledging_does_not_hold_the_serve() {
         ::habilis_network_test_tracing::run_multi_thread(
@@ -1133,40 +1243,55 @@ mod tests {
                     LookupOpts::loopback(),
                     temp_spool(),
                     None,
-                    PayloadPath::DirectOnly,
+                    PayloadPath::RelayAllowed,
                     limits,
                 )
                 .await
                 .expect("start producer");
-                let bytes: Vec<u8> = (0..4_000_000u32).map(|index| (index % 251) as u8).collect();
+                let bytes: Vec<u8> = (0..1_000_000u32).map(|index| (index % 251) as u8).collect();
                 let src = temp_file(&bytes);
-                let mut ticket = server
-                    .register(&src, ContentId::new("blob-test-deaf-consumer"))
+                let ticket = server
+                    .register(&src, ContentId::new("blob-test-frozen-consumer"))
                     .await
                     .expect("register");
-                let upstream = only_ip_address(&ticket.address);
-                let deaf_after = Some(Duration::from_millis(500));
-                let proxy = slow_link_proxy(upstream, 1_000_000, deaf_after).await;
-                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
-                let consumer = tokio::spawn(async move {
-                    let mut out = Vec::new();
-                    super::consume::fetch_building(
-                        &ticket,
-                        &mut out,
-                        &ticket.secret,
-                        &super::consume::DIAL_CAPS,
-                        None,
-                        fresh_endpoint,
-                    )
-                    .await
+                let address = server.address();
+                let request: Vec<u8> = [
+                    ticket.sha256.as_bytes().as_slice(),
+                    ticket.secret.as_bytes(),
+                ]
+                .concat();
+                let frozen = std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("consumer runtime");
+                    runtime.block_on(async move {
+                        let client = iroh::Endpoint::builder(presets::Minimal)
+                            .relay_mode(iroh::RelayMode::Disabled)
+                            .bind()
+                            .await
+                            .expect("bind client");
+                        let connection = client
+                            .connect(address, super::BLOB_ALPN)
+                            .await
+                            .expect("connect");
+                        let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
+                        send.write_all(&request).await.expect("send request");
+                        // The size header proves that the request arrived and the data flows.
+                        let mut size = [0u8; 8];
+                        recv.read_exact(&mut size).await.expect("read the size");
+                        // No await until the sleep ends: nothing on this thread can answer a packet.
+                        std::thread::sleep(Duration::from_secs(9));
+                        client.close().await;
+                    });
                 });
-                time::sleep(Duration::from_secs(10)).await;
+                time::sleep(Duration::from_secs(6)).await;
                 assert_eq!(
                     server.inflight(),
                     0,
-                    "a consumer that sent no acknowledgement for 9 s still holds the serve"
+                    "a consumer that was silent for 6 s still holds the serve"
                 );
-                consumer.abort();
+                frozen.join().expect("consumer thread");
                 fs::remove_file(&src).ok();
                 server.shutdown().await;
             },
