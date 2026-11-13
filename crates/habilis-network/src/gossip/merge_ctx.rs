@@ -882,10 +882,13 @@ mod tests {
     use super::{farewell_targets, peer_info_json, wire};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::identity::Identity;
+    use crate::protocol::seal_error::SEAL_SYMMETRIC_OVERHEAD;
     use crate::protocol::{
         Channel, MeshId, Message, MessageBody, Nickname, SymmetricKey, seal_to_body,
     };
-    use crate::testing::{endpoint_id, fresh_state, longest_mesh_id, nick, test_key};
+    use crate::testing::{
+        endpoint_id, fresh_state, fresh_state_with_mesh_key, longest_mesh_id, nick, test_key,
+    };
     use crate::transport::SendError;
     use crate::util::consts::MAX_MESSAGE_SIZE;
     use habilis_network_doc::SliceError;
@@ -1850,6 +1853,58 @@ mod tests {
             parsed["value"],
             serde_json::Value::Object(value),
             "the surfaced body of an inline write must carry the value"
+        );
+    }
+    #[tokio::test]
+    async fn a_chunked_own_write_on_a_passworded_mesh_stores_sealed_chunks() {
+        let mut state = fresh_state_with_mesh_key(SymmetricKey::from([5u8; 32]));
+        let channel = Channel::State;
+        let value = big_value('x', 70_000);
+        write_own(&mut state, channel, value.clone())
+            .await
+            .expect("a chunked write");
+        let own = state.identity.author_key();
+        assert_eq!(
+            state.docs.own_value(channel, &own),
+            value,
+            "the held value must stay whole"
+        );
+        let root = state
+            .docs
+            .chunk_roots(&own)
+            .next()
+            .expect("the slice names one root");
+        let stored = state.chunks.stored_bytes(root).await;
+        let plain = serde_json::to_vec(&value).expect("a JSON value");
+        assert_eq!(
+            stored.len(),
+            plain.len() + SEAL_SYMMETRIC_OVERHEAD,
+            "the chunks must hold the sealed value"
+        );
+        let sample = &plain[plain.len() / 2..plain.len() / 2 + 64];
+        assert!(
+            !stored.windows(sample.len()).any(|window| window == sample),
+            "no plaintext of the value may be in the chunks of a passworded mesh"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_at_the_cap_is_taken_on_a_passworded_mesh() {
+        let mut state = fresh_state_with_mesh_key(SymmetricKey::from([5u8; 32]));
+        let cap = 1_048_576;
+        let started = clock::Instant::now();
+        write_own(&mut state, Channel::State, big_value('x', cap - 8))
+            .await
+            .expect("the seal overhead must not count against the cap of the value");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a value of 1 MiB is too large for one frame, so it must not be sealed whole as a body: it took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            17,
+            "a sealed value of the cap plus 28 bytes must take 17 chunks"
         );
     }
 }

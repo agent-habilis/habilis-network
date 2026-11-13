@@ -965,7 +965,7 @@ impl EventLoopState {
         } = init.secrets;
         // Per-channel keys, domain-separated from each other and from every other seed-derived
         // secret. `None` (passwordless): the docs and the broadcast chat stay plaintext.
-        let [state_key, meta_key, broadcast_key] = Self::channel_keys(mesh_key.as_ref());
+        let [state_key, meta_key, broadcast_key, chunk_key] = Self::channel_keys(mesh_key.as_ref());
         Self {
             linked_endpoints: HashSet::new(),
             orphaned_endpoints: BoundedFifoSet::new(ORPHANED_ENDPOINTS_MAX),
@@ -1061,7 +1061,7 @@ impl EventLoopState {
             receive_memory: ReceiveMemory::default(),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
-            chunks: init.chunks,
+            chunks: init.chunks.key(chunk_key),
             docs: ChannelDocs {
                 state: SliceStore::new(
                     protocol::Channel::State,
@@ -1108,10 +1108,15 @@ impl EventLoopState {
         }
     }
 
-    /// The keys of the `state` channel, the `meta` channel and the broadcast chat.
-    fn channel_keys(mesh_key: Option<&SymmetricKey>) -> [Option<SymmetricKey>; 3] {
-        [b"state-doc".as_slice(), b"meta-doc", b"broadcast"]
-            .map(|label| mesh_key.map(|key| key.derive(label)))
+    /// The keys of the `state` channel, the `meta` channel, the broadcast chat and the chunks of a large value.
+    fn channel_keys(mesh_key: Option<&SymmetricKey>) -> [Option<SymmetricKey>; 4] {
+        [
+            b"state-doc".as_slice(),
+            b"meta-doc",
+            b"broadcast",
+            b"chunks",
+        ]
+        .map(|label| mesh_key.map(|key| key.derive(label)))
     }
 
     /// The number of members of the mesh as this node counts them: the peers whose arrival was

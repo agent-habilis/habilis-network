@@ -22,7 +22,7 @@ use crate::daemon::state::{
     EventLoopState, FrameOverheads, MeshChunks, MeshSecrets, RunKeys, StateInit,
 };
 use crate::protocol::identity::Identity;
-use crate::protocol::{AuthorKey, Channel, MeshId, Nickname, peer_addr_error};
+use crate::protocol::{AuthorKey, Channel, MeshId, Nickname, SymmetricKey, peer_addr_error};
 use crate::util::clock::Instant;
 
 use iroh::address_lookup::memory;
@@ -47,16 +47,30 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
 /// [`fresh_state`] for a node with no member key: a client that proves no nickname, which answers
 /// no proof request.
 pub(crate) fn fresh_state_without_member_key() -> EventLoopState {
-    fresh_state_that_waits_with_book_and_member(memory::MemoryLookup::new(), false)
+    fresh_state_that_waits_with_book_and_member(
+        memory::MemoryLookup::new(),
+        false,
+        MeshSecrets::default(),
+    )
+}
+
+/// [`fresh_state`] for a mesh with a password, whose mesh key is `key`.
+pub(crate) fn fresh_state_with_mesh_key(key: SymmetricKey) -> EventLoopState {
+    let secrets = MeshSecrets {
+        password: None,
+        key: Some(key),
+    };
+    fresh_state_that_waits_with_book_and_member(memory::MemoryLookup::new(), true, secrets)
 }
 
 fn fresh_state_that_waits_with_book(address_book: memory::MemoryLookup) -> EventLoopState {
-    fresh_state_that_waits_with_book_and_member(address_book, true)
+    fresh_state_that_waits_with_book_and_member(address_book, true, MeshSecrets::default())
 }
 
 fn fresh_state_that_waits_with_book_and_member(
     address_book: memory::MemoryLookup,
     member_key: bool,
+    secrets: MeshSecrets,
 ) -> EventLoopState {
     EventLoopState::new(
         StateInit {
@@ -90,7 +104,7 @@ fn fresh_state_that_waits_with_book_and_member(
                 key_lock: None,
                 keys_state: None,
             },
-            secrets: MeshSecrets::default(),
+            secrets,
             webrtc_admission: transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS),
             address_book,
             webrtc_ice: transport::IceProfile::default(),

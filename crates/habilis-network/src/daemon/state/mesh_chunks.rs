@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::Path;
@@ -6,6 +7,8 @@ use std::sync::Mutex;
 use std::{fs, io::ErrorKind};
 
 use habilis_network_chunks::{ChunkError, ChunkMap, ChunkStore, InMemoryStore, Root};
+
+use crate::protocol::{SymmetricKey, seal_error};
 
 #[cfg(not(target_arch = "wasm32"))]
 use habilis_network_chunks::DiskStore;
@@ -19,6 +22,9 @@ pub(crate) struct MeshChunks {
     /// The roots whose map this run put and has not dropped. A run starts with an empty store, so no
     /// other map can be there.
     mapped: Mutex<HashSet<Root>>,
+    /// The key that seals a value before it is cut into chunks, on a passworded mesh. Without it the chunks are
+    /// the bytes of the value, and the chunk store is as open as the `state` channel of a mesh with no password.
+    key: Option<SymmetricKey>,
 }
 
 #[derive(Debug)]
@@ -57,6 +63,7 @@ impl MeshChunks {
             return Ok(Self {
                 store: Store::Disk(DiskStore::open(folder)?),
                 mapped: Mutex::default(),
+                key: None,
             });
         }
         #[cfg(target_arch = "wasm32")]
@@ -64,7 +71,14 @@ impl MeshChunks {
         Ok(Self {
             store: Store::Memory(InMemoryStore::new()),
             mapped: Mutex::default(),
+            key: None,
         })
+    }
+
+    /// Seals each value under `key` from now on. `None` keeps the chunks as the bytes of the value.
+    pub(crate) fn key(mut self, key: Option<SymmetricKey>) -> Self {
+        self.key = key;
+        self
     }
 
     /// Cuts `bytes` into chunks, keeps them with their chunk map, and returns the root.
@@ -73,9 +87,12 @@ impl MeshChunks {
     ///
     /// The store cannot keep a chunk or the map.
     pub(crate) async fn put_value(&self, bytes: &[u8]) -> Result<Root, ChunkError> {
-        let map = ChunkMap::build(bytes);
+        let stored: Cow<'_, [u8]> = self.key.as_ref().map_or(Cow::Borrowed(bytes), |key| {
+            Cow::Owned(seal_error::seal_symmetric(key, bytes))
+        });
+        let map = ChunkMap::build(&stored);
         for index in 0..map.len() {
-            let chunk = chunk_at(bytes, map.range_of(index)).ok_or_else(|| {
+            let chunk = chunk_at(&stored, map.range_of(index)).ok_or_else(|| {
                 ChunkError::Malformed("a chunk range is past the value".to_owned())
             })?;
             let hash = map.leaf(index).ok_or_else(|| {
@@ -145,6 +162,33 @@ impl MeshChunks {
         map.expect("a map lookup").is_some()
     }
 
+    /// The bytes that the chunks of `root` hold, in order, when the store is in memory.
+    #[cfg(test)]
+    pub(crate) async fn stored_bytes(&self, root: Root) -> Vec<u8> {
+        use habilis_network_chunks::ChunkSource as _;
+
+        let Store::Memory(store) = &self.store else {
+            panic!("the bytes can be read from a store in memory only");
+        };
+        let map = store
+            .map(root)
+            .await
+            .expect("a map lookup")
+            .expect("a stored map");
+        let mut bytes = Vec::new();
+        for index in 0..map.len() {
+            let hash = map.leaf(index).expect("a leaf of the map");
+            bytes.extend(
+                store
+                    .get(hash)
+                    .await
+                    .expect("a chunk lookup")
+                    .expect("a stored chunk"),
+            );
+        }
+        bytes
+    }
+
     /// How many chunks the store holds, when it is in memory.
     #[cfg(test)]
     pub(crate) fn stored_chunks(&self) -> usize {
@@ -186,6 +230,9 @@ mod tests {
     use std::{env, fs, process};
 
     use habilis_network_chunks::{ChunkSource as _, ChunkStore as _, DiskStore, chunk_hash};
+
+    use crate::protocol::SymmetricKey;
+    use crate::protocol::seal_error::{SEAL_SYMMETRIC_OVERHEAD, open_symmetric};
 
     use super::{MeshChunks, Store};
 
@@ -234,6 +281,49 @@ mod tests {
             chunks.stored_chunks(),
             1,
             "the chunk of the old value must be swept"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_key_the_chunks_are_the_bytes_of_the_value() {
+        let chunks = MeshChunks::open(None).expect("an in-memory store");
+        let root = chunks
+            .put_value(b"the value of a mesh with no password")
+            .await
+            .expect("a value");
+        assert_eq!(
+            chunks.stored_bytes(root).await,
+            b"the value of a mesh with no password",
+            "a mesh with no password must keep the value as it is"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_a_key_the_chunks_are_sealed_and_open_to_the_value() {
+        let key = SymmetricKey::from([5u8; 32]);
+        let chunks = MeshChunks::open(None)
+            .expect("an in-memory store")
+            .key(Some(key.clone()));
+        let value = b"the value of a passworded mesh".as_slice();
+        let root = chunks.put_value(value).await.expect("a value");
+        let stored = chunks.stored_bytes(root).await;
+        assert_eq!(
+            stored.len(),
+            value.len() + SEAL_SYMMETRIC_OVERHEAD,
+            "the chunks must hold the sealed value, which is the overhead longer"
+        );
+        assert!(
+            !stored.windows(value.len()).any(|window| window == value),
+            "the chunks of a passworded mesh must not hold the plaintext"
+        );
+        assert_eq!(
+            open_symmetric(&key, &stored).expect("the key opens the chunks"),
+            value,
+            "the key of the mesh must open the stored bytes to the value"
+        );
+        assert!(
+            open_symmetric(&SymmetricKey::from([6u8; 32]), &stored).is_err(),
+            "another key must not open the stored bytes"
         );
     }
 
