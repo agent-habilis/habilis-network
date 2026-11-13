@@ -26,8 +26,10 @@ use super::{RendezvousParams, RungRead, RungWatch, rung_is_busy};
 ///   dial a rung where the other is not. An address with every rung reaches the beacon on
 ///   whichever rung it homes. A dial opens at most one relay connection per rung, and does not wait
 ///   for the slowest rung.
-/// - `None`: relay disabled and no ladder, so there is nothing to name and
-///   only mDNS/DHT can resolve the id.
+/// - `None`: relay disabled, no ladder, or a walk that found no reachable rung
+///   (`bootstrap_relay` is `None`), so there is nothing to name and only mDNS/DHT can resolve the
+///   id. The probe then reads the rendezvous as held when no lookup can resolve it, and never
+///   as free blind.
 ///
 /// Two causes of the split are open: the probe of 10 s per rung (a retry of rung 0 before the walk
 /// skips it would keep a loaded host on rung 0), and the move of a peer endpoint back and forth
@@ -41,11 +43,11 @@ pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr>
         }
         return Some(address);
     }
+    // No rung from the walk: the beacon and the prober of this member have no relay
+    // (`beacon_lookups`), so an address of relays is one that they cannot dial.
+    let bootstrap = params.bootstrap_relay.clone()?;
     let mut rungs: Vec<RelayUrl> = relay_ladder(&params.lookups.relay_lookup).collect();
-    rungs.extend(params.bootstrap_relay.clone());
-    if rungs.is_empty() {
-        return None;
-    }
+    rungs.push(bootstrap);
     for rung in rungs {
         address = address.with_relay_url(rung);
     }

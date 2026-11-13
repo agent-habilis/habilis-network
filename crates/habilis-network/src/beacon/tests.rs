@@ -1540,6 +1540,36 @@ fn a_rival_probe_from_another_rung_finds_the_beacon() {
     });
 }
 
+/// **A member with no reachable rung reads the rendezvous as held, not as free.**
+///
+/// The walk found no rung, so `bootstrap_relay` is `None` while the ladder is not empty. The beacon
+/// and the prober of such a member have no relay (`beacon_lookups` maps no rung to no relay). An
+/// address that named the ladder would send a prober with no relay to dial relays, and the dial
+/// would run out and read "free". The member would claim a beacon with no relay. With mDNS and DHT
+/// off nothing can resolve the id, so the probe must not dial, and reads "held".
+#[test]
+fn a_member_with_no_reachable_rung_reads_the_rendezvous_as_held() {
+    use crate::protocol::meshes::RelayChoice;
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let mut params = public_params();
+        params.lookups = LookupOpts::new(RelayChoice::Custom(unserved_rungs(&["a", "b"])))
+            .mdns(false)
+            .dht(false);
+        params.bootstrap_relay = None;
+        let node = SecretKey::generate().public();
+
+        let mut probe = spawn_rival_probe(&params, node).await;
+        let verdict =
+            n0future_time::timeout(std_Duration::from_secs(20), probe_verdict(&mut probe)).await;
+
+        assert!(
+            matches!(verdict, Ok(true)),
+            "a member with no reachable rung and no lookup read the rendezvous as free: {verdict:?}"
+        );
+    });
+}
+
 #[test]
 fn a_private_rendezvous_is_named_at_every_ladder_rung() {
     let _guard = ::habilis_network_test_tracing::init();
