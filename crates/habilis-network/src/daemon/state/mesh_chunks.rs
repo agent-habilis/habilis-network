@@ -7,6 +7,8 @@ use std::sync::Mutex;
 use std::{fs, io::ErrorKind};
 
 use habilis_network_chunks::{ChunkError, ChunkHash, ChunkMap, ChunkStore, InMemoryStore, Root};
+#[cfg(test)]
+use habilis_network_doc::ChunkPointer;
 
 use crate::protocol::{SymmetricKey, seal_error};
 
@@ -90,9 +92,20 @@ impl MeshChunks {
         let stored: Cow<'_, [u8]> = self.key.as_ref().map_or(Cow::Borrowed(bytes), |key| {
             Cow::Owned(seal_error::seal_symmetric(key, bytes))
         });
-        let map = ChunkMap::build(&stored);
+        self.put_stored(&stored).await
+    }
+
+    /// Cuts `stored`, the bytes as they are kept, into chunks, keeps them with their chunk map, and returns the
+    /// root. A value that was fetched from a peer is already sealed, so it comes here and not through
+    /// [`put_value`](Self::put_value).
+    ///
+    /// # Errors
+    ///
+    /// The store cannot keep a chunk or the map.
+    pub(crate) async fn put_stored(&self, stored: &[u8]) -> Result<Root, ChunkError> {
+        let map = ChunkMap::build(stored);
         for index in 0..map.len() {
-            let chunk = chunk_at(&stored, map.range_of(index)).ok_or_else(|| {
+            let chunk = chunk_at(stored, map.range_of(index)).ok_or_else(|| {
                 ChunkError::Malformed("a chunk range is past the value".to_owned())
             })?;
             let hash = map.leaf(index).ok_or_else(|| {
@@ -147,6 +160,30 @@ impl MeshChunks {
             mapped.remove(root);
         }
         Ok(())
+    }
+
+    /// The bytes that the chunks of a value of `pointer` hold: the size of the value, and the seal of a passworded
+    /// mesh. An asker expects this size from the map of a root, and reads no more bytes than it.
+    #[cfg(test)]
+    pub(crate) fn stored_size(&self, pointer: ChunkPointer) -> u64 {
+        let seal = self.key.as_ref().map_or(0, |_| {
+            u64::try_from(seal_error::SEAL_SYMMETRIC_OVERHEAD).unwrap_or(u64::MAX)
+        });
+        pointer.size().saturating_add(seal)
+    }
+
+    /// The value that the stored bytes of a root hold: the bytes as they are, or opened with the key of the mesh.
+    ///
+    /// # Errors
+    ///
+    /// The seal does not open: the bytes are not a value of this mesh.
+    #[cfg(test)]
+    pub(crate) fn open_value(&self, stored: &[u8]) -> Result<Vec<u8>, ChunkError> {
+        match &self.key {
+            Some(key) => seal_error::open_symmetric(key, stored)
+                .map_err(|error| ChunkError::Malformed(error.to_string())),
+            None => Ok(stored.to_vec()),
+        }
     }
 
     /// The chunk map of `root`, when the store holds it.
@@ -261,6 +298,8 @@ mod tests {
 
     use habilis_network_chunks::{ChunkSource as _, ChunkStore as _, DiskStore, chunk_hash};
 
+    use habilis_network_doc::ChunkPointer;
+
     use crate::protocol::SymmetricKey;
     use crate::protocol::seal_error::{SEAL_SYMMETRIC_OVERHEAD, open_symmetric};
 
@@ -354,6 +393,100 @@ mod tests {
         assert!(
             open_symmetric(&SymmetricKey::from([6u8; 32]), &stored).is_err(),
             "another key must not open the stored bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_that_was_fetched_is_kept_as_it_came_and_names_the_same_root() {
+        let key = SymmetricKey::from([5u8; 32]);
+        let author = MeshChunks::open(None)
+            .expect("an in-memory store")
+            .key(Some(key.clone()));
+        let fetcher = MeshChunks::open(None)
+            .expect("an in-memory store")
+            .key(Some(key));
+        let root = author
+            .put_value(b"a value to fetch")
+            .await
+            .expect("a value");
+        let stored = author.stored_bytes(root).await;
+        assert_eq!(
+            fetcher.put_stored(&stored).await.expect("stored bytes"),
+            root,
+            "stored bytes must name the root that the author named"
+        );
+        assert_eq!(
+            fetcher.stored_bytes(root).await,
+            stored,
+            "the fetcher must keep the bytes as they came, and not seal them again"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_stored_size_of_a_pointer_counts_the_seal_of_a_passworded_mesh_only() {
+        let value = b"the value of a mesh".as_slice();
+        let size = u64::try_from(value.len()).expect("a size");
+        let plain = MeshChunks::open(None).expect("an in-memory store");
+        let sealed = MeshChunks::open(None)
+            .expect("an in-memory store")
+            .key(Some(SymmetricKey::from([5u8; 32])));
+        let plain_root = plain.put_value(value).await.expect("a value");
+        assert_eq!(
+            plain.stored_size(ChunkPointer::new(plain_root, size)),
+            size,
+            "a mesh with no password stores the bytes of the value"
+        );
+        let sealed_root = sealed.put_value(value).await.expect("a value");
+        let expected = size + u64::try_from(SEAL_SYMMETRIC_OVERHEAD).expect("a size");
+        assert_eq!(
+            sealed.stored_size(ChunkPointer::new(sealed_root, size)),
+            expected,
+            "a passworded mesh stores the seal too"
+        );
+        assert_eq!(
+            u64::try_from(sealed.stored_bytes(sealed_root).await.len()).expect("a size"),
+            expected,
+            "the stored size must be the size of the stored bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_stored_bytes_of_a_value_open_to_the_value_with_the_key_of_the_mesh_only() {
+        let key = SymmetricKey::from([5u8; 32]);
+        let sealed = MeshChunks::open(None)
+            .expect("an in-memory store")
+            .key(Some(key));
+        let other = MeshChunks::open(None)
+            .expect("an in-memory store")
+            .key(Some(SymmetricKey::from([6u8; 32])));
+        let plain = MeshChunks::open(None).expect("an in-memory store");
+        let root = sealed.put_value(b"the value").await.expect("a value");
+        let stored = sealed.stored_bytes(root).await;
+        assert_eq!(
+            sealed.open_value(&stored).expect("the key opens it"),
+            b"the value",
+            "the key of the mesh must open the stored bytes"
+        );
+        assert!(
+            other.open_value(&stored).is_err(),
+            "another key must not open the stored bytes"
+        );
+        assert!(
+            plain
+                .open_value(&stored)
+                .is_ok_and(|opened| opened != b"the value"),
+            "a mesh with no password has no key to open them"
+        );
+        let mut tampered = stored;
+        tampered[20] ^= 1;
+        assert!(
+            sealed.open_value(&tampered).is_err(),
+            "a stored value that was changed must not open"
+        );
+        assert_eq!(
+            plain.open_value(b"as it is").expect("no key, no seal"),
+            b"as it is",
+            "a mesh with no password keeps the bytes of the value as they are"
         );
     }
 
