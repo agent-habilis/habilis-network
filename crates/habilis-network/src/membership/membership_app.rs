@@ -484,8 +484,9 @@ pub enum Linking {
         reply: oneshot::Sender<Result<bool, UnknownPeer>>,
     },
     /// Tests only: forget the pooled unicast connection of the member `peer`, then put it on the
-    /// dial-failure cooldown, as a failed dial does. The next directed send to it is cold and
-    /// the cooldown refuses it at once, so a test reads the text of that refusal in the reply.
+    /// dial-failure cooldown, as a failed dial does. It waits for the dial that runs for the peer,
+    /// so that dial cannot clear the cooldown after the reply. The next directed send to it is cold
+    /// and the cooldown refuses it at once, so a test reads the text of that refusal in the reply.
     NoteDialFailure {
         /// The peer, by nickname.
         peer: String,
@@ -1166,16 +1167,20 @@ impl MembershipApp {
             }
             Linking::NoteDialFailure { peer, reply } => {
                 let id = known_peer(state, &peer).map(|address| address.id);
-                let pool = &state.unicast_pool;
-                let outcome = match id {
+                match id {
                     Ok(id) => {
-                        pool.drop_connection(id).await;
-                        pool.note_dial_failure(id).await;
-                        Ok(())
+                        // The failure waits for the dial that runs for the peer, so a task of its own
+                        // waits for it: the loop serves the next request meanwhile.
+                        let pool = state.unicast_pool.clone();
+                        task::spawn(async move {
+                            pool.fail_dial_for_test(id).await;
+                            let _ = reply.send(Ok(()));
+                        });
                     }
-                    Err(unknown) => Err(unknown),
-                };
-                let _ = reply.send(outcome);
+                    Err(unknown) => {
+                        let _ = reply.send(Err(unknown));
+                    }
+                }
                 false
             }
             Linking::SeverGossip { reply } => {

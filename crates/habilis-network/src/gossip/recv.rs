@@ -6,7 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use crate::daemon::state::{FrameShape, RendezvousFlag, Standing};
+use crate::daemon::state::{Arrival, FrameShape, RendezvousFlag, Standing};
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
@@ -561,6 +561,18 @@ fn test_hook_drops(state: &EventLoopState, verified: &Verified) -> bool {
     slice || left
 }
 
+/// Counts a frame that the dedup dropped as a repeat, on the plane that it arrived on: the unicast
+/// plane while a unicast frame is handled, else the gossip plane.
+fn note_repeat(state: &mut EventLoopState, shape: &FrameShape<'_>) {
+    state.idle.duplicates += 1;
+    let arrival = if state.unicast_arrival.is_some() {
+        Arrival::Unicast
+    } else {
+        Arrival::Gossip
+    };
+    state.idle.wire_in.note_dup(shape, arrival);
+}
+
 pub(crate) async fn ingest_from(
     frame: Bytes,
     state: &mut EventLoopState,
@@ -626,7 +638,7 @@ pub(crate) async fn ingest_from(
     // A slice that answers a pull skips this gate, because the store is idempotent and takes it once.
     let pulled = take_pulled_answer(&verified, state, Instant::now());
     if verified.shard.is_none() && !pulled && state.mark_seen(&verified) {
-        state.idle.duplicates += 1;
+        note_repeat(state, &shape);
         restore_lost_proof(&verified, state, app, context).await;
         return;
     }
@@ -1462,7 +1474,14 @@ fn dispatch_channel(
         }
         return;
     }
-    let applied = ingest_channel_event(event, &mut state.docs, Instant::now(), context);
+    let outcome = ingest_channel_event(event, &mut state.docs, Instant::now(), context);
+    if matches!(
+        outcome,
+        SliceIngest::Duplicate | SliceIngest::Stale | SliceIngest::Conflict
+    ) {
+        state.idle.wire_in.note_content_again();
+    }
+    let applied = matches!(outcome, SliceIngest::Applied);
     if applied && channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
@@ -1505,7 +1524,7 @@ fn surface_view(frame: &Verified, plain: Option<MessageBody>) -> Authored {
     }
 }
 
-/// Ingest a durable channel event (`State`/`Meta`) into its slice store, and say whether the store took
+/// Ingest a durable channel event (`State`/`Meta`) into its slice store, and say what the store did with
 /// it. A `StateChanged` is surfaced for `channel` only when the store took the frame and we're past the
 /// join horizon (a backfilling joiner updates its slice silently). A received event is never our own
 /// (`is_self = false`). Both channels share this path verbatim.
@@ -1514,17 +1533,15 @@ fn ingest_channel_event(
     docs: &mut ChannelDocs,
     now: Instant,
     context: &HandlerCtx<'_>,
-) -> bool {
+) -> SliceIngest {
     let ChannelEvent {
         channel,
         message,
         surfaceable,
         live,
     } = event;
-    let applied = matches!(
-        docs.ingest(channel, message, live, now),
-        SliceIngest::Applied
-    );
+    let outcome = docs.ingest(channel, message, live, now);
+    let applied = matches!(outcome, SliceIngest::Applied);
     if applied && surfaceable {
         let surfaced = surface_view(message, docs.plain_body(channel, &message.key()));
         context.sink.emit(NodeEvent::StateChanged {
@@ -1534,7 +1551,7 @@ fn ingest_channel_event(
             is_self: false,
         });
     }
-    applied
+    outcome
 }
 
 /// A directed leg (a directed `app_msg` or a `Task`) is surfaced **only by
@@ -8683,6 +8700,85 @@ mod dedup_counter_tests {
                 *self.0.lock().expect("the count lock is not poisoned") += 1;
             }
         }
+    }
+
+    /// **The census counts the repeats that the dedup drops, by plane.** The columns `dup` and
+    /// `dup_by_arrival` had no writer, so every census line said that no frame came twice, and a
+    /// reader could not tell "no repeat" from "not measured". A repeat of a frame counts its bytes in
+    /// its class, on the plane that it arrived on: the gossip plane, or the unicast plane while a
+    /// unicast frame is handled.
+    #[test]
+    fn a_repeated_frame_counts_its_bytes_as_a_dup_on_its_plane() {
+        use crate::daemon::state::{Arrival, FrameClass};
+
+        let session = Identity::generate();
+        let frame = alive_of(&session, "twin");
+        let bytes = u64::try_from(frame.len()).expect("a frame length fits");
+        let class = FrameClass::Presence.index();
+
+        let by_gossip = reader_with(fresh_state(), vec![frame.clone(), frame.clone()]);
+        let mut on_unicast = fresh_state();
+        on_unicast.unicast_arrival = Some(endpoint_id(3));
+        let by_unicast = reader_with(on_unicast, vec![frame.clone(), frame]);
+
+        let gossip = &by_gossip.idle.wire_in;
+        assert_eq!(
+            gossip.dup[class], bytes,
+            "the repeat is not counted as a dup"
+        );
+        assert_eq!(
+            gossip.dup_by_arrival[Arrival::Gossip.index()][class],
+            bytes,
+            "the repeat is not counted on the gossip plane"
+        );
+        let unicast = &by_unicast.idle.wire_in;
+        assert_eq!(
+            unicast.dup_by_arrival[Arrival::Unicast.index()][class],
+            bytes,
+            "the repeat is not counted on the unicast plane"
+        );
+        assert_eq!(
+            unicast.dup_by_arrival[Arrival::Gossip.index()][class],
+            0,
+            "a unicast repeat is counted on the gossip plane too"
+        );
+    }
+
+    /// A frame that is new by id but whose content the store holds counts in `cdup`, and it stays
+    /// part of `fresh`: a slice of a lower version than the held one. The frame of the higher
+    /// version that the store applies is not content that came again.
+    #[test]
+    fn a_slice_that_the_store_already_outdates_counts_as_content_that_came_again() {
+        use crate::daemon::state::FrameClass;
+        use crate::protocol::{Channel, MessageBody};
+
+        let session = Identity::generate();
+        let key = session.author_key();
+        let slice = |version: u64| {
+            let body = format!(r#"{{"version":{version},"value":{{"turn":"{version}"}}}}"#);
+            let frame = Message::new_channel_event(
+                &MeshId::from("test"),
+                &nick("writer"),
+                MessageBody::from(body.as_str()),
+                Channel::Meta,
+            )
+            .sign(&session);
+            frame.serialize().expect("serialize").into_bytes()
+        };
+        let (newer, older) = (slice(2), slice(1));
+        let older_len = u64::try_from(older.len()).expect("a frame length fits");
+        let mut initial = fresh_state();
+        initial.peers.insert(key);
+        initial.names.insert(key, nick("writer"));
+
+        let reader = reader_with(initial, vec![newer, older]);
+
+        let wire = &reader.idle.wire_in;
+        assert_eq!(
+            wire.cdup[FrameClass::Meta.index()],
+            older_len,
+            "the stale slice is not counted as content that came again"
+        );
     }
 
     /// An alive frame of a session, as the bytes that arrive.

@@ -987,6 +987,73 @@ mod tests {
         );
     }
 
+    /// **A forced dial failure waits for the dial that runs.** A dial that passed the cooldown check
+    /// before the failure was forced ends with a success, clears the cooldown and pools a connection.
+    /// The next send then succeeds instead of meeting the cooldown that the test forced, and the test
+    /// is a race. The forced failure takes the dial lock of the peer, so it comes after that dial.
+    #[test]
+    fn a_forced_dial_failure_waits_for_the_dial_in_flight_and_so_it_stays() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::Router;
+
+                use super::super::unicast_acceptor::UnicastAcceptor;
+
+                let (tx, _frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        super::super::UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+                let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                let pool = super::UnicastPool::new(node.clone(), true);
+                let peer = server.id();
+
+                let gate = pool.hold_next_dial();
+                let dial = pool.probe_connection(peer);
+                let force = async {
+                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    let forcing = pool.fail_dial_for_test(peer);
+                    tokio::pin!(forcing);
+                    let early = time::timeout(Duration::from_millis(300), &mut forcing).await;
+                    assert!(
+                        early.is_err(),
+                        "the forced failure did not wait for the dial that was in flight"
+                    );
+                    gate.notify_one();
+                    forcing.await;
+                };
+                let (connected, ()) = tokio::join!(dial, force);
+                connected.expect("the dial in flight ends with a connection");
+
+                assert!(
+                    pool.is_cooling(peer).await,
+                    "the dial in flight cleared the cooldown that the test forced"
+                );
+                assert!(
+                    !pool.has_warm(peer).await,
+                    "the dial in flight left a pooled connection after the forced failure"
+                );
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+                server.close().await;
+            },
+        );
+    }
+
     /// A dial that is cancelled leaves no lock behind: the lock of the peer goes when the dial future is dropped, not
     /// only when the dial ends.
     #[test]

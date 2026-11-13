@@ -77,7 +77,7 @@ impl FrameClass {
         }
     }
 
-    const fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self as usize
     }
 
@@ -258,7 +258,7 @@ impl Arrival {
         }
     }
 
-    const fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self as usize
     }
 }
@@ -320,6 +320,26 @@ impl WireIn {
         self.last_fresh = Some((shape.class, shape.wire));
         add_bytes(&mut self.fresh[shape.class.index()], shape.wire);
         self.note_tag(shape);
+    }
+
+    /// The frame is a repeat that the dedup dropped. Its bytes count in its class, on the plane that
+    /// it arrived on.
+    pub(crate) fn note_dup(&mut self, shape: &FrameShape<'_>, arrival: Arrival) {
+        add_bytes(&mut self.dup[shape.class.index()], shape.wire);
+        add_bytes(
+            &mut self.dup_by_arrival[arrival.index()][shape.class.index()],
+            shape.wire,
+        );
+        self.note_tag(shape);
+    }
+
+    /// The last frame that was new by id carried content that the store already held. Its bytes
+    /// count in `cdup`, and they stay in `fresh`. A frame that is not fresh, or whose content was
+    /// counted already, changes nothing.
+    pub(crate) fn note_content_again(&mut self) {
+        if let Some((class, wire)) = self.last_fresh.take() {
+            add_bytes(&mut self.cdup[class.index()], wire);
+        }
     }
 
     fn note_tag(&mut self, shape: &FrameShape<'_>) {

@@ -524,6 +524,18 @@ impl UnicastPool {
             .on_cooldown(&eid, Instant::now())
     }
 
+    /// Tests only: forget the pooled connection of `eid` and put it on the dial-failure cooldown, as
+    /// a failed dial does. It waits for the dial that runs for the peer, because a dial that ends
+    /// after it would clear the cooldown and pool a connection, and the next send would not meet
+    /// the cooldown that the test asked for.
+    #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+    pub(crate) async fn fail_dial_for_test(&self, eid: EndpointId) {
+        let turn = DialTurn::new(self, eid);
+        let _held = turn.mutex().lock().await;
+        self.drop_connection(eid).await;
+        self.note_dial_failure(eid).await;
+    }
+
     /// Put `eid` on the dial-failure cooldown, as a failed dial does.
     #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
     pub(crate) async fn note_dial_failure(&self, eid: EndpointId) {
@@ -697,7 +709,7 @@ impl UnicastPool {
     /// must be closed with `close()`, not dropped: an unacknowledged frame on a dropped connection is lost.
     async fn dial_pooled(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
         let turn = DialTurn::new(self, eid);
-        let permit = turn.lock.lock().await;
+        let permit = turn.mutex().lock().await;
         let result = self.dial_pooled_turn(eid, hold).await;
         drop(permit);
         result
@@ -822,24 +834,41 @@ impl UnicastPool {
 struct DialTurn<'pool> {
     pool: &'pool UnicastPool,
     eid: EndpointId,
-    // shared: the dialer and every waiter for the peer hold the same lock
-    lock: Arc<Mutex<()>>,
+    // shared: the dialer and every waiter for the peer hold the same lock. It is `None` only inside
+    // the drop, which gives it back while the map is locked.
+    lock: Option<Arc<Mutex<()>>>,
 }
 
 impl<'pool> DialTurn<'pool> {
     fn new(pool: &'pool UnicastPool, eid: EndpointId) -> Self {
         let lock = pool.dial_lock(eid);
-        Self { pool, eid, lock }
+        Self {
+            pool,
+            eid,
+            lock: Some(lock),
+        }
+    }
+
+    /// The lock of the peer, to wait on and to hold for the dial. A borrow, so that it adds no
+    /// handle to the count of the map.
+    fn mutex(&self) -> &Mutex<()> {
+        self.lock
+            .as_deref()
+            .expect("a turn holds its lock until it is dropped")
     }
 }
 
 impl Drop for DialTurn<'_> {
     fn drop(&mut self) {
         let mut locks = self.pool.inner.dial_locks.lock();
-        // two handles: the map and this turn
+        // The turn gives its handle back while it holds the map. A turn that counted its own handle
+        // after the map was released could see the handle of another turn that was ending at the same
+        // time, and both would leave the entry in the map.
+        drop(self.lock.take());
+        // one handle: the map
         if locks
             .get(&self.eid)
-            .is_some_and(|lock| Arc::strong_count(lock) == 2)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
         {
             locks.remove(&self.eid);
         }
@@ -920,7 +949,8 @@ pub(super) async fn send_one(
 mod tests {
     use super::{DialTurn, UnicastPool};
     use crate::testing;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     /// Two dial turns of one peer share one lock. When the first turn ends, the map still holds the lock for the
     /// second one; when the last turn ends, the map is empty.
@@ -932,12 +962,13 @@ mod tests {
         let first = DialTurn::new(&pool, peer);
         let second = DialTurn::new(&pool, peer);
         drop(first);
-        let second_keeps_it = pool
-            .inner
-            .dial_locks
-            .lock()
+        let held = pool.inner.dial_locks.lock();
+        let own = second.lock.as_ref();
+        let second_keeps_it = held
             .get(&peer)
-            .is_some_and(|lock| Arc::ptr_eq(lock, &second.lock));
+            .zip(own)
+            .is_some_and(|(mapped, turn)| Arc::ptr_eq(mapped, turn));
+        drop(held);
         assert!(
             second_keeps_it,
             "the map still holds the lock that the second turn waits on"
@@ -947,5 +978,35 @@ mod tests {
             pool.inner.dial_locks.lock().is_empty(),
             "the last turn of the peer removes its lock"
         );
+    }
+
+    /// The last two turns of a peer end on two threads at once. Each turn must give its handle back
+    /// while it holds the map lock, or both can count the handle of the other, leave the entry in the
+    /// map, and keep a lock that nobody waits on until the peer is dialed again. A run of many pairs
+    /// finds such a pair, so the map must be empty after every pair.
+    #[test]
+    fn two_turns_that_end_at_once_leave_no_lock_in_the_map() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let pool = UnicastPool::disconnected();
+        let peer = testing::endpoint_id(8);
+        for round in 0..100_000 {
+            let first = DialTurn::new(&pool, peer);
+            let second = DialTurn::new(&pool, peer);
+            let start = Barrier::new(2);
+            thread::scope(|scope| {
+                scope.spawn(|| {
+                    start.wait();
+                    drop(first);
+                });
+                scope.spawn(|| {
+                    start.wait();
+                    drop(second);
+                });
+            });
+            assert!(
+                pool.inner.dial_locks.lock().is_empty(),
+                "round {round}: a lock stayed in the map after the last two turns ended"
+            );
+        }
     }
 }
