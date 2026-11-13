@@ -983,7 +983,10 @@ mod tests {
     /// The last two turns of a peer end on two threads at once. Each turn must give its handle back
     /// while it holds the map lock, or both can count the handle of the other, leave the entry in the
     /// map, and keep a lock that nobody waits on until the peer is dialed again. A run of many pairs
-    /// finds such a pair, so the map must be empty after every pair.
+    /// finds such a pair, so the map must be empty after every pair. The window is a few
+    /// nanoseconds, so the red is not certain: on the old code a run of 2,000,000 pairs failed at pair
+    /// 71,213 and a run of 20,000 pairs did not fail. A run of 100,000 pairs fails on the old code in
+    /// about 3 runs of 4, and it passes on the code with the fix. It is a guard, not a proof.
     #[test]
     fn two_turns_that_end_at_once_leave_no_lock_in_the_map() {
         let _guard = ::habilis_network_test_tracing::init();

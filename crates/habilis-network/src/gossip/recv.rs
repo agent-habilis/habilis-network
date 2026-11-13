@@ -967,7 +967,7 @@ async fn dispatch_infra(
             return ControlFlow::Break(());
         }
         MessageKind::State => {
-            dispatch_channel(
+            let outcome = dispatch_channel(
                 ChannelEvent {
                     channel: Channel::State,
                     message,
@@ -978,10 +978,11 @@ async fn dispatch_infra(
                 app,
                 context,
             );
+            note_content_again(state, outcome.as_ref());
             return ControlFlow::Break(());
         }
         MessageKind::Meta => {
-            dispatch_channel(
+            let outcome = dispatch_channel(
                 ChannelEvent {
                     channel: Channel::Meta,
                     message,
@@ -992,6 +993,7 @@ async fn dispatch_infra(
                 app,
                 context,
             );
+            note_content_again(state, outcome.as_ref());
             return ControlFlow::Break(());
         }
         MessageKind::LinkState => {
@@ -1453,39 +1455,48 @@ struct ChannelEvent<'message> {
     live: bool,
 }
 
+/// Takes a slice frame into the store, or holds it for its author. Returns what the store did with
+/// it, or `None` when the store was not asked: the author said goodbye, or is not in the roster yet.
 fn dispatch_channel(
     event: ChannelEvent<'_>,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
-) {
+) -> Option<SliceIngest> {
     let ChannelEvent {
         channel, message, ..
     } = event;
     if state.key_said_goodbye(message.key()) {
         // A key that said goodbye does not rejoin, so its frame would wait in the pending set for nothing.
         tracing::debug!(target: "habilis_network::gossip", "a slice of a key that said goodbye is dropped");
-        return;
+        return None;
     }
     if !state.keeps_slice(&message.key()) {
         // The slice waits until its author joins or returns, so a stranger cannot fill the store.
         if let Err(error) = state.docs.hold(channel, message, Instant::now()) {
             tracing::debug!(target: "habilis_network::gossip", %error, "a slice of an author outside the roster is refused");
         }
-        return;
+        return None;
     }
     let outcome = ingest_channel_event(event, &mut state.docs, Instant::now(), context);
-    if matches!(
-        outcome,
-        SliceIngest::Duplicate | SliceIngest::Stale | SliceIngest::Conflict
-    ) {
-        state.idle.wire_in.note_content_again();
-    }
-    let applied = matches!(outcome, SliceIngest::Applied);
-    if applied && channel == Channel::Meta {
+    if matches!(outcome, SliceIngest::Applied) && channel == Channel::Meta {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
         // freshly-synced meta doc (the borrow above released `state`).
         app.on_meta_applied(&message.key(), state, context);
+    }
+    Some(outcome)
+}
+
+/// A slice that the store already outdates is content that came again: the last frame that was new by
+/// id moves to `cdup`. Only the caller that handles that frame says so. A slice that leaves the pending
+/// set is applied inside the handling of another frame, and the bytes of that frame are not content
+/// that came again, so [`promote_pending`] does not call this.
+fn note_content_again(state: &mut EventLoopState, outcome: Option<&SliceIngest>) {
+    if matches!(
+        outcome,
+        Some(SliceIngest::Duplicate | SliceIngest::Stale | SliceIngest::Conflict)
+    ) {
+        state.idle.wire_in.note_content_again();
     }
 }
 
@@ -2181,7 +2192,7 @@ mod first_contact_tests {
     use iroh_gossip::net::Gossip;
 
     use super::{
-        ChannelEvent, Gated, dispatch_channel, dispatch_infra, gate_and_decrypt,
+        ChannelEvent, Gated, SliceIngest, dispatch_channel, dispatch_infra, gate_and_decrypt,
         handle_gossip_event, ingest, maybe_push_inbound, pong_for, promote_pending,
     };
     use crate::daemon::handler_ctx::HandlerCtx;
@@ -2398,6 +2409,62 @@ mod first_contact_tests {
                 unchanged.body.as_str(),
                 "the open text",
                 "a plain body changed on its way through the gate"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// **A slice that leaves the pending set does not take the bytes of the frame that let it out.**
+    /// The census moves the last fresh frame to `cdup` when the store already outdates a slice. A held
+    /// slice is applied when its author joins, inside the handling of another frame, a presence. If
+    /// that applied slice is outdated, the bytes of the presence must not go to `cdup`: they are not
+    /// content that came again. The store holds version 2 of the key; the pending set holds version 1.
+    #[test]
+    fn a_promoted_slice_that_is_outdated_does_not_move_the_frame_that_freed_it_to_cdup() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::daemon::state::{FrameClass, FrameShape};
+            use crate::protocol::{Channel, MessageBody};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let session = Identity::generate();
+            let key = session.author_key();
+            let slice = |version: u64| {
+                let body = format!(r#"{{"version":{version},"value":{{"turn":"{version}"}}}}"#);
+                Message::new_channel_event(
+                    &node.mesh,
+                    &nick("writer"),
+                    MessageBody::from(body.as_str()),
+                    Channel::Meta,
+                )
+                .sign(&session)
+            };
+            let mut state = fresh_state();
+            state.peers.insert(key);
+            state.names.insert(key, nick("writer"));
+            let now = clock::Instant::now();
+            let outcome = state.docs.ingest(Channel::Meta, &slice(2), true, now);
+            assert!(
+                matches!(outcome, SliceIngest::Applied),
+                "the premise: the store holds version 2: {outcome:?}"
+            );
+            state
+                .docs
+                .hold(Channel::Meta, &slice(1), now)
+                .expect("the pending set takes version 1");
+            let signed = Message::new_alive(&node.mesh, &nick("writer")).sign(&session);
+            let alive = signed.serialize().expect("serialize").into_bytes();
+            let shape = FrameShape::of(&alive);
+            state.idle.wire_in.note_received(&shape);
+            state.idle.wire_in.note_fresh(&shape);
+            let mut app = Inert;
+
+            promote_pending(key, now, &mut state, &mut app, &context);
+
+            assert_eq!(
+                state.idle.wire_in.cdup[FrameClass::Presence.index()],
+                0,
+                "the presence that freed the pending slice was counted as content that came again"
             );
             node.endpoint.close().await;
         });
@@ -4994,9 +5061,7 @@ mod first_contact_tests {
             assert!(
                 matches!(
                     answer,
-                    habilis_network_doc::SliceIngest::Refused(
-                        habilis_network_doc::SliceError::GoneKey
-                    )
+                    SliceIngest::Refused(habilis_network_doc::SliceError::GoneKey)
                 ),
                 "a replaced run's key is in the gone set, so its later slice is refused"
             );
@@ -5031,9 +5096,7 @@ mod first_contact_tests {
             assert!(
                 matches!(
                     answer,
-                    habilis_network_doc::SliceIngest::Refused(
-                        habilis_network_doc::SliceError::GoneKey
-                    )
+                    SliceIngest::Refused(habilis_network_doc::SliceError::GoneKey)
                 ),
                 "a signed goodbye puts the key in the gone set, so its later slice is refused"
             );
