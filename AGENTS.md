@@ -156,9 +156,25 @@ Code: `habilis-network/src/blob`.
 
 Layer: state. Two channels per mesh: `state` and `meta`.
 
-A JSON object that each member writes in part. A member writes only its own slice, a signed value with a version. A member reads the slice of every author. The view of a channel maps the lowercase hex of each author key to the value of its slice. A frame with a higher version replaces the slice of its author. On a tie of versions, the lower content hash wins. A slice and its frame fit the wire limit, a channel holds 1024 authors, and an author has a burst of 5 versions for a write.
+A JSON object that each member writes in part. A member writes only its own slice, a signed value with a version. A member reads the slice of every author. The view of a channel maps the lowercase hex of each author key to the value of its slice. A frame with a higher version replaces the slice of its author. On a tie of versions, the lower content hash wins. A slice and its frame fit the wire limit, a channel holds 1024 authors, and an author has a burst of 5 versions for a write. The encoded value of a slice is 1 MiB at most. A value that does not fit one frame is a chunked value (see chunk pointer).
 
 Code: `habilis-network-doc` (`SliceStore`), `protocol::Channel`.
+
+### chunk pointer
+
+Layer: state. Keyed by author key.
+
+The value of a slice that is too large for one frame. The slice holds `{"$chunks": {"root", "size"}}` in place of the value, and the bytes are chunks of 64 KiB in the chunk store. The key `$chunks` is reserved for the engine. A node holds the whole value with the pointer once it has fetched every chunk. Until then the view keeps the last complete version of the author, and the slice is in the `syncing` list. The raw view shows the pointer, and the view shows the value.
+
+Code: `habilis-network-doc` (`ChunkPointer`, `SliceStore::resolve_pointer`), `habilis-network/src/chunk_fetch`.
+
+### chunk plane
+
+Layer: state. A direct QUIC channel beside gossip, on the ALPN `habilis-mesh/chunks/1`.
+
+The channel that carries the map and the chunks of a chunked value between members. A node answers only a member, and only for a root that a live slice names. It gives the same absent byte for every refusal. It is not the blob channel: a blob is a file with a ticket, and a chunk is part of a value in a slice.
+
+Code: `habilis-network/src/chunk_fetch`, `transport::ChunkAcceptor`.
 
 ### backfill
 
