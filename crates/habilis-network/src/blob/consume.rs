@@ -359,7 +359,26 @@ where
     result
 }
 
+/// The transfer, with the cause of a failure in the log. The error that a caller sees says only
+/// "connection lost". The close reason says who ended the connection and why.
 async fn transfer<Writer>(
+    connection: &Connection,
+    ticket: &BlobTicket,
+    token: &TicketSecret,
+    out: &mut Writer,
+) -> Result<()>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let result = transfer_stream(connection, ticket, token, out).await;
+    if let Err(error) = &result {
+        let cause = format!("{error:#}");
+        tracing::debug!(target: "habilis_network::blob", %cause, close = ?connection.close_reason(), "blob transfer failed");
+    }
+    result
+}
+
+async fn transfer_stream<Writer>(
     connection: &Connection,
     ticket: &BlobTicket,
     token: &TicketSecret,

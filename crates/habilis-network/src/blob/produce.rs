@@ -285,7 +285,8 @@ async fn handle_incoming(
     relay_transport: PayloadPath,
 ) {
     if let Err(error) = serve_connection(incoming, &store, limits, relay_transport).await {
-        tracing::debug!(%error, "blob serve connection ended");
+        let cause = format!("{error:#}");
+        tracing::debug!(target: "habilis_network::blob", %cause, "blob serve connection ended");
     }
     inflight.fetch_sub(1, Ordering::Relaxed);
 }
@@ -318,7 +319,9 @@ async fn serve_connection(
     let (send, recv) = time::timeout_at(deadline, connection.accept_bi())
         .await
         .context("no fetch request within the pre-authentication deadline")??;
-    serve_stream(&connection, send, recv, store, deadline).await
+    let result = serve_stream(&connection, send, recv, store, deadline).await;
+    tracing::debug!(target: "habilis_network::blob", failed = result.is_err(), close = ?connection.close_reason(), "blob serve ended");
+    result
 }
 
 /// The fetch protocol, producer side. Reads the fixed 64-byte request
