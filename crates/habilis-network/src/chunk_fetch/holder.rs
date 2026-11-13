@@ -77,8 +77,8 @@ impl Holder<'_> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_chunks::{CHUNK_BYTES_USIZE, ChunkMap, Root};
-    use habilis_network_doc::{ChunkPointer, SliceIngest};
+    use habilis_network_chunks::{CHUNK_BYTES_USIZE, Root};
+    use habilis_network_doc::ChunkPointer;
     use habilis_network_util::clock::Instant;
     use iroh::EndpointId;
     use tokio::sync::oneshot;
@@ -86,64 +86,18 @@ mod tests {
     use super::{ABSENT, ChunkAsk, ChunkServeBudget, Holder};
     use crate::chunk_fetch::ChunkRequest;
     use crate::chunk_fetch::answer_check::{decode_chunk, decode_map};
+    use crate::chunk_fetch::fixtures::{
+        bytes, hold_named_value, name_root, slice_of_peer, state_trusting,
+    };
     use crate::daemon::state::EventLoopState;
     use crate::protocol::identity::Identity;
-    use crate::protocol::{Channel, MeshId, Message, MessageBody};
-    use crate::testing::{endpoint_id, fresh_state, nick, test_key};
+    use crate::testing::{endpoint_id, test_key};
     use habilis_network_util::tuning::CHUNK_SERVES_PER_WINDOW;
-
-    /// Bytes that no two chunks of share, `len` long.
-    fn bytes(len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|index| u8::try_from((index * 31 + index / 7) % 251).expect("a byte"))
-            .collect()
-    }
 
     /// A state that trusts `endpoint_id(1)` as the endpoint of a member.
     fn state_with_member() -> (EventLoopState, EndpointId) {
-        let mut state = fresh_state();
         let member = endpoint_id(1);
-        state.proven_endpoints.trust(test_key("member"), member);
-        (state, member)
-    }
-
-    /// Holds `value` as chunks, and a slice of `peer` that names them. Returns the root and the map.
-    async fn hold_named_value(
-        state: &mut EventLoopState,
-        peer: &Identity,
-        value: &[u8],
-    ) -> (Root, ChunkMap) {
-        let root = state.chunks.put_value(value).await.expect("a value");
-        let map = state
-            .chunks
-            .map(root)
-            .await
-            .expect("a lookup")
-            .expect("a map");
-        let size = u64::try_from(value.len()).expect("a size");
-        name_root(state, peer, ChunkPointer::new(root, size), 1);
-        (root, map)
-    }
-
-    /// Ingests a slice of a peer, with `version`, that names `pointer`.
-    fn name_root(state: &mut EventLoopState, peer: &Identity, pointer: ChunkPointer, version: u64) {
-        let body = serde_json::json!({"version": version, "value": pointer.to_value()});
-        slice_of_peer(state, peer, &body.to_string(), version);
-    }
-
-    /// Ingests a slice of a peer, with the body `text`.
-    fn slice_of_peer(state: &mut EventLoopState, peer: &Identity, text: &str, version: u64) {
-        let body = MessageBody::try_new(text).expect("a body");
-        let frame =
-            Message::new_channel_event(&MeshId::from("test"), &nick("peer"), body, Channel::State)
-                .sign(peer);
-        assert_eq!(
-            state
-                .docs
-                .ingest(Channel::State, &frame, true, Instant::now()),
-            SliceIngest::Applied,
-            "the slice of version {version} must apply"
-        );
+        (state_trusting(member), member)
     }
 
     async fn ask(

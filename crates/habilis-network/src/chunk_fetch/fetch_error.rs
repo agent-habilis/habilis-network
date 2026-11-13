@@ -19,6 +19,16 @@ pub(crate) enum FetchError {
     PastDeclaredSize { index: usize },
     /// A chunk is shorter than the map says.
     ShortChunk { index: usize },
+    /// The holder cannot be reached: the dial or the stream failed.
+    Unreachable,
+    /// The holder did not answer inside the deadline.
+    Stalled,
+    /// No holder was left to ask, or the list of holders was empty.
+    NoSource,
+    /// The chunk store could not keep the value.
+    Store,
+    /// The value does not open with the key of the mesh.
+    Seal,
 }
 
 impl fmt::Display for FetchError {
@@ -40,6 +50,14 @@ impl fmt::Display for FetchError {
             Self::ShortChunk { index } => {
                 write!(formatter, "chunk {index} is shorter than the map says")
             }
+            Self::Unreachable => write!(formatter, "the holder cannot be reached"),
+            Self::Stalled => write!(formatter, "the holder did not answer in time"),
+            Self::NoSource => write!(formatter, "no holder is left to ask"),
+            Self::Store => write!(formatter, "the chunk store cannot keep the value"),
+            Self::Seal => write!(
+                formatter,
+                "the value does not open with the key of the mesh"
+            ),
         }
     }
 }

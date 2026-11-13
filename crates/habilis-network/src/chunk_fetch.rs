@@ -3,10 +3,14 @@
 #[cfg(test)]
 mod answer_check;
 mod chunk_answer;
+#[cfg(test)]
+mod chunk_client;
 mod chunk_request;
 mod chunk_serve_budget;
 #[cfg(test)]
 mod fetch_error;
+#[cfg(test)]
+mod fixtures;
 mod holder;
 
 pub(crate) use chunk_request::ChunkRequest;
