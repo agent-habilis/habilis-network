@@ -1,8 +1,9 @@
+use std::ops::Range;
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs, io::ErrorKind};
 
-use habilis_network_chunks::{ChunkError, InMemoryStore};
+use habilis_network_chunks::{ChunkError, ChunkMap, ChunkStore as _, InMemoryStore, Root};
 
 #[cfg(not(target_arch = "wasm32"))]
 use habilis_network_chunks::DiskStore;
@@ -58,6 +59,80 @@ impl MeshChunks {
             store: Store::Memory(InMemoryStore::new()),
         })
     }
+
+    /// Cuts `bytes` into chunks, keeps them with their chunk map, and returns the root.
+    ///
+    /// # Errors
+    ///
+    /// The store cannot keep a chunk or the map.
+    pub(crate) async fn put_value(&self, bytes: &[u8]) -> Result<Root, ChunkError> {
+        let map = ChunkMap::build(bytes);
+        for index in 0..map.len() {
+            let chunk = chunk_at(bytes, map.range_of(index)).ok_or_else(|| {
+                ChunkError::Malformed("a chunk range is past the value".to_owned())
+            })?;
+            let hash = map.leaf(index).ok_or_else(|| {
+                ChunkError::Malformed("a chunk has no hash in its map".to_owned())
+            })?;
+            match &self.store {
+                Store::Memory(store) => store.put(hash, chunk).await?,
+                #[cfg(not(target_arch = "wasm32"))]
+                Store::Disk(store) => store.put(hash, chunk).await?,
+            }
+        }
+        match &self.store {
+            Store::Memory(store) => store.put_map(&map).await?,
+            #[cfg(not(target_arch = "wasm32"))]
+            Store::Disk(store) => store.put_map(&map).await?,
+        }
+        Ok(map.root())
+    }
+
+    /// Drops every chunk that no root of `roots` names.
+    ///
+    /// # Errors
+    ///
+    /// A root has no stored map, or the store cannot sweep.
+    pub(crate) async fn keep_only(
+        &self,
+        roots: impl IntoIterator<Item = Root>,
+    ) -> Result<(), ChunkError> {
+        match &self.store {
+            Store::Memory(store) => {
+                store.start_marking().await?;
+                for root in roots {
+                    store.mark(root).await?;
+                }
+                store.sweep().await?;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Store::Disk(store) => {
+                store.start_marking().await?;
+                for root in roots {
+                    store.mark(root).await?;
+                }
+                store.sweep().await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// How many chunks the store holds, when it is in memory.
+    #[cfg(test)]
+    pub(crate) fn stored_chunks(&self) -> usize {
+        match &self.store {
+            Store::Memory(store) => store.stored_chunks(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Store::Disk(_) => usize::MAX,
+        }
+    }
+}
+
+/// The bytes of `bytes` in `range`, when the range lies inside them.
+fn chunk_at(bytes: &[u8], range: Range<u64>) -> Option<&[u8]> {
+    let start = usize::try_from(range.start).ok()?;
+    let end = usize::try_from(range.end).ok()?;
+    bytes.get(start..end)
 }
 
 #[cfg(test)]

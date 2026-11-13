@@ -5,10 +5,6 @@ mod gossip_msgs;
 mod idle_counters;
 mod key_of_error;
 mod latch;
-#[expect(
-    dead_code,
-    reason = "the write path of a large value reads the store in the next step"
-)]
 mod mesh_chunks;
 mod mesh_secrets;
 mod ping_round;

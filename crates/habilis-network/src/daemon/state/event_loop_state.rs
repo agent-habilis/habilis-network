@@ -40,7 +40,8 @@ use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
-use habilis_network_doc::{SliceError, SliceIngest, SliceLimits, SliceStore};
+use habilis_network_chunks::Root;
+use habilis_network_doc::{ChunkPointer, SliceError, SliceIngest, SliceLimits, SliceStore};
 use habilis_network_protocol::ContentHash;
 use habilis_network_protocol::digest::{DigestPage, DigestRoot};
 
@@ -179,6 +180,20 @@ impl ChannelDocs {
         self.get_mut(channel).prepare_local(own, value, now)
     }
 
+    /// Makes the draft of the next write of the own slice `own` on `channel` as a pointer to `value`, which the
+    /// caller has chunked.
+    pub(crate) fn prepare_pointer(
+        &mut self,
+        channel: protocol::Channel,
+        own: &AuthorKey,
+        pointer: ChunkPointer,
+        value: serde_json::Map<String, serde_json::Value>,
+        now: Instant,
+    ) -> Result<habilis_network_doc::LocalDraft, SliceError> {
+        self.get_mut(channel)
+            .prepare_pointer(own, pointer, value, now)
+    }
+
     /// Makes the draft of the farewell of `own` on `channel`: a tombstone, which spends no token.
     pub(crate) fn prepare_leave(
         &mut self,
@@ -204,6 +219,17 @@ impl ChannelDocs {
     #[cfg(test)]
     pub(crate) fn is_gone(&self, channel: protocol::Channel, key: &AuthorKey) -> bool {
         self.get(channel).is_gone(key)
+    }
+
+    /// The roots of the chunked values that the slices of `key` hold, in both channels.
+    pub(crate) fn chunk_roots<'docs>(
+        &'docs self,
+        key: &'docs AuthorKey,
+    ) -> impl Iterator<Item = Root> + 'docs {
+        let root_of = |channel| self.get(channel).pointer(key).map(ChunkPointer::root);
+        [protocol::Channel::State, protocol::Channel::Meta]
+            .into_iter()
+            .filter_map(root_of)
     }
 
     /// The signed frame of the slice that `key` holds on `channel`, as a wire frame.
@@ -823,11 +849,7 @@ pub struct EventLoopState {
     /// The shared documents of the `state` and `meta` channels.
     pub(crate) docs: ChannelDocs,
     /// The chunks of the values that are too large for a slice, held for this run.
-    #[expect(
-        dead_code,
-        reason = "the write path of a large value reads it in the next step"
-    )]
-    chunks: MeshChunks,
+    pub(crate) chunks: MeshChunks,
     /// This member's signing identity (Ed25519). Shared with the
     /// send path so messages we author are signed before broadcast.
     /// The public key is the durable identity; the nickname is a

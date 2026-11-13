@@ -388,6 +388,8 @@ pub struct LocalDraft {
     key: AuthorKey,
     version: u64,
     body: MessageBody,
+    /// The whole value of a draft that names a chunked value, which the commit keeps with the slice.
+    resolved: Option<Value>,
 }
 
 impl LocalDraft {
@@ -508,19 +510,15 @@ impl SliceStore {
     /// The value of the slice of `key`, when the store holds one.
     #[must_use]
     pub fn value(&self, key: &AuthorKey) -> Option<&Value> {
-        self.slices.get(key).and_then(|slice| match &slice.value {
-            SliceValue::Inline(value) => Some(value),
-            SliceValue::Pointer(_) => None,
-        })
+        self.slices
+            .get(key)
+            .and_then(|slice| slice.value.resolved())
     }
 
     /// The pointer that the slice of `key` holds, when it holds one in place of a value.
     #[must_use]
     pub fn pointer(&self, key: &AuthorKey) -> Option<&ChunkPointer> {
-        self.slices.get(key).and_then(|slice| match &slice.value {
-            SliceValue::Inline(_) => None,
-            SliceValue::Pointer(pointer) => Some(pointer),
-        })
+        self.slices.get(key).and_then(|slice| slice.value.pointer())
     }
 
     /// Returns the signed frame held for `key`, which a resend sends. No caller yet.
@@ -699,6 +697,40 @@ impl SliceStore {
         self.draft_at(own, Value::Object(value), now, true)
     }
 
+    /// Makes the draft of the next write of the own slice `own` as a pointer to `value`, a value that
+    /// is too large for one frame and that the caller has chunked. The draft carries the pointer, and
+    /// the commit keeps `value` whole with the slice, so a reader sees it. The write takes one token.
+    ///
+    /// # Errors
+    ///
+    /// [`SliceError::ValueTooLarge`] when the pointer names more bytes than the value cap,
+    /// [`SliceError::Seal`] when the channel key does not seal the body, and
+    /// [`SliceError::RateLimited`] when `own` has no token left.
+    pub fn prepare_pointer(
+        &mut self,
+        own: &AuthorKey,
+        pointer: ChunkPointer,
+        value: Map<String, Value>,
+        now: Instant,
+    ) -> Result<LocalDraft, SliceError> {
+        let limit = self.limits.max_value_bytes;
+        let bytes = usize::try_from(pointer.size()).unwrap_or(usize::MAX);
+        if bytes > limit {
+            return Err(SliceError::ValueTooLarge { bytes, limit });
+        }
+        let (version, body, _) = self.seal_body(own, pointer.to_value())?;
+        if !self.take_token(own, now, self.limits.burst) {
+            return Err(SliceError::RateLimited);
+        }
+        Ok(LocalDraft {
+            channel: self.channel,
+            key: *own,
+            version,
+            body,
+            resolved: Some(Value::Object(value)),
+        })
+    }
+
     /// Makes the draft of the own tombstone of `own`, the farewell of a leaving member.
     ///
     /// # Errors
@@ -766,6 +798,7 @@ impl SliceStore {
             key,
             version,
             body,
+            resolved,
         } = draft;
         if channel != self.channel || frame.key() != key || frame.body.as_str() != body.as_str() {
             return Err(SliceError::DraftMismatch);
@@ -774,7 +807,12 @@ impl SliceStore {
             return Err(SliceError::StaleDraft);
         }
         match self.ingest(frame, false, now) {
-            SliceIngest::Applied => Ok(()),
+            SliceIngest::Applied => {
+                if let Some(value) = resolved {
+                    self.resolve(&key, value);
+                }
+                Ok(())
+            }
             SliceIngest::Refused(error) => {
                 if matches!(error, SliceError::TooLarge { .. }) {
                     self.refund_token(&key);
@@ -784,6 +822,16 @@ impl SliceStore {
             SliceIngest::Duplicate | SliceIngest::Stale | SliceIngest::Conflict => {
                 Err(SliceError::StaleDraft)
             }
+        }
+    }
+
+    /// Keeps `value` whole with the pointer that the slice of `key` holds.
+    fn resolve(&mut self, key: &AuthorKey, value: Value) {
+        let Some(slice) = self.slices.get_mut(key) else {
+            return;
+        };
+        if let SliceValue::Pointer(pointer) = slice.value {
+            slice.value = SliceValue::Chunked { pointer, value };
         }
     }
 
@@ -1007,6 +1055,18 @@ impl SliceStore {
     }
 
     /// The number of keys in the gone set, for the tests that check a key takes one entry.
+    /// The bytes and the count of the whole values that chunked slices hold, for the leak tests.
+    #[cfg(test)]
+    fn chunked_held(&self) -> (usize, usize) {
+        self.slices
+            .values()
+            .filter_map(|slice| match &slice.value {
+                SliceValue::Chunked { value, .. } => Some(value.to_string().len()),
+                SliceValue::Inline(_) | SliceValue::Pointer(_) => None,
+            })
+            .fold((0, 0), |(bytes, count), len| (bytes + len, count + 1))
+    }
+
     #[cfg(test)]
     fn gone_count(&self) -> usize {
         self.gone.len()
@@ -1029,6 +1089,7 @@ impl SliceStore {
             key: *own,
             version,
             body,
+            resolved: None,
         })
     }
 
@@ -1050,6 +1111,16 @@ impl SliceStore {
         if value.get(CHUNKS_KEY).is_some() {
             return Err(SliceError::Reserved);
         }
+        self.seal_body(own, value)
+    }
+
+    /// Builds the next version and the sealed body of the slice of `own` with `value`, and measures
+    /// the body against the frame cap.
+    fn seal_body(
+        &self,
+        own: &AuthorKey,
+        value: Value,
+    ) -> Result<(u64, MessageBody, usize), SliceError> {
         let version = self.version(own).unwrap_or(0) + 1;
         let mut body_json = json!({"version": version});
         body_json["value"] = value;
@@ -1669,6 +1740,111 @@ mod tests {
         assert!(
             store.prepare_leave(&key(1), now).is_ok(),
             "a tombstone must be taken whatever the held value is"
+        );
+    }
+
+    /// A store with wide frames, a pointer to the `size` bytes of the value `{"k": "x"...}`, and the value.
+    fn chunked_write(
+        store: &mut SliceStore,
+        text_len: usize,
+        now: Instant,
+    ) -> Result<LocalDraft, SliceError> {
+        let value = object(json!({"k": "x".repeat(text_len)}));
+        let size = Value::Object(value.clone()).to_string().len() as u64;
+        let pointer = ChunkPointer::new(Root::from_bytes([3; 32]), size);
+        store.prepare_pointer(&key(1), pointer, value, now)
+    }
+
+    #[test]
+    fn a_pointer_draft_commits_a_chunked_slice_that_reads_whole() {
+        let mut store = value_capped_store(1 << 20);
+        let now = Instant::now();
+        let draft = chunked_write(&mut store, 5000, now).expect("a pointer draft");
+        let frame = frame_of(&draft, key(1));
+        store.commit_local(draft, &frame, now).expect("the commit");
+        let whole = Value::Object(object(json!({"k": "x".repeat(5000)})));
+        assert_eq!(
+            store.value(&key(1)),
+            Some(&whole),
+            "a chunked slice must read as its whole value"
+        );
+        assert!(
+            store.pointer(&key(1)).is_some(),
+            "a chunked slice must keep its pointer"
+        );
+        let hex = String::from_utf8_lossy(&key(1).hex()).into_owned();
+        assert_eq!(
+            store.view().get(&hex),
+            Some(&whole),
+            "the view must show the whole value and not the pointer"
+        );
+        assert_eq!(store.chunked_held().1, 1, "one chunked value is held");
+    }
+
+    #[test]
+    fn a_pointer_draft_that_names_more_than_the_value_cap_is_refused() {
+        let mut store = value_capped_store(100);
+        let pointer = ChunkPointer::new(Root::from_bytes([3; 32]), 101);
+        assert_eq!(
+            store
+                .prepare_pointer(&key(1), pointer, Map::new(), Instant::now())
+                .map(|_| ()),
+            Err(SliceError::ValueTooLarge {
+                bytes: 101,
+                limit: 100
+            }),
+            "a pointer past the cap must be refused"
+        );
+    }
+
+    #[test]
+    fn a_newer_inline_version_drops_the_resolved_value_of_a_chunked_slice() {
+        let mut store = value_capped_store(1 << 20);
+        let now = Instant::now();
+        let draft = chunked_write(&mut store, 5000, now).expect("a pointer draft");
+        let frame = frame_of(&draft, key(1));
+        store.commit_local(draft, &frame, now).expect("the commit");
+        assert_eq!(store.chunked_held().1, 1, "one chunked value is held");
+        let inline = store
+            .prepare_local(
+                &key(1),
+                object(json!({"a": 1})),
+                now + Duration::from_secs(2),
+            )
+            .expect("an inline draft");
+        let inline_frame = frame_of(&inline, key(1));
+        store
+            .commit_local(inline, &inline_frame, now + Duration::from_secs(2))
+            .expect("the commit");
+        assert_eq!(
+            store.chunked_held(),
+            (0, 0),
+            "an inline version must drop the held bytes and the held count"
+        );
+        assert!(
+            store.pointer(&key(1)).is_none(),
+            "an inline version must drop the pointer"
+        );
+    }
+
+    #[test]
+    fn a_tombstone_drops_the_resolved_value_of_a_chunked_slice() {
+        let mut store = value_capped_store(1 << 20);
+        let now = Instant::now();
+        let draft = chunked_write(&mut store, 5000, now).expect("a pointer draft");
+        let frame = frame_of(&draft, key(1));
+        store.commit_local(draft, &frame, now).expect("the commit");
+        let leave = store
+            .prepare_leave(&key(1), now)
+            .expect("a tombstone draft");
+        let leave_frame = frame_of(&leave, key(1));
+        store
+            .commit_local(leave, &leave_frame, now)
+            .expect("the commit");
+        assert_eq!(
+            store.chunked_held(),
+            (0, 0),
+            "a tombstone must drop the held bytes and the held count"
         );
     }
 
