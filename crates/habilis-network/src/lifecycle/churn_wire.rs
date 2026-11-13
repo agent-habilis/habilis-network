@@ -73,8 +73,10 @@ const ANNOUNCE_FIXED_BYTES: usize = 563;
 /// escaped text. The node sends the address that it has when it sends the frame, and the host can
 /// change it between two frames (a port of 4 digits, a second address).
 ///
-/// The seal key: its Base58 text is 43 or 44 characters, by the random key of the run. A count taken
-/// once, or a constant for 44, is 1 byte per frame too many in a run with a key of 43.
+/// The seal key: its Base58 text is about 44 characters, fewer for a small key (43 in about 6% of
+/// the runs). A count taken once, or a constant for 44, is 1 byte per frame too many in a run with a
+/// key of 43. The text must be the Base58 of 32 bytes, which the engine decodes: another encoding is
+/// a change of the wire form, and the count must not absorb it.
 fn varying_bytes_of(frame: &Message) -> usize {
     let body: serde_json::Value =
         serde_json::from_str(frame.body.as_str()).expect("a PeerInfo body is JSON");
@@ -87,11 +89,11 @@ fn varying_bytes_of(frame: &Message) -> usize {
     let escaped_address = serde_json::to_string(&address)
         .expect("a string serializes")
         .len();
-    escaped_address
-        + body["seal"]
-            .as_str()
-            .expect("a PeerInfo names its seal key")
-            .len()
+    gossip::peer_info_seal_key(&body).expect("a PeerInfo seal is the Base58 of 32 bytes");
+    let seal = body["seal"]
+        .as_str()
+        .expect("a PeerInfo names its seal key");
+    escaped_address + seal.len()
 }
 
 /// The bytes that the `PeerInfo` frames among `frames` have on top of their fixed part, each read
@@ -259,8 +261,9 @@ fn wire_cost_of_one_minute_with_5_peers() {
 }
 
 /// 5 `PeerInfo` frames. The first 4 carry an address with a port of 5 digits and a seal key of 44
-/// characters. The last carries a port of 4 digits and a seal key of 43, as when the host changes its
-/// address between two frames and another run draws another key. The count follows each frame: the
+/// characters (32 bytes of 0xff). The last carries a port of 4 digits and a seal key of 43 (a 1 in
+/// the first byte), as when the host changes its address between two frames and another run draws
+/// another key. The count follows each frame: the
 /// numbers of the first frame, taken for all 5, are 2 bytes too many.
 #[test]
 fn the_announce_bytes_follow_the_address_and_the_seal_key_that_each_frame_carries() {
@@ -288,7 +291,17 @@ fn the_announce_bytes_follow_the_address_and_the_seal_key_that_each_frame_carrie
             .len()
     };
     let (long, short) = (address_on("127.0.0.1:54321"), address_on("127.0.0.1:5432"));
-    let (seal_44, seal_43) = ("1".repeat(44), "1".repeat(43));
+    let mut small = [0u8; 32];
+    small[0] = 1;
+    let (seal_44, seal_43) = (
+        bs58::encode([0xff_u8; 32]).into_string(),
+        bs58::encode(small).into_string(),
+    );
+    assert_eq!(
+        (seal_44.len(), seal_43.len()),
+        (44, 43),
+        "the 2 keys are the 2 lengths of the run"
+    );
     let frames = vec![
         frame(&long, &seal_44),
         frame(&long, &seal_44),
@@ -310,4 +323,19 @@ fn the_announce_bytes_follow_the_address_and_the_seal_key_that_each_frame_carrie
         5 * first,
         "the numbers of the first frame, taken for all 5, are 2 bytes too many"
     );
+}
+
+/// A seal of another encoding is a change of the wire form: the count refuses it, and does not absorb
+/// its length.
+#[test]
+#[should_panic(expected = "a PeerInfo seal is the Base58 of 32 bytes")]
+fn a_seal_that_is_not_the_base58_of_32_bytes_is_refused() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let (mesh, identity, us) = (MeshId::from("test"), Identity::generate(), nick("us"));
+    let address = iroh::EndpointAddr::new(endpoint_id(1));
+    let mut body = peer_addr_error::endpoint_addr_to_json(&address);
+    body["seal"] = serde_json::Value::String("ab".repeat(32));
+    let message = Message::new_peer_info(&mesh, &us, MessageBody::from(body.to_string().as_str()));
+
+    let _ = varying_bytes_of(&message.sign(&identity));
 }

@@ -44,6 +44,8 @@ const _: () = assert!(
 
 #[cfg(feature = "multihop")]
 pub(crate) use json_body::json_body;
+#[cfg(test)]
+pub(crate) use merge_ctx::peer_info_seal_key;
 pub use merge_ctx::{
     Farewell, MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge,
     seal_broadcast_body, sealed_body_len_bound, send_app, start_ping_round, unicast_farewell,
