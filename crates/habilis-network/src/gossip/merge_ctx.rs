@@ -560,9 +560,9 @@ pub(crate) async fn draft_own_write(
     now: clock::Instant,
 ) -> Result<habilis_network_doc::LocalDraft, transport::SendError> {
     let own = state.identity.author_key();
-    match state.docs.prepare_local(channel, &own, next.clone(), now) {
-        Err(SliceError::TooLarge { .. }) => {}
-        other => return other.map_err(transport::SendError::State),
+    let first = state.docs.prepare_local(channel, &own, next.clone(), now);
+    if !matches!(first, Err(SliceError::TooLarge { .. })) {
+        return first.map_err(transport::SendError::State);
     }
     let bytes =
         serde_json::to_vec(&next).map_err(|error| transport::SendError::internal(error.into()))?;
@@ -1779,23 +1779,25 @@ mod tests {
                 inline_len - 2
             };
             let held_chunks = state.chunks.stored_chunks();
-            match write_own_at(&mut state, channel, big_value('x', len), now).await {
-                Ok(()) => assert_eq!(
+            let written = write_own_at(&mut state, channel, big_value('x', len), now).await;
+            if matches!(written, Err(SendError::State(SliceError::RateLimited))) {
+                refused = true;
+                assert_eq!(
+                    state.chunks.stored_chunks(),
+                    held_chunks,
+                    "round {round}: a refused write must leave the chunks of the held version"
+                );
+                now = hours_after(now, 1);
+            } else {
+                written.unwrap_or_else(|other| {
+                    panic!("round {round}: an unexpected refusal {other:?}")
+                });
+                assert_eq!(
                     state.chunks.stored_chunks(),
                     usize::from(chunked),
                     "round {round}: a value of {len} characters must be {}",
                     if chunked { "chunked" } else { "inline" }
-                ),
-                Err(SendError::State(SliceError::RateLimited)) => {
-                    refused = true;
-                    assert_eq!(
-                        state.chunks.stored_chunks(),
-                        held_chunks,
-                        "round {round}: a refused write must leave the chunks of the held version"
-                    );
-                    now = hours_after(now, 1);
-                }
-                Err(other) => panic!("round {round}: an unexpected refusal {other:?}"),
+                );
             }
         }
         assert!(
