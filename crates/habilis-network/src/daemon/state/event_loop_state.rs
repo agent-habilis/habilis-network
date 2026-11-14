@@ -164,6 +164,7 @@ impl ChannelDocs {
     }
 
     /// The value of the slice that `key` holds on `channel`, or an empty object.
+    #[cfg(test)]
     pub(crate) fn own_value(
         &self,
         channel: protocol::Channel,
@@ -173,6 +174,15 @@ impl ChannelDocs {
             Some(serde_json::Value::Object(map)) => map.clone(),
             _ => serde_json::Map::new(),
         }
+    }
+
+    /// The value of the slice that `key` holds on `channel`, borrowed, when it holds an object.
+    pub(crate) fn own_value_ref(
+        &self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+    ) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.get(channel).value(key)?.as_object()
     }
 
     /// Makes the draft of the next write of the own slice `own` on `channel`.

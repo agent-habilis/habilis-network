@@ -536,15 +536,18 @@ pub(crate) fn merged_own_value(
     merge: &serde_json::Value,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, transport::SendError> {
     let own = state.identity.author_key();
-    let held = state.docs.own_value(channel, &own);
-    let mut value = serde_json::Value::Object(held.clone());
+    // The held value is borrowed: the patch works on one copy, and the held value is compared in place.
+    let held: Option<&serde_json::Map<String, serde_json::Value>> =
+        state.docs.own_value_ref(channel, &own);
+    let mut value = serde_json::Value::Object(held.cloned().unwrap_or_default());
     json_merge_patch(&mut value, merge);
     let serde_json::Value::Object(next) = value else {
         return Err(transport::SendError::internal(anyhow::anyhow!(
             "the merge must be a JSON object"
         )));
     };
-    Ok((next != held).then_some(next))
+    let unchanged = held.map_or(next.is_empty(), |held| *held == next);
+    Ok((!unchanged).then_some(next))
 }
 
 /// The draft of the next version of the own slice with `next` as its whole value. A value that fits one frame is
