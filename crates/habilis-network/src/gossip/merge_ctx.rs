@@ -10,6 +10,7 @@ use std::fmt;
 
 use crate::transport::MeshSender;
 
+use crate::chunk_fetch;
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
 use crate::doc::wire;
@@ -18,6 +19,7 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
+use habilis_network_doc::{ChunkPointer, SliceError};
 
 use crate::logging::messages;
 use crate::protocol::{peer_addr_error, seal_error};
@@ -515,26 +517,93 @@ pub async fn broadcast_state_merge(
 
     // 1. The own slice with the merge patch applied (RFC 7386). A merge that changes nothing is a
     //    silent success.
-    let own = state.identity.author_key();
     let now = clock::Instant::now();
-    let mut value = serde_json::Value::Object(state.docs.own_value(channel, &own));
-    json_merge_patch(&mut value, &merge);
+    let Some(next) = merged_own_value(state, channel, &merge)? else {
+        return Ok(());
+    };
+
+    // 2. The draft of the next version, the signed frame of its body, and the commit of the frame.
+    //    The engine refuses a write past the rate limit; the caller gets the typed error.
+    let draft = draft_own_write(state, channel, next, now).await?;
+    commit_and_send(state, &context, channel, draft, farewell, surface).await
+}
+
+/// The own value of `channel` with the merge patch `merge` applied (RFC 7386), as a whole value. The cap
+/// applies to this whole value, not to the patch. `None` when the merge changes nothing.
+pub(crate) fn merged_own_value(
+    state: &EventLoopState,
+    channel: Channel,
+    merge: &serde_json::Value,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, transport::SendError> {
+    let own = state.identity.author_key();
+    // The held value is borrowed: the patch works on one copy, and the held value is compared in place.
+    let held: Option<&serde_json::Map<String, serde_json::Value>> =
+        state.docs.own_value_ref(channel, &own);
+    let mut value = serde_json::Value::Object(held.cloned().unwrap_or_default());
+    json_merge_patch(&mut value, merge);
     let serde_json::Value::Object(next) = value else {
         return Err(transport::SendError::internal(anyhow::anyhow!(
             "the merge must be a JSON object"
         )));
     };
-    if next == state.docs.own_value(channel, &own) {
-        return Ok(());
-    }
+    let unchanged = held.map_or(next.is_empty(), |held| *held == next);
+    Ok((!unchanged).then_some(next))
+}
 
-    // 2. The draft of the next version, the signed frame of its body, and the commit of the frame.
-    //    The engine refuses a write past the rate limit; the caller gets the typed error.
+/// The draft of the next version of the own slice with `next` as its whole value. A value that fits one frame is
+/// the value of the slice. A value that does not is cut into chunks, and the slice holds a pointer to them. A
+/// value past the value cap is refused before any chunk is made.
+pub(crate) async fn draft_own_write(
+    state: &mut EventLoopState,
+    channel: Channel,
+    next: serde_json::Map<String, serde_json::Value>,
+    now: clock::Instant,
+) -> Result<habilis_network_doc::LocalDraft, transport::SendError> {
+    let own = state.identity.author_key();
+    let first = state.docs.prepare_local(channel, &own, next.clone(), now);
+    if !matches!(first, Err(SliceError::TooLarge { .. })) {
+        return first.map_err(transport::SendError::State);
+    }
+    let bytes =
+        serde_json::to_vec(&next).map_err(|error| transport::SendError::internal(error.into()))?;
+    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let root = state
+        .chunks
+        .put_value(&bytes)
+        .await
+        .map_err(|error| transport::SendError::internal(error.into()))?;
+    drop(bytes);
     let draft = state
         .docs
-        .prepare_local(channel, &own, next.clone(), now)
+        .prepare_pointer(channel, &own, ChunkPointer::new(root, size), next, now);
+    if draft.is_err() {
+        chunk_fetch::keep_held(state).await;
+    }
+    draft.map_err(transport::SendError::State)
+}
+
+/// Signs the body of `draft`, and commits the frame as the own slice. Returns the frame and its wire form.
+pub(crate) async fn sign_and_commit(
+    state: &mut EventLoopState,
+    (mesh, author): (&MeshId, &Nickname),
+    channel: Channel,
+    draft: habilis_network_doc::LocalDraft,
+) -> Result<(Verified, WireFrame), transport::SendError> {
+    let now = clock::Instant::now();
+    let signed = Message::new_channel_event(mesh, author, draft.body().clone(), channel)
+        .sign(&state.identity);
+    // The token that prepare_local spent is not refunded if this serialize fails. The frame_overhead probe keeps
+    // a draft at the cap within one frame, so the failure cannot happen for a draft the store took.
+    let bytes = signed
+        .serialize()
+        .map_err(|error| transport::SendError::Internal(error.into()))?;
+    messages::log_out(&signed);
+    state
+        .docs
+        .commit_local(channel, draft, &signed, now)
         .map_err(transport::SendError::State)?;
-    commit_and_send(state, &context, channel, draft, farewell, surface).await
+    chunk_fetch::keep_held(state).await;
+    Ok((signed, bytes))
 }
 
 /// Commits a local draft, then sends its signed frame. A frame that announces a departure also goes to each live
@@ -547,20 +616,8 @@ pub(crate) async fn commit_and_send(
     farewell: Farewell,
     surface: bool,
 ) -> Result<(), transport::SendError> {
-    let now = clock::Instant::now();
-    let signed =
-        Message::new_channel_event(context.mesh, context.author, draft.body().clone(), channel)
-            .sign(&state.identity);
-    // The token that prepare_local spent is not refunded if this serialize fails. The frame_overhead probe keeps
-    // a draft at the cap within one frame, so the failure cannot happen for a draft the store took.
-    let bytes = signed
-        .serialize()
-        .map_err(|error| transport::SendError::Internal(error.into()))?;
-    messages::log_out(&signed);
-    state
-        .docs
-        .commit_local(channel, draft, &signed, now)
-        .map_err(transport::SendError::State)?;
+    let (signed, bytes) =
+        sign_and_commit(state, (context.mesh, context.author), channel, draft).await?;
 
     // A departure is mirrored before gossip takes the frame: once gossip has it, the frame is
     // no longer ours to copy, and a leaver can exit before the overlay carries it.
@@ -818,10 +875,19 @@ fn json_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::{farewell_targets, peer_info_json, wire};
+    use crate::daemon::state::EventLoopState;
     use crate::protocol::identity::Identity;
-    use crate::protocol::{MeshId, Message, MessageBody, Nickname, SymmetricKey, seal_to_body};
-    use crate::testing::{endpoint_id, fresh_state, longest_mesh_id, nick, test_key};
+    use crate::protocol::seal_error::SEAL_SYMMETRIC_OVERHEAD;
+    use crate::protocol::{
+        Channel, MeshId, Message, MessageBody, Nickname, SymmetricKey, seal_to_body,
+    };
+    use crate::testing::{
+        endpoint_id, fresh_state, fresh_state_with_mesh_key, longest_mesh_id, nick, test_key,
+    };
+    use crate::transport::SendError;
     use crate::util::consts::MAX_MESSAGE_SIZE;
+    use habilis_network_doc::SliceError;
+    use std::time::Duration;
 
     use crate::protocol::peer_addr_error;
     #[cfg(feature = "host")]
@@ -1333,6 +1399,508 @@ mod tests {
                 );
                 node.endpoint.close().await;
             },
+        );
+    }
+
+    /// A value of one key, `len` characters long, so the encoded value has `len + 8` bytes. The text varies, so
+    /// no two chunks of it are equal, and the store cannot keep fewer chunks than the value has.
+    fn big_value(fill: char, len: usize) -> serde_json::Map<String, serde_json::Value> {
+        let mut value = serde_json::Map::new();
+        let letters = "abcdefghijklmnopqrstuvwxyz";
+        let mut seed = u32::from(fill);
+        let mut text = String::with_capacity(len);
+        for _ in 0..len {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let index = usize::try_from(seed >> 16).expect("a small index") % letters.len();
+            text.push_str(&letters[index..=index]);
+        }
+        value.insert("k".to_owned(), text.into());
+        value
+    }
+
+    /// Drafts and commits an own write of `value` on `channel`, without a network.
+    async fn write_own(
+        state: &mut EventLoopState,
+        channel: Channel,
+        value: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), SendError> {
+        write_own_at(state, channel, value, clock::Instant::now()).await
+    }
+
+    /// The same as `write_own`, with the time of the write given, so a test can pass the rate limit.
+    async fn write_own_at(
+        state: &mut EventLoopState,
+        channel: Channel,
+        value: serde_json::Map<String, serde_json::Value>,
+        now: clock::Instant,
+    ) -> Result<(), SendError> {
+        let draft = super::draft_own_write(state, channel, value, now).await?;
+        let mesh = MeshId::from("test");
+        let author = nick("test");
+        super::sign_and_commit(state, (&mesh, &author), channel, draft).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_value_too_large_for_one_frame_is_chunked_and_reads_whole() {
+        let mut state = fresh_state();
+        let value = big_value('x', 70_000);
+        write_own(&mut state, Channel::State, value.clone())
+            .await
+            .expect("a chunked write");
+        let own = state.identity.author_key();
+        assert_eq!(
+            state.docs.own_value(Channel::State, &own),
+            value,
+            "the own value of a chunked slice must be the whole value and not the pointer"
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            2,
+            "a value of 70000 bytes must be kept as 2 chunks of 64 KiB"
+        );
+        assert_eq!(
+            state.docs.resolved_roots().count(),
+            1,
+            "the slice must name one root"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_past_the_cap_is_refused_before_a_chunk_is_made() {
+        let mut state = fresh_state();
+        let error = write_own(&mut state, Channel::State, big_value('x', 2 * 1024 * 1024))
+            .await
+            .expect_err("a value past the cap must be refused");
+        assert!(
+            matches!(
+                error,
+                SendError::State(SliceError::ValueTooLarge {
+                    limit: 1_048_576,
+                    ..
+                })
+            ),
+            "the refusal must be the typed value cap error, not {error:?}"
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            0,
+            "a refused value must leave no chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_smaller_inline_version_drops_the_chunks_of_the_old_value() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        write_own(&mut state, channel, big_value('x', 70_000))
+            .await
+            .expect("a chunked write");
+        write_own(&mut state, channel, big_value('y', 10))
+            .await
+            .expect("an inline write");
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            0,
+            "an inline version must drop the chunks of the old value"
+        );
+        assert_eq!(
+            state.docs.resolved_roots().count(),
+            0,
+            "an inline version must name no root"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunked_rewrite_drops_the_chunks_of_the_old_version() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        write_own(&mut state, channel, big_value('x', 70_000))
+            .await
+            .expect("the first chunked write");
+        write_own(&mut state, channel, big_value('y', 70_000))
+            .await
+            .expect("the second chunked write");
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            2,
+            "a rewrite must keep the chunks of the new version only"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunked_write_that_the_rate_limit_refuses_leaves_no_chunk() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        let mut refused = None;
+        for count in 0..16 {
+            if let Err(error) = write_own(&mut state, channel, big_value('x', 70_000 + count)).await
+            {
+                refused = Some(error);
+                break;
+            }
+        }
+        assert!(
+            matches!(refused, Some(SendError::State(SliceError::RateLimited))),
+            "a burst of chunked writes must reach the rate limit, got {refused:?}"
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            2,
+            "a refused write must leave only the chunks of the held version"
+        );
+    }
+    /// Applies the merge patch `merge` to the own value and writes the result, as a state merge does.
+    async fn merge_own(
+        state: &mut EventLoopState,
+        channel: Channel,
+        merge: &serde_json::Value,
+        now: clock::Instant,
+    ) -> Result<(), SendError> {
+        if let Some(next) = super::merged_own_value(state, channel, merge)? {
+            write_own_at(state, channel, next, now).await?;
+        }
+        Ok(())
+    }
+
+    /// A time `hours` hours after `start`, so each write of a test is past the rate limit.
+    fn hours_after(start: clock::Instant, hours: u64) -> clock::Instant {
+        start + Duration::from_hours(hours)
+    }
+
+    #[tokio::test]
+    async fn a_patch_whose_result_is_past_the_cap_is_refused_and_the_held_value_stays() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        let start = clock::Instant::now();
+        let held = big_value('x', 600_000);
+        write_own_at(&mut state, channel, held.clone(), start)
+            .await
+            .expect("a chunked write under the cap");
+        let patch = serde_json::json!({ "j": "y".repeat(600_000) });
+        let error = merge_own(&mut state, channel, &patch, hours_after(start, 1))
+            .await
+            .expect_err("a patch with a whole value past the cap must be refused");
+        assert!(
+            matches!(
+                error,
+                SendError::State(SliceError::ValueTooLarge {
+                    limit: 1_048_576,
+                    ..
+                })
+            ),
+            "the cap applies to the value after the patch, got {error:?}"
+        );
+        let own = state.identity.author_key();
+        assert_eq!(
+            state.docs.own_value(channel, &own),
+            held,
+            "a refused patch must keep the held value"
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            10,
+            "a refused patch must keep the chunks of the held value and make none"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_at_the_cap_is_taken_and_one_byte_more_is_refused() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        let start = clock::Instant::now();
+        let cap = 1_048_576;
+        // The encoded value of `big_value(_, len)` has `len + 8` bytes.
+        write_own_at(&mut state, channel, big_value('x', cap - 9), start)
+            .await
+            .expect("a value one byte under the cap");
+        let at_cap = big_value('y', cap - 8);
+        write_own_at(&mut state, channel, at_cap.clone(), hours_after(start, 1))
+            .await
+            .expect("a value at the cap");
+        let error = write_own_at(
+            &mut state,
+            channel,
+            big_value('z', cap - 7),
+            hours_after(start, 2),
+        )
+        .await
+        .expect_err("a value one byte over the cap must be refused");
+        assert!(
+            matches!(
+                error,
+                SendError::State(SliceError::ValueTooLarge { bytes, limit })
+                    if bytes == cap + 1 && limit == cap
+            ),
+            "the refusal must name the size and the cap, got {error:?}"
+        );
+        let own = state.identity.author_key();
+        assert_eq!(
+            state.docs.own_value(channel, &own),
+            at_cap,
+            "a refused write must keep the last complete version"
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            16,
+            "the held version of 1 MiB must keep its 16 chunks and the refusal makes none"
+        );
+        write_own_at(
+            &mut state,
+            channel,
+            big_value('s', 10),
+            hours_after(start, 3),
+        )
+        .await
+        .expect("a shrink after a refusal");
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            0,
+            "a shrink to an inline value must drop every chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delete_patch_shrinks_a_chunked_value_to_inline_and_a_later_patch_grows_it_again() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        let start = clock::Instant::now();
+        let own = state.identity.author_key();
+        let big = serde_json::json!({ "big": "x".repeat(70_000), "small": 1 });
+        merge_own(&mut state, channel, &big, start)
+            .await
+            .expect("a chunked write");
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            2,
+            "the big value must be chunked"
+        );
+        merge_own(
+            &mut state,
+            channel,
+            &serde_json::json!({ "big": null }),
+            hours_after(start, 1),
+        )
+        .await
+        .expect("a delete patch");
+        assert_eq!(
+            serde_json::Value::Object(state.docs.own_value(channel, &own)),
+            serde_json::json!({ "small": 1 }),
+            "a delete patch must leave the other keys"
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            0,
+            "a value that fits one frame again must drop every chunk"
+        );
+        merge_own(&mut state, channel, &big, hours_after(start, 2))
+            .await
+            .expect("a patch that grows the value again");
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            2,
+            "a value past one frame again must be chunked again"
+        );
+        let replace = serde_json::json!({ "other": 2, "big": null, "small": null });
+        merge_own(&mut state, channel, &replace, hours_after(start, 3))
+            .await
+            .expect("a patch that replaces the keys");
+        assert_eq!(
+            serde_json::Value::Object(state.docs.own_value(channel, &own)),
+            serde_json::json!({ "other": 2 }),
+            "a replace patch must leave only the new key"
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            0,
+            "a replace must drop every chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn fifty_rewrites_leave_the_chunks_of_the_held_version_only() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        let start = clock::Instant::now();
+        for round in 0..50_u64 {
+            let (len, expected) = match round % 3 {
+                0 => (70_000 + usize::try_from(round).expect("a small round"), 2),
+                1 => (200_000, 4),
+                _ => (10, 0),
+            };
+            write_own_at(
+                &mut state,
+                channel,
+                big_value('x', len),
+                hours_after(start, round),
+            )
+            .await
+            .expect("a rewrite");
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                expected,
+                "round {round} must keep only the chunks of its own version"
+            );
+        }
+    }
+
+    /// The most characters of `big_value` that one frame takes, found by trial on fresh stores.
+    async fn longest_inline_len() -> usize {
+        let (mut inline, mut chunked) = (1_000_usize, 3_500_usize);
+        while chunked - inline > 1 {
+            let middle = inline + (chunked - inline) / 2;
+            let mut state = fresh_state();
+            write_own(&mut state, Channel::State, big_value('x', middle))
+                .await
+                .expect("a write at the boundary");
+            if state.chunks.stored_chunks() == 0 {
+                inline = middle;
+            } else {
+                chunked = middle;
+            }
+        }
+        inline
+    }
+
+    #[tokio::test]
+    async fn the_boundary_of_one_frame_flips_between_inline_and_chunked_under_the_rate_limit() {
+        let inline_len = longest_inline_len().await;
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        let mut now = clock::Instant::now();
+        let mut refused = false;
+        for round in 0..16_usize {
+            let chunked = round % 2 == 1;
+            // The version number is in the body, so the 10th version has one byte more than the 1st: the inline
+            // side stays 2 bytes under the edge that the first version found.
+            let len = if chunked {
+                inline_len + 1
+            } else {
+                inline_len - 2
+            };
+            let held_chunks = state.chunks.stored_chunks();
+            let written = write_own_at(&mut state, channel, big_value('x', len), now).await;
+            if matches!(written, Err(SendError::State(SliceError::RateLimited))) {
+                refused = true;
+                assert_eq!(
+                    state.chunks.stored_chunks(),
+                    held_chunks,
+                    "round {round}: a refused write must leave the chunks of the held version"
+                );
+                now = hours_after(now, 1);
+            } else {
+                written.unwrap_or_else(|other| {
+                    panic!("round {round}: an unexpected refusal {other:?}")
+                });
+                assert_eq!(
+                    state.chunks.stored_chunks(),
+                    usize::from(chunked),
+                    "round {round}: a value of {len} characters must be {}",
+                    if chunked { "chunked" } else { "inline" }
+                );
+            }
+        }
+        assert!(
+            refused,
+            "the burst must reach the rate limit at the boundary"
+        );
+    }
+    #[tokio::test]
+    async fn the_surfaced_body_of_a_chunked_own_write_is_the_pointer_and_not_the_value() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        write_own(&mut state, channel, big_value('x', 700_000))
+            .await
+            .expect("a chunked write");
+        let own = state.identity.author_key();
+        let body = state
+            .docs
+            .plain_body(channel, &own)
+            .expect("a body for a held slice");
+        let text: &[u8] = body.as_ref();
+        assert!(
+            text.len() < 400,
+            "the surfaced body must stay small for a value of 700000 bytes, got {} bytes",
+            text.len()
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(text).expect("a JSON body");
+        assert!(
+            parsed["value"].get("$chunks").is_some(),
+            "the surfaced body must name the chunks, got {parsed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_surfaced_body_of_an_inline_own_write_is_the_value() {
+        let mut state = fresh_state();
+        let channel = Channel::State;
+        let value = big_value('x', 100);
+        write_own(&mut state, channel, value.clone())
+            .await
+            .expect("an inline write");
+        let own = state.identity.author_key();
+        let body = state
+            .docs
+            .plain_body(channel, &own)
+            .expect("a body for a held slice");
+        let text: &[u8] = body.as_ref();
+        let parsed: serde_json::Value = serde_json::from_slice(text).expect("a JSON body");
+        assert_eq!(
+            parsed["value"],
+            serde_json::Value::Object(value),
+            "the surfaced body of an inline write must carry the value"
+        );
+    }
+    #[tokio::test]
+    async fn a_chunked_own_write_on_a_passworded_mesh_stores_sealed_chunks() {
+        let mut state = fresh_state_with_mesh_key(SymmetricKey::from([5u8; 32]));
+        let channel = Channel::State;
+        let value = big_value('x', 70_000);
+        write_own(&mut state, channel, value.clone())
+            .await
+            .expect("a chunked write");
+        let own = state.identity.author_key();
+        assert_eq!(
+            state.docs.own_value(channel, &own),
+            value,
+            "the held value must stay whole"
+        );
+        let root = state
+            .docs
+            .resolved_roots()
+            .next()
+            .expect("the slice names one root");
+        let stored = state.chunks.stored_bytes(root).await;
+        let plain = serde_json::to_vec(&value).expect("a JSON value");
+        assert_eq!(
+            stored.len(),
+            plain.len() + SEAL_SYMMETRIC_OVERHEAD,
+            "the chunks must hold the sealed value"
+        );
+        let sample = &plain[plain.len() / 2..plain.len() / 2 + 64];
+        assert!(
+            !stored.windows(sample.len()).any(|window| window == sample),
+            "no plaintext of the value may be in the chunks of a passworded mesh"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_at_the_cap_is_taken_on_a_passworded_mesh() {
+        let mut state = fresh_state_with_mesh_key(SymmetricKey::from([5u8; 32]));
+        let cap = 1_048_576;
+        let started = clock::Instant::now();
+        write_own(&mut state, Channel::State, big_value('x', cap - 8))
+            .await
+            .expect("the seal overhead must not count against the cap of the value");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a value of 1 MiB is too large for one frame, so it must not be sealed whole as a body: it took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            17,
+            "a sealed value of the cap plus 28 bytes must take 17 chunks"
         );
     }
 }

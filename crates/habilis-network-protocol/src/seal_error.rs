@@ -301,6 +301,20 @@ fn decode_array<const N: usize>(encoded: &str) -> Result<[u8; N], SealError> {
         .map_err(|_| SealError::Invalid(format!("expected {N} bytes")))
 }
 
+/// The bytes that [`seal_symmetric`] adds to a plaintext: the nonce and the authentication tag. A sealed blob is
+/// the plaintext length plus this.
+///
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::crypto::SymmetricKey;
+/// use habilis_network_protocol::seal_error::{SEAL_SYMMETRIC_OVERHEAD, seal_symmetric};
+///
+/// let blob = seal_symmetric(&SymmetricKey::from([9u8; 32]), b"state");
+/// assert_eq!(blob.len(), b"state".len() + SEAL_SYMMETRIC_OVERHEAD);
+/// ```
+pub const SEAL_SYMMETRIC_OVERHEAD: usize = 12 + 16;
+
 /// Symmetrically seal `plaintext` under a pre-shared `key` (a
 /// mesh-password-derived channel key). Layout: `nonce(12) ‖ ct+tag`. Unlike
 /// [`seal_to_body`] there is no ECDH — every holder of `key` can open it, which
@@ -380,8 +394,8 @@ pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>, SealEr
 #[cfg(test)]
 mod tests {
     use super::{
-        ENVELOPE_VERSION, Envelope, open_symmetric, seal_symmetric, seal_to_body,
-        sealed_to_body_len_bound, unseal_from_body,
+        ENVELOPE_VERSION, Envelope, SEAL_SYMMETRIC_OVERHEAD, open_symmetric, seal_symmetric,
+        seal_to_body, sealed_to_body_len_bound, unseal_from_body,
     };
     use crate::crypto::SymmetricKey;
     use x25519_dalek::{PublicKey, StaticSecret};
@@ -440,6 +454,19 @@ mod tests {
                     .expect("the blob was sealed with this key just above, so it opens"),
                 plaintext,
                 "a symmetric seal opens to the plaintext"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sealed_blob_is_the_plaintext_length_plus_the_overhead() {
+        let key = key(7);
+        for length in [0, 1, 100, 5000] {
+            let blob = seal_symmetric(&key, &vec![0u8; length]);
+            assert_eq!(
+                blob.len(),
+                length + SEAL_SYMMETRIC_OVERHEAD,
+                "a plaintext of {length} bytes must seal to the overhead more"
             );
         }
     }

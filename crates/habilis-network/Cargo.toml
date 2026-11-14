@@ -150,6 +150,8 @@ habilis-network-protocol = { path = "../habilis-network-protocol", default-featu
 # Shared-state slice store, the tracing sink (owns
 # tracing-subscriber), multipart reassembly, and the directory ad codec.
 habilis-network-doc = { path = "../habilis-network-doc", default-features = false }
+# Chunks of a value too large for one slice, kept per run.
+habilis-network-chunks = { path = "../habilis-network-chunks" }
 habilis-network-logging = { path = "../habilis-network-logging", default-features = false }
 bs58.workspace = true
 sha2.workspace = true

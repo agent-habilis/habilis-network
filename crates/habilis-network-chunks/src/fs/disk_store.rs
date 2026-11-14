@@ -302,6 +302,17 @@ impl DiskStore {
         write_atomic(&self.map_path(map.root()), &encode_map(map))
     }
 
+    fn drop_map_now(&self, root: Root) -> Result<(), ChunkError> {
+        match fs::remove_file(self.map_path(root)) {
+            Err(error) if error.kind() != ErrorKind::NotFound => {
+                Err(store(|| format!("dropping the map of {}", root.to_hex()))(
+                    error,
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn set_bind_now(&self, file: &FileId, root: Root) -> Result<(), ChunkError> {
         let snapshot = {
             let mut binds = self
@@ -374,6 +385,10 @@ impl ChunkSource for DiskStore {
 impl ChunkStore for DiskStore {
     fn put(&self, hash: ChunkHash, bytes: &[u8]) -> impl Future<Output = Result<(), ChunkError>> {
         future::ready(self.put_now(hash, bytes))
+    }
+
+    fn drop_map(&self, root: Root) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.drop_map_now(root))
     }
 
     fn put_map(&self, map: &ChunkMap) -> impl Future<Output = Result<(), ChunkError>> {

@@ -30,7 +30,9 @@ use habilis_network_util::consts::MAX_MESSAGE_SIZE;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::chunk_pointer::{CHUNKS_KEY, ChunkPointer};
 use crate::pending_slices::PendingSlices;
+use crate::slice_value::SliceValue;
 use crate::wire;
 
 /// The default time a key stays gone, after a signed goodbye or a replaced run. It must cover
@@ -186,6 +188,9 @@ pub struct SliceLimits {
     /// The most authors one store holds. The default is 1024, the cap of the live roster. The
     /// pending set holds as many keys.
     pub max_authors: usize,
+    /// The most bytes that the encoded value of one slice can take. A write past it is refused before
+    /// any chunk is made, and a pointer that names more is refused before any chunk is fetched.
+    pub max_value_bytes: usize,
     /// The writes one author can make at once.
     pub burst: u32,
     /// The time a tombstone keeps its author slot before the key goes to the gone set.
@@ -217,10 +222,18 @@ impl SliceLimits {
             slice_bytes,
             write_interval,
             max_authors,
+            max_value_bytes: tuning::SLICE_VALUE_MAX_BYTES,
             burst,
             tombstone_ttl: Duration::from_mins(10),
             gone_ttl: DEFAULT_GONE_TTL,
         }
+    }
+
+    /// Sets the most bytes that the encoded value of one slice can take.
+    #[must_use]
+    pub fn max_value_bytes(mut self, bytes: usize) -> Self {
+        self.max_value_bytes = bytes;
+        self
     }
 
     /// Sets the time a tombstone keeps its author slot.
@@ -240,7 +253,12 @@ impl SliceLimits {
 
 impl Default for SliceLimits {
     fn default() -> Self {
-        Self::new(MAX_MESSAGE_SIZE, Duration::from_secs(1), 1024, 5)
+        Self::new(
+            MAX_MESSAGE_SIZE,
+            Duration::from_secs(1),
+            tuning::SLICE_AUTHORS_MAX,
+            5,
+        )
     }
 }
 
@@ -286,6 +304,15 @@ pub enum SliceError {
     StaleDraft,
     /// The body could not be sealed with the channel key.
     Seal,
+    /// The encoded value is larger than the value cap.
+    ValueTooLarge {
+        /// The size of the encoded value in bytes.
+        bytes: usize,
+        /// The cap in bytes.
+        limit: usize,
+    },
+    /// The value holds the reserved `$chunks` key, which only a chunk pointer may carry.
+    Reserved,
 }
 
 impl fmt::Display for SliceError {
@@ -304,6 +331,11 @@ impl fmt::Display for SliceError {
             Self::DraftMismatch => write!(f, "the frame is not the draft it claims"),
             Self::StaleDraft => write!(f, "the slice moved on after the draft"),
             Self::Seal => write!(f, "the body could not be sealed"),
+            Self::ValueTooLarge { bytes, limit } => write!(
+                f,
+                "the value has {bytes} bytes, past the cap of {limit} bytes: store the data as a blob and put the ticket in the value"
+            ),
+            Self::Reserved => write!(f, "the value holds the reserved \"$chunks\" key"),
         }
     }
 }
@@ -356,6 +388,8 @@ pub struct LocalDraft {
     key: AuthorKey,
     version: u64,
     body: MessageBody,
+    /// The whole value of a draft that names a chunked value, which the commit keeps with the slice.
+    resolved: Option<Value>,
 }
 
 impl LocalDraft {
@@ -406,7 +440,7 @@ struct Slice {
     frame: Verified,
     version: u64,
     hash: ContentHash,
-    value: Value,
+    value: SliceValue,
     since: Instant,
 }
 
@@ -476,7 +510,123 @@ impl SliceStore {
     /// The value of the slice of `key`, when the store holds one.
     #[must_use]
     pub fn value(&self, key: &AuthorKey) -> Option<&Value> {
-        self.slices.get(key).map(|slice| &slice.value)
+        self.slices
+            .get(key)
+            .and_then(|slice| slice.value.resolved())
+    }
+
+    /// The pointer that the slice of `key` holds, when it holds one in place of a value.
+    #[must_use]
+    pub fn pointer(&self, key: &AuthorKey) -> Option<&ChunkPointer> {
+        self.slices.get(key).and_then(|slice| slice.value.pointer())
+    }
+
+    /// The pointers that the slices of this store hold, one for each author whose value is chunked.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert_eq!(store.pointers().count(), 0);
+    /// ```
+    pub fn pointers(&self) -> impl Iterator<Item = &ChunkPointer> {
+        self.slices
+            .values()
+            .filter_map(|slice| slice.value.pointer())
+    }
+
+    /// The authors whose held version is a pointer that has not been fetched, with the pointer. The engine asks
+    /// the holders of the chunks of each one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert_eq!(store.unresolved().count(), 0);
+    /// ```
+    pub fn unresolved(&self) -> impl Iterator<Item = (AuthorKey, ChunkPointer)> {
+        self.slices
+            .iter()
+            .filter_map(|(key, slice)| match &slice.value {
+                SliceValue::Pointer { pointer, .. } => Some((*key, *pointer)),
+                SliceValue::Inline(_) | SliceValue::Chunked { .. } => None,
+            })
+    }
+
+    /// Whether the held version of `key` is a pointer that has not been fetched.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::{AuthorKey, Channel};
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert!(!store.is_unresolved(&AuthorKey::from([1u8; 32])));
+    /// ```
+    #[must_use]
+    pub fn is_unresolved(&self, key: &AuthorKey) -> bool {
+        self.slices
+            .get(key)
+            .is_some_and(|slice| matches!(slice.value, SliceValue::Pointer { .. }))
+    }
+
+    /// The pointers of the slices whose chunked value is fetched and held whole. The chunks of these roots are in the
+    /// chunk store, and a sweep keeps them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert_eq!(store.resolved_pointers().count(), 0);
+    /// ```
+    pub fn resolved_pointers(&self) -> impl Iterator<Item = &ChunkPointer> {
+        self.slices.values().filter_map(|slice| match &slice.value {
+            SliceValue::Chunked { pointer, .. } => Some(pointer),
+            SliceValue::Inline(_) | SliceValue::Pointer { .. } => None,
+        })
+    }
+
+    /// Keeps `value`, the whole value that `pointer` names, with the slice of `key`, and says whether it did. It
+    /// does not when the slice no longer holds `pointer`: a newer version replaced it, or the author left.
+    ///
+    /// # Errors
+    ///
+    /// [`SliceError::Malformed`] when `value` is not an object, and [`SliceError::Reserved`] when it holds the
+    /// `$chunks` key. The slice keeps its pointer and its last complete value.
+    pub fn resolve_pointer(
+        &mut self,
+        key: &AuthorKey,
+        pointer: ChunkPointer,
+        value: Value,
+    ) -> Result<bool, SliceError> {
+        if !value.is_object() {
+            return Err(SliceError::Malformed);
+        }
+        if value.get(CHUNKS_KEY).is_some() {
+            return Err(SliceError::Reserved);
+        }
+        let Some(slice) = self.slices.get_mut(key) else {
+            return Ok(false);
+        };
+        match &slice.value {
+            SliceValue::Pointer { pointer: held, .. } if *held == pointer => {
+                slice.value = SliceValue::Chunked { pointer, value };
+                Ok(true)
+            }
+            SliceValue::Pointer { .. } | SliceValue::Inline(_) | SliceValue::Chunked { .. } => {
+                Ok(false)
+            }
+        }
     }
 
     /// Returns the signed frame held for `key`, which a resend sends. No caller yet.
@@ -491,22 +641,47 @@ impl SliceStore {
         self.slices.len()
     }
 
+    /// Returns the document as the slices were signed: `{<lowercase hex author key>: value}`, where the value of a
+    /// chunked slice is its pointer and not the value that the pointer names. It shows what travels, for a reader that
+    /// debugs the sync. A tombstone is left out.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use habilis_network_doc::{SliceLimits, SliceStore, worst_frame_overhead};
+    /// use habilis_network_protocol::Channel;
+    ///
+    /// let store = SliceStore::new(Channel::State, SliceLimits::default(), worst_frame_overhead());
+    /// assert!(store.raw_view().is_empty());
+    /// ```
+    #[must_use]
+    pub fn raw_view(&self) -> Map<String, Value> {
+        self.slices
+            .iter()
+            .filter(|(_, slice)| !slice.value.is_tombstone())
+            .map(|(key, slice)| {
+                let hex = String::from_utf8_lossy(&key.hex()).into_owned();
+                (hex, slice.value.signed())
+            })
+            .collect()
+    }
+
     /// Returns the whole document as `{<lowercase hex author key>: value}`, without the gone
     /// authors.
     #[must_use]
     pub fn view(&self) -> Map<String, Value> {
         self.slices
             .iter()
-            .filter(|(_, slice)| !slice.value.is_null())
-            .map(|(key, slice)| {
+            .filter(|(_, slice)| !slice.value.is_tombstone())
+            .filter_map(|(key, slice)| {
                 let hex = String::from_utf8_lossy(&key.hex()).into_owned();
-                (hex, slice.value.clone())
+                slice.value.to_value().map(|value| (hex, value))
             })
             .collect()
     }
 
-    /// Checks a frame the way [`SliceStore::ingest`] does, and returns its slice body.
-    fn read(&self, frame: &Verified) -> Result<SliceBody, SliceError> {
+    /// Checks a frame the way [`SliceStore::ingest`] does, and returns its version and value.
+    fn read(&self, frame: &Verified) -> Result<(u64, SliceValue), SliceError> {
         if frame.kind != self.channel.event_kind() {
             return Err(SliceError::WrongChannel);
         }
@@ -523,7 +698,35 @@ impl SliceStore {
         if !(body.value.is_object() || body.value.is_null()) {
             return Err(SliceError::Malformed);
         }
-        Ok(body)
+        if body.value.get(CHUNKS_KEY).is_none() {
+            return Ok((body.version, SliceValue::Inline(body.value)));
+        }
+        if body
+            .value
+            .as_object()
+            .is_some_and(|object| object.len() > 1)
+        {
+            return Err(SliceError::Reserved);
+        }
+        let pointer = ChunkPointer::parse(&body.value).ok_or(SliceError::Malformed)?;
+        self.check_pointer_size(pointer)?;
+        Ok((
+            body.version,
+            SliceValue::Pointer {
+                pointer,
+                last: None,
+            },
+        ))
+    }
+
+    /// Refuses a pointer that names more bytes than the value cap. The check comes before any chunk is asked for.
+    fn check_pointer_size(&self, pointer: ChunkPointer) -> Result<(), SliceError> {
+        let limit = self.limits.max_value_bytes;
+        let bytes = usize::try_from(pointer.size()).unwrap_or(usize::MAX);
+        if bytes > limit {
+            return Err(SliceError::ValueTooLarge { bytes, limit });
+        }
+        Ok(())
     }
 
     /// Holds a frame of an author that is not in the roster yet, until [`SliceStore::take_pending`]
@@ -549,12 +752,12 @@ impl SliceStore {
     /// assert!(store.view().is_empty());
     /// ```
     pub fn hold(&mut self, frame: &Verified, now: Instant) -> Result<(), SliceError> {
-        let body = self.read(frame)?;
+        let (version, _) = self.read(frame)?;
         let key = frame.key();
         if self.is_gone(&key) {
             return Err(SliceError::GoneKey);
         }
-        self.pending.hold(frame, body.version, now);
+        self.pending.hold(frame, version, now);
         Ok(())
     }
 
@@ -587,8 +790,8 @@ impl SliceStore {
         live: bool,
         now: Instant,
     ) -> SliceIngest {
-        let body = match self.read(frame) {
-            Ok(body) => body,
+        let (version, value) = match self.read(frame) {
+            Ok(read) => read,
             Err(error) => return SliceIngest::Refused(error),
         };
         let key = frame.key();
@@ -598,7 +801,7 @@ impl SliceStore {
         let hash = frame.content_hash();
         let is_new = match self.slices.get(&key) {
             None => true,
-            Some(held) => match body.version.cmp(&held.version) {
+            Some(held) => match version.cmp(&held.version) {
                 Ordering::Greater => true,
                 Ordering::Less => return SliceIngest::Stale,
                 Ordering::Equal if hash == held.hash => return SliceIngest::Duplicate,
@@ -614,11 +817,18 @@ impl SliceStore {
         if live && is_new && !self.take_token(&key, now, self.receive_burst()) {
             return SliceIngest::Refused(SliceError::RateLimited);
         }
+        let mut value = value;
+        if let SliceValue::Pointer { last, .. } = &mut value {
+            *last = self
+                .slices
+                .get_mut(&key)
+                .and_then(|held| held.value.take_complete());
+        }
         let incoming = Slice {
             frame: frame.clone(),
-            version: body.version,
+            version,
             hash,
-            value: body.value,
+            value,
             since: now,
         };
         self.slices.insert(key, incoming);
@@ -632,7 +842,7 @@ impl SliceStore {
     ///
     /// # Errors
     ///
-    /// [`SliceError::Malformed`] when the body does not build, [`SliceError::Seal`] when the
+    /// [`SliceError::Malformed`] when the body does not build,  when the encoded value is past the value cap, [`SliceError::Seal`] when the
     /// channel key does not seal it, [`SliceError::TooLarge`] when the body is past the cap, and
     /// [`SliceError::RateLimited`] when `own` has no token left.
     pub fn prepare_local(
@@ -642,6 +852,36 @@ impl SliceStore {
         now: Instant,
     ) -> Result<LocalDraft, SliceError> {
         self.draft_at(own, Value::Object(value), now, true)
+    }
+
+    /// Makes the draft of the next write of the own slice `own` as a pointer to `value`, a value that
+    /// is too large for one frame and that the caller has chunked. The draft carries the pointer, and
+    /// the commit keeps `value` whole with the slice, so a reader sees it. The write takes one token.
+    ///
+    /// # Errors
+    ///
+    /// [`SliceError::ValueTooLarge`] when the pointer names more bytes than the value cap,
+    /// [`SliceError::Seal`] when the channel key does not seal the body, and
+    /// [`SliceError::RateLimited`] when `own` has no token left.
+    pub fn prepare_pointer(
+        &mut self,
+        own: &AuthorKey,
+        pointer: ChunkPointer,
+        value: Map<String, Value>,
+        now: Instant,
+    ) -> Result<LocalDraft, SliceError> {
+        self.check_pointer_size(pointer)?;
+        let (version, body, _) = self.seal_body(own, pointer.to_value())?;
+        if !self.take_token(own, now, self.limits.burst) {
+            return Err(SliceError::RateLimited);
+        }
+        Ok(LocalDraft {
+            channel: self.channel,
+            key: *own,
+            version,
+            body,
+            resolved: Some(Value::Object(value)),
+        })
     }
 
     /// Makes the draft of the own tombstone of `own`, the farewell of a leaving member.
@@ -711,6 +951,7 @@ impl SliceStore {
             key,
             version,
             body,
+            resolved,
         } = draft;
         if channel != self.channel || frame.key() != key || frame.body.as_str() != body.as_str() {
             return Err(SliceError::DraftMismatch);
@@ -719,7 +960,12 @@ impl SliceStore {
             return Err(SliceError::StaleDraft);
         }
         match self.ingest(frame, false, now) {
-            SliceIngest::Applied => Ok(()),
+            SliceIngest::Applied => {
+                if let Some(value) = resolved {
+                    self.resolve(&key, value);
+                }
+                Ok(())
+            }
             SliceIngest::Refused(error) => {
                 if matches!(error, SliceError::TooLarge { .. }) {
                     self.refund_token(&key);
@@ -729,6 +975,16 @@ impl SliceStore {
             SliceIngest::Duplicate | SliceIngest::Stale | SliceIngest::Conflict => {
                 Err(SliceError::StaleDraft)
             }
+        }
+    }
+
+    /// Keeps `value` whole with the pointer that the slice of `key` holds.
+    fn resolve(&mut self, key: &AuthorKey, value: Value) {
+        let Some(slice) = self.slices.get_mut(key) else {
+            return;
+        };
+        if let SliceValue::Pointer { pointer, .. } = slice.value {
+            slice.value = SliceValue::Chunked { pointer, value };
         }
     }
 
@@ -753,7 +1009,7 @@ impl SliceStore {
             .slices
             .iter()
             .filter(|(_, slice)| {
-                slice.value.is_null() && now.saturating_duration_since(slice.since) >= ttl
+                slice.value.is_tombstone() && now.saturating_duration_since(slice.since) >= ttl
             })
             .map(|(key, _)| *key)
             .collect();
@@ -952,6 +1208,18 @@ impl SliceStore {
     }
 
     /// The number of keys in the gone set, for the tests that check a key takes one entry.
+    /// The bytes and the count of the whole values that chunked slices hold, for the leak tests.
+    #[cfg(test)]
+    fn chunked_held(&self) -> (usize, usize) {
+        self.slices
+            .values()
+            .filter_map(|slice| match &slice.value {
+                SliceValue::Chunked { value, .. } => Some(value.to_string().len()),
+                SliceValue::Inline(_) | SliceValue::Pointer { .. } => None,
+            })
+            .fold((0, 0), |(bytes, count), len| (bytes + len, count + 1))
+    }
+
     #[cfg(test)]
     fn gone_count(&self) -> usize {
         self.gone.len()
@@ -974,6 +1242,7 @@ impl SliceStore {
             key: *own,
             version,
             body,
+            resolved: None,
         })
     }
 
@@ -985,28 +1254,49 @@ impl SliceStore {
         own: &AuthorKey,
         value: Value,
     ) -> Result<(u64, MessageBody, usize), SliceError> {
+        let encoded = value.to_string().len();
+        if encoded > self.limits.max_value_bytes {
+            return Err(SliceError::ValueTooLarge {
+                bytes: encoded,
+                limit: self.limits.max_value_bytes,
+            });
+        }
+        if value.get(CHUNKS_KEY).is_some() {
+            return Err(SliceError::Reserved);
+        }
+        self.seal_body(own, value)
+    }
+
+    /// Builds the next version and the sealed body of the slice of `own` with `value`, and measures
+    /// the body against the frame cap.
+    fn seal_body(
+        &self,
+        own: &AuthorKey,
+        value: Value,
+    ) -> Result<(u64, MessageBody, usize), SliceError> {
         let version = self.version(own).unwrap_or(0) + 1;
         let mut body_json = json!({"version": version});
         body_json["value"] = value;
         let json = body_json.to_string();
         let plain = MessageBody::try_new(&json).map_err(|_| SliceError::Malformed)?;
-        let (body, measured) = if let Some(key) = self.key.as_ref() {
-            (
-                wire::encrypt_body(&plain, key).map_err(|_| SliceError::Seal)?,
-                wire::sealed_body_len_bound(plain.as_str().len()),
-            )
+        let measured: usize = if self.key.is_some() {
+            wire::sealed_body_len_bound(plain.as_str().len())
         } else {
-            let escaped =
-                serde_json::to_string(plain.as_str()).map_or(usize::MAX, |text| text.len());
-            (plain, escaped)
+            serde_json::to_string(plain.as_str()).map_or(usize::MAX, |text| text.len())
         };
         let limit = self.limits.slice_bytes.saturating_sub(self.frame_overhead);
+        // The check comes before the seal: sealing encodes the whole body in base 58, which costs more than
+        // the square of its length, so a value that is too large for a frame must not be sealed.
         if measured > limit {
             return Err(SliceError::TooLarge {
                 bytes: measured,
                 limit,
             });
         }
+        let body = match self.key.as_ref() {
+            Some(key) => wire::encrypt_body(&plain, key).map_err(|_| SliceError::Seal)?,
+            None => plain,
+        };
         Ok((version, body, measured))
     }
 
@@ -1094,6 +1384,8 @@ mod tests {
         LocalDraft, PAGE_OVERHEAD_UNPROBED, SliceError, SliceIngest, SliceLimits, SliceStore,
         WORST_FRAME_OVERHEAD, wire,
     };
+    use crate::ChunkPointer;
+    use habilis_network_chunks::Root;
     use habilis_network_protocol::digest::{DigestEntry, DigestPage};
     use habilis_network_protocol::messages::{MessageError, Verified};
     use habilis_network_protocol::{
@@ -1101,6 +1393,7 @@ mod tests {
         Message, MessageBody, Nickname, RelayLadder, Seed, SymmetricKey,
     };
     use habilis_network_util::consts::MAX_MESSAGE_SIZE;
+    use habilis_network_util::tuning;
     use serde_json::{Map, Value, json};
     use std::time::{Duration, Instant};
 
@@ -1295,6 +1588,685 @@ mod tests {
     }
 
     #[test]
+    fn ingest_refuses_a_value_with_the_reserved_chunks_key() {
+        let mut store = store();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, json!({"$chunks": 1, "a": 2}))),
+            SliceIngest::Refused(SliceError::Reserved),
+            "an inline value with the chunks key must be refused as reserved"
+        );
+        assert_eq!(store.authors(), 0, "a reserved value must leave no author");
+    }
+
+    #[test]
+    fn prepare_local_refuses_a_value_with_the_reserved_chunks_key() {
+        let mut store = store();
+        assert_eq!(
+            store
+                .prepare_local(&key(1), object(json!({"$chunks": 1})), Instant::now())
+                .map(|_| ()),
+            Err(SliceError::Reserved),
+            "a write with the chunks key must be refused as reserved"
+        );
+    }
+
+    fn pointer_value() -> (ChunkPointer, Value) {
+        let pointer = ChunkPointer::new(Root::from_bytes([7; 32]), 100_000);
+        let value = pointer.to_value();
+        (pointer, value)
+    }
+
+    #[test]
+    fn ingest_applies_a_pointer_slice_and_keeps_the_pointer() {
+        let mut store = store();
+        let (pointer, value) = pointer_value();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, value)),
+            SliceIngest::Applied,
+            "a slice that is exactly one pointer must apply"
+        );
+        assert_eq!(
+            store.pointer(&key(1)),
+            Some(&pointer),
+            "the store must keep the pointer"
+        );
+        assert_eq!(
+            store.value(&key(1)),
+            None,
+            "a pointer slice holds no inline value"
+        );
+    }
+
+    fn hex_of(key: &AuthorKey) -> String {
+        String::from_utf8_lossy(&key.hex()).into_owned()
+    }
+
+    #[test]
+    fn view_leaves_out_an_author_whose_first_version_is_a_pointer_that_is_not_fetched() {
+        let mut store = store();
+        let (pointer, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 1, value));
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            None,
+            "a reader must not see the raw pointer, nor a half of a value"
+        );
+        let unresolved: Vec<(AuthorKey, ChunkPointer)> = store.unresolved().collect();
+        assert_eq!(
+            unresolved,
+            vec![(key(1), pointer)],
+            "the engine must be told that the pointer is not fetched"
+        );
+    }
+
+    #[test]
+    fn view_keeps_the_last_complete_value_while_the_next_version_is_fetched() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"old": true})));
+        let (_, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 2, value));
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&json!({"old": true})),
+            "the view must keep the last complete version until the new one is fetched"
+        );
+        let newer = ChunkPointer::new(Root::from_bytes([8; 32]), 200_000).to_value();
+        apply(&mut store, &frame(key(1), 3, newer));
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&json!({"old": true})),
+            "a second pointer version must not lose the last complete value"
+        );
+    }
+
+    #[test]
+    fn a_fetched_value_replaces_the_last_complete_one_and_the_pointer_is_resolved() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"old": true})));
+        let (pointer, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 2, value));
+        let fetched = json!({"new": "value"});
+        assert_eq!(
+            store.resolve_pointer(&key(1), pointer, fetched.clone()),
+            Ok(true),
+            "a value that the held pointer names must be kept"
+        );
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&fetched),
+            "the view must show the fetched value"
+        );
+        assert_eq!(
+            store.value(&key(1)),
+            Some(&fetched),
+            "the slice holds it whole"
+        );
+        assert_eq!(
+            store.unresolved().count(),
+            0,
+            "a resolved pointer is no longer waiting for chunks"
+        );
+        assert_eq!(
+            store.chunked_held(),
+            (fetched.to_string().len(), 1),
+            "the old value must be dropped, and the new one held once"
+        );
+    }
+
+    #[test]
+    fn the_raw_view_shows_the_pointer_where_the_view_shows_the_value() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"inline": true})));
+        let (pointer, value) = pointer_value();
+        apply(&mut store, &frame(key(2), 1, value.clone()));
+        apply(&mut store, &frame(key(3), 1, value.clone()));
+        let fetched = json!({"whole": "value"});
+        store
+            .resolve_pointer(&key(3), pointer, fetched.clone())
+            .expect("an object");
+        apply(&mut store, &frame(key(4), 1, Value::Null));
+        let raw = store.raw_view();
+        assert_eq!(
+            raw.get(&hex_of(&key(1))),
+            Some(&json!({"inline": true})),
+            "an inline value is its own raw value"
+        );
+        assert_eq!(
+            raw.get(&hex_of(&key(2))),
+            Some(&value),
+            "a pointer that waits is shown as the pointer"
+        );
+        assert_eq!(
+            raw.get(&hex_of(&key(3))),
+            Some(&value),
+            "a pointer that was fetched is still the pointer in the raw view"
+        );
+        assert_eq!(raw.get(&hex_of(&key(4))), None, "a tombstone is left out");
+        let view = store.view();
+        assert_eq!(
+            view.get(&hex_of(&key(3))),
+            Some(&fetched),
+            "the view shows the whole value of the same slice"
+        );
+        assert_eq!(
+            view.get(&hex_of(&key(2))),
+            None,
+            "the view leaves out a first version that is not fetched"
+        );
+    }
+
+    #[test]
+    fn a_pointer_is_unresolved_until_its_value_is_fetched_and_only_then_resolved() {
+        let mut store = store();
+        let (pointer, value) = pointer_value();
+        assert!(
+            !store.is_unresolved(&key(1)),
+            "an author with no slice has none"
+        );
+        apply(&mut store, &frame(key(1), 1, value));
+        assert!(
+            store.is_unresolved(&key(1)),
+            "a pointer that nobody fetched waits"
+        );
+        assert_eq!(
+            store.resolved_pointers().count(),
+            0,
+            "a pointer that waits has no chunks to keep"
+        );
+        assert_eq!(
+            store.resolve_pointer(&key(1), pointer, json!({"a": 1})),
+            Ok(true),
+            "the fetched value is kept"
+        );
+        assert!(
+            !store.is_unresolved(&key(1)),
+            "a resolved pointer does not wait"
+        );
+        let resolved: Vec<ChunkPointer> = store.resolved_pointers().copied().collect();
+        assert_eq!(
+            resolved,
+            vec![pointer],
+            "the chunks of a resolved pointer are kept"
+        );
+        apply(&mut store, &frame(key(1), 2, json!({"inline": 1})));
+        assert_eq!(
+            store.resolved_pointers().count(),
+            0,
+            "a newer inline version unpins the old root"
+        );
+    }
+
+    #[test]
+    fn a_fetched_value_of_a_pointer_that_a_newer_version_replaced_is_not_kept() {
+        let mut store = store();
+        let (old, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 1, value));
+        apply(&mut store, &frame(key(1), 2, json!({"newer": 1})));
+        assert_eq!(
+            store.resolve_pointer(&key(1), old, json!({"late": true})),
+            Ok(false),
+            "a value of a replaced pointer must not be kept"
+        );
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&json!({"newer": 1})),
+            "the newer version must stay"
+        );
+        assert_eq!(
+            store.resolve_pointer(&key(2), old, json!({"nobody": true})),
+            Ok(false),
+            "an author with no slice has nothing to resolve"
+        );
+    }
+
+    #[test]
+    fn a_fetched_value_that_is_not_an_object_or_holds_the_reserved_key_is_refused() {
+        let mut store = store();
+        apply(&mut store, &frame(key(1), 1, json!({"old": true})));
+        let (pointer, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 2, value));
+        assert_eq!(
+            store.resolve_pointer(&key(1), pointer, json!([1, 2])),
+            Err(SliceError::Malformed),
+            "a value that is not an object must be refused"
+        );
+        assert_eq!(
+            store.resolve_pointer(&key(1), pointer, json!({"$chunks": 1})),
+            Err(SliceError::Reserved),
+            "a value with the reserved key must be refused"
+        );
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&json!({"old": true})),
+            "a refused value must leave the last complete version"
+        );
+        assert_eq!(store.unresolved().count(), 1, "the pointer must still wait");
+    }
+
+    #[test]
+    fn a_chunked_value_that_a_pointer_version_follows_is_kept_as_the_last_complete_one() {
+        let mut store = value_capped_store(1 << 20);
+        let (first, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 1, value));
+        let fetched = json!({"first": "value"});
+        assert_eq!(
+            store.resolve_pointer(&key(1), first, fetched.clone()),
+            Ok(true),
+            "the first value is fetched"
+        );
+        let next = ChunkPointer::new(Root::from_bytes([9; 32]), 150_000);
+        apply(&mut store, &frame(key(1), 2, next.to_value()));
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&fetched),
+            "the chunked value must stay in the view until the next one is fetched"
+        );
+        assert_eq!(
+            store.chunked_held(),
+            (0, 0),
+            "the last complete value is held once, as the last value of the pointer, and not twice"
+        );
+    }
+
+    #[test]
+    fn ingest_refuses_a_chunks_key_that_is_not_a_pointer() {
+        let mut store = store();
+        for value in [
+            json!({"$chunks": 1}),
+            json!({"$chunks": {"root": "zz", "size": 1}}),
+            json!({"$chunks": {"root": "00", "size": 1, "extra": 1}}),
+        ] {
+            assert_eq!(
+                apply(&mut store, &frame(key(1), 1, value.clone())),
+                SliceIngest::Refused(SliceError::Malformed),
+                "a lone chunks key that is no pointer must be malformed: {value}"
+            );
+        }
+    }
+
+    /// A store whose slice cap is wide, so only the value cap refuses a write.
+    fn value_capped_store(cap: usize) -> SliceStore {
+        let limits = SliceLimits::default().max_value_bytes(cap);
+        small_store(SliceLimits {
+            slice_bytes: 1 << 20,
+            ..limits
+        })
+    }
+
+    #[test]
+    fn ingest_refuses_a_pointer_that_names_more_than_the_value_cap_and_keeps_the_held_version() {
+        let mut store = value_capped_store(64);
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, json!({"a": 1}))),
+            SliceIngest::Applied,
+            "an inline version must apply first"
+        );
+        let over = ChunkPointer::new(Root::from_bytes([7; 32]), 65).to_value();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 2, over)),
+            SliceIngest::Refused(SliceError::ValueTooLarge {
+                bytes: 65,
+                limit: 64
+            }),
+            "a pointer past the cap must be refused before any chunk is asked for"
+        );
+        assert_eq!(
+            store.version(&key(1)),
+            Some(1),
+            "a refused pointer must keep the last complete version"
+        );
+        assert_eq!(store.pointer(&key(1)), None, "no pointer may be held");
+        let at_cap = ChunkPointer::new(Root::from_bytes([7; 32]), 64).to_value();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 2, at_cap)),
+            SliceIngest::Applied,
+            "a pointer at the cap must apply"
+        );
+    }
+
+    #[test]
+    fn prepare_local_refuses_a_value_past_the_value_cap_and_says_what_to_do() {
+        let mut store = value_capped_store(64);
+        let error: SliceError = store
+            .prepare_local(
+                &key(1),
+                object(json!({"k": "x".repeat(100)})),
+                Instant::now(),
+            )
+            .map(|_| ())
+            .expect_err("a value past the cap must be refused");
+        assert_eq!(
+            error,
+            SliceError::ValueTooLarge {
+                bytes: 108,
+                limit: 64
+            },
+            "the error must carry the encoded size and the cap"
+        );
+        assert_eq!(
+            error.to_string(),
+            "the value has 108 bytes, past the cap of 64 bytes: store the data as a blob and put the ticket in the value",
+            "the error text must name the cap and say to use a blob"
+        );
+    }
+
+    #[test]
+    fn prepare_local_takes_a_value_at_the_value_cap_and_spends_nothing_past_it() {
+        let mut store = value_capped_store(16);
+        let at_cap = object(json!({"k": "x".repeat(8)}));
+        assert!(
+            store.prepare_local(&key(1), at_cap, Instant::now()).is_ok(),
+            "a value of exactly the cap must be taken"
+        );
+        let past_cap = object(json!({"k": "x".repeat(9)}));
+        assert!(
+            store
+                .prepare_local(&key(1), past_cap, Instant::now())
+                .is_err(),
+            "one byte past the cap must be refused"
+        );
+        assert_eq!(
+            store.limits().max_value_bytes,
+            16,
+            "the cap is the limit of the store"
+        );
+    }
+
+    #[test]
+    fn the_value_cap_counts_encoded_bytes_not_characters() {
+        let mut store = value_capped_store(12);
+        for (name, text) in [("multi-byte", "éé"), ("escaped", "\n\n")] {
+            let at_cap = object(json!({"k": text}));
+            assert!(
+                store.prepare_local(&key(1), at_cap, Instant::now()).is_ok(),
+                "a {name} value of 12 encoded bytes must fit a cap of 12"
+            );
+            let past_cap = object(json!({"k": format!("{text}x")}));
+            assert_eq!(
+                store
+                    .prepare_local(&key(1), past_cap, Instant::now())
+                    .map(|_| ()),
+                Err(SliceError::ValueTooLarge {
+                    bytes: 13,
+                    limit: 12
+                }),
+                "a {name} value of 13 encoded bytes must be past a cap of 12"
+            );
+        }
+    }
+
+    #[test]
+    fn state_and_meta_have_the_same_value_cap() {
+        for channel in [Channel::State, Channel::Meta] {
+            let limits = SliceLimits::default().max_value_bytes(16);
+            let mut store = SliceStore::new(
+                channel,
+                SliceLimits {
+                    slice_bytes: 1 << 20,
+                    ..limits
+                },
+                WORST_FRAME_OVERHEAD,
+            );
+            let past_cap = object(json!({"k": "x".repeat(9)}));
+            assert!(
+                matches!(
+                    store.prepare_local(&key(1), past_cap, Instant::now()),
+                    Err(SliceError::ValueTooLarge { limit: 16, .. })
+                ),
+                "the {channel:?} channel must refuse a value past the cap"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_write_leaves_the_version_and_the_store_as_they_were() {
+        let mut store = value_capped_store(16);
+        let past_cap = object(json!({"k": "x".repeat(50)}));
+        assert!(
+            store
+                .prepare_local(&key(1), past_cap, Instant::now())
+                .is_err(),
+            "a value past the cap must be refused"
+        );
+        assert_eq!(
+            store.version(&key(1)),
+            None,
+            "a refused write must not make a version"
+        );
+        assert_eq!(
+            store.authors(),
+            0,
+            "a refused write must not make an author"
+        );
+    }
+
+    #[test]
+    fn an_inline_value_that_fits_one_frame_is_never_refused_by_the_default_cap() {
+        let mut store = store();
+        let inline = object(json!({"k": "x".repeat(1000)}));
+        assert!(
+            store.prepare_local(&key(1), inline, Instant::now()).is_ok(),
+            "a value of 1000 bytes must fit the default cap and one frame"
+        );
+    }
+
+    #[test]
+    fn the_default_value_cap_is_the_tuning_constant_and_the_field_changes_the_check() {
+        assert_eq!(
+            SliceLimits::default().max_value_bytes,
+            tuning::SLICE_VALUE_MAX_BYTES,
+            "the default cap must be the tuning constant"
+        );
+        assert_eq!(tuning::SLICE_VALUE_MAX_BYTES, 1_048_576, "the cap is 1 MiB");
+        let wide = SliceLimits {
+            slice_bytes: 1 << 22,
+            ..SliceLimits::default()
+        };
+        let value = |len: usize| object(json!({"k": "x".repeat(len)}));
+        let mut at_default = small_store(wide);
+        assert!(
+            at_default
+                .prepare_local(&key(1), value(1_048_576 - 8), Instant::now())
+                .is_ok(),
+            "a value of exactly 1 MiB must be taken at the default cap"
+        );
+        assert_eq!(
+            at_default
+                .prepare_local(&key(1), value(1_048_576 - 7), Instant::now())
+                .map(|_| ()),
+            Err(SliceError::ValueTooLarge {
+                bytes: 1_048_577,
+                limit: 1_048_576
+            }),
+            "one byte past 1 MiB must be refused at the default cap"
+        );
+        let mut raised = small_store(wide.max_value_bytes(1_048_577));
+        assert!(
+            raised
+                .prepare_local(&key(1), value(1_048_576 - 7), Instant::now())
+                .is_ok(),
+            "a raised field must raise the check"
+        );
+    }
+
+    #[test]
+    fn a_value_past_the_cap_costs_no_write_token() {
+        let limits = SliceLimits::default().max_value_bytes(16);
+        let mut store = small_store(SliceLimits {
+            burst: 1,
+            slice_bytes: 1 << 20,
+            ..limits
+        });
+        let now = Instant::now();
+        let past_cap = object(json!({"k": "x".repeat(50)}));
+        assert!(
+            store.prepare_local(&key(1), past_cap, now).is_err(),
+            "a value past the cap must be refused"
+        );
+        assert!(
+            store
+                .prepare_local(&key(1), object(json!({"k": 1})), now)
+                .is_ok(),
+            "a refused value must leave the one token of the burst"
+        );
+    }
+
+    #[test]
+    fn a_smaller_value_replaces_a_held_one_after_a_refused_write() {
+        let mut store = value_capped_store(64);
+        let now = Instant::now();
+        let held = store
+            .prepare_local(&key(1), object(json!({"k": "x".repeat(40)})), now)
+            .expect("a value under the cap");
+        let frame = frame_of(&held, key(1));
+        store
+            .commit_local(held, &frame, now)
+            .expect("the first write");
+        let before = store.value(&key(1)).cloned();
+        assert!(
+            store
+                .prepare_local(&key(1), object(json!({"k": "x".repeat(80)})), now)
+                .is_err(),
+            "a value past the cap must be refused"
+        );
+        assert_eq!(
+            store.value(&key(1)).cloned(),
+            before,
+            "a refused write must leave the held value as it was"
+        );
+        assert!(
+            store
+                .prepare_local(&key(1), object(json!({"k": "x"})), now)
+                .is_ok(),
+            "a smaller value must be taken right after a refused write"
+        );
+        assert!(
+            store.prepare_leave(&key(1), now).is_ok(),
+            "a tombstone must be taken whatever the held value is"
+        );
+    }
+
+    /// A store with wide frames, a pointer to the `size` bytes of the value `{"k": "x"...}`, and the value.
+    fn chunked_write(
+        store: &mut SliceStore,
+        text_len: usize,
+        now: Instant,
+    ) -> Result<LocalDraft, SliceError> {
+        let value = object(json!({"k": "x".repeat(text_len)}));
+        let size = Value::Object(value.clone()).to_string().len() as u64;
+        let pointer = ChunkPointer::new(Root::from_bytes([3; 32]), size);
+        store.prepare_pointer(&key(1), pointer, value, now)
+    }
+
+    #[test]
+    fn a_pointer_draft_commits_a_chunked_slice_that_reads_whole() {
+        let mut store = value_capped_store(1 << 20);
+        let now = Instant::now();
+        let draft = chunked_write(&mut store, 5000, now).expect("a pointer draft");
+        let frame = frame_of(&draft, key(1));
+        store.commit_local(draft, &frame, now).expect("the commit");
+        let whole = Value::Object(object(json!({"k": "x".repeat(5000)})));
+        assert_eq!(
+            store.value(&key(1)),
+            Some(&whole),
+            "a chunked slice must read as its whole value"
+        );
+        assert!(
+            store.pointer(&key(1)).is_some(),
+            "a chunked slice must keep its pointer"
+        );
+        let hex = String::from_utf8_lossy(&key(1).hex()).into_owned();
+        assert_eq!(
+            store.view().get(&hex),
+            Some(&whole),
+            "the view must show the whole value and not the pointer"
+        );
+        assert_eq!(store.chunked_held().1, 1, "one chunked value is held");
+    }
+
+    #[test]
+    fn a_pointer_draft_that_names_more_than_the_value_cap_is_refused() {
+        let mut store = value_capped_store(100);
+        let pointer = ChunkPointer::new(Root::from_bytes([3; 32]), 101);
+        assert_eq!(
+            store
+                .prepare_pointer(&key(1), pointer, Map::new(), Instant::now())
+                .map(|_| ()),
+            Err(SliceError::ValueTooLarge {
+                bytes: 101,
+                limit: 100
+            }),
+            "a pointer past the cap must be refused"
+        );
+    }
+
+    #[test]
+    fn a_newer_inline_version_drops_the_resolved_value_of_a_chunked_slice() {
+        let mut store = value_capped_store(1 << 20);
+        let now = Instant::now();
+        let draft = chunked_write(&mut store, 5000, now).expect("a pointer draft");
+        let frame = frame_of(&draft, key(1));
+        store.commit_local(draft, &frame, now).expect("the commit");
+        assert_eq!(store.chunked_held().1, 1, "one chunked value is held");
+        let inline = store
+            .prepare_local(
+                &key(1),
+                object(json!({"a": 1})),
+                now + Duration::from_secs(2),
+            )
+            .expect("an inline draft");
+        let inline_frame = frame_of(&inline, key(1));
+        store
+            .commit_local(inline, &inline_frame, now + Duration::from_secs(2))
+            .expect("the commit");
+        assert_eq!(
+            store.chunked_held(),
+            (0, 0),
+            "an inline version must drop the held bytes and the held count"
+        );
+        assert!(
+            store.pointer(&key(1)).is_none(),
+            "an inline version must drop the pointer"
+        );
+    }
+
+    #[test]
+    fn a_tombstone_drops_the_resolved_value_of_a_chunked_slice() {
+        let mut store = value_capped_store(1 << 20);
+        let now = Instant::now();
+        let draft = chunked_write(&mut store, 5000, now).expect("a pointer draft");
+        let frame = frame_of(&draft, key(1));
+        store.commit_local(draft, &frame, now).expect("the commit");
+        let leave = store
+            .prepare_leave(&key(1), now)
+            .expect("a tombstone draft");
+        let leave_frame = frame_of(&leave, key(1));
+        store
+            .commit_local(leave, &leave_frame, now)
+            .expect("the commit");
+        assert_eq!(
+            store.chunked_held(),
+            (0, 0),
+            "a tombstone must drop the held bytes and the held count"
+        );
+    }
+
+    #[test]
+    fn a_nested_chunks_key_is_not_reserved() {
+        let mut store = store();
+        assert!(
+            store
+                .prepare_local(
+                    &key(1),
+                    object(json!({"a": {"$chunks": 1}})),
+                    Instant::now()
+                )
+                .is_ok(),
+            "only the top-level key is reserved"
+        );
+    }
+
+    #[test]
     fn ingest_refuses_a_new_author_past_the_author_cap() {
         let limits = SliceLimits::new(3072, Duration::from_secs(1), 1, 5);
         let mut store = small_store(limits);
@@ -1394,6 +2366,23 @@ mod tests {
             "a body sealed under another key must be malformed"
         );
         assert_eq!(store.authors(), 0, "an unopened body must leave no author");
+    }
+
+    #[test]
+    fn a_value_too_large_for_one_frame_is_refused_before_it_is_sealed() {
+        let mut store = store().with_key(Some(SymmetricKey::from([3u8; 32])));
+        let value = object(json!({"k": "x".repeat(300_000)}));
+        let started = Instant::now();
+        let refused = store.prepare_local(&key(1), value, started);
+        assert!(
+            matches!(refused, Err(SliceError::TooLarge { .. })),
+            "a value past one frame must be TooLarge on a keyed store, got {refused:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the refusal must not seal the body first: it took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

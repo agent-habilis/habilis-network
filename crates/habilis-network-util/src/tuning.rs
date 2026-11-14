@@ -1180,8 +1180,53 @@ pub const DIGEST_SERVES_GLOBAL: usize = 32;
 /// fits, so a round never needs more.
 pub const DIGEST_PULLS_OPEN: usize = 1024;
 
+/// The most authors that one channel of the shared state holds. It is the cap of the live roster.
+pub const SLICE_AUTHORS_MAX: usize = 1024;
+
+/// The most bytes that the encoded value of one slice can take, in `state` and in `meta` alike. The cap is low
+/// on purpose: a member that needs more stores the data as a blob and puts the ticket in the value.
+pub const SLICE_VALUE_MAX_BYTES: usize = 1024 * 1024;
+
 /// The length of the window of the serve budget.
 pub const DIGEST_SERVE_WINDOW: Duration = Duration::from_secs(5);
+
+/// The length of the window of the chunk serve budget.
+pub const CHUNK_SERVE_WINDOW: Duration = Duration::from_secs(5);
+
+/// How many chunk answers this node gives one asker in one window. A map and a chunk both count. A value at
+/// the cap has 16 chunks and a map, so one asker takes about 2 such values in a window.
+pub const CHUNK_SERVES_PER_WINDOW: usize = 40;
+
+/// How many chunk answers this node gives in all, in one window, whoever asks.
+pub const CHUNK_SERVES_GLOBAL: usize = 160;
+
+/// How long one stream of the chunk protocol can take, from the request to the end of the answer. A stalled
+/// asker or a stalled event loop does not hold the stream longer.
+pub const CHUNK_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many streams of the chunk protocol one endpoint can have open at once.
+pub const CHUNK_STREAMS_PER_PEER: usize = 4;
+
+/// How many chunk requests wait for the event loop. A request over the cap gets the absent answer.
+pub const CHUNK_INBOX_CAP: usize = 64;
+
+/// How many values this node fetches at once. A pointer past the cap waits for a fetch to end.
+pub const CHUNK_FETCHES_MAX: usize = 4;
+
+/// The bytes of chunks that this node holds for the slices of all members, in both channels. A value that would take
+/// the held bytes past it is not fetched, and its author keeps showing the last complete version. The chunks that no
+/// slice names are swept at once, so they never count.
+pub const CHUNK_STORE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// How many holders one fetch can ask: the author first, then the members that this node knows.
+pub const CHUNK_SOURCES_MAX: usize = 4;
+
+/// How long this node waits before it asks again for a value that no holder gave.
+pub const CHUNK_FETCH_RETRY: Duration = Duration::from_secs(5);
+
+/// How long this node waits before it asks again for a value that came whole but that it refused: it does not open,
+/// is not an object, or holds the reserved key. The author is wrong, so the wait is long.
+pub const CHUNK_FETCH_REFUSED_RETRY: Duration = Duration::from_secs(60);
 
 /// How long a node waits after it sees a digest that differs from its own, before it asks for the pages.
 /// The live frames in flight land during this delay, so most differences end with no request.

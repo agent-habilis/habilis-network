@@ -144,6 +144,12 @@ pub trait ChunkStore: ChunkSource {
     /// Record a leaf row, so its chunks can be named and swept.
     fn put_map(&self, map: &ChunkMap) -> impl Future<Output = Result<(), ChunkError>>;
 
+    /// Forget the leaf row of `root`, so a later [`mark`] of it is refused. The chunks stay until a sweep that
+    /// does not mark them. A root with no row is not an error.
+    ///
+    /// [`mark`]: ChunkStore::mark
+    fn drop_map(&self, root: Root) -> impl Future<Output = Result<(), ChunkError>>;
+
     /// Record that this file version hashes to `root`.
     fn set_bind(&self, file: &FileId, root: Root) -> impl Future<Output = Result<(), ChunkError>>;
 

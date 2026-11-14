@@ -112,14 +112,14 @@ The engine depends on `habilis-network-iroh-webrtc-transport` on both targets: t
 |---|---|
 | `habilis-network-util` | Host helpers: runtime directories, clock, tuning dials, bounded containers, every constant. |
 | `habilis-network-protocol` | Wire vocabulary: messages, mesh ids, identity, sealing, invites, multipart reassembly, the directory ad codec. Depends on `iroh-base` only. |
-| `habilis-network-doc` | The `state` and `meta` slice channels: one signed slice for each author, and the slice store. |
+| `habilis-network-doc` | The `state` and `meta` slice channels: one signed slice for each author, the slice store, and the pointer of a slice whose value is chunked. |
 | `habilis-network-logging` | Tracing sink and directive filter. |
 | `habilis-network` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
 | `habilis-network-ffi` | A C-ABI shim, so a non-Rust process joins a mesh or opens byte streams in-process. |
 | `habilis-network-stream` | 1-1 byte streams addressed by a hash, over a direct path by default (the relay only when the stream allows it), never gossip (§9.4). Reaches wasm32. |
 | `habilis-network-stream-cli` | The `habilis-network-stream` binary: stdin to one reader, or a stream to stdout. |
 | `habilis-network-wasm` | The browser peer: `habilis_network::membership` and `habilis-network-stream` as wasm-bindgen classes. Runs only on wasm32. |
-| `habilis-network-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `habilis-network-blobs`. |
+| `habilis-network-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `habilis-network-blobs`. The engine keeps the chunked values of the shared state in it (section 8.3). |
 | `habilis-network-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
 | `habilis-network-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
 
@@ -595,15 +595,17 @@ On a passworded mesh the body is sealed with the channel key, and the store open
 Authenticity is the job of the engine.
 
 The store has three caps:
-- A slice and its frame must fit the wire limit, `MAX_MESSAGE_SIZE` (3840 bytes). The cap of a body is that limit minus the frame overhead of the session, which holds the envelope, the mesh id and the nickname. A larger write is refused with the error `TooLarge`.
+- A slice and its frame must fit the wire limit, `MAX_MESSAGE_SIZE` (3840 bytes). The cap of a body is that limit minus the frame overhead of the session, which holds the envelope, the mesh id and the nickname. A value that does not fit is not refused: the engine cuts it into chunks, and the slice holds a pointer to them (section 8.3).
+- The encoded value of a slice is 1 MiB at most (`SLICE_VALUE_MAX_BYTES`), on both channels. The cap applies to the whole value after the merge, so a patch that makes the value larger than the cap is refused, and a shrink, a replace and a tombstone always work. The refusal is the error `ValueTooLarge`, and its text says to store the data as a blob and to put the ticket in the value.
 - A channel holds 1024 authors at most. This is the cap of the live roster.
 - An author has a burst of 5 versions, and then 1 version for each write interval (1 s). An arrival has a burst of 10, so the jitter of a network does not refuse an honest version. A write or an arrival past the rate limit is refused with the error `RateLimited`. Every arrival of a key that the store keeps is charged, a replay from the gossip cache too. A frame that answers a pull takes no token. A slice that waits in the pending set is charged when it is applied (section 8.1).
 
-The caps bound the memory.
-In the worst case, a slice takes 3840 bytes.
+The caps bound the memory of the slice frames.
+In the worst case, a slice frame takes 3840 bytes.
 A full store of 1024 authors takes 3.75 MiB for each channel, so 7.5 MiB for the two channels.
 The pending set can hold the same, so the worst case is 15 MiB in all.
 A normal slice is about 300 bytes, so a normal full store takes about 600 KiB.
+A chunked value is held whole in memory, as a JSON value, beside its slice frame. The cap on the encoded value does not bound that memory: a parsed JSON value takes between 1 and about 80 times its encoded size, by its shape (section 11).
 
 ### 8.1 The roster gate
 
@@ -646,6 +648,27 @@ The pending TTL applies to that slice.
 A lapsed key is not gone, because it can return.
 The sweep releases its slice, and its frames wait in the pending set.
 When the key returns, its pending frame applies, and the digest round pulls the rest.
+
+### 8.3 Large values: a pointer in the slice, the bytes in chunks
+
+A slice stays one signed frame. A value that does not fit one frame travels as chunks, outside gossip.
+
+**The pointer.** The slice holds `{"$chunks": {"root": "<hex>", "size": <bytes>}}` in place of the value. The key `$chunks` is reserved: an app write that holds it is refused with the error `Reserved`, and a received slice that holds it next to another key is refused. The root commits to the ordered hashes of the chunks, and each chunk is 64 KiB addressed by `blake3` of its bytes. The author signs the slice, the slice names the root, the root names the chunks, and each chunk proves itself, so the bytes need no trust in the peer that sends them. A pointer that names more than the value cap is refused when it arrives, before any chunk is asked for.
+
+**The write.** The engine applies the merge patch (RFC 7386) to the whole own value, so the patch works on the value and not on the pointer. A value that fits one frame stays inline, as before. A value that does not fit is cut into chunks, the chunks and their map go into the chunk store, and the slice carries the pointer. The store keeps the whole value with the pointer, so the next patch and the own view use the whole value.
+
+**The chunk store.** Each run of a mesh has its own chunk store, empty at the start: a restarted peer is a new author, so the bytes never outlive the run. A host keeps it in a folder under the runtime directory, and a build with no runtime directory keeps it in memory. The browser build keeps it in memory. On a passworded mesh the value is sealed with a key that the mesh key derives with the label `chunks` before it is cut, so the chunks, in the store and on the wire, are ciphertext. The pointer names the size of the value, and the stored size is 28 bytes more with the seal.
+
+**The chunk plane.** A member asks another for chunks on the ALPN `habilis-mesh/chunks/1`, on the member endpoint. One stream carries one request and one answer. A request is the map of a root (the size and the hash of each chunk), or one chunk of a root. An answer is the map, the bytes of the chunk, or one absent byte.
+- A node answers only a member whose endpoint a member proved, and only for a root that a live slice of any author names. A request that fails for any reason, or that is over the budget, gets the same absent byte, so a probe learns nothing.
+- Each node gives at most 40 answers to one endpoint and 160 in all in a window of 5 s. An endpoint has 4 streams open at most, a stream lasts 10 s at most, and a request is 64 bytes at most.
+- The asker reads a map up to the bytes that the pointer allows, and checks it against the root before it asks for any chunk. It reads each chunk up to the length that the map gives it, and checks it against its leaf. It asks the author first, then the members that it knows, at most 4 holders. A holder that fails is not asked again in that fetch, so a stalled author costs one deadline.
+
+**The fetch.** A node fetches the value of every pointer that it holds: the slice arrives by gossip, backfill or the digest round, and the node starts the fetch. A pointer is not shown when it arrives. The view keeps the last complete version of the author until the new value is whole, and leaves the author out if the pointer is its first version, so a reader never sees a pointer or a mix of two versions. When the value is whole the engine opens it, keeps it with the slice, keeps the chunks so that this node serves them in turn, and shows the change once, with the whole value. A fetch that failed starts again after 5 s, and a value that the node refuses (it does not open, is not an object, or holds the reserved key) after 60 s. A node fetches 4 values at once at most.
+
+**The pin policy and the budget.** A sweep of the chunk store keeps the chunks of the roots of the slices whose value is held whole, whoever the author is, and frees the others. A newer version, a tombstone, a goodbye or a lapse of the author frees its chunks at the next sweep, on an own write, at the end of a fetch, and on the sweep tick. A node holds 256 MiB of chunks at most (`CHUNK_STORE_BUDGET_BYTES`). A value that would pass the budget is not fetched, and its author keeps showing the last complete version until room comes back.
+
+**Reading.** `EventLoopState::view` gives the whole values. `raw_view` gives the slices as they were signed, with the pointers. `syncing` lists the authors whose new value is not whole yet, each with its key, the root, and the chunks held and the chunks that the value has.
 
 ## 9. Transports
 
@@ -884,7 +907,8 @@ What the engine is not:
 
 - It is not a general-purpose networking library, and it is not published to crates.io.
 - It is not a bulk-transfer system.
-  Gossip re-broadcasts every frame, so large payloads go over the `blob` channel or not at all.
+  Gossip re-broadcasts every frame, so a payload past the value cap of 1 MiB goes over the `blob` channel or not at all. A value of up to 1 MiB in the shared state travels as chunks (section 8.3).
+- A chunked value is held whole in memory as a parsed JSON value. Measured with a counting allocator on a value that encodes to exactly 1 MiB: one long string takes 1.0 times its encoded size, 20 000 short entries 5.0 times, an array of a million numbers 16 times, nested small objects 29 times, and an array of tiny objects 83 times (87 MB for one author).
 - The identity of a session is not durable.
   A restart mints a new session key. Only the member key, which signs the proof, survives a restart.
 

@@ -15,7 +15,7 @@ use crate::daemon::state::TestHold;
 use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 #[cfg(feature = "multihop")]
 use crate::protocol;
-use crate::{lookup, transport};
+use crate::{chunk_fetch, lookup, transport};
 use iroh_gossip::net;
 use n0_future::time;
 #[cfg(feature = "host")]
@@ -40,7 +40,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::protocol::meshes::{Mesh, MeshName};
+use crate::protocol::meshes::MeshName;
 use crate::protocol::messages::Authored;
 use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};
@@ -71,7 +71,7 @@ use super::node::SignalHandling;
 #[cfg(feature = "host")]
 use super::shutdown;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
-use super::state::{EventLoopState, FrameOverheads, MeshSecrets};
+use super::state::{EventLoopState, FrameOverheads, MeshChunks, MeshSecrets};
 use super::timers;
 use crate::daemon::setup::LiveCount;
 use crate::protocol::Channel;
@@ -148,13 +148,13 @@ async fn run_checked<Driver: NodeDriver>(
     let external_req_rx = session_rx;
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
+    let chunks = open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author)?;
     let mut state: EventLoopState = initial_state(
         mesh.keys,
         MeshSecrets {
             password: mesh.mesh_password.take(),
             key: mesh.mesh_key.take(),
         },
-        mesh.mint_mesh.take(),
         &transports,
         started,
         state_file,
@@ -163,7 +163,9 @@ async fn run_checked<Driver: NodeDriver>(
             meta: habilis_network_doc::frame_overhead(Channel::Meta, &mesh.mesh, &mesh.author),
             page: habilis_network_doc::page_frame_overhead(&mesh.mesh, &mesh.author),
         },
+        chunks,
     );
+    state.mint_mesh = mesh.mint_mesh.take(); // creator-only: backs the `invite` command
     let owned = OwnedEndpoints {
         router: endpoints.router,
         owner: endpoints.endpoint_owner,
@@ -171,6 +173,8 @@ async fn run_checked<Driver: NodeDriver>(
         #[cfg(feature = "multihop")]
         multihop: transports.multihop.clone(),
     };
+    let (fetch_tx, fetch_rx) = mpsc::unbounded_channel();
+    state.fetches = chunk_fetch::Fetches::new(fetch_tx);
     let (direct_rx, path_rx) = wire_transports(
         &mut state,
         &endpoints.endpoint,
@@ -272,6 +276,8 @@ async fn run_checked<Driver: NodeDriver>(
         exit_on_quit,
         http_rx,
         unicast_rx: Some(endpoints.unicast_rx),
+        chunk_rx: Some(endpoints.chunk_rx),
+        fetch_rx,
         lan_contacts: endpoints.lan_contacts,
         direct_rx,
         path_rx,
@@ -393,6 +399,32 @@ fn leave_label(mesh: &MeshSpec) -> String {
     )
 }
 
+/// The chunk store of this run: in the folder of the node under the runtime base, and in memory when there is no
+/// runtime base.
+#[cfg_attr(
+    not(feature = "host"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as the version for a target with files"
+    )
+)]
+fn open_chunks(
+    runtime_base: Option<&path::Path>,
+    mesh: &MeshId,
+    author: &Nickname,
+) -> Result<MeshChunks> {
+    #[cfg(feature = "host")]
+    if let Some(base) = runtime_base {
+        use crate::util;
+        util::ensure_mesh_runtime_dir(base, mesh.as_str())?;
+        let folder = setup::default_chunks_path(base, mesh, author);
+        return Ok(MeshChunks::open(Some(&folder))?);
+    }
+    #[cfg(not(feature = "host"))]
+    let _ = (runtime_base, mesh, author);
+    Ok(MeshChunks::open(None)?)
+}
+
 /// The state file a daemon seeds its state with: a host daemon has one, and a browser keeps its path.
 #[cfg(feature = "host")]
 type StateFileSeed = Option<StateFile>;
@@ -405,21 +437,22 @@ fn initial_state(
     // The loop holds the keys across `&mut state`, so it keeps shared handles.
     keys: state::RunKeys,
     secrets: MeshSecrets,
-    mint_mesh: Option<Mesh>,
     transports: &TransportSet,
     started: Instant,
     state_file: StateFileSeed,
     overheads: FrameOverheads,
+    chunks: MeshChunks,
 ) -> EventLoopState {
     #[cfg(not(feature = "host"))]
     drop(state_file);
-    let mut state: EventLoopState = EventLoopState::new(
+    EventLoopState::new(
         state::StateInit {
             #[cfg(feature = "host")]
             state_file,
             keys,
             secrets,
             overheads,
+            chunks,
             // The *same* table the Router's signal acceptor holds, not a fresh
             // one: the cap only counts if both roles count against it together.
             webrtc_admission: transports.webrtc_admission.clone(),
@@ -427,9 +460,7 @@ fn initial_state(
             webrtc_ice: transports.webrtc_ice,
         },
         started,
-    );
-    state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
-    state
+    )
 }
 
 /// Wires the transports into the state, and returns the receivers of the three channels that
@@ -841,6 +872,12 @@ struct EventLoop<Driver: NodeDriver> {
     /// `gossip::ingest` (same validation + dedup path as gossip). `Option` so
     /// the `select!` arm can disable itself if the channel ever closes.
     unicast_rx: Option<mpsc::Receiver<transport::UnicastFrame>>,
+    /// Inbound chunk requests from the `CHUNKS_ALPN` acceptor, answered from the state. `Option` so the `select!`
+    /// arm can disable itself if the channel ever closes.
+    chunk_rx: Option<mpsc::Receiver<transport::ChunkAsk>>,
+    /// The fetches of the values that pointers name, when one ends. Never closes: `state` holds a sender for the
+    /// loop's lifetime.
+    fetch_rx: mpsc::UnboundedReceiver<chunk_fetch::FetchDone>,
     /// The members of this mesh that the LAN announces (`gossip::lan`). `Option` so the arm is
     /// off without an mDNS handle and when the channel closes.
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
@@ -897,6 +934,10 @@ struct Loop<'node, Driver: NodeDriver> {
     exit_on_quit: bool,
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
     unicast_rx: Option<mpsc::Receiver<transport::UnicastFrame>>,
+    /// Inbound chunk requests from the `CHUNKS_ALPN` acceptor, answered from the state. `Option` so the `select!`
+    /// arm can disable itself if the channel ever closes.
+    chunk_rx: Option<mpsc::Receiver<transport::ChunkAsk>>,
+    fetch_rx: mpsc::UnboundedReceiver<chunk_fetch::FetchDone>,
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
@@ -1120,6 +1161,26 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         lifecycle::retry_deferred_asks(&mut self.state, &context, sign).await;
     }
 
+    /// Takes in the value that a fetch brought, or notes that the fetch failed.
+    async fn fetch_done(&mut self, done: chunk_fetch::FetchDone) {
+        self.state.idle.ext.chunk += 1;
+        let context = self.parts.handler_ctx(&self.sender);
+        chunk_fetch::finish(
+            &mut self.state,
+            &mut self.app,
+            &context,
+            done,
+            Instant::now(),
+        )
+        .await;
+    }
+
+    /// Answers one chunk request from the state, to the stream that waits for it.
+    async fn chunk_ask(&mut self, ask: transport::ChunkAsk) {
+        self.state.idle.ext.chunk += 1;
+        chunk_fetch::Holder::serve(&mut self.state, ask, Instant::now()).await;
+    }
+
     fn prune(&mut self) {
         self.state.idle.prune += 1;
         timers::tick_prune(&mut self.state, self.parts.sink);
@@ -1174,6 +1235,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             self.state.last_sent_at = Instant::now();
         }
         probe::prove_routed_pairs(&mut self.state, &context);
+        chunk_fetch::on_sweep(&mut self.state, &context, Instant::now()).await;
         self.app.on_tick(&mut self.state, &context).await;
         // The proof requests that waited for a warm path and got none from a unicast frame: once more.
         lifecycle::retry_deferred_asks(&mut self.state, &context, None).await;
@@ -1529,6 +1591,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         exit_on_quit,
         http_rx,
         unicast_rx,
+        chunk_rx,
+        fetch_rx,
         lan_contacts,
         direct_rx,
         path_rx,
@@ -1606,6 +1670,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         exit_on_quit,
         http_rx,
         unicast_rx,
+        chunk_rx,
+        fetch_rx,
         lan_contacts,
         direct_rx,
         path_rx,
@@ -1680,6 +1746,11 @@ async fn run_loop<Driver: NodeDriver>(
             frame = recv_opt(&mut lp.unicast_rx) => match frame {
                 Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },
+            },
+            Some(done) = lp.fetch_rx.recv() => { lp.fetch_done(done).await; },
+            ask = recv_opt(&mut lp.chunk_rx) => match ask {
+                Some(ask) => { lp.chunk_ask(ask).await; },
+                None => { lp.chunk_rx = None; },
             },
             _ = lp.intervals.prune.tick() => {
                 lp.prune();

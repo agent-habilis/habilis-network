@@ -6,8 +6,9 @@ use super::TestDrop;
 use super::TestHold;
 use super::peer_info_flood::PeerInfoFlood;
 use super::{
-    BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshSecrets, PingRound,
-    Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
+    BeaconNote, DirectCounts, DirectState, IdleCounters, KeyOfError, Latch, MeshChunks,
+    MeshSecrets, PingRound, Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot,
+    Standing, StateInit, Syncing,
 };
 use crate::daemon::cohost_arm;
 use crate::daemon::probe_backoff::ProbeBackoff;
@@ -26,6 +27,7 @@ use std::time::Duration;
 use iroh::{EndpointAddr, EndpointId};
 
 use super::proof_exchange::ProofExchange;
+use crate::chunk_fetch::{ChunkServeBudget, Fetches};
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::digest_round::DigestRound;
@@ -39,7 +41,8 @@ use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
-use habilis_network_doc::{SliceError, SliceIngest, SliceLimits, SliceStore};
+use habilis_network_chunks::{Root, chunk_count};
+use habilis_network_doc::{ChunkPointer, SliceError, SliceIngest, SliceLimits, SliceStore};
 use habilis_network_protocol::ContentHash;
 use habilis_network_protocol::digest::{DigestPage, DigestRoot};
 
@@ -155,7 +158,13 @@ impl ChannelDocs {
         serde_json::Value::Object(self.get(channel).view())
     }
 
+    /// The JSON view of `channel` as the slices were signed: the value of a chunked slice is its pointer.
+    pub(crate) fn to_raw_json(&self, channel: protocol::Channel) -> serde_json::Value {
+        serde_json::Value::Object(self.get(channel).raw_view())
+    }
+
     /// The value of the slice that `key` holds on `channel`, or an empty object.
+    #[cfg(test)]
     pub(crate) fn own_value(
         &self,
         channel: protocol::Channel,
@@ -167,6 +176,15 @@ impl ChannelDocs {
         }
     }
 
+    /// The value of the slice that `key` holds on `channel`, borrowed, when it holds an object.
+    pub(crate) fn own_value_ref(
+        &self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+    ) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.get(channel).value(key)?.as_object()
+    }
+
     /// Makes the draft of the next write of the own slice `own` on `channel`.
     pub(crate) fn prepare_local(
         &mut self,
@@ -176,6 +194,20 @@ impl ChannelDocs {
         now: Instant,
     ) -> Result<habilis_network_doc::LocalDraft, SliceError> {
         self.get_mut(channel).prepare_local(own, value, now)
+    }
+
+    /// Makes the draft of the next write of the own slice `own` on `channel` as a pointer to `value`, which the
+    /// caller has chunked.
+    pub(crate) fn prepare_pointer(
+        &mut self,
+        channel: protocol::Channel,
+        own: &AuthorKey,
+        pointer: ChunkPointer,
+        value: serde_json::Map<String, serde_json::Value>,
+        now: Instant,
+    ) -> Result<habilis_network_doc::LocalDraft, SliceError> {
+        self.get_mut(channel)
+            .prepare_pointer(own, pointer, value, now)
     }
 
     /// Makes the draft of the farewell of `own` on `channel`: a tombstone, which spends no token.
@@ -205,6 +237,79 @@ impl ChannelDocs {
         self.get(channel).is_gone(key)
     }
 
+    /// Whether a slice of any author, in either channel, names `root`. A member serves the chunks of such a root and
+    /// of no other.
+    pub(crate) fn names_root(&self, root: Root) -> bool {
+        [protocol::Channel::State, protocol::Channel::Meta]
+            .into_iter()
+            .any(|channel| {
+                self.get(channel)
+                    .pointers()
+                    .any(|pointer| pointer.root() == root)
+            })
+    }
+
+    /// Keeps the fetched `value` of `pointer` with the slice of `key` on `channel`, and says whether it did.
+    ///
+    /// # Errors
+    ///
+    /// The value is not an object, or holds the reserved key.
+    pub(crate) fn resolve_pointer(
+        &mut self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+        pointer: ChunkPointer,
+        value: serde_json::Value,
+    ) -> Result<bool, SliceError> {
+        self.get_mut(channel).resolve_pointer(key, pointer, value)
+    }
+
+    /// The pointers that wait for their chunks, in both channels, with the channel and the author of each.
+    pub(crate) fn unresolved(&self) -> Vec<(protocol::Channel, AuthorKey, ChunkPointer)> {
+        let mut waiting = Vec::new();
+        for channel in [protocol::Channel::State, protocol::Channel::Meta] {
+            for (key, pointer) in self.get(channel).unresolved() {
+                waiting.push((channel, key, pointer));
+            }
+        }
+        waiting
+    }
+
+    /// Whether the held version of `key` on `channel` is a pointer that waits for its chunks.
+    pub(crate) fn is_unresolved(&self, channel: protocol::Channel, key: &AuthorKey) -> bool {
+        self.get(channel).is_unresolved(key)
+    }
+
+    /// The signed frame that `key` holds on `channel`.
+    pub(crate) fn held_frame(
+        &self,
+        channel: protocol::Channel,
+        key: &AuthorKey,
+    ) -> Option<&Verified> {
+        self.get(channel).frame(key)
+    }
+
+    /// The pointers of the chunked values that the slices of every author hold whole, in both channels.
+    pub(crate) fn resolved_pointers(&self) -> impl Iterator<Item = ChunkPointer> + '_ {
+        let in_channel = |channel| self.get(channel).resolved_pointers().copied();
+        [protocol::Channel::State, protocol::Channel::Meta]
+            .into_iter()
+            .flat_map(in_channel)
+    }
+
+    /// The roots of the chunked values that the slices of every author hold whole, in both channels. A sweep of the
+    /// chunk store keeps the chunks of these roots. A pointer that waits for its chunks is not one of them.
+    pub(crate) fn resolved_roots(&self) -> impl Iterator<Item = Root> + '_ {
+        let in_channel = |channel| {
+            self.get(channel)
+                .resolved_pointers()
+                .map(ChunkPointer::root)
+        };
+        [protocol::Channel::State, protocol::Channel::Meta]
+            .into_iter()
+            .flat_map(in_channel)
+    }
+
     /// The signed frame of the slice that `key` holds on `channel`, as a wire frame.
     pub(crate) fn own_frame(
         &self,
@@ -214,15 +319,19 @@ impl ChannelDocs {
         self.get(channel).frame(key)?.serialize().ok()
     }
 
-    /// The plaintext body of the slice that `key` holds on `channel`, in the shape of a frame body.
+    /// The plaintext body of the slice that `key` holds on `channel`, in the shape of a frame body. A
+    /// chunked slice has the pointer as its value, as the signed frame has, so the body stays one frame long.
     pub(crate) fn plain_body(
         &self,
         channel: protocol::Channel,
         key: &AuthorKey,
     ) -> Option<protocol::MessageBody> {
         let store = self.get(channel);
-        let body =
-            serde_json::json!({ "version": store.version(key)?, "value": store.value(key)? });
+        let value: serde_json::Value = match store.pointer(key) {
+            Some(pointer) => pointer.to_value(),
+            None => store.value(key)?.clone(),
+        };
+        let body = serde_json::json!({ "version": store.version(key)?, "value": value });
         protocol::MessageBody::try_new(&body.to_string()).ok()
     }
 
@@ -821,6 +930,8 @@ pub struct EventLoopState {
     pub(crate) shard_cache: ShardCache,
     /// The shared documents of the `state` and `meta` channels.
     pub(crate) docs: ChannelDocs,
+    /// The chunks of the values that are too large for a slice, held for this run.
+    pub(crate) chunks: MeshChunks,
     /// This member's signing identity (Ed25519). Shared with the
     /// send path so messages we author are signed before broadcast.
     /// The public key is the durable identity; the nickname is a
@@ -829,6 +940,10 @@ pub struct EventLoopState {
     /// The endpoint that the unicast frame being handled arrived on, while it is handled. Set only
     /// around the handling of a unicast frame, so a proof answer can go back on the same connection.
     pub(crate) unicast_arrival: Option<EndpointId>,
+    /// The chunk answers that this node gave in the current window.
+    pub(crate) chunk_budget: ChunkServeBudget,
+    /// The fetches of the values that the pointers of other members name.
+    pub(crate) fetches: Fetches,
     /// The slice pulls that wait for an answer, by holder, channel and author.
     pub(crate) outstanding_pulls: OutstandingPulls,
     /// The digests that differ from ours, until their pages are read.
@@ -917,6 +1032,57 @@ impl EventLoopState {
         self.docs.to_json(channel)
     }
 
+    /// The shared state of `channel` as the slices were signed: the value of a chunked slice is its pointer. It shows what
+    /// travels, to debug the sync. The `view` shows the whole values.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use habilis_network::embed::EventLoopState;
+    /// use habilis_network::protocol::Channel;
+    ///
+    /// # fn demo(state: &EventLoopState) {
+    /// let _signed = state.raw_view(Channel::State);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn raw_view(&self, channel: protocol::Channel) -> serde_json::Value {
+        self.docs.to_raw_json(channel)
+    }
+
+    /// The bytes that the chunks of the values held whole take, as the chunk store keeps them.
+    pub(crate) fn held_chunk_bytes(&self) -> u64 {
+        let pointers = self.docs.resolved_pointers();
+        pointers
+            .map(|pointer| self.chunks.stored_size(pointer))
+            .sum()
+    }
+
+    /// The authors of `channel` whose new version is not whole yet, for the `syncing` list of a state read.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use habilis_network::embed::EventLoopState;
+    /// use habilis_network::protocol::Channel;
+    ///
+    /// # fn demo(state: &EventLoopState) {
+    /// let _waiting = state.syncing(Channel::State);
+    /// # }
+    /// ```
+    pub fn syncing(&self, channel: protocol::Channel) -> impl Iterator<Item = Syncing> + '_ {
+        let in_channel = self
+            .docs
+            .unresolved()
+            .into_iter()
+            .filter(move |(waiting_channel, ..)| *waiting_channel == channel);
+        in_channel.map(|(_, author, pointer)| {
+            let key = String::from_utf8_lossy(&author.hex()).into_owned();
+            let chunks = chunk_count(self.chunks.stored_size(pointer));
+            Syncing::new(key, pointer.root().to_hex(), 0, chunks)
+        })
+    }
+
     /// Build a fresh event-loop state. `now` is passed explicitly so
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
@@ -932,7 +1098,7 @@ impl EventLoopState {
         } = init.secrets;
         // Per-channel keys, domain-separated from each other and from every other seed-derived
         // secret. `None` (passwordless): the docs and the broadcast chat stay plaintext.
-        let [state_key, meta_key, broadcast_key] = Self::channel_keys(mesh_key.as_ref());
+        let [state_key, meta_key, broadcast_key, chunk_key] = Self::channel_keys(mesh_key.as_ref());
         Self {
             linked_endpoints: HashSet::new(),
             orphaned_endpoints: BoundedFifoSet::new(ORPHANED_ENDPOINTS_MAX),
@@ -1028,6 +1194,7 @@ impl EventLoopState {
             receive_memory: ReceiveMemory::default(),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
+            chunks: init.chunks.key(chunk_key),
             docs: ChannelDocs {
                 state: SliceStore::new(
                     protocol::Channel::State,
@@ -1053,6 +1220,9 @@ impl EventLoopState {
             #[cfg(feature = "iroh-test-utils")]
             drop_left_from: None,
             serve_budget: ServeBudget::default(),
+            chunk_budget: ChunkServeBudget::default(),
+            // the event loop replaces the sender with one whose receiver it reads
+            fetches: Fetches::new(mpsc::unbounded_channel().0),
             teardown_pending: BoundedFifoSet::new(TEARDOWN_PENDING_MAX),
             proofs: ProofExchange::with_cap(QUIET_CAP),
             own_answer: None,
@@ -1074,10 +1244,15 @@ impl EventLoopState {
         }
     }
 
-    /// The keys of the `state` channel, the `meta` channel and the broadcast chat.
-    fn channel_keys(mesh_key: Option<&SymmetricKey>) -> [Option<SymmetricKey>; 3] {
-        [b"state-doc".as_slice(), b"meta-doc", b"broadcast"]
-            .map(|label| mesh_key.map(|key| key.derive(label)))
+    /// The keys of the `state` channel, the `meta` channel, the broadcast chat and the chunks of a large value.
+    fn channel_keys(mesh_key: Option<&SymmetricKey>) -> [Option<SymmetricKey>; 4] {
+        [
+            b"state-doc".as_slice(),
+            b"meta-doc",
+            b"broadcast",
+            b"chunks",
+        ]
+        .map(|label| mesh_key.map(|key| key.derive(label)))
     }
 
     /// The number of members of the mesh as this node counts them: the peers whose arrival was
