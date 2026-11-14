@@ -150,6 +150,13 @@ pub(crate) fn start(state: &mut EventLoopState, context: &HandlerCtx<'_>, now: I
     }
 }
 
+/// What the sweep tick does for the chunks: a member that left, or lapsed, took its slice, so the chunks that only
+/// it named go, and a pointer whose fetch failed, or that found no holder, is fetched again once its wait is over.
+pub(crate) async fn on_sweep(state: &mut EventLoopState, context: &HandlerCtx<'_>, now: Instant) {
+    keep_held(state).await;
+    start(state, context, now);
+}
+
 /// What the event loop does when a fetch ends: it opens the bytes, keeps the value with the slice, keeps the chunks
 /// so that this node can serve them, sweeps the store, and shows the change, all in this one step. A fetch that
 /// failed starts again after a wait, and the view keeps the last complete version.
@@ -816,5 +823,48 @@ mod tests {
             90_000,
             "the value held whole counts, as the store keeps it"
         );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_tick_frees_the_chunks_of_a_member_that_left_and_starts_the_wait_that_is_over()
+     {
+        let harness = Harness::spawn().await;
+        let context = harness.context();
+        let leaver = Identity::generate();
+        let waiting = Identity::generate();
+        let (held, stored, _) = author_side(CHUNK_BYTES_USIZE + 4_000, None).await;
+        let mut state = state_waiting(&leaver, held);
+        assert!(
+            state
+                .docs
+                .resolve_pointer(
+                    Channel::State,
+                    &leaver.author_key(),
+                    held,
+                    serde_json::json!({"a": 1})
+                )
+                .expect("an object"),
+            "the value of the member is whole"
+        );
+        state
+            .chunks
+            .put_stored(&stored)
+            .await
+            .expect("the chunks are kept");
+        let (other, _, _) = author_side(CHUNK_BYTES_USIZE + 9_000, None).await;
+        fixtures::name_root(&mut state, &waiting, other, 1);
+        state.docs.forget(&leaver.author_key(), Instant::now());
+        super::on_sweep(&mut state, &context, Instant::now()).await;
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            0,
+            "the sweep tick frees the chunks that no slice names any more"
+        );
+        assert_eq!(
+            state.fetches.running(),
+            1,
+            "the sweep tick starts the fetch of the pointer that waits"
+        );
+        harness.endpoint.close().await;
     }
 }

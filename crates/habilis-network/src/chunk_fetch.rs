@@ -15,7 +15,7 @@ mod keep_held;
 pub(crate) use chunk_client::ChunkClient;
 pub(crate) use chunk_request::ChunkRequest;
 pub(crate) use chunk_serve_budget::ChunkServeBudget;
-pub(crate) use fetches::{FetchDone, Fetches, finish, start};
+pub(crate) use fetches::{FetchDone, Fetches, finish, on_sweep, start};
 pub(crate) use holder::Holder;
 pub(crate) use keep_held::keep_held;
 
