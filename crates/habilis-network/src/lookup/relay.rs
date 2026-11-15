@@ -57,7 +57,7 @@ use n0_future::{task as n0future_task, time as n0future_time};
 /// direct path and by its tunnel. iroh opens one relay session per URL, and a
 /// relay drops the older session of an endpoint id, so a relay map that holds
 /// both names makes an endpoint drop its own session. No map holds 2 rungs: an
-/// endpoint homes on one rung, alone in its map ([`peer_relay_mode`]). Rungs
+/// endpoint homes on one rung, alone in its map (`peer_relay_mode`). Rungs
 /// 0..2 are direct: each relay answers QUIC address discovery, so a member
 /// homed on it learns its public address. Rungs 2..4 are tunnels: the tunnel
 /// carries no UDP, so they answer no QUIC address discovery, and an endpoint
