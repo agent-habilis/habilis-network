@@ -1,5 +1,7 @@
 //! A dial that is in flight, so that concurrent sends share one connection attempt.
 
+use std::collections::HashMap;
+
 use iroh::EndpointId;
 use tokio::sync::watch;
 
@@ -18,15 +20,31 @@ pub(crate) struct InFlightDial {
 }
 
 impl InFlightDial {
-    /// Tell the waiters how the dial ended.
+    /// Tell the waiters how the dial ended. The entry leaves the map in the same step, under its
+    /// lock: a send that registers after the outcome is a new dialer, and does not take the outcome
+    /// of a dial that ended before it asked.
     pub(in crate::transport::pool) fn publish(&self, outcome: Result<(), String>) {
+        let mut dialing = self.pool.inner.dialing.lock();
+        self.leave(&mut dialing);
         self.outcome_tx.send_replace(Some(outcome));
+    }
+
+    /// Remove the entry of this dial from `dialing`, and not the entry of a later dial of the peer.
+    fn leave(&self, dialing: &mut HashMap<EndpointId, watch::Receiver<DialOutcome>>) {
+        let ours = self.outcome_tx.subscribe();
+        if dialing
+            .get(&self.eid)
+            .is_some_and(|entry| entry.same_channel(&ours))
+        {
+            dialing.remove(&self.eid);
+        }
     }
 }
 
 impl Drop for InFlightDial {
     fn drop(&mut self) {
-        self.pool.inner.dialing.lock().remove(&self.eid);
+        let mut dialing = self.pool.inner.dialing.lock();
+        self.leave(&mut dialing);
         self.outcome_tx.send_if_modified(|outcome| {
             if outcome.is_some() {
                 return false;
