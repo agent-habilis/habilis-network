@@ -930,10 +930,11 @@ pub fn directory_private_for_test() -> bool {
 
 /// Per-rung timeout when selecting the public-mode bootstrap relay
 /// (`habilis_network::net`'s bootstrap-rung selection) and when the beacon polls
-/// its own rung's liveness. The selector walks the relay ladder and
-/// homes on the first rung whose pinned endpoint reaches `online()`
-/// within this budget; a rung that does not answer in time is treated
-/// as unreachable and the next is tried.
+/// its own rung's liveness. The selector probes every rung of the relay
+/// ladder at once and homes on the lowest rung whose pinned endpoint
+/// reaches `online()` within this budget. A rung that does not answer in
+/// time is treated as unreachable, so the walk of a ladder of silent rungs
+/// takes one budget, not one for each rung.
 ///
 /// Set to iroh's `NET_REPORT_TIMEOUT` (10s): `online()`'s own docs say
 /// to use a timeout close to it so at least one net-report has been
