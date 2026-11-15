@@ -1,5 +1,5 @@
 //! The relay leg of the lookup layer: the default **relay ladder** (n0
-//! prod), how a [`RelayChoice`] maps to an iroh [`RelayMode`], and the
+//! prod), how a [`RelayChoice`] maps to an iroh [`RelayMode`] of one rung, and the
 //! deterministic "home on the first reachable rung" bootstrap selection
 //! plus its steady-state failover decision.
 //!
@@ -51,9 +51,11 @@ use n0_future::{task as n0future_task, time as n0future_time};
 /// dial: a creator-independent bootstrap that needs no address lookup to
 /// reach the rendezvous.
 ///
-/// Rungs 0..4 are our relays, one URL for each relay process. iroh opens one
-/// relay session per URL, and a relay drops the older session of an endpoint
-/// id, so two URLs of one process make an endpoint drop its own session. Rungs
+/// Rungs 0..4 are our relays. Rungs 1 and 2 name one relay process, by its
+/// direct path and by its tunnel. iroh opens one relay session per URL, and a
+/// relay drops the older session of an endpoint id, so a relay map that holds
+/// both names makes an endpoint drop its own session. No map holds 2 rungs: an
+/// endpoint homes on one rung, alone in its map ([`peer_relay_mode`]). Rungs
 /// 0..2 are direct: each relay answers QUIC address discovery, so a member
 /// homed on it learns its public address. Rungs 2..4 are tunnels: the tunnel
 /// carries no UDP, so they answer no QUIC address discovery, and an endpoint
@@ -137,7 +139,7 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 /// ([`RENDEZVOUS_RELAY_LADDER`]: our fleet, then the n0 prod rungs), `Custom` ⇒ the operator ladder (`--relay a,b,c`, order
 /// preserved). The beacon homes on, and the joiner pre-registers at, the
 /// first reachable rung (`select_bootstrap_rung`) — the beacon leg of
-/// `relay_mode` and `daemon::setup::register_rendezvous` must agree or
+/// `peer_relay_mode` and `daemon::setup::register_rendezvous` must agree or
 /// the relay-direct bootstrap dial finds nothing.
 ///
 /// # Examples
@@ -194,41 +196,15 @@ fn config_with_qad(url: RelayUrl, qad_port: Option<u16>) -> RelayConfig {
     config
 }
 
-/// Map a [`RelayChoice`] to the iroh [`RelayMode`] for an endpoint.
-///
-/// - **Beacon** homes on exactly **one** rung — the deterministic relay
-///   joiners pre-register. The caller encodes that by passing a
-///   one-element `Custom([rung])` (the rung `select_bootstrap_rung`
-///   chose), so the beacon never reaches the multi-relay `Pinned` arm.
-/// - **Peer** on `Pinned` maps to the whole default ladder, our fleet
-///   first, never to the n0 relays alone. A peer endpoint does not
-///   build on this map: [`peer_relay_mode`] narrows it to the first
-///   reachable rung, and falls back to the whole map only when no rung
-///   answers. A `Custom` ladder maps to that whole set.
-///
-/// So `Custom(ladder)` covers both: a 1-rung beacon and a multi-rung
-/// peer alike map to `RelayMode::Custom`.
-pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
-    match choice {
-        RelayChoice::Disabled => {
-            tracing::debug!("relay disabled (not in the lookup allowlist)");
-            RelayMode::Disabled
-        }
-        RelayChoice::Custom(ladder) => {
-            tracing::debug!(rungs = ladder.len(), "endpoint pinned to relay ladder");
-            RelayMode::Custom(ladder.iter().map(rung_config).collect())
-        }
-        RelayChoice::Pinned => {
-            tracing::debug!("peer on the default relay ladder");
-            RelayMode::Custom(
-                RENDEZVOUS_RELAY_LADDER_URLS
-                    .iter()
-                    .map(rung_config)
-                    .collect(),
-            )
-        }
-        _ => RelayMode::Disabled,
-    }
+/// The relay mode of an endpoint homed on `rung` alone, or with no relay. An endpoint never holds 2
+/// rungs in its map: iroh homes on the relay with the lowest latency, not on the first one.
+fn one_rung_mode(rung: Option<&RelayUrl>) -> RelayMode {
+    let Some(rung) = rung else {
+        tracing::debug!("relay disabled (not in the lookup allowlist)");
+        return RelayMode::Disabled;
+    };
+    tracing::debug!(relay = %rung, "endpoint homed on one relay rung");
+    RelayMode::Custom([rung_config(rung)].into_iter().collect())
 }
 
 /// The relay mode of a peer endpoint, and the ladder it must follow when its rung does not connect.
@@ -237,17 +213,13 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
 /// that holds the whole ladder does not make rung 0 the home. A peer homes the way the beacon
 /// does: on one rung, alone in its map. The bind does not wait for a probe: the endpoint starts on
 /// rung 0, and [`Homing::follow`] moves it to the first reachable rung when rung 0 does not
-/// connect. A one-rung ladder has no choice to make, and neither has an empty one: those keep
-/// [`relay_mode`].
+/// connect. A one-rung ladder has no choice to make, and an empty one has no relay: neither gets a
+/// [`Homing`]. The beacon homes on its rung through a one-rung ladder.
 pub(super) fn peer_relay_mode(choice: &RelayChoice) -> (RelayMode, Option<Homing>) {
     let ladder: Vec<RelayUrl> = relay_ladder(choice).collect();
-    let Some(rung) = ladder.first().filter(|_| ladder.len() > 1).cloned() else {
-        return (relay_mode(choice), None);
-    };
-    (
-        relay_mode(&RelayChoice::Custom(vec![rung.clone()])),
-        Some(Homing { ladder, rung }),
-    )
+    let mode = one_rung_mode(ladder.first());
+    let homing: Option<RelayUrl> = ladder.first().filter(|_| ladder.len() > 1).cloned();
+    (mode, homing.map(|rung| Homing { ladder, rung }))
 }
 
 /// The ladder of a peer endpoint, and the rung that it homes on.
@@ -886,7 +858,6 @@ mod tests {
     use iroh::{RelayMode, Watcher as _};
     use iroh_relay::server::Server;
     use n0_future::task as n0future_task;
-    use std::collections::BTreeSet;
     use std::net::{Ipv4Addr, TcpListener};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -995,7 +966,7 @@ mod tests {
     /// The QUIC address discovery port of a beacon homed on `raw`: its one-rung custom ladder.
     fn beacon_qad(raw: &str) -> Option<u16> {
         let rung: RelayUrl = raw.parse().expect("a literal https URL parses");
-        let relay_map = super::relay_mode(&RelayChoice::Custom(vec![rung.clone()])).relay_map();
+        let relay_map = super::one_rung_mode(Some(&rung)).relay_map();
         let config = relay_map.get(&rung).expect("the rung is in the relay map");
         config.quic.as_ref().map(|quic| quic.port)
     }
@@ -1084,20 +1055,6 @@ mod tests {
         assert!(dotted.is_empty(), "dotted ladder hosts: {dotted:?}");
     }
 
-    /// A peer on `Pinned` must reach the rung that the beacon homes on, so the
-    /// relay map of the default choice holds the whole pinned ladder, not
-    /// iroh's own default set.
-    #[test]
-    fn pinned_peer_endpoint_holds_the_whole_ladder() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let held: BTreeSet<RelayUrl> = super::relay_mode(&RelayChoice::Pinned).relay_map().urls();
-        let ladder: BTreeSet<RelayUrl> = RENDEZVOUS_RELAY_LADDER_URLS.iter().cloned().collect();
-        assert_eq!(
-            held, ladder,
-            "the relay map of a Pinned peer holds every rung of the default ladder"
-        );
-    }
-
     #[test]
     fn pinned_ladder_resolves_to_prod_set() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1127,17 +1084,43 @@ mod tests {
     // relay by latency and ignores the order of the map, so a peer can home on a rung that is
     // not the first one. A peer endpoint homes on the first reachable rung of its ladder.
 
-    /// When no rung answers, the map still holds the whole ladder, so the endpoint can find a
-    /// rung that comes back. The default choice never maps to the n0 relays alone.
+    /// **A peer on the default choice starts on rung 0 alone, and follows the whole ladder.**
+    ///
+    /// iroh homes on the relay with the lowest latency, so a map with 2 rungs could home on rung
+    /// 1. The map holds rung 0 alone, and the ladder that the endpoint follows holds every rung.
     #[test]
-    fn the_default_relay_choice_maps_to_the_whole_ladder() {
+    fn a_default_peer_starts_on_rung_0_alone_and_follows_the_whole_ladder() {
         let _guard = ::habilis_network_test_tracing::init();
-        let urls: Vec<RelayUrl> = super::relay_mode(&RelayChoice::Pinned).relay_map().urls();
-        let ladder: BTreeSet<RelayUrl> = RENDEZVOUS_RELAY_LADDER_URLS.iter().cloned().collect();
-        let mapped: BTreeSet<RelayUrl> = urls.into_iter().collect();
+        let (mode, homing) = super::peer_relay_mode(&RelayChoice::Pinned);
+        let held: Vec<RelayUrl> = mode.relay_map().urls();
         assert_eq!(
-            mapped, ladder,
-            "the relay map of the default choice is the whole ladder"
+            held,
+            vec![RENDEZVOUS_RELAY_LADDER_URLS[0].clone()],
+            "the relay map of a default peer holds rung 0 alone"
+        );
+        let homing = homing.expect("a ladder of 8 rungs has a choice to make");
+        assert_eq!(
+            homing.ladder, *RENDEZVOUS_RELAY_LADDER_URLS,
+            "the endpoint follows the whole default ladder"
+        );
+    }
+
+    #[test]
+    fn the_rungs_below_a_home() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let ladder = rungs(&["a", "b", "c"]);
+        assert_eq!(
+            super::rungs_below(&ladder, &rung("c")),
+            &ladder[..2],
+            "the rungs below rung 2 are rungs 0 and 1"
+        );
+        assert!(
+            super::rungs_below(&ladder, &rung("a")).is_empty(),
+            "rung 0 has no rung below it"
+        );
+        assert!(
+            super::rungs_below(&ladder, &rung("elsewhere")).is_empty(),
+            "a home that is not on the ladder has no rung below it"
         );
     }
 
@@ -1320,7 +1303,7 @@ mod tests {
             let (front, half_open) = spawn_switchable_relay(&real).await;
             let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
             let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
-                .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![front.clone()])));
+                .relay_mode(super::one_rung_mode(Some(&front)));
             let endpoint = builder.bind().await.expect("bind the endpoint");
             let homing = super::Homing {
                 ladder: vec![front.clone(), second.clone()],
@@ -1370,9 +1353,8 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
             let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
-            let builder: Builder = iroh::Endpoint::builder(presets::Minimal).relay_mode(
-                super::relay_mode(&RelayChoice::Custom(vec![second.clone()])),
-            );
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&second)));
             let endpoint = builder.bind().await.expect("bind the beacon endpoint");
             let (rung_tx, rung_rx) = watch::channel(Some(second.clone()));
             let (_stop, stopped) = watch::channel(());
@@ -1424,7 +1406,7 @@ mod tests {
             let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
             let (second, second_server) = test_relay::spawn_plain().await.expect("a local relay");
             let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
-                .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![first.clone()])));
+                .relay_mode(super::one_rung_mode(Some(&first)));
             let endpoint = builder.bind().await.expect("bind the endpoint");
             let homing = super::Homing {
                 ladder: vec![first.clone(), second],
@@ -1536,7 +1518,7 @@ mod tests {
             }
             let first = ladder[0].clone();
             let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
-                .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![first.clone()])));
+                .relay_mode(super::one_rung_mode(Some(&first)));
             let endpoint = builder.bind().await.expect("bind the endpoint");
             let homing = super::Homing {
                 ladder,
@@ -2155,7 +2137,7 @@ mod tests {
             .await
             .expect("a plain local relay");
         let endpoint = iroh::Endpoint::builder(presets::Minimal)
-            .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![url])))
+            .relay_mode(super::one_rung_mode(Some(&url)))
             .bind()
             .await
             .expect("bind an endpoint on the rung");
