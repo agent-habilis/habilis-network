@@ -979,6 +979,11 @@ pub const RELAY_RETURN_PROBE_INTERVAL: Duration = Duration::from_mins(1);
 /// How long a lower relay rung must answer every probe round before a member returns to it: 4
 /// rounds in a row. A relay that restarts or flaps would otherwise move every member back and
 /// forth, and each move drops the relay paths of the member for a moment.
+///
+/// The hold applies to a return from a healthy rung only. When the rung of a member fails, the
+/// member walks the whole ladder, and the walk can pick a healthy lower rung at once, with no
+/// hold. That is by design: the member has to leave its rung anyway, and the lowest rung that
+/// answers is the rung that every member picks.
 pub const RELAY_RETURN_HOLD: Duration = Duration::from_mins(3);
 
 /// Timeout for *one attempt* of the private-mode rendezvous identity
