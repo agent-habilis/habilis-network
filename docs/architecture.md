@@ -253,12 +253,40 @@ A lost `PeerInfo` is back within one period, that is within 7.5 minutes for a me
 
 ### 5.3 The relay ladder
 
-`RENDEZVOUS_RELAY_LADDER` is a 14-rung list: the project relay fleet, each name on its 2 domains, then the 4 n0 regions.
-The fleet relays are behind Cloudflare, so they have no QUIC address discovery.
+`RENDEZVOUS_RELAY_LADDER` is an 8-rung list of `DefaultRung` values: 4 rungs of the project relay fleet, then the 4 n0 rungs.
+Each URL reaches its own relay process.
+A relay drops the older session of an endpoint id, so 2 URLs of one process make an endpoint drop its own session.
+
+Each rung has a `RungPath`: direct or tunnel.
+A direct rung faces the internet and answers QUIC address discovery (QAD) on a UDP port.
+A member homed on a direct rung learns its public address.
+A tunnel rung is behind an HTTP tunnel, which carries no UDP, so it answers no QAD.
+Rungs 0 and 1 are direct, rungs 2 and 3 are tunnels, and the n0 rungs are direct.
+The relay config of a rung asks for QAD only on a direct rung.
+An endpoint that asks a tunnel rung for QAD waits 3 s for its first net report, and has no home relay until then.
+The QAD setting follows the URL.
+Thus a beacon that homes on a default rung through a one-rung custom ladder gets it too.
+A custom ladder is URLs only, on the wire and in the API.
+A custom `https` rung asks for QAD on port 7842, and a custom `http` rung asks for none.
+
 The beacon homes on the first reachable rung, and the joiner pre-registers at the same rung.
 These two choices must agree, or the bootstrap dial finds nothing.
 Setup picks rung 0 without a probe, so readiness never blocks on the network.
 A startup task probes off-loop and corrects the rung through a watch channel into the event loop.
+
+The walk probes every rung at once.
+A rung wins only when every rung below it said no, so every member picks the same rung.
+A lower rung that answers late still wins over a higher rung that answers early.
+A ladder of silent rungs costs one probe window, not one window for each rung.
+When the walk decides, it stops the probes that are left, and each probe closes its endpoint before the walk returns.
+
+A member on a later rung returns to a lower rung when that rung comes back.
+Each minute, the member probes the rungs below its rung.
+When the lowest of them answered every round for 3 minutes, the member moves to it.
+The hold keeps a relay that restarts or flaps from moving every member back and forth.
+A peer endpoint moves its relay map in place.
+The beacon publishes the lower rung through the watch channel, and the event loop re-homes the beacon on it.
+The rendezvous address names every rung, so a joiner still reaches the beacon while it moves.
 
 ### 5.4 Rendezvous and beacon
 
