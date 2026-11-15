@@ -3,7 +3,7 @@
 //! The first member writes a value of the cap, `1 MiB`. Its slice is a pointer, and the second member fetches
 //! the 17 chunks over the chunk plane. The second member shows the value when it is whole, so both views
 //! agree. A shrink to a small value replaces it, and a write past the cap is refused with the text that says
-//! what to do.
+//! what to do. A value with the most structure units travels the same way, and one unit more is refused.
 
 #![cfg(feature = "host")]
 
@@ -16,6 +16,7 @@ use habilis_network::protocol::{AuthorKey, Channel, LookupOpts, Nickname};
 use habilis_network::runtime::{
     Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
 };
+use habilis_network::util::tuning::SLICE_VALUE_UNITS_MAX;
 use serde_json::{Map, Value, json};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -226,6 +227,80 @@ fn a_value_at_the_cap_reaches_the_other_member_whole_and_both_views_agree() {
             view(&first).await.get(&author).cloned(),
             Some(json!({ "after": "shrink" })),
             "a refused write must keep the last complete value"
+        );
+
+        let _ = second.leave().await;
+        let _ = first.leave().await;
+    });
+}
+
+/// An object of one key that holds `numbers` numbers. Its encoding has `numbers + 1` structure units and is far
+/// under the byte cap, but over one frame, so it travels as chunks.
+fn numbers_of(numbers: usize) -> Value {
+    json!({ "k": vec![1; numbers] })
+}
+
+#[test]
+fn a_value_at_the_unit_cap_reaches_the_other_member_and_one_unit_more_is_refused() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let nonce: u64 = rand::random();
+        let topic = format!("chunked-units-{nonce}");
+        let first = spawn(&topic, "first").await;
+        let second = spawn(&topic, "second").await;
+        let author = hex_key(&first).await;
+
+        let small = json!({ "small": 1 });
+        assert_eq!(
+            merge_within(&first, &small).await,
+            Ok(()),
+            "the first small write goes through"
+        );
+        assert_eq!(
+            slice_within(&second, &author, &small).await,
+            Some(small),
+            "the second member shows the small value"
+        );
+
+        // The most units that a value can have: a pointer on the wire, 2 chunks on the chunk plane.
+        let at_cap = numbers_of(SLICE_VALUE_UNITS_MAX - 1);
+        // The write is a patch: it drops the small key, so the value after the patch is `at_cap` and no more.
+        let mut patch = at_cap.clone();
+        patch["small"] = Value::Null;
+        assert_eq!(
+            merge_within(&first, &patch).await,
+            Ok(()),
+            "a value with the cap of units is accepted"
+        );
+        assert_eq!(
+            slice_within(&second, &author, &at_cap).await,
+            Some(at_cap.clone()),
+            "the second member must show the whole value"
+        );
+        assert_eq!(
+            view(&first).await,
+            view(&second).await,
+            "both members must show the same document"
+        );
+
+        // One unit more is refused, says what to do, and changes nothing on either member.
+        let over = numbers_of(SLICE_VALUE_UNITS_MAX);
+        let message = merge(&first, over)
+            .await
+            .expect_err("a value with too many units must be refused");
+        assert!(
+            message.contains("structure units") && message.contains("blob"),
+            "the refusal must name the units and say to use a blob, got: {message}"
+        );
+        assert_eq!(
+            view(&first).await.get(&author).cloned(),
+            Some(at_cap),
+            "a refused write must keep the last complete value"
+        );
+        assert_eq!(
+            view(&first).await,
+            view(&second).await,
+            "both members must still show the same document"
         );
 
         let _ = second.leave().await;
