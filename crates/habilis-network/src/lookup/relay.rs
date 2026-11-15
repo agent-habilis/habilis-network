@@ -1252,11 +1252,6 @@ mod tests {
         }
     }
 
-    fn is_n0_relay(url: &RelayUrl) -> bool {
-        url.host_str()
-            .is_some_and(|host| host.ends_with(".relay.n0.iroh.link"))
-    }
-
     /// How many HTTP connections a relay accepted. An endpoint that holds a relay in its map
     /// connects to it to measure the latency, even when it does not home on it.
     fn http_connections(server: &Server) -> u64 {
@@ -1279,13 +1274,13 @@ mod tests {
         lookups
     }
 
-    /// **A default peer endpoint homes on an n0 relay and learns its public address.**
+    /// **A default peer endpoint homes on rung 0 and learns its public address.**
     ///
-    /// The n0 relays answer QUIC address discovery, so the net report has a public address and
-    /// `udp_v4`. Rung 0 of the old ladder had none. This test needs the internet.
+    /// Rung 0 is a direct rung: it answers QUIC address discovery, so the net report has a public
+    /// address and `udp_v4`. This test needs the internet.
     #[test]
-    #[ignore = "needs the internet: it builds a peer endpoint on the n0 relays"]
-    fn a_default_peer_endpoint_homes_on_n0_and_has_a_public_address() {
+    #[ignore = "needs the internet, and the direct relay of rung 0 deployed: it builds a peer endpoint on the default ladder"]
+    fn a_default_peer_endpoint_homes_on_rung_0_and_has_a_public_address() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let endpoint = build_peer_endpoint(&LookupOpts::new(RelayChoice::Pinned))
                 .await
@@ -1300,9 +1295,10 @@ mod tests {
             let udp_v4 = report.udp_v4;
             endpoint.close().await;
 
-            assert!(
-                home.iter().all(is_n0_relay),
-                "the home relay is not an n0 relay: {home:?}"
+            assert_eq!(
+                home,
+                vec![RENDEZVOUS_RELAY_LADDER_URLS[0].clone()],
+                "the home relay is not rung 0"
             );
             assert!(udp_v4, "the net report has no udp_v4");
             assert!(global_v4.is_some(), "the net report has no public address");
