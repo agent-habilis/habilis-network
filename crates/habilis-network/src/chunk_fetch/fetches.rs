@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use habilis_network_chunks::Root;
-use habilis_network_doc::ChunkPointer;
+use habilis_network_doc::{ChunkPointer, structure_units};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::tuning::{
     CHUNK_FETCH_REFUSED_RETRY, CHUNK_FETCH_RETRY, CHUNK_FETCHES_MAX, CHUNK_SOURCES_MAX,
@@ -35,13 +35,23 @@ pub(crate) struct FetchDone {
     pub(crate) result: Result<Vec<u8>, FetchError>,
 }
 
-/// The fetches in flight, and when a fetch that failed can start again.
+/// Why this node refused the bytes of a value, and whether another fetch can change that.
+#[derive(Debug, Clone, Copy)]
+struct Refusal {
+    reason: &'static str,
+    /// The refusal depends on the bytes alone, and the bytes of a root do not change, so no fetch is made again.
+    for_good: bool,
+}
+
+/// The fetches in flight, when a fetch that failed can start again, and the values that this node refused.
 #[derive(Debug)]
 pub(crate) struct Fetches {
     done: mpsc::UnboundedSender<FetchDone>,
     /// The fetches in flight, with the bytes that each one will keep.
     running: HashMap<Wanted, u64>,
     retry_after: HashMap<Wanted, Instant>,
+    /// The values that came whole and that this node refused, for as long as their pointers wait.
+    refused: HashMap<Wanted, Refusal>,
 }
 
 impl Fetches {
@@ -51,7 +61,20 @@ impl Fetches {
             done,
             running: HashMap::new(),
             retry_after: HashMap::new(),
+            refused: HashMap::new(),
         }
+    }
+
+    /// Why this node refused the value that the slice of `author` names on `channel`, if it did.
+    pub(crate) fn refusal(
+        &self,
+        channel: Channel,
+        author: &AuthorKey,
+        root: Root,
+    ) -> Option<&'static str> {
+        self.refused
+            .get(&(channel, *author, root))
+            .map(|refusal| refusal.reason)
     }
 
     /// How many fetches run, for the tests that check a pointer starts one.
@@ -81,6 +104,7 @@ impl Fetches {
             .map(|(channel, author, pointer)| (*channel, *author, pointer.root()))
             .collect();
         self.retry_after.retain(|name, _| wanted.contains(name));
+        self.refused.retain(|name, _| wanted.contains(name));
         let room = CHUNK_FETCHES_MAX.saturating_sub(self.running.len());
         let mut byte_room_left = byte_room;
         let mut due = Vec::new();
@@ -90,7 +114,11 @@ impl Fetches {
                 .retry_after
                 .get(&name)
                 .is_some_and(|after| now < *after);
-            if due.len() >= room || self.running.contains_key(&name) || waits {
+            let refused_for_good = self
+                .refused
+                .get(&name)
+                .is_some_and(|refusal| refusal.for_good);
+            if due.len() >= room || self.running.contains_key(&name) || waits || refused_for_good {
                 continue;
             }
             // A value that does not fit is not fetched now, and the next that fits is. It waits for room.
@@ -187,14 +215,26 @@ pub(crate) async fn finish(
         }
     };
     match resolve(state, (channel, &author), pointer, &stored) {
-        Resolution::Kept => {}
+        Resolution::Kept => {
+            state.fetches.refused.remove(&name);
+        }
         Resolution::Superseded => return,
-        Resolution::Refused(reason) => {
-            tracing::warn!(target: "habilis_network::gossip", reason, "a fetched value was refused");
-            state
-                .fetches
-                .retry_after
-                .insert(name, now + CHUNK_FETCH_REFUSED_RETRY);
+        Resolution::Refused(refusal) => {
+            tracing::warn!(target: "habilis_network::gossip", reason = refusal.reason, "a fetched value was refused");
+            let first = state.fetches.refused.insert(name, refusal).is_none();
+            if first {
+                context.sink.emit(NodeEvent::Info(format!(
+                    "the value of {} on the {channel:?} channel was refused: {}",
+                    String::from_utf8_lossy(&author.hex()),
+                    refusal.reason
+                )));
+            }
+            if !refusal.for_good {
+                state
+                    .fetches
+                    .retry_after
+                    .insert(name, now + CHUNK_FETCH_REFUSED_RETRY);
+            }
             return;
         }
     }
@@ -214,8 +254,8 @@ enum Resolution {
     Kept,
     /// A newer version replaced the pointer while the chunks were on their way, so the value is of no use.
     Superseded,
-    /// The bytes are not a value that this node takes: they do not open, are not an object, or hold the reserved key.
-    Refused(&'static str),
+    /// The bytes are not a value that this node takes. A later fetch can differ only when the cause is not the bytes.
+    Refused(Refusal),
 }
 
 /// Opens `stored`, reads the value, and keeps it with the slice of `author` if the slice still holds `pointer`.
@@ -226,16 +266,33 @@ fn resolve(
     stored: &[u8],
 ) -> Resolution {
     let Ok(plain) = state.chunks.open_value(stored) else {
-        return Resolution::Refused("the bytes do not open with the key of the mesh");
+        return Resolution::Refused(Refusal {
+            reason: "the bytes do not open with the key of the mesh",
+            for_good: false,
+        });
     };
+    // The scan comes before the parse: the parsed value can take up to 486 bytes for each unit. A pointer that this
+    // node took names at most the cap of units, so bytes that count what the pointer names are under the cap too.
+    if u64::try_from(structure_units(&plain)) != Ok(pointer.units()) {
+        return Resolution::Refused(Refusal {
+            reason: "the units of the bytes differ from the pointer",
+            for_good: true,
+        });
+    }
     let parsed: Result<serde_json::Value, serde_json::Error> = serde_json::from_slice(&plain);
     let Ok(value) = parsed else {
-        return Resolution::Refused("the bytes are not JSON");
+        return Resolution::Refused(Refusal {
+            reason: "the bytes are not JSON",
+            for_good: false,
+        });
     };
     match state.docs.resolve_pointer(channel, author, pointer, value) {
         Ok(true) => Resolution::Kept,
         Ok(false) => Resolution::Superseded,
-        Err(_) => Resolution::Refused("the value is not an object, or holds the reserved key"),
+        Err(_) => Resolution::Refused(Refusal {
+            reason: "the value is not an object, or holds the reserved key",
+            for_good: false,
+        }),
     }
 }
 
@@ -262,10 +319,11 @@ mod tests {
     use std::sync::Mutex;
 
     use habilis_network_chunks::{CHUNK_BYTES_USIZE, Root};
-    use habilis_network_doc::ChunkPointer;
+    use habilis_network_doc::{ChunkPointer, structure_units};
     use habilis_network_util::clock::Instant;
     use habilis_network_util::tuning::{
         CHUNK_FETCH_REFUSED_RETRY, CHUNK_FETCH_RETRY, CHUNK_FETCHES_MAX, CHUNK_SOURCES_MAX,
+        SLICE_VALUE_UNITS_MAX,
     };
     use iroh::endpoint::presets;
     use iroh::{EndpointAddr, EndpointId};
@@ -290,6 +348,20 @@ mod tests {
     struct Recorder(Mutex<Vec<NodeEvent>>);
 
     impl Recorder {
+        fn infos(&self) -> Vec<String> {
+            let events = self.0.lock().expect("the record lock");
+            events
+                .iter()
+                .filter_map(|event| {
+                    if let NodeEvent::Info(text) = event {
+                        Some(text.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+
         fn state_changes(&self) -> Vec<NodeEvent> {
             let events = self.0.lock().expect("the record lock");
             events
@@ -608,6 +680,154 @@ mod tests {
                     .len(),
                 1,
                 "the fetch starts again when the long wait is over"
+            );
+            harness.endpoint.close().await;
+        });
+    }
+
+    /// Finishes the fetch of `plain`, for a pointer that says `units` units, and returns the node and what it shows.
+    async fn finish_with_units(
+        harness: &Harness,
+        author: &Identity,
+        plain: &[u8],
+        units: u64,
+        now: Instant,
+    ) -> EventLoopState {
+        let chunks = MeshChunks::open(None).expect("an in-memory store");
+        let root = chunks.put_value(plain).await.expect("a value");
+        let size = u64::try_from(plain.len()).expect("a size");
+        let pointer = ChunkPointer::new(root, size, units);
+        let mut state = state_waiting(author, pointer);
+        let done = FetchDone {
+            channel: Channel::State,
+            author: author.author_key(),
+            pointer,
+            result: Ok(chunks.stored_bytes(root).await),
+        };
+        super::finish(&mut state, &mut Inert, &harness.context(), done, now).await;
+        state
+    }
+
+    #[test]
+    fn bytes_with_more_units_than_the_pointer_says_are_refused_for_good_and_shown() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "a fetched value was refused",
+            );
+            let harness = Harness::spawn().await;
+            let author = Identity::generate();
+            let numbers = SLICE_VALUE_UNITS_MAX;
+            let plain =
+                serde_json::to_vec(&serde_json::json!({"k": vec![1; numbers]})).expect("JSON");
+            let now = Instant::now();
+            let state = finish_with_units(&harness, &author, &plain, 5, now).await;
+            assert!(
+                harness.sink.state_changes().is_empty(),
+                "a refused value shows nothing"
+            );
+            assert!(
+                state
+                    .docs
+                    .is_unresolved(Channel::State, &author.author_key()),
+                "a refused value leaves the pointer waiting"
+            );
+            let mut state = state;
+            let waiting = state.docs.unresolved();
+            assert!(
+                state
+                    .fetches
+                    .due(
+                        waiting,
+                        now + 100 * CHUNK_FETCH_REFUSED_RETRY,
+                        u64::MAX,
+                        ChunkPointer::size
+                    )
+                    .is_empty(),
+                "the bytes do not change for a root, so a refusal of the structure is for good"
+            );
+            let listed: Vec<_> = state.syncing(Channel::State).collect();
+            assert_eq!(listed.len(), 1, "the pointer is still listed");
+            assert_eq!(
+                listed[0].refused.as_deref(),
+                Some("the units of the bytes differ from the pointer"),
+                "the list must say why the value is refused"
+            );
+            assert_eq!(
+                harness.sink.infos().len(),
+                1,
+                "the refusal must be shown as an event"
+            );
+            harness.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn bytes_with_fewer_units_than_the_pointer_says_are_refused_too() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "a fetched value was refused",
+            );
+            let harness = Harness::spawn().await;
+            let author = Identity::generate();
+            let plain = serde_json::to_vec(&serde_json::json!({"k": [1, 2]})).expect("JSON");
+            let state = finish_with_units(&harness, &author, &plain, 7, Instant::now()).await;
+            assert!(
+                harness.sink.state_changes().is_empty(),
+                "a count that is not the true count is a lie, in both directions"
+            );
+            assert!(
+                state
+                    .docs
+                    .is_unresolved(Channel::State, &author.author_key()),
+                "a refused value leaves the pointer waiting"
+            );
+            harness.endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_refusal_that_can_change_is_shown_once_and_still_retried() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "a fetched value was refused",
+            );
+            let harness = Harness::spawn().await;
+            let author = Identity::generate();
+            let plain = serde_json::to_vec(&serde_json::json!([1, 2, 3])).expect("JSON");
+            let units = u64::try_from(structure_units(&plain)).expect("a count");
+            let now = Instant::now();
+            let mut state = finish_with_units(&harness, &author, &plain, units, now).await;
+            let listed: Vec<_> = state.syncing(Channel::State).collect();
+            assert_eq!(
+                listed[0].refused.as_deref(),
+                Some("the value is not an object, or holds the reserved key"),
+                "the list must say why the value is refused"
+            );
+            assert_eq!(harness.sink.infos().len(), 1, "the refusal is shown once");
+            let chunks = MeshChunks::open(None).expect("an in-memory store");
+            let root = chunks.put_value(&plain).await.expect("a value");
+            let pointer = ChunkPointer::of(root, &plain);
+            let again = FetchDone {
+                channel: Channel::State,
+                author: author.author_key(),
+                pointer,
+                result: Ok(chunks.stored_bytes(root).await),
+            };
+            super::finish(
+                &mut state,
+                &mut Inert,
+                &harness.context(),
+                again,
+                now + CHUNK_FETCH_REFUSED_RETRY,
+            )
+            .await;
+            assert_eq!(
+                harness.sink.infos().len(),
+                1,
+                "the same refusal of the same pointer must not be shown again"
             );
             harness.endpoint.close().await;
         });

@@ -27,6 +27,10 @@ pub struct Syncing {
     pub have: usize,
     /// The chunks that the value has.
     pub of: usize,
+    /// Why this node refused the bytes of the value, when it did. The pointer still waits, and a reader keeps seeing
+    /// the last complete version. It is absent while the chunks are only on their way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 impl Syncing {
@@ -36,7 +40,14 @@ impl Syncing {
             root,
             have,
             of,
+            refused: None,
         }
+    }
+
+    /// Sets the reason that this node refused the bytes of the value.
+    pub(crate) fn refused(mut self, reason: Option<&str>) -> Self {
+        self.refused = reason.map(str::to_owned);
+        self
     }
 }
 

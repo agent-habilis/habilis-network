@@ -1076,10 +1076,11 @@ impl EventLoopState {
             .unresolved()
             .into_iter()
             .filter(move |(waiting_channel, ..)| *waiting_channel == channel);
-        in_channel.map(|(_, author, pointer)| {
+        in_channel.map(move |(_, author, pointer)| {
             let key = String::from_utf8_lossy(&author.hex()).into_owned();
             let chunks = chunk_count(self.chunks.stored_size(pointer));
-            Syncing::new(key, pointer.root().to_hex(), 0, chunks)
+            let refused = self.fetches.refusal(channel, &author, pointer.root());
+            Syncing::new(key, pointer.root().to_hex(), 0, chunks).refused(refused)
         })
     }
 
