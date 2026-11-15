@@ -903,9 +903,9 @@ fn next_relay_backoff(current: Duration) -> Duration {
 /// - **Homed** (`home`, the rung the event loop homed the beacon on):
 ///   follow the ladder with the signal and the times of a peer endpoint
 ///   ([`follow_rung`]). On a sustained outage, re-walk the ladder once and
-///   publish the result (`Some` ⇒ re-home, `None` ⇒ demote to
-///   relay-less). A walk that picks the same rung publishes nothing and
-///   goes on following. On a later rung, publish the lowest rung below it
+///   publish the rung it picks; the event loop re-homes the beacon on it.
+///   A walk that picks the same rung, or finds no rung, publishes nothing,
+///   and the beacon goes on following on its rung. On a later rung, publish the lowest rung below it
 ///   once it answered every round for [`RELAY_RETURN_HOLD`]. The
 ///   rendezvous address names every rung, so a joiner still reaches the
 ///   beacon while it moves.
@@ -991,7 +991,7 @@ mod tests {
     use n0_future::task as n0future_task;
     use std::net::{Ipv4Addr, TcpListener};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::{TcpListener as AsyncListener, TcpStream};
     use tokio::sync::watch;
     use tokio::task::JoinHandle;
@@ -1791,13 +1791,13 @@ mod tests {
     fn a_walk_that_finds_no_rung_keeps_the_follower_alive() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             allow_refused_rung_warnings();
-            let ladder = vec![refused_rung(), refused_rung()];
-            let first = ladder[0].clone();
+            let first = refused_rung();
+            let (second, walk_probes) = spawn_closing_rung().await;
             let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(super::one_rung_mode(Some(&first)));
             let endpoint = builder.bind().await.expect("bind the endpoint");
             let homing = super::Homing {
-                ladder,
+                ladder: vec![first.clone(), second],
                 rung: first,
             };
             let follower =
@@ -1806,9 +1806,11 @@ mod tests {
             // The first walk starts after the 2 s that the rung gets to connect, and ends at once.
             time::sleep(std_Duration::from_secs(8)).await;
             let alive = !follower.is_finished();
+            let walked = walk_probes.load(Ordering::SeqCst);
             endpoint.close().await;
             drop(follower.await);
 
+            assert!(walked > 0, "no walk ran in 8 s, so the test proves nothing");
             assert!(alive, "the follower ended while its endpoint was open");
         });
     }
@@ -2104,6 +2106,29 @@ mod tests {
     /// connects to it to measure the latency, even when it does not home on it.
     fn http_connections(server: &Server) -> u64 {
         server.metrics().server.http_connections.get()
+    }
+
+    /// A relay URL on a local port that accepts each connection, counts it, and closes it at once.
+    /// The endpoint holds only its own rung, so each connection to this rung is a probe of a walk.
+    async fn spawn_closing_rung() -> (RelayUrl, Arc<AtomicUsize>) {
+        let listener: AsyncListener = AsyncListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("a free loopback port");
+        let address = listener.local_addr().expect("the bound address");
+        let port: u16 = address.port();
+        // The count is shared with the accept task and with the test.
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        n0future_task::spawn(async move {
+            while let Ok((stream, _peer)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/")
+            .parse()
+            .expect("a literal http URL parses");
+        (url, accepted)
     }
 
     /// A relay URL on a local port that refuses connections.
