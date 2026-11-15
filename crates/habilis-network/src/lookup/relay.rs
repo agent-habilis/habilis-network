@@ -15,6 +15,7 @@
 use std::future;
 mod default_rung;
 mod return_watch;
+mod rung_follower;
 mod rung_path;
 mod rung_refresh;
 mod stoppable_task;
@@ -31,7 +32,7 @@ use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher};
 use tokio::sync::watch;
 
 pub use default_rung::DefaultRung;
-use return_watch::ReturnWatch;
+use rung_follower::RungFollower;
 pub use rung_path::RungPath;
 pub(crate) use rung_refresh::RungRefresh;
 pub(crate) use stoppable_task::StoppableTask;
@@ -317,7 +318,7 @@ enum Mover<'tx> {
 async fn follow_rung(
     endpoint: &Endpoint,
     ladder: &[RelayUrl],
-    mut rung: RelayUrl,
+    rung: RelayUrl,
     times: HomingTimes,
     mover: Mover<'_>,
     stop: Option<&watch::Receiver<()>>,
@@ -330,24 +331,11 @@ async fn follow_rung(
         ) => matches!(connected, Ok(true)),
         () = ended(endpoint, stop) => return,
     };
-    let mut fails: u32 = if connected_at_start {
-        0
-    } else {
-        RELAY_LIVENESS_FAILS_TO_EVICT
-    };
-    // The first walk of a rung that never connected does not probe it again: the probe
-    // would wait out its time. A later walk probes the whole ladder, because a net report
-    // under load can drop the preferred relay of a live rung, and the walk must be able
-    // to stay on it.
-    let mut skip_rung = !connected_at_start;
-    let mut returns = Returns::new(times);
-    let mut next_read = Instant::now() + times.interval;
+    let mut follower = RungFollower::new(ladder, rung, times, connected_at_start, Instant::now());
+    let mut round: Option<ReturnRound> = None;
     loop {
-        if should_evict_rung(fails) {
-            returns.cancel_round().await;
-            fails = 0;
-            let walk = rungs_to_walk(ladder, &rung, skip_rung);
-            skip_rung = false;
+        if let Some(walk) = follower.walk_due() {
+            cancel_round(&mut round).await;
             let selected = walk_until_ended(endpoint, stop, |walk_stopped| async move {
                 select_bootstrap_rung(&walk, times.probe, Some(&walk_stopped)).await
             })
@@ -355,50 +343,40 @@ async fn follow_rung(
             if is_ended(endpoint, stop) {
                 return;
             }
-            // A walk that finds no rung keeps the member on its rung: the next failed reads walk
-            // again, and the first rung that comes back wins. A walk that picks the same rung
-            // keeps it too. The rung failed either way, so the waits of the lower rungs start over.
-            match selected.filter(|next| *next != rung) {
+            match follower.walked(selected, Instant::now()) {
                 Some(next) => {
-                    let Some(next) = mover.take(endpoint, &rung, next, "next").await else {
+                    let Some(next) = mover.take(endpoint, follower.rung(), next, "next").await
+                    else {
                         return;
                     };
-                    rung = next;
+                    follower.moved(next, Instant::now());
                 }
                 None => {
-                    tracing::info!(target: "habilis_network::lookup", relay = %rung, "the walk found no other relay rung; staying on it");
+                    tracing::info!(target: "habilis_network::lookup", relay = %follower.rung(), "the walk found no other relay rung; staying on it");
                 }
             }
-            returns = Returns::new(times);
-            next_read = Instant::now() + times.interval;
         }
-        let until_read = next_read.saturating_duration_since(Instant::now());
+        let until_read = follower.read_at().saturating_duration_since(Instant::now());
         tokio::select! {
             () = n0future_time::sleep(until_read) => {
-                next_read = Instant::now() + times.interval;
-                fails = if home_connected(&status.get(), &rung) && probes_answer(endpoint) {
-                    0
-                } else {
-                    fails + 1
-                };
+                let alive = home_connected(&status.get(), follower.rung()) && probes_answer(endpoint);
+                follower.read(alive, Instant::now());
             }
-            answered = returns.round_answers() => {
-                if let Some(lower) = returns.observe(&answered) {
-                    let Some(next) = mover.take(endpoint, &rung, lower, "lower").await else {
+            answered = round_answers(&mut round) => {
+                if let Some(lower) = follower.round_ended(&answered, Instant::now()) {
+                    let Some(next) = mover.take(endpoint, follower.rung(), lower, "lower").await else {
                         return;
                     };
-                    rung = next;
-                    returns = Returns::new(times);
-                    next_read = Instant::now() + times.interval;
+                    follower.moved(next, Instant::now());
                 }
             }
             () = ended(endpoint, stop) => {
-                returns.cancel_round().await;
+                cancel_round(&mut round).await;
                 return;
             }
         }
-        if fails == 0 {
-            returns.start_round_if_due(rungs_below(ladder, &rung));
+        if let Some(below) = follower.round_due(Instant::now()) {
+            round = Some(ReturnRound::spawn(below, times.probe));
         }
     }
 }
@@ -428,17 +406,6 @@ impl Mover<'_> {
     }
 }
 
-/// The return of a member on a later rung to a lower one: the rounds that probe the rungs below the
-/// home, and what they found so far.
-#[derive(Debug)]
-struct Returns {
-    times: HomingTimes,
-    watch: ReturnWatch,
-    wait: Duration,
-    next_round: Instant,
-    round: Option<ReturnRound>,
-}
-
 /// One probe round of the rungs below the home, in a task of its own beside the liveness reads.
 #[derive(Debug)]
 struct ReturnRound {
@@ -446,56 +413,31 @@ struct ReturnRound {
     task: n0future_task::JoinHandle<Vec<RelayUrl>>,
 }
 
-impl Returns {
-    fn new(times: HomingTimes) -> Self {
-        Self {
-            times,
-            watch: ReturnWatch::default(),
-            wait: times.return_every,
-            next_round: Instant::now() + times.return_every,
-            round: None,
-        }
-    }
-
-    /// Start a round of `below` when none runs and its time has come. A home on rung 0 has nothing
-    /// below it, and starts no round.
-    fn start_round_if_due(&mut self, below: &[RelayUrl]) {
-        if self.round.is_some() || below.is_empty() || Instant::now() < self.next_round {
-            return;
-        }
+impl ReturnRound {
+    /// Start a round that probes each of `below`.
+    fn spawn(below: Vec<RelayUrl>, probe: Duration) -> Self {
         let (stop, stopped) = watch::channel(());
-        let below = below.to_vec();
-        let probe = self.times.probe;
         let task =
             n0future_task::spawn(async move { probe_lower_rungs(&below, probe, &stopped).await });
-        self.round = Some(ReturnRound { stop, task });
+        Self { stop, task }
     }
+}
 
-    /// The rungs that answered the round in flight, once it ends. Never resolves without a round.
-    async fn round_answers(&mut self) -> Vec<RelayUrl> {
-        let Some(round) = self.round.as_mut() else {
-            return future::pending().await;
-        };
-        let answered = (&mut round.task).await.unwrap_or_default();
-        self.round = None;
-        answered
-    }
+/// The rungs that answered the round in flight, once it ends. Never resolves without a round.
+async fn round_answers(round: &mut Option<ReturnRound>) -> Vec<RelayUrl> {
+    let Some(running) = round.as_mut() else {
+        return future::pending().await;
+    };
+    let answered = (&mut running.task).await.unwrap_or_default();
+    *round = None;
+    answered
+}
 
-    /// Note the rungs that answered a round, and plan the next round. Returns the rung to return
-    /// to, once it answered every round for the hold.
-    fn observe(&mut self, answered: &[RelayUrl]) -> Option<RelayUrl> {
-        self.wait = next_return_wait(self.wait, !answered.is_empty(), self.times);
-        self.next_round = Instant::now() + self.wait;
-        self.watch
-            .observe(answered, Instant::now(), self.times.return_hold)
-    }
-
-    /// Stop the round in flight, and wait until its probes have closed their endpoints.
-    async fn cancel_round(&mut self) {
-        if let Some(ReturnRound { stop, task }) = self.round.take() {
-            drop(stop);
-            drop(task.await);
-        }
+/// Stop the round in flight, and wait until its probes have closed their endpoints.
+async fn cancel_round(round: &mut Option<ReturnRound>) {
+    if let Some(ReturnRound { stop, task }) = round.take() {
+        drop(stop);
+        drop(task.await);
     }
 }
 
@@ -560,7 +502,7 @@ where
 
 /// Probe each of `rungs` at once, and return the rungs that answered, in their order. Each rung
 /// that answers counts, not only the lowest one, so that a rung that flaps does not hold back a
-/// steady rung above it ([`ReturnWatch`]). Once `stop`'s sender is dropped, every probe ends and
+/// steady rung above it ([`return_watch::ReturnWatch`]). Once `stop`'s sender is dropped, every probe ends and
 /// closes its endpoint before this returns.
 async fn probe_lower_rungs(
     rungs: &[RelayUrl],
@@ -1568,18 +1510,23 @@ mod tests {
             let (silent, _held) = spawn_silent_rung().await;
             let mut times = return_times(std_Duration::from_hours(1));
             times.return_every = std_Duration::ZERO;
-            let mut returns = super::Returns::new(times);
+            let ladder = vec![silent.clone(), rung("later")];
+            let now = time::Instant::now();
 
-            returns.start_round_if_due(&[]);
-            assert!(returns.round.is_none(), "rung 0 has no rung below it");
-
-            returns.start_round_if_due(&[silent]);
-            assert!(
-                returns.round.is_some(),
-                "a due round of a later home starts"
+            let mut on_rung_0 = super::RungFollower::new(&ladder, silent, times, true, now);
+            assert_eq!(
+                on_rung_0.round_due(now),
+                None,
+                "rung 0 has no rung below it"
             );
-            returns.cancel_round().await;
-            assert!(returns.round.is_none(), "a cancel ends the round");
+
+            let mut on_rung_1 = super::RungFollower::new(&ladder, rung("later"), times, true, now);
+            let below = on_rung_1
+                .round_due(now)
+                .expect("a due round of a later home starts");
+            let mut round = Some(super::ReturnRound::spawn(below, times.probe));
+            super::cancel_round(&mut round).await;
+            assert!(round.is_none(), "a cancel ends the round");
         });
     }
 
