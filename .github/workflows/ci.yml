@@ -241,13 +241,24 @@ jobs:
       - name: Test (blob)
         run: cargo test -p habilis-network --features blob
 
-      # Not covered by `Test` above: the test is ignored, because it waits 60 s for
-      # 2 periods of the net report of iroh. It is the CI proof of the fix in the iroh
-      # fork (agent-habilis/iroh#7): an incremental net report must measure a relay
-      # with no QUIC address discovery, or a peer on a healthy tunnel rung walks the
-      # ladder in every second period. It failed on iroh e970dd25 in 10 of 10 runs.
-      - name: Test (a relay rung without QAD keeps its peer)
-        run: cargo test -p habilis-network --lib -- --ignored --exact lookup::relay::tests::a_peer_on_a_healthy_rung_without_qad_is_not_evicted
+      # Not covered by `Test` above: these relay follower tests are ignored, because
+      # each waits 20-60 s for real relay timers. a_peer_on_a_healthy_rung_without_qad_is_not_evicted
+      # is the CI proof of the fix in the iroh fork (agent-habilis/iroh#7): an
+      # incremental net report must measure a relay with no QUIC address discovery,
+      # or a peer on a healthy tunnel rung walks the ladder in every second period.
+      # It failed on iroh e970dd25 in 10 of 10 runs. The others prove that a beacon
+      # leaves a rung that dies silently, that a return round does not hold back the
+      # liveness read, and that a full outage keeps the follower of a peer and of the
+      # beacon alive. The libtest harness runs them in parallel, so the step takes
+      # about 60 s.
+      - name: Test (relay rung follower)
+        run: >-
+          cargo test -p habilis-network --lib -- --ignored --exact
+          lookup::relay::tests::a_peer_on_a_healthy_rung_without_qad_is_not_evicted
+          lookup::relay::tests::a_beacon_leaves_a_rung_that_dies_silently
+          lookup::relay::tests::a_slow_return_round_does_not_hold_back_the_liveness_read
+          lookup::relay::tests::a_peer_moves_to_a_rung_that_comes_back_after_a_full_outage
+          lookup::relay::tests::a_walk_that_finds_no_rung_does_not_demote_the_beacon
 
       # Not covered by `--workspace` above: the loopback suite is behind
       # `required-features = ["native"]`, so a default-feature test run skips
