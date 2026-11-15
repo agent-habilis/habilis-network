@@ -1187,6 +1187,16 @@ pub const SLICE_AUTHORS_MAX: usize = 1024;
 /// on purpose: a member that needs more stores the data as a blob and puts the ticket in the value.
 pub const SLICE_VALUE_MAX_BYTES: usize = 1024 * 1024;
 
+/// The most structure units that the encoded value of one slice can hold, in `state` and in `meta` alike. A unit is
+/// one `{`, `[` or `,` outside a string. The byte cap does not bound the RAM of the parsed value: a 1 `MiB` array of
+/// small objects takes 87 MB (83x), and nested objects take 93 MB (97x). The parsed value takes up to 486 bytes for
+/// each unit, so this cap holds the RAM of one value to about 16 MB (15x the byte cap). A real value of 20000 short
+/// entries fits.
+///
+/// The cap is a constant of the protocol, not a setting: every member must refuse the same pointers. A change needs a
+/// bump of the wire version.
+pub const SLICE_VALUE_UNITS_MAX: usize = 32 * 1024;
+
 /// The length of the window of the serve budget.
 pub const DIGEST_SERVE_WINDOW: Duration = Duration::from_secs(5);
 

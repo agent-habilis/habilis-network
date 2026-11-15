@@ -311,6 +311,13 @@ pub enum SliceError {
         /// The cap in bytes.
         limit: usize,
     },
+    /// The value holds more structure units than the cap, so its parsed form could take too much RAM.
+    ValueTooComplex {
+        /// The number of structure units of the value.
+        units: usize,
+        /// The cap in units.
+        limit: usize,
+    },
     /// The value holds the reserved `$chunks` key, which only a chunk pointer may carry.
     Reserved,
 }
@@ -334,6 +341,11 @@ impl fmt::Display for SliceError {
             Self::ValueTooLarge { bytes, limit } => write!(
                 f,
                 "the value has {bytes} bytes, past the cap of {limit} bytes: store the data as a blob and put the ticket in the value"
+            ),
+            Self::ValueTooComplex { units, limit } => write!(
+                f,
+                "the value has {units} structure units, past the cap of {limit} units (the cap in bytes is {}): store the data as a blob and put the ticket in the value",
+                tuning::SLICE_VALUE_MAX_BYTES
             ),
             Self::Reserved => write!(f, "the value holds the reserved \"$chunks\" key"),
         }
@@ -1947,6 +1959,28 @@ mod tests {
             error.to_string(),
             "the value has 108 bytes, past the cap of 64 bytes: store the data as a blob and put the ticket in the value",
             "the error text must name the cap and say to use a blob"
+        );
+    }
+
+    #[test]
+    fn the_structure_error_names_both_caps_and_says_what_to_do() {
+        let error = SliceError::ValueTooComplex {
+            units: 40_000,
+            limit: 32_768,
+        };
+        assert_eq!(
+            error.to_string(),
+            "the value has 40000 structure units, past the cap of 32768 units (the cap in bytes is 1048576): store the data as a blob and put the ticket in the value",
+            "the error text must name both caps and say to use a blob"
+        );
+    }
+
+    #[test]
+    fn the_structure_cap_is_a_fixed_constant_of_the_protocol() {
+        assert_eq!(
+            tuning::SLICE_VALUE_UNITS_MAX,
+            32_768,
+            "the cap is 32768 units"
         );
     }
 
