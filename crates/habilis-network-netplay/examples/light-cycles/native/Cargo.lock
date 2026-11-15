@@ -2105,7 +2105,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=e970dd25148386850feaffbac044bba64765fe73#e970dd25148386850feaffbac044bba64765fe73"
+source = "git+https://github.com/agent-habilis/iroh?rev=a52584ffc9681b1e60fc3cd0e1eeb80926ba0ba9#a52584ffc9681b1e60fc3cd0e1eeb80926ba0ba9"
 dependencies = [
  "backon",
  "blake3",
@@ -2155,7 +2155,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=e970dd25148386850feaffbac044bba64765fe73#e970dd25148386850feaffbac044bba64765fe73"
+source = "git+https://github.com/agent-habilis/iroh?rev=a52584ffc9681b1e60fc3cd0e1eeb80926ba0ba9#a52584ffc9681b1e60fc3cd0e1eeb80926ba0ba9"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -2173,7 +2173,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=e970dd25148386850feaffbac044bba64765fe73#e970dd25148386850feaffbac044bba64765fe73"
+source = "git+https://github.com/agent-habilis/iroh?rev=a52584ffc9681b1e60fc3cd0e1eeb80926ba0ba9#a52584ffc9681b1e60fc3cd0e1eeb80926ba0ba9"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2196,7 +2196,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.102.0"
-source = "git+https://github.com/agent-habilis/iroh-gossip?rev=810fc0fdd5541e7bd337fc6212a61cb6e18ac264#810fc0fdd5541e7bd337fc6212a61cb6e18ac264"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=67e453efb8436efb37fa47a70f6135ef85bfbee5#67e453efb8436efb37fa47a70f6135ef85bfbee5"
 dependencies = [
  "blake3",
  "bytes",
@@ -2222,7 +2222,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=a40fd1371cfdb627428b7050268cc9016310aa82#a40fd1371cfdb627428b7050268cc9016310aa82"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=136f733de94241815f15af77cfc605a4d051645a#136f733de94241815f15af77cfc605a4d051645a"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2239,7 +2239,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=a40fd1371cfdb627428b7050268cc9016310aa82#a40fd1371cfdb627428b7050268cc9016310aa82"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=136f733de94241815f15af77cfc605a4d051645a#136f733de94241815f15af77cfc605a4d051645a"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -2285,7 +2285,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=e970dd25148386850feaffbac044bba64765fe73#e970dd25148386850feaffbac044bba64765fe73"
+source = "git+https://github.com/agent-habilis/iroh?rev=a52584ffc9681b1e60fc3cd0e1eeb80926ba0ba9#a52584ffc9681b1e60fc3cd0e1eeb80926ba0ba9"
 dependencies = [
  "blake3",
  "bytes",
