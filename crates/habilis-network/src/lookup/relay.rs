@@ -13,6 +13,8 @@
 //! (`beacon::RendezvousParams::bind_ports`).
 
 use std::future;
+mod default_rung;
+mod rung_path;
 mod rung_refresh;
 mod stoppable_task;
 
@@ -20,10 +22,13 @@ use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use iroh::defaults::DEFAULT_RELAY_QUIC_PORT;
 use iroh::endpoint::{RelayStatus, presets};
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher};
 use tokio::sync::watch;
 
+pub use default_rung::DefaultRung;
+pub use rung_path::RungPath;
 pub(crate) use rung_refresh::RungRefresh;
 pub(crate) use stoppable_task::StoppableTask;
 
@@ -42,11 +47,14 @@ use n0_future::{task as n0future_task, time as n0future_time};
 /// dial: a creator-independent bootstrap that needs no address lookup to
 /// reach the rendezvous.
 ///
-/// Rungs 0..10 are our relays: each relay name on both of our domains. Each
-/// URL must reach its own relay process. iroh opens one relay session per
-/// URL, and a relay drops the older session of an endpoint id, so two URLs of
-/// one process make an endpoint drop its own session. Rungs 10..14 are iroh
-/// `defaults::prod`.
+/// Rungs 0..4 are our relays, one URL for each relay process. iroh opens one
+/// relay session per URL, and a relay drops the older session of an endpoint
+/// id, so two URLs of one process make an endpoint drop its own session. Rungs
+/// 0..2 are direct: each relay answers QUIC address discovery, so a member
+/// homed on it learns its public address. Rungs 2..4 are tunnels: the tunnel
+/// carries no UDP, so they answer no QUIC address discovery, and an endpoint
+/// that asked them for it would wait 3 s for its first net report. Rungs 4..8
+/// are iroh `defaults::prod`, which are direct.
 ///
 /// Hardcoded, **not** `defaults::prod::default_relay_map()`, so members on
 /// different iroh versions still agree on the *same* ladder. Relay infra is
@@ -54,35 +62,69 @@ use n0_future::{task as n0future_task, time as n0future_time};
 /// `defaults::prod` off these hosts. `pinned_ladder_matches_iroh_prod` is
 /// the tripwire: it fails on such a move so we review the n0 rungs before
 /// the bump ships.
-pub const RENDEZVOUS_RELAY_LADDER: &[&str] = &[
+pub const RENDEZVOUS_RELAY_LADDER: &[DefaultRung] = &[
     // No trailing-dot FQDN on any rung. Safari rejects the certificate of a
-    // dotted host, so a browser member could reach none of them. Our rungs
-    // have a second reason: Cloudflare routes by exact Host header and 404s
-    // the dotted form (including the /relay websocket upgrade).
-    "https://relay.agent-habilis.com/",
-    "https://relay.habilis.network/",
-    "https://nyc-relay1.agent-habilis.com/",
-    "https://nyc-relay1.habilis.network/",
-    "https://nyc-relay2.agent-habilis.com/",
-    "https://nyc-relay2.habilis.network/",
-    "https://nyc-relay3.agent-habilis.com/",
-    "https://nyc-relay3.habilis.network/",
-    "https://slz-relay1.agent-habilis.com/",
-    "https://slz-relay1.habilis.network/",
-    "https://use1-1.relay.n0.iroh.link/",
-    "https://usw1-1.relay.n0.iroh.link/",
-    "https://euc1-1.relay.n0.iroh.link/",
-    "https://aps1-1.relay.n0.iroh.link/",
+    // dotted host, so a browser member could reach none of them. Our tunnel
+    // rungs have a second reason: the tunnel routes by exact Host header and
+    // 404s the dotted form (including the /relay websocket upgrade).
+    DefaultRung {
+        url: "https://nyc-relay1.agent-habilis.com/",
+        path: DIRECT,
+    },
+    DefaultRung {
+        url: "https://nyc-relay2.agent-habilis.com/",
+        path: DIRECT,
+    },
+    DefaultRung {
+        url: "https://nyc-relay2.habilis.network/",
+        path: RungPath::Tunnel,
+    },
+    DefaultRung {
+        url: "https://slz-relay1.habilis.network/",
+        path: RungPath::Tunnel,
+    },
+    DefaultRung {
+        url: "https://use1-1.relay.n0.iroh.link/",
+        path: DIRECT,
+    },
+    DefaultRung {
+        url: "https://usw1-1.relay.n0.iroh.link/",
+        path: DIRECT,
+    },
+    DefaultRung {
+        url: "https://euc1-1.relay.n0.iroh.link/",
+        path: DIRECT,
+    },
+    DefaultRung {
+        url: "https://aps1-1.relay.n0.iroh.link/",
+        path: DIRECT,
+    },
 ];
 
-/// Parsed once; `RelayUrl` clones are `Arc`-backed (cheap).
-static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| {
+/// The path of a direct rung of the default ladder: QUIC address discovery on the default port.
+const DIRECT: RungPath = RungPath::Direct {
+    qad_port: DEFAULT_RELAY_QUIC_PORT,
+};
+
+/// The relay config of each rung of the default ladder, parsed once.
+static RENDEZVOUS_RELAY_LADDER_CONFIGS: LazyLock<Vec<RelayConfig>> = LazyLock::new(|| {
     RENDEZVOUS_RELAY_LADDER
         .iter()
-        .map(|raw| {
-            raw.parse()
-                .expect("RENDEZVOUS_RELAY_LADDER entries are valid relay URL constants")
+        .map(|rung| {
+            let url: RelayUrl = rung
+                .url()
+                .parse()
+                .expect("RENDEZVOUS_RELAY_LADDER entries are valid relay URL constants");
+            config_with_qad(url, rung.path().qad_port())
         })
+        .collect()
+});
+
+/// The URLs of the default ladder, in order. `RelayUrl` clones are `Arc`-backed (cheap).
+static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| {
+    RENDEZVOUS_RELAY_LADDER_CONFIGS
+        .iter()
+        .map(|config| config.url.clone())
         .collect()
 });
 
@@ -113,14 +155,38 @@ pub fn relay_ladder(choice: &RelayChoice) -> impl Iterator<Item = RelayUrl> {
     rungs.into_iter()
 }
 
-/// The relay config of one rung. A rung over plain `http://` has no TLS, and QUIC needs TLS, so
-/// it cannot serve QUIC address discovery. Probing its default QUIC port holds the first net
-/// report until the 3 s probe timeout of iroh, and the endpoint has no home relay until then.
+/// The relay config of one rung, with the QUIC address discovery that the relay answers. An
+/// endpoint that asks a relay for QUIC address discovery that it does not answer holds its first
+/// net report until the 3 s probe timeout of iroh, and has no home relay until then.
+///
+/// The setting belongs to the relay, so it follows the URL: a rung of the default ladder takes its
+/// [`RungPath`] wherever a ladder names it, a one-rung custom ladder of the beacon too. A custom
+/// ladder is URLs only, on the wire and in the API, so a custom rung that the default ladder does
+/// not name takes the rule of its scheme. An `https://` rung asks for QUIC address discovery on
+/// the default port. An `http://` rung has no TLS, and QUIC needs TLS, so it asks for none.
 fn rung_config(url: &RelayUrl) -> RelayConfig {
-    let mut config = RelayConfig::from(url.clone());
-    if url.scheme() == "http" {
-        config.quic = None;
+    if let Some(config) = RENDEZVOUS_RELAY_LADDER_CONFIGS
+        .iter()
+        .find(|config| config.url == *url)
+    {
+        return config.clone();
     }
+    let qad_port = (url.scheme() == "https").then_some(DEFAULT_RELAY_QUIC_PORT);
+    config_with_qad(url.clone(), qad_port)
+}
+
+/// The relay config of `url`, with QUIC address discovery on `qad_port`, or none. The QUIC config
+/// of iroh has no public constructor here, so the port is set on the one that `RelayConfig::from`
+/// makes.
+fn config_with_qad(url: RelayUrl, qad_port: Option<u16>) -> RelayConfig {
+    let mut config = RelayConfig::from(url);
+    let template = config.quic.take();
+    config.quic = qad_port.and_then(|port| {
+        template.map(|mut quic| {
+            quic.port = port;
+            quic
+        })
+    });
     config
 }
 
@@ -620,6 +686,7 @@ mod tests {
     };
     use crate::lookup::{TransportOpts, build_peer_endpoint, build_peer_webrtc};
     use crate::protocol::meshes::LookupOpts;
+    use iroh::defaults::DEFAULT_RELAY_QUIC_PORT;
     use iroh::{RelayMode, Watcher as _};
     use iroh_relay::server::Server;
     use n0_future::task as n0future_task;
@@ -676,14 +743,109 @@ mod tests {
     }
 
     /// Every member homes on the first reachable rung, so rung 0 carries the
-    /// bootstrap load of every mesh on the default ladder.
+    /// bootstrap load of every mesh on the default ladder. It is a direct rung,
+    /// so a member homed on it learns its public address.
     #[test]
-    fn rung_zero_is_the_legacy_relay_name() {
+    fn rung_zero_is_a_direct_rung_with_qad() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let rung_zero = &RENDEZVOUS_RELAY_LADDER_URLS[0];
+        assert_eq!(
+            rung_zero.as_str(),
+            "https://nyc-relay1.agent-habilis.com/",
+            "rung 0 of the default ladder"
+        );
+        assert_eq!(
+            qad_port(rung_zero),
+            Some(DEFAULT_RELAY_QUIC_PORT),
+            "rung 0 asks for QUIC address discovery on the default port"
+        );
+    }
+
+    /// The QUIC address discovery port of the relay config of a rung, if any.
+    fn qad_port(url: &RelayUrl) -> Option<u16> {
+        super::rung_config(url).quic.map(|quic| quic.port)
+    }
+
+    /// **The default ladder, in order, with the QUIC address discovery of each rung.**
+    ///
+    /// A direct rung answers QUIC address discovery. A tunnel rung carries no UDP, so an endpoint
+    /// that asks it for the discovery waits 3 s for its first net report and has no home relay
+    /// until then.
+    #[test]
+    fn the_default_ladder_is_typed_rung_by_rung() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let direct = Some(DEFAULT_RELAY_QUIC_PORT);
+        let expected = [
+            ("https://nyc-relay1.agent-habilis.com/", direct),
+            ("https://nyc-relay2.agent-habilis.com/", direct),
+            ("https://nyc-relay2.habilis.network/", None),
+            ("https://slz-relay1.habilis.network/", None),
+            ("https://use1-1.relay.n0.iroh.link/", direct),
+            ("https://usw1-1.relay.n0.iroh.link/", direct),
+            ("https://euc1-1.relay.n0.iroh.link/", direct),
+            ("https://aps1-1.relay.n0.iroh.link/", direct),
+        ];
+        let actual: Vec<(&str, Option<u16>)> = RENDEZVOUS_RELAY_LADDER_URLS
+            .iter()
+            .map(|url| (url.as_str(), qad_port(url)))
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "each default rung, in order, with its QUIC address discovery port"
+        );
+    }
+
+    /// The QUIC address discovery port of a beacon homed on `raw`: its one-rung custom ladder.
+    fn beacon_qad(raw: &str) -> Option<u16> {
+        let rung: RelayUrl = raw.parse().expect("a literal https URL parses");
+        let relay_map = super::relay_mode(&RelayChoice::Custom(vec![rung.clone()])).relay_map();
+        let config = relay_map.get(&rung).expect("the rung is in the relay map");
+        config.quic.as_ref().map(|quic| quic.port)
+    }
+
+    /// **A beacon on a default rung asks for the QUIC address discovery of that rung.**
+    ///
+    /// The beacon homes on its rung through a one-rung custom ladder
+    /// (`beacon::beacon_lookups`), so the setting follows the URL of the rung, not the choice that
+    /// names it.
+    #[test]
+    fn a_beacon_on_a_default_rung_gets_the_qad_of_that_rung() {
         let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
-            RENDEZVOUS_RELAY_LADDER_URLS[0].as_str(),
-            "https://relay.agent-habilis.com/",
-            "rung 0 of the default ladder is the legacy relay name"
+            beacon_qad("https://nyc-relay1.agent-habilis.com/"),
+            Some(DEFAULT_RELAY_QUIC_PORT),
+            "a beacon on a direct rung asks for QUIC address discovery"
+        );
+        assert_eq!(
+            beacon_qad("https://nyc-relay2.habilis.network/"),
+            None,
+            "a beacon on a tunnel rung asks for no QUIC address discovery"
+        );
+    }
+
+    /// **A custom rung that the default ladder does not name keeps the rule of its scheme.**
+    ///
+    /// A custom ladder is URLs only, on the wire and in the API. An https rung asks for QUIC
+    /// address discovery on the default port. An http rung has no TLS, and QUIC needs TLS, so it
+    /// asks for none.
+    #[test]
+    fn a_custom_rung_takes_the_qad_of_its_scheme() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let https: RelayUrl = "https://custom.example/"
+            .parse()
+            .expect("a literal https URL parses");
+        let http: RelayUrl = "http://custom.example/"
+            .parse()
+            .expect("a literal http URL parses");
+        assert_eq!(
+            qad_port(&https),
+            Some(DEFAULT_RELAY_QUIC_PORT),
+            "a custom https rung asks for QUIC address discovery on the default port"
+        );
+        assert_eq!(
+            qad_port(&http),
+            None,
+            "a custom http rung asks for no QUIC address discovery"
         );
     }
 

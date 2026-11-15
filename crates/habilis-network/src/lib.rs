@@ -139,7 +139,7 @@ pub use util::version::VERSION;
 /// `lookup` is `pub(crate)`, so without this agent-share had to keep its own
 /// copy of the list — two constants that must agree, with nothing to make them.
 /// A share and the mesh derived from it should home on one relay, not two.
-pub use lookup::RENDEZVOUS_RELAY_LADDER;
+pub use lookup::{DefaultRung, RENDEZVOUS_RELAY_LADDER, RungPath};
 
 // The `NodeApp` / `NodeDriver` seams are `#[async_trait]`, so any consumer
 // implementing them needs the same macro. Re-export it so a downstream crate
