@@ -1,5 +1,5 @@
-//! The relay leg of the lookup layer: the default **relay ladder** (n0
-//! prod), how a [`RelayChoice`] maps to an iroh [`RelayMode`], and the
+//! The relay leg of the lookup layer: the default **relay ladder** (our
+//! fleet, then n0 prod), how a [`RelayChoice`] maps to an iroh [`RelayMode`], and the
 //! deterministic "home on the first reachable rung" bootstrap selection
 //! plus its steady-state failover decision.
 //!
@@ -16,10 +16,7 @@ use std::future::Future;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use iroh::{
-    Endpoint, RelayConfig, RelayMode, RelayUrl,
-    endpoint::{default_relay_mode, presets},
-};
+use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, endpoint::presets};
 use n0_future::task::JoinHandle;
 use tokio::sync::watch;
 
@@ -29,42 +26,46 @@ use crate::util::tuning::{
     RELAY_REPROBE_BACKOFF_MIN, RELAY_RUNG_PROBE, RENDEZVOUS_CLOSE,
 };
 
-/// The default relay **ladder** — n0's prod relay set, in fixed
-/// preference order. The beacon homes on the first reachable rung
-/// (`select_bootstrap_rung`) and the joiner pre-registers
-/// `rendezvous_id` at that same rung — `EndpointAddr::new(rendezvous_id)
-/// .with_relay_url(rung)` — for a **zero-address-lookup** relay-direct
-/// dial: a creator-independent bootstrap that needs no address lookup to
-/// reach the rendezvous.
+/// The default relay **ladder**, in fixed preference order: our relay
+/// fleet first, then n0's prod relays as the last fallback. The beacon homes
+/// on the first reachable rung (`select_bootstrap_rung`) and the joiner
+/// pre-registers `rendezvous_id` at that same rung —
+/// `EndpointAddr::new(rendezvous_id).with_relay_url(rung)` — for a
+/// **zero-address-lookup** relay-direct dial: a creator-independent bootstrap
+/// that needs no address lookup to reach the rendezvous.
 ///
-/// rung 0 is our own operated relay; rungs 1..4 are iroh `defaults::prod`
-/// (NA-east, NA-west, EU, AP) as the resilient fallback. Hardcoded,
-/// **not** `defaults::prod::default_relay_map()`, so members on different
-/// iroh versions still agree on the *same* ladder. Relay infra is
-/// versioned and not cross-compatible (sendme #121): an iroh bump can
-/// move `defaults::prod` off these hosts, silently breaking the
-/// relay-direct bootstrap for members on a different iroh version.
-/// `pinned_ladder_matches_iroh_prod` is the tripwire — it fails
-/// on such a move so we review (do these hosts still operate?) before
-/// shipping the bump.
+/// Rungs 0..10 are our fleet (the `relay-server` stacks of the homelab repo):
+/// one host after the other, each on both of our domains. A dead host costs
+/// two rung probes, and a dead domain leaves the other domain of the same
+/// host as the next rung. Rungs 0..2 are the legacy `relay.*` names of
+/// nyc-macmini2. Rungs 10..14 are iroh `defaults::prod` (NA-east, NA-west,
+/// EU, AP).
 ///
-/// Last such move: iroh 1.0.1 retired the `iroh-canary` infix for the
-/// stable `*.relay.n0.iroh.link` hosts. Mixed-ladder meshes (binaries
-/// from before/after that bump) still rendezvous via rung 0, which is
-/// ladder-version-independent; only the fallback rungs diverge. The
-/// `relay.agent-habilis.com` cutover then moved rung 0 itself: binaries
-/// from before it home on the retired `swarm-relay.…` host, so they
-/// cannot relay-direct rendezvous with binaries from after.
-pub const RENDEZVOUS_RELAY_LADDER: [&str; 5] = [
+/// Hardcoded, **not** `defaults::prod::default_relay_map()`, so members on
+/// different iroh versions still agree on the *same* ladder. Relay infra is
+/// versioned and not cross-compatible (sendme #121): an iroh bump can move
+/// `defaults::prod` off these hosts. `pinned_ladder_ends_with_iroh_prod` is
+/// the tripwire: it fails on such a move so we review the n0 rungs before
+/// the bump ships.
+pub const RENDEZVOUS_RELAY_LADDER: [&str; 14] = [
     // No trailing-dot FQDN on any rung. Safari rejects the certificate of a
-    // dotted host, so a browser member could reach none of them. Rung 0 has
-    // a second reason: Cloudflare routes by exact Host header and 404s the
-    // dotted form (including the /relay websocket upgrade).
-    "https://relay.agent-habilis.com/",   // ours (rung 0)
-    "https://use1-1.relay.n0.iroh.link/", // NA-east
-    "https://usw1-1.relay.n0.iroh.link/", // NA-west
-    "https://euc1-1.relay.n0.iroh.link/", // EU
-    "https://aps1-1.relay.n0.iroh.link/", // AP
+    // dotted host, so a browser member could reach none of them. Our rungs
+    // have a second reason: Cloudflare routes by exact Host header and 404s
+    // the dotted form (including the /relay websocket upgrade).
+    "https://relay.agent-habilis.com/", // nyc-macmini2, legacy name
+    "https://relay.habilis.network/",
+    "https://nyc-relay1.agent-habilis.com/", // do-nyc-droplet1
+    "https://nyc-relay1.habilis.network/",
+    "https://nyc-relay2.agent-habilis.com/", // nyc-macmini2
+    "https://nyc-relay2.habilis.network/",
+    "https://nyc-relay3.agent-habilis.com/", // nyc-pi2
+    "https://nyc-relay3.habilis.network/",
+    "https://slz-relay1.agent-habilis.com/", // slz-pi1
+    "https://slz-relay1.habilis.network/",
+    "https://use1-1.relay.n0.iroh.link/", // n0 NA-east
+    "https://usw1-1.relay.n0.iroh.link/", // n0 NA-west
+    "https://euc1-1.relay.n0.iroh.link/", // n0 EU
+    "https://aps1-1.relay.n0.iroh.link/", // n0 AP
 ];
 
 /// Parsed once; `RelayUrl` clones are `Arc`-backed (cheap).
@@ -79,8 +80,8 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 });
 
 /// Resolve a [`RelayChoice`] into the ordered relay **ladder**:
-/// `Disabled` ⇒ empty (no relay), `Pinned` ⇒ the default n0 prod
-/// ladder, `Custom` ⇒ the operator ladder (`--relay a,b,c`, order
+/// `Disabled` ⇒ empty (no relay), `Pinned` ⇒ the default ladder
+/// ([`RENDEZVOUS_RELAY_LADDER`]), `Custom` ⇒ the operator ladder (`--relay a,b,c`, order
 /// preserved). The beacon homes on, and the joiner pre-registers at, the
 /// first reachable rung (`select_bootstrap_rung`) — the beacon leg of
 /// `relay_mode` and `daemon::setup::register_rendezvous` must agree or
@@ -110,28 +111,23 @@ fn rung_config(url: &RelayUrl) -> RelayConfig {
 ///   joiners pre-register. The caller encodes that by passing a
 ///   one-element `Custom([rung])` (the rung `select_bootstrap_rung`
 ///   chose), so the beacon never reaches the multi-relay `Pinned` arm.
-/// - **Peer** on `Pinned` uses iroh's resilient multi-relay
-///   `default_relay_mode()` (the n0 prod set): pinning a peer to
-///   one relay made `bind()` block on that relay's handshake and dropped
-///   iroh's relay fallback — a `Default` peer still reaches the
-///   beacon at its rung and skips relays entirely same-LAN via mDNS. A
-///   `Custom` ladder pins the peer to that whole set.
+/// - **Peer** holds the whole ladder, `Pinned` or `Custom`, so it reaches
+///   the beacon at any rung, and iroh keeps its fallback across the set.
+///   Pinning a peer to one relay made `bind()` block on that relay's
+///   handshake and dropped that fallback.
 ///
-/// So `Custom(ladder)` covers both: a 1-rung beacon and a multi-rung
-/// peer alike map to `RelayMode::Custom`.
+/// So every relay choice but `Disabled` maps to `RelayMode::Custom` of its
+/// ladder: a 1-rung beacon and a multi-rung peer alike.
 pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
     match choice {
         RelayChoice::Disabled => {
             tracing::debug!("relay disabled (not in the lookup allowlist)");
             RelayMode::Disabled
         }
-        RelayChoice::Custom(ladder) => {
+        RelayChoice::Pinned | RelayChoice::Custom(_) => {
+            let ladder = relay_ladder(choice);
             tracing::debug!(rungs = ladder.len(), "endpoint pinned to relay ladder");
             RelayMode::Custom(ladder.iter().map(rung_config).collect())
-        }
-        RelayChoice::Pinned => {
-            tracing::debug!("peer on iroh resilient multi-relay default");
-            default_relay_mode()
         }
     }
 }
@@ -462,16 +458,15 @@ mod tests {
     };
     use habilis_network_test_tracing::test;
 
-    /// Tripwire: the iroh fallback rungs of our pinned rendezvous ladder
-    /// must stay equal to iroh's `defaults::prod` relay hosts, **in
-    /// order** (rung 1 = NA-east). Rung 0 is our own operated relay and
-    /// is excluded here. Relay infra is versioned and not cross-compatible
+    /// Tripwire: the last rungs of our pinned rendezvous ladder must stay
+    /// equal to iroh's `defaults::prod` relay hosts, **in order** (NA-east
+    /// first). The rungs before them are our own fleet and are excluded here. Relay infra is versioned and not cross-compatible
     /// (sendme #121); if an iroh bump moves a prod relay off these hosts,
     /// the relay-direct bootstrap silently breaks for members on a
     /// different iroh version. Failing here forces a manual review (are
     /// these hosts still served?) before the bump ships.
     #[test]
-    fn pinned_ladder_matches_iroh_prod() {
+    fn pinned_ladder_ends_with_iroh_prod() {
         use iroh::defaults::prod;
         let expected = [
             prod::NA_EAST_RELAY_HOSTNAME,
@@ -479,10 +474,10 @@ mod tests {
             prod::EU_RELAY_HOSTNAME,
             prod::AP_RELAY_HOSTNAME,
         ];
-        // Skip rung 0 (our own relay); the rest must track iroh's prod set.
+        let fleet_rungs = RENDEZVOUS_RELAY_LADDER_URLS.len() - expected.len();
         let ours: Vec<&str> = RENDEZVOUS_RELAY_LADDER_URLS
             .iter()
-            .skip(1)
+            .skip(fleet_rungs)
             .map(|url| {
                 url.host_str()
                     .expect("ladder relay URL has a host")
@@ -517,11 +512,31 @@ mod tests {
         assert_eq!(
             relay_ladder(&RelayChoice::Pinned),
             *RENDEZVOUS_RELAY_LADDER_URLS,
-            "Pinned ⇒ the full n0 prod ladder"
+            "Pinned ⇒ the full default ladder"
         );
         assert!(relay_ladder(&RelayChoice::Disabled).is_empty());
         let custom = vec!["https://a.example./".parse::<RelayUrl>().unwrap()];
         assert_eq!(relay_ladder(&RelayChoice::Custom(custom.clone())), custom);
+    }
+
+    /// Every member homes on the first reachable rung, so rung 0 carries the
+    /// bootstrap load of every mesh on the default ladder.
+    #[test]
+    fn rung_zero_is_the_legacy_relay_name() {
+        assert_eq!(
+            RENDEZVOUS_RELAY_LADDER_URLS[0].as_str(),
+            "https://relay.agent-habilis.com/"
+        );
+    }
+
+    /// A peer on `Pinned` must reach the rung that the beacon homes on, so its
+    /// endpoint holds the whole pinned ladder, not iroh's own default set.
+    #[test]
+    fn pinned_peer_endpoint_holds_the_whole_ladder() {
+        use std::collections::BTreeSet;
+        let held: BTreeSet<RelayUrl> = super::relay_mode(&RelayChoice::Pinned).relay_map().urls();
+        let ladder: BTreeSet<RelayUrl> = RENDEZVOUS_RELAY_LADDER_URLS.iter().cloned().collect();
+        assert_eq!(held, ladder);
     }
 
     #[test]

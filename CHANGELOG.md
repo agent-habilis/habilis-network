@@ -169,6 +169,11 @@ published to a registry; pin it with
 
 ### Changed
 
+- The default relay ladder (`RENDEZVOUS_RELAY_LADDER`) is now 14 rungs: our relay fleet first,
+  then the 4 n0 relays as the last fallback. The fleet rungs are `relay` (rung 0),
+  `nyc-relay1`, `nyc-relay2`, `nyc-relay3`, and `slz-relay1`, each on `agent-habilis.com`
+  and then on `habilis.network`. A peer on the default ladder now holds the whole ladder, not
+  iroh's own default relay set (n0 only), so it can reach the beacon at any rung.
 - **Wire change:** the loopback port ladder of a private mesh now maps into `1024..=32767`, not
   `1024..=65535`. The ephemeral bind of another endpoint (Linux 32768-60999, macOS and Windows
   49152-65535) can no longer land on a rung, which caused the rare "stranger on a rung" warnings

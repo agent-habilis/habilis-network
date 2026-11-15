@@ -237,7 +237,8 @@ Later links only re-send `PeerInfo`, behind a cooldown, so a flapping link canno
 
 ### 5.3 The relay ladder
 
-`RENDEZVOUS_RELAY_LADDER` is a five-rung list: the project relay first, then four n0 regions.
+`RENDEZVOUS_RELAY_LADDER` is a 14-rung list: the project relay fleet, each name on its 2 domains, then the 4 n0 regions.
+A peer endpoint holds the whole ladder.
 The beacon homes on the first reachable rung, and the joiner pre-registers at the same rung.
 These two choices must agree, or the bootstrap dial finds nothing.
 Setup picks rung 0 without a probe, so readiness never blocks on the network.
