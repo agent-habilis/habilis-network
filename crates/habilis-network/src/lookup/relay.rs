@@ -1655,8 +1655,13 @@ mod tests {
         });
     }
 
+    /// The walk probes every rung at once, so its own throwaway probe endpoints reach the last
+    /// rung. The endpoint itself must hold no rung after its home: an endpoint that holds a relay
+    /// in its map probes it in each net report, every 20 to 26 s. So the count of the last relay
+    /// is read once the endpoint is home and the walk has closed its probes, and must not grow
+    /// over one net report period.
     #[test]
-    #[ignore = "10 s: waits for the probe budget of the dead rung"]
+    #[ignore = "40 s: waits for the probe budget of the dead rung, then one net report period"]
     fn a_peer_endpoint_homes_on_the_next_rung_when_rung_0_is_down() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             // Rung 0 refuses connections on purpose, so the probe of its latency fails.
@@ -1672,12 +1677,14 @@ mod tests {
                     .expect("a peer endpoint");
 
             assert_eq!(home_of(&endpoint).await, vec![next], "the home relay");
-            assert_eq!(
-                http_connections(&last_server),
-                0,
-                "a rung after the first reachable one never sees the endpoint"
-            );
+            let after_the_walk = http_connections(&last_server);
+            time::sleep(std_Duration::from_secs(30)).await;
+            let later = http_connections(&last_server);
             endpoint.close().await;
+            assert_eq!(
+                later, after_the_walk,
+                "a rung after the first reachable one sees the endpoint after the walk"
+            );
         });
     }
 
