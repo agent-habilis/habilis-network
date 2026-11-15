@@ -112,10 +112,11 @@ impl<'ladder> RungFollower<'ladder> {
         self.watch.observe(answered, now, self.times.return_hold)
     }
 
-    /// Note the move of the member to `rung`, done at `now`. The next read comes one interval after
-    /// the move.
+    /// Note the move of the member to `rung`, done at `now`. The failed reads of the old rung say
+    /// nothing of the new one, and the next read comes one interval after the move.
     pub(super) fn moved(&mut self, rung: RelayUrl, now: Instant) {
         self.rung = rung;
+        self.fails = 0;
         self.restart(now);
     }
 
@@ -434,6 +435,39 @@ mod tests {
             follower.read_at(),
             moved_at + TIMES.interval,
             "the next read is one interval after the move"
+        );
+    }
+
+    /// **After a move, the failed reads of the old rung do not count.**
+    ///
+    /// A read of the old rung fails while the return round runs, and the round returns. One failed
+    /// read of the new rung is a blip, not the second failure of a walk.
+    #[test]
+    fn a_move_starts_the_failed_reads_over() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let ladder = ladder();
+        let start = Instant::now();
+        let mut follower = RungFollower::new(&ladder, rung("c"), TIMES, true, start);
+        for minute in 1..4 {
+            round(
+                &mut follower,
+                &[rung("a")],
+                start + TIMES.return_every * minute,
+            );
+        }
+        let last = start + TIMES.return_every * 4;
+        follower.read(true, last);
+        assert!(follower.round_due(last).is_some(), "the last round starts");
+        follower.read(false, last);
+        let lower = follower
+            .round_ended(&[rung("a")], last)
+            .expect("rung 0 answered for the hold");
+        follower.moved(lower, last);
+        follower.read(false, last + TIMES.interval);
+        assert_eq!(
+            follower.walk_due(),
+            None,
+            "1 failed read of the new rung is a blip"
         );
     }
 }

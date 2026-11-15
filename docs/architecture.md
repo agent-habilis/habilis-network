@@ -289,7 +289,7 @@ A rung is alive when the relay status says that the relay connection is up, and 
 After 2 failed reads in a row, the member walks the ladder.
 A walk that finds no rung keeps the member on its rung, the beacon too, and the next failed reads walk again.
 A walk that stays on the rung starts the waits of the lower rungs over, because the rung failed.
-After a move, the next read comes one read interval after the move.
+After a move, the failed reads of the old rung do not count, and the next read comes one read interval after the move.
 The beacon is not demoted to no relay by a short full outage, because the peers are not.
 A peer endpoint moves its relay map in place.
 The beacon publishes the new rung through the watch channel, and the event loop re-homes the beacon on it.
