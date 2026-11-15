@@ -23,6 +23,7 @@ use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use futures_util::future as future_util;
 use futures_util::stream::FuturesUnordered;
 use iroh::defaults::DEFAULT_RELAY_QUIC_PORT;
 use iroh::endpoint::{RelayStatus, presets};
@@ -400,14 +401,34 @@ async fn probe_return(
     if below.is_empty() {
         return None;
     }
-    let lowest = select_first_reachable(below, Some(&stop), |rung, probes_stopped| async move {
-        relay_rung_reachable(&rung, times.probe, Some(probes_stopped)).await
-    })
-    .await;
+    let answered = probe_lower_rungs(below, times.probe, &stop).await;
     if is_stopped(&stop) {
         return None;
     }
-    returning.observe(lowest, Instant::now(), times.return_hold)
+    returning.observe(&answered, Instant::now(), times.return_hold)
+}
+
+/// Probe each of `rungs` at once, and return the rungs that answered, in their order. Each rung
+/// that answers counts, not only the lowest one, so that a rung that flaps does not hold back a
+/// steady rung above it ([`ReturnWatch`]). Once `stop`'s sender is dropped, every probe ends and
+/// closes its endpoint before this returns.
+async fn probe_lower_rungs(
+    rungs: &[RelayUrl],
+    probe: Duration,
+    stop: &watch::Receiver<()>,
+) -> Vec<RelayUrl> {
+    let probes = rungs
+        .iter()
+        .map(|rung| relay_rung_reachable(rung, probe, Some(stop.clone())));
+    let answers: Vec<bool> = future_util::join_all(probes).await;
+    let mut answered = Vec::new();
+    let paired = rungs.iter().zip(answers);
+    for (rung, answer) in paired {
+        if answer {
+            answered.push(rung.clone());
+        }
+    }
+    answered
 }
 
 /// The rungs of `ladder` below `home`. Empty when `home` is rung 0, or is not on the ladder.
@@ -1424,6 +1445,60 @@ mod tests {
             assert_eq!(
                 walked, 0,
                 "the endpoint judged its healthy rung dead and walked the ladder"
+            );
+        });
+    }
+
+    /// **A return round reports every lower rung that answers, not only the lowest.**
+    #[test]
+    fn a_return_round_reports_every_rung_that_answers() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (silent, _held) = spawn_silent_rung().await;
+            let (third, _third_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (_stop, stopped) = watch::channel(());
+
+            let answered = super::probe_lower_rungs(
+                &[first.clone(), silent, third.clone()],
+                std_Duration::from_secs(2),
+                &stopped,
+            )
+            .await;
+
+            assert_eq!(
+                answered,
+                vec![first, third],
+                "the 2 live rungs answer, and the silent rung between them does not"
+            );
+        });
+    }
+
+    /// **A return round that is stopped ends at once, and closes its probes.**
+    ///
+    /// iroh logs an error for an endpoint that is dropped open, and the test fails on it.
+    #[test]
+    fn a_stopped_return_round_ends_at_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (one, _held_one) = spawn_silent_rung().await;
+            let (two, _held_two) = spawn_silent_rung().await;
+            let (stop, stopped) = watch::channel(());
+            let stopping = async {
+                time::sleep(std_Duration::from_millis(200)).await;
+                drop(stop);
+            };
+
+            let started = time::Instant::now();
+            let silent = [one, two];
+            let (answered, ()) = tokio::join!(
+                super::probe_lower_rungs(&silent, std_Duration::from_secs(30), &stopped),
+                stopping
+            );
+            let took = started.elapsed();
+
+            assert!(answered.is_empty(), "a stopped round reports no rung");
+            assert!(
+                took < std_Duration::from_secs(5),
+                "the stopped round of 30 s probes took {took:?}"
             );
         });
     }
