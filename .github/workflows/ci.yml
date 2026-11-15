@@ -248,9 +248,10 @@ jobs:
       # or a peer on a healthy tunnel rung walks the ladder in every second period.
       # It failed on iroh e970dd25 in 10 of 10 runs. The others prove that a beacon
       # leaves a rung that dies silently, that a return round does not hold back the
-      # liveness read, and that a full outage keeps the follower of a peer and of the
-      # beacon alive. The libtest harness runs them in parallel, so the step takes
-      # about 60 s.
+      # liveness read, that a full outage keeps the follower of a peer and of the
+      # beacon alive, and that a peer leaves a rung that dies, that refuses the relay
+      # connection, or that is down at start. The libtest harness runs them in
+      # parallel, so the step takes about 60 s.
       - name: Test (relay rung follower)
         run: >-
           cargo test -p habilis-network --lib -- --ignored --exact
@@ -259,6 +260,9 @@ jobs:
           lookup::relay::tests::a_slow_return_round_does_not_hold_back_the_liveness_read
           lookup::relay::tests::a_peer_moves_to_a_rung_that_comes_back_after_a_full_outage
           lookup::relay::tests::a_walk_that_finds_no_rung_does_not_demote_the_beacon
+          lookup::relay::tests::a_peer_endpoint_leaves_a_rung_that_refuses_the_relay_connection
+          lookup::relay::tests::a_peer_endpoint_homes_on_the_next_rung_when_rung_0_is_down
+          lookup::relay::tests::a_peer_endpoint_moves_to_the_next_rung_when_its_rung_dies
 
       # Not covered by `--workspace` above: the loopback suite is behind
       # `required-features = ["native"]`, so a default-feature test run skips
