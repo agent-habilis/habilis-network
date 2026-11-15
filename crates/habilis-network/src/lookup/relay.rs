@@ -1411,6 +1411,42 @@ mod tests {
         });
     }
 
+    /// **A peer on a healthy rung without QUIC address discovery is not evicted.**
+    ///
+    /// iroh measures a relay in an incremental net report by QUIC address discovery only. A rung
+    /// without it, a tunnel rung or a plain `http://` rung, gets no latency there, so every second
+    /// periodic report, every 20 to 26 s, has no preferred relay for one period. A liveness read
+    /// that takes that as a dead rung evicts a healthy rung and walks the ladder. The walk probes
+    /// every rung, so the count of the second relay grows.
+    #[test]
+    #[ignore = "60 s: waits for 2 periods of the net report of iroh"]
+    fn a_peer_on_a_healthy_rung_without_qad_is_not_evicted() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (second, second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![first.clone()])));
+            let endpoint = builder.bind().await.expect("bind the endpoint");
+            let homing = super::Homing {
+                ladder: vec![first.clone(), second],
+                rung: first.clone(),
+            };
+            let follower =
+                homing.follow_with(endpoint.clone(), return_times(std_Duration::from_hours(1)));
+            assert_eq!(home_of(&endpoint).await, vec![first], "the home relay");
+
+            time::sleep(std_Duration::from_secs(60)).await;
+            let walked = http_connections(&second_server);
+            endpoint.close().await;
+            drop(follower.await);
+
+            assert_eq!(
+                walked, 0,
+                "the endpoint judged its healthy rung dead and walked the ladder"
+            );
+        });
+    }
+
     /// A relay URL in front of `real`. While the flag is off, it forwards every connection. When
     /// the flag turns on, it cuts the open connections, still forwards a plain request, and
     /// refuses the relay upgrade with 403.
