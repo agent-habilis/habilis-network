@@ -1300,8 +1300,7 @@ mod tests {
     /// back. A move on failure alone keeps the endpoint on rung 1 for good: rung 1 never fails.
     /// The endpoint probes the rungs below its own, and returns once rung 0 answered every round
     /// for the hold time, not before: about 6 s after rung 0 comes back, with a hold of 4 s. The
-    /// bound is 15 s, because a false failure of rung 1 starts a walk that also finds rung 0, about
-    /// 28 s after the move.
+    /// bound is 15 s, well before a later walk of the ladder could find rung 0 by another path.
     #[test]
     fn a_peer_endpoint_returns_to_rung_0_after_the_hold() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
