@@ -31,6 +31,10 @@ mod slice_store;
 
 mod slice_value;
 
+mod structure;
+
+pub use structure::structure_units;
+
 pub use slice_store::{
     LocalDraft, SliceError, SliceIngest, SliceLimits, SliceStore, frame_overhead,
     page_frame_overhead, worst_frame_overhead,
