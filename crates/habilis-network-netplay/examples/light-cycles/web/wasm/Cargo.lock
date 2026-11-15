@@ -1315,6 +1315,7 @@ dependencies = [
  "iroh-gossip",
  "memchr",
  "n0-future",
+ "netdev",
  "parking_lot",
  "rand 0.9.5",
  "serde",
@@ -1332,7 +1333,6 @@ dependencies = [
 name = "habilis-network-doc"
 version = "0.6.0"
 dependencies = [
- "anyhow",
  "bs58",
  "chacha20poly1305",
  "habilis-network-protocol",
