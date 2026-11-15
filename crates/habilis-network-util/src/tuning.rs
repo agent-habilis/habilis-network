@@ -964,6 +964,16 @@ pub const RELAY_REPROBE_BACKOFF_MIN: Duration = Duration::from_secs(30);
 /// The longest wait between two re-probes of a relay rung.
 pub const RELAY_REPROBE_BACKOFF_MAX: Duration = Duration::from_mins(5);
 
+/// How often a member homed on a later relay rung probes the rungs below it, to return to a lower
+/// rung that came back. A round binds one probe endpoint for each lower rung, about 15 ms of CPU
+/// each, so a round each minute costs nothing that a member feels.
+pub const RELAY_RETURN_PROBE_INTERVAL: Duration = Duration::from_mins(1);
+
+/// How long a lower relay rung must answer every probe round before a member returns to it: 4
+/// rounds in a row. A relay that restarts or flaps would otherwise move every member back and
+/// forth, and each move drops the relay paths of the member for a moment.
+pub const RELAY_RETURN_HOLD: Duration = Duration::from_mins(3);
+
 /// Timeout for *one attempt* of the private-mode rendezvous identity
 /// probe. When a ladder rung is `AddrInUse`, a member probes it to tell
 /// *our* mesh's beacon (→ stay a peer) from an unrelated mesh squatting
