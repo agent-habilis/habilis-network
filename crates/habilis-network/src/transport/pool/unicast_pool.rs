@@ -515,6 +515,13 @@ impl UnicastPool {
         was_pooled
     }
 
+    /// Whether a send to `eid` has a dial or a path wait in flight. A cold send now would wait
+    /// for it and take its outcome. For a test whose send must be its own dialer.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) fn dial_in_flight(&self, eid: EndpointId) -> bool {
+        self.inner.dialing.lock().contains_key(&eid)
+    }
+
     /// Whether `eid` is on the dial-failure cooldown.
     pub(crate) async fn is_cooling(&self, eid: EndpointId) -> bool {
         self.inner

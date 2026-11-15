@@ -28,9 +28,15 @@ const ASK_AFTER: Duration = Duration::from_millis(200);
 const LOCAL_CEILING: Duration = Duration::from_secs(2);
 /// The send must wait at least this long, or the test did not make the loop wait and proves nothing.
 const PREMISE: Duration = Duration::from_secs(1);
-/// How many times alice is asked to forget the connection of bob before the send. A probe of the
-/// direct path can pool one again, so one forget is not enough; the answer `false` says there is none.
-const FORGET_TRIES: usize = 20;
+/// How long alice may take to have no pooled connection to bob and no send to bob in flight. A send
+/// in flight ends within the path budget (5 s) after its dial.
+const COLD_TAKES: Duration = Duration::from_secs(15);
+/// The cold send of the dial test joins a send in flight this long after that send started: before
+/// the path budget (5 s) of that send ends.
+const JOIN_AFTER: Duration = Duration::from_secs(4);
+/// A cold send that dials on its own waits at least the path budget (5 s). A send that joins a dial
+/// in flight ends when that dial ends, about 1 s after it joined.
+const OWN_DIAL: Duration = Duration::from_secs(3);
 /// How long iroh may take to re-run path selection after the block. It reads the path list on its
 /// path-stat updates, which come within a few seconds.
 const BLOCK_TAKES_EFFECT: Duration = Duration::from_secs(30);
@@ -205,6 +211,39 @@ impl Member {
             .expect("alice knows bob");
     }
 
+    /// Whether a send to `peer` has a dial or a path wait in flight: see [`InspectTest::DialInFlight`].
+    async fn dial_in_flight(&self, peer: &str) -> bool {
+        self.membership
+            .request(|reply| {
+                Request::InspectTest(InspectTest::DialInFlight {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
+            .await
+            .expect("the loop answers")
+            .expect("alice knows bob")
+    }
+
+    /// Wait until the next send to `peer` is cold and dials on its own: no pooled connection, and
+    /// no send in flight whose outcome the send would take. A probe of the direct path can pool a
+    /// connection again, and a send of the engine (a backfill, a digest) can dial `peer` at any
+    /// time, so the test asks until both are gone.
+    async fn until_send_is_cold(&self, peer: &str) {
+        let cold_ends = Instant::now() + COLD_TAKES;
+        loop {
+            let pooled = self.forget_unicast(peer).await;
+            if !pooled && !self.dial_in_flight(peer).await {
+                return;
+            }
+            assert!(
+                Instant::now() < cold_ends,
+                "alice still had a connection or a send to {peer} after {COLD_TAKES:?}"
+            );
+            time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Whether a unicast connection to `peer` was pooled, and is forgotten now.
     async fn forget_unicast(&self, peer: &str) -> bool {
         self.membership
@@ -231,14 +270,9 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
         alice.until_knows("bob").await;
         alice.cut_ip_to("bob", &bob).await;
 
-        // Forget the connection to bob, so that the send dials in the common case. A probe of the direct
-        // path can still pool one again before the send, so the send is `SendCold`: it never takes the
-        // warm fast path, and its wait does not depend on this race.
-        for _ in 0..FORGET_TRIES {
-            if !alice.forget_unicast("bob").await {
-                break;
-            }
-        }
+        // The send must dial on its own. A pooled connection would answer it at once, and a send of
+        // the engine to bob in flight would give it the outcome of that dial, as soon as it ends.
+        alice.until_send_is_cold("bob").await;
 
         let started = Instant::now();
         let send = async {
@@ -271,6 +305,55 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
         assert!(
             local_done < ASK_AFTER + LOCAL_CEILING,
             "alice answered the local request at {local_done:?}, more than {LOCAL_CEILING:?} after it was asked"
+        );
+    });
+}
+
+/// **A cold send after a send in flight to the same peer dials on its own.**
+///
+/// A cold send that registers while another send to bob waits on its path takes the outcome of
+/// that send when it ends, and waits only for the rest of its path budget. The dial test above
+/// must not meet that case, or it proves nothing: it waits until alice has no send to bob in
+/// flight. Here a first send is in flight when the second one starts, and the wait makes the
+/// second one dial on its own.
+#[test]
+fn a_cold_send_after_a_send_in_flight_dials_on_its_own() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let bob = Member::join("bob", &alice).await;
+
+        alice.until_knows("bob").await;
+        alice.cut_ip_to("bob", &bob).await;
+        alice.until_send_is_cold("bob").await;
+
+        let first = alice.send_cold("bob", "first");
+        let second = async {
+            time::sleep(JOIN_AFTER).await;
+            let joined = alice.dial_in_flight("bob").await;
+            alice.until_send_is_cold("bob").await;
+            let started = Instant::now();
+            let verdict = alice.send_cold("bob", "second").await;
+            (joined, verdict, started.elapsed())
+        };
+        let (first_verdict, (joined, second_verdict, second_took)) = tokio::join!(first, second);
+
+        let _ = bob.membership.node.leave().await;
+        let _ = alice.membership.node.leave().await;
+
+        assert!(
+            joined,
+            "the first send was not in flight when the second one started, so this run proves nothing"
+        );
+        assert!(
+            first_verdict.is_err() && second_verdict.is_err(),
+            "a send with no direct path is refused: {first_verdict:?}, {second_verdict:?}"
+        );
+        assert!(
+            second_took >= OWN_DIAL,
+            "the second send took {second_took:?} and returned {second_verdict:?}: it took the \
+             outcome of the first send, not a dial of its own"
         );
     });
 }

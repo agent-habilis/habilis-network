@@ -412,6 +412,14 @@ pub enum InspectTest {
         /// Gets the reason, or `None` when there is none.
         reply: oneshot::Sender<Option<&'static str>>,
     },
+    /// Tests only: whether a send to the member `peer` has a dial or a path wait in flight. A
+    /// cold send now would wait for that dial and take its outcome, not dial on its own.
+    DialInFlight {
+        /// The peer, by nickname.
+        peer: String,
+        /// Gets the answer, or `UnknownPeer` when no member has that nickname.
+        reply: oneshot::Sender<Result<bool, UnknownPeer>>,
+    },
 }
 
 /// Test-only reads of routes, on a host build.
@@ -1090,6 +1098,12 @@ impl MembershipApp {
                     };
                     let _ = reply.send(rung);
                 });
+                false
+            }
+            InspectTest::DialInFlight { peer, reply } => {
+                let answer = known_peer(state, &peer)
+                    .map(|address| state.unicast_pool.dial_in_flight(address.id));
+                let _ = reply.send(answer);
                 false
             }
         }
