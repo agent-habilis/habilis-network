@@ -33,6 +33,7 @@ use serde_json::{Map, Value, json};
 use crate::chunk_pointer::{CHUNKS_KEY, ChunkPointer};
 use crate::pending_slices::PendingSlices;
 use crate::slice_value::SliceValue;
+use crate::structure::structure_units;
 use crate::wire;
 
 /// The default time a key stays gone, after a signed goodbye or a replaced run. It must cover
@@ -721,7 +722,7 @@ impl SliceStore {
             return Err(SliceError::Reserved);
         }
         let pointer = ChunkPointer::parse(&body.value).ok_or(SliceError::Malformed)?;
-        self.check_pointer_size(pointer)?;
+        self.check_pointer(pointer)?;
         Ok((
             body.version,
             SliceValue::Pointer {
@@ -731,12 +732,21 @@ impl SliceStore {
         ))
     }
 
-    /// Refuses a pointer that names more bytes than the value cap. The check comes before any chunk is asked for.
-    fn check_pointer_size(&self, pointer: ChunkPointer) -> Result<(), SliceError> {
+    /// Refuses a pointer that names more bytes than the value cap, or more structure units than the unit cap. The
+    /// check comes before any chunk is asked for. The caps are the same on every member, so every member refuses the
+    /// same pointers.
+    fn check_pointer(&self, pointer: ChunkPointer) -> Result<(), SliceError> {
         let limit = self.limits.max_value_bytes;
         let bytes = usize::try_from(pointer.size()).unwrap_or(usize::MAX);
         if bytes > limit {
             return Err(SliceError::ValueTooLarge { bytes, limit });
+        }
+        let units = usize::try_from(pointer.units()).unwrap_or(usize::MAX);
+        if units > tuning::SLICE_VALUE_UNITS_MAX {
+            return Err(SliceError::ValueTooComplex {
+                units,
+                limit: tuning::SLICE_VALUE_UNITS_MAX,
+            });
         }
         Ok(())
     }
@@ -882,7 +892,7 @@ impl SliceStore {
         value: Map<String, Value>,
         now: Instant,
     ) -> Result<LocalDraft, SliceError> {
-        self.check_pointer_size(pointer)?;
+        self.check_pointer(pointer)?;
         let (version, body, _) = self.seal_body(own, pointer.to_value())?;
         if !self.take_token(own, now, self.limits.burst) {
             return Err(SliceError::RateLimited);
@@ -1266,11 +1276,18 @@ impl SliceStore {
         own: &AuthorKey,
         value: Value,
     ) -> Result<(u64, MessageBody, usize), SliceError> {
-        let encoded = value.to_string().len();
-        if encoded > self.limits.max_value_bytes {
+        let encoded = value.to_string();
+        if encoded.len() > self.limits.max_value_bytes {
             return Err(SliceError::ValueTooLarge {
-                bytes: encoded,
+                bytes: encoded.len(),
                 limit: self.limits.max_value_bytes,
+            });
+        }
+        let units = structure_units(encoded.as_bytes());
+        if units > tuning::SLICE_VALUE_UNITS_MAX {
+            return Err(SliceError::ValueTooComplex {
+                units,
+                limit: tuning::SLICE_VALUE_UNITS_MAX,
             });
         }
         if value.get(CHUNKS_KEY).is_some() {
@@ -2231,6 +2248,95 @@ mod tests {
                 limit: 100
             }),
             "a pointer past the cap must be refused"
+        );
+    }
+
+    /// The value `{"k": [1, 1, …]}` with `numbers` numbers has `numbers + 1` structure units.
+    fn array_value(numbers: usize) -> Map<String, Value> {
+        object(json!({"k": vec![1; numbers]}))
+    }
+
+    #[test]
+    fn prepare_local_refuses_a_value_with_too_many_units_and_takes_one_at_the_cap() {
+        let mut store = value_capped_store(1 << 20);
+        let at_cap = tuning::SLICE_VALUE_UNITS_MAX;
+        assert!(
+            store
+                .prepare_local(&key(1), array_value(at_cap - 1), Instant::now())
+                .is_ok(),
+            "a value with exactly the cap of units must be taken"
+        );
+        assert_eq!(
+            store
+                .prepare_local(&key(1), array_value(at_cap), Instant::now())
+                .map(|_| ()),
+            Err(SliceError::ValueTooComplex {
+                units: at_cap + 1,
+                limit: at_cap
+            }),
+            "a value past the cap of units must be refused, though it is far under the byte cap"
+        );
+    }
+
+    #[test]
+    fn a_pointer_with_too_many_units_is_refused_before_any_chunk_is_asked_for() {
+        let mut store = value_capped_store(1 << 20);
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, json!({"a": 1}))),
+            SliceIngest::Applied,
+            "an inline version must apply first"
+        );
+        let at_cap = u64::try_from(tuning::SLICE_VALUE_UNITS_MAX).expect("a count");
+        let over = ChunkPointer::new(Root::from_bytes([7; 32]), 100, at_cap + 1).to_value();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 2, over)),
+            SliceIngest::Refused(SliceError::ValueTooComplex {
+                units: tuning::SLICE_VALUE_UNITS_MAX + 1,
+                limit: tuning::SLICE_VALUE_UNITS_MAX
+            }),
+            "a pointer past the cap of units must be refused before any chunk is asked for"
+        );
+        assert_eq!(
+            store.version(&key(1)),
+            Some(1),
+            "a refused pointer must keep the last complete version"
+        );
+        assert_eq!(store.pointer(&key(1)), None, "no pointer may be held");
+        let at = ChunkPointer::new(Root::from_bytes([7; 32]), 100, at_cap).to_value();
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 2, at)),
+            SliceIngest::Applied,
+            "a pointer at the cap of units must apply"
+        );
+    }
+
+    #[test]
+    fn a_pointer_draft_that_names_too_many_units_is_refused() {
+        let mut store = value_capped_store(1 << 20);
+        let over = u64::try_from(tuning::SLICE_VALUE_UNITS_MAX).expect("a count") + 1;
+        let pointer = ChunkPointer::new(Root::from_bytes([3; 32]), 100, over);
+        assert_eq!(
+            store
+                .prepare_pointer(&key(1), pointer, Map::new(), Instant::now())
+                .map(|_| ()),
+            Err(SliceError::ValueTooComplex {
+                units: tuning::SLICE_VALUE_UNITS_MAX + 1,
+                limit: tuning::SLICE_VALUE_UNITS_MAX
+            }),
+            "a pointer past the cap of units must be refused"
+        );
+    }
+
+    #[test]
+    fn the_byte_cap_is_checked_before_the_unit_cap() {
+        let mut store = value_capped_store(64);
+        let error = store
+            .prepare_local(&key(1), array_value(1000), Instant::now())
+            .map(|_| ())
+            .expect_err("a value past both caps must be refused");
+        assert!(
+            matches!(error, SliceError::ValueTooLarge { .. }),
+            "the byte cap comes first: {error:?}"
         );
     }
 

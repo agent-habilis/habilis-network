@@ -886,6 +886,7 @@ mod tests {
     };
     use crate::transport::SendError;
     use crate::util::consts::MAX_MESSAGE_SIZE;
+    use crate::util::tuning::SLICE_VALUE_UNITS_MAX;
     use habilis_network_doc::SliceError;
     use std::time::Duration;
 
@@ -1463,6 +1464,30 @@ mod tests {
             state.docs.resolved_roots().count(),
             1,
             "the slice must name one root"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_with_too_many_units_is_refused_and_leaves_no_chunk() {
+        let mut state = fresh_state();
+        let numbers = SLICE_VALUE_UNITS_MAX;
+        let mut value = serde_json::Map::new();
+        value.insert("k".to_owned(), serde_json::json!(vec![1; numbers]));
+        let error = write_own(&mut state, Channel::State, value)
+            .await
+            .expect_err("a value with too many units must be refused");
+        assert!(
+            matches!(
+                error,
+                SendError::State(SliceError::ValueTooComplex { units, limit })
+                    if units == numbers + 1 && limit == numbers
+            ),
+            "the refusal must be the typed structure cap error, not {error:?}"
+        );
+        assert_eq!(
+            state.chunks.stored_chunks(),
+            0,
+            "a refused value must leave no chunk"
         );
     }
 
