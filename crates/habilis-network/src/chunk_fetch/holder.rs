@@ -187,7 +187,7 @@ mod tests {
             .expect("an unnamed value");
         // A slice names this root, and the store holds nothing of it.
         let missing = Root::from_bytes([3; 32]);
-        name_root(&mut state, &peer, ChunkPointer::new(missing, 10), 2);
+        name_root(&mut state, &peer, ChunkPointer::new(missing, 10, 0), 2);
         let mut budget = ChunkServeBudget::default();
         let requests = [
             (

@@ -566,16 +566,16 @@ pub(crate) async fn draft_own_write(
     }
     let bytes =
         serde_json::to_vec(&next).map_err(|error| transport::SendError::internal(error.into()))?;
-    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let root = state
         .chunks
         .put_value(&bytes)
         .await
         .map_err(|error| transport::SendError::internal(error.into()))?;
+    let pointer = ChunkPointer::of(root, &bytes);
     drop(bytes);
     let draft = state
         .docs
-        .prepare_pointer(channel, &own, ChunkPointer::new(root, size), next, now);
+        .prepare_pointer(channel, &own, pointer, next, now);
     if draft.is_err() {
         chunk_fetch::keep_held(state).await;
     }

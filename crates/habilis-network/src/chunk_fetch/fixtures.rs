@@ -39,8 +39,7 @@ pub(crate) async fn hold_named_value(
         .await
         .expect("a lookup")
         .expect("a map");
-    let size = u64::try_from(value.len()).expect("a size");
-    name_root(state, peer, ChunkPointer::new(root, size), 1);
+    name_root(state, peer, ChunkPointer::of(root, value), 1);
     (root, map)
 }
 
@@ -78,8 +77,7 @@ pub(crate) async fn hold_named_value_sealed(
     mesh_key: &SymmetricKey,
 ) -> Root {
     let root = state.chunks.put_value(value).await.expect("a value");
-    let size = u64::try_from(value.len()).expect("a size");
-    let pointer = ChunkPointer::new(root, size);
+    let pointer = ChunkPointer::of(root, value);
     let text = serde_json::json!({"version": 1, "value": pointer.to_value()}).to_string();
     let plain = MessageBody::try_new(&text).expect("a body");
     let sealed = wire::encrypt_body(&plain, &mesh_key.derive(b"state-doc")).expect("a sealed body");

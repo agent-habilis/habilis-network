@@ -429,14 +429,14 @@ mod tests {
             .key(Some(SymmetricKey::from([5u8; 32])));
         let plain_root = plain.put_value(value).await.expect("a value");
         assert_eq!(
-            plain.stored_size(ChunkPointer::new(plain_root, size)),
+            plain.stored_size(ChunkPointer::new(plain_root, size, 0)),
             size,
             "a mesh with no password stores the bytes of the value"
         );
         let sealed_root = sealed.put_value(value).await.expect("a value");
         let expected = size + u64::try_from(SEAL_SYMMETRIC_OVERHEAD).expect("a size");
         assert_eq!(
-            sealed.stored_size(ChunkPointer::new(sealed_root, size)),
+            sealed.stored_size(ChunkPointer::new(sealed_root, size, 0)),
             expected,
             "a passworded mesh stores the seal too"
         );

@@ -319,7 +319,7 @@ mod tests {
             let author = MeshChunks::open(None).expect("an in-memory store");
             author.put_value(value).await.expect("a value")
         };
-        let pointer = ChunkPointer::new(root, u64::try_from(value.len()).expect("a size"));
+        let pointer = ChunkPointer::of(root, value);
         (
             MeshChunks::open(None).expect("an in-memory store"),
             pointer,
@@ -334,7 +334,7 @@ mod tests {
         let mut state = state_trusting(client.id());
         let peer = Identity::generate();
         let (root, _) = hold_named_value(&mut state, &peer, &value).await;
-        let pointer = ChunkPointer::new(root, u64::try_from(value.len()).expect("a size"));
+        let pointer = ChunkPointer::of(root, &value);
         let author = serve_state(Box::new(state)).await;
         let chunks = MeshChunks::open(None).expect("an in-memory store");
         let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
@@ -483,7 +483,7 @@ mod tests {
             .trust(test_key("member"), client.id());
         let peer = Identity::generate();
         let root = hold_named_value_sealed(&mut state, &peer, &value, &key).await;
-        let pointer = ChunkPointer::new(root, u64::try_from(value.len()).expect("a size"));
+        let pointer = ChunkPointer::of(root, &value);
         let author = serve_state(Box::new(state)).await;
         let keyed = MeshChunks::open(None)
             .expect("an in-memory store")
@@ -547,7 +547,7 @@ mod tests {
         let mut author_state = state_trusting(relay_client.id());
         let peer = Identity::generate();
         let (root, _) = hold_named_value(&mut author_state, &peer, &value).await;
-        let pointer = ChunkPointer::new(root, u64::try_from(value.len()).expect("a size"));
+        let pointer = ChunkPointer::of(root, &value);
         let author = serve_state(Box::new(author_state)).await;
         // The relay fetches from the author, and keeps the chunks, and a slice of the peer names the root there.
         let relay_chunks = MeshChunks::open(None).expect("an in-memory store");

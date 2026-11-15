@@ -396,7 +396,7 @@ mod tests {
         let plain = serde_json::to_vec(&value).expect("a JSON value");
         let chunks = MeshChunks::open(None).expect("an in-memory store").key(key);
         let root = chunks.put_value(&plain).await.expect("a value");
-        let pointer = ChunkPointer::new(root, u64::try_from(plain.len()).expect("a size"));
+        let pointer = ChunkPointer::of(root, &plain);
         (pointer, chunks.stored_bytes(root).await, value)
     }
 
@@ -563,7 +563,7 @@ mod tests {
             let chunks = MeshChunks::open(None).expect("an in-memory store");
             let plain = serde_json::to_vec(&serde_json::json!([1, 2, 3])).expect("JSON");
             let root = chunks.put_value(&plain).await.expect("a value");
-            let pointer = ChunkPointer::new(root, u64::try_from(plain.len()).expect("a size"));
+            let pointer = ChunkPointer::of(root, &plain);
             let mut state = state_waiting(&author, pointer);
             let now = Instant::now();
             let done = FetchDone {
@@ -656,7 +656,7 @@ mod tests {
                 (
                     Channel::State,
                     testing::test_key(&format!("author{number}")),
-                    ChunkPointer::new(Root::from_bytes([number; 32]), 100_000),
+                    ChunkPointer::new(Root::from_bytes([number; 32]), 100_000, 0),
                 )
             })
             .collect();
@@ -725,7 +725,7 @@ mod tests {
                 (
                     Channel::State,
                     testing::test_key(&format!("author{number}")),
-                    ChunkPointer::new(Root::from_bytes([number; 32]), size),
+                    ChunkPointer::new(Root::from_bytes([number; 32]), size, 0),
                 )
             })
             .collect()
@@ -753,7 +753,7 @@ mod tests {
             (
                 Channel::State,
                 testing::test_key("small"),
-                ChunkPointer::new(Root::from_bytes([200; 32]), 10),
+                ChunkPointer::new(Root::from_bytes([200; 32]), 10, 0),
             ),
         );
         let big_skipped = fetches.due(mixed, now, 100_050, ChunkPointer::size);
@@ -800,8 +800,8 @@ mod tests {
         let mut state = testing::fresh_state();
         let first = Identity::generate();
         let second = Identity::generate();
-        let waiting = ChunkPointer::new(Root::from_bytes([3; 32]), 70_000);
-        let whole = ChunkPointer::new(Root::from_bytes([4; 32]), 90_000);
+        let waiting = ChunkPointer::new(Root::from_bytes([3; 32]), 70_000, 0);
+        let whole = ChunkPointer::new(Root::from_bytes([4; 32]), 90_000, 0);
         fixtures::name_root(&mut state, &first, waiting, 1);
         fixtures::name_root(&mut state, &second, whole, 1);
         assert_eq!(

@@ -5152,6 +5152,7 @@ mod first_contact_tests {
         let pointer = habilis_network_doc::ChunkPointer::new(
             habilis_network_chunks::Root::from_bytes([7; 32]),
             100_000,
+            0,
         );
         let body = MessageBody::try_new(
             &serde_json::json!({"version": version, "value": pointer.to_value()}).to_string(),

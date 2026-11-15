@@ -54,7 +54,7 @@ mod tests {
     /// A pointer to a value of `chunks` chunks, with no chunk behind it.
     fn pointer_of(chunks: usize, seed: u8) -> ChunkPointer {
         let size = u64::try_from(CHUNK_BYTES_USIZE * (chunks - 1) + 10).expect("a size");
-        ChunkPointer::new(Root::from_bytes([seed; 32]), size)
+        ChunkPointer::new(Root::from_bytes([seed; 32]), size, 0)
     }
 
     #[test]

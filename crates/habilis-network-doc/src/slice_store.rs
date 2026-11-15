@@ -1623,7 +1623,7 @@ mod tests {
     }
 
     fn pointer_value() -> (ChunkPointer, Value) {
-        let pointer = ChunkPointer::new(Root::from_bytes([7; 32]), 100_000);
+        let pointer = ChunkPointer::new(Root::from_bytes([7; 32]), 100_000, 0);
         let value = pointer.to_value();
         (pointer, value)
     }
@@ -1682,7 +1682,7 @@ mod tests {
             Some(&json!({"old": true})),
             "the view must keep the last complete version until the new one is fetched"
         );
-        let newer = ChunkPointer::new(Root::from_bytes([8; 32]), 200_000).to_value();
+        let newer = ChunkPointer::new(Root::from_bytes([8; 32]), 200_000, 0).to_value();
         apply(&mut store, &frame(key(1), 3, newer));
         assert_eq!(
             store.view().get(&hex_of(&key(1))),
@@ -1866,7 +1866,7 @@ mod tests {
             Ok(true),
             "the first value is fetched"
         );
-        let next = ChunkPointer::new(Root::from_bytes([9; 32]), 150_000);
+        let next = ChunkPointer::new(Root::from_bytes([9; 32]), 150_000, 0);
         apply(&mut store, &frame(key(1), 2, next.to_value()));
         assert_eq!(
             store.view().get(&hex_of(&key(1))),
@@ -1913,7 +1913,7 @@ mod tests {
             SliceIngest::Applied,
             "an inline version must apply first"
         );
-        let over = ChunkPointer::new(Root::from_bytes([7; 32]), 65).to_value();
+        let over = ChunkPointer::new(Root::from_bytes([7; 32]), 65, 0).to_value();
         assert_eq!(
             apply(&mut store, &frame(key(1), 2, over)),
             SliceIngest::Refused(SliceError::ValueTooLarge {
@@ -1928,7 +1928,7 @@ mod tests {
             "a refused pointer must keep the last complete version"
         );
         assert_eq!(store.pointer(&key(1)), None, "no pointer may be held");
-        let at_cap = ChunkPointer::new(Root::from_bytes([7; 32]), 64).to_value();
+        let at_cap = ChunkPointer::new(Root::from_bytes([7; 32]), 64, 0).to_value();
         assert_eq!(
             apply(&mut store, &frame(key(1), 2, at_cap)),
             SliceIngest::Applied,
@@ -2188,7 +2188,7 @@ mod tests {
     ) -> Result<LocalDraft, SliceError> {
         let value = object(json!({"k": "x".repeat(text_len)}));
         let size = Value::Object(value.clone()).to_string().len() as u64;
-        let pointer = ChunkPointer::new(Root::from_bytes([3; 32]), size);
+        let pointer = ChunkPointer::new(Root::from_bytes([3; 32]), size, 0);
         store.prepare_pointer(&key(1), pointer, value, now)
     }
 
@@ -2221,7 +2221,7 @@ mod tests {
     #[test]
     fn a_pointer_draft_that_names_more_than_the_value_cap_is_refused() {
         let mut store = value_capped_store(100);
-        let pointer = ChunkPointer::new(Root::from_bytes([3; 32]), 101);
+        let pointer = ChunkPointer::new(Root::from_bytes([3; 32]), 101, 0);
         assert_eq!(
             store
                 .prepare_pointer(&key(1), pointer, Map::new(), Instant::now())

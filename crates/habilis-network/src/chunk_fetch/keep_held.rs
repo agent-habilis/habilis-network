@@ -28,7 +28,7 @@ mod tests {
     async fn hold_fetched_value(state: &mut EventLoopState, peer: &Identity, seed: usize) -> Root {
         let value = fixtures::bytes(CHUNK_BYTES_USIZE + 100 + seed);
         let root = state.chunks.put_value(&value).await.expect("a value");
-        let pointer = ChunkPointer::new(root, u64::try_from(value.len()).expect("a size"));
+        let pointer = ChunkPointer::of(root, &value);
         fixtures::name_root(state, peer, pointer, 1);
         let resolved = state
             .docs
@@ -125,12 +125,7 @@ mod tests {
         let peer = Identity::generate();
         let value = fixtures::bytes(CHUNK_BYTES_USIZE + 50);
         let root = state.chunks.put_value(&value).await.expect("a value");
-        fixtures::name_root(
-            &mut state,
-            &peer,
-            ChunkPointer::new(root, u64::try_from(value.len()).expect("a size")),
-            1,
-        );
+        fixtures::name_root(&mut state, &peer, ChunkPointer::of(root, &value), 1);
         super::keep_held(&state).await;
         assert_eq!(
             state.chunks.stored_chunks(),
