@@ -40,6 +40,7 @@ use crate::protocol::meshes::RelayChoice;
 use crate::util::tuning::{
     RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_LIVENESS_INTERVAL, RELAY_REPROBE_BACKOFF_MAX,
     RELAY_REPROBE_BACKOFF_MIN, RELAY_RETURN_HOLD, RELAY_RETURN_PROBE_INTERVAL, RELAY_RUNG_PROBE,
+    RELAY_RUNG_STAGGER,
 };
 use n0_future::time::Instant;
 use n0_future::{task as n0future_task, time as n0future_time};
@@ -491,10 +492,12 @@ async fn wait_for_home_connection(
 /// only reports online once a home relay is chosen, so a successful
 /// `online()` against a one-relay `RelayMode` *is* that rung being live.
 ///
-/// The walk probes every rung at once, so a ladder of silent rungs costs one
-/// window of `per_rung`, not one window for each rung. Eight concurrent probes
-/// cost about the CPU of eight probes in order, and about 80 sockets at the
-/// peak.
+/// The walk starts the probe of each rung [`RELAY_RUNG_STAGGER`] after the one
+/// below it, or at once when the rung below says no. A healthy rung 0 answers
+/// before rung 1 starts, so the later rungs see no probe. A ladder of silent
+/// rungs costs one window of `per_rung` plus the staggers, not one window for
+/// each rung. Eight concurrent probes cost about the CPU of eight probes in
+/// order, and about 80 sockets at the peak.
 ///
 /// `None` ⇒ the ladder is empty (relay disabled) or every rung was
 /// unreachable; the caller then leans on mDNS/DHT (the other reliability
@@ -505,14 +508,14 @@ pub(crate) async fn select_bootstrap_rung(
     per_rung: Duration,
     stop: Option<&watch::Receiver<()>>,
 ) -> Option<RelayUrl> {
-    let selected = select_first_reachable(ladder, stop, |rung, probes_stopped| async move {
+    let probe = |rung: RelayUrl, probes_stopped| async move {
         let reachable = relay_rung_reachable(&rung, per_rung, Some(probes_stopped)).await;
         if !reachable {
             tracing::debug!(target: "habilis_network::lookup", relay = %rung, "bootstrap relay rung did not answer");
         }
         reachable
-    })
-    .await;
+    };
+    let selected = select_first_reachable(ladder, stop, RELAY_RUNG_STAGGER, probe).await;
     match &selected {
         Some(rung) => {
             tracing::info!(target: "habilis_network::lookup", relay = %rung, "selected bootstrap relay rung");
@@ -526,19 +529,23 @@ pub(crate) async fn select_bootstrap_rung(
 }
 
 /// The pure ladder walk behind [`select_bootstrap_rung`]: start the probe of
-/// every rung at once, and return the lowest rung for which `reachable` is
-/// `true`, else `None`. A rung wins only when every rung below it said no, so a
-/// lower rung that answers late still beats a higher rung that answers early.
-/// That is what makes the selection deterministic across members, and what
-/// makes a recovered earlier rung win over a later one on every (re)selection.
+/// rung 0 at once, and of each later rung `stagger` after the one before it,
+/// or at once when a rung says no. Return the lowest rung for which
+/// `reachable` is `true`, else `None`. A rung wins only when every rung
+/// below it said no, so a lower rung that answers late still beats a higher
+/// rung that answers early. That is what makes the selection deterministic
+/// across members, and what makes a recovered earlier rung win over a later
+/// one on every (re)selection.
 ///
 /// Each probe gets a receiver whose sender the walk drops once it decides, or
-/// once `stop`'s sender is dropped. The walk then waits for every probe to end,
-/// so no probe outlives it. Generic over the reachability probe so the order
-/// logic is unit tested without touching the network.
+/// once `stop`'s sender is dropped. The walk then starts no more probes and
+/// waits for every probe to end, so no probe outlives it. Generic over the
+/// reachability probe so the order logic is unit tested without touching the
+/// network.
 async fn select_first_reachable<Probe, Fut>(
     ladder: &[RelayUrl],
     stop: Option<&watch::Receiver<()>>,
+    stagger: Duration,
     mut reachable: Probe,
 ) -> Option<RelayUrl>
 where
@@ -549,29 +556,41 @@ where
 
     let (stop_probes, probes_stopped) = watch::channel(());
     let mut stop_probes = Some(stop_probes);
-    let mut probes: FuturesUnordered<_> = ladder
-        .iter()
-        .enumerate()
-        .map(|(index, rung)| {
-            let probe = reachable(rung.clone(), probes_stopped.clone());
-            async move { (index, probe.await) }
-        })
-        .collect();
+    let mut probes = FuturesUnordered::new();
+    let mut unstarted = ladder.iter().enumerate();
+    let mut next_start = Instant::now();
     let mut answers: Vec<Option<bool>> = vec![None; ladder.len()];
     let mut selected = None;
     loop {
+        let may_start = stop_probes.is_some() && unstarted.len() > 0;
+        if may_start && (probes.is_empty() || Instant::now() >= next_start) {
+            if let Some((index, rung)) = unstarted.next() {
+                let probe = reachable(rung.clone(), probes_stopped.clone());
+                probes.push(async move { (index, probe.await) });
+            }
+            next_start = Instant::now() + stagger;
+            continue;
+        }
+        if probes.is_empty() {
+            return selected;
+        }
+        let until_next_start = next_start.saturating_duration_since(Instant::now());
         let next = tokio::select! {
             next = probes.next() => next,
+            () = n0future_time::sleep(until_next_start), if may_start => continue,
             () = stopped(stop.cloned()), if stop_probes.is_some() => {
                 stop_probes = None;
                 continue;
             }
         };
         let Some((index, answer)) = next else {
-            return selected;
+            continue;
         };
         if let Some(slot) = answers.get_mut(index) {
             *slot = Some(answer);
+        }
+        if !answer {
+            next_start = Instant::now();
         }
         if stop_probes.is_none() {
             continue;
@@ -1845,14 +1864,38 @@ mod tests {
         });
     }
 
-    /// **The walk probes every rung at once.**
+    /// **A healthy rung 0 leaves the later rungs unprobed.**
+    ///
+    /// The walk starts rung 1 a stagger after rung 0, and a healthy rung 0 answers before that.
+    /// A walk that starts every rung at once sends a probe to every relay of the ladder, the n0
+    /// relays too, each time a member walks.
+    #[test]
+    fn a_healthy_rung_0_leaves_the_later_rungs_unprobed() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (second, second_server) = test_relay::spawn_plain().await.expect("a local relay");
+
+            let selected =
+                select_bootstrap_rung(&[first.clone(), second], std_Duration::from_secs(2), None)
+                    .await;
+
+            assert_eq!(selected, Some(first), "the walk picks rung 0");
+            assert_eq!(
+                http_connections(&second_server),
+                0,
+                "rung 1 saw a probe, though rung 0 answered"
+            );
+        });
+    }
+
+    /// **A walk over silent rungs costs about one window, not one window for each rung.**
     ///
     /// A walk that probes one rung after the other waits a full window for each silent rung
-    /// before it reaches a live one: 3 silent rungs cost 3 windows. The walk probes every rung at
-    /// once, so it waits one window for the silent rungs below the live one, and every member
-    /// still picks the same rung.
+    /// before it reaches a live one: 3 silent rungs cost 3 windows. The walk starts each rung a
+    /// stagger after the one below it, so it waits one window plus the staggers for the silent
+    /// rungs below the live one, and every member still picks the same rung.
     #[test]
-    fn the_walk_probes_every_rung_at_once() {
+    fn the_walk_of_silent_rungs_costs_about_one_window() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             ::habilis_network_test_tracing::allow_warn(
                 "iroh::net_report::reportgen",
@@ -1873,8 +1916,13 @@ mod tests {
             ladder.push(live.clone());
             let window = std_Duration::from_secs(2);
 
+            let probe = |rung: RelayUrl, probes_stopped| async move {
+                super::relay_rung_reachable(&rung, window, Some(probes_stopped)).await
+            };
+
             let started = time::Instant::now();
-            let selected = select_bootstrap_rung(&ladder, window, None).await;
+            let stagger = std_Duration::from_millis(200);
+            let selected = select_first_reachable(&ladder, None, stagger, probe).await;
             let took = started.elapsed();
 
             assert_eq!(selected, Some(live), "the walk picks the live rung");
@@ -1973,7 +2021,7 @@ mod tests {
     //
     // Network-free coverage of the walk: a fake probe answers after a delay,
     // up or down, and ends early when the walk stops it. We assert which rung
-    // wins, how many probes ran at once, and which probes the walk stopped.
+    // wins, which rungs started, and which probes the walk stopped.
 
     fn rungs(hosts: &[&str]) -> Vec<RelayUrl> {
         hosts.iter().map(|host| rung(host)).collect()
@@ -1997,36 +2045,41 @@ mod tests {
         up: bool,
     }
 
-    /// What a walk over fake rungs did. `stopped` is sorted.
+    /// What a walk over fake rungs did. `started` is in the order the probes started, and
+    /// `stopped` is sorted.
     struct Walk {
         selected: Option<String>,
-        most_at_once: usize,
+        started: Vec<String>,
         stopped: Vec<String>,
     }
 
+    /// The stagger of the fake walks: a rung that answers in 10 ms answers before the next starts.
+    const FAKE_STAGGER: std_Duration = std_Duration::from_millis(100);
+
     /// Run the ladder walk over fake rungs, with `stop` as the stop of the caller.
-    async fn walk_with(fakes: &[FakeRung], stop: Option<&watch::Receiver<()>>) -> Walk {
+    async fn walk_with(
+        fakes: &[FakeRung],
+        stop: Option<&watch::Receiver<()>>,
+        stagger: std_Duration,
+    ) -> Walk {
         let hosts: Vec<&str> = fakes.iter().map(|fake| fake.host).collect();
         let ladder = rungs(&hosts);
-        let in_flight = cell::Cell::new(0_usize);
-        let most_at_once = cell::Cell::new(0_usize);
+        let started = cell::RefCell::new(Vec::new());
         let stopped = cell::RefCell::new(Vec::new());
-        let selected = select_first_reachable(&ladder, stop, |rung, probes_stopped| {
+        let selected = select_first_reachable(&ladder, stop, stagger, |rung, probes_stopped| {
             let host = short_host(&rung);
             let fake = fakes
                 .iter()
                 .find(|fake| fake.host == host)
                 .expect("each rung has a fake");
             let (delay, up) = (std_Duration::from_millis(fake.delay_ms), fake.up);
-            let (in_flight, most_at_once, stopped) = (&in_flight, &most_at_once, &stopped);
+            started.borrow_mut().push(host.clone());
+            let stopped = &stopped;
             async move {
-                in_flight.set(in_flight.get() + 1);
-                most_at_once.set(most_at_once.get().max(in_flight.get()));
                 let answer = tokio::select! {
                     () = time::sleep(delay) => Some(up),
                     () = super::stopped(Some(probes_stopped)) => None,
                 };
-                in_flight.set(in_flight.get() - 1);
                 if answer.is_none() {
                     stopped.borrow_mut().push(host);
                 }
@@ -2038,13 +2091,13 @@ mod tests {
         stopped.sort();
         Walk {
             selected: host_of(selected.as_ref()),
-            most_at_once: most_at_once.get(),
+            started: started.into_inner(),
             stopped,
         }
     }
 
     async fn walk(fakes: &[FakeRung]) -> Walk {
-        walk_with(fakes, None).await
+        walk_with(fakes, None, FAKE_STAGGER).await
     }
 
     fn fake(host: &'static str, delay_ms: u64, up: bool) -> FakeRung {
@@ -2055,7 +2108,7 @@ mod tests {
     fn ladder_picks_first_when_all_reachable() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let walked = walk(&[
-                fake("a", 100, true),
+                fake("a", 400, true),
                 fake("b", 10, true),
                 fake("c", 10, true),
             ])
@@ -2065,7 +2118,11 @@ mod tests {
                 Some("a"),
                 "the first rung is picked when all are reachable, though it answers last"
             );
-            assert_eq!(walked.most_at_once, 3, "every rung is probed at once");
+            assert_eq!(
+                walked.started,
+                vec!["a", "b", "c"],
+                "a slow rung 0 lets the later rungs start, one stagger after the other"
+            );
         });
     }
 
@@ -2074,9 +2131,9 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             // rung 0 down → rung 1 wins once rung 0 said no; the slow rung 2 is stopped.
             let walked = walk(&[
-                fake("a", 50, false),
+                fake("a", 300, false),
                 fake("b", 10, true),
-                fake("c", 1000, true),
+                fake("c", 5000, true),
             ])
             .await;
             assert_eq!(
@@ -2107,8 +2164,9 @@ mod tests {
                 "the ladder skips multiple dead prefix rungs"
             );
             assert_eq!(
-                walked.most_at_once, 3,
-                "the dead rungs and the live one are probed at once"
+                walked.started,
+                vec!["a", "b", "c"],
+                "the walk starts each rung in order"
             );
         });
     }
@@ -2119,16 +2177,16 @@ mod tests {
             // "reset and start from the first": the walk always re-picks the
             // earliest reachable rung, so a recovered rung 0 wins over a
             // still-up rung 1.
-            let walked = walk(&[
-                fake("a", 10, true),
-                fake("b", 10, true),
-                fake("c", 10, true),
-            ])
-            .await;
+            let walked = walk(&[fake("a", 5, true), fake("b", 5, true), fake("c", 5, true)]).await;
             assert_eq!(
                 walked.selected.as_deref(),
                 Some("a"),
                 "the first rung is preferred again once it recovers"
+            );
+            assert_eq!(
+                walked.started,
+                vec!["a"],
+                "a rung 0 that answers within the stagger starts no later rung"
             );
         });
     }
@@ -2146,7 +2204,11 @@ mod tests {
                 walked.selected.is_none(),
                 "every rung down ⇒ None (use mDNS/DHT)"
             );
-            assert_eq!(walked.most_at_once, 3, "probes the whole ladder at once");
+            assert_eq!(
+                walked.started,
+                vec!["a", "b", "c"],
+                "probes the whole ladder"
+            );
         });
     }
 
@@ -2155,7 +2217,23 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let walked = walk(&[]).await;
             assert!(walked.selected.is_none(), "an empty ladder selects nothing");
-            assert_eq!(walked.most_at_once, 0, "an empty ladder probes nothing");
+            assert!(walked.started.is_empty(), "an empty ladder probes nothing");
+        });
+    }
+
+    /// **A rung that says no starts the next rung at once, not after the stagger.**
+    #[test]
+    fn a_rung_that_says_no_starts_the_next_at_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let started = time::Instant::now();
+            let fakes = [fake("a", 10, false), fake("b", 10, true)];
+            let walked = walk_with(&fakes, None, std_Duration::from_secs(10)).await;
+            let took = started.elapsed();
+            assert_eq!(walked.selected.as_deref(), Some("b"), "rung 1 answers");
+            assert!(
+                took < std_Duration::from_secs(1),
+                "the walk waited {took:?} for a stagger of 10 s after rung 0 said no"
+            );
         });
     }
 
@@ -2165,11 +2243,12 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (stop, stopped) = watch::channel(());
             let stopping = async {
-                time::sleep(std_Duration::from_millis(20)).await;
+                time::sleep(std_Duration::from_millis(300)).await;
                 drop(stop);
             };
-            let fakes = [fake("a", 1000, true), fake("b", 1000, true)];
-            let (walked, ()) = tokio::join!(walk_with(&fakes, Some(&stopped)), stopping);
+            let fakes = [fake("a", 5000, true), fake("b", 5000, true)];
+            let (walked, ()) =
+                tokio::join!(walk_with(&fakes, Some(&stopped), FAKE_STAGGER), stopping);
             assert!(walked.selected.is_none(), "a stopped walk selects nothing");
             assert_eq!(
                 walked.stopped,

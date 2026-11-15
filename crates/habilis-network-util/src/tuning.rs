@@ -942,6 +942,12 @@ pub fn directory_private_for_test() -> bool {
 /// as down and trigger a spurious fall-through.
 pub const RELAY_RUNG_PROBE: Duration = Duration::from_secs(10);
 
+/// The delay between the start of the probe of one relay rung and the start of the next, in a
+/// walk of the ladder. A rung that says no starts the next at once. A healthy rung answers in
+/// 0.3 to 0.5 s, so it answers before the next rung starts, and the later rungs see no probe. 7
+/// silent rungs below a live one add 7 s to the walk, beside a probe window of 10 s.
+pub const RELAY_RUNG_STAGGER: Duration = Duration::from_secs(1);
+
 /// How often the beacon polls whether its current relay rung is still
 /// connected (`timeout(RELAY_RUNG_PROBE, online())` on its own
 /// endpoint). Off the event loop, inside the beacon co-host task.
