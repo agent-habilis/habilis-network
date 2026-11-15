@@ -683,7 +683,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             RENDEZVOUS_RELAY_LADDER_URLS[0].as_str(),
-            "https://relay.agent-habilis.com/"
+            "https://relay.agent-habilis.com/",
+            "rung 0 of the default ladder is the legacy relay name"
         );
     }
 
@@ -733,7 +734,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let held: BTreeSet<RelayUrl> = super::relay_mode(&RelayChoice::Pinned).relay_map().urls();
         let ladder: BTreeSet<RelayUrl> = RENDEZVOUS_RELAY_LADDER_URLS.iter().cloned().collect();
-        assert_eq!(held, ladder);
+        assert_eq!(
+            held, ladder,
+            "the relay map of a Pinned peer holds every rung of the default ladder"
+        );
     }
 
     #[test]
