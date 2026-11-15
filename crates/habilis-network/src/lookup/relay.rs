@@ -1546,6 +1546,28 @@ mod tests {
         });
     }
 
+    /// **A home on rung 0 starts no return round; a later home starts one when it is due.**
+    #[test]
+    fn a_return_round_starts_only_below_a_later_home() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (silent, _held) = spawn_silent_rung().await;
+            let mut times = return_times(std_Duration::from_hours(1));
+            times.return_every = std_Duration::ZERO;
+            let mut returns = super::Returns::new(times);
+
+            returns.start_round_if_due(&[]);
+            assert!(returns.round.is_none(), "rung 0 has no rung below it");
+
+            returns.start_round_if_due(&[silent]);
+            assert!(
+                returns.round.is_some(),
+                "a due round of a later home starts"
+            );
+            returns.cancel_round().await;
+            assert!(returns.round.is_none(), "a cancel ends the round");
+        });
+    }
+
     /// **A return round reports every lower rung that answers, not only the lowest.**
     #[test]
     fn a_return_round_reports_every_rung_that_answers() {
