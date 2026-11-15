@@ -274,18 +274,30 @@ These two choices must agree, or the bootstrap dial finds nothing.
 Setup picks rung 0 without a probe, so readiness never blocks on the network.
 A startup task probes off-loop and corrects the rung through a watch channel into the event loop.
 
-The walk probes every rung at once.
+The walk starts the probe of rung 0 at once, and of each later rung 1 s after the one before it.
+A rung that says no starts the next rung at once.
+A healthy rung answers in 0.3 to 0.5 s, so a healthy rung 0 answers before rung 1 starts.
+Then the later rungs see no probe.
 A rung wins only when every rung below it said no, so every member picks the same rung.
 A lower rung that answers late still wins over a higher rung that answers early.
-A ladder of silent rungs costs one probe window, not one window for each rung.
-When the walk decides, it stops the probes that are left, and each probe closes its endpoint before the walk returns.
+A ladder of silent rungs costs one probe window plus the staggers, not one window for each rung.
+When the walk decides, it starts no more probes and stops the probes that are left.
+Each probe closes its endpoint before the walk returns.
+
+The peer endpoint and the beacon follow their rung with one loop.
+A rung is alive when the relay status says that the relay connection is up, and the net report has a preferred relay.
+After 2 failed reads in a row, the member walks the ladder.
+A peer endpoint moves its relay map in place.
+The beacon publishes the new rung through the watch channel, and the event loop re-homes the beacon on it.
 
 A member on a later rung returns to a lower rung when that rung comes back.
-Each minute, the member probes the rungs below its rung.
-When the lowest of them answered every round for 3 minutes, the member moves to it.
+Each minute, the member probes every rung below its rung, in a task beside the liveness reads.
+Each lower rung keeps the time since which it answered every round.
+When a lower rung answered every round for 3 minutes, the member moves to the lowest such rung.
+A rung that flaps restarts only its own wait, so it does not hold back a steady rung above it.
 The hold keeps a relay that restarts or flaps from moving every member back and forth.
-A peer endpoint moves its relay map in place.
-The beacon publishes the lower rung through the watch channel, and the event loop re-homes the beacon on it.
+A round that finds no lower rung doubles the wait to the next round, up to 5 minutes.
+A walk after a failure can pick a healthy lower rung with no hold, because the member must leave its rung anyway.
 The rendezvous address names every rung, so a joiner still reaches the beacon while it moves.
 
 ### 5.4 Rendezvous and beacon
