@@ -2,9 +2,9 @@
 //!
 //! Two in-process native peers, A and B, and one real browser tab, T, all on one local plain-HTTP
 //! relay and one mesh whose transports are `udp,webrtc,multihop` (relay as a lookup only, so the
-//! relay carries no payload). A and B have an IP link. T has no IP, so T to A is a WebRTC session.
+//! relay carries no payload). A and B have an IP link. T has no IP, so T to A is a `WebRTC` session.
 //! T to B must have no direct path at all: B refuses T's session in both roles
-//! (`Request::DenyPeer`), so the only way from T to B is the multihop route through A.
+//! (`Blocking::DenyPeer`), so the only way from T to B is the multihop route through A.
 //!
 //! The cell moves a directed message each way and reads A's `forwarded_cells` after each one: A
 //! carried cells for a pair that it is not part of. It is the proof that the tab takes part in
@@ -30,6 +30,11 @@ use super::mesh::{
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
+use habilis_network::net::test_relay;
+use habilis_network::util::tuning;
+use std::fs;
+use tokio::time::{Instant, Instant as tokio_Instant};
+use tokio::{runtime, time};
 /// The route is learned from link vectors (15 s apart) and the underlay session of the tab comes
 /// on the next tick after that, so a message may wait a few ticks for its route.
 const ROUTE_TIMEOUT: Duration = Duration::from_mins(3);
@@ -50,14 +55,12 @@ fn transports() -> String {
         .join(",")
 }
 
-fn native_opts(nick: &str, topic: &str, relay_url: &str) -> membership::Opts {
-    membership::Opts {
-        topic: Some(topic.to_owned()),
-        nick: Some(nick.to_owned()),
-        relay_urls: vec![relay_url.to_owned()],
-        transport: TRANSPORTS.to_vec(),
-        ..membership::Opts::default()
-    }
+fn native_opts(nick: &str, topic: &str, relay_url: &str) -> membership::JoinOptions {
+    membership::JoinOptions::default()
+        .topic(Some(topic.to_owned()))
+        .nick(Some(nick.to_owned()))
+        .relay_urls(vec![relay_url.to_owned()])
+        .transport(TRANSPORTS.to_vec())
 }
 
 fn page_url(base: &str, relay_url: &str, topic: &str) -> String {
@@ -71,15 +74,19 @@ fn page_url(base: &str, relay_url: &str, topic: &str) -> String {
 /// A's count of the cells it passed on for other members.
 async fn forwarded_cells(alpha: &Native) -> Result<u64, CellFailure> {
     alpha
-        .request(|reply| membership::Request::ForwardedCells { reply })
+        .request(|reply| {
+            membership::Request::Routing(membership::Routing::ForwardedCells { reply })
+        })
         .await
         .map_err(|error| CellFailure(format!("A's forwarded-cell count is unreadable: {error}")))
 }
 
-/// The WebRTC sessions on A's multihop underlay. The tab has no IP, so A reaches it only over one.
+/// The `WebRTC` sessions on A's multihop underlay. The tab has no IP, so A reaches it only over one.
 async fn underlay_sessions(alpha: &Native) -> String {
     alpha
-        .request(|reply| membership::Request::UnderlaySessions { reply })
+        .request(|reply| {
+            membership::Request::Routing(membership::Routing::UnderlaySessions { reply })
+        })
         .await
         .map_or_else(
             |error| format!("unreadable: {error}"),
@@ -89,22 +96,24 @@ async fn underlay_sessions(alpha: &Native) -> String {
 
 /// Whether B learns a route to the tab, through A, before the window ends.
 async fn route_to_tab(bravo: &Native) -> bool {
-    let deadline = tokio::time::Instant::now() + ROUTE_TIMEOUT;
+    let deadline = tokio_Instant::now() + ROUTE_TIMEOUT;
     loop {
         let has_route = bravo
-            .request(|reply| membership::Request::HasRoute {
-                peer: "tab".to_owned(),
-                reply,
+            .request(|reply| {
+                membership::Request::InspectHost(membership::InspectHost::HasRoute {
+                    peer: "tab".to_owned(),
+                    reply,
+                })
             })
             .await
             .unwrap_or(false);
         if has_route {
             return true;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if tokio_Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -144,21 +153,21 @@ async fn tab_to_b(
     bravo: &mut Native,
     after_down: u64,
 ) -> Result<u64, CellFailure> {
-    let deadline = tokio::time::Instant::now() + ROUTE_TIMEOUT;
+    let deadline = tokio_Instant::now() + ROUTE_TIMEOUT;
     loop {
         // A send before the tab has its route is refused or held; try again until the window ends.
         let _ = call_page(page, "harness", "send('bravo', 'tab-to-b')");
         if bravo.saw_msg("tab-to-b", true) {
             break;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             let now = forwarded_cells(alpha).await?;
             return Err(fail(format!(
                 "the tab's message never reached B (A's forwarded cells: {after_down} then {now}; A's underlay sessions: {})",
                 underlay_sessions(alpha).await
             )));
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
     let after_up = forwarded_cells(alpha).await?;
     if after_up <= after_down {
@@ -218,10 +227,12 @@ async fn run_cell(
         )));
     }
     bravo
-        .request(|reply| membership::Request::DenyPeer {
-            peer: "tab".to_owned(),
-            denied: true,
-            reply,
+        .request(|reply| {
+            membership::Request::Blocking(membership::Blocking::DenyPeer {
+                peer: "tab".to_owned(),
+                denied: true,
+                reply,
+            })
         })
         .await
         .map_err(|error| fail(format!("B could not deny the tab: {error}")))?
@@ -262,18 +273,18 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     init_logging();
     // As in the mesh suite: the beacon re-check is parked beyond the cell, which measures the mesh's
     // steady state.
-    habilis_network::util::tuning::init(habilis_network::util::tuning::Tuning {
-        rival_recheck_first: Duration::from_hours(1),
-        rival_recheck: Duration::from_hours(1),
-        rival_recheck_meshed: Duration::from_hours(1),
-        ..habilis_network::util::tuning::Tuning::DEFAULTS
-    });
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    tuning::init(
+        tuning::Tuning::DEFAULTS
+            .rival_recheck_first(Duration::from_hours(1))
+            .rival_recheck(Duration::from_hours(1))
+            .rival_recheck_meshed(Duration::from_hours(1)),
+    );
+    let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
     let (relay_url, _relay_server) = runtime
-        .block_on(habilis_network::net::test_relay::spawn_plain())
+        .block_on(test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let harness = BunServer::serve(
         &repo_root().join("packages/habilis-network-wasm"),
@@ -299,7 +310,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
             let logs = drain_logs();
             let dump = target.join("multihop-cell.log");
             let browser = page.evaluate("(window.harnessLog||[]).join('\\n')");
-            let _ = std::fs::write(&dump, format!("── browser console ──\n{browser}\n{logs}"));
+            let _ = fs::write(&dump, format!("── browser console ──\n{browser}\n{logs}"));
             output::detail(&format!("full log: {}", dump.display()));
             Err(reason.into())
         }

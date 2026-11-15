@@ -12,6 +12,8 @@ import type { MeshEvent } from './types.ts'
 
 export interface BackendMsg {
   readonly from: string
+  /** The author key, 64 lowercase hex digits. */
+  readonly key: string
   readonly text: string
   readonly directed: boolean
 }
@@ -36,7 +38,7 @@ export interface BackendSink {
    * A peer arrived or departed, for a backend that is told rather than one that
    * has to notice. Only called when [`BackendOpen.pushesPresence`] is set.
    */
-  presence(event: { kind: 'joined' | 'left'; nick: string }): void
+  presence(event: { kind: 'joined' | 'left'; nick: string; key: string }): void
   /** A failure with no caller waiting on it. Surfaces as `error`; the mesh stays open. */
   failed(message: string): void
   /**
@@ -58,6 +60,8 @@ export interface MeshBackend {
   readonly maxMsg: number
 
   send(to: string | null, text: string): Promise<void>
+  /** Send to the peer that holds an author key, 64 lowercase hex digits. */
+  sendToKey(key: string, text: string): Promise<void>
   /**
    * Apply an RFC 7386 merge document, and resolve with the *resulting* state
    * JSON.

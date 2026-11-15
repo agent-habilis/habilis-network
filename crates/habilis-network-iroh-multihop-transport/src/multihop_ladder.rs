@@ -1,0 +1,162 @@
+//! Path selection for an endpoint that has multihop and no `WebRTC`: the same
+//! ladder as the `WebRTC` selector, IP, then multihop, then gossip, then the relay.
+//!
+//! iroh's default selector treats a custom transport as primary. This one puts
+//! multihop below a direct path and above the relay: a route through other
+//! members beats the relay, which is kept for lookup. The rung order is the one
+//! in [`Rung`], shared with the `WebRTC` selector, so that it does not change
+//! with the list of transports.
+
+use habilis_network_iroh_transport_util::{
+    Rung, climb, custom_rung, ip_remote, is_blocked_to, remote_id,
+};
+use iroh::endpoint::transports::{
+    PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
+};
+
+use std::net;
+/// The ladder of one node. `local` is the endpoint this selector serves, so that a
+/// test can take a rung, or an IP port, away from this node alone: the underlay
+/// has an endpoint of its own, with its own id.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MultihopLadder {
+    local: iroh::EndpointId,
+}
+
+impl MultihopLadder {
+    pub(crate) fn new(local: iroh::EndpointId) -> Self {
+        Self { local }
+    }
+
+    /// Whether a path of `rung`, to the IP address `remote` (none for a relay or a
+    /// custom path), is one that a test has not taken from this node. Always true
+    /// without the `test-hooks` of `habilis-network-iroh-transport-util`.
+    fn usable(
+        &self,
+        rung: Rung,
+        remote: Option<net::SocketAddr>,
+        remote_id: Option<iroh::EndpointId>,
+    ) -> bool {
+        !is_blocked_to(self.local, rung, remote, remote_id)
+    }
+}
+
+impl PathSelector for MultihopLadder {
+    fn select(&self, context: &PathSelectionContext<'_>) -> PathSelection {
+        let paths: Vec<PathSelectionData<'_>> = context.paths().collect();
+        let chosen = climb(&paths, custom_rung, |rung, path| {
+            self.usable(rung, ip_remote(path), remote_id(path))
+        });
+        let mut selection = PathSelection::none();
+        if let Some(path) = chosen {
+            selection.set(path);
+        }
+        selection
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use habilis_network_iroh_transport_util::{block_ip_to, block_rung, block_rung_to};
+
+    use super::{MultihopLadder, Rung, custom_rung};
+    use std::net;
+    /// The ladder names this crate's transport by the id that the transport uses.
+    /// The ids are written twice, here and in the util crate, which is below this
+    /// one; this is the guard that they stay equal.
+    #[test]
+    fn the_ladder_knows_the_multihop_transport_id_of_this_crate() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            custom_rung(crate::MULTIHOP_TRANSPORT_ID),
+            Rung::Multihop,
+            "the ladder knows the multihop transport id of this crate"
+        );
+    }
+
+    fn node(seed: u8) -> iroh::EndpointId {
+        iroh::SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    fn at(port: u16) -> net::SocketAddr {
+        net::SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    /// The underlay has its own endpoint, and a test must be able to take its IP
+    /// paths away: the ladder reads the same tables as the `WebRTC` selector.
+    #[test]
+    fn the_ladder_of_a_node_gives_up_an_ip_port_that_a_test_blocked() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (local, other) = (node(21), node(22));
+        let ladder = MultihopLadder::new(local);
+        block_ip_to(local, [5000]);
+        assert!(
+            !ladder.usable(Rung::Ip, Some(at(5000)), None),
+            "the blocked port"
+        );
+        assert!(
+            ladder.usable(Rung::Ip, Some(at(5001)), None),
+            "another port"
+        );
+        assert!(ladder.usable(Rung::Multihop, None, None), "another rung");
+        assert!(ladder.usable(Rung::Relay, None, None), "another rung");
+        assert!(
+            MultihopLadder::new(other).usable(Rung::Ip, Some(at(5000)), None),
+            "another node"
+        );
+        block_ip_to(local, []);
+        assert!(
+            ladder.usable(Rung::Ip, Some(at(5000)), None),
+            "an empty set clears"
+        );
+    }
+
+    #[test]
+    fn the_ladder_of_a_node_gives_up_a_rung_that_a_test_blocked() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (local, other) = (node(23), node(24));
+        let ladder = MultihopLadder::new(local);
+        block_rung(local, Rung::Multihop, true);
+        assert!(
+            !ladder.usable(Rung::Multihop, None, None),
+            "the ladder gives up a rung that a test blocked"
+        );
+        assert!(ladder.usable(Rung::Ip, Some(at(1)), None), "another rung");
+        assert!(
+            MultihopLadder::new(other).usable(Rung::Multihop, None, None),
+            "another node's ladder keeps the multihop rung"
+        );
+        block_rung(local, Rung::Multihop, false);
+        assert!(
+            ladder.usable(Rung::Multihop, None, None),
+            "the ladder keeps the multihop rung when nothing is blocked"
+        );
+    }
+
+    /// The ladder also gives up the `WebRTC` rung to one remote only, which is what
+    /// lets a test cut one pair of three members and keep the others.
+    #[test]
+    fn the_ladder_of_a_node_gives_up_webrtc_to_one_remote_only() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (local, cut, kept) = (node(25), node(26), node(27));
+        let ladder = MultihopLadder::new(local);
+        block_rung_to(local, Rung::WebRtc, cut, true);
+        assert!(
+            !ladder.usable(Rung::WebRtc, None, Some(cut)),
+            "the ladder gives up webrtc to one remote only"
+        );
+        assert!(
+            ladder.usable(Rung::WebRtc, None, Some(kept)),
+            "another remote"
+        );
+        assert!(
+            ladder.usable(Rung::Ip, Some(at(1)), Some(cut)),
+            "another rung"
+        );
+        block_rung_to(local, Rung::WebRtc, cut, false);
+        assert!(
+            ladder.usable(Rung::WebRtc, None, Some(cut)),
+            "the ladder keeps webrtc to the other remote"
+        );
+    }
+}

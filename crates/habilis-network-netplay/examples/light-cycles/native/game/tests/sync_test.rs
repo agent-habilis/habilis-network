@@ -15,15 +15,17 @@
 //! starts.
 
 use habilis_network_netplay::{PlayerHandle, Request, RollbackError, SyncTestSession};
-use habilis_network_test_tracing::test;
 
-use light_cycles_native::app::LightCycles;
-use light_cycles_native::grid::{Dir, Input};
-use light_cycles_native::round::RoundDescriptor;
-use light_cycles_native::sim::{self, World};
+use light_cycles_native::dir::Dir;
+use light_cycles_native::input::Input;
+use light_cycles_native::light_cycles::LightCycles;
+use light_cycles_native::round_descriptor::RoundDescriptor;
+use light_cycles_native::sim;
+use light_cycles_native::world::World;
 
 /// Drives the simulation from the session's requests, exactly as the real
 /// client does.
+#[derive(Clone)]
 struct Runner {
     world: World,
 }
@@ -42,6 +44,7 @@ impl Runner {
                 let inputs: Vec<Input> = inputs.iter().map(|(input, _)| *input).collect();
                 sim::step(&mut self.world, &inputs);
             }
+            _ => unreachable!("a request this test does not expect"),
         }
     }
 }
@@ -64,13 +67,14 @@ fn steer(player: usize, frame: usize) -> Input {
 fn the_simulation_survives_a_rollback_on_every_frame() {
     const PLAYERS: usize = 4;
 
+    let _guard = ::habilis_network_test_tracing::init();
     let roster: Vec<String> = (0..PLAYERS).map(|i| format!("player-{i}")).collect();
     let descriptor = RoundDescriptor::derive(0xfeed_1234_5678_9abc, roster);
     let mut runner = Runner {
         world: World::spawn(&descriptor),
     };
 
-    let mut session = SyncTestSession::<LightCycles>::new(PLAYERS, 4);
+    let mut session: SyncTestSession<LightCycles> = SyncTestSession::new(PLAYERS, 4);
     for frame in 0..400 {
         for player in 0..PLAYERS {
             session

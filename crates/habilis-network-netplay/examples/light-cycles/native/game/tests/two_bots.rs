@@ -12,15 +12,21 @@
 use std::time::Duration;
 
 use habilis_network::embed::SilentSink;
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, Nickname};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use habilis_network_netplay::RollbackDriver;
 
-use light_cycles_native::app::{Game, LightCycles};
-use light_cycles_native::grid::{Dir, TICK_MS};
-use light_cycles_native::sim::{Outcome, World};
+use light_cycles_native::dir::Dir;
+use light_cycles_native::game::Game;
+use light_cycles_native::grid::TICK_MS;
+use light_cycles_native::light_cycles::LightCycles;
+use light_cycles_native::outcome::Outcome;
+use light_cycles_native::world::World;
 
+use std::{process, thread};
+use tokio::time::{self, Instant};
 struct Bot {
     node: Node<RollbackDriver<LightCycles>>,
     game: Game,
@@ -29,7 +35,7 @@ struct Bot {
 async fn spawn_bot(topic: &str, nick: &str) -> Bot {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let kind = SetupKind::Topic {
         mesh,
         topic_string: topic.to_string(),
@@ -37,26 +43,14 @@ async fn spawn_bot(topic: &str, nick: &str) -> Bot {
 
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author: author.clone(),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: std::sync::Arc::new(SilentSink),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author.clone(), SilentSink::default()).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
 
-    let (driver, pending) = RollbackDriver::<LightCycles>::new();
-    let node: Node<RollbackDriver<LightCycles>> = Node::spawn(config, driver, None, false);
+    let (driver, pending): (RollbackDriver<LightCycles>, _) = RollbackDriver::new();
+    let node: Node<RollbackDriver<LightCycles>> =
+        Node::spawn(config, driver, None, SignalHandling::Leave);
     let game = Game::new(pending.connect(node.sender()), topic.to_string(), author);
 
     Bot { node, game }
@@ -70,7 +64,7 @@ async fn drive(
     timeout: Duration,
     mut condition: impl FnMut(&[Bot]) -> bool,
 ) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
     let mut tick: usize = 0;
     loop {
         for (index, bot) in bots.iter_mut().enumerate() {
@@ -84,10 +78,10 @@ async fn drive(
         if condition(bots) {
             return true;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(u64::from(TICK_MS))).await;
+        time::sleep(Duration::from_millis(u64::from(TICK_MS))).await;
     }
 }
 
@@ -112,9 +106,9 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(
         guard,
-        std::thread::available_parallelism().map_or(1, usize::from),
+        thread::available_parallelism().map_or(1, usize::from),
         async {
-            let topic = format!("light-cycles-two-bots-test-{}", std::process::id());
+            let topic = format!("light-cycles-two-bots-test-{}", process::id());
 
             let mut bots = vec![
                 spawn_bot(&topic, "alice").await,
@@ -124,7 +118,8 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
             // The mesh forms, the lobby agrees a match, and both bots build a
             // session for it. Nobody negotiates the roster: the lobby fixes it.
             let started = drive(&mut bots, Duration::from_secs(30), |bots| {
-                bots.iter().all(|bot| bot.game.snapshot().roster.len() == 2)
+                let roster = |bot: &Bot| bot.game.snapshot().roster.len();
+                bots.iter().all(|bot| roster(bot) == 2)
             })
             .await;
             assert!(started, "the two bots never started a match together");
@@ -174,10 +169,9 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
                     });
                 }
                 let first = first_match[0].as_ref().map(|seen| seen.outcome);
-                first.is_some()
-                    && first_match
-                        .iter()
-                        .all(|seen| seen.as_ref().map(|seen| seen.outcome) == first)
+                let outcome_of = |seen: &Option<FirstMatch>| seen.as_ref().map(|seen| seen.outcome);
+                let agreed = first_match.iter().all(|seen| outcome_of(seen) == first);
+                first.is_some() && agreed
             })
             .await;
             assert!(
@@ -187,7 +181,10 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
 
             // A match that ends before it starts would satisfy every assertion
             // above vacuously, so pin down that one was actually simulated.
-            for seen in first_match.iter().flatten() {
+            for seen in &first_match {
+                let Some(seen) = seen else {
+                    continue;
+                };
                 assert!(
                     seen.tick > 5,
                     "the match decided at tick {} — too early to have been played",
@@ -204,22 +201,18 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
             // job: the second match's id is not ordered below the first's, so the
             // tie-break alone would have refused it and the two would have sat on
             // a finished game forever.
-            let first_arena = first_match[0]
-                .as_ref()
-                .map(|seen| seen.positions.clone())
-                .unwrap_or_default();
+            let head = first_match[0].as_ref();
+            let first_arena = head.map(|seen| seen.positions.clone()).unwrap_or_default();
 
             let rematched = drive(&mut bots, Duration::from_secs(30), |bots| {
                 bots.iter().all(|bot| bot.game.snapshot().match_number == 2)
             })
             .await;
-            assert!(
-                rematched,
-                "no rematch was agreed: {:?}",
-                bots.iter()
-                    .map(|bot| bot.game.snapshot().match_number)
-                    .collect::<Vec<_>>()
-            );
+            let matches: Vec<_> = bots
+                .iter()
+                .map(|bot| bot.game.snapshot().match_number)
+                .collect();
+            assert!(rematched, "no rematch was agreed: {matches:?}");
             assert_ne!(
                 positions(&bots[0].game.snapshot().world),
                 first_arena,

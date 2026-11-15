@@ -12,7 +12,7 @@
 //!    is reachable if a later input contradicts a guess made now.
 //! 2. [`Sync::synchronize_inputs`] — gather one input per player, real where
 //!    known and predicted where not.
-//! 3. the game advances one frame.
+//! 3. The game advances one frame.
 //! 4. [`Sync::check_simulation`] — if a real input has since contradicted a
 //!    prediction, load the state from the frame it went wrong at and
 //!    re-simulate forward to where we were.
@@ -26,13 +26,15 @@
 )]
 
 use crate::config::Config;
-use crate::error::RollbackError;
 use crate::frame::{Frame, InputStatus};
-use crate::handle::PlayerHandle;
 use crate::input_queue::InputQueue;
+use crate::player_handle::PlayerHandle;
 use crate::request::{Request, StateCell};
+use crate::rollback_error::RollbackError;
 use crate::saved_states::SavedStates;
 
+use std::fmt;
+#[derive(Clone)]
 pub(crate) struct Sync<T: Config> {
     input_queues: Vec<InputQueue<T>>,
     saved_states: SavedStates<T::State>,
@@ -43,13 +45,14 @@ pub(crate) struct Sync<T: Config> {
     last_confirmed_frame: Frame,
 }
 
-impl<T: Config> std::fmt::Debug for Sync<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Sync")
+impl<T: Config> fmt::Debug for Sync<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("Sync");
+        debug
             .field("current_frame", &self.current_frame)
             .field("last_confirmed_frame", &self.last_confirmed_frame)
-            .field("max_prediction", &self.max_prediction)
+            .field("max_prediction", &self.max_prediction);
+        debug
             .field("players", &self.input_queues.len())
             .finish_non_exhaustive()
     }
@@ -180,12 +183,12 @@ impl<T: Config> Sync<T> {
     /// The earliest frame any player's real input contradicted our guess, or
     /// [`Frame::NULL`] if every guess is still holding.
     fn first_incorrect_frame(&self) -> Frame {
-        self.input_queues
+        let holding = self
+            .input_queues
             .iter()
             .map(InputQueue::first_incorrect_frame)
-            .filter(|frame| *frame != Frame::NULL)
-            .min()
-            .unwrap_or(Frame::NULL)
+            .filter(|frame| *frame != Frame::NULL);
+        holding.min().unwrap_or(Frame::NULL)
     }
 
     /// If a prediction turned out wrong, emit the requests that undo and
@@ -227,7 +230,10 @@ impl<T: Config> Sync<T> {
             requests.push(Request::AdvanceFrame { inputs });
             self.advance_frame();
         }
-        debug_assert_eq!(self.current_frame, resume_at);
+        debug_assert_eq!(
+            self.current_frame, resume_at,
+            "the simulation resumes at the frame it was asked to resume at"
+        );
     }
 
     /// The saved state for `frame`, for checksum comparison.
@@ -245,16 +251,15 @@ impl<T: Config> Sync<T> {
 #[cfg(test)]
 mod tests {
     use super::Sync;
-    use crate::error::RollbackError;
     use crate::frame::{Frame, InputStatus};
-    use crate::handle::PlayerHandle;
+    use crate::player_handle::PlayerHandle;
     use crate::request::Request;
-    use crate::testutil::{TestGame, TestInput, TestRunner};
-    use habilis_network_test_tracing::test;
+    use crate::rollback_error::RollbackError;
+    use crate::test_game::{TestGame, TestInput, TestRunner};
 
     /// Two players, generous prediction window, no input delay.
     fn session() -> Sync<TestGame> {
-        Sync::<TestGame>::new(2, 8, 0, PlayerHandle::new(0))
+        Sync::new(2, 8, 0, PlayerHandle::new(0))
     }
 
     /// Advance one frame the way a real caller does.
@@ -269,6 +274,7 @@ mod tests {
 
     #[test]
     fn a_correct_prediction_never_rolls_back() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         let mut runner = TestRunner::new();
 
@@ -290,11 +296,16 @@ mod tests {
             vec![Frame::new(0), Frame::new(1), Frame::new(2), Frame::new(3)],
             "each frame ran once"
         );
-        assert_eq!(runner.state.value, 4 * (1 + 2));
+        assert_eq!(
+            runner.state.value,
+            4 * (1 + 2),
+            "a correct prediction never rolls back the state"
+        );
     }
 
     #[test]
     fn a_wrong_prediction_rolls_back_and_re_simulates_with_the_truth() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         let mut runner = TestRunner::new();
 
@@ -311,10 +322,15 @@ mod tests {
                 .expect("under the limit");
             step(&mut sync, &mut runner);
         }
-        assert_eq!(runner.state.value, 11 + 11 + 11);
+        assert_eq!(
+            runner.state.value,
+            11 + 11 + 11,
+            "a wrong prediction rolls back and re-simulates with the truth"
+        );
         assert_eq!(
             runner.advanced,
-            vec![Frame::new(0), Frame::new(1), Frame::new(2)]
+            vec![Frame::new(0), Frame::new(1), Frame::new(2)],
+            "the rollback re-simulates the frames from the wrong one"
         );
 
         // Player 1's real frame-1 input turns out different.
@@ -334,9 +350,14 @@ mod tests {
                 Frame::new(2),
                 Frame::new(1),
                 Frame::new(2)
-            ]
+            ],
+            "the re-simulated frames are the ones after the rollback"
         );
-        assert_eq!(runner.state.value, 11 + 21 + 21);
+        assert_eq!(
+            runner.state.value,
+            11 + 21 + 21,
+            "the re-simulated state uses the true input"
+        );
         assert_eq!(
             sync.current_frame(),
             Frame::new(3),
@@ -346,6 +367,7 @@ mod tests {
 
     #[test]
     fn re_simulation_uses_a_fresh_prediction_for_frames_still_unknown() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         let mut runner = TestRunner::new();
 
@@ -369,12 +391,17 @@ mod tests {
         runner.handle_all(requests);
 
         // frame 0 = 1 (real), frame 1 = 5 (real), frame 2 = 5 (predicted from 1)
-        assert_eq!(runner.state.value, 1 + 5 + 5);
+        assert_eq!(
+            runner.state.value,
+            1 + 5 + 5,
+            "re-simulation uses a fresh prediction for frames still unknown"
+        );
     }
 
     #[test]
     fn the_prediction_limit_stops_the_caller_rather_than_guessing_further() {
-        let mut sync = Sync::<TestGame>::new(2, 3, 0, PlayerHandle::new(0));
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut sync: Sync<TestGame> = Sync::new(2, 3, 0, PlayerHandle::new(0));
         let mut runner = TestRunner::new();
 
         // Player 1 never sends anything, so nothing is ever confirmed.
@@ -392,7 +419,8 @@ mod tests {
 
     #[test]
     fn confirming_frames_reopens_the_prediction_window() {
-        let mut sync = Sync::<TestGame>::new(2, 3, 0, PlayerHandle::new(0));
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut sync: Sync<TestGame> = Sync::new(2, 3, 0, PlayerHandle::new(0));
         let mut runner = TestRunner::new();
 
         for _ in 0..3 {
@@ -402,31 +430,44 @@ mod tests {
         }
         assert!(
             sync.add_local_input(PlayerHandle::new(0), TestInput(1))
-                .is_err()
+                .is_err(),
+            "confirming frames reopens the prediction window"
         );
 
         sync.confirm_through(Frame::new(1));
-        assert_eq!(sync.last_confirmed_frame(), Frame::new(1));
-        assert_eq!(sync.frames_ahead(), 2);
+        assert_eq!(
+            sync.last_confirmed_frame(),
+            Frame::new(1),
+            "the last confirmed frame is one"
+        );
+        assert_eq!(
+            sync.frames_ahead(),
+            2,
+            "two frames are ahead after the confirm"
+        );
         sync.add_local_input(PlayerHandle::new(0), TestInput(1))
             .expect("confirmation made room again");
     }
 
     #[test]
     fn an_unknown_player_handle_is_an_error_not_a_panic() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         assert_eq!(
             sync.add_local_input(PlayerHandle::new(9), TestInput(0)),
-            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9)))
+            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9))),
+            "an unknown local player handle is an error, not a panic"
         );
         assert_eq!(
             sync.add_remote_input(PlayerHandle::new(9), Frame::new(0), TestInput(0)),
-            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9)))
+            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9))),
+            "an unknown remote player handle is an error, not a panic"
         );
     }
 
     #[test]
     fn inputs_are_reported_as_confirmed_or_predicted_honestly() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         sync.add_local_input(PlayerHandle::new(0), TestInput(1))
             .expect("under the limit");
@@ -437,9 +478,11 @@ mod tests {
             InputStatus::Predicted,
             "the absent peer's is a guess"
         );
+        let added: Vec<_> = sync.last_added_frames().collect();
         assert_eq!(
-            sync.last_added_frames().collect::<Vec<_>>(),
-            vec![Frame::new(0), Frame::NULL]
+            added,
+            vec![Frame::new(0), Frame::NULL],
+            "inputs are reported as confirmed or predicted honestly"
         );
     }
 }

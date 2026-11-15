@@ -1,0 +1,92 @@
+//! What can go wrong.
+
+use crate::frame::Frame;
+use crate::player_handle::PlayerHandle;
+
+use std::{error, fmt};
+/// Errors a rollback session can return.
+///
+/// # Examples
+///
+/// An input for a player that is not in the match returns this error.
+///
+/// ```
+/// use habilis_network_netplay::{PlayerHandle, RollbackError, SyncTestSession};
+///
+/// use habilis_network_netplay::Config;
+///
+/// struct Game;
+///
+/// impl Config for Game {
+///     type Input = u8;
+///     type State = u32;
+///     type Address = u8;
+/// }
+///
+/// let mut session = SyncTestSession::<Game>::new(2, 1);
+/// let error = session.add_input(PlayerHandle::new(9), 1).unwrap_err();
+/// assert!(matches!(error, RollbackError::InvalidPlayer(_)));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[non_exhaustive]
+#[must_use]
+pub enum RollbackError {
+    /// We have simulated `max_prediction` frames past the last confirmed one
+    /// and cannot guess further — there would be no saved state left to roll
+    /// back to.
+    ///
+    /// **Not a failure.** It is the session telling the caller to skip this
+    /// frame and let remote inputs catch up; a real match hits it whenever
+    /// the network hiccups. Render the same frame again and retry.
+    PredictionLimit,
+
+    /// A player handle that does not exist in this session.
+    InvalidPlayer(PlayerHandle),
+
+    /// `advance_frame` was called without a local input for this frame.
+    /// Supply one with `add_local_input` first.
+    MissingLocalInput,
+
+    /// Two peers' state checksums disagree for the same frame: they are no
+    /// longer simulating the same game.
+    ///
+    /// This is unrecoverable by design — rollback assumes determinism, and
+    /// once it is broken there is nothing to reconcile against. It means the
+    /// simulation violated the determinism contract on
+    /// [`crate::Config`]. Run [`crate::SyncTestSession`] to find where.
+    Desync {
+        /// The frame that disagreed.
+        frame: Frame,
+        /// What we computed.
+        local: u128,
+        /// What the peer computed.
+        remote: u128,
+    },
+}
+
+impl fmt::Display for RollbackError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PredictionLimit => write!(
+                formatter,
+                "prediction limit reached; skip this frame and let remote inputs arrive"
+            ),
+            Self::InvalidPlayer(handle) => write!(formatter, "no such player handle: {handle}"),
+            Self::MissingLocalInput => write!(
+                formatter,
+                "no local input for this frame; call add_local_input before advance_frame"
+            ),
+            Self::Desync {
+                frame,
+                local,
+                remote,
+            } => write!(
+                formatter,
+                "desync at frame {frame}: local checksum {local:#x} != remote {remote:#x}; \
+                 the simulation is not deterministic (see the Config determinism contract)"
+            ),
+        }
+    }
+}
+
+impl error::Error for RollbackError {}

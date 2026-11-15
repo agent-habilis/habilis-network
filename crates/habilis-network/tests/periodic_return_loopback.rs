@@ -15,6 +15,9 @@ use habilis_network::protocol::{Lookup, Transport};
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use std::{env, fs};
+use tokio::time;
 /// The creator, who hosts the rendezvous, and three joiners. Each joiner ends with three links,
 /// which is the release count.
 const GROUP: usize = 4;
@@ -33,7 +36,8 @@ fn count(needle: &str) -> usize {
 /// The lines that say how the rendezvous was held, let go of and re-grafted: the
 /// last 120, because the lines that explain a failure come after the group forms.
 fn rendezvous_trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -48,19 +52,16 @@ fn rendezvous_trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take(120)
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    let newest = lines.into_iter().rev().take(120);
+    let recent: Vec<_> = newest.rev().collect();
+    recent.join("\n")
 }
 
 /// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
 fn dump_logs() {
-    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
-        let _ = std::fs::write(path, logs());
+    if let Ok(path) = env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = fs::write(path, logs());
     }
 }
 
@@ -70,7 +71,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -82,9 +83,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -92,23 +95,21 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![Transport::Udp],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(vec![Transport::Udp])
+            .relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 }
 
@@ -124,14 +125,9 @@ fn a_member_that_let_go_of_the_rendezvous_comes_back_and_lets_go_again() {
     );
     habilis_network_test_tracing::clear_captured_logs();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        init(Tuning {
-            rendezvous_periodic_return: PERIOD,
-            ..Tuning::DEFAULTS
-        });
+        init(Tuning::DEFAULTS.rendezvous_periodic_return(PERIOD));
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let creator = Member::create("member-0", &relay).await;
         assert!(
@@ -144,7 +140,7 @@ fn a_member_that_let_go_of_the_rendezvous_comes_back_and_lets_go_again() {
         for index in 1..GROUP {
             let member = Member::join(&format!("member-{index}"), &members[0]).await;
             members.push(member);
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
         let joiners = GROUP - 1;
         let formed = eventually(Duration::from_mins(1), || {

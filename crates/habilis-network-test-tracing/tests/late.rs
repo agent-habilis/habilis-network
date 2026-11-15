@@ -2,30 +2,28 @@
 //! runtime that drops its endpoints after the test body, fails the next test
 //! and names the test that ended.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::thread;
 
-use habilis_network_test_tracing::init;
-
 fn named<T: Send + 'static>(name: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(body)
-        .expect("spawn")
-        .join()
-        .expect("join")
+    let builder = thread::Builder::new().name(name.to_owned());
+    let handle = builder.spawn(body).expect("spawn");
+    handle.join().expect("join")
 }
 
 #[test]
 fn an_event_after_the_guard_dropped_fails_the_next_test() {
     named("late_first", || {
-        drop(init());
+        drop(habilis_network_test_tracing::init());
         tracing::error!("endpoint dropped by the runtime");
     });
     let err = named("late_second", || {
-        catch_unwind(AssertUnwindSafe(|| drop(init()))).expect_err("the guard must panic")
+        habilis_network_test_tracing::catch_panic(AssertUnwindSafe(|| {
+            drop(habilis_network_test_tracing::init());
+        }))
+        .expect_err("the guard must panic")
     });
-    let text = err.downcast_ref::<String>().expect("panic text");
+    let text: &String = err.downcast_ref().expect("panic text");
     assert!(
         text.contains("logged after test late_first ended"),
         "{text}"

@@ -20,7 +20,7 @@
 //! *inside* the engine's event loop. The game's frame loop runs outside it.
 //! So sends cannot happen where the session wants to make them.
 //!
-//! Instead [`MeshTransport::send_to`] enqueues onto the node's session
+//! Instead `MeshTransport::send_to` enqueues onto the node's session
 //! channel (`Node::sender()`), and the driver drains it inside
 //! `handle_session` where the engine hands it the state it needs. Inbound
 //! goes the other way: `on_app_frame` fires in the event loop and drops
@@ -36,10 +36,14 @@
 //! 33% size. Rollback packets are small (a handful of frames of a small
 //! input), so the compactness a binary codec would buy is not worth that.
 
-mod driver;
 mod lobby;
-mod transport;
+mod mailboxes;
+mod mesh_transport;
+mod outbound;
+mod pending_transport;
+mod rollback_driver;
 
-pub use driver::{LOBBY_TAG, Outbound, ROLLBACK_TAG, RollbackDriver};
 pub use lobby::{Epoch, Lobby, LobbyError, SessionId, StartedMatch, Tick, TickSpan};
-pub use transport::MeshTransport;
+pub use mesh_transport::MeshTransport;
+pub use outbound::Outbound;
+pub use rollback_driver::{LOBBY_TAG, ROLLBACK_TAG, RollbackDriver};

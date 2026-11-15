@@ -369,8 +369,8 @@ the control events go on a queue that never drops. This measures what the split 
   frames from about 22% to 0.1% to 0.4%.
 - The capacity of the subscription (2048 against 8192) made no difference we can measure at 64 or 128 MiB/s. What remains at 128 MiB/s is a few `Lagged` events of 150 to 400 frames each, when the topic
   delivers a burst faster than the splitter task is scheduled. So the engine keeps iroh's default of 2048: at most 8 MB of queued events, where 8192 would allow 31 MB.
-- The queue of mesh messages is the one place where more capacity helped, and only for a synthetic burst of 20000 messages. A real burst (a digest round, a roster refresh at N = 66) is some hundreds.
-  A message dropped from that queue is counted in `forward_dropped` and repaired by anti-entropy.
+- The queue of mesh messages is the one place where more capacity helped, and only for a synthetic burst of 20000 messages. A real burst (a roster refresh at N = 66) is some hundreds.
+  A message dropped from that queue is counted in `forward_dropped`.
 - A `Lagged` event did not close the subscription in any of these runs: B kept reading after the first one.
 - The default budget of 1 MiB/s is per member. A node can receive about N MiB/s from N members that all send at the budget, so 64 MiB/s is about N = 64.
 

@@ -2,16 +2,27 @@
 //! Behind the `bench` feature with the cells, so a default build of the
 //! runner carries only the CLI surface.
 
+use std::{error, fs, iter};
+use tokio::runtime;
+mod measured;
+mod outcome;
+mod rtt;
+mod sample;
+
 use std::time::Duration;
 
 use habilis_network_iroh_webrtc_transport::bench;
 
 use crate::TaskOutcome;
-use crate::util::wasm;
-use crate::util::{output, repo_root};
+use crate::util::{output, repo_root, wasm};
 
-use super::web::Engine::{Chrome, Safari};
-use super::{Args, Cell, Direction, gossip, multihop, native, serve, wanted, web};
+use super::engine::Engine::{Chrome, Safari};
+use super::{Args, Cell, Direction, browser, gossip, multihop, native, serve, wanted};
+
+pub(crate) use measured::Measured;
+pub(crate) use outcome::Outcome;
+pub(crate) use rtt::Rtt;
+pub(crate) use sample::Sample;
 
 impl Direction {
     pub(crate) fn protocol(self) -> bench::Direction {
@@ -60,115 +71,10 @@ impl Cell {
     }
 }
 
-/// One transfer as the receiving side timed it.
-pub(crate) struct Sample {
-    pub(crate) bytes: usize,
-    pub(crate) elapsed_ms: f64,
-    /// `webrtc`, `ip`, `data-channel` or `other` — what carried it.
-    pub(crate) path: String,
-}
-
-impl Sample {
-    /// Decimal megabits per second, the network convention.
-    fn mbit_per_s(&self) -> f64 {
-        // Lossless below 2^53 bytes, which is 8 PiB past the 64 MiB ceiling.
-        #[expect(clippy::cast_precision_loss, reason = "bounded by MAX_TRANSFER_BYTES")]
-        let bits = (self.bytes * 8) as f64;
-        (bits / 1_000_000.0) / (self.elapsed_ms / 1000.0)
-    }
-}
-
-/// Round-trip time of the 1 `KiB` probes, in milliseconds.
-pub(crate) struct Rtt {
-    pub(crate) p50_ms: f64,
-    pub(crate) p99_ms: f64,
-}
-
-impl Rtt {
-    /// Nearest-rank percentiles of the samples; `None` when there are none.
-    pub(crate) fn from_samples(samples: &[Duration]) -> Option<Self> {
-        let mut sorted: Vec<f64> = samples
-            .iter()
-            .map(|sample| sample.as_secs_f64() * 1000.0)
-            .collect();
-        if sorted.is_empty() {
-            return None;
-        }
-        sorted.sort_by(f64::total_cmp);
-        let at = |percent: usize| sorted[(percent * sorted.len()).div_ceil(100) - 1];
-        Some(Self {
-            p50_ms: at(50),
-            p99_ms: at(99),
-        })
-    }
-}
-
-/// A cell's samples, warm-up already dropped, all on one path.
-pub(crate) struct Measured {
-    pub(crate) negotiate_ms: f64,
-    pub(crate) path: String,
-    pub(crate) rounds: Vec<Sample>,
-    /// `None` for the cells that measure throughput only.
-    pub(crate) rtt: Option<Rtt>,
-    /// Numbers of a cell that measures more than a rate, kept in the JSON.
-    pub(crate) extra: Option<serde_json::Value>,
-}
-
-impl Measured {
-    fn median_mbit_per_s(&self) -> f64 {
-        let mut rates: Vec<f64> = self.rounds.iter().map(Sample::mbit_per_s).collect();
-        median(&mut rates)
-    }
-
-    /// The first sample is the warm-up and is discarded; every remaining one
-    /// must have crossed the same path, or the cell measured two things.
-    pub(crate) fn from_samples(negotiate_ms: f64, mut rounds: Vec<Sample>) -> Result<Self, String> {
-        if rounds.len() < 2 {
-            return Err("fewer than two samples: nothing left after the warm-up".to_owned());
-        }
-        rounds.remove(0);
-        let path = rounds[0].path.clone();
-        if rounds.iter().any(|sample| sample.path != path) {
-            return Err(format!(
-                "rounds crossed different paths: {:?}",
-                rounds.iter().map(|sample| &sample.path).collect::<Vec<_>>()
-            ));
-        }
-        Ok(Self {
-            negotiate_ms,
-            path,
-            rounds,
-            rtt: None,
-            extra: None,
-        })
-    }
-}
-
-pub(crate) enum Outcome {
-    Ok(Measured),
-    Skipped(String),
-    Failed(String),
-}
-
 /// A transfer is bounded by this: an 8 `MiB` round at a slow cell's
 /// 100 Mbit/s takes seconds, and `both` doubles it. A stall is indefinite,
 /// so generous costs only wall clock.
 pub(crate) const TRANSFER_TIMEOUT: Duration = Duration::from_mins(2);
-
-impl From<Result<Measured, String>> for Outcome {
-    fn from(result: Result<Measured, String>) -> Self {
-        match result {
-            Ok(measured) => Self::Ok(measured),
-            Err(reason) => Self::Failed(reason),
-        }
-    }
-}
-
-impl From<crate::util::Skip> for Outcome {
-    fn from(crate::util::Skip(reason): crate::util::Skip) -> Self {
-        Self::Skipped(reason)
-    }
-}
 
 struct Row {
     cell: Cell,
@@ -215,7 +121,7 @@ fn table(rows: &[Row]) -> Vec<String> {
             cells
                 .iter()
                 .map(|row| row.0[column].chars().count())
-                .chain(std::iter::once(name.chars().count()))
+                .chain(iter::once(name.chars().count()))
                 .max()
                 .unwrap_or_default()
         })
@@ -379,7 +285,7 @@ impl Row {
     }
 }
 
-fn serve_page() -> Result<serve::Static, Box<dyn std::error::Error>> {
+fn serve_page() -> Result<serve::StaticServer, Box<dyn error::Error>> {
     wasm::check_wasm_bindgen()?;
     let env = wasm::wasm_env()?;
     output::status("Building", "the browser side (habilis-network-bench-wasm)");
@@ -387,7 +293,7 @@ fn serve_page() -> Result<serve::Static, Box<dyn std::error::Error>> {
     let glue = wasm::build_wasm_cdylib("habilis-network-bench-wasm", &env, &wasm_dir)?;
     output::detail(&format!("             {}", glue.display()));
     let www = repo_root().join("crates/habilis-network-bench-wasm/www");
-    let server = serve::Static::serve(www, wasm_dir)?;
+    let server = serve::StaticServer::serve(www, wasm_dir)?;
     output::status("Serving", &server.url);
     Ok(server)
 }
@@ -418,7 +324,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
         );
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
@@ -435,7 +341,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     let mut rows = Vec::new();
     for cell in cells {
         output::status("Running", cell.label());
-        let browser = || web::Browser {
+        let browser = || browser::Browser {
             server: server.as_ref().expect("built above"),
             args,
         };
@@ -512,7 +418,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             "direction": args.direction.protocol().label(),
             "rows": rows.iter().map(Row::json).collect::<Vec<_>>(),
         });
-        std::fs::write(path, serde_json::to_string_pretty(&dump).expect("json"))
+        fs::write(path, serde_json::to_string_pretty(&dump).expect("json"))
             .map_err(|error| format!("could not write {}: {error}", path.display()))?;
         output::detail(&format!("json: {}", path.display()));
     }
@@ -526,7 +432,6 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{Cell, Measured, Outcome, Row, Rtt, Sample, table};
@@ -551,17 +456,20 @@ mod tests {
 
     #[test]
     fn rtt_is_the_nearest_rank_p50_and_p99() {
-        let rtt = Rtt::from_samples(&millis(100)).map(|rtt| (rtt.p50_ms, rtt.p99_ms));
+        let _guard = ::habilis_network_test_tracing::init();
+        let rtt = Rtt::summarize(&millis(100)).map(|rtt| (rtt.p50_ms, rtt.p99_ms));
         assert_eq!(rtt, Some((50.0, 99.0)));
     }
 
     #[test]
     fn rtt_of_no_samples_is_none() {
-        assert!(Rtt::from_samples(&[]).is_none());
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(Rtt::summarize(&[]).is_none());
     }
 
     #[test]
     fn the_table_has_the_two_rtt_columns_and_a_dash_where_a_cell_has_none() {
+        let _guard = ::habilis_network_test_tracing::init();
         let rows = [
             Row {
                 cell: Cell::IrohNativeNative,

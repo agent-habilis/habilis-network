@@ -9,6 +9,7 @@ use xshell::Shell;
 
 use crate::util::{metadata, output};
 
+use std::error;
 #[derive(Args, Clone, Default)]
 pub(crate) struct Scope {
     /// Only this crate. Repeatable; omit for the whole workspace.
@@ -46,7 +47,7 @@ impl Scope {
     /// Cargo would reject it too, but only once per step and only after the
     /// steps before it had already built. One typo should cost one error, and
     /// the error should say what the valid names are.
-    pub(crate) fn validate(&self, sh: &Shell) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn validate(&self, sh: &Shell) -> Result<(), Box<dyn error::Error>> {
         if self.packages.is_empty() {
             return Ok(());
         }
@@ -67,7 +68,7 @@ impl Scope {
 
 /// The workspace member names, from cargo rather than a list here that would
 /// drift the first time a crate is added.
-fn members(sh: &Shell) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn members(sh: &Shell) -> Result<Vec<String>, Box<dyn error::Error>> {
     let mut names: Vec<String> = metadata(sh)?
         .packages
         .into_iter()

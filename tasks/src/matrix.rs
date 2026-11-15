@@ -20,6 +20,9 @@
 //!
 //! One test thread: the cells share the process-wide block tables, and a cell
 //! that takes IP away from a node must not meet another cell on the same host.
+//!
+//! `--no-fail-fast`: a red test binary does not skip the binaries after it, so one night shows
+//! every failure.
 
 use xshell::{Shell, cmd};
 
@@ -53,7 +56,7 @@ pub(crate) fn run(sh: &Shell, list: bool) -> TaskOutcome {
     let only_list: &[&str] = if list { &["--list"] } else { &[] };
     cmd!(
         sh,
-        "cargo test -p habilis-network --features iroh-test-utils {tests...} -- --include-ignored --test-threads=1 {only_list...}"
+        "cargo test -p habilis-network --features iroh-test-utils --no-fail-fast {tests...} -- --include-ignored --test-threads=1 {only_list...}"
     )
     .quiet()
     .run()?;

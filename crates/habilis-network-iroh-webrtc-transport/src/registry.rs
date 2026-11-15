@@ -42,8 +42,9 @@ use std::sync::{Arc, Mutex};
 
 use iroh_base::EndpointId;
 
+use std::{mem, sync};
 /// One peer's slot: reserved while `value` is `None`, live once it is `Some`.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Slot<T> {
     generation: u64,
     value: Option<T>,
@@ -57,7 +58,9 @@ pub(crate) struct Registry<T> {
 }
 
 impl<T> Registry<T> {
+    // the registry is shared by the transport and its sessions
     pub(crate) fn new() -> Arc<Self> {
+        // the registry is shared by the transport and its sessions
         Arc::new(Self {
             slots: Mutex::new(HashMap::new()),
             next_generation: AtomicU64::new(0),
@@ -98,19 +101,15 @@ impl<T> Registry<T> {
 
     /// How many usable sessions this registry holds.
     pub(crate) fn live_len(&self) -> usize {
-        self.lock()
-            .values()
-            .filter(|slot| slot.value.is_some())
-            .count()
+        let slots = self.lock();
+        slots.values().filter(|slot| slot.value.is_some()).count()
     }
 
     /// Endpoint ids of every *usable* session (reservations excluded).
     pub(crate) fn live_ids(&self) -> Vec<EndpointId> {
-        self.lock()
-            .iter()
-            .filter(|(_, slot)| slot.value.is_some())
-            .map(|(id, _)| *id)
-            .collect()
+        let slots = self.lock();
+        let usable = slots.iter().filter(|(_, slot)| slot.value.is_some());
+        usable.map(|(id, _)| *id).collect()
     }
 
     /// Run `f` against `remote`'s payload, if it is live.
@@ -122,10 +121,9 @@ impl<T> Registry<T> {
         remote: &EndpointId,
         read: impl FnOnce(&T) -> R,
     ) -> Option<R> {
-        self.lock()
-            .get(remote)
-            .and_then(|slot| slot.value.as_ref())
-            .map(read)
+        let slots = self.lock();
+        let slot = slots.get(remote).and_then(|slot| slot.value.as_ref());
+        slot.map(read)
     }
 
     /// Drop `remote`'s slot whatever its generation. Returns whether the slot
@@ -160,20 +158,22 @@ impl<T> Registry<T> {
     /// Drop every slot. Returns how many of them were live.
     pub(crate) fn clear(&self) -> usize {
         let mut slots = self.lock();
-        let live = slots.values().filter(|slot| slot.value.is_some()).count();
+        let filled = slots.values().filter(|slot| slot.value.is_some());
+        let live = filled.count();
         slots.clear();
         live
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<EndpointId, Slot<T>>> {
+    fn lock(&self) -> sync::MutexGuard<'_, HashMap<EndpointId, Slot<T>>> {
         self.slots.lock().expect("session registry poisoned")
     }
 }
 
 /// A claimed but unfilled slot. Dropping it releases the claim.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use = "dropping a reservation releases the peer's slot"]
 pub(crate) struct Reservation<T> {
+    // the guard keeps the registry alive while the slot is held
     registry: Arc<Registry<T>>,
     remote: EndpointId,
     generation: u64,
@@ -199,7 +199,7 @@ impl<T> Reservation<T> {
         let generation = self.generation;
         // Take the reservation apart without running its `Drop`, which would
         // release the very slot we are about to fill.
-        std::mem::forget(self);
+        mem::forget(self);
 
         {
             let mut sessions = registry.lock();
@@ -231,9 +231,10 @@ impl<T> Drop for Reservation<T> {
 /// channel is carrying traffic and the registry now owns the session outright;
 /// dropping says it never got there, and the payload's own `Drop` — closing the
 /// channel and the peer connection — runs on the way out.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use = "an uncommitted session guard tears the session down when dropped"]
 pub(crate) struct SessionGuard<T> {
+    // the guard keeps the registry alive while the slot is held
     registry: Arc<Registry<T>>,
     remote: EndpointId,
     generation: u64,
@@ -272,12 +273,11 @@ impl<T> Drop for SessionGuard<T> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::cell::Cell;
     use std::rc::Rc;
+    use std::sync::Arc;
 
-    use super::*;
-
+    use super::{EndpointId, Registry};
     fn peer(byte: u8) -> EndpointId {
         iroh_base::SecretKey::from_bytes(&[byte; 32]).public()
     }
@@ -297,18 +297,29 @@ mod tests {
         (Probe(Rc::clone(&dropped)), dropped)
     }
 
+    // `Registry::new` hands out the registry that the transport and its sessions share
+    fn probe_registry() -> Arc<Registry<Probe>> {
+        Registry::new()
+    }
+
     #[test]
     fn a_reservation_is_not_live() {
-        let registry = Registry::<Probe>::new();
+        let _guard = ::habilis_network_test_tracing::init();
+        let registry = probe_registry();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
-        assert!(!registry.is_live(&peer(1)));
-        assert_eq!(registry.live_len(), 0);
+        assert!(!registry.is_live(&peer(1)), "a reservation is not live");
+        assert_eq!(
+            registry.live_len(),
+            0,
+            "no live session is counted for a reservation"
+        );
         drop(reservation);
     }
 
     #[test]
     fn dropping_a_reservation_frees_the_slot() {
-        let registry = Registry::<Probe>::new();
+        let _guard = ::habilis_network_test_tracing::init();
+        let registry = probe_registry();
         drop(registry.reserve(peer(1)).expect("first reserve"));
         assert!(
             registry.reserve(peer(1)).is_some(),
@@ -318,7 +329,8 @@ mod tests {
 
     #[test]
     fn reserve_refuses_while_reserved_and_while_live() {
-        let registry = Registry::<Probe>::new();
+        let _guard = ::habilis_network_test_tracing::init();
+        let registry = probe_registry();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
         assert!(registry.reserve(peer(1)).is_none(), "reserved");
 
@@ -330,15 +342,16 @@ mod tests {
 
     #[test]
     fn dropping_an_uncommitted_guard_removes_the_slot_and_drops_the_payload() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
         let (payload, dropped) = probe();
-        let guard = registry
-            .reserve(peer(1))
-            .expect("first reserve")
-            .fulfil(payload)
-            .expect("slot is ours");
+        let reserved = registry.reserve(peer(1)).expect("first reserve");
+        let guard = reserved.fulfil(payload).expect("slot is ours");
 
-        assert!(registry.is_live(&peer(1)));
+        assert!(
+            registry.is_live(&peer(1)),
+            "the peer reads live after dropping an uncommitted guard"
+        );
         drop(guard);
 
         assert!(!registry.is_live(&peer(1)), "the slot must be gone");
@@ -347,17 +360,22 @@ mod tests {
 
     #[test]
     fn a_committed_guard_leaves_the_session_live() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
         let (payload, dropped) = probe();
-        registry
-            .reserve(peer(1))
-            .expect("first reserve")
-            .fulfil(payload)
-            .expect("slot is ours")
-            .commit();
+        let reserved = registry.reserve(peer(1)).expect("first reserve");
+        let guard = reserved.fulfil(payload).expect("slot is ours");
+        guard.commit();
 
-        assert!(registry.is_live(&peer(1)));
-        assert_eq!(registry.live_len(), 1);
+        assert!(
+            registry.is_live(&peer(1)),
+            "a committed guard leaves the session live"
+        );
+        assert_eq!(
+            registry.live_len(),
+            1,
+            "one live session is counted after the commit"
+        );
         assert!(!dropped.get(), "committing must not tear the session down");
     }
 
@@ -365,79 +383,83 @@ mod tests {
     /// died late, must not take out the session that replaced it.
     #[test]
     fn a_stale_guard_does_not_evict_a_newer_session() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
 
         let (first, first_dropped) = probe();
-        let stale = registry
-            .reserve(peer(1))
-            .expect("first reserve")
-            .fulfil(first)
-            .expect("slot is ours");
+        let claimed = registry.reserve(peer(1)).expect("first reserve");
+        let stale = claimed.fulfil(first).expect("slot is ours");
         registry.remove(&peer(1));
-        assert!(first_dropped.get());
+        assert!(
+            first_dropped.get(),
+            "the first session is dropped when its guard goes stale"
+        );
 
         let (second, second_dropped) = probe();
-        registry
-            .reserve(peer(1))
-            .expect("second reserve")
-            .fulfil(second)
-            .expect("slot is ours")
-            .commit();
+        let reserved = registry.reserve(peer(1)).expect("second reserve");
+        let guard = reserved.fulfil(second).expect("slot is ours");
+        guard.commit();
 
         drop(stale);
 
         assert!(registry.is_live(&peer(1)), "the newer session must survive");
-        assert!(!second_dropped.get());
+        assert!(
+            !second_dropped.get(),
+            "a stale guard does not evict the newer session"
+        );
     }
 
     /// The same guarantee for the close/error hook a session installs on its
     /// own data channel, which is what actually fires in production.
     #[test]
     fn a_stale_close_hook_is_a_no_op() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
         let stale_generation = {
-            let guard = registry
-                .reserve(peer(1))
-                .expect("first reserve")
-                .fulfil(probe().0)
-                .expect("slot is ours");
+            let reserved = registry.reserve(peer(1)).expect("first reserve");
+            let guard = reserved.fulfil(probe().0).expect("slot is ours");
             let generation = guard.generation();
             guard.commit();
             generation
         };
         registry.remove(&peer(1));
-        registry
-            .reserve(peer(1))
-            .expect("second reserve")
-            .fulfil(probe().0)
-            .expect("slot is ours")
-            .commit();
+        let reserved = registry.reserve(peer(1)).expect("second reserve");
+        let guard = reserved.fulfil(probe().0).expect("slot is ours");
+        guard.commit();
 
-        assert!(!registry.remove_if_generation(&peer(1), stale_generation));
+        assert!(
+            !registry.remove_if_generation(&peer(1), stale_generation),
+            "a stale close hook is a no-op"
+        );
         assert!(registry.is_live(&peer(1)), "the newer session must survive");
     }
 
     #[test]
     fn with_live_skips_a_reservation() {
-        let registry = Registry::<Probe>::new();
+        let _guard = ::habilis_network_test_tracing::init();
+        let registry = probe_registry();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
-        assert!(registry.with_live(&peer(1), |_| ()).is_none());
+        assert!(
+            registry.with_live(&peer(1), |_| ()).is_none(),
+            "with_live skips a reservation"
+        );
 
         let guard = reservation.fulfil(probe().0).expect("slot is ours");
-        assert!(registry.with_live(&peer(1), |_| ()).is_some());
+        assert!(
+            registry.with_live(&peer(1), |_| ()).is_some(),
+            "with_live reaches a committed session"
+        );
         guard.commit();
     }
 
     #[test]
     fn clear_takes_reservations_too_and_counts_only_live_ones() {
-        let registry = Registry::<Probe>::new();
+        let _guard = ::habilis_network_test_tracing::init();
+        let registry = probe_registry();
         let reservation = registry.reserve(peer(1)).expect("reserve one");
-        registry
-            .reserve(peer(2))
-            .expect("reserve two")
-            .fulfil(probe().0)
-            .expect("slot is ours")
-            .commit();
+        let reserved = registry.reserve(peer(2)).expect("reserve two");
+        let guard = reserved.fulfil(probe().0).expect("slot is ours");
+        guard.commit();
 
         assert_eq!(registry.clear(), 1, "only the live one counts");
         assert!(registry.reserve(peer(1)).is_some(), "no slot left stranded");

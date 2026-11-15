@@ -1,6 +1,6 @@
 //! The room: a roster and a fan-out, with no notion of how anyone is connected.
 //!
-//! Nothing here mentions iroh, WebRTC or a stream. That is deliberate — the
+//! Nothing here mentions iroh, `WebRTC` or a stream. That is deliberate — the
 //! host's own terminal is a member on exactly the same terms as a browser tab,
 //! so "the native peer" in the demo is not a special case bolted on beside the
 //! real ones. It joins, it says things, it leaves.
@@ -32,7 +32,7 @@ pub struct MemberId(u64);
 #[derive(Debug, Clone)]
 pub struct Fanout {
     from: MemberId,
-    pub msg: ServerMsg,
+    pub message: ServerMsg,
 }
 
 #[derive(Debug)]
@@ -45,6 +45,7 @@ struct Inner {
 /// A handle to the room. Cheap to clone; every clone is the same room.
 #[derive(Debug, Clone)]
 pub struct Room {
+    // the room is shared by the accept handlers and the host loop
     inner: Arc<Inner>,
 }
 
@@ -53,6 +54,7 @@ impl Room {
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(FANOUT_CAPACITY);
         Self {
+            // the room is shared by the accept handlers and the host loop
             inner: Arc::new(Inner {
                 members: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(0),
@@ -87,7 +89,7 @@ impl Room {
         // member joining an empty room is the ordinary case, not an error.
         let _ = self.inner.tx.send(Fanout {
             from: id,
-            msg: ServerMsg::Joined { nick: nick.clone() },
+            message: ServerMsg::Joined { nick: nick.clone() },
         });
 
         Membership {
@@ -114,7 +116,7 @@ impl Room {
         };
         let _ = self.inner.tx.send(Fanout {
             from,
-            msg: ServerMsg::Said { nick, text },
+            message: ServerMsg::Said { nick, text },
         });
     }
 
@@ -162,6 +164,7 @@ fn unique_nick(requested: &str, members: &HashMap<MemberId, String>) -> String {
 
 /// A member's presence in the room. Leaving is what dropping this does.
 #[derive(Debug)]
+#[must_use]
 pub struct Membership {
     pub id: MemberId,
     /// What the room actually called them — not necessarily what they asked for.
@@ -169,6 +172,7 @@ pub struct Membership {
     /// The roster at the moment they joined, themselves included.
     pub roster: Vec<String>,
     rx: broadcast::Receiver<Fanout>,
+    // the room is shared by the accept handlers and the host loop
     inner: Arc<Inner>,
 }
 
@@ -208,7 +212,7 @@ impl Drop for Membership {
         if let Some(nick) = removed {
             let _ = self.inner.tx.send(Fanout {
                 from: self.id,
-                msg: ServerMsg::Left { nick },
+                message: ServerMsg::Left { nick },
             });
         }
     }
@@ -216,67 +220,100 @@ impl Drop for Membership {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use habilis_network_test_tracing::test;
+    use super::{Room, ServerMsg};
 
     #[test]
-    async fn a_second_bob_is_renamed_and_told_so() {
-        let room = Room::new();
-        let first = room.join("bob");
-        let second = room.join("bob");
-        assert_eq!(first.nick, "bob");
-        assert_eq!(second.nick, "bob#2");
-        assert_eq!(room.len(), 2);
+    fn a_second_bob_is_renamed_and_told_so() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let room = Room::new();
+            let first = room.join("bob");
+            let second = room.join("bob");
+            assert_eq!(first.nick, "bob", "the first bob keeps his nick");
+            assert_eq!(second.nick, "bob#2", "a second bob is renamed to bob#2");
+            assert_eq!(
+                room.len(),
+                2,
+                "the room holds two members after the second bob joins"
+            );
+        });
     }
 
     /// The regression this guards: a client that renders its own line locally
     /// *and* receives it back prints everything twice.
     #[test]
-    async fn a_member_does_not_hear_its_own_message() {
-        let room = Room::new();
-        let mut alice = room.join("alice");
-        let mut bob = room.join("bob");
+    fn a_member_does_not_hear_its_own_message() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let room = Room::new();
+            let mut alice = room.join("alice");
+            let mut bob = room.join("bob");
 
-        // alice's own Joined is filtered; bob's is not.
-        let seen = alice.next_broadcast().await.expect("bob joined");
-        assert!(matches!(seen.msg, ServerMsg::Joined { ref nick } if nick == "bob"));
+            // alice's own Joined is filtered; bob's is not.
+            let seen = alice.next_broadcast().await.expect("bob joined");
+            assert!(
+                matches!(seen.message, ServerMsg::Joined { ref nick } if nick == "bob"),
+                "the sender sees its own join first"
+            );
 
-        room.say(alice.id, "hi".to_owned());
-        let heard = bob.next_broadcast().await.expect("bob hears alice");
-        assert!(
-            matches!(heard.msg, ServerMsg::Said { ref nick, ref text } if nick == "alice" && text == "hi")
-        );
+            room.say(alice.id, "hi".to_owned());
+            let heard = bob.next_broadcast().await.expect("bob hears alice");
+            assert!(
+                matches!(heard.message, ServerMsg::Said { ref nick, ref text } if nick == "alice" && text == "hi"),
+                "the other member hears the message"
+            );
 
-        // And alice hears nothing further of her own.
-        room.say(bob.id, "hello".to_owned());
-        let next = alice.next_broadcast().await.expect("alice hears bob");
-        assert!(matches!(next.msg, ServerMsg::Said { ref nick, .. } if nick == "bob"));
+            // And alice hears nothing further of her own.
+            room.say(bob.id, "hello".to_owned());
+            let next = alice.next_broadcast().await.expect("alice hears bob");
+            assert!(
+                matches!(next.message, ServerMsg::Said { ref nick, .. } if nick == "bob"),
+                "the next message is the one said"
+            );
+        });
     }
 
     /// Leaving is a `Drop`, so a handler that unwinds still cleans up. If this
     /// regresses, a tab that closes mid-frame leaves a name in the roster
     /// forever.
     #[test]
-    async fn dropping_a_membership_announces_the_departure() {
-        let room = Room::new();
-        let mut alice = room.join("alice");
-        let bob = room.join("bob");
-        let _ = alice.next_broadcast().await; // bob joined
-        assert_eq!(room.len(), 2);
+    fn dropping_a_membership_announces_the_departure() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let room = Room::new();
+            let mut alice = room.join("alice");
+            let bob = room.join("bob");
+            let _ = alice.next_broadcast().await; // bob joined
+            assert_eq!(
+                room.len(),
+                2,
+                "the room holds two members before the departure"
+            );
 
-        drop(bob);
-        let seen = alice.next_broadcast().await.expect("bob left");
-        assert!(matches!(seen.msg, ServerMsg::Left { ref nick } if nick == "bob"));
-        assert_eq!(room.len(), 1);
+            drop(bob);
+            let seen = alice.next_broadcast().await.expect("bob left");
+            assert!(
+                matches!(seen.message, ServerMsg::Left { ref nick } if nick == "bob"),
+                "a departure is announced to the remaining member"
+            );
+            assert_eq!(
+                room.len(),
+                1,
+                "the room holds one member after the departure"
+            );
+        });
     }
 
     /// And the name comes free again, so a reconnecting tab is `bob`, not
     /// `bob#2` climbing forever.
     #[test]
-    async fn a_departed_nick_is_reusable() {
-        let room = Room::new();
-        let _alice = room.join("alice");
-        drop(room.join("bob"));
-        assert_eq!(room.join("bob").nick, "bob");
+    fn a_departed_nick_is_reusable() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let room = Room::new();
+            let _alice = room.join("alice");
+            drop(room.join("bob"));
+            assert_eq!(
+                room.join("bob").nick,
+                "bob",
+                "a departed nick is free to join again"
+            );
+        });
     }
 }

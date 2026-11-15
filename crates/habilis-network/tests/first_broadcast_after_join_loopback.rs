@@ -3,28 +3,18 @@
 //!
 //! Three members on a local relay: the creator C and two joiners J1 and J2. Each joiner sends a
 //! broadcast as soon as `join` returns. A frame sent before the node is meshed is parked and
-//! flushed on its first non-rendezvous link (`gossip::recv::flush_pending`), and the creator asks
-//! for what it missed with a digest on its first real link (`gossip::antientropy`). The lost
-//! message is the one that neither path brings.
+//! flushed on its first non-rendezvous link (`gossip::recv::flush_pending`). Nothing else
+//! is sent by the test, so the race measures only that flush.
 //!
-//! The tests record WHEN each broadcast reaches two observers, the creator and the other
-//! joiner, up to `OBSERVE`, and fail if the creator gets one later than the bound of the race (`EXPECTED`, or 5 s for the control). The failure
-//! message carries the arrival times and classifies each message:
+//! The tests record WHEN each broadcast reaches two observers, the creator and the other joiner,
+//! up to `OBSERVE`, and fail if the creator gets one later than the bound of the race (`EXPECTED`,
+//! or 5 s for the control). The failure message carries the arrival times and classifies each
+//! message:
 //! - nobody got it: the send or the flush dropped it;
 //! - only the creator: the flood stopped at the first hop;
-//! - the creator missed it and the other joiner got it: the creator's inbound path;
-//! - both, late: a resend. An arrival near 90 s is the sender's own gossip actor dropping the
-//!   resend as a duplicate until iroh-gossip forgets the message id (`message_id_retention`).
-//!
-//! They also read the length of each member's message log before the send and at the end, which
-//! is where anti-entropy finds what it serves: a sender whose log did not grow while the
-//! creator's did cannot serve its own message again.
+//! - the creator missed it and the other joiner got it: the creator's inbound path.
 //!
 //! `transport: Vec::new()` is the default list of the mesh (udp, webrtc, multihop, gossip).
-//!
-//! Two apps run the race. The membership app never retains chat, so anti-entropy cannot resend
-//! it there. The logging app retains every chat frame it receives, as agent-gossip's app does,
-//! and so exercises the resend. Each report names its app.
 //!
 //! Debug greps for a run: `RUST_LOG=habilis_network::messages=info,habilis_network::gossip=debug`.
 //! Every test is `#[ignore]`: each stands up three real members and runs under a host grant, with
@@ -34,7 +24,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex};
@@ -43,16 +33,21 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
-use habilis_network::net::TransportOpts;
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, Membership, Messaging, Request,
+};
 use habilis_network::ops::{app_frame, send_app};
 use habilis_network::protocol::{
     AppFrameParams, AppTag, Lookup, LookupOpts, MessageBody, Nickname, Transport,
 };
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
+use habilis_network::net::test_relay;
+use tokio::time;
 /// How long a broadcast may take to reach the creator before the test calls it lost.
 const EXPECTED: Duration = Duration::from_mins(1);
 /// How long the test keeps looking, to tell a late message from one that never comes: past the
@@ -67,9 +62,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -78,33 +75,33 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(transport)
+            .relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     /// A broadcast, which is a `msg` with no addressee.
     async fn broadcast(&self, text: &str) -> Result<(), String> {
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send {
-                to: None,
-                body,
-                reply,
+            .request(|reply| {
+                Request::Messaging(Messaging::Send {
+                    to: None,
+                    body,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -112,12 +109,12 @@ impl Member {
 
     /// Whether a broadcast with this text has reached this member.
     fn saw_broadcast(&mut self, text: &str) -> bool {
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen.push(message);
         }
         self.seen
             .iter()
-            .any(|msg| !msg.directed && msg.text == text)
+            .any(|message| !message.directed && message.text == text)
     }
 
     fn ports(&self) -> Vec<u16> {
@@ -126,9 +123,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -190,9 +189,7 @@ trait Peer: Sized {
     async fn broadcast(&self, text: &str) -> Result<(), String>;
     /// Whether a broadcast with this text has reached this member.
     fn saw_broadcast(&mut self, text: &str) -> bool;
-    /// How many messages the member holds in the log that anti-entropy serves from.
-    async fn log_len(&self) -> usize;
-    /// How many other members this one lists; a member does not list itself.
+    /// How many members this one counts, itself included.
     async fn peer_count(&self) -> usize;
     async fn leave(self);
 }
@@ -208,16 +205,9 @@ impl Peer for Member {
         Member::saw_broadcast(self, text)
     }
 
-    async fn log_len(&self) -> usize {
-        self.membership
-            .request(|reply| Request::MessageLogLen { reply })
-            .await
-            .expect("the loop answers")
-    }
-
     async fn peer_count(&self) -> usize {
         self.membership
-            .request(|reply| Request::PeerCount { reply })
+            .request(|reply| Request::Inspect(Inspect::PeerCount { reply }))
             .await
             .expect("the loop answers")
     }
@@ -230,25 +220,19 @@ impl Peer for Member {
 /// Records the chat frames it gets, and logs them as agent-gossip's app does.
 #[derive(Clone, Default)]
 struct Chat {
+    // Shared with the sink the membership owns: the test reads what arrived after the join.
     received: Arc<Mutex<Vec<String>>>,
 }
 
 enum ChatSession {
     Send(String, oneshot::Sender<Result<(), String>>),
-    LogLen(oneshot::Sender<usize>),
     PeerCount(oneshot::Sender<usize>),
 }
 
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: true,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::NONE.union(AppClass::PUSH).union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -258,10 +242,8 @@ impl NodeApp for Chat {
         _ctx: &HandlerCtx<'_>,
     ) -> bool {
         if frame.surfaceable {
-            self.received
-                .lock()
-                .expect("no poison")
-                .push(frame.message.body.as_str().to_owned());
+            let text = frame.message.body.as_str().to_owned();
+            self.received.lock().expect("no poison").push(text);
         }
         true
     }
@@ -277,30 +259,28 @@ impl NodeDriver for Chat {
         &mut self,
         session: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
         match session {
             ChatSession::Send(text, reply) => {
                 let frame = app_frame(
-                    ctx,
-                    AppFrameParams {
-                        tag: AppTag::from("chat"),
-                        to: None,
-                        corr: None,
-                        body: MessageBody::new(text).expect("a short body"),
-                    },
-                );
-                let class = self.classify(&frame.authored());
-                let sent = send_app(state, ctx, frame, class).await.map(|_| ());
+                    state,
+                    context,
+                    self,
+                    AppFrameParams::new(
+                        AppTag::try_new("chat").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::try_new(&text).expect("a short body"),
+                    ),
+                )
+                .expect("a chat frame is built");
+                let sent = send_app(state, context, frame).await.map(|_| ());
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true
             }
-            ChatSession::LogLen(reply) => {
-                let _ = reply.send(state.message_log_len());
-                false
-            }
             ChatSession::PeerCount(reply) => {
-                let _ = reply.send(state.roster_snapshot().peers.len());
+                let _ = reply.send(state.member_count());
                 false
             }
         }
@@ -323,38 +303,28 @@ impl LoggingMember {
     async fn start(topic: &str, name: &str) -> Self {
         let mesh =
             derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
+        let topic_string = topic.to_owned();
         let config = setup_mesh(
-            SetupKind::Topic {
-                mesh,
-                topic_string: topic.to_owned(),
-            },
-            SetupParams {
-                author: Nickname::new(name).expect("valid nickname"),
-                max_peers: 16,
-                max_direct: 0,
-                endpoint: None,
-                protocols: Vec::new(),
-                transports: TransportOpts::default(),
-                runtime_base: None,
-                state_file: None,
-                sink: Arc::new(Quiet),
-                per_peer_gate: None,
-                cohost: None,
-                live_count: None,
-            },
+            SetupKind::Topic { mesh, topic_string },
+            SetupParams::new(
+                Nickname::try_new(name).expect("valid nickname"),
+                // The membership keeps its sink as a trait object for its whole life.
+                Arc::new(Quiet),
+            )
+            .max_peers(16),
         )
         .await
         .expect("setup_mesh on a loopback mesh");
         let chat = Chat::default();
         Self {
-            node: Node::spawn(config, chat.clone(), None, false),
+            node: Node::spawn(config, chat.clone(), None, SignalHandling::Leave),
             chat,
         }
     }
 }
 
 impl Peer for LoggingMember {
-    const APP: &'static str = "logging chat (loggable: true)";
+    const APP: &'static str = "pushing chat (PUSH)";
 
     async fn broadcast(&self, text: &str) -> Result<(), String> {
         let (reply, answer) = oneshot::channel();
@@ -374,15 +344,6 @@ impl Peer for LoggingMember {
             .any(|received| received == text)
     }
 
-    async fn log_len(&self) -> usize {
-        let (reply, answer) = oneshot::channel();
-        self.node
-            .send(ChatSession::LogLen(reply))
-            .await
-            .expect("the loop takes the request");
-        answer.await.expect("the loop answers")
-    }
-
     async fn peer_count(&self) -> usize {
         let (reply, answer) = oneshot::channel();
         self.node
@@ -400,10 +361,10 @@ impl Peer for LoggingMember {
 /// Poll until both broadcasts reached both observers, or `OBSERVE` has passed. The observers of
 /// the first broadcast are the creator and joiner two, and of the second the creator and joiner
 /// one.
-async fn watch<P: Peer>(
-    creator: &mut P,
-    joiner_one: &mut P,
-    joiner_two: &mut P,
+async fn watch<Participant: Peer>(
+    creator: &mut Participant,
+    joiner_one: &mut Participant,
+    joiner_two: &mut Participant,
     probes: &mut [Probe; 2],
 ) {
     let started = Instant::now();
@@ -420,49 +381,26 @@ async fn watch<P: Peer>(
         if probes.iter().all(Probe::observed) {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
 }
 
-/// The lengths of the three message logs: the creator, joiner one and joiner two.
-async fn log_lens<P: Peer>(members: [&P; 3]) -> [usize; 3] {
-    [
-        members[0].log_len().await,
-        members[1].log_len().await,
-        members[2].log_len().await,
-    ]
-}
-
 /// The report line of a run, for the failure message and the log.
-fn report(
-    name: &str,
-    app: &str,
-    probes: &[Probe; 2],
-    before: [usize; 3],
-    after: [usize; 3],
-) -> String {
-    let growth = |index: usize| {
-        i64::try_from(after[index]).unwrap_or(i64::MAX)
-            - i64::try_from(before[index]).unwrap_or(i64::MAX)
-    };
+fn report(name: &str, app: &str, probes: &[Probe; 2]) -> String {
     format!(
-        "DIAG {name} [app: {app}]: joiner one's broadcast: {}; joiner two's broadcast: {}; message \
-         log growth (end minus before the sends): creator {:+}, joiner one {:+}, joiner two {:+}",
+        "DIAG {name} [app: {app}]: joiner one's broadcast: {}; joiner two's broadcast: {}",
         probes[0].describe(),
         probes[1].describe(),
-        growth(0),
-        growth(1),
-        growth(2),
     )
 }
 
-/// Wait until every member lists the other two; the roster does not list its owner.
-async fn wait_until_meshed<P: Peer>(members: [&P; 3]) {
+/// Wait until every member counts all three members, itself included.
+async fn wait_until_meshed<Participant: Peer>(members: [&Participant; 3]) {
     let deadline = Instant::now() + MESH_DEADLINE;
     for member in members {
-        while member.peer_count().await < members.len() - 1 {
+        while member.peer_count().await < members.len() {
             assert!(Instant::now() < deadline, "the mesh did not settle");
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
     }
 }
@@ -470,12 +408,12 @@ async fn wait_until_meshed<P: Peer>(members: [&P; 3]) {
 /// Both joiners are in the mesh, then each broadcasts `delay` after its `join` returned. Each
 /// broadcast is observed by the creator and by the other joiner, and must reach the creator
 /// within `expected`. With `settle`, the race waits first until every member lists the others.
-async fn run_race<P: Peer>(
+async fn run_race<Participant: Peer>(
     name: &str,
     delay: Duration,
     expected: Duration,
     settle: bool,
-    members: [P; 3],
+    members: [Participant; 3],
 ) {
     if let Err(line) = measure_race(name, delay, expected, settle, members).await {
         panic!(
@@ -485,18 +423,17 @@ async fn run_race<P: Peer>(
 }
 
 /// [`run_race`] that returns the report line of a failed race instead of panicking.
-async fn measure_race<P: Peer>(
+async fn measure_race<Participant: Peer>(
     name: &str,
     delay: Duration,
     expected: Duration,
     settle: bool,
-    [mut creator, mut j1, mut j2]: [P; 3],
+    [mut creator, mut j1, mut j2]: [Participant; 3],
 ) -> Result<(), String> {
     if settle {
         wait_until_meshed([&creator, &j1, &j2]).await;
     }
-    let before = log_lens([&creator, &j1, &j2]).await;
-    tokio::time::sleep(delay).await;
+    time::sleep(delay).await;
     let first = Probe::sent(format!("{name} one"));
     j1.broadcast(&first.text)
         .await
@@ -508,13 +445,7 @@ async fn measure_race<P: Peer>(
 
     let mut probes = [first, second];
     watch(&mut creator, &mut j1, &mut j2, &mut probes).await;
-    let line = report(
-        name,
-        P::APP,
-        &probes,
-        before,
-        log_lens([&creator, &j1, &j2]).await,
-    );
+    let line = report(name, Participant::APP, &probes);
     eprintln!("{line}");
     let in_time = probes
         .iter()
@@ -538,9 +469,7 @@ fn membership_race(
 ) {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay_url, _relay) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay_url, _relay) = test_relay::spawn_plain().await.expect("local relay");
         let creator = Member::create("creator", &relay_url, transport).await;
         let j1 = Member::join("joiner-one", &creator).await;
         let j2 = Member::join("joiner-two", &creator).await;
@@ -548,19 +477,6 @@ fn membership_race(
             j1.block_ip_to(j2.ports()).await;
             j2.block_ip_to(j1.ports()).await;
         }
-        run_race(name, delay, expected, settle, [creator, j1, j2]).await;
-    });
-}
-
-/// Three members of the logging chat app on a loopback topic mesh.
-fn logging_race(name: &str, delay: Duration, expected: Duration, settle: bool) {
-    let guard = habilis_network_test_tracing::init();
-    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let topic = format!("first-broadcast-{}", rand::random::<u64>());
-
-        let creator = LoggingMember::start(&topic, "creator").await;
-        let j1 = LoggingMember::start(&topic, "joiner-one").await;
-        let j2 = LoggingMember::start(&topic, "joiner-two").await;
         run_race(name, delay, expected, settle, [creator, j1, j2]).await;
     });
 }
@@ -621,36 +537,6 @@ fn a_broadcast_sent_after_the_mesh_settled_reaches_the_creator() {
     );
 }
 
-/// The reporter's case: an app that logs chat, so that anti-entropy can resend it.
-#[test]
-#[ignore = "run by cargo task matrix"]
-fn a_logged_broadcast_sent_right_after_join_reaches_the_creator() {
-    logging_race("logging app, at once", Duration::ZERO, EXPECTED, false);
-}
-
-#[test]
-#[ignore = "run by cargo task matrix"]
-fn a_logged_broadcast_sent_a_second_after_join_reaches_the_creator() {
-    logging_race(
-        "logging app, after 1 s",
-        Duration::from_secs(1),
-        EXPECTED,
-        false,
-    );
-}
-
-/// Control for the logging app.
-#[test]
-#[ignore = "run by cargo task matrix"]
-fn a_logged_broadcast_sent_after_the_mesh_settled_reaches_the_creator() {
-    logging_race(
-        "logging app, 20 s after join",
-        Duration::from_secs(20),
-        Duration::from_secs(5),
-        true,
-    );
-}
-
 /// How many races run at once in the load test: the monitor contract of agent-gossip runs 30
 /// tests in parallel, each with three in-process members.
 const PARALLEL_RACES: usize = 24;
@@ -666,7 +552,8 @@ fn broadcasts_sent_right_after_join_reach_the_creator_under_load() {
         let races: Vec<_> = (0..PARALLEL_RACES)
             .map(|index| {
                 tokio::spawn(async move {
-                    let topic = format!("first-broadcast-load-{index}-{}", rand::random::<u64>());
+                    let nonce: u64 = rand::random();
+                    let topic = format!("first-broadcast-load-{index}-{nonce}");
                     let creator = LoggingMember::start(&topic, "creator").await;
                     let j1 = LoggingMember::start(&topic, "joiner-one").await;
                     let j2 = LoggingMember::start(&topic, "joiner-two").await;

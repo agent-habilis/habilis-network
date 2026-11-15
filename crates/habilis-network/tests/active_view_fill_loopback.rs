@@ -12,14 +12,18 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Inspect, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network::util::tuning::STARVED;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use std::future;
+use tokio::{task, time};
 /// Long enough for a mesh of ten to form and for the alive ticks to fill what the
 /// first grafts missed.
 const FILL_DEADLINE: Duration = Duration::from_mins(3);
@@ -47,9 +51,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -57,46 +63,44 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, max_peers: usize) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let relay_urls = vec![relay.to_string()];
+        let options = options
+            .transport(vec![
                 Transport::Udp,
                 Transport::WebRtc,
                 Transport::Multihop,
                 Transport::Relay,
-            ],
-            relay_urls: vec![relay.to_string()],
-            max_peers,
-            ..membership::Opts::default()
-        })
-        .await
+            ])
+            .relay_urls(relay_urls)
+            .max_peers(max_peers);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self, max_peers: usize) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            max_peers,
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        let options = options.max_peers(max_peers);
+        Self::open(&options).await
     }
 
     /// The nicknames of the peers this member holds a live gossip link to.
-    async fn linked_set(&self) -> std::collections::BTreeSet<String> {
+    async fn linked_set(&self) -> BTreeSet<String> {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
-        roster["peers"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
+        let peers = roster["peers"].as_array().cloned().unwrap_or_default();
+        let direct = peers
             .iter()
-            .filter(|peer| peer["reach"].as_str() == Some("direct"))
+            .filter(|peer| peer["reach"].as_str() == Some("direct"));
+        direct
             .filter_map(|peer| peer["nickname"].as_str().map(str::to_owned))
             .collect()
     }
@@ -105,12 +109,12 @@ impl Member {
     async fn counts(&self) -> (usize, usize) {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
         let peers = roster["peers"].as_array().cloned().unwrap_or_default();
-        let linked = peers
+        let linked: usize = peers
             .iter()
             .filter(|peer| peer["reach"].as_str() == Some("direct"))
             .count();
@@ -119,13 +123,12 @@ impl Member {
 }
 
 /// `count` members on a local relay, each with the active view cap `max_peers`.
-async fn mesh(count: usize, max_peers: usize) -> (Vec<Member>, tokio::task::JoinHandle<()>) {
-    let (relay, server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
+async fn mesh(count: usize, max_peers: usize) -> (Vec<Member>, task::JoinHandle<()>) {
+    let (relay, server) = test_relay::spawn_plain().await.expect("local relay");
     let keep = tokio::spawn(async move {
         let _server = server;
-        std::future::pending::<()>().await;
+        let forever: future::Pending<()> = future::pending();
+        forever.await;
     });
     let first = Member::create("m0", &relay, max_peers).await;
     let mut members = Vec::with_capacity(count);
@@ -151,15 +154,16 @@ async fn until_every_view_holds(
         if counts.iter().all(|(_, linked)| *linked == want) {
             return Ok(());
         }
+        let links_per_member: Vec<_> = counts.iter().map(|(_, linked)| *linked).collect();
         eprintln!(
             "{:>4} s: links per member {:?}",
             started.elapsed().as_secs(),
-            counts.iter().map(|(_, linked)| *linked).collect::<Vec<_>>()
+            links_per_member
         );
         if started.elapsed() >= deadline {
             return Err(counts);
         }
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        time::sleep(Duration::from_secs(10)).await;
     }
 }
 
@@ -167,13 +171,20 @@ async fn until_every_view_holds(
 fn a_mesh_of_ten_links_every_member_to_every_other() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        // Two members can claim the rendezvous a few milliseconds apart: a holder that is bound and
+        // not serving yet answers the probe with a refusal, which the probe reads as silence. The
+        // rival check resolves that overlap by design, and the relay logs the connection that it replaced.
+        habilis_network_test_tracing::allow_warn(
+            "iroh::socket::transports::relay::actor",
+            "Another endpoint connected with the same endpoint id",
+        );
         let (members, keep) = mesh(10, 32).await;
 
         let result = until_every_view_holds(&members, 9, FILL_DEADLINE).await;
         assert!(
             result.is_ok(),
             "every member must hold 9 links; (roster, linked) per member: {:?}",
-            result.unwrap_err()
+            result.expect_err("the message prints only when is_ok failed")
         );
 
         for member in members {
@@ -197,7 +208,7 @@ fn a_mesh_of_g_plus_one_links_every_member_to_every_other_the_beacon_holder_too(
             result.is_ok(),
             "every member must hold {VIEW_CAP} links, the holder of the beacon too; \
              (roster, linked) per member: {:?}",
-            result.unwrap_err()
+            result.expect_err("the message prints only when is_ok failed")
         );
 
         for member in members {
@@ -232,10 +243,11 @@ fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
         let mut link_total = 0_u32;
         let mut link_samples = 0_u32;
         let mut near_target = vec![0_u32; members.len()];
-        let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
+        let mut previous: Vec<BTreeSet<String>> = Vec::new();
         while started.elapsed() < settle + CHURN_WINDOW {
             let mut now = Vec::with_capacity(members.len());
-            for (index, member) in members.iter().enumerate() {
+            let indexed: Vec<(usize, &Member)> = members.iter().enumerate().collect();
+            for (index, member) in indexed {
                 let links = member.linked_set().await;
                 if let Some(before) = previous.get(index) {
                     link_ups += u32::try_from(links.difference(before).count()).unwrap_or(u32::MAX);
@@ -251,7 +263,7 @@ fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
             if started.elapsed() >= settle {
                 previous = now;
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            time::sleep(Duration::from_secs(5)).await;
         }
         let minutes = CHURN_WINDOW.as_secs_f64() / 60.0;
         let per_member_per_minute =
@@ -305,12 +317,13 @@ fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported(
         let mut at_cap = 0_u32;
         let mut samples = 0_u32;
         let mut changes = 0_u32;
-        let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
+        let mut previous: Vec<BTreeSet<String>> = Vec::new();
         let started = Instant::now();
         let window = FILL_DEADLINE + STABLE_FOR;
         while started.elapsed() < window {
             let mut now = Vec::with_capacity(members.len());
-            for (index, member) in members.iter().enumerate() {
+            let indexed: Vec<(usize, &Member)> = members.iter().enumerate().collect();
+            for (index, member) in indexed {
                 let links = member.linked_set().await;
                 reached[index] |= links.len() == VIEW_CAP;
                 // Only after the fill deadline do samples count toward the fraction.
@@ -327,7 +340,7 @@ fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported(
             if started.elapsed() >= FILL_DEADLINE {
                 previous = now;
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            time::sleep(Duration::from_secs(5)).await;
         }
         let minutes = STABLE_FOR.as_secs_f64() / 60.0;
         eprintln!(

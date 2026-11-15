@@ -23,10 +23,12 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Blocking, Inspect, Membership, Request};
 use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use tokio::time;
 /// The probe deadline of 15 s and 10 s more: a link that stayed on the relay
 /// would be closed inside it, and a session round takes a few seconds.
 const WINDOW: Duration = Duration::from_secs(25);
@@ -40,10 +42,12 @@ fn logs() -> String {
 /// such link, so the joiner is the only member that counts.
 fn rendezvous_lines(state: &str) -> usize {
     let needle = format!("gossip neighbor {state}");
-    logs()
-        .lines()
-        .filter(|line| line.contains(&needle) && line.contains("is_rendezvous=true"))
-        .count()
+    let text = logs();
+    let lines = text.lines().filter(|line| {
+        let matches_needle = line.contains(&needle);
+        matches_needle && line.contains("is_rendezvous=true")
+    });
+    lines.count()
 }
 
 async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -52,7 +56,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -63,9 +67,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -73,39 +79,36 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options.relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
 
     async fn block_udp(&self, blocked: bool) {
         self.membership
-            .request(|reply| Request::BlockUdp { blocked, reply })
+            .request(|reply| Request::Blocking(Blocking::BlockUdp { blocked, reply }))
             .await
             .expect("the loop answers");
     }
@@ -113,7 +116,8 @@ impl Member {
 
 /// The rendezvous trace: the lines that say how the link went and what was offered.
 fn trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -125,8 +129,8 @@ fn trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    lines.join("\n")
 }
 
 #[test]
@@ -135,9 +139,7 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
         "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
 
@@ -153,8 +155,23 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
                 "the pair never linked\n{}",
                 trace()
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
+        // The roster is presence, not a gossip link. Cut IP only once the member pair is a
+        // neighbor on both ends, or the test cuts a link that was never up.
+        let member_gossip_links = || {
+            let text = logs();
+            text.lines()
+                .filter(|line| {
+                    line.contains("gossip neighbor up") && line.contains("is_rendezvous=false")
+                })
+                .count()
+        };
+        assert!(
+            eventually(Duration::from_mins(1), || member_gossip_links() >= 2).await,
+            "the member pair never became a gossip neighbor on both ends\n{}",
+            trace()
+        );
         let downs_before = rendezvous_lines("down");
 
         alice.block_udp(true).await;
@@ -167,9 +184,18 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
          WebRTC session is offered only after the close\n{}",
             trace()
         );
+        let rendezvous = alice.membership.node.endpoint_id().to_string();
+        let attached_to_rendezvous = || {
+            ["answerer", "offerer"].iter().any(|role| {
+                logs().contains(&format!(
+                    "webrtc session attached ({role}) remote={rendezvous}"
+                ))
+            })
+        };
         assert!(
-            logs().contains("webrtc session attached to the linked rendezvous"),
-            "no session attached to the linked rendezvous\n{}",
+            logs().contains("webrtc session attached to the linked rendezvous")
+                || attached_to_rendezvous(),
+            "the rendezvous has no WebRTC session after the IP loss\n{}",
             trace()
         );
         for member in [alice, bob] {

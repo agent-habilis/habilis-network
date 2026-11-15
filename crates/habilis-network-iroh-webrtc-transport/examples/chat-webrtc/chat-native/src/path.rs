@@ -11,6 +11,7 @@ use habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID;
 use habilis_network_iroh_webrtc_transport::iroh::TransportAddr;
 use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Connection, Path};
 
+use tokio::time::{self, Instant};
 /// The label a settled `webrtc` path reports. Compared against rather than
 /// spelled out at each site, since the UI and the tests both key off it.
 pub const WEBRTC: &str = "webrtc";
@@ -30,13 +31,13 @@ const SETTLE_POLL: Duration = Duration::from_millis(100);
 /// Resolves early the moment the answer is `webrtc`, since that is the one
 /// outcome that will not change for the better.
 pub async fn settled_label(connection: &Connection) -> String {
-    let deadline = tokio::time::Instant::now() + SETTLE_TIMEOUT;
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
     loop {
         let label = selected_label(connection);
-        if label == WEBRTC || tokio::time::Instant::now() >= deadline {
+        if label == WEBRTC || Instant::now() >= deadline {
             return label;
         }
-        tokio::time::sleep(SETTLE_POLL).await;
+        time::sleep(SETTLE_POLL).await;
     }
 }
 
@@ -50,15 +51,15 @@ pub fn selected_label(connection: &Connection) -> String {
     label_of(selected.remote_addr())
 }
 
-fn label_of(addr: &TransportAddr) -> String {
-    match addr {
-        TransportAddr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => WEBRTC.to_owned(),
+fn label_of(address: &TransportAddr) -> String {
+    match address {
+        TransportAddr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => String::from(WEBRTC),
         // A different custom transport is not a case this example produces, but
         // saying which one beats reporting "custom" and leaving the reader to
         // guess whether it was ours.
         TransportAddr::Custom(custom) => format!("custom({})", custom.id()),
-        TransportAddr::Ip(_) => "ip".to_owned(),
-        TransportAddr::Relay(_) => "relay".to_owned(),
+        TransportAddr::Ip(_) => String::from("ip"),
+        TransportAddr::Relay(_) => String::from("relay"),
         other => format!("{other:?}"),
     }
 }

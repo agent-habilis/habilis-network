@@ -25,165 +25,52 @@
 //! temp file first. A streaming produce path would have to rework hashing and the
 //! `MAX_BLOB_BYTES` check, which cannot run before the length is known.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
-use anyhow::Result;
-use iroh::Endpoint;
-
-use crate::protocol::mesh::LookupOpts;
-
+mod blob_digest;
+mod close_on_drop;
+mod consts;
 mod consume;
+mod content_id;
+mod dialed;
+mod error;
+mod offload_request;
+mod online;
 mod produce;
 mod store;
 mod ticket;
 
-pub use consume::fetch;
+pub use blob_digest::BlobDigest;
+pub(crate) use consts::{BAD_SECRET, BLOB_ALPN, DONE, RELAY_REFUSED_CODE, TOO_SLOW, UNKNOWN_BLOB};
+pub use consts::{HASH_LEN, SECRET_LEN};
+pub use consume::{fetch, fetch_hedged, fetch_with_endpoint};
+pub use content_id::ContentId;
+pub use error::BlobError;
+pub use offload_request::{OffloadRequest, offload};
+pub(crate) use online::wait_online;
 pub use produce::BlobServer;
 pub use ticket::BlobTicket;
 
-/// An opaque content-group id the blob layer keys evictable blobs by.
-///
-/// Whatever the application groups content by — a task, a job, a conversation —
-/// it maps into this; the blob layer never names that type. `evict_content` then
-/// drops a whole group at once.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ContentId(String);
-
-impl ContentId {
-    #[must_use]
-    pub fn new(id: &str) -> Self {
-        Self(id.to_owned())
-    }
-}
-
-/// One offload: which file, where to spool it, which content group it belongs to,
-/// and the mesh password it inherits (so a scraped ticket cannot be redeemed
-/// without it).
-#[derive(Debug)]
-pub struct OffloadRequest {
-    pub path: PathBuf,
-    pub spool_dir: PathBuf,
-    pub content_id: ContentId,
-    pub password: Option<crate::protocol::crypto::Password>,
-}
-
-/// Offload a file over the blob channel and return the [`BlobTicket`] that
-/// fetches it back. Lazily binds `server` on the first call (into
-/// `request.spool_dir`), reusing it thereafter — so a caller holds one
-/// `Option<BlobServer>` for its lifetime and passes it here each time.
-///
-/// The ticket is the whole result: `encode()` it into whatever reference the
-/// application uses, ship that string over gossip, and the peer calls
-/// [`fetch`]. Content-addressed dedup means offloading identical bytes twice
-/// returns the first ticket without re-paying the hash or the Argon2 stretch.
-///
-/// `relay_transport` must be the mesh's `transport.relay_transport`
-/// (`mesh.transport().relay_transport`): the ticket carries it so the fetcher
-/// applies the same rule, and a per-node value would let one member serve over
-/// the relay for everyone.
-///
-/// # Errors
-/// Binding the blob server, hashing, or snapshotting the file fails (e.g. the
-/// file is unreadable or exceeds `MAX_BLOB_BYTES`).
-///
-/// # Panics
-/// Panics if an internal invariant is violated.
-pub async fn offload(
-    server: &mut Option<BlobServer>,
-    lookups: &LookupOpts,
-    relay_transport: bool,
-    request: OffloadRequest,
-) -> Result<BlobTicket> {
-    let OffloadRequest {
-        path,
-        spool_dir,
-        content_id,
-        password,
-    } = request;
-    if server.is_none() {
-        *server =
-            Some(BlobServer::start(lookups.clone(), spool_dir, password, relay_transport).await?);
-    }
-    server
-        .as_ref()
-        .expect("server set above")
-        .register(&path, content_id)
-        .await
-}
-
-/// ALPN for the blob channel — a raw bidirectional QUIC stream with its own
-/// protocol identity, distinct from `GOSSIP_ALPN` and the application's own bridge
-/// ALPN, so a mismatched dial is rejected at the QUIC handshake.
-pub(crate) const BLOB_ALPN: &[u8] = b"habilis-mesh/blob/1";
-
-/// Length of the bearer-capability secret carried in a blob ticket, and of the
-/// auth token opening the fetch stream (the raw secret, or its Argon2id stretch
-/// when passworded — same size either way).
-pub const SECRET_LEN: usize = 32;
-
-/// Length of the SHA-256 content hash that addresses a blob.
-pub const HASH_LEN: usize = 32;
-
-/// The SHA-256 of a blob's bytes: the name it is stored, ticketed and fetched
-/// under. Prints as lowercase hex, the same text as its spool file name.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlobDigest([u8; HASH_LEN]);
-
-impl BlobDigest {
-    /// Wrap the 32 bytes of a SHA-256.
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    /// The raw bytes, borrowed.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for BlobDigest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        crate::protocol::identity::write_hex(formatter, &self.0)
-    }
-}
-
-impl std::fmt::Debug for BlobDigest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "BlobDigest({self})")
-    }
-}
-
-/// Fetch stream close code: the presented bearer secret matched no blob's secret.
-pub(crate) const BAD_SECRET: u32 = 1;
-
-/// Fetch stream close code: the requested content hash is not in the store.
-pub(crate) const UNKNOWN_BLOB: u32 = 2;
-/// The connection's selected path is the relay and the producer's mesh keeps
-/// the relay for lookup only.
-pub(crate) const RELAY_REFUSED_CODE: u32 = 3;
-
-/// Fetch stream close code: an orderly done from the producer.
-pub(crate) const DONE: u32 = 0;
-
-/// Best-effort wait (≤5s) for the endpoint to publish reachable addresses, so a
-/// freshly-minted ticket resolves immediately. Never blocks forever.
-async fn wait_online(endpoint: &Endpoint) {
-    let _ = tokio::time::timeout(Duration::from_secs(5), endpoint.online()).await;
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{BlobServer, ContentId, fetch};
-    use crate::protocol::mesh::LookupOpts;
-    use habilis_network_test_tracing::test;
+    use super::{BlobError, BlobServer, BlobTicket, ContentId, fetch};
+    use crate::protocol::meshes::LookupOpts;
+    use crate::transport::PayloadPath;
     use rand::RngCore;
-    use std::fs;
     use std::path::PathBuf;
     use std::time::Duration;
+    use std::{fs, io};
 
+    use crate::lookup;
+    use crate::protocol::crypto;
+    use iroh::endpoint::{
+        Connection, ConnectionError, QuicTransportConfig, RecvStream, SendStream, VarInt, presets,
+    };
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+    use std::{env, thread};
+    use tokio::net::UdpSocket;
+    use tokio::runtime::Builder;
+    use tokio::time;
     /// A secret that is already in a wiped buffer (the blob salt, the token read off
     /// the wire) moves into its type whole, through the constructor that takes the
     /// buffer, with no plain `[u8; 32]` copy on the way. This does not compile
@@ -193,15 +80,24 @@ mod tests {
         use crate::protocol::crypto::{SymmetricKey, TicketSecret};
         use zeroize::Zeroizing;
 
-        let secret = TicketSecret::from_zeroizing(Zeroizing::new([5u8; super::SECRET_LEN]));
-        assert_eq!(secret.as_bytes(), &[5u8; super::SECRET_LEN]);
-        let key = SymmetricKey::from_zeroizing(Zeroizing::new([6u8; 32]));
-        assert_eq!(key.as_bytes(), &[6u8; 32]);
+        let _guard = ::habilis_network_test_tracing::init();
+        let secret = TicketSecret::from(Zeroizing::new([5u8; super::SECRET_LEN]));
+        assert_eq!(
+            secret.as_bytes(),
+            &[5u8; super::SECRET_LEN],
+            "a secret moves into its type whole"
+        );
+        let key = SymmetricKey::from(Zeroizing::new([6u8; 32]));
+        assert_eq!(
+            key.as_bytes(),
+            &[6u8; 32],
+            "a key moves into its type whole"
+        );
     }
 
     /// A throwaway file under the OS temp dir holding `bytes`; the caller drops it.
     fn temp_file(bytes: &[u8]) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
+        let path = env::temp_dir().join(format!(
             "habilis-network-blob-src-{}",
             rand::rng().next_u64()
         ));
@@ -210,7 +106,7 @@ mod tests {
     }
 
     fn temp_spool() -> PathBuf {
-        std::env::temp_dir().join(format!(
+        env::temp_dir().join(format!(
             "habilis-network-blob-spool-{}",
             rand::rng().next_u64()
         ))
@@ -225,8 +121,12 @@ mod tests {
     /// and asks for a new decision.
     #[test]
     fn a_blob_endpoint_is_built_with_no_custom_transport() {
-        let defaults = crate::lookup::TransportHandles::default();
-        assert!(defaults.gossip.is_none() && defaults.webrtc.is_none());
+        let _guard = ::habilis_network_test_tracing::init();
+        let defaults = lookup::TransportHandles::default();
+        assert!(
+            defaults.gossip.is_none() && defaults.webrtc.is_none(),
+            "a blob endpoint has no custom transport by default"
+        );
 
         let server = include_str!("produce.rs");
         let start = server
@@ -234,12 +134,10 @@ mod tests {
             .expect("the server builder");
         let built = &server[start..];
         let call = &built[built.find("build_endpoint(").expect("the server builds")..];
-        let args: String = call[..call.find(".await?").expect("the call ends")]
-            .chars()
-            .filter(|ch| !ch.is_whitespace())
-            .collect();
+        let call_args = &call[..call.find(".await?").expect("the call ends")];
+        let args: String = call_args.chars().filter(|ch| !ch.is_whitespace()).collect();
         assert!(
-            args.ends_with("crate::lookup::TransportHandles::default(),)"),
+            args.ends_with("lookup::TransportHandles::default(),)"),
             "the blob server must pass no transport handle: {args}"
         );
 
@@ -248,7 +146,7 @@ mod tests {
             consumer.contains("build_peer_endpoint(&ticket.lookups)"),
             "the blob consumer must build its endpoint with the peer builder"
         );
-        let lookup = include_str!("../lookup/mod.rs");
+        let lookup = include_str!("../lookup/peer.rs");
         let peer = &lookup[lookup
             .find("pub async fn build_peer_endpoint")
             .expect("the peer builder")..];
@@ -262,9 +160,14 @@ mod tests {
     /// Start a loopback producer serving `payload`, fetch it back over a second
     /// loopback endpoint, and return the fetched bytes.
     async fn round_trip(payload: &[u8]) -> Vec<u8> {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .expect("start producer");
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .expect("start producer");
         let src = temp_file(payload);
         let ticket = server
             .register(&src, ContentId::new("blob-test-content"))
@@ -277,29 +180,227 @@ mod tests {
         out
     }
 
+    /// **A caller's long-lived endpoint serves many fetches and stays open.**
+    ///
+    /// `fetch` binds a cold endpoint and closes it on every call. A caller that
+    /// already holds an endpoint passes it to `fetch_with_endpoint`, which must
+    /// dial from it and leave it open for the next fetch.
+    #[test]
+    fn a_caller_endpoint_serves_two_fetches_and_stays_open() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .expect("start producer");
+                let endpoint = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                let services = || endpoint.address_lookup().expect("lookup services").len();
+                let services_before = services();
+                for (name, payload) in [
+                    ("blob-test-reuse-a", &b"first bytes"[..]),
+                    ("blob-test-reuse-b", &b"second bytes"[..]),
+                ] {
+                    let src = temp_file(payload);
+                    let ticket = server
+                        .register(&src, ContentId::new(name))
+                        .await
+                        .expect("register");
+                    let mut out = Vec::new();
+                    super::fetch_with_endpoint(&endpoint, &ticket, &mut out, None)
+                        .await
+                        .expect("fetch from the caller endpoint");
+                    assert_eq!(out, payload, "the fetch returns the registered bytes");
+                    assert!(
+                        !endpoint.is_closed(),
+                        "the caller endpoint stays open after a fetch"
+                    );
+                    fs::remove_file(&src).ok();
+                }
+                assert_eq!(
+                    services(),
+                    services_before,
+                    "a fetch adds no lookup service to a long-lived endpoint"
+                );
+                endpoint.close().await;
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A caller can watch the address of the blob server and wait for it to be online.**
+    ///
+    /// The ticket holds the address of the server at the time of `register`. A caller that
+    /// keeps the server for a long time needs the address as it changes, and needs to know when
+    /// the server has a home relay.
+    #[test]
+    fn a_blob_server_exposes_its_address_watcher_and_online_wait() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::Watcher as _;
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .expect("start producer");
+                assert_eq!(
+                    server.watch_addr().get(),
+                    server.address(),
+                    "the watcher holds the address that a ticket carries"
+                );
+                assert!(
+                    time::timeout(Duration::from_millis(200), server.online())
+                        .await
+                        .is_err(),
+                    "with the relay disabled there is no home relay, so online never returns"
+                );
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **The address watcher follows the home relay, so a ticket minted earlier goes stale.**
+    ///
+    /// A ticket holds the address at `register` time. When the home relay of the server goes
+    /// away, the endpoint homes on another relay and the watcher shows the new address. The old
+    /// ticket still names the dead relay, and a registered blob gets a fresh ticket from
+    /// `register` again.
+    #[test]
+    #[ignore = "45 s: waits for iroh to drop a dead home relay"]
+    fn the_address_watcher_follows_the_home_relay_while_an_old_ticket_goes_stale() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::lookup::test_relay::spawn_plain;
+                use crate::protocol::meshes::RelayChoice;
+                use iroh::Watcher as _;
+                // Dropping the home relay is the point of the test, so its probes and its
+                // sockets fail on purpose.
+                ::habilis_network_test_tracing::allow_warn(
+                    "iroh::net_report::reportgen",
+                    "probe failed",
+                );
+                ::habilis_network_test_tracing::allow_warn(
+                    "iroh_relay::server::http_server",
+                    "error accepting upgraded connection",
+                );
+                let (url_a, relay_a) = spawn_plain().await.expect("relay a");
+                let (url_b, relay_b) = spawn_plain().await.expect("relay b");
+                let mut lookups = LookupOpts::loopback();
+                lookups.relay_lookup = RelayChoice::Custom(vec![url_a.clone(), url_b.clone()]);
+                let server =
+                    BlobServer::start(lookups, temp_spool(), None, PayloadPath::RelayAllowed)
+                        .await
+                        .expect("start producer");
+                server.online().await;
+                let src = temp_file(b"stale ticket bytes");
+                let content_id = ContentId::new("blob-test-stale-ticket");
+                let old_ticket = server
+                    .register(&src, content_id.clone())
+                    .await
+                    .expect("register");
+                let home: iroh::RelayUrl = old_ticket
+                    .address
+                    .relay_urls()
+                    .next()
+                    .cloned()
+                    .expect("the first ticket names the home relay");
+                let (survivor, survivor_relay, dead_relay) = if home == url_a {
+                    (url_b, relay_b, relay_a)
+                } else {
+                    (url_a, relay_a, relay_b)
+                };
+                drop(dead_relay);
+                let mut watcher = server.watch_addr();
+                let moved = time::timeout(Duration::from_secs(120), async {
+                    loop {
+                        let address = watcher.get();
+                        if address.relay_urls().any(|url| url == &survivor) {
+                            break address;
+                        }
+                        watcher.updated().await.expect("the endpoint is alive");
+                    }
+                })
+                .await
+                .expect("the watcher shows the surviving relay");
+                assert_eq!(
+                    old_ticket.address.relay_urls().next(),
+                    Some(&home),
+                    "the ticket minted before the move still names the dead relay"
+                );
+                let fresh = server
+                    .register(&src, content_id)
+                    .await
+                    .expect("register again");
+                assert_eq!(
+                    fresh.address, moved,
+                    "register on a spooled blob mints a ticket with the current address"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+                drop(survivor_relay);
+            },
+        );
+    }
+
     /// A loopback fetch runs on a direct path, so a producer whose mesh keeps
     /// the relay for lookup only (the default) serves it — and the ticket
     /// carries the policy to the consumer.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn relay_lookup_only_still_serves_a_direct_fetch() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, false)
-            .await
-            .expect("start producer");
-        let src = temp_file(b"direct bytes");
-        let ticket = server
-            .register(&src, ContentId::new("blob-test-direct"))
-            .await
-            .expect("register");
-        assert!(!ticket.relay_transport);
-        let decoded = super::BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
-        assert!(!decoded.relay_transport);
-        let mut out = Vec::new();
-        fetch(&decoded, &mut out, None)
-            .await
-            .expect("fetch over a direct path");
-        assert_eq!(out, b"direct bytes");
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
+    #[test]
+    fn relay_lookup_only_still_serves_a_direct_fetch() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"direct bytes");
+                let ticket = server
+                    .register(&src, ContentId::new("blob-test-direct"))
+                    .await
+                    .expect("register");
+                assert_eq!(
+                    ticket.relay_transport,
+                    PayloadPath::DirectOnly,
+                    "a relay lookup-only ticket keeps the direct payload path"
+                );
+                let decoded = BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
+                assert_eq!(
+                    decoded.relay_transport,
+                    PayloadPath::DirectOnly,
+                    "the decoded ticket keeps the direct payload path"
+                );
+                let mut out = Vec::new();
+                fetch(&decoded, &mut out, None)
+                    .await
+                    .expect("fetch over a direct path");
+                assert_eq!(
+                    out, b"direct bytes",
+                    "the direct fetch still returns the bytes"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
     }
 
     /// **A peer that connects and goes quiet must not accumulate serve tasks.**
@@ -310,68 +411,101 @@ mod tests {
     /// inside the request being awaited. So a connection that never sends parks
     /// a task, and nothing bounded how many could park at once or freed the
     /// ones that had.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_peer_that_never_sends_does_not_pin_serve_tasks() {
-        use super::produce::ServeLimits;
+    #[test]
+    fn a_peer_that_never_sends_does_not_pin_serve_tasks() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use super::produce::ServeLimits;
 
-        let limits = ServeLimits {
-            pre_auth: Duration::from_millis(300),
-            max_inflight: 4,
-        };
-        let server =
-            BlobServer::start_with_limits(LookupOpts::loopback(), temp_spool(), None, true, limits)
+                let limits = ServeLimits {
+                    pre_auth: Duration::from_millis(300),
+                    max_inflight: 4,
+                    ..ServeLimits::DEFAULT
+                };
+                let server = BlobServer::start_with_limits(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                    limits,
+                )
                 .await
                 .expect("start producer");
 
-        // Connect and then do nothing at all — never open a stream, never send.
-        let mut clients = Vec::new();
-        let mut idle = Vec::new();
-        for _ in 0..12u8 {
-            let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-                .relay_mode(iroh::RelayMode::Disabled)
-                .bind()
-                .await
-                .expect("bind client");
-            if let Ok(conn) = client.connect(server.addr(), super::BLOB_ALPN).await {
-                idle.push(conn);
-            }
-            clients.push(client);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            server.inflight() <= limits.max_inflight,
-            "{} serves in flight, over the {} ceiling",
-            server.inflight(),
-            limits.max_inflight
-        );
+                // Connect and then do nothing at all — never open a stream, never send.
+                let mut clients = Vec::new();
+                let mut idle = Vec::new();
+                for _ in 0..12u8 {
+                    let client = iroh::Endpoint::builder(presets::Minimal)
+                        .relay_mode(iroh::RelayMode::Disabled)
+                        .bind()
+                        .await
+                        .expect("bind client");
+                    if let Ok(connection) = client.connect(server.address(), super::BLOB_ALPN).await
+                    {
+                        idle.push(connection);
+                    }
+                    clients.push(client);
+                }
+                time::sleep(Duration::from_millis(100)).await;
+                assert!(
+                    server.inflight() <= limits.max_inflight,
+                    "{} serves in flight, over the {} ceiling",
+                    server.inflight(),
+                    limits.max_inflight
+                );
 
-        // Past the deadline they must be gone, or the ceiling above is just a
-        // slower way to run out.
-        tokio::time::sleep(limits.pre_auth + Duration::from_millis(400)).await;
-        assert_eq!(
-            server.inflight(),
-            0,
-            "a silent peer still holds serve tasks after the pre-auth deadline"
-        );
+                // Past the deadline they must be gone, or the ceiling above is just a
+                // slower way to run out.
+                time::sleep(limits.pre_auth + Duration::from_millis(400)).await;
+                assert_eq!(
+                    server.inflight(),
+                    0,
+                    "a silent peer still holds serve tasks after the pre-auth deadline"
+                );
 
-        for conn in idle {
-            conn.close(0u32.into(), b"done");
-        }
-        for client in clients {
-            client.close().await;
-        }
-        server.shutdown().await;
+                for connection in idle {
+                    connection.close(0u32.into(), b"done");
+                }
+                for client in clients {
+                    client.close().await;
+                }
+                server.shutdown().await;
+            },
+        );
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn round_trips_a_blob_byte_for_byte() {
-        let payload = vec![7u8; 200_000];
-        assert_eq!(round_trip(&payload).await, payload);
+    #[test]
+    fn round_trips_a_blob_byte_for_byte() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let payload = vec![7u8; 200_000];
+                assert_eq!(
+                    round_trip(&payload).await,
+                    payload,
+                    "a blob round trips byte for byte"
+                );
+            },
+        );
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn round_trips_an_empty_blob() {
-        assert_eq!(round_trip(b"").await, b"");
+    #[test]
+    fn round_trips_an_empty_blob() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                assert_eq!(
+                    round_trip(b"").await,
+                    b"",
+                    "an empty blob round trips to empty bytes"
+                );
+            },
+        );
     }
 
     /// The whole produce → reference → consume path through the **public** surface
@@ -379,188 +513,1521 @@ mod tests {
     /// string an application would ship over gossip, and [`fetch`] streams the
     /// bytes back. Nothing here names an application type, which is the point —
     /// this is the shape any consumer writes, whatever its data model.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn offload_to_fetch_needs_no_application_type() {
-        let payload: Vec<u8> = (0..40_000_u32).map(|byte| byte.to_le_bytes()[0]).collect();
-        let src = temp_file(&payload);
-        let mut server: Option<BlobServer> = None;
+    #[test]
+    fn offload_to_fetch_needs_no_application_type() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let payload: Vec<u8> = (0..40_000_u32).map(|byte| byte.to_le_bytes()[0]).collect();
+                let src = temp_file(&payload);
+                let mut server: Option<BlobServer> = None;
 
-        let ticket = super::offload(
-            &mut server,
-            &LookupOpts::loopback(),
-            true,
-            super::OffloadRequest {
-                path: src.clone(),
-                spool_dir: temp_spool(),
-                content_id: ContentId::new("generic-consumer-group"),
-                password: None,
+                let ticket = super::offload(
+                    &mut server,
+                    &LookupOpts::loopback(),
+                    PayloadPath::RelayAllowed,
+                    super::OffloadRequest {
+                        path: src.clone(),
+                        spool_dir: temp_spool(),
+                        content_id: ContentId::new("generic-consumer-group"),
+                        password: None,
+                    },
+                )
+                .await
+                .expect("offload");
+
+                // Raw bytes, so no base64/UTF-8 detour: the payload cycles 0..=255,
+                // which a frame body would reject outright.
+                let wire = ticket.encode();
+                let decoded = BlobTicket::decode(&wire).expect("ticket round-trips as a string");
+
+                let mut out = Vec::new();
+                fetch(&decoded, &mut out, None).await.expect("fetch");
+                assert_eq!(out, payload, "bytes must survive byte-for-byte");
+
+                // Content-addressed dedup: the same bytes offload to the same ticket
+                // without re-hashing.
+                let again = super::offload(
+                    &mut server,
+                    &LookupOpts::loopback(),
+                    PayloadPath::RelayAllowed,
+                    super::OffloadRequest {
+                        path: src.clone(),
+                        spool_dir: temp_spool(),
+                        content_id: ContentId::new("generic-consumer-group"),
+                        password: None,
+                    },
+                )
+                .await
+                .expect("second offload");
+                assert_eq!(
+                    again.sha256_hex(),
+                    ticket.sha256_hex(),
+                    "offloading to fetch needs no application type and keeps the digest"
+                );
+
+                fs::remove_file(&src).ok();
+                if let Some(server) = server {
+                    server.shutdown().await;
+                }
             },
-        )
-        .await
-        .expect("offload");
-
-        // Raw bytes, so no base64/UTF-8 detour: the payload cycles 0..=255,
-        // which a frame body would reject outright.
-        let wire = ticket.encode();
-        let decoded = super::BlobTicket::decode(&wire).expect("ticket round-trips as a string");
-
-        let mut out = Vec::new();
-        fetch(&decoded, &mut out, None).await.expect("fetch");
-        assert_eq!(out, payload, "bytes must survive byte-for-byte");
-
-        // Content-addressed dedup: the same bytes offload to the same ticket
-        // without re-hashing.
-        let again = super::offload(
-            &mut server,
-            &LookupOpts::loopback(),
-            true,
-            super::OffloadRequest {
-                path: src.clone(),
-                spool_dir: temp_spool(),
-                content_id: ContentId::new("generic-consumer-group"),
-                password: None,
-            },
-        )
-        .await
-        .expect("second offload");
-        assert_eq!(again.sha256_hex(), ticket.sha256_hex());
-
-        fs::remove_file(&src).ok();
-        if let Some(server) = server {
-            server.shutdown().await;
-        }
+        );
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn passworded_blob_requires_the_password() {
-        use crate::protocol::crypto::Password;
-        let password = Password::new("hunter2".to_owned());
-        let server = BlobServer::start(
-            LookupOpts::loopback(),
-            temp_spool(),
-            Some(password.clone()),
-            true,
-        )
-        .await
-        .unwrap();
-        let src = temp_file(b"secret bytes");
-        let ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        assert!(ticket.password, "the ticket must be password-protected");
-
-        // Missing password and a wrong password are both refused.
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "a passworded ticket must not redeem without the password"
-        );
-        out.clear();
-        assert!(
-            fetch(&ticket, &mut out, Some(Password::new("wrong".to_owned())))
+    #[test]
+    fn passworded_blob_requires_the_password() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::crypto::Password;
+                let password = Password::new("hunter2".to_owned());
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    Some(password.clone()),
+                    PayloadPath::RelayAllowed,
+                )
                 .await
-                .is_err(),
-            "a wrong password must be refused"
-        );
-        // The mesh password fetches byte-for-byte.
-        out.clear();
-        fetch(&ticket, &mut out, Some(password))
-            .await
-            .expect("fetch");
-        assert_eq!(out, b"secret bytes");
+                .expect("the loopback blob server starts");
+                let src = temp_file(b"secret bytes");
+                let ticket = server
+                    .register(&src, ContentId::new("blob-test-content"))
+                    .await
+                    .expect("the password-protected blob registers");
+                assert!(ticket.password, "the ticket must be password-protected");
 
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
+                // Missing password and a wrong password are both refused.
+                let mut out = Vec::new();
+                assert!(
+                    fetch(&ticket, &mut out, None).await.is_err(),
+                    "a passworded ticket must not redeem without the password"
+                );
+                out.clear();
+                assert!(
+                    fetch(&ticket, &mut out, Some(Password::new("wrong".to_owned())))
+                        .await
+                        .is_err(),
+                    "a wrong password must be refused"
+                );
+                // The mesh password fetches byte-for-byte.
+                out.clear();
+                fetch(&ticket, &mut out, Some(password))
+                    .await
+                    .expect("fetch");
+                assert_eq!(
+                    out, b"secret bytes",
+                    "a passworded blob returns its bytes with the password"
+                );
+
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
     }
 
     /// The same bytes offloaded under two groups share one spool file, so
     /// evicting one group must leave the other's ticket redeemable.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn evicting_one_group_keeps_a_shared_blob_for_the_other() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
-        let src = temp_file(b"shared bytes");
-        let group_a = ContentId::new("blob-test-group-a");
-        let group_b = ContentId::new("blob-test-group-b");
-        server.register(&src, group_a.clone()).await.unwrap();
-        let ticket_b = server.register(&src, group_b.clone()).await.unwrap();
+    #[test]
+    fn evicting_one_group_keeps_a_shared_blob_for_the_other() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .expect("the loopback blob server starts");
+                let src = temp_file(b"shared bytes");
+                let group_a = ContentId::new("blob-test-group-a");
+                let group_b = ContentId::new("blob-test-group-b");
+                server
+                    .register(&src, group_a.clone())
+                    .await
+                    .expect("the first group registers the file");
+                let ticket_b = server
+                    .register(&src, group_b.clone())
+                    .await
+                    .expect("the second group registers the same file");
 
-        server.evict_content(&group_a).await;
-        let mut out = Vec::new();
-        fetch(&ticket_b, &mut out, None)
-            .await
-            .expect("group B still holds the blob");
-        assert_eq!(out, b"shared bytes");
+                server.evict_content(&group_a).await;
+                let mut out = Vec::new();
+                fetch(&ticket_b, &mut out, None)
+                    .await
+                    .expect("group B still holds the blob");
+                assert_eq!(
+                    out, b"shared bytes",
+                    "evicting one group keeps the shared blob for the other group"
+                );
 
-        server.evict_content(&group_b).await;
-        out.clear();
-        assert!(
-            fetch(&ticket_b, &mut out, None).await.is_err(),
-            "the blob goes once its last group is evicted"
+                server.evict_content(&group_b).await;
+                out.clear();
+                assert!(
+                    fetch(&ticket_b, &mut out, None).await.is_err(),
+                    "the blob goes once its last group is evicted"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
         );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_bad_secret_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
-        let src = temp_file(b"secret payload");
-        let mut ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        ticket.secret = crate::protocol::crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "a wrong secret must be refused"
+    #[test]
+    fn a_bad_secret_is_refused() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .expect("the loopback blob server starts");
+                let src = temp_file(b"secret payload");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-content"))
+                    .await
+                    .expect("the secret blob registers");
+                ticket.secret = crypto::TicketSecret::from([0u8; super::SECRET_LEN]);
+                let mut out = Vec::new();
+                assert!(
+                    fetch(&ticket, &mut out, None).await.is_err(),
+                    "a wrong secret must be refused"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
         );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_unknown_hash_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
-        let src = temp_file(b"real content");
-        let mut ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        ticket.sha256 = super::BlobDigest::from_bytes([0xabu8; super::HASH_LEN]);
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "an unknown hash must be refused"
+    #[test]
+    fn an_unknown_hash_is_refused() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .expect("the loopback blob server starts");
+                let src = temp_file(b"real content");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-content"))
+                    .await
+                    .expect("the blob registers");
+                ticket.sha256 = super::BlobDigest::from([0xabu8; super::HASH_LEN]);
+                let mut out = Vec::new();
+                assert!(
+                    fetch(&ticket, &mut out, None).await.is_err(),
+                    "an unknown hash must be refused"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
         );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_size_disagreement_is_rejected() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
-        let src = temp_file(b"exactly this many bytes");
-        let mut ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        ticket.size += 1; // producer will offer the true size, which won't match
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "a size disagreement must be rejected"
+    #[test]
+    fn a_size_disagreement_is_rejected() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .expect("the loopback blob server starts");
+                let src = temp_file(b"exactly this many bytes");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-content"))
+                    .await
+                    .expect("the blob registers");
+                ticket.size += 1; // producer will offer the true size, which won't match
+                let mut out = Vec::new();
+                assert!(
+                    fetch(&ticket, &mut out, None).await.is_err(),
+                    "a size disagreement must be rejected"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
         );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
+    }
+
+    /// A UDP relay on loopback between a consumer and `upstream`. With `drop_first_socket` it drops
+    /// every datagram of the first socket that talks to it, both ways, and forwards every later
+    /// socket: a path where the handshake of one consumer endpoint never completes while a new
+    /// endpoint gets through. `delay` holds each datagram for that long in each direction.
+    async fn lossy_proxy(
+        upstream: SocketAddr,
+        drop_first_socket: bool,
+        delay: Duration,
+    ) -> SocketAddr {
+        let front = UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+        let address = front.local_addr().expect("proxy address");
+        // The reply tasks send through the front socket, so they share it with the loop.
+        let front = Arc::new(front);
+        tokio::spawn(async move {
+            let mut dropped = None;
+            // One socket per client, shared by its reply task and the loop.
+            let mut routes: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
+            let mut buffer = vec![0u8; 2048];
+            loop {
+                let Ok((read, client)) = front.recv_from(&mut buffer).await else {
+                    return;
+                };
+                if drop_first_socket && *dropped.get_or_insert(client) == client {
+                    continue;
+                }
+                let route = if let Some(route) = routes.get(&client) {
+                    Arc::clone(route)
+                } else {
+                    let route = UdpSocket::bind("127.0.0.1:0").await.expect("bind route");
+                    route.connect(upstream).await.expect("connect route");
+                    // One socket per client, read by a task and written by this loop.
+                    let route = Arc::new(route);
+                    let (reply, front) = (Arc::clone(&route), Arc::clone(&front));
+                    tokio::spawn(async move {
+                        let mut reply_buffer = vec![0u8; 2048];
+                        while let Ok(replied) = reply.recv(&mut reply_buffer).await {
+                            let datagram = reply_buffer[..replied].to_vec();
+                            let front = Arc::clone(&front);
+                            tokio::spawn(async move {
+                                time::sleep(delay).await;
+                                let _ = front.send_to(&datagram, client).await;
+                            });
+                        }
+                    });
+                    routes.insert(client, Arc::clone(&route));
+                    route
+                };
+                let datagram = buffer[..read].to_vec();
+                tokio::spawn(async move {
+                    time::sleep(delay).await;
+                    let _ = route.send(&datagram).await;
+                });
+            }
+        });
+        address
+    }
+
+    /// A UDP relay on loopback that passes every datagram of the consumer at once and paces the
+    /// datagrams of the producer to `bytes_per_second`. A queue holds what the pace does not pass,
+    /// so nothing is lost: the link is slow, not lossy.
+    async fn slow_link_proxy(upstream: SocketAddr, bytes_per_second: u64) -> SocketAddr {
+        let front = UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+        let address = front.local_addr().expect("proxy address");
+        // The reply tasks send through the front socket, so they share it with the loop.
+        let front = Arc::new(front);
+        tokio::spawn(async move {
+            // One socket per client, shared by its reply task and the loop.
+            let mut routes: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
+            let mut buffer = vec![0u8; 2048];
+            loop {
+                let Ok((read, client)) = front.recv_from(&mut buffer).await else {
+                    return;
+                };
+                let route = if let Some(route) = routes.get(&client) {
+                    Arc::clone(route)
+                } else {
+                    let route = UdpSocket::bind("127.0.0.1:0").await.expect("bind route");
+                    route.connect(upstream).await.expect("connect route");
+                    // One socket per client, read by a task and written by this loop.
+                    let route = Arc::new(route);
+                    let (reply, front) = (Arc::clone(&route), Arc::clone(&front));
+                    tokio::spawn(async move {
+                        let mut reply_buffer = vec![0u8; 2048];
+                        let mut free_at = time::Instant::now();
+                        while let Ok(replied) = reply.recv(&mut reply_buffer).await {
+                            let datagram = reply_buffer[..replied].to_vec();
+                            let cost = Duration::from_micros(
+                                replied as u64 * 1_000_000 / bytes_per_second,
+                            );
+                            free_at = free_at.max(time::Instant::now()) + cost;
+                            let (front, send_at) = (Arc::clone(&front), free_at);
+                            tokio::spawn(async move {
+                                time::sleep_until(send_at).await;
+                                let _ = front.send_to(&datagram, client).await;
+                            });
+                        }
+                    });
+                    routes.insert(client, Arc::clone(&route));
+                    route
+                };
+                let _ = route.send(&buffer[..read]).await;
+            }
+        });
+        address
+    }
+
+    /// **A handshake that stalls is retried on a new endpoint, not waited out.**
+    ///
+    /// On a LAN with two interfaces, the reply flight of the producer to one consumer endpoint is
+    /// sometimes lost for good, and every retry from the same endpoint is lost as well. The dial
+    /// waited 30 s for each attempt on that one endpoint. Here the first socket of the consumer
+    /// gets no reply at all. The fetch must give up that attempt after a few seconds, bind a new
+    /// endpoint, and complete through it.
+    #[test]
+    fn a_stalled_handshake_is_retried_on_a_new_endpoint() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes behind a stalled path");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-stalled-handshake"))
+                    .await
+                    .expect("register");
+                let upstream = only_ip_address(&ticket.address);
+                let proxy = lossy_proxy(upstream, true, Duration::ZERO).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let mut out = Vec::new();
+                let fetched =
+                    time::timeout(Duration::from_secs(20), fetch(&ticket, &mut out, None)).await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes through a new endpoint within 20 s: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a stalled path",
+                    "the fetch returns the registered bytes"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A fetch that the caller drops closes the endpoint that it bound.**
+    ///
+    /// `Endpoint::close` is async, so a dropped future cannot await it. A caller that cancels a
+    /// fetch (a deadline, a superseded attempt) must not leave the endpoint open: the task that
+    /// follows its home relay holds a clone of it for the life of the process.
+    #[test]
+    fn a_dropped_fetch_closes_its_endpoint() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes that are never fetched");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-dropped-fetch"))
+                    .await
+                    .expect("register");
+                let upstream = only_ip_address(&ticket.address);
+                let proxy = lossy_proxy(upstream, true, Duration::ZERO).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                // The test keeps a clone of each endpoint that the fetch binds.
+                let bound = Bound::default();
+                let build = || bound.build_anyhow();
+                let mut out = Vec::new();
+                let cancelled = time::timeout(
+                    Duration::from_secs(1),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(5); 3],
+                        None,
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    cancelled.is_err(),
+                    "the fetch still waits for the handshake when the caller drops it"
+                );
+                let endpoint = bound.first();
+                for _ in 0..30 {
+                    if endpoint.is_closed() {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(100)).await;
+                }
+                assert!(
+                    endpoint.is_closed(),
+                    "the endpoint that a dropped fetch bound is closed within 3 s"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A slow handshake gets a longer attempt, not the same short one again.**
+    ///
+    /// A new endpoint is online about 3 s after it binds, and a lossy or distant link needs more
+    /// than 5 s for a handshake. Here every datagram takes 400 ms in each direction, so the
+    /// handshake needs about 0.8 s. The first attempt (500 ms) must give up, and a later attempt
+    /// must wait long enough. A fixed cap of 500 ms never completes.
+    #[test]
+    fn a_slow_handshake_gets_a_longer_attempt() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes behind a slow path");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-slow-handshake"))
+                    .await
+                    .expect("register");
+                let upstream = only_ip_address(&ticket.address);
+                let proxy = lossy_proxy(upstream, false, Duration::from_millis(400)).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let caps = [
+                    Duration::from_millis(500),
+                    Duration::from_millis(1500),
+                    Duration::from_secs(3),
+                ];
+                let build = fresh_endpoint;
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(30),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &caps,
+                        None,
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes on a later, longer attempt within 30 s: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a slow path",
+                    "the fetch returns the registered bytes"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A blob that the link needs more than 2 s to carry is fetched whole.**
+    ///
+    /// The producer buffers the whole file at once, finishes the stream, and used to wait 2 s for
+    /// the consumer to acknowledge all of it before it closed the connection. On a link that
+    /// carries less than the file in 2 s, that close cut the transfer, and the consumer read
+    /// "connection lost" on every attempt. Here the link carries 1 MB/s and the file is 4 MB, so
+    /// the transfer takes about 4 s.
+    #[test]
+    fn a_blob_that_the_link_needs_more_than_2_s_to_carry_is_fetched_whole() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let bytes: Vec<u8> = (0..4_000_000u32).map(|index| (index % 251) as u8).collect();
+                let src = temp_file(&bytes);
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-slow-link"))
+                    .await
+                    .expect("register");
+                let upstream = only_ip_address(&ticket.address);
+                let proxy = slow_link_proxy(upstream, 1_000_000).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(60),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &super::consume::DIAL_CAPS,
+                        None,
+                        fresh_endpoint,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes over a 1 MB/s link: {fetched:?}"
+                );
+                assert_eq!(out, bytes, "the fetch returns every byte of the file");
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **The budget of a serve grows with the file.**
+    ///
+    /// A fixed total time would cut a big file on a slow link, as the 2 s cap did. The budget is
+    /// the stall window plus the time that the file needs at the slowest accepted rate.
+    #[test]
+    fn the_serve_budget_grows_with_the_size_of_the_file() {
+        use super::produce::{ServeLimits, serve_budget};
+
+        let limits = ServeLimits::DEFAULT;
+        assert_eq!(
+            serve_budget(0, limits),
+            limits.ack_stall,
+            "an empty file gets the stall window only"
+        );
+        assert_eq!(
+            serve_budget(limits.min_bytes_per_second * 100, limits),
+            limits.ack_stall + Duration::from_secs(100),
+            "100 times the floor rate adds 100 s"
+        );
+        let zero_rate = ServeLimits {
+            min_bytes_per_second: 0,
+            ..limits
+        };
+        assert_eq!(
+            serve_budget(10, zero_rate),
+            limits.ack_stall + Duration::from_secs(10),
+            "a rate of 0 counts as 1 byte per second, not as a division by zero"
+        );
+    }
+
+    /// A client that sends the fetch request for `ticket` over a connection of its own.
+    /// With `window`, the client accepts at most that many bytes of the stream before it reads.
+    async fn request_without_reading(
+        server: &BlobServer,
+        ticket: &BlobTicket,
+        window: Option<u32>,
+    ) -> (iroh::Endpoint, Connection, SendStream, RecvStream) {
+        let mut builder =
+            iroh::Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled);
+        if let Some(window) = window {
+            let window = VarInt::from_u32(window);
+            builder = builder.transport_config(
+                QuicTransportConfig::builder()
+                    .stream_receive_window(window)
+                    .receive_window(window)
+                    .build(),
+            );
+        }
+        let client = builder.bind().await.expect("bind client");
+        let connection = client
+            .connect(server.address(), super::BLOB_ALPN)
+            .await
+            .expect("connect");
+        let (mut send, recv) = connection.open_bi().await.expect("open stream");
+        send.write_all(ticket.sha256.as_bytes())
+            .await
+            .expect("send hash");
+        send.write_all(ticket.secret.as_bytes())
+            .await
+            .expect("send secret");
+        (client, connection, send, recv)
+    }
+
+    /// **A consumer that stops reading does not hold the serve for ever.**
+    ///
+    /// The consumer accepts `64 KiB` of the stream and then reads nothing. It stays alive and answers
+    /// the packets of the producer, so its connection never idles out, and the stall rule has
+    /// nothing to count. The write of the producer blocks on the flow-control window, so only the
+    /// time budget of the serve can end it. The budget of this serve is 1 s plus 4 MB at 1 MB/s,
+    /// 5 s. A serve with no budget stays for the whole test.
+    #[test]
+    fn a_consumer_that_stops_reading_does_not_hold_the_serve() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use super::produce::ServeLimits;
+
+                let limits = ServeLimits {
+                    ack_stall: Duration::from_secs(1),
+                    min_bytes_per_second: 1_000_000,
+                    ..ServeLimits::DEFAULT
+                };
+                let server = BlobServer::start_with_limits(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                    limits,
+                )
+                .await
+                .expect("start producer");
+                let bytes: Vec<u8> = (0..4_000_000u32).map(|index| (index % 251) as u8).collect();
+                let src = temp_file(&bytes);
+                let ticket = server
+                    .register(&src, ContentId::new("blob-test-silent-reader"))
+                    .await
+                    .expect("register");
+                let (client, connection, _send, _recv) =
+                    request_without_reading(&server, &ticket, Some(64 * 1024)).await;
+                time::sleep(Duration::from_secs(9)).await;
+                assert_eq!(
+                    server.inflight(),
+                    0,
+                    "a consumer that read nothing for 9 s still holds the serve, past its 5 s budget"
+                );
+                let reason = connection.close_reason();
+                assert!(
+                    matches!(
+                        &reason,
+                        Some(ConnectionError::ApplicationClosed(close))
+                            if close.error_code == VarInt::from_u32(super::TOO_SLOW)
+                    ),
+                    "the cut serve closes with TOO_SLOW, not with DONE: {reason:?}"
+                );
+                connection.close(0u32.into(), b"done");
+                client.close().await;
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A consumer that stops acknowledging does not hold the serve for ever.**
+    ///
+    /// The producer waits for the acknowledgement of the tail with no cap on the time that the
+    /// link needs, so a silent consumer must be bounded some other way: by a window with no
+    /// acknowledgement in it. Here the consumer runs on a runtime of its own that blocks its thread
+    /// right after the size header of the answer, so it cannot answer another packet. The file of 1 MB
+    /// fits in the first flow-control window, so the producer reaches the wait for the
+    /// acknowledgement. With a stall window of 1 s, the serve must end within a few seconds. A wait
+    /// with no stall window holds it until the budget of the serve, 1 s plus 1 MB at 16 KiB/s,
+    /// about 62 s.
+    #[test]
+    fn a_consumer_that_stops_acknowledging_does_not_hold_the_serve() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use super::produce::ServeLimits;
+
+                let limits = ServeLimits {
+                    ack_stall: Duration::from_secs(1),
+                    ..ServeLimits::DEFAULT
+                };
+                let server = BlobServer::start_with_limits(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                    limits,
+                )
+                .await
+                .expect("start producer");
+                let bytes: Vec<u8> = (0..1_000_000u32).map(|index| (index % 251) as u8).collect();
+                let src = temp_file(&bytes);
+                let ticket = server
+                    .register(&src, ContentId::new("blob-test-frozen-consumer"))
+                    .await
+                    .expect("register");
+                let address = server.address();
+                let request: Vec<u8> = [
+                    ticket.sha256.as_bytes().as_slice(),
+                    ticket.secret.as_bytes(),
+                ]
+                .concat();
+                let frozen = thread::spawn(move || {
+                    let runtime = Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("consumer runtime");
+                    runtime.block_on(async move {
+                        let client = iroh::Endpoint::builder(presets::Minimal)
+                            .relay_mode(iroh::RelayMode::Disabled)
+                            .bind()
+                            .await
+                            .expect("bind client");
+                        let connection = client
+                            .connect(address, super::BLOB_ALPN)
+                            .await
+                            .expect("connect");
+                        let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
+                        send.write_all(&request).await.expect("send request");
+                        // The size header proves that the request arrived and the data flows.
+                        let mut size = [0u8; 8];
+                        recv.read_exact(&mut size).await.expect("read the size");
+                        // No await until the sleep ends: nothing on this thread can answer a packet.
+                        thread::sleep(Duration::from_secs(9));
+                        client.close().await;
+                    });
+                });
+                // The stall window is 1 s and the serve ends within 2 windows, so 6 s leaves the
+                // margin of a slow machine. The thread of the consumer sleeps 9 s, longer than this
+                // wait, so the consumer is still frozen when the assert runs.
+                time::sleep(Duration::from_secs(6)).await;
+                assert_eq!(
+                    server.inflight(),
+                    0,
+                    "a consumer that was silent for 6 s still holds the serve"
+                );
+                frozen.join().expect("consumer thread");
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A caller endpoint that stalls on every attempt gets a typed error.**
+    ///
+    /// A retry from an endpoint that the producer cannot answer stalls again, and the caller owns
+    /// the endpoint, so only the caller can build a new one. `fetch_with_endpoint` must stop after
+    /// the attempts of its caps and return `BlobError::HandshakeStalled`, and leave the endpoint
+    /// open for the caller to close.
+    #[test]
+    fn a_stalled_caller_endpoint_gets_a_handshake_stalled_error() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes behind a dead path");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-stalled-caller"))
+                    .await
+                    .expect("register");
+                let upstream = only_ip_address(&ticket.address);
+                let proxy = lossy_proxy(upstream, true, Duration::ZERO).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let endpoint = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                let caps = [
+                    Duration::from_millis(200),
+                    Duration::from_millis(300),
+                    Duration::from_millis(400),
+                ];
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(10),
+                    super::consume::fetch_with_endpoint_caps(
+                        &endpoint, &ticket, &mut out, None, &caps,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Err(BlobError::HandshakeStalled))),
+                    "every attempt stalls, so the fetch returns HandshakeStalled within 10 s: {fetched:?}"
+                );
+                assert!(
+                    !endpoint.is_closed(),
+                    "the caller endpoint stays open for the caller to close"
+                );
+                endpoint.close().await;
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// Builds loopback peer endpoints and keeps a clone of each, so that a test sees what a fetch
+    /// binds.
+    #[derive(Clone, Default)]
+    struct Bound(Arc<Mutex<Vec<iroh::Endpoint>>>); // clones share the list of one test
+
+    impl Bound {
+        async fn build(&self) -> Result<iroh::Endpoint, lookup::EndpointError> {
+            let endpoint = lookup::build_peer_endpoint(&LookupOpts::loopback()).await?;
+            self.0.lock().expect("lock").push(endpoint.clone());
+            Ok(endpoint)
+        }
+
+        /// The same build, with the error of an `anyhow` builder.
+        async fn build_anyhow(&self) -> Result<iroh::Endpoint, anyhow::Error> {
+            Ok(self.build().await?)
+        }
+
+        /// The first endpoint that was built.
+        fn first(&self) -> iroh::Endpoint {
+            self.0.lock().expect("lock")[0].clone()
+        }
+
+        fn count(&self) -> usize {
+            self.0.lock().expect("lock").len()
+        }
+
+        /// Whether every endpoint built so far is closed within 6 s. A close that waits for a dial
+        /// with no reply takes about 3 s.
+        async fn all_closed(&self) -> bool {
+            for _ in 0..60 {
+                let open: usize = {
+                    let endpoints = self.0.lock().expect("lock");
+                    endpoints
+                        .iter()
+                        .filter(|endpoint| !endpoint.is_closed())
+                        .count()
+                };
+                if open == 0 {
+                    return true;
+                }
+                time::sleep(Duration::from_millis(100)).await;
+            }
+            false
+        }
+    }
+
+    /// The one IP address of a loopback ticket.
+    fn only_ip_address(address: &iroh::EndpointAddr) -> SocketAddr {
+        let first: Option<SocketAddr> = address.ip_addrs().next().copied();
+        first.expect("a loopback ticket carries one IP address")
+    }
+
+    /// A builder of a loopback peer endpoint, for a fetch that binds its own.
+    async fn fresh_endpoint() -> Result<iroh::Endpoint, anyhow::Error> {
+        Ok(lookup::build_peer_endpoint(&LookupOpts::loopback()).await?)
+    }
+
+    /// A builder that fails, with the error of a custom builder.
+    fn build_error(text: &str) -> Result<iroh::Endpoint, io::Error> {
+        Err(io::Error::other(text.to_owned()))
+    }
+
+    /// A builder whose endpoint is closed when it returns.
+    async fn build_closed(bound: &Bound) -> Result<iroh::Endpoint, lookup::EndpointError> {
+        let closed = bound.build().await?;
+        closed.close().await;
+        Ok(closed)
+    }
+
+    /// A producer behind `lossy_proxy`, and a ticket that dials the proxy.
+    async fn ticket_behind_proxy(
+        content: &str,
+        bytes: &[u8],
+        drop_first_socket: bool,
+        delay: Duration,
+    ) -> (BlobServer, BlobTicket, PathBuf) {
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("start producer");
+        let src = temp_file(bytes);
+        let mut ticket = server
+            .register(&src, ContentId::new(content))
+            .await
+            .expect("register");
+        let upstream = only_ip_address(&ticket.address);
+        let proxy = lossy_proxy(upstream, drop_first_socket, delay).await;
+        ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+        (server, ticket, src)
+    }
+
+    /// **A dial that gets no reply is hedged from a new endpoint at once, not after its cap.**
+    ///
+    /// The reply flight of the producer to one consumer socket is lost for 30 s or more, while a
+    /// new socket gets through at once. Here the first socket gets no reply, and every attempt may
+    /// wait 30 s. The fetch must start a second dial from a new endpoint after the hedge delay and
+    /// complete through it, and it must close both endpoints.
+    #[test]
+    fn a_stalled_first_dial_is_hedged_from_a_new_endpoint() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, ticket, src) = ticket_behind_proxy(
+                    "blob-test-hedged-dial",
+                    b"bytes behind a stalled flow",
+                    true,
+                    Duration::ZERO,
+                )
+                .await;
+                let bound = Bound::default();
+                let build = || bound.build_anyhow();
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(15),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(30); 3],
+                        Some(Duration::from_millis(300)),
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes through the hedge within 15 s, long before the 30 s cap: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a stalled flow",
+                    "the fetch returns the registered bytes"
+                );
+                assert_eq!(
+                    bound.count(),
+                    2,
+                    "the first attempt binds one endpoint and the hedge binds one"
+                );
+                assert!(
+                    bound.all_closed().await,
+                    "both endpoints are closed within 6 s"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A handshake that completes in time starts no hedge.**
+    ///
+    /// The hedge costs nothing in the good case: a second endpoint is bound only for a dial that
+    /// has no reply after the hedge delay.
+    #[test]
+    fn a_fast_handshake_starts_no_hedge() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, ticket, src) = ticket_behind_proxy(
+                    "blob-test-no-hedge",
+                    b"bytes behind a good path",
+                    false,
+                    Duration::ZERO,
+                )
+                .await;
+                let bound = Bound::default();
+                let build = || bound.build_anyhow();
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(15),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(30); 3],
+                        Some(Duration::from_secs(5)),
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes within 15 s: {fetched:?}"
+                );
+                assert_eq!(
+                    bound.count(),
+                    1,
+                    "a handshake that completes before the hedge delay binds no second endpoint"
+                );
+                assert!(
+                    bound.all_closed().await,
+                    "the endpoint is closed within 6 s"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A caller endpoint that stalls is hedged from a new endpoint, and stays open.**
+    ///
+    /// `fetch_hedged` dials first from the endpoint of the caller. When that dial has no reply
+    /// after the hedge delay, it binds one more endpoint with the builder of the caller and dials
+    /// from it. The fetch completes, the hedge endpoint is closed, and the caller endpoint is not.
+    #[test]
+    fn a_stalled_caller_endpoint_is_hedged_and_stays_open() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, ticket, src) = ticket_behind_proxy(
+                    "blob-test-hedged-caller",
+                    b"bytes behind a stalled caller",
+                    true,
+                    Duration::ZERO,
+                )
+                .await;
+                let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                let bound = Bound::default();
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(15),
+                    super::consume::fetch_hedged_caps(
+                        &caller,
+                        || bound.build(),
+                        &ticket,
+                        &mut out,
+                        None,
+                        &[Duration::from_secs(30); 3],
+                        Some(Duration::from_millis(300)),
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes through the hedge within 15 s: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a stalled caller",
+                    "the fetch returns the registered bytes"
+                );
+                assert_eq!(bound.count(), 1, "the hedge binds one endpoint");
+                assert!(
+                    bound.all_closed().await,
+                    "the hedge endpoint is closed within 6 s"
+                );
+                assert!(
+                    !caller.is_closed(),
+                    "the caller endpoint stays open for the caller to close"
+                );
+                caller.close().await;
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A hedge that loses closes its endpoint.**
+    ///
+    /// Every datagram takes 600 ms in each direction, so the handshake needs more than the hedge
+    /// delay and the hedge starts. The first dial began earlier and wins. The endpoint of the hedge
+    /// has no connection to carry, so it must close, and no connection is left half open.
+    #[test]
+    fn a_hedge_that_loses_closes_its_endpoint() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"bytes behind a slow flow");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-losing-hedge"))
+                    .await
+                    .expect("register");
+                let upstream = only_ip_address(&ticket.address);
+                let proxy = lossy_proxy(upstream, false, Duration::from_millis(600)).await;
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id).with_ip_addr(proxy);
+                let bound = Bound::default();
+                let build = || bound.build_anyhow();
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(30),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(20); 3],
+                        Some(Duration::from_millis(300)),
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes within 30 s: {fetched:?}"
+                );
+                assert_eq!(
+                    bound.count(),
+                    2,
+                    "the handshake is slower than the hedge delay, so the hedge binds an endpoint"
+                );
+                assert!(
+                    bound.all_closed().await,
+                    "both endpoints are closed within 6 s, the loser too"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A hedge whose endpoint is slow to build does not hold the dial past its cap.**
+    ///
+    /// The builder of the second endpoint can be slow: a ladder walk with every relay down takes
+    /// 10 s for each rung. The cap of the attempt still applies while it builds.
+    #[test]
+    fn a_slow_hedge_build_keeps_the_cap() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, ticket, src) = ticket_behind_proxy(
+                    "blob-test-slow-hedge-build",
+                    b"bytes behind a stalled flow",
+                    true,
+                    Duration::ZERO,
+                )
+                .await;
+                let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                // The first endpoint of the caller stalls, and the builder never returns.
+                let build = || async {
+                    time::sleep(Duration::from_secs(3600)).await;
+                    build_error("never built")
+                };
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(10),
+                    super::consume::fetch_hedged_caps(
+                        &caller,
+                        build,
+                        &ticket,
+                        &mut out,
+                        None,
+                        &[Duration::from_secs(1); 3],
+                        Some(Duration::from_millis(300)),
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Err(BlobError::HandshakeStalled))),
+                    "every attempt ends at its 1 s cap, so the fetch returns HandshakeStalled within 10 s: {fetched:?}"
+                );
+                caller.close().await;
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A hedge that cannot be built leaves the first dial alone.**
+    ///
+    /// Every datagram takes 600 ms in each direction, so the handshake needs more than the hedge
+    /// delay but completes. A builder that fails at once must not end the attempt: the first dial
+    /// keeps waiting for its handshake until its cap.
+    #[test]
+    fn a_failed_hedge_build_keeps_the_first_dial() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, ticket, src) = ticket_behind_proxy(
+                    "blob-test-failed-hedge-build",
+                    b"bytes behind a slow flow",
+                    false,
+                    Duration::from_millis(600),
+                )
+                .await;
+                let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                let build = || async { build_error("cannot build") };
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(30),
+                    super::consume::fetch_hedged_caps(
+                        &caller,
+                        build,
+                        &ticket,
+                        &mut out,
+                        None,
+                        &[Duration::from_secs(20); 3],
+                        Some(Duration::from_millis(300)),
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the first dial completes although the hedge cannot be built: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a slow flow",
+                    "the fetch returns the registered bytes"
+                );
+                caller.close().await;
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A first dial that fails leaves the hedge its chance.**
+    ///
+    /// The first dial gets no reply, and its endpoint is closed after the hedge started, so the dial
+    /// fails. The hedge needs more time than that, because each datagram takes 500 ms. The fresh
+    /// socket of the hedge is the point of the hedge: the fetch completes through it, and does not
+    /// return the error of the old endpoint.
+    #[test]
+    fn a_first_dial_that_fails_leaves_the_hedge_its_chance() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, ticket, src) = ticket_behind_proxy(
+                    "blob-test-failed-first-dial",
+                    b"bytes behind a failed dial",
+                    true,
+                    Duration::from_millis(500),
+                )
+                .await;
+                let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                let closing = caller.clone();
+                let closer = tokio::spawn(async move {
+                    time::sleep(Duration::from_millis(800)).await;
+                    closing.close().await;
+                });
+                let bound = Bound::default();
+                let mut out = Vec::new();
+                let fetched = time::timeout(
+                    Duration::from_secs(15),
+                    super::consume::fetch_hedged_caps(
+                        &caller,
+                        || bound.build(),
+                        &ticket,
+                        &mut out,
+                        None,
+                        &[Duration::from_secs(30); 3],
+                        Some(Duration::from_millis(300)),
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(fetched, Ok(Ok(()))),
+                    "the fetch completes through the hedge after the first dial fails: {fetched:?}"
+                );
+                assert_eq!(
+                    out, b"bytes behind a failed dial",
+                    "the fetch returns the registered bytes"
+                );
+                closer.await.expect("the caller endpoint closes");
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A first dial that fails and a hedge that stays silent is a stall.**
+    ///
+    /// Neither dial got a handshake by the cap, so the caller must retire its endpoint, as it
+    /// does for any stall. The error of the first dial is not what the caller acts on. This calls
+    /// one attempt: a second attempt on the closed endpoint would fail at once for another reason.
+    #[test]
+    fn a_failed_first_dial_and_a_silent_hedge_is_a_stall() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, mut ticket, src) = ticket_behind_proxy(
+                    "blob-test-failed-first-silent-hedge",
+                    b"bytes never fetched",
+                    false,
+                    Duration::ZERO,
+                )
+                .await;
+                // A socket that nobody reads: no reply ever comes, on any endpoint.
+                let silent = UdpSocket::bind("127.0.0.1:0").await.expect("bind silent");
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id)
+                    .with_ip_addr(silent.local_addr().expect("silent address"));
+                let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                    .await
+                    .expect("caller endpoint");
+                let closing = caller.clone();
+                let closer = tokio::spawn(async move {
+                    time::sleep(Duration::from_millis(800)).await;
+                    closing.close().await;
+                });
+                let bound = Bound::default();
+                let attempt = time::timeout(
+                    Duration::from_secs(10),
+                    super::consume::dial_once(
+                        &caller,
+                        &ticket,
+                        Duration::from_secs(2),
+                        Some(Duration::from_millis(300)),
+                        &|| async { Ok(bound.build().await?) },
+                    ),
+                )
+                .await;
+                let error = attempt
+                    .expect("the attempt ends at its cap")
+                    .err()
+                    .expect("no dial connects");
+                assert!(
+                    error.to_string().starts_with("no handshake within"),
+                    "the first dial fails at 800 ms and the hedge gets no reply, so the attempt is a stall: {error}"
+                );
+                closer.await.expect("the caller endpoint closes");
+                assert!(
+                    bound.all_closed().await,
+                    "every hedge endpoint is closed within 6 s"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// **A hedge whose dial fails leaves the first dial waiting.**
+    ///
+    /// The hedge endpoint has no transport, so its dial fails at once. Every datagram takes
+    /// 600 ms in each direction, so the first dial needs more than the hedge delay and still
+    /// completes. The failed hedge must not end the attempt.
+    #[test]
+    fn a_failed_hedge_dial_leaves_the_first_dial_waiting() {
+        let guard = ::habilis_network_test_tracing::init();
+        // The hedge endpoint is closed, and the address book of a closed endpoint says so.
+        guard.allow_warn("habilis_network::lookup", "no lookup services");
+        ::habilis_network_test_tracing::run_multi_thread(guard, 2, async {
+            let (server, ticket, src) = ticket_behind_proxy(
+                "blob-test-failed-hedge-dial",
+                b"bytes behind a slow flow",
+                false,
+                Duration::from_millis(600),
+            )
+            .await;
+            let caller = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                .await
+                .expect("caller endpoint");
+            let bound = Bound::default();
+            let build = || build_closed(&bound);
+            let mut out = Vec::new();
+            let fetched = time::timeout(
+                Duration::from_secs(30),
+                super::consume::fetch_hedged_caps(
+                    &caller,
+                    build,
+                    &ticket,
+                    &mut out,
+                    None,
+                    &[Duration::from_secs(20); 3],
+                    Some(Duration::from_millis(300)),
+                ),
+            )
+            .await;
+            assert!(
+                matches!(fetched, Ok(Ok(()))),
+                "the first dial completes although the hedge dial fails: {fetched:?}"
+            );
+            assert_eq!(
+                out, b"bytes behind a slow flow",
+                "the fetch returns the registered bytes"
+            );
+            assert_eq!(bound.count(), 1, "the hedge bound one endpoint");
+            caller.close().await;
+            fs::remove_file(&src).ok();
+            server.shutdown().await;
+        });
+    }
+
+    /// **A hedged fetch that the caller drops closes both endpoints.**
+    ///
+    /// Both dials get no reply (a socket that nobody reads), and the caller gives up while they
+    /// wait. The endpoint of the first attempt and the endpoint of the hedge must both close.
+    #[test]
+    fn a_dropped_hedged_fetch_closes_both_endpoints() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, mut ticket, src) = ticket_behind_proxy(
+                    "blob-test-dropped-hedge",
+                    b"bytes never fetched",
+                    false,
+                    Duration::ZERO,
+                )
+                .await;
+                // A socket that nobody reads: no reply ever comes.
+                let silent = UdpSocket::bind("127.0.0.1:0").await.expect("bind silent");
+                ticket.address = iroh::EndpointAddr::new(ticket.address.id)
+                    .with_ip_addr(silent.local_addr().expect("silent address"));
+                let bound = Bound::default();
+                let build = || bound.build_anyhow();
+                let mut out = Vec::new();
+                let cancelled = time::timeout(
+                    Duration::from_millis(2500),
+                    super::consume::fetch_building(
+                        &ticket,
+                        &mut out,
+                        &ticket.secret,
+                        &[Duration::from_secs(30); 3],
+                        Some(Duration::from_millis(300)),
+                        build,
+                    ),
+                )
+                .await;
+                assert!(
+                    cancelled.is_err(),
+                    "the fetch still waits when the caller drops it"
+                );
+                assert_eq!(
+                    bound.count(),
+                    2,
+                    "the first attempt and the hedge each bound an endpoint"
+                );
+                assert!(
+                    bound.all_closed().await,
+                    "both endpoints are closed within 6 s of the drop"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
+    }
+
+    /// The caps of the dial attempts grow, and the last one repeats. The tests above pass their own
+    /// caps, so this pins the real ones.
+    #[test]
+    fn the_dial_caps_grow_and_the_last_one_repeats() {
+        let caps: Vec<u64> = (0..5)
+            .map(|attempt| super::consume::cap_of(&super::consume::DIAL_CAPS, attempt).as_secs())
+            .collect();
+        assert_eq!(
+            caps,
+            [5, 10, 20, 20, 20],
+            "the caps of the first 5 attempts, in seconds"
+        );
     }
 }

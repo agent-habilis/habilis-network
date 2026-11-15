@@ -12,17 +12,22 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::{EndpointId, RelayUrl};
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, Membership, Messaging, Request,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use std::{env, fs};
+use tokio::{sync, time};
 /// Members of the first group: the creator, who hosts the rendezvous, and five
 /// joiners. Each joiner ends with five links, above the release count of three.
 const GROUP: usize = 6;
 
-fn serial() -> &'static tokio::sync::Mutex<()> {
-    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+fn serial() -> &'static sync::Mutex<()> {
+    static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| sync::Mutex::new(()))
 }
 
 fn logs() -> String {
@@ -37,7 +42,9 @@ fn count(needle: &str) -> usize {
 /// the whole buffer holds lines from the start of the test, and from members the step did not touch.
 /// A line count, not a byte offset: a count cannot fall inside a character.
 fn logs_since(since: usize) -> String {
-    logs().lines().skip(since).collect::<Vec<_>>().join("\n")
+    let text = logs();
+    let lines: Vec<_> = text.lines().skip(since).collect();
+    lines.join("\n")
 }
 
 /// Whether, since `since`, the ladder of `local` considered a path of the member that bound
@@ -83,17 +90,18 @@ fn ladder_lines(since: usize, local: &EndpointId, remote_ports: &[u16]) -> Strin
 /// of any other member, the rendezvous host included, does not count.
 fn pair_link_closed(since: usize, one: &EndpointId, two: &EndpointId) -> bool {
     let log = logs_since(since);
-    let closed = log.lines().any(|line| {
+    let closed: bool = log.lines().any(|line| {
         line.contains("gossip link on the relay path past the deadline: closing it")
             && (line.contains(&format!("remote={one} "))
                 || line.contains(&format!("remote={two} ")))
     });
-    let down = log.lines().any(|line| {
+    let down_from = |local: &EndpointId, far: &EndpointId, line: &str| {
+        line.contains(&format!("local={} ", local.fmt_short()))
+            && line.contains(&format!("endpoint_id={far} "))
+    };
+    let down: bool = log.lines().any(|line| {
         line.contains("gossip neighbor down")
-            && ((line.contains(&format!("local={} ", one.fmt_short()))
-                && line.contains(&format!("endpoint_id={two} ")))
-                || (line.contains(&format!("local={} ", two.fmt_short()))
-                    && line.contains(&format!("endpoint_id={one} "))))
+            && (down_from(one, two, line) || down_from(two, one, line))
     });
     closed && down
 }
@@ -103,16 +111,19 @@ fn pair_link_closed(since: usize, one: &EndpointId, two: &EndpointId) -> bool {
 /// comes back and leaves again counts twice. The creator hosts the rendezvous
 /// and has no such link, so it never counts.
 fn rendezvous_links_down() -> usize {
-    logs()
-        .lines()
-        .filter(|line| line.contains("gossip neighbor down") && line.contains("is_rendezvous=true"))
-        .count()
+    let text = logs();
+    let lines = text.lines().filter(|line| {
+        let down = line.contains("gossip neighbor down");
+        down && line.contains("is_rendezvous=true")
+    });
+    lines.count()
 }
 
 /// The lines that say how the rendezvous was held, let go of and re-grafted: the
 /// last 120, because the lines that explain a failure come after the group forms.
 fn rendezvous_trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -127,19 +138,16 @@ fn rendezvous_trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take(120)
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    let recent = lines.into_iter().rev().take(120);
+    let recent: Vec<_> = recent.rev().collect();
+    recent.join("\n")
 }
 
 /// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
 fn dump_logs() {
-    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
-        let _ = std::fs::write(path, logs());
+    if let Ok(path) = env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = fs::write(path, logs());
     }
 }
 
@@ -149,7 +157,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -161,9 +169,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             events,
@@ -172,46 +182,44 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![Transport::Udp],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(vec![Transport::Udp])
+            .relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     fn pump(&mut self) {
         while self.events.try_recv().is_ok() {}
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen_msgs.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(message);
         }
     }
 
     fn saw_msg(&mut self, text: &str) -> bool {
         self.pump();
-        self.seen_msgs.iter().any(|msg| msg.text == text)
+        self.seen_msgs.iter().any(|message| message.text == text)
     }
 
     /// Whether this member holds a live link to the member `nick`.
     async fn linked_to(&self, nick: &str) -> bool {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
             .and_then(|roster| {
                 roster["peers"].as_array().map(|peers| {
                     peers
@@ -225,11 +233,11 @@ impl Member {
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
@@ -237,10 +245,12 @@ impl Member {
     async fn send(&self, text: &str) {
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send {
-                to: None,
-                body,
-                reply,
+            .request(|reply| {
+                Request::Messaging(Messaging::Send {
+                    to: None,
+                    body,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -255,9 +265,11 @@ impl Member {
     /// Take UDP away from this member alone, to the nodes bound on `ports`.
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -265,7 +277,7 @@ impl Member {
 
     async fn block_udp(&self, blocked: bool) {
         self.membership
-            .request(|reply| Request::BlockUdp { blocked, reply })
+            .request(|reply| Request::Blocking(Blocking::BlockUdp { blocked, reply }))
             .await
             .expect("the loop answers");
     }
@@ -289,7 +301,7 @@ async fn rosters_until(members: &[&Member], peers: usize, deadline: Duration) ->
         if rosters.iter().all(|len| *len == peers) || started.elapsed() >= deadline {
             return rosters;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -307,7 +319,7 @@ async fn group_that_let_go(relay: &RelayUrl) -> Vec<Member> {
     for index in 1..GROUP {
         let member = Member::join(&format!("member-{index}"), &members[0]).await;
         members.push(member);
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
     assert!(
         all_rosters_hold(&refs(&members), GROUP - 1, Duration::from_mins(1)).await,
@@ -355,9 +367,7 @@ fn a_late_joiner_finds_a_mesh_where_every_member_let_go_of_the_rendezvous() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _serial = serial().lock().await;
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut members = group_that_let_go(&relay).await;
 
         let late = Member::join("late-joiner", &members[0]).await;
@@ -382,9 +392,7 @@ fn the_beacon_holder_leaving_is_replaced_though_every_other_member_let_go_of_it(
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _serial = serial().lock().await;
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut members = group_that_let_go(&relay).await;
         let before = count("beacon role active");
 
@@ -421,9 +429,7 @@ fn a_link_left_on_the_relay_is_closed_and_the_heal_brings_it_back() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _serial = serial().lock().await;
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let creator = Member::create("alice", &relay).await;
         assert!(
             eventually(Duration::from_mins(1), || logs()
@@ -456,7 +462,7 @@ fn a_link_left_on_the_relay_is_closed_and_the_heal_brings_it_back() {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(90) {
             alice.send("after the heal").await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            time::sleep(Duration::from_secs(2)).await;
             if bob.saw_msg("after the heal") {
                 healed = true;
                 break;
@@ -475,7 +481,7 @@ fn refs(members: &[Member]) -> Vec<&Member> {
     members.iter().collect()
 }
 
-/// The cut between two chosen nodes (`Request::BlockIpTo`): they lose UDP to
+/// The cut between two chosen nodes (`Blocking::BlockIpTo`): they lose UDP to
 /// each other and to no one else. Their link falls back to the relay, which
 /// carries no payload on this mesh, so it is closed after 15 seconds; the heal
 /// brings it back once the cut is lifted. The process-wide block of the test
@@ -498,9 +504,7 @@ fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _serial = serial().lock().await;
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut members = vec![Member::create("member-0", &relay).await];
         assert!(
             eventually(Duration::from_mins(1), || logs()
@@ -527,7 +531,7 @@ fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
                 "member-1 and member-2 never linked to each other before the cut\n{}",
                 rendezvous_trace()
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         // Cut member-1 from member-2, and nobody else. Every check about the cut reads the log from here.
@@ -564,7 +568,7 @@ fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
         let started = Instant::now();
         while started.elapsed() < Duration::from_mins(2) {
             members[1].send("after the cut").await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            time::sleep(Duration::from_secs(2)).await;
             if members[2].saw_msg("after the cut") {
                 healed = true;
                 break;

@@ -28,10 +28,15 @@ class Waiting<T> {
   }
 }
 
+const KEY = 'cd'.repeat(32)
+/** The shape of the engine: one slice per author, keyed by the author key. */
+const STATE = JSON.stringify({ [KEY]: { a: 1 } })
+
 function roster(...nicks: string[]): string {
   return JSON.stringify({
     peers: nicks.map((nickname) => ({
       nickname,
+      key: KEY,
       last_seen_secs_ago: 1,
       quiet: false,
       reach: 'direct',
@@ -46,6 +51,7 @@ interface Fake {
   events: Waiting<string | undefined>
   module: HabilisNetworkWasmModule
   sent: { to: string | undefined; text: string }[]
+  sentToKey: { key: string; text: string }[]
   closes: number
   rosterJson: string
 }
@@ -57,6 +63,7 @@ function fake(): Fake {
     msgs,
     events,
     sent: [],
+    sentToKey: [],
     closes: 0,
     rosterJson: roster(),
     module: undefined as unknown as HabilisNetworkWasmModule,
@@ -70,12 +77,16 @@ function fake(): Fake {
       handle.sent.push({ to, text })
       return Promise.resolve()
     },
+    sendToKey: (key, text) => {
+      handle.sentToKey.push({ key, text })
+      return Promise.resolve()
+    },
     nextMsg: () => msgs.take(),
     nextEvent: () => events.take(),
     peersJson: () => Promise.resolve(handle.rosterJson),
     peerCount: () => Promise.resolve(0),
     stateJson: () => Promise.resolve('{}'),
-    stateMerge: () => Promise.resolve('{"a":1}'),
+    stateMerge: () => Promise.resolve(STATE),
     close: () => {
       handle.closes += 1
       return Promise.resolve()
@@ -121,7 +132,7 @@ describe('openWasm', () => {
   test('messages and events reach the sink', async () => {
     const wasm = fake()
     const msgs: BackendMsg[] = []
-    const presence: { kind: string; nick: string }[] = []
+    const presence: { kind: string; nick: string; key: string }[] = []
     const states: string[] = []
     const extras: MeshEvent[] = []
     const opened = await openWasm(wasm.module, '{}')({
@@ -134,24 +145,24 @@ describe('openWasm', () => {
       event: (event) => extras.push(event),
     })
 
-    wasm.msgs.put(JSON.stringify({ nick: 'bob', directed: true, text: 'hi' }))
-    wasm.events.put(JSON.stringify({ kind: 'joined', nick: 'bob' }))
+    wasm.msgs.put(JSON.stringify({ nick: 'bob', key: KEY, directed: true, text: 'hi' }))
+    wasm.events.put(JSON.stringify({ kind: 'joined', nick: 'bob', key: KEY }))
     wasm.events.put(
       JSON.stringify({
         kind: 'state_changed',
         channel: 'state',
         author: 'bob',
-        document: { a: 1 },
+        document: { [KEY]: { a: 1 } },
         is_self: false,
       }),
     )
-    wasm.events.put(JSON.stringify({ kind: 'quiet', nick: 'bob', last_seen_secs_ago: 99 }))
+    wasm.events.put(JSON.stringify({ kind: 'quiet', nick: 'bob', key: KEY, last_seen_secs_ago: 99 }))
     await settle()
 
-    expect(msgs).toEqual([{ from: 'bob', text: 'hi', directed: true }])
-    expect(presence).toEqual([{ kind: 'joined', nick: 'bob' }])
-    expect(states).toEqual(['{"a":1}'])
-    expect(extras).toEqual([{ kind: 'quiet', nick: 'bob' }])
+    expect(msgs).toEqual([{ from: 'bob', key: KEY, text: 'hi', directed: true }])
+    expect(presence).toEqual([{ kind: 'joined', nick: 'bob', key: KEY }])
+    expect(states).toEqual([STATE])
+    expect(extras).toEqual([{ kind: 'quiet', nick: 'bob', key: KEY }])
     await opened.backend.close()
   })
 
@@ -188,6 +199,22 @@ describe('openWasm', () => {
     await opened.backend.send('bob', 'two')
     expect(wasm.sent[0]?.to).toBeUndefined()
     expect(wasm.sent[1]?.to).toBe('bob')
+    await opened.backend.close()
+  })
+
+  test('sendToKey passes the key through and not the nickname path', async () => {
+    const wasm = fake()
+    const opened = await openWasm(wasm.module, '{}')({
+      msg: () => {},
+      roster: () => {},
+      state: () => {},
+      presence: () => {},
+      failed: () => {},
+      closed: () => {},
+    })
+    await opened.backend.sendToKey(KEY, 'for one of two')
+    expect(wasm.sentToKey).toEqual([{ key: KEY, text: 'for one of two' }])
+    expect(wasm.sent).toEqual([])
     await opened.backend.close()
   })
 })

@@ -16,7 +16,12 @@ export interface MeshPeerHandle {
   /** One whole message; refused, not split, when it does not fit. `to` absent = broadcast. */
   send(to: string | undefined, text: string): Promise<void>
   /**
-   * The next inbound message as JSON (`{nick, directed, text}`), or
+   * One whole message to the member that holds an author key (64 lowercase hex digits); refused,
+   * not split, when it does not fit. Two members can use one nickname; a key names one.
+   */
+  sendToKey(key: string, text: string): Promise<void>
+  /**
+   * The next inbound message as JSON (`{nick, key, directed, text}`), or
    * `undefined` once the mesh is gone. One in-flight call at a time is the
    * intended shape; a concurrent second call waits.
    */

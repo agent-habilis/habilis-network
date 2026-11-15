@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::util::wait_for;
 use crate::util::webdriver::{Driver, capabilities, session_refused};
 
-use super::{Harvest, Skip, server};
+use super::{Harvest, Skip, harness};
 
 /// Run one cell and harvest what the page published.
 pub(super) fn run(
@@ -57,7 +57,7 @@ pub(super) fn run(
             .unwrap_or_default()
     };
 
-    let url = format!("{}/?pressure={pressure}", server::URL);
+    let url = format!("{}/?pressure={pressure}", harness::URL);
     let _ = driver.post(
         &format!("/session/{session}/url"),
         &serde_json::json!({ "url": url }),

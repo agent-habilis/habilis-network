@@ -1,6 +1,6 @@
 //! Behavioural knobs. Changing these affects timing, capacity, and
 //! policy but never the on-the-wire format — the size cap belongs in
-//! `protocol::message` (`MAX_MESSAGE_SIZE`).
+//! `protocol::messages` (`MAX_MESSAGE_SIZE`).
 //!
 //! **The split with `crate::consts` is by who may change a value.** A `pub
 //! const` here is fixed at build time; a `pub fn` reads the process [`Tuning`]
@@ -9,23 +9,16 @@
 
 use std::time::Duration;
 
-/// In-memory message-log capacity: how many recent messages each member
-/// retains as the anti-entropy recovery source and poll/fetch history. A
-/// bigger log lets a reconnecting peer recover a longer gap. It also anchors
-/// the shared IPC response cap.
-pub const MESSAGE_LOG_SIZE: usize = 1000;
-const _: () = assert!(MESSAGE_LOG_SIZE >= 1, "a zero-length log retains nothing");
+use std::sync;
+/// How many completed shard groups are remembered, so that a group is surfaced once. A group
+/// that a repeat of its shards would re-complete is not surfaced again. It stays 1000 as the
+/// count of groups a member keeps; the old log size it was tied to no longer exists.
+pub const REASSEMBLED_GROUPS_CAP: usize = 1000;
 
-/// How many recently-seen message ids are retained for duplicate
-/// suppression. Kept at **2× the message log** so it always covers the
-/// retention window with margin: anti-entropy resends any message still
-/// in the log, and a resend whose id had scrolled out of this set would be
-/// reprocessed and **re-surfaced**. Derived, so the two cannot drift.
-pub const SEEN_IDS_CAP: usize = MESSAGE_LOG_SIZE * 2;
-const _: () = assert!(
-    SEEN_IDS_CAP >= MESSAGE_LOG_SIZE,
-    "the dedup set must outlive the message log"
-);
+/// How many recently-seen message ids are retained for duplicate suppression. Shard frames are
+/// not in this set: the reassembly store dedups their slots. It stays 2000, twice the 1000 that
+/// it was derived from, so the dedup window of a busy room is the same as before.
+pub const SEEN_IDS_CAP: usize = 2000;
 
 /// How many outbound frames are buffered while the node has no gossip link
 /// yet (sent before the first `NeighborUp`). Flushed in order once connected;
@@ -46,20 +39,31 @@ pub const PENDING_OUTBOUND_CAP: usize = 1024;
 /// above a typical mesh so recent peers are always retained.
 pub const KNOWN_ENDPOINTS_CAP: usize = 64;
 
-/// Anti-entropy: how often a member broadcasts its digest (recent
-/// message ids it holds) so peers can re-send anything it missed
-/// while partitioned/asleep. Short enough that a returning peer
-/// recovers within a couple of cycles; digests are small and a
-/// re-send only happens when there is an actual gap, so steady-state
-/// cost is one tiny message per interval. Hidden flag
-/// `--antientropy-interval-secs` so the backfill tests reconcile in
-/// seconds. Clamped to `>= 1 s`.
-pub const ANTIENTROPY_INTERVAL: Duration = Duration::from_secs(10);
+/// Backfill: how often a node runs its backfill check, which asks peers for the slices it lacks
+/// after a partition or a sleep. A returning peer recovers within a couple of cycles, and a
+/// steady mesh pays one small check per interval. The CLI sets it with `--backfill-interval-secs`,
+/// so the backfill tests reconcile in seconds. Clamped to `>= 1 s`.
+pub const BACKFILL_INTERVAL: Duration = Duration::from_secs(10);
 
-/// The live value, after any CLI override of [`ANTIENTROPY_INTERVAL`].
+/// How long a slice pull waits for its answer. A pull that the holder does not answer in this time is
+/// dropped, and the asker pulls again at its next tick.
+pub const DIGEST_PULL_TTL: Duration = Duration::from_secs(5);
+
+/// The live value, after any CLI override of [`BACKFILL_INTERVAL`].
+///
+/// # Examples
+///
+/// The backfill interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::backfill_interval;
+/// use std::time::Duration;
+///
+/// assert!(backfill_interval() > Duration::ZERO);
+/// ```
 #[must_use]
-pub fn antientropy_interval() -> Duration {
-    current().antientropy_interval.max(Duration::from_secs(1))
+pub fn backfill_interval() -> Duration {
+    current().backfill_interval.max(Duration::from_secs(1))
 }
 
 /// How often a node re-broadcasts its relay **link-state** vector (its own
@@ -86,31 +90,6 @@ pub const LINKSTATE_MAX_AGE: Duration = LINKSTATE_INTERVAL.saturating_mul(3);
 /// hole punch.
 pub const MULTIHOP_RELAY_STUCK: Duration = Duration::from_secs(20);
 
-/// Max ids advertised per digest **window**. A digest carries up to two
-/// windows: an **open-ended newest** one (`[lo, i64::MAX]`, which drives
-/// reconnect recovery — holders re-send every *newer* message the sender
-/// lacks) and a rolling **closed** older one (`[lo, hi]`, which reconciles
-/// deep interior gaps without re-sending the out-of-window remainder). At
-/// 70 ids each (~140 total) the body packs the 16-byte dedup keys
-/// Base58-encoded (~22 chars/id) to ~3.1 KB; plus the `{windows:[…]}` and
-/// message envelope (the mesh id alone is ~80 chars) it stays under
-/// `MAX_MESSAGE_SIZE` (3840) — guarded by the `digest_fits_gossip_cap`
-/// test. Sized to a single gossip message, **not** the (larger,
-/// configurable) log, which the rolling cursor sweeps across rounds.
-pub const ANTIENTROPY_DIGEST_WINDOW_IDS: usize = 70;
-
-/// Max messages re-broadcast in response to one received digest, so a
-/// far-behind peer can't trigger an unbounded burst. This throttles
-/// deep-backfill throughput (~`this × peers` messages per
-/// `ANTIENTROPY_INTERVAL`). Hidden flag `--antientropy-max-resend` (tests raise it for deep backfill).
-pub const ANTIENTROPY_MAX_RESEND: usize = 64;
-
-/// The live value, after any CLI override of [`ANTIENTROPY_MAX_RESEND`].
-#[must_use]
-pub fn antientropy_max_resend() -> usize {
-    current().antientropy_max_resend.max(1)
-}
-
 /// Capacity of a `habilis-network`'s `Node`'s inbound push channel
 /// (`DriverMode::InProcess::msg_tx`). Bounded so a slow consumer never
 /// backpressures the gossip/membership loop; under sustained lag the oldest
@@ -135,6 +114,45 @@ pub const RESIDENT_MEMORY_WARN_MB: u64 = 1024;
 /// timer, so chatty meshes pay zero heartbeat cost.
 pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How long a link vector waits for the endpoint proof of its signer. The next vector of the
+/// signer comes one `LINKSTATE_INTERVAL` on and finds the proof or parks again, so a vector older
+/// than two of those intervals is of no use, and its slot goes to another signer.
+pub const PARKED_LINK_STATE_TTL: Duration = LINKSTATE_INTERVAL.saturating_mul(2);
+
+/// The least time between two `PeerInfo` refreshes of a node. No frame repairs a
+/// `PeerInfo` that a member missed; only the flood of its sender does. The refresh
+/// sends it again, so a lost one is back within one period.
+pub const PEERINFO_REFRESH_MIN: Duration = Duration::from_mins(5);
+
+/// The refresh period grows with the roster by this much per live member. The caller never
+/// shortens the period, so the whole mesh sends at most 1 refresh per this span, however many
+/// members it holds.
+pub const PEERINFO_REFRESH_PER_PEER: Duration = Duration::from_secs(5);
+
+/// The time after the last `PeerInfo` flood at which a node floods it again, for a roster of
+/// `members` live members (itself included). It is the larger of two spans: the tuning value of
+/// [`PEERINFO_REFRESH_MIN`], and the tuning value of [`PEERINFO_REFRESH_PER_PEER`] times
+/// `members`. The caller lengthens the value by a random factor of 1.0 to 1.5, so that the members
+/// do not flood together.
+///
+/// # Examples
+///
+/// A small roster refreshes at the least period.
+///
+/// ```
+/// use habilis_network_util::tuning::{PEERINFO_REFRESH_MIN, peerinfo_refresh_period};
+///
+/// assert_eq!(peerinfo_refresh_period(3), PEERINFO_REFRESH_MIN);
+/// ```
+#[must_use]
+pub fn peerinfo_refresh_period(members: usize) -> Duration {
+    let tuning = current();
+    let grown = tuning
+        .peerinfo_refresh_per_peer
+        .saturating_mul(u32::try_from(members).unwrap_or(u32::MAX));
+    tuning.peerinfo_refresh_min.max(grown)
+}
+
 /// How long a peer can go unheard before the sweeper evicts it.
 /// Must exceed `ALIVE_INTERVAL` comfortably — 3x absorbs one or
 /// two lost gossip rounds. Worst-case ghost window is
@@ -146,6 +164,17 @@ pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 pub const ALIVE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The live value, after any CLI override of [`ALIVE_TIMEOUT`].
+///
+/// # Examples
+///
+/// The alive timeout is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::alive_timeout;
+/// use std::time::Duration;
+///
+/// assert!(alive_timeout() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn alive_timeout() -> Duration {
     current().alive_timeout
@@ -157,6 +186,17 @@ pub fn alive_timeout() -> Duration {
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The live value, after any CLI override of [`SWEEP_INTERVAL`].
+///
+/// # Examples
+///
+/// The sweep interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::sweep_interval;
+/// use std::time::Duration;
+///
+/// assert!(sweep_interval() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn sweep_interval() -> Duration {
     current().sweep_interval
@@ -171,6 +211,17 @@ pub fn sweep_interval() -> Duration {
 pub const BEACON_COHOST_GRACE: Duration = Duration::from_secs(10);
 
 /// The live value, after any CLI override of [`BEACON_COHOST_GRACE`].
+///
+/// # Examples
+///
+/// The co-host grace is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::cohost_grace;
+/// use std::time::Duration;
+///
+/// assert!(cohost_grace() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn cohost_grace() -> Duration {
     current().cohost_grace
@@ -183,6 +234,17 @@ pub fn cohost_grace() -> Duration {
 pub const PING_WINDOW: Duration = Duration::from_secs(10);
 
 /// The live value, after any CLI override of [`PING_WINDOW`].
+///
+/// # Examples
+///
+/// The ping window is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::ping_window;
+/// use std::time::Duration;
+///
+/// assert!(ping_window() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn ping_window() -> Duration {
     current().ping_window
@@ -200,6 +262,17 @@ pub const PPID_WATCH_INTERVAL: Duration = Duration::from_millis(1500);
 ///
 /// Gated with its only caller (`daemon::event_loop::spawn_orphan_watch`): the
 /// orphan watch is `libc::getppid`, which arrives with `host`.
+///
+/// # Examples
+///
+/// The parent watch interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::ppid_watch_interval;
+/// use std::time::Duration;
+///
+/// assert!(ppid_watch_interval() > Duration::ZERO);
+/// ```
 #[cfg(all(unix, feature = "host"))]
 #[must_use]
 pub fn ppid_watch_interval() -> Duration {
@@ -211,27 +284,141 @@ pub fn ppid_watch_interval() -> Duration {
 /// experiment is now an edit-the-const + commit, and a subprocess test passes
 /// the flag. Production runs on [`Tuning::DEFAULTS`] (the `crate::consts`
 /// values) when [`init`] is never called (the in-process path).
+///
+/// # Examples
+///
+/// A tuning starts from the defaults, and each builder sets one value.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use habilis_network_util::tuning::Tuning;
+///
+/// let tuning = Tuning::default().heal_interval(Duration::from_secs(3));
+/// assert_eq!(tuning.heal_interval, Duration::from_secs(3));
+/// ```
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Tuning {
+    /// How long a peer may stay silent before it is quiet.
     pub alive_timeout: Duration,
+    /// How often the sweeper looks for expired peers.
     pub sweep_interval: Duration,
+    /// How often the mesh checks its links and heals them.
     pub heal_interval: Duration,
-    pub antientropy_interval: Duration,
+    /// How often the backfill tick runs: a node asks its peers for messages it may have missed.
+    pub backfill_interval: Duration,
+    /// How long an unmeshed joiner waits before it co-hosts the rendezvous anyway.
     pub cohost_grace: Duration,
+    /// How long a ping round collects pongs before it reports.
     pub ping_window: Duration,
+    /// How often the daemon checks that its parent process is alive.
     pub ppid_watch_interval: Duration,
+    /// How long the mesh may stay unhealthy before it re-bootstraps.
     pub heal_stall_threshold: Duration,
+    /// How long with no verified inbound gossip, while peers are known, before the node re-bridges and re-announces.
     pub starvation_threshold: Duration,
+    /// How often a directory advertiser re-broadcasts its mesh.
     pub advertise_interval: Duration,
+    /// How long a directory entry stays listed without a new advertisement.
     pub directory_expiry: Duration,
-    pub antientropy_max_resend: usize,
+    /// Whether a directory advertiser keeps its mesh unlisted.
     pub directory_private: bool,
+    /// How soon the first rival check runs after a probed claim.
     pub rival_recheck_first: Duration,
+    /// How often a lone public beacon holder rechecks for a rival.
     pub rival_recheck: Duration,
+    /// How often a meshed public beacon holder rechecks for a rival.
     pub rival_recheck_meshed: Duration,
+    /// The cap of the ramping recheck interval of a beacon holder with no peers (a topic peer that stays alone).
     pub rival_recheck_alone: Duration,
+    /// How often a node revisits the rendezvous to meet split islands.
     pub rendezvous_periodic_return: Duration,
+    /// Whether a topic mesh looks up peers over mDNS only.
     pub topic_mdns_only: bool,
+    /// The least time between two refreshes of the `PeerInfo` of a node.
+    pub peerinfo_refresh_min: Duration,
+    /// How much a live member adds to the refresh period.
+    pub peerinfo_refresh_per_peer: Duration,
+}
+
+impl Tuning {
+    /// Set how often the backfill tick runs.
+    #[must_use]
+    pub fn backfill_interval(mut self, backfill_interval: Duration) -> Self {
+        self.backfill_interval = backfill_interval;
+        self
+    }
+
+    /// Set how long the first rival recheck waits.
+    #[must_use]
+    pub fn rival_recheck_first(mut self, rival_recheck_first: Duration) -> Self {
+        self.rival_recheck_first = rival_recheck_first;
+        self
+    }
+
+    /// Set how long each rival recheck waits.
+    #[must_use]
+    pub fn rival_recheck(mut self, rival_recheck: Duration) -> Self {
+        self.rival_recheck = rival_recheck;
+        self
+    }
+
+    /// Set how long each rival recheck waits once meshed.
+    #[must_use]
+    pub fn rival_recheck_meshed(mut self, rival_recheck_meshed: Duration) -> Self {
+        self.rival_recheck_meshed = rival_recheck_meshed;
+        self
+    }
+
+    /// Set how often the heal tick runs.
+    #[must_use]
+    pub fn heal_interval(mut self, heal_interval: Duration) -> Self {
+        self.heal_interval = heal_interval;
+        self
+    }
+
+    /// Set how often the sweeper looks for expired peers.
+    #[must_use]
+    pub fn sweep_interval(mut self, sweep_interval: Duration) -> Self {
+        self.sweep_interval = sweep_interval;
+        self
+    }
+
+    /// Set the least time between two refreshes of the `PeerInfo` of a node.
+    #[must_use]
+    pub fn peerinfo_refresh_min(mut self, peerinfo_refresh_min: Duration) -> Self {
+        self.peerinfo_refresh_min = peerinfo_refresh_min;
+        self
+    }
+
+    /// Set how much a live member adds to the refresh period.
+    #[must_use]
+    pub fn peerinfo_refresh_per_peer(mut self, peerinfo_refresh_per_peer: Duration) -> Self {
+        self.peerinfo_refresh_per_peer = peerinfo_refresh_per_peer;
+        self
+    }
+
+    /// Set the co-host grace period.
+    #[must_use]
+    pub fn cohost_grace(mut self, cohost_grace: Duration) -> Self {
+        self.cohost_grace = cohost_grace;
+        self
+    }
+
+    /// Set how long a member waits before it asks for the rendezvous again.
+    #[must_use]
+    pub fn rendezvous_periodic_return(mut self, rendezvous_periodic_return: Duration) -> Self {
+        self.rendezvous_periodic_return = rendezvous_periodic_return;
+        self
+    }
+
+    /// Set the rival recheck interval for a lone member.
+    #[must_use]
+    pub fn rival_recheck_alone(mut self, rival_recheck_alone: Duration) -> Self {
+        self.rival_recheck_alone = rival_recheck_alone;
+        self
+    }
 }
 
 impl Tuning {
@@ -240,7 +427,7 @@ impl Tuning {
         alive_timeout: ALIVE_TIMEOUT,
         sweep_interval: SWEEP_INTERVAL,
         heal_interval: HEAL_INTERVAL,
-        antientropy_interval: ANTIENTROPY_INTERVAL,
+        backfill_interval: BACKFILL_INTERVAL,
         cohost_grace: BEACON_COHOST_GRACE,
         ping_window: PING_WINDOW,
         ppid_watch_interval: PPID_WATCH_INTERVAL,
@@ -248,7 +435,6 @@ impl Tuning {
         starvation_threshold: STARVATION_THRESHOLD,
         advertise_interval: ADVERTISE_INTERVAL,
         directory_expiry: DIRECTORY_EXPIRY,
-        antientropy_max_resend: ANTIENTROPY_MAX_RESEND,
         directory_private: false,
         rival_recheck_first: RIVAL_RECHECK_FIRST,
         rival_recheck: RIVAL_RECHECK,
@@ -256,6 +442,8 @@ impl Tuning {
         rival_recheck_alone: RIVAL_RECHECK_ALONE,
         rendezvous_periodic_return: RENDEZVOUS_PERIODIC_RETURN,
         topic_mdns_only: false,
+        peerinfo_refresh_min: PEERINFO_REFRESH_MIN,
+        peerinfo_refresh_per_peer: PEERINFO_REFRESH_PER_PEER,
     };
 }
 
@@ -265,11 +453,22 @@ impl Default for Tuning {
     }
 }
 
-static TUNING: std::sync::OnceLock<Tuning> = std::sync::OnceLock::new();
+static TUNING: sync::OnceLock<Tuning> = sync::OnceLock::new();
 
 /// Install the process tuning, once, at daemon startup (from the parsed CLI
 /// flags). A second call is ignored; if never called (in-process: library API or MCP), `current`
 /// returns [`Tuning::DEFAULTS`].
+///
+/// # Examples
+///
+/// Init sets the tuning that the getters read.
+///
+/// ```
+/// use habilis_network_util::tuning::{Tuning, heal_interval, init};
+///
+/// init(Tuning::default());
+/// assert_eq!(heal_interval(), Tuning::default().heal_interval);
+/// ```
 pub fn init(tuning: Tuning) {
     let _ = TUNING.set(tuning);
 }
@@ -296,6 +495,17 @@ pub const STATE_REFRESH: Duration = Duration::from_secs(10);
 pub const HEAL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// The live value, after any CLI override of [`HEAL_INTERVAL`].
+///
+/// # Examples
+///
+/// The heal interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::heal_interval;
+/// use std::time::Duration;
+///
+/// assert!(heal_interval() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn heal_interval() -> Duration {
     current().heal_interval.max(Duration::from_secs(1))
@@ -305,6 +515,17 @@ pub fn heal_interval() -> Duration {
 /// partition: one heal and one census tick. The heal arm re-bridges a member that lost its
 /// links, so a shorter gap is a heal that is on its way, or a link that was closed on purpose;
 /// a longer one is a heal that did not work.
+///
+/// # Examples
+///
+/// The silent partition time is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::silent_partition_after;
+/// use std::time::Duration;
+///
+/// assert!(silent_partition_after() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn silent_partition_after() -> Duration {
     heal_interval().saturating_add(STATE_REFRESH)
@@ -328,6 +549,7 @@ pub const RESUBSCRIBE_MAX_ATTEMPTS: u32 = 8;
 #[cfg(feature = "host")]
 pub const IPC_ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(100);
 #[cfg(feature = "host")]
+/// The longest wait between two tries to accept an IPC connection.
 pub const IPC_ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
 /// Per-connection IPC I/O deadline: how long the daemon waits for a
@@ -344,6 +566,7 @@ pub const IPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// cold daemon start (the file appears sub-second once the process is up).
 /// Client-side, so these are not part of the daemon `Tuning` struct.
 pub const READY_MAX: Duration = Duration::from_secs(30);
+/// How often the readiness gate reads the state file while it waits.
 pub const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How fresh a `ready: true` state-file write must be for the gate to trust
@@ -399,6 +622,17 @@ pub const HEAL_PROBE_BACKOFF_MAX: Duration = Duration::from_mins(2);
 pub const HEAL_STALL_THRESHOLD: Duration = Duration::from_mins(1);
 
 /// The live value, after any CLI override of [`HEAL_STALL_THRESHOLD`].
+///
+/// # Examples
+///
+/// The heal stall threshold is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::heal_stall_threshold;
+/// use std::time::Duration;
+///
+/// assert!(heal_stall_threshold() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn heal_stall_threshold() -> Duration {
     current().heal_stall_threshold
@@ -413,6 +647,17 @@ pub fn heal_stall_threshold() -> Duration {
 pub const STARVATION_THRESHOLD: Duration = ALIVE_TIMEOUT.saturating_mul(2);
 
 /// The live value, after any CLI override of [`STARVATION_THRESHOLD`].
+///
+/// # Examples
+///
+/// The starvation threshold is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::starvation_threshold;
+/// use std::time::Duration;
+///
+/// assert!(starvation_threshold() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn starvation_threshold() -> Duration {
     current().starvation_threshold
@@ -429,7 +674,7 @@ pub const RECLAIM_WINDOW: Duration = Duration::from_secs(6);
 pub const RECLAIM_INTERVAL: Duration = Duration::from_millis(400);
 
 /// How often a member repeats that every port of its room's ladder is held by other processes
-/// (`daemon::beacon_arm`: the warning and the event of the app).
+/// (`daemon::cohost_arm`: the warning and the event of the app).
 ///
 /// The walk runs at every heal tick and at every tick of the reclaim burst, and the state does
 /// not change in between. A line every heal tick is 240 lines an hour in the log and in the
@@ -444,6 +689,12 @@ pub const NO_RUNG_REPEAT: Duration = Duration::from_mins(5);
 /// only a missed `peer_return` surface — acceptable. Generously above any
 /// realistic live roster.
 pub const QUIET_CAP: usize = 1024;
+
+/// Max protocol versions that the loop has named in an error line. A frame that names another
+/// version does not parse, so the key of its sender is not proven: the line is once for each
+/// version. The set takes no version past the cap, and one line says that many are unknown, so a
+/// sender that makes up versions gets neither memory nor a line for each frame.
+pub const UNSUPPORTED_VERSION_CAP: usize = 16;
 
 /// Minimum gap between our own re-dial + `PeerInfo` re-flood of the *same*
 /// peer learned via `PeerInfo` (`gossip::recv::handle_peer_info`). Caps the
@@ -497,6 +748,17 @@ pub const STARVED: Duration = Duration::from_mins(5);
 pub const ADVERTISE_INTERVAL: Duration = Duration::from_secs(20);
 
 /// The live value, after any CLI override of [`ADVERTISE_INTERVAL`].
+///
+/// # Examples
+///
+/// The advertise interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::advertise_interval;
+/// use std::time::Duration;
+///
+/// assert!(advertise_interval() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn advertise_interval() -> Duration {
     current().advertise_interval
@@ -511,6 +773,17 @@ pub fn advertise_interval() -> Duration {
 pub const DIRECTORY_EXPIRY: Duration = Duration::from_mins(1);
 
 /// The live value, after any CLI override of [`DIRECTORY_EXPIRY`].
+///
+/// # Examples
+///
+/// The directory expiry is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::directory_expiry;
+/// use std::time::Duration;
+///
+/// assert!(directory_expiry() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn directory_expiry() -> Duration {
     current().directory_expiry
@@ -523,6 +796,17 @@ pub fn directory_expiry() -> Duration {
 pub const RIVAL_RECHECK_FIRST: Duration = Duration::from_secs(12);
 
 /// The live value, after any CLI override of [`RIVAL_RECHECK_FIRST`].
+///
+/// # Examples
+///
+/// The first rival recheck is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rival_recheck_first;
+/// use std::time::Duration;
+///
+/// assert!(rival_recheck_first() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rival_recheck_first() -> Duration {
     current().rival_recheck_first.max(Duration::from_secs(1))
@@ -534,6 +818,17 @@ pub fn rival_recheck_first() -> Duration {
 pub const RIVAL_RECHECK: Duration = Duration::from_secs(30);
 
 /// The live value, after any CLI override of [`RIVAL_RECHECK`].
+///
+/// # Examples
+///
+/// The rival recheck is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rival_recheck;
+/// use std::time::Duration;
+///
+/// assert!(rival_recheck() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rival_recheck() -> Duration {
     current().rival_recheck.max(Duration::from_secs(1))
@@ -545,13 +840,24 @@ pub fn rival_recheck() -> Duration {
 pub const RIVAL_RECHECK_MESHED: Duration = Duration::from_mins(5);
 
 /// The live value, after any CLI override of [`RIVAL_RECHECK_MESHED`].
+///
+/// # Examples
+///
+/// The meshed rival recheck is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rival_recheck_meshed;
+/// use std::time::Duration;
+///
+/// assert!(rival_recheck_meshed() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rival_recheck_meshed() -> Duration {
     current().rival_recheck_meshed.max(Duration::from_secs(1))
 }
 
 /// Shed cadence ceiling for a holder with an **empty roster** — the tier
-/// `daemon::beacon_arm::next_recheck_delay` picks when `roster == 0`.
+/// `daemon::cohost_arm::next_recheck_delay` picks when `roster == 0`.
 ///
 /// [`RIVAL_RECHECK_MESHED`] is priced for two multi-member islands, and
 /// the geometric ramp caps there for every small roster. A node that knows no
@@ -567,6 +873,17 @@ pub fn rival_recheck_meshed() -> Duration {
 pub const RIVAL_RECHECK_ALONE: Duration = Duration::from_hours(1);
 
 /// The live value, after any CLI override of [`RIVAL_RECHECK_ALONE`].
+///
+/// # Examples
+///
+/// The alone rival recheck is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rival_recheck_alone;
+/// use std::time::Duration;
+///
+/// assert!(rival_recheck_alone() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rival_recheck_alone() -> Duration {
     current().rival_recheck_alone.max(Duration::from_secs(1))
@@ -576,6 +893,16 @@ pub fn rival_recheck_alone() -> Duration {
 /// their lookups to mDNS (no DHT, no relay). **Test-only** (hidden flag): the
 /// beacon-claim race is otherwise unreachable in CI (no public relay), same
 /// rationale as `--directory-private` — see `tests/topic_split.rs`.
+///
+/// # Examples
+///
+/// The test hook is off by default.
+///
+/// ```
+/// use habilis_network_util::tuning::topic_mdns_only_for_test;
+///
+/// assert!(!topic_mdns_only_for_test());
+/// ```
 #[must_use]
 pub fn topic_mdns_only_for_test() -> bool {
     current().topic_mdns_only
@@ -586,6 +913,16 @@ pub fn topic_mdns_only_for_test() -> bool {
 /// requires-`--public` guard. **Test-only** (hidden flag): the live
 /// advertise→discover path is otherwise unreachable in CI (no public relay) —
 /// see `tests/directory.rs`.
+///
+/// # Examples
+///
+/// The test hook is off by default.
+///
+/// ```
+/// use habilis_network_util::tuning::directory_private_for_test;
+///
+/// assert!(!directory_private_for_test());
+/// ```
 #[must_use]
 pub fn directory_private_for_test() -> bool {
     current().directory_private
@@ -624,6 +961,7 @@ pub const RELAY_LIVENESS_FAILS_TO_EVICT: u32 = 2;
 /// sparsely). Distinct from `RELAY_LIVENESS_INTERVAL`, which is the
 /// *homed* poll cadence (cheap, no backoff).
 pub const RELAY_REPROBE_BACKOFF_MIN: Duration = Duration::from_secs(30);
+/// The longest wait between two re-probes of a relay rung.
 pub const RELAY_REPROBE_BACKOFF_MAX: Duration = Duration::from_mins(5);
 
 /// Timeout for *one attempt* of the private-mode rendezvous identity
@@ -698,60 +1036,6 @@ pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
 /// and yields — a tie-break, not a delay knob, so no flag.
 pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
 
-/// How often one peer's digest may be *served*.
-///
-/// Answering a digest costs up to [`ANTIENTROPY_MAX_RESEND`] mesh-wide
-/// broadcasts, and the budget was per digest with nothing per peer, so one
-/// small crafted frame bought that from every member at once. Comfortably under
-/// [`ANTIENTROPY_INTERVAL`], so the honest cadence is never refused.
-pub const ANTIENTROPY_SERVE_COOLDOWN: Duration = Duration::from_secs(5);
-
-/// How many members answer one chat digest.
-///
-/// Every member that holds a message the asker lacks used to answer, so one
-/// digest bought up to `ANTIENTROPY_MAX_RESEND` broadcasts from each of the N - 1
-/// others, and each broadcast reaches N - 1 links: about N^3 deliveries per
-/// digest round. Of those, all but the first copy of a message are wasted. A
-/// few answerers cover a lost answer and a holder that lacks the message, and
-/// the answerers change with every digest (see `answers_digest`), so a message
-/// that only one member holds still comes back within a few rounds.
-pub const ANTIENTROPY_ANSWERERS: usize = 3;
-
-/// How many resends the outbox of the event loop holds. A digest answer is at
-/// most `ANTIENTROPY_MAX_RESEND` messages, so this is a few answers. When it is
-/// full the resend is dropped and counted: the next digest asks again.
-pub const RESEND_OUTBOX_CAP: usize = 256;
-
-/// How many state digest answers one asker may get per channel on the unicast
-/// plane in one [`ANTIENTROPY_SERVE_COOLDOWN`] window; the same heads get
-/// an answer again only after [`FAST_ROUND_MIN_INTERVAL`]. A backfilling
-/// node asks again as long as a peer's heads show it is behind (a fast round),
-/// so it needs several per window; eight answers of
-/// [`ANTIENTROPY_MAX_RESEND`] frames cover 512 changes, and still bound a node
-/// whose fast rounds misbehave.
-pub const ANTIENTROPY_SERVES_PER_WINDOW: usize = 8;
-
-/// The shortest time between two direct fast-round digests to one peer, for
-/// one channel. A peer that advertises heads nobody can hold then costs one
-/// small frame per interval.
-pub const FAST_ROUND_MIN_INTERVAL: Duration = Duration::from_millis(200);
-
-/// How long after a direct fast-round digest a node holds back its own
-/// broadcast digests for that channel.
-pub const FAST_ROUND_ACTIVE: Duration = Duration::from_secs(1);
-
-/// How long a stalled fast round waits before it asks a peer that is still
-/// ahead again: a lost request, a lost answer, or a refusal costs this, not an
-/// anti-entropy tick. The reclaim timer drives the check, so this matches it.
-pub const FAST_ROUND_RETRY: Duration = Duration::from_millis(400);
-
-/// How many peers a node remembers as ahead of it, per channel.
-pub const FAST_ROUND_AHEAD_MAX: usize = 16;
-
-/// How long a peer stays remembered as ahead after its heads last showed it:
-/// a peer whose heads we can never hold must not hold a place for ever.
-pub const FAST_ROUND_AHEAD_TTL: Duration = Duration::from_mins(1);
-
 /// `HyParView` **active view** capacity (G): the number of direct gossip
 /// neighbors (open QUIC links) each member keeps per topic. A mesh of G + 1
 /// members or fewer forms a **full mesh** with nothing to shuffle, so it has
@@ -808,6 +1092,17 @@ pub const RENDEZVOUS_DWELL: Duration = Duration::from_secs(30);
 pub const RENDEZVOUS_PERIODIC_RETURN: Duration = Duration::from_mins(10);
 
 /// The live value, after any override of [`RENDEZVOUS_PERIODIC_RETURN`]. Clamped to `>= 1 s`.
+///
+/// # Examples
+///
+/// The periodic return is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rendezvous_periodic_return;
+/// use std::time::Duration;
+///
+/// assert!(rendezvous_periodic_return() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rendezvous_periodic_return() -> Duration {
     current()
@@ -868,8 +1163,33 @@ pub const PROBE_HOLD: Duration = Duration::from_secs(15);
 
 /// Max bytes a per-member log file grows before rotating to `<file>.1`
 /// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag
-/// overrides; `0` disables rotation. Resolved by [`crate::logs::log_max_bytes`].
+/// overrides; `0` disables rotation. Resolved by [`crate::log_config::log_max_bytes`].
 ///
 /// `host`-only with the file sink: a browser has no log file to rotate.
 #[cfg(feature = "host")]
 pub const LOG_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
+
+/// How many slice answers this node gives one asker on one channel in one window. A pull and a page
+/// request both count.
+pub const DIGEST_SERVES_PER_WINDOW: usize = 8;
+
+/// How many slice answers this node gives in all, in one window, whoever asks.
+pub const DIGEST_SERVES_GLOBAL: usize = 32;
+
+/// How many slice keys this node pulls and waits for at once, across all holders. A full store of 1024 keys
+/// fits, so a round never needs more.
+pub const DIGEST_PULLS_OPEN: usize = 1024;
+
+/// The length of the window of the serve budget.
+pub const DIGEST_SERVE_WINDOW: Duration = Duration::from_secs(5);
+
+/// How long a node waits after it sees a digest that differs from its own, before it asks for the pages.
+/// The live frames in flight land during this delay, so most differences end with no request.
+pub const DIGEST_SETTLE: Duration = Duration::from_secs(1);
+
+/// The random part of the settle delay: each mismatch waits `DIGEST_SETTLE` plus up to this, so the peers
+/// that see the same difference do not all ask at once.
+pub const DIGEST_SETTLE_JITTER: Duration = Duration::from_millis(500);
+
+/// How often the digest round checks its differences and sends its page requests, so a settle that ends is acted on at once.
+pub const DIGEST_ROUND_TICK: Duration = Duration::from_millis(250);

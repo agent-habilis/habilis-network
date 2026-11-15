@@ -4,6 +4,8 @@ import { createWire, ffiOpener, joinWire } from './index.ts'
 import type { Command, FromWorker, OpenReply } from './protocol.ts'
 import type { WorkerHost } from './worker-host.ts'
 
+const KEY = 'ab'.repeat(32)
+
 const OPEN_REPLY: OpenReply = {
   id: 'mesh-id',
   name: 'mesh-name',
@@ -95,11 +97,11 @@ describe('ffiOpener', () => {
     await ffiOpener(joinWire({ topic: 'tea' }), { spawn: async () => host, lib: '/fake' })(
       recorder.sink,
     )
-    emit({ t: 'msg', from: 'bo', directed: false, text: 'hi' })
+    emit({ t: 'msg', from: 'bo', key: KEY, directed: false, text: 'hi' })
     emit({ t: 'roster', json: '{"count":2,"peers":[]}' })
     emit({ t: 'state', json: '{"a":1}' })
     emit({ t: 'failed', message: 'poll hiccup' })
-    expect(recorder.msgs).toEqual([{ from: 'bo', directed: false, text: 'hi' }])
+    expect(recorder.msgs).toEqual([{ from: 'bo', key: KEY, directed: false, text: 'hi' }])
     expect(recorder.rosters).toEqual(['{"count":2,"peers":[]}'])
     expect(recorder.states).toEqual(['{"a":1}'])
     expect(recorder.failures).toEqual(['poll hiccup'])
@@ -119,6 +121,21 @@ describe('ffiOpener', () => {
     await opened.backend.send('bo', 'hello')
     expect(posted[1]).toMatchObject({ t: 'send', to: 'bo', text: 'hello' })
   })
+  test('sendToKey posts the key and the text, and not the nickname command', async () => {
+    const { host, posted } = fakeHost((command, emit) => {
+      if (command.t === 'open' || command.t === 'sendToKey') {
+        emit({ t: 'ok', id: command.id, value: command.t === 'open' ? OPEN_REPLY : null })
+      }
+    })
+    const { sink } = recordingSink()
+    const opened = await ffiOpener(joinWire({ topic: 'tea' }), {
+      spawn: async () => host,
+      lib: '/fake',
+    })(sink)
+    await opened.backend.sendToKey(KEY, 'hello')
+    expect(posted[1]).toMatchObject({ t: 'sendToKey', key: KEY, text: 'hello' })
+  })
+
   test('close awaits the worker reply and terminates it', async () => {
     const { host, terminatedCount } = fakeHost((command, emit) => {
       if (command.t === 'open') {

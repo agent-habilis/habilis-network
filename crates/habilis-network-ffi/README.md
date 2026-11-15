@@ -10,6 +10,15 @@ the other.
 
 - A failed call returns NULL or `-1`. `habilis_network_last_error()` says why. The
   error slot is thread-local.
+- A message names its author by key. `habilis_network_msg_send` takes a nickname and
+  resolves it to one key: the live key of the nickname, else the quiet key of a peer that can
+  return. It refuses a nickname that names no key, and one that two or more keys use. A nickname
+  that a member key proved names one member, so it is never ambiguous; a nickname that no member
+  key proved (a client with no member key) can be used by two members, and it is refused only
+  while two of them are there. `habilis_network_msg_send_to_key` names the member itself: it takes
+  the 64 lowercase hex digits of the key that `habilis_network_msg_recv` gave in
+  `habilis_network_msg.key`. The struct has 144 bytes and no size field. A caller built with an
+  older header must be rebuilt.
 - Buffers are sized by asking: pass a NULL buffer to get the length, then
   call again with one that fits.
 - A handle belongs to one thread. Distinct handles are independent.

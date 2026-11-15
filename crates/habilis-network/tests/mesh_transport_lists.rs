@@ -10,19 +10,23 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, InspectTest, Membership, Messaging, Request,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use tokio::{sync, time};
 /// A JSEP round and a graft, with room to spare: a healthy pair is direct in
 /// about 4 s. Below the 15 s heal tick on purpose, so a pair that only links
 /// once a heal re-grafts it fails here instead of passing slowly.
 const LINK_DEADLINE: Duration = Duration::from_secs(12);
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(20);
 
-fn serial() -> &'static tokio::sync::Mutex<()> {
-    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+fn serial() -> &'static sync::Mutex<()> {
+    static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| sync::Mutex::new(()))
 }
 
 fn logs() -> String {
@@ -31,7 +35,8 @@ fn logs() -> String {
 
 /// The engine lines that say how a link formed or why it did not.
 fn link_trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -56,8 +61,8 @@ fn link_trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    lines.join("\n")
 }
 
 async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -66,7 +71,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -79,9 +84,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             events,
@@ -92,23 +99,21 @@ impl Member {
 
     /// Mint a mesh over the local relay alone, with `transport` as its list.
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(transport)
+            .relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     fn pump(&mut self) {
@@ -117,8 +122,8 @@ impl Member {
                 self.seen_events.push(event);
             }
         }
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen_msgs.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(message);
         }
     }
 
@@ -134,12 +139,12 @@ impl Member {
         self.pump();
         self.seen_msgs
             .iter()
-            .any(|msg| msg.directed == directed && msg.text == text)
+            .any(|message| message.directed == directed && message.text == text)
     }
 
     async fn roster(&self) -> String {
         self.membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default()
     }
@@ -148,7 +153,7 @@ impl Member {
         let to = membership::parse_to(to).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send { to, body, reply })
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
             .await
             .expect("the loop answers")
             .expect("sent");
@@ -156,7 +161,7 @@ impl Member {
 
     async fn state_merge(&self, merge: serde_json::Value) {
         self.membership
-            .request(|reply| Request::StateMerge { merge, reply })
+            .request(|reply| Request::Messaging(Messaging::StateMerge { merge, reply }))
             .await
             .expect("the loop answers")
             .expect("merged");
@@ -164,21 +169,21 @@ impl Member {
 
     async fn endpoint_id(&self) -> iroh::EndpointId {
         self.membership
-            .request(|reply| Request::EndpointId { reply })
+            .request(|reply| Request::InspectTest(InspectTest::EndpointId { reply }))
             .await
             .expect("the loop answers")
     }
 
     async fn block_udp(&self, blocked: bool) {
         self.membership
-            .request(|reply| Request::BlockUdp { blocked, reply })
+            .request(|reply| Request::Blocking(Blocking::BlockUdp { blocked, reply }))
             .await
             .expect("the loop answers");
     }
 
     async fn state_json(&self) -> String {
         self.membership
-            .request(|reply| Request::StateJson { reply })
+            .request(|reply| Request::Inspect(Inspect::StateJson { reply }))
             .await
             .unwrap_or_default()
     }
@@ -213,7 +218,7 @@ async fn linked_pair(relay: &RelayUrl, transport: Vec<Transport>) -> (Member, Me
             "the pair never went direct: {alice_roster} / {bob_roster}\n{}",
             link_trace()
         );
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
     (alice, bob)
 }
@@ -259,7 +264,7 @@ async fn every_lane_carries(alice: &mut Member, bob: &mut Member) {
             started.elapsed() < PAYLOAD_DEADLINE,
             "bob never got the state merge"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -272,9 +277,7 @@ fn a_webrtc_only_mesh_carries_every_lane_between_natives() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::WebRtc]).await;
         every_lane_carries(&mut alice, &mut bob).await;
@@ -304,9 +307,7 @@ fn a_udp_only_mesh_never_opens_a_webrtc_session() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::Udp]).await;
         every_lane_carries(&mut alice, &mut bob).await;
@@ -330,9 +331,7 @@ fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let (mut alice, mut bob) =
             linked_pair(&relay, vec![Transport::Udp, Transport::WebRtc]).await;
@@ -341,12 +340,12 @@ fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
         // round to end one way or the other.
         let raced = eventually(Duration::from_secs(30), || {
             let logs = logs();
+            let offers = logs.matches("webrtc session attached (offerer)").count();
+            let wins = logs
+                .matches("udp won the race; webrtc session detached")
+                .count();
             logs.contains("udp already selected")
-                || logs.matches("webrtc session attached (offerer)").count()
-                    == logs
-                        .matches("udp won the race; webrtc session detached")
-                        .count()
-                    && logs.contains("webrtc session attached (offerer)")
+                || offers == wins && logs.contains("webrtc session attached (offerer)")
         })
         .await;
 
@@ -394,9 +393,7 @@ fn pair_races_again_when_udp_drops(bob_is_higher: Option<bool>) {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let transport = vec![Transport::Udp, Transport::WebRtc];
         let (mut alice, mut bob) = match bob_is_higher {
@@ -416,7 +413,7 @@ fn pair_races_again_when_udp_drops(bob_is_higher: Option<bool>) {
         // 3 s dial, then 5 s for UDP to be selected). Waiting 9 s past the attach
         // lets it end first, so the session is kept and the watcher, not the
         // race, has to drop it once UDP is back.
-        tokio::time::sleep(Duration::from_secs(9)).await;
+        time::sleep(Duration::from_secs(9)).await;
         let carried_on_webrtc = if raced {
             alice.send(None, "over the data channel").await;
             eventually(PAYLOAD_DEADLINE, || {

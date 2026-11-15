@@ -20,33 +20,34 @@
 //! take": a driver with two required methods and three associated types.
 //! Everything else on `NodeDriver` has a default.
 
-use habilis_network::protocol::message::Authored;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use habilis_network::protocol::messages::Authored;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{
     DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, TransportPolicy,
 };
-use habilis_network::runtime::{CreateParams, JoinParams, Node, Resolved, SetupParams, setup_mesh};
+use habilis_network::runtime::{
+    CreateParams, JoinParams, LiveCount, Node, Resolved, SetupParams, SignalHandling, setup_mesh,
+};
 
+use habilis_network::protocol::RelayChoice;
+use habilis_network::runtime::SetupKind;
+use habilis_network::{protocol, runtime};
+use std::{env, io};
+use tokio::{signal, time};
 /// The do-nothing application. A peer that only carries presence still forms a
 /// mesh — payload handling is a separate concern from membership.
+#[derive(Debug, Clone, Copy)]
 struct Probe;
 
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -68,18 +69,17 @@ impl NodeDriver for Probe {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "habilis_network=info".into());
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "habilis_network=info".into()),
-        )
-        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .with_writer(io::stderr)
         .init();
 
     // Env var rather than a flag: this example takes exactly one positional
     // argument and adding a parser for one knob is not worth it. The real CLI
     // surface is `--transport`, on `agent-share`.
-    let udp = match std::env::var("MESH_TRANSPORT").as_deref() {
+    let udp = match env::var("MESH_TRANSPORT").as_deref() {
         Ok("webrtc") => false,
         Ok(other) if !other.is_empty() => {
             anyhow::bail!("unknown MESH_TRANSPORT {other:?}; expected `webrtc`")
@@ -91,77 +91,67 @@ async fn main() -> anyhow::Result<()> {
     // by topic, so the two sides meet on one string. `MESH_RELAY_URLS`
     // (comma-separated) swaps the default ladder — with a topic it is part
     // of the derived id, so both sides must pass the same list.
-    let relay_urls = std::env::var("MESH_RELAY_URLS")
+    let relay_urls = env::var("MESH_RELAY_URLS")
         .ok()
         .filter(|urls| !urls.is_empty());
-    if let Ok(topic) = std::env::var("MESH_TOPIC") {
+    if let Ok(topic) = env::var("MESH_TOPIC") {
         let ladder = match &relay_urls {
-            Some(urls) => habilis_network::protocol::RelayChoice::Custom(
-                urls.split(',')
-                    .map(|url| url.trim().parse())
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            None => habilis_network::protocol::RelayChoice::Pinned,
+            Some(urls) => {
+                let fields = urls.split(',');
+                let parsed: Result<Vec<iroh::RelayUrl>, _> =
+                    fields.map(|url| url.trim().parse()).collect();
+                RelayChoice::Custom(parsed?)
+            }
+            None => RelayChoice::Pinned,
         };
-        let mesh = habilis_network::runtime::derive_topic_mesh_config(
+        let transport = TransportPolicy::default()
+            .relay_transport(env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"))
+            .udp(udp);
+        let mesh: protocol::Mesh = runtime::derive_topic_mesh_config(
             &topic,
-            MeshConfig {
-                lookups: LookupOpts {
-                    mdns: true,
-                    dht: true,
-                    relay_lookup: ladder,
-                },
-                password: None,
-                issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
-                        .is_some_and(|value| value == "on"),
-                    udp,
-                    ..TransportPolicy::default()
-                },
-            },
+            MeshConfig::new(
+                LookupOpts::new(ladder).mdns(true).dht(true),
+                None,
+                None,
+                transport,
+            ),
         )?;
         return run_peer(
-            habilis_network::runtime::SetupKind::Topic {
+            SetupKind::Topic {
                 mesh,
                 topic_string: topic,
             },
-            habilis_network::protocol::Nickname::random(),
+            protocol::Nickname::random(),
         )
         .await;
     }
 
-    let arg = std::env::args().nth(1);
-    let Resolved { kind, author, .. } = match arg {
-        Some(id) => JoinParams {
-            target: id.parse::<JoinTarget>()?,
-            nickname: None,
-            password: None,
+    let arg = env::args().nth(1);
+    // Baked into the id, so a joiner inherits it: only the creator reads the env var.
+    let create_transport = TransportPolicy::default()
+        .relay_transport(env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"))
+        .udp(udp);
+    let Resolved {
+        kind,
+        author,
+        advertise_directory: _advertise_directory,
+        ..
+    } = match arg {
+        Some(id) => {
+            let target: JoinTarget = id.parse()?;
+            JoinParams::new(target, None, None).resolve()?
         }
-        .resolve()?,
-        None => CreateParams {
-            name: MeshName::random(),
-            nickname: None,
+        None => CreateParams::new(
+            MeshName::random(),
+            None,
             // Public preset: mDNS + DHT + the pinned relay ladder. The relay
             // rung is the part that matters here — it is the only leg a browser
             // peer has, and the rendezvous homes on it.
-            config: MeshConfig {
-                lookups: LookupOpts::public_preset(),
-                password: None,
-                issuer_pubkey: None,
-                // Baked into the id, so a joiner inherits it: only the
-                // creator reads the env var.
-                transport: TransportPolicy {
-                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
-                        .is_some_and(|value| value == "on"),
-                    udp,
-                    ..TransportPolicy::default()
-                },
-            },
-            advertise: DirectorySelection::Unset,
-            password: None,
-            invite_only: false,
-        }
+            MeshConfig::new(LookupOpts::public_preset(), None, None, create_transport),
+            DirectorySelection::Unset,
+        )
+        .password(None)
+        .invite_only(false)
         .resolve()?,
     };
 
@@ -169,32 +159,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Stand the peer up and print its per-second status until ctrl-c.
-async fn run_peer(
-    kind: habilis_network::runtime::SetupKind,
-    author: habilis_network::protocol::Nickname,
-) -> anyhow::Result<()> {
+async fn run_peer(kind: SetupKind, author: protocol::Nickname) -> anyhow::Result<()> {
     // The live peer count, mirrored out of the loop on every roster change and
     // on the periodic refresh. Lock-free, so reading it per second costs
     // nothing and needs no request/response hop into the loop.
-    let live = Arc::new(AtomicUsize::new(0));
+    let live = LiveCount::default();
+    let live_count = live.clone();
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author: author.clone(),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            // No files and no control socket: this is an embedded peer, not a
-            // daemon something else drives.
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: Some(Arc::clone(&live)),
-        },
+        SetupParams::new(author.clone(), SilentSink::default())
+            .max_peers(16)
+            .live_count(live_count),
     )
     .await?;
 
@@ -204,17 +179,17 @@ async fn run_peer(
     // `handle_signals: false` — registering tokio's signal handlers suppresses
     // the OS default-terminate for the whole process, permanently. This example
     // wants ctrl-c to keep working.
-    let node: Node<Probe> = Node::spawn(config, Probe, None, false);
+    let node: Node<Probe> = Node::spawn(config, Probe, None, SignalHandling::Leave);
 
     let ticker = async {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
             println!("peers   {}", live.load(Ordering::Relaxed));
         }
     };
     tokio::select! {
         () = ticker => {}
-        _ = tokio::signal::ctrl_c() => {}
+        _ = signal::ctrl_c() => {}
     }
     node.leave().await?;
     Ok(())

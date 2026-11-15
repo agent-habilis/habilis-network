@@ -31,7 +31,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # Cargo-style status output, so a long sweep reads like the cargo invocations
 # around it rather than like a shell script.
 anstyle = "1"
-anstream = "0.6"
+anstream = "1"
 # The `mesh` feature's deps: the mesh and chat suites run a real native peer
 # in-process and a local relay, so the runner depends on the engine it drives.
 habilis-network = { path = "../crates/habilis-network", features = ["iroh-test-utils"], optional = true }

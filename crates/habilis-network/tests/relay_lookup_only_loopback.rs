@@ -8,31 +8,27 @@
 
 #![cfg(feature = "host")]
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
-use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype, Transport};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::Notify;
 
+use tokio::time;
 /// The do-nothing application: presence alone forms a mesh.
 struct Probe;
 
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -61,15 +57,15 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg, .. } = event
+        if let NodeEvent::Presence { message, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
-            } = msg.kind
+            } = message.kind
         {
             self.peers
                 .lock()
                 .expect("no poison")
-                .push(msg.author.clone());
+                .push(message.author.clone());
             self.changed.notify_waiters();
         }
     }
@@ -87,56 +83,47 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
+// each member's sink is shared with the node that writes to it, and the test reads it
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Probe> {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
     assert!(
-        !mesh.transport().relay_transport,
+        !mesh.transport().allows(Transport::Relay),
         "the default policy keeps the relay for lookup only"
     );
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let config = setup_mesh(
         SetupKind::Topic {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
-    Node::spawn(config, Probe, None, false)
+    Node::spawn(config, Probe, None, SignalHandling::Leave)
 }
 
 #[test]
 fn two_loopback_nodes_mesh_with_the_relay_lookup_only() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let topic = format!("relay-lookup-only-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("relay-lookup-only-{nonce}");
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let alice = spawn(&topic, "alice", Arc::clone(&alice_saw)).await;
         let bob = spawn(&topic, "bob", Arc::clone(&bob_saw)).await;
 
         let deadline = Duration::from_secs(45);
-        let bob_nick = Nickname::new("bob").expect("valid");
-        let alice_nick = Nickname::new("alice").expect("valid");
+        let bob_nick = Nickname::try_new("bob").expect("valid");
+        let alice_nick = Nickname::try_new("alice").expect("valid");
         assert!(
             alice_saw.wait_for(&bob_nick, deadline).await,
             "alice never saw bob join: the graft gate held a direct pair"

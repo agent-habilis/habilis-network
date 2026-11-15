@@ -5,7 +5,7 @@
 //!
 //! Three real members on a local relay, with the transport list
 //! `udp,webrtc,multihop,relay`. Every assertion reads the selected path of the
-//! **pooled unicast connection** from `alice` to `bob` (`Request::SelectedRung`).
+//! **pooled unicast connection** from `alice` to `bob` (`InspectTest::SelectedRung`).
 //! It is not the gossip link: the relay policy closes a gossip link that stays on
 //! the relay, so the last rung could not be read on it without a race.
 
@@ -16,11 +16,15 @@ mod until_known;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request, Rung};
+use habilis_network::membership::{
+    self, Blocking, Inspect, InspectHost, InspectTest, LinkHold, Linking, Membership, Request,
+    Routing, Rung,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
-use until_known::until_peer_known;
 
+use habilis_network::net;
+use tokio::time;
 /// Long enough for an ICE round, or for a multihop route to be advertised once
 /// (every 15 s) and then used.
 const STEP_DEADLINE: Duration = Duration::from_mins(2);
@@ -31,9 +35,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -55,33 +61,31 @@ impl Member {
     }
 
     async fn create_with(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(transport)
+            .relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
@@ -92,9 +96,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -102,10 +108,12 @@ impl Member {
 
     async fn block_rung(&self, rung: Rung, blocked: bool) {
         self.membership
-            .request(|reply| Request::BlockRung {
-                rung,
-                blocked,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockRung {
+                    rung,
+                    blocked,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -113,9 +121,11 @@ impl Member {
 
     /// Forget that `peer` is proven direct and offer it a `WebRTC` session now.
     async fn offer_session(&self, peer: &str) {
-        until_peer_known(&self.membership, peer, |reply| Request::OfferSession {
-            peer: peer.to_owned(),
-            reply,
+        until_known::until_peer_known(&self.membership, peer, |reply| {
+            Request::Linking(Linking::OfferSession {
+                peer: peer.to_owned(),
+                reply,
+            })
         })
         .await;
     }
@@ -123,9 +133,11 @@ impl Member {
     /// The rung of the selected path on this member's pooled connection to `peer`.
     async fn rung_to(&self, peer: &str) -> Option<&'static str> {
         self.membership
-            .request(|reply| Request::SelectedRung {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .ok()
@@ -135,7 +147,7 @@ impl Member {
     /// The multihop cells that this member has forwarded for others.
     async fn forwarded_cells(&self) -> u64 {
         self.membership
-            .request(|reply| Request::ForwardedCells { reply })
+            .request(|reply| Request::Routing(Routing::ForwardedCells { reply }))
             .await
             .expect("the loop answers")
     }
@@ -144,7 +156,7 @@ impl Member {
     /// routing table, or let it go (`false`), which advertises at once.
     async fn hold_link_state(&self, hold: bool) {
         self.membership
-            .request(|reply| Request::HoldLinkState { hold, reply })
+            .request(|reply| Request::LinkHold(LinkHold::HoldLinkState { hold, reply }))
             .await
             .expect("the loop answers");
     }
@@ -152,9 +164,11 @@ impl Member {
     /// Whether this member's multihop topology has a route to `peer` now.
     async fn has_route(&self, peer: &str) -> bool {
         self.membership
-            .request(|reply| Request::HasRoute {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectHost(InspectHost::HasRoute {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -184,7 +198,7 @@ impl Member {
             {
                 return rung;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
         panic!("{step}: expected one of the rungs {expected:?}, the last rung read was {seen:?}");
     }
@@ -203,7 +217,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -211,9 +225,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
 fn a_node_steps_down_the_ladder_and_climbs_back() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
         let carol = Member::join("carol", &alice).await;
@@ -272,18 +284,16 @@ fn a_node_steps_down_the_ladder_and_climbs_back() {
 /// pair, since it already has a session and so makes no offer.
 ///
 /// The test forces the order by construction: alice's link-vector is held back and
-/// withdrawn from her own table (`Request::HoldLinkState`), so that she has no route for as
+/// withdrawn from her own table (`LinkHold::HoldLinkState`), so that she has no route for as
 /// long as the hold lasts, however old the mesh is. It attaches the session with
-/// `Request::OfferSession`, blocks `WebRTC`, and lets the vector go only after the loss
+/// `Linking::OfferSession`, blocks `WebRTC`, and lets the vector go only after the loss
 /// is observed. The two asserts that no route exists hold by construction: a failure of
 /// either is a fault of the hook, not a reason to skip.
 #[test]
 fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
         let carol = Member::join("carol", &alice).await;
@@ -324,9 +334,9 @@ fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
                 lost_at.elapsed() < STEP_DEADLINE,
                 "the pair never left WebRTC after the block"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
         assert!(
             !alice.has_route("bob").await,
             "alice has a route to bob after the loss although her link-vector is withdrawn"
@@ -390,9 +400,7 @@ async fn cut_webrtc_between(first: &Member, second: &Member) {
 fn the_multihop_rung_forwards_through_a_third_member() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
         let alice = Member::create_with("alice", &relay, list).await;
         let bob = Member::join("bob", &alice).await;
@@ -432,7 +440,7 @@ fn the_multihop_rung_forwards_through_a_third_member() {
                 "alice reached bob on the multihop rung, but carol forwarded no cell: \
              the pair used a link that is not a hop"
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         for member in [alice, bob, carol] {

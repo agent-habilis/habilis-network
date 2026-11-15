@@ -13,6 +13,7 @@ use xshell::{Shell, cmd};
 use crate::TaskOutcome;
 use crate::util::{metadata, output, repo_root};
 
+use std::{fs, path};
 /// Relative to the target directory, which cargo owns.
 const ARCHIVE: &str = "release/libhabilis_network_ffi.a";
 const HEADER: &str = "crates/habilis-network-ffi/include/habilis_network.h";
@@ -28,7 +29,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         return Err(format!("{} was not produced", archive.display()).into());
     }
 
-    let declared = declared(&std::fs::read_to_string(repo_root().join(HEADER))?);
+    let declared = declared(&fs::read_to_string(repo_root().join(HEADER))?);
     let (reader, flags) = symbol_reader(sh);
     // Non-zero status and a warning for every archive member with no symbols,
     // and a rust staticlib has plenty. The symbols it did print are still the
@@ -99,7 +100,7 @@ fn bundled_nm(sh: &Shell) -> Option<String> {
         .read()
         .ok()?;
     let triple = host_triple(sh)?;
-    let path = std::path::Path::new(sysroot.trim())
+    let path = path::Path::new(sysroot.trim())
         .join("lib/rustlib")
         .join(triple)
         .join("bin/llvm-nm");
@@ -129,7 +130,7 @@ fn declared(header: &str) -> BTreeSet<String> {
             continue;
         }
         let len = header[start..]
-            .find(|ch: char| !(ch.is_ascii_lowercase() || ch == '_'))
+            .find(|ch: char| !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'))
             .unwrap_or(header.len() - start);
         if header[start + len..].starts_with('(') {
             names.insert(header[start..start + len].to_owned());
@@ -152,8 +153,36 @@ fn exported(nm: &str) -> BTreeSet<String> {
             symbol.starts_with("habilis_network_")
                 && symbol
                     .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         })
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{declared, exported};
+
+    /// A name with a digit, such as `habilis_network_msg_recv_v2`, is a function of the header.
+    /// A scrape that stops at the digit never sees it, and the gate passes for a symbol that the
+    /// archive might not export.
+    #[test]
+    fn a_function_name_with_a_digit_is_declared() {
+        let names = declared("long habilis_network_msg_recv_v2(habilis_network_mesh *handle);");
+
+        assert!(
+            names.contains("habilis_network_msg_recv_v2"),
+            "the scrape missed a name with a digit: {names:?}"
+        );
+    }
+
+    #[test]
+    fn an_archive_symbol_with_a_digit_is_exported() {
+        let names = exported("0000000000001234 T _habilis_network_msg_recv_v2\n");
+
+        assert!(
+            names.contains("habilis_network_msg_recv_v2"),
+            "the filter dropped a symbol with a digit: {names:?}"
+        );
+    }
 }

@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The style scripts under scripts/ are TypeScript.
+      - uses: oven-sh/setup-bun@v2
+
       # Reads rust-toolchain.toml — do not duplicate the version here.
       # The extra target is for `habilis-network-chunks`, whose IndexedDB backend
       # only exists on wasm32 and would otherwise compile nowhere.
@@ -35,6 +38,64 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The crate attr of this unstable lint comes from the command line: a crate root gated by
+      # target_arch drops it, so the wasm32 crates are checked on their own.
+      - name: Omitted patterns
+        env:
+          RUSTFLAGS: -Zcrate-attr=feature(non_exhaustive_omitted_patterns_lint) -D non_exhaustive_omitted_patterns
+        run: |
+          cargo check --workspace --all-targets
+          cargo check --target wasm32-unknown-unknown -p habilis-network-bench-wasm
+          cargo check --target wasm32-unknown-unknown -p habilis-network-chunks --test idb_browser --test origin --test conformance
+
+      # The rules of the Rust style guide that no lint checks (issue #29).
+      - name: Style rules without a lint
+        run: |
+          bun test scripts/style-check/style-check.test.ts
+          bun scripts/style-check/style-check.ts
+
+      # Every script is TypeScript run with Bun (AGENTS.md, "Scripts").
+      - name: Script language
+        run: |
+          bun test scripts/script-language/script-language.test.ts
+          bun scripts/script-language/script-language.ts
+
+      # No macro_rules! or proc macro.
+      - name: Macro rules
+        run: |
+          bun test scripts/macro-rules/macro-rules.test.ts
+          bun scripts/macro-rules/macro-rules.ts
+
+      # Every pub trait is a generic bound, a dyn object, an impl bound or a supertrait (R7).
+      - name: Pub traits
+        run: |
+          bun test scripts/pub-trait/pub-trait.test.ts
+          bun scripts/pub-trait/pub-trait.ts
+
+      # A pub struct with all-pub fields implements Debug (R12); an error of Copy-able fields is Copy (R13).
+      - name: Derives
+        run: |
+          bun test scripts/derive-check/derive-check.test.ts
+          bun scripts/derive-check/derive-check.ts
+
+      # A leaf file is named for its primary public type (O9).
+      - name: Module layout
+        run: |
+          bun test scripts/module-layout/module-layout.test.ts
+          bun scripts/module-layout/module-layout.ts
+
+      # Naming proxies of the Rust style guide (N10, N12).
+      - name: Naming
+        run: |
+          bun test scripts/naming/naming.test.ts
+          bun scripts/naming/naming.ts
+
+      # A doc paragraph starts each sentence with a capital, a digit or a code span (D5).
+      - name: Doc sentence case
+        run: |
+          bun test scripts/doc-sentence/doc-sentence.test.ts
+          bun scripts/doc-sentence/doc-sentence.ts
+
       # `blob` is off by default (only agent-gossip enables it), so the line
       # above never lints `src/blob/` — ~1,300 lines including its own ALPN
       # server. `--all-features` below only *checks* it.
@@ -46,7 +107,7 @@ jobs:
       # method renamed out from under its own docs.
       - name: Doc links
         env:
-          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links --document-private-items
         run: cargo doc --workspace --no-deps --all-features
 
       - name: Check
@@ -137,7 +198,6 @@ jobs:
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-doc --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-logging --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-test-tracing -- -D warnings -D clippy::disallowed_methods
-          cargo clippy --target wasm32-unknown-unknown -p habilis-network-test-tracing-macros -- -D warnings -D clippy::disallowed_methods
 
       # A path in `clippy.toml` that names no function is a plain warning, which `-D warnings`
       # leaves alone: a typo would switch one entry off. Clippy prints it only when it lints the
@@ -150,9 +210,12 @@ jobs:
           crate=habilis-network-iroh-gossip-transport
           dead='does not refer to a reachable function'
           probe=$(mktemp -d)
-          echo 'disallowed-methods = [{ path = "tokio::time::sleeeep" }]' > "$probe/clippy.toml"
+          # The probe replaces clippy.toml, so the run below can fail on a lint that the real
+          # clippy.toml settles (a duplicate crate, for one). Only the warning text matters here,
+          # so the exit code of this run is ignored.
+          printf '%s\n' 'disallowed-methods = [{ path = "tokio::time::sleeeep" }]' > "$probe/clippy.toml"
           cargo clean -p $crate --target wasm32-unknown-unknown
-          out=$(CLIPPY_CONF_DIR="$probe" cargo clippy --target wasm32-unknown-unknown -p $crate 2>&1)
+          out=$(CLIPPY_CONF_DIR="$probe" cargo clippy --target wasm32-unknown-unknown -p $crate 2>&1 || true)
           if ! grep -q "$dead" <<< "$out"; then
             echo "clippy did not warn about a path that names no function: has its message changed?"
             exit 1
@@ -260,9 +323,8 @@ jobs:
         run: cargo task ffi
 
   # `crates/habilis-network-netplay/examples/light-cycles/native/` is its own cargo
-  # workspace (a separate `rust-toolchain.toml` pins it to nightly —
-  # `visage-rust-tui` uses native generators, a nightly-only feature — so it
-  # can't join the root `check` job's stable toolchain). Not covered by anything
+  # workspace (`visage-rust-tui` uses native generators, a nightly-only feature,
+  # which the root nightly toolchain allows). Not covered by anything
   # above; the root CI doesn't touch `chat-webrtc` either, so this is the first
   # example to get its own job, not a gap being left open.
   light-cycles-native:
@@ -275,17 +337,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # `rust-src-dir` is what makes this read *this workspace's*
-      # rust-toolchain.toml (nightly, for `visage-rust-tui`'s generators)
-      # rather than the repo root's — the action cds into it before looking
-      # for the file, and hard-fails if the path is gone. So the version
-      # still lives in exactly one place, same as the root `check` job.
-      # It also drives the action's embedded rust-cache (`workspaces`
-      # defaults to it), which is why there is no separate cache step here.
+      # The root rust-toolchain.toml applies (rustup walks up from this
+      # workspace), so the version lives in exactly one place, same as the root
+      # `check` job. `cache-workspaces` has to be spelled out, since it otherwise
+      # defaults to `rust-src-dir`, which is unset here.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          rust-src-dir: crates/habilis-network-netplay/examples/light-cycles/native
-          components: clippy, rustfmt
+          cache-workspaces: crates/habilis-network-netplay/examples/light-cycles/native
 
       - name: Format
         run: cargo fmt --check
@@ -318,8 +376,7 @@ jobs:
 
   # `crates/habilis-network-netplay/examples/light-cycles/web/wasm/` is its own cargo
   # workspace (an empty `[workspace]` table, same trick chat-web uses —
-  # `web-sys` doesn't exist off wasm32). Root toolchain applies (no nightly
-  # features here), unlike the native example above.
+  # `web-sys` doesn't exist off wasm32). Root toolchain applies.
   light-cycles-web:
     name: light-cycles (web)
     runs-on: ubuntu-latest
@@ -371,11 +428,11 @@ jobs:
           echo "wasm-bindgen resolved to $version"
           cargo install wasm-bindgen-cli --version "$version" --locked
 
+      - uses: oven-sh/setup-bun@v2
+
       - name: Build wasm
         working-directory: crates/habilis-network-netplay/examples/light-cycles/web
-        run: ./build-wasm.sh
-
-      - uses: oven-sh/setup-bun@v2
+        run: bun build-wasm.ts
 
       - name: Install frontend dependencies
         working-directory: crates/habilis-network-netplay/examples/light-cycles/web
@@ -388,3 +445,46 @@ jobs:
       - name: Typecheck
         working-directory: crates/habilis-network-netplay/examples/light-cycles/web
         run: bun run typecheck
+
+  # The IndexedDB backend in a real browser: the cases of idb_browser/cases.rs.
+  # `Check` only compiles them. Chrome and its chromedriver come from one Chrome
+  # for Testing release (the Stable channel, as tasks/src/util/cdp.rs reads it),
+  # so the two versions match by construction.
+  idb-browser:
+    name: IdbStore (browser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      # The same rule as the Install wasm-bindgen-cli step of `Check (wasm32)`.
+      - name: Install wasm-bindgen-cli
+        run: |
+          version=$(cargo pkgid wasm-bindgen | sed 's/.*[@#]//')
+          echo "wasm-bindgen resolved to $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: Chrome for Testing and its chromedriver
+        run: |
+          json=$(curl --fail --silent --show-error https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json)
+          chrome_url=$(jq -r '.channels.Stable.downloads.chrome[] | select(.platform == "linux64") | .url' <<<"$json")
+          driver_url=$(jq -r '.channels.Stable.downloads.chromedriver[] | select(.platform == "linux64") | .url' <<<"$json")
+          dir="$RUNNER_TEMP/cft"
+          mkdir -p "$dir"
+          curl --fail --silent --show-error --location -o "$dir/chrome.zip" "$chrome_url"
+          curl --fail --silent --show-error --location -o "$dir/driver.zip" "$driver_url"
+          unzip -q "$dir/chrome.zip" -d "$dir"
+          unzip -q "$dir/driver.zip" -d "$dir"
+          printf '{"goog:chromeOptions":{"binary":"%s","args":["--headless=new","--no-sandbox","--disable-gpu"]}}' "$dir/chrome-linux64/chrome" > "$dir/webdriver.json"
+          echo "CHROMEDRIVER=$dir/chromedriver-linux64/chromedriver" >> "$GITHUB_ENV"
+          echo "WASM_BINDGEN_TEST_WEBDRIVER_JSON=$dir/webdriver.json" >> "$GITHUB_ENV"
+
+      - name: IdbStore in Chrome
+        env:
+          WASM_BINDGEN_USE_BROWSER: "1"
+        run: cargo test --target wasm32-unknown-unknown -p habilis-network-chunks --test idb_browser

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct Input(i32);
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Copy)]
 struct State {
     value: i64,
     frame: i32,
@@ -28,6 +28,7 @@ impl Config for Game {
 /// Applies requests. `drift` is added to every advance, which makes the
 /// simulation depend on how many times it has run rather than only on its
 /// inputs — exactly the bug `SyncTestSession` exists to find.
+#[derive(Clone, Copy)]
 struct Runner {
     state: State,
     drift: i64,
@@ -61,7 +62,7 @@ impl Runner {
     fn handle(&mut self, request: Request<Game>) {
         match request {
             Request::SaveState { cell, frame } => {
-                cell.save(frame, self.state.clone(), Some(Self::checksum(&self.state)));
+                cell.save(frame, self.state, Some(Self::checksum(&self.state)));
             }
             Request::LoadState { cell } => {
                 self.state = cell.load().expect("the session only loads frames it saved");
@@ -73,13 +74,14 @@ impl Runner {
                 self.state.frame += 1;
                 self.advances += 1;
             }
+            _ => unreachable!("a request this test does not expect"),
         }
     }
 }
 
 /// Runs `frames` frames, returning the first error the session reports.
 fn run(runner: &mut Runner, frames: i32) -> Result<(), RollbackError> {
-    let mut session = SyncTestSession::<Game>::new(2, 4);
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(2, 4);
     for frame in 0..frames {
         session.add_input(PlayerHandle::new(0), Input(frame % 3))?;
         session.add_input(PlayerHandle::new(1), Input(frame % 5))?;
@@ -117,22 +119,28 @@ fn a_nondeterministic_simulation_is_caught() {
 
 #[test]
 fn a_missing_input_is_reported_rather_than_silently_defaulted() {
-    let mut session = SyncTestSession::<Game>::new(2, 4);
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(2, 4);
     session
         .add_input(PlayerHandle::new(0), Input(1))
         .expect("valid handle");
     // Player 1's input was never supplied.
-    assert!(matches!(
-        session.advance_frame(),
-        Err(RollbackError::InvalidPlayer(missing)) if missing == PlayerHandle::new(1)
-    ));
+    assert!(
+        matches!(
+            session.advance_frame(),
+            Err(RollbackError::InvalidPlayer(missing)) if missing == PlayerHandle::new(1)
+        ),
+        "a missing input is reported, not silently defaulted"
+    );
 }
 
 #[test]
 fn an_out_of_range_handle_is_rejected() {
-    let mut session = SyncTestSession::<Game>::new(2, 4);
-    assert!(matches!(
-        session.add_input(PlayerHandle::new(7), Input(1)),
-        Err(RollbackError::InvalidPlayer(unknown)) if unknown == PlayerHandle::new(7)
-    ));
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(2, 4);
+    assert!(
+        matches!(
+            session.add_input(PlayerHandle::new(7), Input(1)),
+            Err(RollbackError::InvalidPlayer(unknown)) if unknown == PlayerHandle::new(7)
+        ),
+        "an out-of-range handle is rejected"
+    );
 }

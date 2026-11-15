@@ -106,7 +106,7 @@ pub(super) const WORDS: &[&str] = &[
     "pilgrim", "plover", "quiver", "raptor", "sentry",
 ];
 
-const _: () = assert!(!WORDS.is_empty());
+const _: () = assert!(!WORDS.is_empty(), "the word list is not empty");
 
 /// A random `word-word` pair from the curated list.
 ///
@@ -115,13 +115,13 @@ const _: () = assert!(!WORDS.is_empty());
 /// pair here fits).
 pub(super) fn random_pair() -> String {
     use rand::seq::IndexedRandom;
-    let mut rng = rand::rng();
-    let first = WORDS.choose(&mut rng).expect("wordlist is non-empty");
-    let second = WORDS.choose(&mut rng).expect("wordlist is non-empty");
+    let mut random = rand::rng();
+    let first = WORDS.choose(&mut random).expect("wordlist is non-empty");
+    let second = WORDS.choose(&mut random).expect("wordlist is non-empty");
     format!("{first}-{second}")
 }
 
-/// Holds the TypeScript transcription of [`WORDS`] to this one.
+/// Holds the `TypeScript` transcription of [`WORDS`] to this one.
 ///
 /// `packages/habilis-network-api` has a copy because neither of its backends can reach
 /// [`random_pair`]: the C ABI exports no nickname generator, and adding one is a
@@ -131,24 +131,20 @@ pub(super) fn random_pair() -> String {
 #[cfg(test)]
 mod js_copy {
     use super::WORDS;
-    use habilis_network_test_tracing::test;
 
     const SOURCE: &str = include_str!("../../../packages/habilis-network-api/src/wordlist.ts");
 
-    /// The words in the TypeScript array, bounded by the array's own delimiters
+    /// The words in the `TypeScript` array, bounded by the array's own delimiters
     /// rather than scanned for quotes — the prose above it contains
     /// apostrophes, which a quote scanner would read as entries.
     fn transcribed() -> Vec<&'static str> {
-        SOURCE
-            .lines()
-            .skip_while(|line| !line.ends_with("= ["))
-            .skip(1)
+        let lines = SOURCE.lines();
+        let body = lines.skip_while(|line| !line.ends_with("= [")).skip(1);
+        let entries = body
             .take_while(|line| *line != "]")
-            .flat_map(|line| line.split(','))
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(|entry| entry.trim_matches('\''))
-            .collect()
+            .flat_map(|line| line.split(','));
+        let trimmed = entries.map(str::trim).filter(|entry| !entry.is_empty());
+        trimmed.map(|entry| entry.trim_matches('\'')).collect()
     }
 
     /// Reports the first divergence rather than asserting the two lists are
@@ -156,8 +152,10 @@ mod js_copy {
     /// one word that moved under two screens of the ones that did not.
     #[test]
     fn the_typescript_copy_is_word_for_word_the_same() {
+        let _guard = ::habilis_network_test_tracing::init();
         let copy = transcribed();
-        for (index, (mine, theirs)) in WORDS.iter().zip(&copy).enumerate() {
+        let pairs: Vec<(usize, (&&str, &&str))> = WORDS.iter().zip(&copy).enumerate().collect();
+        for (index, (mine, theirs)) in pairs {
             assert_eq!(
                 mine, theirs,
                 "wordlist.ts diverges at index {index}: expected {mine:?}, found {theirs:?}"

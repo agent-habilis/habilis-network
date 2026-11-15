@@ -8,6 +8,11 @@
 //! Warn-only by design: host safety comes from the scenario runbook's OS resource
 //! caps, not from the daemon exiting.
 
+#[cfg(any(
+    all(target_os = "macos", feature = "host"),
+    all(unix, feature = "host")
+))]
+use std::mem;
 /// This process's peak resident memory in **bytes**, or `None` if it can't
 /// be read on this platform.
 ///
@@ -15,6 +20,18 @@
 /// instantaneous deliberately: a memory leak climbs monotonically, so peak ==
 /// current in the case we care about, and crossing the threshold is exactly
 /// the leak signal — with one cheap syscall and no `/proc` parsing or mach FFI.
+///
+/// # Examples
+///
+/// The peak resident memory is reported in bytes, where the platform gives it.
+///
+/// ```
+/// use habilis_network_util::resident_memory::peak_resident_memory_bytes;
+///
+/// if let Some(bytes) = peak_resident_memory_bytes() {
+///     assert!(bytes > 0);
+/// }
+/// ```
 #[must_use]
 pub fn peak_resident_memory_bytes() -> Option<u64> {
     maxrss_bytes()
@@ -27,6 +44,18 @@ pub fn peak_resident_memory_bytes() -> Option<u64> {
 /// memory is monotonic, so a churn-proportional leak shows as a rising slope on
 /// one always-on timeline next to the roster/link counts — no external `ps`
 /// sampler needed (the gap the distributed-soak runbook had to work around).
+///
+/// # Examples
+///
+/// The peak resident memory is reported in megabytes, where the platform gives it.
+///
+/// ```
+/// use habilis_network_util::resident_memory::peak_resident_memory_mb;
+///
+/// if let Some(mb) = peak_resident_memory_mb() {
+///     assert!(mb > 0);
+/// }
+/// ```
 #[must_use]
 pub fn peak_resident_memory_mb() -> Option<u64> {
     peak_resident_memory_bytes().map(|bytes| bytes / (1024 * 1024))
@@ -38,12 +67,36 @@ pub fn peak_resident_memory_mb() -> Option<u64> {
 /// The peak above cannot show that memory grew after a point: it includes the
 /// burst at start-up, and it never falls. A measurement of what a feature costs
 /// reads this before and after.
+///
+/// # Examples
+///
+/// The current resident memory is reported in bytes, where the platform gives it.
+///
+/// ```
+/// use habilis_network_util::resident_memory::current_resident_memory_bytes;
+///
+/// if let Some(bytes) = current_resident_memory_bytes() {
+///     assert!(bytes > 0);
+/// }
+/// ```
 #[must_use]
 pub fn current_resident_memory_bytes() -> Option<u64> {
     current_rss_bytes()
 }
 
 /// [`current_resident_memory_bytes`] in `MiB`.
+///
+/// # Examples
+///
+/// The current resident memory is reported in megabytes, where the platform gives it.
+///
+/// ```
+/// use habilis_network_util::resident_memory::current_resident_memory_mb;
+///
+/// if let Some(mb) = current_resident_memory_mb() {
+///     assert!(mb > 0);
+/// }
+/// ```
 #[must_use]
 pub fn current_resident_memory_mb() -> Option<u64> {
     current_resident_memory_bytes().map(|bytes| bytes / (1024 * 1024))
@@ -60,16 +113,19 @@ pub fn current_resident_memory_mb() -> Option<u64> {
     reason = "libc points to the mach2 crate for the mach calls; one read does not warrant a dependency"
 )]
 fn current_rss_bytes() -> Option<u64> {
-    let mut info: libc::mach_task_basic_info = unsafe { std::mem::zeroed() };
+    // SAFETY: `mach_task_basic_info` is a plain C struct of integers, so all-zero bytes are a
+    // valid value.
+    let mut info: libc::mach_task_basic_info = unsafe { mem::zeroed() };
     let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
-    // SAFETY: `info` is a valid, unique `mach_task_basic_info`, `count` is its size
-    // in `natural_t` units as the call needs, and the selector is the documented
+    let info_ptr: *mut libc::integer_t = (&raw mut info).cast();
+    // SAFETY: `info_ptr` points to `info`, a valid, unique `mach_task_basic_info`, `count` is its
+    // size in `natural_t` units as the call needs, and the selector is the documented
     // `MACH_TASK_BASIC_INFO` for the current task.
     let status = unsafe {
         libc::task_info(
             libc::mach_task_self_,
             libc::MACH_TASK_BASIC_INFO,
-            (&raw mut info).cast::<libc::integer_t>(),
+            info_ptr,
             &raw mut count,
         )
     };
@@ -79,13 +135,13 @@ fn current_rss_bytes() -> Option<u64> {
 /// Linux: the resident pages of `/proc/self/statm` (its second field), times the
 /// size of a page.
 #[cfg(all(target_os = "linux", feature = "host"))]
-#[expect(unsafe_code, reason = "libc sysconf FFI for the page size")]
 fn current_rss_bytes() -> Option<u64> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    use rustix::param;
+    use std::fs;
+
+    let statm = fs::read_to_string("/proc/self/statm").ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    // SAFETY: `sysconf` with a valid name has no memory effects.
-    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    u64::try_from(page).ok()?.checked_mul(pages)
+    u64::try_from(param::page_size()).ok()?.checked_mul(pages)
 }
 
 /// No reading: another target, or no `host` feature.
@@ -107,7 +163,7 @@ fn maxrss_bytes() -> Option<u64> {
     // overwrites the fields it reports. We pass a valid unique pointer to it
     // and the documented `RUSAGE_SELF` selector.
     let usage = unsafe {
-        let mut usage: libc::rusage = std::mem::zeroed();
+        let mut usage: libc::rusage = mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) != 0 {
             return None;
         }
@@ -135,9 +191,9 @@ fn maxrss_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::peak_resident_memory_bytes;
-    use habilis_network_test_tracing::test;
 
+    #[cfg(all(any(target_os = "macos", target_os = "linux"), feature = "host"))]
+    use std::ptr;
     /// The current reading falls when memory is given back, which the peak never
     /// does. A block of 128 `MiB` is mapped, touched, read, unmapped and read again;
     /// `munmap` returns the pages at once, whereas `free` on macOS leaves them
@@ -149,17 +205,16 @@ mod tests {
         reason = "libc mmap and munmap: the pages must go back at once"
     )]
     fn the_current_resident_memory_falls_when_memory_is_given_back() {
-        use super::current_resident_memory_bytes;
-
         const BLOCK: usize = 128 * 1024 * 1024;
         const MIB: u64 = 1024 * 1024;
-        let before = current_resident_memory_bytes().expect("readable");
+        let _guard = ::habilis_network_test_tracing::init();
+        let before = super::current_resident_memory_bytes().expect("readable");
         // SAFETY: an anonymous private mapping of BLOCK bytes that nothing else
         // uses; every write is inside it, and it is unmapped once, with the same
         // length.
         let (with_block, after) = unsafe {
             let base = libc::mmap(
-                std::ptr::null_mut(),
+                ptr::null_mut(),
                 BLOCK,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_ANON | libc::MAP_PRIVATE,
@@ -167,15 +222,15 @@ mod tests {
                 0,
             );
             assert_ne!(base, libc::MAP_FAILED, "the mapping");
-            let bytes = base.cast::<u8>();
+            let bytes: *mut u8 = base.cast();
             for page in (0..BLOCK).step_by(4096) {
                 bytes.add(page).write_volatile(1);
             }
-            let with_block = current_resident_memory_bytes().expect("readable");
+            let with_block = super::current_resident_memory_bytes().expect("readable");
             assert_eq!(libc::munmap(base, BLOCK), 0, "the unmapping");
             (
                 with_block,
-                current_resident_memory_bytes().expect("readable"),
+                super::current_resident_memory_bytes().expect("readable"),
             )
         };
         assert!(
@@ -191,10 +246,11 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn reads_a_plausible_resident_memory() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The test process holds a real address space, so resident memory is
         // readable and non-trivial — guards against a units/selector regression
         // returning 0.
-        let bytes = peak_resident_memory_bytes().expect("resident memory readable on unix");
+        let bytes = super::peak_resident_memory_bytes().expect("resident memory readable on unix");
         assert!(
             bytes > 1024 * 1024,
             "resident memory should exceed 1 MiB, got {bytes} bytes"

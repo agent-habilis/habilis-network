@@ -1,2 +1,2 @@
 [test]
-preload = ["./scripts/fail-on-console.ts"]
+preload = ["./scripts/fail-on-console/fail-on-console.ts"]

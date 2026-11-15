@@ -21,19 +21,24 @@
 
 #![cfg(feature = "host")]
 
-use habilis_network::protocol::message::Authored;
-use std::sync::{Arc, Mutex};
+use habilis_network::protocol::messages::Authored;
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
+use tokio::sync;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype, RelayChoice};
 use habilis_network::runtime::tuning::{Tuning, init};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::Notify;
 
+use futures_util::future;
+use std::{env, fs, io, path, process};
+use tokio::time;
 /// The time that a mesh of members has to converge. A quiet run converges in 15 to 25
 /// seconds. The merge is a race over several rounds of the re-check, so the bound is
 /// the one of `agent-gossip` `topic_split.rs`.
@@ -63,22 +68,22 @@ const CONTROL_ROUNDS: usize = 5;
 
 /// Tests of this file take turns: each one runs real mDNS responders, and two of
 /// them on one host starve each other past their deadlines.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static SERIAL: sync::Mutex<()> = sync::Mutex::const_new(());
 
 /// The file that the log of the running round goes to. Rounds run one after the other.
-static ROUND_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static ROUND_LOG: Mutex<Option<fs::File>> = Mutex::new(None);
 
 struct RoundLogWriter;
 
-impl std::io::Write for RoundLogWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+impl io::Write for RoundLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if let Some(file) = ROUND_LOG.lock().expect("no poison").as_mut() {
             file.write_all(bytes)?;
         }
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -90,9 +95,9 @@ impl std::io::Write for RoundLogWriter {
 /// `RUST_LOG=habilis_network=debug,iroh_gossip=debug` to fill it. The log of one process
 /// has no tag per member, so a line names its member only when it has a `local=` or
 /// `node=` field.
-fn round_log_path(topic: &str) -> std::path::PathBuf {
-    let prefix = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
-        std::env::temp_dir()
+fn round_log_path(topic: &str) -> path::PathBuf {
+    let prefix: String = env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
+        env::temp_dir()
             .join("simultaneous-start")
             .display()
             .to_string()
@@ -101,16 +106,16 @@ fn round_log_path(topic: &str) -> std::path::PathBuf {
 }
 
 fn init_process() -> habilis_network_test_tracing::Guard {
-    static ONCE: std::sync::Once = std::sync::Once::new();
+    static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        init(Tuning {
-            heal_interval: Duration::from_secs(5),
-            rival_recheck_first: Duration::from_secs(3),
-            rival_recheck: Duration::from_secs(8),
-            rival_recheck_meshed: Duration::from_secs(12),
-            rival_recheck_alone: Duration::from_secs(12),
-            ..Tuning::DEFAULTS
-        });
+        let tuning = Tuning::DEFAULTS
+            .heal_interval(Duration::from_secs(5))
+            .rival_recheck_first(Duration::from_secs(3))
+            .rival_recheck(Duration::from_secs(8));
+        let tuning = tuning
+            .rival_recheck_meshed(Duration::from_secs(12))
+            .rival_recheck_alone(Duration::from_secs(12));
+        init(tuning);
     });
     habilis_network_test_tracing::init_with_writer(
         "habilis_network=info,habilis_network::beacon=info",
@@ -124,13 +129,7 @@ struct Member;
 #[habilis_network::async_trait]
 impl NodeApp for Member {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -168,14 +167,14 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg, .. } = event
+        if let NodeEvent::Presence { message, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
-            } = msg.kind
+            } = message.kind
         {
             let mut seen = self.seen.lock().expect("no poison");
-            if !seen.contains(&msg.author) {
-                seen.push(msg.author.clone());
+            if !seen.contains(&message.author) {
+                seen.push(message.author.clone());
             }
             drop(seen);
             self.changed.notify_waiters();
@@ -200,7 +199,7 @@ impl Joined {
             }
         };
         let left = until.saturating_duration_since(Instant::now());
-        let done = tokio::time::timeout(left, wait).await.is_ok() || {
+        let done: bool = time::timeout(left, wait).await.is_ok() || {
             others.iter().all(|nick| self.has_seen(nick))
         };
         done.then(Instant::now)
@@ -214,39 +213,23 @@ impl Joined {
 
 /// The reach of a public topic room cut down to the LAN. See the doc of the file.
 fn mdns_only() -> LookupOpts {
-    LookupOpts {
-        mdns: true,
-        dht: false,
-        relay_lookup: RelayChoice::Disabled,
-    }
+    LookupOpts::new(RelayChoice::Disabled).mdns(true)
 }
 
+// The sink is shared: the spawned task feeds it and the caller reads it after the join.
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Member> {
     let mesh = derive_topic_mesh_with(topic, mdns_only()).expect("derive an mDNS-only mesh");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let config = setup_mesh(
         SetupKind::Topic {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink).max_peers(16),
     )
     .await
     .expect("setup_mesh on an mDNS-only mesh");
-    Node::spawn(config, Member, None, false)
+    Node::spawn(config, Member, None, SignalHandling::Leave)
 }
 
 /// How the members of a round start.
@@ -260,25 +243,24 @@ enum Start {
 
 /// The result of one round: the time to converge, or the text of the split.
 async fn round(members: usize, start: Start, index: usize) -> Result<Duration, String> {
-    let topic = format!(
-        "simultaneous-start-{}-{}",
-        std::process::id(),
-        rand::random::<u64>()
-    );
+    let nonce: u64 = rand::random();
+    let topic = format!("simultaneous-start-{}-{nonce}", process::id());
     let log_path = round_log_path(&topic);
     *ROUND_LOG.lock().expect("no poison") =
-        Some(std::fs::File::create(&log_path).expect("create the log file of the round"));
+        Some(fs::File::create(&log_path).expect("create the log file of the round"));
     let names: Vec<String> = (0..members).map(|number| format!("peer{number}")).collect();
-    let nicks: Vec<Nickname> = names
-        .iter()
-        .map(|name| Nickname::new(name.as_str()).expect("valid nickname"))
-        .collect();
+    let parsed = names.iter().map(|name| {
+        let text = name.as_str();
+        Nickname::try_new(text).expect("valid nickname")
+    });
+    let nicks: Vec<Nickname> = parsed.collect();
+    // One sink per member, each handed to that member's task while the caller keeps the others.
     let sinks: Vec<Arc<Joined>> = nicks.iter().map(|_| Arc::default()).collect();
 
     let began = Instant::now();
     let nodes = match start {
         Start::Together => {
-            futures_util::future::join_all(
+            future::join_all(
                 names
                     .iter()
                     .zip(&sinks)
@@ -288,9 +270,11 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
         }
         Start::Staggered => {
             let mut nodes = Vec::new();
-            for (name, sink) in names.iter().zip(&sinks) {
+            // Each sink is shared with the task of its member.
+            let named_sinks: Vec<(&String, &Arc<Joined>)> = names.iter().zip(&sinks).collect();
+            for (name, sink) in named_sinks {
                 nodes.push(spawn(&topic, name, Arc::clone(sink)).await);
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                time::sleep(Duration::from_secs(3)).await;
             }
             nodes
         }
@@ -299,13 +283,14 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
     let until = began + MERGE_BUDGET;
     let mut slowest = Duration::ZERO;
     let mut stuck = Vec::new();
-    for (member, sink) in sinks.iter().enumerate() {
-        let others: Vec<Nickname> = nicks
+    // Each sink is shared with the task of its member.
+    let indexed_sinks: Vec<(usize, &Arc<Joined>)> = sinks.iter().enumerate().collect();
+    for (member, sink) in indexed_sinks {
+        let candidates = nicks
             .iter()
             .enumerate()
-            .filter(|(other, _)| *other != member)
-            .map(|(_, nick)| nick.clone())
-            .collect();
+            .filter(|(other, _)| *other != member);
+        let others: Vec<Nickname> = candidates.map(|(_, nick)| nick.clone()).collect();
         match sink.wait_for_all(&others, until).await {
             Some(when) => slowest = slowest.max(when.duration_since(began)),
             None => stuck.push(format!("{} saw {:?}", names[member], sink.seen_names())),
@@ -325,7 +310,7 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
     }
     *ROUND_LOG.lock().expect("no poison") = None;
     if index >= KEEP_FIRST_ROUNDS && matches!(verdict, Ok(time) if time <= KEEP_LOG_OVER) {
-        let _ = std::fs::remove_file(&log_path);
+        let _ = fs::remove_file(&log_path);
     }
     verdict
 }
@@ -341,12 +326,15 @@ fn distribution(times: &[Duration]) -> String {
             .filter(|time| **time > Duration::from_secs(limit))
             .count()
     };
+    let middle = sorted.len() / 2;
+    let median = sorted.get(middle).copied().unwrap_or_default();
+    let max = sorted.last().copied().unwrap_or_default();
     format!(
         "median {:?}, over 20 s {}, over 30 s {}, max {:?}",
-        sorted.get(sorted.len() / 2).copied().unwrap_or_default(),
+        median,
         over(20),
         over(30),
-        sorted.last().copied().unwrap_or_default()
+        max
     )
 }
 

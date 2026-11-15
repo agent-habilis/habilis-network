@@ -1,4 +1,4 @@
-//! The resident memory that one WebRTC session costs the process that holds it.
+//! The resident memory that one `WebRTC` session costs the process that holds it.
 //!
 //! An underlay session and an application session are the same object: a session made by
 //! `offer_with` and `answer_with`, and attached to a `WebRtcTransport`. This example measures
@@ -22,6 +22,7 @@
 //! such lines and prints the slope per role, with its standard error and the noise floor
 //! (the spread of the `k = 0` runs).
 
+use std::io as std_io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,11 +31,14 @@ use habilis_network_iroh_webrtc_transport::iroh_base::{EndpointId, SecretKey};
 use habilis_network_iroh_webrtc_transport::{
     IceConfig, SignalEnvelope, WebRtcTransport, answer_with, offer_with,
 };
-use habilis_network_util::resident_memory::current_resident_memory_bytes;
+use habilis_network_util::resident_memory;
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{self, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 
+use std::{env, fs, process};
+use tokio::time;
 const JSEP_DEADLINE: Duration = Duration::from_secs(30);
 const MIB: f64 = 1_048_576.0;
 
@@ -54,7 +58,7 @@ fn median(values: &[u64]) -> u64 {
 }
 
 /// A least-squares line through `(x, y)` points.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 struct Fit {
     slope: f64,
     intercept: f64,
@@ -62,14 +66,15 @@ struct Fit {
     slope_stderr: Option<f64>,
 }
 
-#[expect(clippy::cast_precision_loss, reason = "a handful of points")]
 fn fit(points: &[(f64, f64)]) -> Option<Fit> {
     if points.len() < 2 {
         return None;
     }
-    let count = points.len() as f64;
-    let mean_x = points.iter().map(|&(px, _)| px).sum::<f64>() / count;
-    let mean_y = points.iter().map(|&(_, py)| py).sum::<f64>() / count;
+    let count = points.len().to_f64().unwrap_or(f64::NAN);
+    let sum_x: f64 = points.iter().map(|&(px, _)| px).sum();
+    let sum_y: f64 = points.iter().map(|&(_, py)| py).sum();
+    let mean_x = sum_x / count;
+    let mean_y = sum_y / count;
     let sxx: f64 = points.iter().map(|&(px, _)| (px - mean_x).powi(2)).sum();
     if sxx <= f64::EPSILON {
         return None;
@@ -80,7 +85,7 @@ fn fit(points: &[(f64, f64)]) -> Option<Fit> {
         .sum();
     let slope = sxy / sxx;
     let intercept = mean_y - slope * mean_x;
-    let slope_stderr = (points.len() >= 3).then(|| {
+    let slope_stderr: Option<f64> = (points.len() >= 3).then(|| {
         let sse: f64 = points
             .iter()
             .map(|&(px, py)| (py - (intercept + slope * px)).powi(2))
@@ -95,19 +100,19 @@ fn fit(points: &[(f64, f64)]) -> Option<Fit> {
 }
 
 /// The sample standard deviation, `None` with fewer than two values.
-#[expect(clippy::cast_precision_loss, reason = "a handful of values")]
 fn std_dev(values: &[f64]) -> Option<f64> {
     if values.len() < 2 {
         return None;
     }
-    let count = values.len() as f64;
-    let mean = values.iter().sum::<f64>() / count;
+    let count = values.len().to_f64().unwrap_or(f64::NAN);
+    let sum: f64 = values.iter().sum();
+    let mean = sum / count;
     let squares: f64 = values.iter().map(|value| (value - mean).powi(2)).sum();
     Some((squares / (count - 1.0)).sqrt())
 }
 
 /// A line on the pipe between the two processes.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum Msg {
     /// The measured process answers: the peer is to make an offer.
@@ -134,7 +139,7 @@ async fn send(out: &mut ChildStdin, message: &Msg) -> anyhow::Result<()> {
     Ok(())
 }
 
-type Lines = tokio::io::Lines<BufReader<ChildStdout>>;
+type Lines = io::Lines<BufReader<ChildStdout>>;
 
 async fn receive(lines: &mut Lines) -> anyhow::Result<Msg> {
     let line = lines
@@ -181,46 +186,44 @@ async fn open_one(
 }
 
 fn resident() -> u64 {
-    current_resident_memory_bytes().unwrap_or(0)
+    resident_memory::current_resident_memory_bytes().unwrap_or(0)
 }
 
 /// Waits `settle` seconds, then the median of five readings one second apart.
 async fn settled(settle: u64) -> u64 {
-    tokio::time::sleep(Duration::from_secs(settle)).await;
+    time::sleep(Duration::from_secs(settle)).await;
     let mut readings = Vec::new();
     for _ in 0..5 {
         readings.push(resident());
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
     median(&readings)
 }
 
 /// The load average of the last minute, `None` where it cannot be read.
 fn load1() -> Option<f64> {
-    if let Ok(text) = std::fs::read_to_string("/proc/loadavg") {
+    if let Ok(text) = fs::read_to_string("/proc/loadavg") {
         return text.split_whitespace().next()?.parse().ok();
     }
-    let output = std::process::Command::new("sysctl")
+    let output = process::Command::new("sysctl")
         .args(["-n", "vm.loadavg"])
         .output()
         .ok()?;
-    String::from_utf8(output.stdout)
-        .ok()?
-        .split_whitespace()
-        .find_map(|word| word.parse().ok())
+    let text = String::from_utf8(output.stdout).ok()?;
+    text.split_whitespace().find_map(|word| word.parse().ok())
 }
 
 async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
-        current_resident_memory_bytes().is_some(),
+        resident_memory::current_resident_memory_bytes().is_some(),
         "the resident memory of this process cannot be read on this platform"
     );
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(env::current_exe()?);
+    command
         .arg("peer")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .stdin(process::Stdio::piped())
+        .stdout(process::Stdio::piped());
+    let mut child = command.kill_on_drop(true).spawn()?;
     let mut to_peer = child.stdin.take().context("no stdin")?;
     let mut from_peer = BufReader::new(child.stdout.take().context("no stdout")?).lines();
     let local = SecretKey::generate().public();
@@ -291,14 +294,16 @@ async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow:
 /// The peer: answers or offers on request, with a fresh endpoint id for every session, and
 /// keeps its end of every session open until its stdin closes.
 async fn run_peer() -> anyhow::Result<()> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut out = tokio::io::stdout();
+    let mut lines = BufReader::new(io::stdin()).lines();
+    let mut out = io::stdout();
+    // the example keeps each transport alive while its sessions run
     let mut held: Vec<Arc<WebRtcTransport>> = Vec::new();
     let ice = IceConfig::host_only();
     while let Some(line) = lines.next_line().await? {
         let id = SecretKey::generate().public();
         let transport = WebRtcTransport::new(id);
-        match serde_json::from_str::<Msg>(&line)? {
+        let message: Msg = serde_json::from_str(&line)?;
+        match message {
             Msg::Offer { env: offer } => {
                 let (pending, env) = answer_with(id, &offer, &ice).await?;
                 reply(&mut out, &Msg::Answer { env }).await?;
@@ -322,7 +327,7 @@ async fn run_peer() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn reply(out: &mut tokio::io::Stdout, message: &Msg) -> anyhow::Result<()> {
+async fn reply(out: &mut io::Stdout, message: &Msg) -> anyhow::Result<()> {
     let mut line = serde_json::to_vec(message)?;
     line.push(b'\n');
     out.write_all(&line).await?;
@@ -338,7 +343,7 @@ fn field(row: &serde_json::Value, name: &str) -> Option<f64> {
 /// Reads the lines of `measure` from stdin and prints the slope per role and per reading.
 fn run_fit() -> anyhow::Result<()> {
     let mut rows: Vec<serde_json::Value> = Vec::new();
-    for line in std::io::stdin().lines() {
+    for line in std_io::stdin().lines() {
         let line = line?;
         if line.trim_start().starts_with('{') {
             rows.push(serde_json::from_str(&line)?);
@@ -421,15 +426,13 @@ fn verdict(floor: Option<f64>, effect: Option<(f64, Option<f64>)>) -> &'static s
 }
 
 fn argument(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|arg| arg == name)
-        .and_then(|index| args.get(index + 1))
-        .cloned()
+    let index = args.iter().position(|arg| arg == name)?;
+    args.get(index + 1).cloned()
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("peer") => Box::pin(run_peer()).await,
         Some("fit") => run_fit(),
@@ -439,7 +442,7 @@ async fn main() -> anyhow::Result<()> {
                 Some("answerer") => Role::Answerer,
                 _ => bail!("--role offerer|answerer"),
             };
-            let sessions = argument(&args, "--k").context("--k")?.parse()?;
+            let sessions: usize = argument(&args, "--k").context("--k")?.parse()?;
             let settle = argument(&args, "--settle").map_or(Ok(5), |value| value.parse())?;
             let hold = argument(&args, "--hold").map_or(Ok(60), |value| value.parse())?;
             measure(role, sessions, settle, hold).await
@@ -456,17 +459,25 @@ mod tests {
 
     #[test]
     fn the_median_of_an_odd_set_is_its_middle_value() {
-        assert_eq!(median(&[9, 1, 5]), 5);
+        assert_eq!(
+            median(&[9, 1, 5]),
+            5,
+            "the median of an odd set is its middle value"
+        );
     }
 
     #[test]
     fn the_median_of_an_even_set_is_the_mean_of_the_two_middle_values() {
-        assert_eq!(median(&[10, 2, 8, 4]), 6);
+        assert_eq!(
+            median(&[10, 2, 8, 4]),
+            6,
+            "the median of an even set is the mean of the two middle values"
+        );
     }
 
     #[test]
     fn the_median_of_nothing_is_zero() {
-        assert_eq!(median(&[]), 0);
+        assert_eq!(median(&[]), 0, "the median of nothing is zero");
     }
 
     #[test]
@@ -478,7 +489,10 @@ mod tests {
         let line = fit(&points).expect("a line");
         assert!((line.slope - 0.25).abs() < 1e-9, "{line:?}");
         assert!((line.intercept - 3.0).abs() < 1e-9, "{line:?}");
-        assert!(line.slope_stderr.expect("a stderr") < 1e-9);
+        assert!(
+            line.slope_stderr.expect("a stderr") < 1e-9,
+            "a fit through points on a line finds its slope"
+        );
     }
 
     #[test]
@@ -497,35 +511,71 @@ mod tests {
 
     #[test]
     fn a_fit_needs_two_different_x_values() {
-        assert_eq!(fit(&[(3.0, 1.0), (3.0, 2.0)]), None);
-        assert_eq!(fit(&[(3.0, 1.0)]), None);
+        assert_eq!(
+            fit(&[(3.0, 1.0), (3.0, 2.0)]),
+            None,
+            "a fit with one x value has no result"
+        );
+        assert_eq!(
+            fit(&[(3.0, 1.0)]),
+            None,
+            "a fit with a single point has no result"
+        );
     }
 
     #[test]
     fn the_standard_deviation_is_the_sample_one() {
         let spread = std_dev(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]).expect("a spread");
         assert!((spread - 2.138_089_935).abs() < 1e-6, "{spread}");
-        assert_eq!(std_dev(&[1.0]), None);
+        assert_eq!(
+            std_dev(&[1.0]),
+            None,
+            "the sample standard deviation needs two values"
+        );
     }
 
     #[test]
     fn a_verdict_needs_both_the_noise_floor_and_the_standard_error_to_be_small() {
         // The effect at k = 32 is 6.4 MiB (slope 0.2). A floor of 0.5 and an error of 0.01 pass.
-        assert!(verdict(Some(0.5), Some((0.2, Some(0.01)))).starts_with("a result"));
+        assert!(
+            verdict(Some(0.5), Some((0.2, Some(0.01)))).starts_with("a result"),
+            "a verdict needs the noise floor and the standard error to be small"
+        );
         // A floor of 1.0 is over 10 percent of 6.4.
-        assert!(verdict(Some(1.0), Some((0.2, Some(0.01)))).starts_with("NO RESULT"));
+        assert!(
+            verdict(Some(1.0), Some((0.2, Some(0.01)))).starts_with("NO RESULT"),
+            "a small noise floor and a small standard error give a verdict"
+        );
         // An error of 0.05 is over 10 percent of the slope.
-        assert!(verdict(Some(0.5), Some((0.2, Some(0.05)))).starts_with("NO RESULT"));
+        assert!(
+            verdict(Some(0.5), Some((0.2, Some(0.05)))).starts_with("NO RESULT"),
+            "a large noise floor gives no verdict"
+        );
         // Nothing to compare: no result.
-        assert!(verdict(None, Some((0.2, Some(0.01)))).starts_with("NO RESULT"));
-        assert!(verdict(Some(0.5), Some((0.2, None))).starts_with("NO RESULT"));
-        assert!(verdict(Some(0.5), None).starts_with("NO RESULT"));
+        assert!(
+            verdict(None, Some((0.2, Some(0.01)))).starts_with("NO RESULT"),
+            "a missing noise floor gives no verdict"
+        );
+        assert!(
+            verdict(Some(0.5), Some((0.2, None))).starts_with("NO RESULT"),
+            "a large standard error gives no verdict"
+        );
+        assert!(
+            verdict(Some(0.5), None).starts_with("NO RESULT"),
+            "a missing standard error gives no verdict"
+        );
     }
 
     #[test]
     fn a_negative_slope_is_never_a_result() {
         // A session that frees memory is a flaw of the run, not a cost, however small the noise.
-        assert!(verdict(Some(0.5), Some((-0.2, Some(0.01)))).starts_with("NO RESULT"));
-        assert!(verdict(Some(0.0), Some((0.0, Some(0.0)))).starts_with("NO RESULT"));
+        assert!(
+            verdict(Some(0.5), Some((-0.2, Some(0.01)))).starts_with("NO RESULT"),
+            "a negative slope is never a result"
+        );
+        assert!(
+            verdict(Some(0.0), Some((0.0, Some(0.0)))).starts_with("NO RESULT"),
+            "a zero slope with zero error is not a negative result"
+        );
     }
 }

@@ -7,267 +7,53 @@
 //! roster directly — that separation is the layer split documented in
 //! the Concept Glossary (AGENTS.md).
 
+#[cfg(test)]
+mod churn_red;
+#[cfg(all(test, feature = "host"))]
+mod churn_wire;
 pub(crate) mod heartbeat;
-pub(crate) mod membership;
-
-use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::state::EventLoopState;
-use crate::gossip::app::NodeApp;
-use crate::gossip::event::NodeEvent;
-use crate::protocol::identity::Identity;
-use crate::protocol::message::Verified;
-use crate::protocol::{MeshId, Message, MessageKind, PresenceSubtype};
-
-use crate::gossip;
-use crate::util::clock::Instant;
-
-/// Developer log for the mesh-ready milestone. Mirrors the operator
-/// `ready` event but on the lifecycle log target (stderr, opt-in via
-/// `RUST_LOG`); the operator JSON/human event is unchanged.
-///
-/// Logs the derived **`TopicId`** (a one-way hash of the seed), never the full
-/// mesh id. The id carries the seed and *is* the bearer credential, and this
-/// log file is written under a shared path — logging the id would leak full
-/// mesh membership to anyone who can read the file. The topic hash is enough
-/// to correlate a run without exposing the secret.
-pub(crate) fn log_ready(
-    topic: iroh_gossip::proto::TopicId,
-    name: &str,
-    nickname: &str,
-    network: &str,
-) {
-    tracing::info!(target: "habilis_network::lifecycle", ?topic, name, nickname, network, "mesh ready");
-}
-
-/// Developer log for graceful departure (mirrors the operator `left`).
-pub(crate) fn log_leaving(name: &str) {
-    tracing::info!(target: "habilis_network::lifecycle", name, "leaving mesh");
-}
-
-/// What [`observe`] computed for one received message: whether it is
-/// past our join horizon (surfaceable) and how it changed the roster.
-/// Returned to the gossip router, which needs both for the inbound-push
-/// gate and the presence/msg dispatch.
-pub(crate) struct Observed {
-    pub surfaceable: bool,
-    pub update: membership::MembershipUpdate,
-}
-
-/// Heartbeat + membership + surfacing + join-horizon for one received
-/// message. Called by the gossip router *before* kind dispatch. All
-/// membership/presentation side effects live here (lifecycle layer);
-/// the gossip layer never touches the roster directly.
-pub(crate) fn observe(
-    message: &Verified,
-    state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
-) -> Observed {
-    let update = membership::compute_for(message, state);
-    // Implicit heartbeat: any received message updates last_seen. Not a stale one: a copy of a
-    // departed key's frame says nothing about whoever holds the nickname now.
-    if !update.stale {
-        match state.last_seen.get_mut(message.author.as_str()) {
-            Some(seen) => *seen = Instant::now(),
-            None => {
-                state
-                    .last_seen
-                    .insert(message.author.clone(), Instant::now());
-            }
-        }
-    }
-    membership::apply(&update, &message.author, state);
-
-    // Join horizon: the node still relays/logs everything (anti-entropy
-    // keeps the mesh's set uniform), but a message stamped before we
-    // joined is never *surfaced* to the operator/agent. Computed here
-    // (not just before the inbound push) because the arrival-surfacing
-    // decisions below need it too.
-    let surfaceable = message.timestamp >= state.joined_at;
-
-    if update.returned && surfaceable {
-        state.surfaced.insert(message.author.clone());
-        ctx.sink.emit(NodeEvent::PeerReturn {
-            nickname: message.author.clone(),
-        });
-        tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer returned");
-    }
-
-    // Make `joined` as reliable as membership. A peer's own `joined`
-    // presence is a one-shot broadcast that can be lost in the
-    // convergence window; `PeerInfo` is re-sent on every `NeighborUp`
-    // and flooded by receivers, so a peer first learned via *any*
-    // non-presence message reliably surfaces a `joined` here. The
-    // real `Presence::Joined` keeps its own emit + roster re-announce
-    // in `handle_presence`; gating on `!Presence` avoids a double.
-    //
-    // Surfacing is gated on `surfaceable` + `surfaced`, NOT on
-    // `joined_new`: `joined_new` (the roster concept) is consumed by
-    // the *first* received message even when it is non-surfaceable
-    // pre-join backlog, so keying off it would swallow the legitimate
-    // arrival of a still-present peer whose first fresh message lands
-    // after some old relayed one. `!surfaced.contains` keeps
-    // this exactly-once instead.
-    if surfaceable
-        && !update.returned
-        && !update.stale
-        && !state.surfaced.contains(message.author.as_str())
-        && !matches!(message.kind, MessageKind::Presence { .. })
-    {
-        state.surfaced.insert(message.author.clone());
-        ctx.sink
-            .emit(synthetic_arrival(ctx.mesh, ctx.identity, message));
-        tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined");
-    }
-
-    Observed {
-        surfaceable,
-        update,
-    }
-}
-
-/// The presence this node surfaces for a peer's first arrival. This node signs the
-/// `joined` that reports it, so the proof names this node, and the nickname stays the
-/// peer's. `peer` is the key of the frame that triggered it, which is the peer's own.
-fn synthetic_arrival(mesh: &MeshId, identity: &Identity, triggering: &Verified) -> NodeEvent {
-    let arrival = Message::new_joined(mesh, &triggering.author).sign(identity);
-    NodeEvent::Presence {
-        msg: Box::new(arrival.authored()),
-        peer: triggering.key(),
-        synthetic: true,
-    }
-}
-
-/// A received `Presence` frame plus the roster delta [`membership::observe`]
-/// already computed for it, passed to [`handle_presence`]. Constructed by
-/// [`crate::gossip::recv::ingest`], across the `gossip`/`lifecycle` module
-/// boundary — hence `pub(crate)` rather than module-private.
-pub(crate) struct PresenceEvent<'a> {
-    pub(crate) message: &'a Verified,
-    pub(crate) subtype: PresenceSubtype,
-    pub(crate) update: &'a membership::MembershipUpdate,
-    pub(crate) surfaceable: bool,
-}
-
-pub(crate) async fn handle_presence(
-    event: PresenceEvent<'_>,
-    state: &mut EventLoopState,
-    app: &mut dyn NodeApp,
-    ctx: &HandlerCtx<'_>,
-) {
-    let PresenceEvent {
-        message,
-        subtype,
-        update,
-        surfaceable,
-    } = event;
-    if subtype == PresenceSubtype::Alive {
-        return;
-    }
-    if subtype == PresenceSubtype::Left {
-        // A key says goodbye once per run. A second copy is a replay that a peer still held, and
-        // the nickname may belong to a new key by now: the replay must not take it away.
-        if state.key_said_goodbye(message.key()) {
-            return;
-        }
-        state.note_left(&message.author, message.key(), message.timestamp);
-        state.drop_departed_presence(&message.key());
-        if state.peers.remove(message.author.as_str()) {
-            state.write_peer_count();
-        }
-        // A graceful goodbye, unlike a silence timeout, drops the dial hint —
-        // and with it the warm unicast connection and any dial cooldown, so a
-        // rejoin re-dials cold.
-        if let Some(endpoint_id) = state.forget_peer_endpoint(message.author.as_str()) {
-            state.unicast_pool.forget(endpoint_id.id).await;
-            // Its advertised links go too, or routes keep running through a peer
-            // that said goodbye until its vector ages out.
-            #[cfg(feature = "multihop")]
-            if let Some(handle) = state.multihop.as_ref() {
-                handle.remove_origin(habilis_network_iroh_multihop_transport::AppId::new(
-                    endpoint_id.id,
-                ));
-            }
-        }
-        state.quiet.remove(message.author.as_str());
-        // Only announce a departure for a peer whose arrival we
-        // surfaced — keeps the join-horizon view symmetric. A `left`
-        // for a peer known only through pre-join backlog (or one we
-        // already showed going quiet) is dropped.
-        if state.surfaced.remove(message.author.as_str()) {
-            ctx.sink.emit(NodeEvent::Presence {
-                msg: Box::new(message.authored()),
-                peer: message.key(),
-                synthetic: false,
-            });
-            tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer left");
-        }
-        // App cleanup last, with the roster already consistent. Gated on
-        // `surfaceable`: a relayed pre-join `Left` must never cancel live
-        // work — the same join-horizon symmetry as the announcement above.
-        if surfaceable {
-            app.on_peer_left(&message.author, state, ctx).await;
-        }
-    } else if subtype == PresenceSubtype::Joined && !update.stale {
-        // Every `joined` re-floods our `PeerInfo`, newcomer and rejoin
-        // alike. A newcomer linked to the *rendezvous*, so no `NeighborUp`
-        // fires on this loop to re-send it and our arrival flood predates
-        // them; a rejoin across a beacon epoch may have lost it the same way
-        // (both observed native↔browser in the mesh matrix: a roster entry
-        // with no endpoint binding reads "unreachable" forever). Throttled
-        // by `joined_refloods_peerinfo`.
-        let now = Instant::now();
-        if state.joined_refloods_peerinfo(update.joined_new, now) {
-            gossip::broadcast_peer_info(state, ctx).await;
-            state.last_sent_at = now;
-        }
-        if update.joined_new {
-            // Re-announce so late joiners seed their roster. Retained locally: a
-            // re-announce mints a fresh id, so without this each one becomes
-            // another message we can never acknowledge and every peer re-sends to
-            // us forever (see `gossip::recv::retain_own_broadcast`).
-            let joined = Message::new_joined(ctx.mesh, ctx.author).sign(ctx.identity);
-            gossip::broadcast_msg(ctx.sender, &joined).await;
-            gossip::retain_own_broadcast(state, &joined);
-            state.last_sent_at = Instant::now();
-            // Suppress "has joined" when we already printed "came back"
-            // from the quiet check, or when this `joined` predates
-            // our own join (relayed backlog).
-            if surfaceable && !update.returned {
-                state.surfaced.insert(message.author.clone());
-                ctx.sink.emit(NodeEvent::Presence {
-                    msg: Box::new(message.authored()),
-                    peer: message.key(),
-                    synthetic: false,
-                });
-                tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
-            }
-        }
-    }
-}
+mod logs;
+pub(crate) mod membership_update;
+mod observed;
+mod presence_event;
+pub(crate) use logs::{log_leaving, log_ready};
+pub(crate) use observed::{Observed, observe};
+pub(crate) use presence_event::{
+    Goodbye, PathSign, PresenceEvent, ask_for_proof, end_pending_endpoints, end_session,
+    handle_presence, retry_deferred_asks, show_again,
+};
 
 #[cfg(test)]
 mod tests {
-    use super::{Identity, MeshId, Message, NodeEvent, synthetic_arrival};
-    use crate::testing::nick;
+    use super::observed;
+    use crate::gossip::event::NodeEvent;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::{MeshId, Message};
+    use crate::testing;
 
     #[test]
     fn a_synthetic_presence_names_the_peer_apart_from_its_signer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from("test");
         let node = Identity::generate();
         let peer = Identity::generate();
-        let joined = Message::new_joined(&mesh, &nick("bob")).sign(&peer);
+        let joined = Message::new_joined(&mesh, &testing::nick("bob")).sign(&peer);
         let NodeEvent::Presence {
-            msg,
+            message,
             peer: key,
             synthetic,
-        } = synthetic_arrival(&mesh, &node, &joined)
+        } = observed::synthetic_arrival(&mesh, &node, &joined)
         else {
             panic!("a synthetic arrival is a presence");
         };
         assert!(synthetic, "this node minted it");
         assert_eq!(key, peer.author_key(), "the peer is the triggering signer");
-        assert_eq!(msg.key(), node.author_key(), "the proof is this node's");
-        assert_eq!(msg.author.as_str(), "bob", "the nickname stays the peer's");
+        assert_eq!(message.key(), node.author_key(), "the proof is this node's");
+        assert_eq!(
+            message.author.as_str(),
+            "bob",
+            "the nickname stays the peer's"
+        );
     }
 }
 
@@ -276,35 +62,32 @@ mod tests {
 /// hold by then, and a stale frame of a departed key must not refresh that nickname's liveness.
 #[cfg(all(test, feature = "host"))]
 mod departed_tests {
-    use habilis_network_test_tracing::test;
     use iroh_gossip::net::Gossip;
 
-    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::SilentSink;
+    use crate::gossip::event::{CountingSink, NodeEvent, NodeSink, SilentSink};
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;
-    use crate::protocol::mesh::LookupOpts;
-    use crate::protocol::message::Authored;
-    use crate::protocol::{MeshId, Message, PresenceSubtype, UnixSecs};
+    use crate::protocol::meshes::LookupOpts;
+    use crate::protocol::messages::Authored;
+    use crate::protocol::{AuthorKey, MeshId, Message, MessageKind, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
-    use crate::transport::MeshSender;
+    use crate::transport::{MeshSender, PayloadPath};
+    use crate::util::tuning::QUIET_CAP;
+    use std::sync::Mutex;
 
-    use super::{PresenceEvent, handle_presence, membership, observe};
+    use super::{PresenceEvent, handle_presence, membership_update, observe};
 
+    use crate::protocol;
+    use iroh_gossip::proto;
     struct Inert;
 
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass {
-                loggable: false,
-                beat: true,
-                valid: true,
-                chained: false,
-                sealed: false,
-            }
+            AppClass::BEAT.union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -323,238 +106,933 @@ mod departed_tests {
             &LookupOpts::loopback(),
             TransportOpts::default(),
             None,
-            false,
+            PayloadPath::DirectOnly,
         )
         .await
         .expect("a peer binds");
         handle.close().await;
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
             .await
             .expect("subscribe to a peerless topic");
         let (gossip_sender, _receiver) = topic.split();
         (endpoint, MeshSender::new(gossip_sender))
     }
 
+    /// A key that is not in the roster can keep a retained endpoint (its `PeerInfo` came before its
+    /// admission). Its goodbye must release that endpoint, or a directed send could still route to it.
     #[test]
-    async fn a_replayed_left_leaves_the_nickname_to_its_new_holder() {
-        let (endpoint, sender) = endpoint_and_sender().await;
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let mesh = MeshId::from("test");
-        let us = nick("us");
-        let sink = SilentSink;
-        let ctx = HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &us,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let who = nick("swift-cedar");
-        let first_run = Identity::generate();
-        let left = Message::new_left(&mesh, &who).sign(&first_run);
-        let mut state = fresh_state();
-        let mut app = Inert;
+    fn the_goodbye_of_a_stranger_releases_its_retained_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let stranger = Identity::generate();
+            let left = Message::new_left(&mesh, &nick("stranger")).sign(&stranger);
+            let mut state = fresh_state();
+            let mut app = Inert;
+            state.retain_refused_endpoint(
+                stranger.author_key(),
+                iroh::EndpointAddr::new(endpoint_id(70)),
+            );
+            let update = membership_update::compute_for(&left, &state);
 
-        // The first run leaves.
-        state.peers.insert(who.clone());
-        let update = membership::compute_for(&left, &state);
-        handle_presence(
-            PresenceEvent {
-                message: &left,
-                subtype: PresenceSubtype::Left,
-                update: &update,
-                surfaceable: true,
-            },
-            &mut state,
-            &mut app,
-            &ctx,
-        )
-        .await;
-        assert!(!state.peers.contains(who.as_str()), "the first run left");
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
 
-        // A second run takes the nickname, then a copy of the first run's goodbye lands.
-        state.peers.insert(who.clone());
-        state.surfaced.insert(who.clone());
-        let replay = membership::compute_for(&left, &state);
-        handle_presence(
-            PresenceEvent {
-                message: &left,
-                subtype: PresenceSubtype::Left,
-                update: &replay,
-                surfaceable: true,
-            },
-            &mut state,
-            &mut app,
-            &ctx,
-        )
-        .await;
-        assert!(
-            state.peers.contains(who.as_str()),
-            "a replayed goodbye of the first run removed the second run"
-        );
-        assert!(
-            state.surfaced.contains(who.as_str()),
-            "a replayed goodbye of the first run un-surfaced the second run"
-        );
-        endpoint.close().await;
+            assert!(
+                !state.refused_endpoints.contains_key(&stranger.author_key()),
+                "a directed send could still route to the endpoint of a key that said goodbye"
+            );
+            endpoint.close().await;
+        });
     }
 
-    /// A departed key's `joined` frames serve nobody once it is gone, and the log never evicts a
-    /// small author, so without this they stay resend subjects for the life of the node. Its chat
-    /// stays: a node that missed it can still backfill it.
     #[test]
-    async fn a_departed_keys_presence_leaves_the_log() {
-        let (endpoint, sender) = endpoint_and_sender().await;
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let mesh = MeshId::from("test");
-        let us = nick("us");
-        let sink = SilentSink;
-        let ctx = HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &us,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let who = nick("swift-cedar");
-        let departed = Identity::generate();
-        let joined = Message::new_joined(&mesh, &who).sign(&departed);
-        let chat = Message::new_app(
-            &mesh,
-            &who,
-            crate::protocol::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: None,
-                corr: None,
-                body: crate::protocol::MessageBody::from("kept"),
-            },
-        )
-        .sign(&departed);
-        let mut state = fresh_state();
-        state.peers.insert(who.clone());
-        state.message_log.push(joined.clone());
-        state.message_log.push(chat.clone());
+    fn a_replayed_left_leaves_the_nickname_to_its_new_holder() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let first_run = Identity::generate();
+            let left = Message::new_left(&mesh, &who).sign(&first_run);
+            let mut state = fresh_state();
+            let mut app = Inert;
 
-        let left = Message::new_left(&mesh, &who).sign(&departed);
-        let update = membership::compute_for(&left, &state);
-        let mut app = Inert;
-        handle_presence(
-            PresenceEvent {
-                message: &left,
-                subtype: PresenceSubtype::Left,
-                update: &update,
-                surfaceable: true,
-            },
-            &mut state,
-            &mut app,
-            &ctx,
-        )
-        .await;
-        assert!(
-            !state.message_log.contains(&joined.dedup_key()),
-            "the departed key's joined is still in the log"
-        );
-        assert!(
-            state.message_log.contains(&chat.dedup_key()),
-            "the departed key's chat left the log"
-        );
-        endpoint.close().await;
+            // The first run leaves. Its key is a peer of the roster.
+            let first_key = first_run.author_key();
+            state.names.insert(first_key, who.clone());
+            state.peers.insert(first_key);
+            let update = membership_update::compute_for(&left, &state);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(!state.peers.contains(&first_key), "the first run left");
+
+            // A second run takes the nickname, then a copy of the first run's goodbye lands.
+            let second_key = Identity::generate().author_key();
+            state.names.insert(second_key, who.clone());
+            state.peers.insert(second_key);
+            state.surfaced.insert(second_key);
+            let replay = membership_update::compute_for(&left, &state);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &replay,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(
+                state.peers.contains(&second_key),
+                "a replayed goodbye of the first run removed the second run"
+            );
+            assert!(
+                state.surfaced.contains(&second_key),
+                "a replayed goodbye of the first run un-surfaced the second run"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// The goodbye of a peer that we showed is shown as a departure: the surfaced mark is read
+    /// before the key is forgotten, or the departure is never announced.
+    #[test]
+    fn a_surfaced_peer_that_says_goodbye_is_shown_leaving() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = CountingSink::new();
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let leaver = Identity::generate();
+            let mut state = fresh_state();
+            state.names.insert(leaver.author_key(), who.clone());
+            state.peers.insert(leaver.author_key());
+            state.surfaced.insert(leaver.author_key());
+            let left = Message::new_left(&mesh, &who).sign(&leaver);
+            let update = membership_update::compute_for(&left, &state);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut Inert,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                sink.count(),
+                1,
+                "the departure of a shown peer is not shown"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// Any key can sign a goodbye. A flood of goodbyes from keys that were never peers must not
+    /// push the tombstone of a real leaver out of the set, or a copy of its frames would bring it
+    /// back as an arrival. The goodbye of a stranger is still a replay the second time.
+    #[test]
+    fn a_flood_of_unknown_goodbyes_keeps_the_tombstone_of_a_departed_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let leaver = Identity::generate();
+            let mut state = fresh_state();
+            state.names.insert(leaver.author_key(), who.clone());
+            state.peers.insert(leaver.author_key());
+            let mut stranger = Identity::generate();
+            for round in 0..=QUIET_CAP {
+                let (key, name) = if round == 0 {
+                    (&leaver, who.clone())
+                } else {
+                    stranger = Identity::generate();
+                    (&stranger, nick("passer-by"))
+                };
+                let left = Message::new_left(&mesh, &name).sign(key);
+                let update = membership_update::compute_for(&left, &state);
+                handle_presence(
+                    PresenceEvent {
+                        message: &left,
+                        subtype: PresenceSubtype::Left,
+                        update: &update,
+                        surfaceable: true,
+                    },
+                    &mut state,
+                    &mut Inert,
+                    &context,
+                )
+                .await;
+            }
+            assert!(
+                state.key_said_goodbye(leaver.author_key()),
+                "a flood of unknown goodbyes evicted the tombstone of a departed peer"
+            );
+            assert!(
+                state.key_said_goodbye(stranger.author_key()),
+                "the latest unknown goodbye is not a replay the second time"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// Records the key and the nickname of each departure that the engine reports to the app.
+    struct Recorder(Vec<(AuthorKey, protocol::Nickname)>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for Recorder {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+
+        async fn on_peer_left(
+            &mut self,
+            key: &AuthorKey,
+            nickname: &protocol::Nickname,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) {
+            self.0.push((*key, nickname.clone()));
+        }
+    }
+
+    /// A goodbye removes the roster entry of its key, which the roster knows under the nickname
+    /// it recorded for that key. The app hears of that peer, not of whatever nickname the frame
+    /// names: a `Left` can carry any nickname.
+    #[test]
+    fn the_app_hears_the_recorded_nickname_of_the_key_that_left() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let run = Identity::generate();
+            let recorded = nick("swift-cedar");
+            let mut state = fresh_state();
+            state.names.insert(run.author_key(), recorded.clone());
+            state.peers.insert(run.author_key());
+
+            // The frame names another nickname than the one the roster holds for the key.
+            let left = Message::new_left(&mesh, &nick("lost-heron")).sign(&run);
+            let update = membership_update::compute_for(&left, &state);
+            let mut app = Recorder(Vec::new());
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert_eq!(
+                app.0,
+                vec![(run.author_key(), recorded)],
+                "the app was told of a nickname that the departed key did not hold"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// One departure that the engine surfaces to the operator: the nickname of the `left` frame,
+    /// the key of the peer that departed, and whether this node minted the frame.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Departure {
+        nickname: protocol::Nickname,
+        peer: AuthorKey,
+        synthetic: bool,
+    }
+
+    /// Keeps each departure that the engine surfaces to the operator.
+    #[derive(Default)]
+    struct DepartureSink(Mutex<Vec<Departure>>);
+
+    impl NodeSink for DepartureSink {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::Presence {
+                message,
+                peer,
+                synthetic,
+            } = event
+                && matches!(
+                    message.kind,
+                    MessageKind::Presence {
+                        subtype: PresenceSubtype::Left
+                    }
+                )
+            {
+                self.0.lock().expect("the sink lock").push(Departure {
+                    nickname: message.author.clone(),
+                    peer,
+                    synthetic,
+                });
+            }
+        }
+    }
+
+    /// The app reads the whole roster, so it holds state for a peer that is not shown yet. The
+    /// goodbye of such a peer, stamped after our join, reaches the hook, and shows no `left`.
+    #[test]
+    fn the_app_hears_the_goodbye_of_a_peer_that_was_never_shown() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = DepartureSink::default();
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let run = Identity::generate();
+            let hidden = nick("swift-cedar");
+            let mut state = fresh_state();
+            state.names.insert(run.author_key(), hidden.clone());
+            state.peers.insert(run.author_key());
+
+            let left = Message::new_left(&mesh, &hidden).sign(&run);
+            let observed = observe(&left, &mut state, &context);
+            let mut app = Recorder(Vec::new());
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert_eq!(
+                app.0,
+                vec![(run.author_key(), hidden)],
+                "the app never heard that a peer it read from the roster left"
+            );
+            assert!(
+                sink.0.lock().expect("the sink lock").is_empty(),
+                "a departure was shown for a peer whose arrival was not shown"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// The whole path of a goodbye, `observe` first. A `Left` can name any nickname, so neither
+    /// `observe` nor the departure may take the nickname of the key from the frame: the app and the
+    /// operator hear of the peer that the roster removed.
+    #[test]
+    fn a_goodbye_that_names_another_nickname_ends_the_key_under_its_recorded_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = DepartureSink::default();
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let run = Identity::generate();
+            let recorded = nick("swift-cedar");
+            let mut state = fresh_state();
+            state.names.insert(run.author_key(), recorded.clone());
+            state.peers.insert(run.author_key());
+            state.surfaced.insert(run.author_key());
+
+            let left = Message::new_left(&mesh, &nick("lost-heron")).sign(&run);
+            let observed = observe(&left, &mut state, &context);
+            let mut app = Recorder(Vec::new());
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert_eq!(
+                app.0,
+                vec![(run.author_key(), recorded.clone())],
+                "the app was told of a nickname that the departed key did not hold"
+            );
+            let expected = Departure {
+                nickname: recorded,
+                peer: run.author_key(),
+                synthetic: true,
+            };
+            assert_eq!(
+                *sink.0.lock().expect("the sink lock"),
+                vec![expected],
+                "the operator was told of a nickname that the departed key did not hold, or not as a departure this node minted"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// The app tracks peers by key, so it hears of every key that leaves, also when another key
+    /// still holds the nickname of the departed key: the twin that stays does not make the state
+    /// of the leaver valid.
+    #[test]
+    fn the_app_hears_of_each_key_that_leaves_also_when_another_key_holds_its_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let first_run = Identity::generate();
+            let second_key = Identity::generate().author_key();
+            let shared = nick("swift-cedar");
+            let mut state = fresh_state();
+            for key in [first_run.author_key(), second_key] {
+                state.names.insert(key, shared.clone());
+                state.peers.insert(key);
+            }
+
+            let left = Message::new_left(&mesh, &nick("lost-heron")).sign(&first_run);
+            let update = membership_update::compute_for(&left, &state);
+            let mut app = Recorder(Vec::new());
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert_eq!(
+                app.0,
+                vec![(first_run.author_key(), shared)],
+                "the app must hear once of the key that left, though the second key holds its nickname"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// A key that outlived the quiet TTL keeps its name and its dial hint, because it can return
+    /// without a `PeerInfo`. It is still a peer of the roster, so its goodbye ends it like the
+    /// goodbye of a quiet peer: the hint, the dial address and the name go, and a directed send
+    /// no longer reaches its node.
+    #[test]
+    fn the_goodbye_of_a_key_that_outlived_the_quiet_ttl_removes_its_dial_hint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let lapsed = Identity::generate();
+            let recorded = nick("swift-cedar");
+            let address = iroh::EndpointAddr::new(endpoint_id(4));
+            let mut state = fresh_state();
+            state.names.insert(lapsed.author_key(), recorded.clone());
+            state
+                .clock_evidence
+                .lapsed_quiet
+                .insert(lapsed.author_key());
+            state.unicast_pool.note_addr(&address);
+            state.bind_peer_endpoint(lapsed.author_key(), recorded.clone(), address);
+
+            let left = Message::new_left(&mesh, &recorded).sign(&lapsed);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.peer_endpoints.contains_key(&recorded),
+                "the dial hint of a departed key survived its goodbye"
+            );
+            assert!(
+                !state.unicast_pool.has_addr(endpoint_id(4)),
+                "the dial address of a departed key survived its goodbye"
+            );
+            assert!(
+                !state.names.contains_key(&lapsed.author_key())
+                    && !state
+                        .clock_evidence
+                        .lapsed_quiet
+                        .contains(&lapsed.author_key()),
+                "a departed key stayed in the roster's memory"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// A `PeerInfo` can bind a dial hint before the roster admits its key. If that key says
+    /// goodbye first, it is no peer, and its hint must go with it: the hint stays routable
+    /// otherwise.
+    #[test]
+    fn the_goodbye_of_a_key_outside_the_roster_removes_the_dial_hints_it_owns() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let stranger = Identity::generate();
+            let other = Identity::generate();
+            let (strangers_endpoint, others_endpoint) = (endpoint_id(44), endpoint_id(45));
+            let mut state = fresh_state();
+            state.bind_peer_endpoint(
+                stranger.author_key(),
+                nick("swift-cedar"),
+                iroh::EndpointAddr::new(strangers_endpoint),
+            );
+            state.bind_peer_endpoint(
+                other.author_key(),
+                nick("calm-otter"),
+                iroh::EndpointAddr::new(others_endpoint),
+            );
+            assert!(
+                !state.peers.contains(&stranger.author_key()),
+                "the key is outside the roster"
+            );
+
+            let left = Message::new_left(&mesh, &nick("swift-cedar")).sign(&stranger);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.endpoint_is_bound(strangers_endpoint),
+                "the dial hint of the stranger survived its goodbye"
+            );
+            assert!(
+                state.endpoint_is_bound(others_endpoint),
+                "the goodbye of the stranger removed the hint of another key"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// A key can prove an endpoint and own no dial hint: its nickname was held by another key when
+    /// its `PeerInfo` came. Its goodbye still ends the pooled connection and the dial cooldown of
+    /// the endpoint that it proved.
+    #[test]
+    fn the_goodbye_of_a_key_that_proved_an_endpoint_and_owns_no_hint_ends_its_pool_state() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let rival = Identity::generate();
+            let proved = endpoint_id(43);
+            let mut state = fresh_state();
+            state.peers.insert(rival.author_key());
+            state.names.insert(rival.author_key(), nick("swift-cedar"));
+            state.proven_endpoints.trust(rival.author_key(), proved);
+            state.unicast_pool.note_dial_failure(proved).await;
+            assert!(
+                !state.endpoint_is_bound(proved),
+                "no nickname binds the endpoint, so the key owns no hint"
+            );
+
+            let left = Message::new_left(&mesh, &nick("swift-cedar")).sign(&rival);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.unicast_pool.is_cooling(proved).await,
+                "the cooldown of the proved endpoint survived the goodbye"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// A key that renamed owns a dial hint under each nickname it used, and each hint names an
+    /// endpoint. Its goodbye ends the pooled connection and the dial cooldown of every one of
+    /// them, not only of the endpoint of its current nickname.
+    #[test]
+    fn the_goodbye_of_a_key_that_renamed_ends_the_pool_state_of_each_endpoint_it_used() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let renamed = Identity::generate();
+            let (old_endpoint, new_endpoint) = (endpoint_id(41), endpoint_id(42));
+            let mut state = fresh_state();
+            state.peers.insert(renamed.author_key());
+            state
+                .names
+                .insert(renamed.author_key(), nick("swift-cedar"));
+            state.bind_peer_endpoint(
+                renamed.author_key(),
+                nick("swift-cedar"),
+                iroh::EndpointAddr::new(old_endpoint),
+            );
+            state.names.insert(renamed.author_key(), nick("calm-otter"));
+            state.bind_peer_endpoint(
+                renamed.author_key(),
+                nick("calm-otter"),
+                iroh::EndpointAddr::new(new_endpoint),
+            );
+            for used in [old_endpoint, new_endpoint] {
+                state.unicast_pool.note_dial_failure(used).await;
+            }
+
+            let left = Message::new_left(&mesh, &nick("calm-otter")).sign(&renamed);
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut Recorder(Vec::new()),
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.unicast_pool.is_cooling(new_endpoint).await,
+                "the cooldown of the current endpoint survived the goodbye"
+            );
+            assert!(
+                !state.unicast_pool.is_cooling(old_endpoint).await,
+                "the cooldown of an endpoint of a previous nickname survived the goodbye"
+            );
+            endpoint.close().await;
+        });
     }
 
     /// A copy of a goodbye reaches `observe` before `handle_presence`. If a later holder of the
     /// nickname has gone quiet, the copy must not read as that holder's return: it is a frame of a
     /// key that already said goodbye, and says nothing about whoever holds the nickname now.
     #[test]
-    async fn a_replayed_left_does_not_return_a_quiet_holder() {
-        let (endpoint, sender) = endpoint_and_sender().await;
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let mesh = MeshId::from("test");
-        let us = nick("us");
-        let sink = SilentSink;
-        let ctx = HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &us,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let who = nick("swift-cedar");
-        let first_run = Identity::generate();
-        let mut state = fresh_state();
-        state.note_left(&who, first_run.author_key(), UnixSecs::from_secs(1_000));
-        // A second run took the nickname and went quiet.
-        state.quiet.insert(who.clone());
+    fn a_replayed_left_does_not_return_a_quiet_holder() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let first_run = Identity::generate();
+            let mut state = fresh_state();
+            state.note_left(first_run.author_key());
+            // A second run took the nickname and went quiet.
+            let second_key = Identity::generate().author_key();
+            state.names.insert(second_key, who.clone());
+            state.quiet.insert(second_key);
 
-        let replay = Message::new_left(&mesh, &who).sign(&first_run);
-        let observed = observe(&replay, &mut state, &ctx);
-        assert!(observed.update.stale, "a copy of a goodbye is not stale");
-        assert!(
-            !state.peers.contains(who.as_str()),
-            "a replayed goodbye of the first run returned the quiet second run"
-        );
-        assert!(
-            state.quiet.contains(who.as_str()),
-            "a replayed goodbye of the first run took the second run out of quiet"
-        );
-        assert!(
-            !state.last_seen.contains_key(who.as_str()),
-            "a replayed goodbye refreshed the nickname's liveness"
-        );
-        endpoint.close().await;
+            let replay = Message::new_left(&mesh, &who).sign(&first_run);
+            let observed = observe(&replay, &mut state, &context);
+            assert!(observed.update.stale, "a copy of a goodbye is not stale");
+            assert!(
+                !state.peers.contains(&second_key),
+                "a replayed goodbye of the first run returned the quiet second run"
+            );
+            assert!(
+                state.quiet.contains(&second_key),
+                "a replayed goodbye of the first run took the second run out of quiet"
+            );
+            assert!(
+                !state.last_seen.contains_key(&second_key)
+                    && !state.last_seen.contains_key(&first_run.author_key()),
+                "a replayed goodbye refreshed the liveness of a key"
+            );
+            endpoint.close().await;
+        });
     }
 
     #[test]
-    async fn a_stale_frame_of_a_departed_key_does_not_refresh_liveness() {
-        let (endpoint, sender) = endpoint_and_sender().await;
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let mesh = MeshId::from("test");
-        let us = nick("us");
-        let sink = SilentSink;
-        let ctx = HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &us,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let who = nick("swift-cedar");
-        let departed = Identity::generate();
-        let mut state = fresh_state();
-        state.note_left(&who, departed.author_key(), UnixSecs::from_secs(1_000));
+    fn a_stale_frame_of_a_departed_key_does_not_refresh_liveness() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let departed = Identity::generate();
+            let mut state = fresh_state();
+            state.note_left(departed.author_key());
 
-        let replay = Message::new_joined(&mesh, &who).sign(&departed);
-        let observed = observe(&replay, &mut state, &ctx);
-        assert!(observed.update.stale);
-        assert!(
-            !state.last_seen.contains_key(who.as_str()),
-            "a stale frame refreshed the nickname's liveness"
-        );
-        endpoint.close().await;
+            let replay = Message::new_joined(&mesh, &who).sign(&departed);
+            let observed = observe(&replay, &mut state, &context);
+            assert!(
+                observed.update.stale,
+                "a stale frame of a departed key is stale"
+            );
+            assert!(
+                !state.last_seen.contains_key(&departed.author_key()),
+                "a stale frame refreshed the liveness of the departed key"
+            );
+            endpoint.close().await;
+        });
     }
 }

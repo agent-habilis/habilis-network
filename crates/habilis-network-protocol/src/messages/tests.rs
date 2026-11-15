@@ -1,0 +1,1514 @@
+use super::{
+    AppFrameParams, AppTag, AppTagError, BuildMsgParams, CorrIdError, MeshId, Message, MessageBody,
+    MessageId, MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
+};
+use crate::AuthorKey;
+use crate::messages::{MessageError, sole_addressee};
+
+use crate::identity;
+fn nick(name: &str) -> Nickname {
+    Nickname::from(name)
+}
+
+/// A key that tells apart from the others by its seed byte.
+fn key_of_seed(seed: u8) -> AuthorKey {
+    AuthorKey::from_bytes([seed; 32])
+}
+
+fn sid() -> MeshId {
+    MeshId::from("test")
+}
+
+#[test]
+fn test_round_trip() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let message = Message::new_app(
+        &sid(),
+        &nick("word-word"),
+        AppFrameParams {
+            tag: AppTag::try_new("app_msg").expect("a valid app tag"),
+            to: None,
+            corr: None,
+            body: MessageBody::from("Hello, world!"),
+        },
+    );
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    assert_eq!(
+        parsed.id, message.id,
+        "the parsed id matches the id of the message"
+    );
+    assert_eq!(
+        parsed.kind,
+        MessageKind::app_broadcast("app_msg"),
+        "the parsed kind is an app broadcast with its tag"
+    );
+    assert_eq!(
+        parsed.body, message.body,
+        "the parsed body matches the body of the message"
+    );
+}
+
+#[test]
+fn app_tag_constructor_rejects_an_invalid_value() {
+    let _guard = ::habilis_network_test_tracing::init();
+    assert_eq!(
+        AppTag::try_new("not-valid!"),
+        Err(AppTagError::Invalid),
+        "a tag with a dash is refused"
+    );
+}
+
+#[test]
+fn correlation_id_constructor_rejects_an_invalid_value() {
+    let _guard = ::habilis_network_test_tracing::init();
+    assert_eq!(
+        super::CorrId::try_new(""),
+        Err(CorrIdError::Invalid),
+        "an empty id is refused"
+    );
+}
+
+#[test]
+fn test_alive_round_trip() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let message = Message::new_alive(&sid(), &nick("word-word"));
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    assert_eq!(
+        parsed.kind,
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Alive
+        },
+        "the parsed alive presence keeps its subtype"
+    );
+    assert_eq!(
+        parsed.body.as_str(),
+        "",
+        "an alive presence has an empty body"
+    );
+}
+
+#[test]
+fn test_ping_round_trip() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let message = Message::new_ping(&sid(), &nick("word-word"));
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("\"type\":\"ping\""),
+        "a ping is written with the ping type"
+    );
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    assert_eq!(parsed.kind, MessageKind::Ping, "the parsed kind is a ping");
+    assert_eq!(parsed.body.as_str(), "", "a ping has an empty body");
+}
+
+/// A browser builds and signs a link-state advertisement as a native node does: the builder
+/// needs no operating system, so it must exist with the `host` feature off.
+#[test]
+fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let identity = identity::Identity::generate();
+    let message = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
+        .sign(&identity);
+    assert!(
+        message.verify_signature(),
+        "a link state message verifies its signature"
+    );
+    let parsed: Message = Message::parse(
+        message
+            .serialize()
+            .expect("the fixture message is well formed, so it serializes")
+            .as_bytes(),
+    )
+    .expect("the bytes just serialized from the fixture message parse back");
+    assert_eq!(
+        parsed.kind,
+        MessageKind::LinkState,
+        "the parsed kind is a link state message"
+    );
+    assert_eq!(
+        parsed.body.as_str(),
+        "{}",
+        "a link state message has an empty object body"
+    );
+}
+
+#[test]
+fn test_pong_round_trip() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let target = key_of_seed(3);
+    let probe = MessageId::random();
+    let message = Message::new_pong(&sid(), &nick("word-word"), target, &probe);
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    assert_eq!(
+        parsed.kind,
+        MessageKind::Pong { to: target, probe },
+        "the parsed kind is a pong to the probe's target"
+    );
+    assert_eq!(parsed.body.as_str(), "", "a pong has an empty body");
+}
+
+#[test]
+fn a_joined_frame_carries_the_proof_in_its_body() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let member = identity::Identity::generate();
+    let session = identity::Identity::generate();
+    let author = nick("word-word");
+    let proof: identity::IdentityProof =
+        member.prove(&session.author_key(), author.as_ref(), sid().as_ref(), 3);
+    let message = Message::new_joined_with_proof(&sid(), &author, &proof);
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    let held = parsed.joined_proof().expect("the body holds a proof");
+    assert!(
+        identity::verify_proof(
+            &held,
+            &session.author_key(),
+            author.as_ref(),
+            sid().as_ref()
+        ),
+        "the proof in the body verifies"
+    );
+    assert!(
+        Message::new_joined(&sid(), &author)
+            .joined_proof()
+            .is_none(),
+        "an empty body holds no proof"
+    );
+}
+
+#[test]
+fn test_proof_request_round_trip() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let target = key_of_seed(9);
+    let message = Message::new_proof_request(&sid(), &nick("word-word"), target);
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    assert_eq!(
+        parsed.kind,
+        MessageKind::ProofRequest { to: target },
+        "the parsed kind is a proof request to the target"
+    );
+    assert!(
+        String::from_utf8_lossy(&bytes).contains(&format!(r#""to":"{target}""#)),
+        "the recipient is on the wire as 64 hex digits of the key, like the recipient of a pong"
+    );
+    assert_eq!(
+        sole_addressee(&parsed.kind),
+        Some(&target),
+        "the router addresses the request by the key"
+    );
+    assert_eq!(
+        parsed.body.as_str(),
+        "",
+        "a proof request has an empty body"
+    );
+}
+
+#[test]
+fn test_task_status_round_trip() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let target = key_of_seed(1);
+    let message = Message::new_app(
+        &sid(),
+        &nick("word-word"),
+        AppFrameParams {
+            tag: AppTag::try_new("app_status").expect("a valid app tag"),
+            to: Some(target),
+            corr: None,
+            body: MessageBody::from(r#"{"kind":"status-update"}"#),
+        },
+    );
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    let wire = String::from_utf8_lossy(&bytes);
+    assert!(
+        wire.contains("\"type\":\"app\""),
+        "a task status is written with the app type"
+    );
+    assert!(
+        wire.contains("\"tag\":\"app_status\""),
+        "a task status is written with its app status tag"
+    );
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    assert_eq!(
+        parsed.kind,
+        MessageKind::app_to("app_status", target, None),
+        "the parsed kind is an app status to the target"
+    );
+    assert_eq!(
+        parsed.body, message.body,
+        "the parsed body matches the body of the task status"
+    );
+}
+
+#[test]
+fn test_task_artifact_round_trip() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let target = key_of_seed(1);
+    let message = Message::new_frame(
+        &sid(),
+        &nick("word-word"),
+        MessageKind::app_to("app_artifact", target, None),
+        MessageBody::from(r#"{"kind":"artifact-update"}"#),
+    );
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("\"tag\":\"app_artifact\""),
+        "a task artifact is written with its app artifact tag"
+    );
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    assert_eq!(
+        parsed.kind,
+        MessageKind::app_to("app_artifact", target, None),
+        "the parsed kind is an app artifact to the target"
+    );
+}
+
+#[test]
+fn test_ext_round_trip() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let mut message = Message::new_app(
+        &sid(),
+        &nick("word-word"),
+        AppFrameParams {
+            tag: AppTag::try_new("app_msg").expect("a valid app tag"),
+            to: None,
+            corr: None,
+            body: MessageBody::from("With ext."),
+        },
+    );
+    message.ext = serde_json::json!({"tags": ["rust", "p2p"], "priority": 1});
+    let bytes = message
+        .serialize()
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+    assert_eq!(
+        parsed.ext["tags"][0], "rust",
+        "the first extension tag survives a round trip"
+    );
+    assert_eq!(
+        parsed.ext["priority"], 1,
+        "the extension priority survives a round trip"
+    );
+}
+
+/// A valid UUID for the hand-written wire-JSON fixtures below (the
+/// validating `MessageId` deserialize rejects non-UUID ids).
+const FIXTURE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+const FIXTURE_MESH: &str = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqay2YxkRe";
+
+#[test]
+fn test_unknown_ext_fields_ignored() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let json = format!(
+        r#"{{"v":"18.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi","ext":{{"future_field":"value","another":42}}}}"#
+    );
+    let parsed =
+        Message::parse(json.as_bytes()).expect("the JSON literal in this test is a valid message");
+    assert_eq!(
+        parsed.body.as_str(),
+        "hi",
+        "the body is read past unknown extension fields"
+    );
+    assert_eq!(
+        parsed.ext["future_field"], "value",
+        "an unknown extension field is kept in the extension"
+    );
+}
+
+#[test]
+fn test_missing_ext_defaults_to_empty_object() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let json = format!(
+        r#"{{"v":"18.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"}}"#
+    );
+    let parsed =
+        Message::parse(json.as_bytes()).expect("the JSON literal in this test is a valid message");
+    assert_eq!(
+        parsed.ext,
+        serde_json::json!({}),
+        "a missing extension defaults to an empty object"
+    );
+}
+
+#[test]
+fn test_version_mismatch_rejected() {
+    let _guard = ::habilis_network_test_tracing::init();
+    // A `1.0` (pre-merge) message must be rejected by this `2.0` binary — the
+    // rolling-upgrade guard: cross-version state never silently folds.
+    let json = format!(
+        r#"{{"v":"1.0","id":"{FIXTURE_ID}","type":"msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{{}}}}"#
+    );
+    assert!(
+        Message::parse(json.as_bytes()).is_err(),
+        "a message with another version is refused"
+    );
+}
+
+// Crafted wire messages that a correct client never produces: the
+// validating newtype `Deserialize` impls must reject them at `parse`, so a
+// malicious peer cannot crash the daemon (bad id) or inject terminal
+// escapes / spoof the `<nick>`/`#mesh` conventions (bad body/author).
+#[test]
+fn parse_rejects_non_uuid_id() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let json = r#"{"v":"18.0","id":"not-a-uuid","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{}}"#;
+    assert!(
+        Message::parse(json.as_bytes()).is_err(),
+        "a message with a non-uuid id is refused"
+    );
+}
+
+#[test]
+fn parse_rejects_control_char_body() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let json = format!(
+        r#"{{"v":"18.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"evil\u0000body","ext":{{}}}}"#
+    );
+    assert!(
+        Message::parse(json.as_bytes()).is_err(),
+        "a message with a control character in its body is refused"
+    );
+}
+
+#[test]
+fn parse_rejects_unsafe_author_nickname() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let json = format!(
+        r#"{{"v":"18.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a#b","ts":0,"body":"hi","ext":{{}}}}"#
+    );
+    assert!(
+        Message::parse(json.as_bytes()).is_err(),
+        "a message with an unsafe author nickname is refused"
+    );
+}
+
+#[test]
+fn parse_rejects_malformed_integrity_fields() {
+    let _guard = ::habilis_network_test_tracing::init();
+    // Each integrity field (pubkey / sig) must be rejected at `parse` when present but not
+    // well-formed lowercase hex, so a crafted value never reaches signature verification.
+    let base = |extra: &str| {
+        format!(
+            r#"{{"v":"18.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"{extra},"ext":{{}}}}"#
+        )
+    };
+    // Each malformed field comes with a well-formed partner, so that the pairing rule (a key
+    // without a signature) cannot be the reason for the reject, and the error names the field.
+    let good_sig = format!(r#","sig":"{}""#, "cd".repeat(64));
+    let good_key = format!(r#","pubkey":"{}""#, "ab".repeat(32));
+    for (extra, reason) in [
+        // 3KB garbage pubkey, and an uppercase one that is also too short.
+        (
+            format!(r#","pubkey":"{}"{good_sig}"#, "z".repeat(3000)),
+            "malformed pubkey",
+        ),
+        (format!(r#","pubkey":"AABB"{good_sig}"#), "malformed pubkey"),
+        (
+            format!(r#"{good_key},"sig":"nothex""#),
+            "malformed signature",
+        ),
+        (
+            format!(r#"{good_key},"sig":"{}""#, "CD".repeat(64)),
+            "malformed signature",
+        ),
+        // Too short.
+    ] {
+        let error =
+            Message::parse(base(&extra).as_bytes()).expect_err(&format!("should reject: {extra}"));
+        assert_eq!(error.to_string(), reason, "for: {extra}");
+    }
+    // A well-formed (if unverifiable) 64-hex pubkey with a 128-hex signature still parses —
+    // shape only; the signature gate is a separate, later check.
+    let ok = base(&format!(
+        r#","pubkey":"{}","sig":"{}""#,
+        "ab".repeat(32),
+        "cd".repeat(64)
+    ));
+    assert!(
+        Message::parse(ok.as_bytes()).is_ok(),
+        "a message with well formed integrity fields parses"
+    );
+    // A pubkey alone no longer parses: a message holds a key and its signature, or neither.
+    let key_only = base(&format!(r#","pubkey":"{}""#, "ab".repeat(32)));
+    assert!(
+        Message::parse(key_only.as_bytes()).is_err(),
+        "a message with only a key field is refused"
+    );
+}
+
+#[test]
+fn build_msg_bytes_message() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let alice = nick("alice");
+    let identity = identity::Identity::generate();
+    let (bytes, built) = build_msg_bytes(
+        BuildMsgParams {
+            tag: AppTag::try_new("app_msg").expect("a valid app tag"),
+            mesh: &sid(),
+            author: &alice,
+            body: MessageBody::from("hello"),
+        },
+        &identity,
+    )
+    .expect("the build params in this test are valid, so the build succeeds");
+    assert!(!built.id.as_str().is_empty(), "the built message has an id");
+    assert!(!bytes.is_empty(), "the built message has bytes");
+    let message = Message::parse(bytes.as_bytes())
+        .expect("the bytes were built from a valid message just above");
+    assert_eq!(
+        message.body.as_str(),
+        "hello",
+        "the built message keeps its body"
+    );
+    assert_eq!(message.author, alice, "the built message names its author");
+}
+
+mod signing {
+    use super::super::{CorrId, Message, MessageKind};
+    use crate::identity::Identity;
+
+    fn identity() -> Identity {
+        Identity::generate()
+    }
+
+    #[test]
+    fn signed_message_verifies() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let message =
+            Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").sign(&identity());
+        assert!(
+            message.signer.is_some(),
+            "a signed message carries a signer"
+        );
+        assert!(
+            message.verify_signature(),
+            "a signed message verifies its signature"
+        );
+    }
+
+    #[test]
+    fn unsigned_message_does_not_verify() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let message = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello");
+        assert!(
+            !message.verify_signature(),
+            "empty pubkey/sig must not verify"
+        );
+    }
+
+    #[test]
+    fn tampered_body_breaks_signature() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut message = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
+            .sign(&identity())
+            .into_message();
+        message.body = "tampered".into();
+        assert!(
+            !message.verify_signature(),
+            "a tampered body breaks the signature"
+        );
+    }
+
+    #[test]
+    fn tampered_author_breaks_signature() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut message = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
+            .sign(&identity())
+            .into_message();
+        message.author = "impostor-bot".into();
+        assert!(
+            !message.verify_signature(),
+            "a tampered author breaks the signature"
+        );
+    }
+
+    #[test]
+    fn tampered_task_target_breaks_signature() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut message = Message::fixture(
+            MessageKind::app_to("app_status", super::key_of_seed(1), None),
+            "{}",
+        )
+        .sign(&identity())
+        .into_message();
+        assert!(
+            message.verify_signature(),
+            "a tampered task target keeps the signature valid"
+        );
+        message.kind = MessageKind::app_to("app_status", super::key_of_seed(2), None);
+        assert!(
+            !message.verify_signature(),
+            "directed `to` is a signed field"
+        );
+    }
+
+    #[test]
+    fn tampered_corr_breaks_signature() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut message: Message = Message::fixture(
+            MessageKind::app_to(
+                "app_req",
+                super::key_of_seed(1),
+                Some(CorrId::try_new("aaaa").expect("a valid correlation id")),
+            ),
+            "{}",
+        )
+        .sign(&identity())
+        .into_message();
+        message.kind = MessageKind::app_to(
+            "app_req",
+            super::key_of_seed(1),
+            Some(CorrId::try_new("bbbb").expect("a valid correlation id")),
+        );
+        assert!(!message.verify_signature(), "`corr` is a signed field");
+    }
+
+    #[test]
+    fn signature_survives_wire_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let message =
+            Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").sign(&identity());
+        let parsed: Message = Message::parse(
+            message
+                .serialize()
+                .expect("the fixture message is well formed, so it serializes")
+                .as_bytes(),
+        )
+        .expect("the bytes just serialized from the fixture message parse back");
+        assert!(
+            parsed.verify_signature(),
+            "the signature survives a wire round trip"
+        );
+        assert_eq!(
+            parsed.signer, message.signer,
+            "the signer survives a wire round trip"
+        );
+    }
+
+    #[test]
+    fn unsigned_wire_omits_signature_fields() {
+        let _guard = ::habilis_network_test_tracing::init();
+        // The skip-if-empty fields keep an unsigned message byte-identical
+        // to the v1 wire, so existing snapshots are unaffected.
+        let bytes = Message::fixture(MessageKind::app_broadcast("app_msg"), "hi")
+            .serialize()
+            .expect("the fixture arguments are valid, so the fixture message builds");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
+        assert!(!wire.contains("pubkey"), "{wire}");
+        assert!(!wire.contains("\"sig\""), "{wire}");
+    }
+}
+
+mod snapshots {
+    use super::super::CorrId;
+    use super::{Message, MessageKind, PresenceSubtype};
+
+    /// A deterministic broadcast app frame. The body is a JSON payload shaped
+    /// like a real consumer's — nested object, unicode, an embedded mesh id —
+    /// but belonging to no actual data model, because what this snapshot pins
+    /// is the **envelope**: field order, the `tag`/`type` discriminators, and
+    /// that a JSON body survives as an opaque string rather than being
+    /// re-encoded.
+    ///
+    /// Pinning a real payload here would make the engine's test suite the
+    /// keeper of an application's wire contract. That contract belongs to the
+    /// application, whose own suite owns it.
+    fn chat_fixture(text: &str) -> Message {
+        assert_eq!(text, "What is Rust?", "chat_fixture body is pinned");
+        let body = concat!(
+            "{\"id\":\"00000000-0000-0000-0000-000000000001\",",
+            "\"role\":\"sender\",\"parts\":[{\"text\":\"What is Rust?\"}],",
+            "\"scope\":\"test\"}"
+        );
+        Message::fixture(MessageKind::app_broadcast("app_msg"), body)
+    }
+
+    #[test]
+    fn snap_wire_message() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let message = chat_fixture("What is Rust?");
+        let bytes = message
+            .serialize()
+            .expect("the fixture message is well formed, so it serializes");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
+        insta::assert_snapshot!(wire);
+    }
+
+    /// A **directed** app frame with no correlation id: pins that `to` is
+    /// present and `corr` is absent. The body is a nested-object placeholder
+    /// for the same reason as [`chat_fixture`]'s — the envelope is the subject.
+    #[test]
+    fn snap_wire_directed_uncorrelated() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let body = concat!(
+            "{\"ref\":\"00000000-0000-0000-0000-000000000001\",",
+            "\"scope\":\"test\",\"progress\":{\"phase\":\"running\"}}"
+        );
+        let message = Message::fixture(
+            MessageKind::app_to("app_status", super::key_of_seed(4), None),
+            body,
+        );
+        let bytes = message
+            .serialize()
+            .expect("the fixture message is well formed, so it serializes");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
+        insta::assert_snapshot!(wire);
+    }
+
+    #[test]
+    fn snap_wire_presence_joined() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let message = Message::fixture(
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Joined,
+            },
+            "",
+        );
+        let bytes = message
+            .serialize()
+            .expect("the fixture message is well formed, so it serializes");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
+        insta::assert_snapshot!(wire);
+    }
+
+    #[test]
+    fn snap_wire_state_merge() {
+        let _guard = ::habilis_network_test_tracing::init();
+        // A shared-state change rides `MessageKind::State`; its body is the signed slice of its
+        // author: a `version` and a `value`. Pinning the wire bytes guards the discriminator and
+        // the shape of the slice.
+        let message = Message::fixture(MessageKind::State, r#"{"version":2,"value":{"turn":"b"}}"#);
+        let bytes = message
+            .serialize()
+            .expect("the fixture message is well formed, so it serializes");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
+        insta::assert_snapshot!(wire);
+    }
+
+    /// A directed **request** frame: correlated by `rpc_id`,
+    /// body = a JSON-RPC `{method, params}` envelope.
+    #[test]
+    fn snap_wire_app_directed_corr_req() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let message = Message::fixture(
+            MessageKind::app_to(
+                "app_req",
+                super::key_of_seed(4),
+                Some(
+                    CorrId::try_new("00000000-0000-0000-0000-0000000000aa")
+                        .expect("a valid correlation id"),
+                ),
+            ),
+            r#"{"op":"list","args":{}}"#,
+        );
+        let wire = String::from_utf8(
+            message
+                .serialize()
+                .expect("the fixture message is well formed, so it serializes"),
+        )
+        .expect("a serialized message is UTF-8 JSON");
+        insta::assert_snapshot!(wire);
+    }
+
+    /// A directed **response** frame, echoing the request's `rpc_id`.
+    #[test]
+    fn snap_wire_app_directed_corr_resp() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let message = Message::fixture(
+            MessageKind::app_to(
+                "app_resp",
+                super::key_of_seed(4),
+                Some(
+                    CorrId::try_new("00000000-0000-0000-0000-0000000000aa")
+                        .expect("a valid correlation id"),
+                ),
+            ),
+            r#"{"result":{"items":[]}}"#,
+        );
+        let wire = String::from_utf8(
+            message
+                .serialize()
+                .expect("the fixture message is well formed, so it serializes"),
+        )
+        .expect("a serialized message is UTF-8 JSON");
+        insta::assert_snapshot!(wire);
+    }
+}
+
+mod prop {
+    use proptest::collection::vec as arb_vec;
+    use proptest::strategy::Strategy;
+    use proptest::{prop_assert, prop_assert_eq, proptest};
+
+    use super::super::{
+        AppFrameParams, AppTag, MAX_MESSAGE_SIZE, Message, MessageBody, MessageKind, Nickname,
+        VERSION,
+    };
+
+    use crate::proptest_support;
+    fn arb_ascii_body() -> impl Strategy<Value = String> {
+        arb_vec(0x20u8..0x7eu8, 0..200)
+            .prop_map(|bytes| String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON"))
+    }
+
+    fn arb_nickname() -> impl Strategy<Value = Nickname> {
+        "[a-z]{3,8}-[a-z]{3,8}".prop_map(|raw| {
+            Nickname::try_new(&raw).expect("the raw fixture nickname is a valid nickname")
+        })
+    }
+
+    proptest! {
+        #![proptest_config(proptest_support::config())]
+        #[test]
+        fn prop_message_round_trip(
+            body in arb_ascii_body(),
+            author in arb_nickname(),
+        ) {
+            let _guard = ::habilis_network_test_tracing::init();
+            let body = MessageBody::try_new(&body).expect("the fixture body is within the body size limit");
+            let message = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
+            let bytes = message.serialize().expect("the fixture message is well formed, so it serializes");
+            let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+            prop_assert_eq!(&parsed.body, &message.body);
+            prop_assert_eq!(&parsed.author, &message.author);
+            prop_assert_eq!(&parsed.version, VERSION);
+            prop_assert_eq!(parsed.kind, MessageKind::app_broadcast("app_msg"));
+                }
+
+        #[test]
+        fn prop_presence_round_trip(is_join: bool) {
+            let _guard = ::habilis_network_test_tracing::init();
+            let test_nick = Nickname::from("test-nick");
+            let message = if is_join {
+                Message::new_joined(&super::sid(), &test_nick)
+            } else {
+                Message::new_left(&super::sid(), &test_nick)
+            };
+            let bytes = message.serialize().expect("the fixture message is well formed, so it serializes");
+            let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+            prop_assert_eq!(parsed.kind, message.kind);
+                }
+
+        #[test]
+        fn prop_control_chars_rejected(
+            // C0 controls excluding the allowed tab/newline/cr.
+            body in "[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]{1,10}",
+        ) {
+            let _guard = ::habilis_network_test_tracing::init();
+            prop_assert!(MessageBody::try_new(&body).is_err());
+                }
+
+        #[test]
+        fn prop_unicode_body_round_trip(
+            // `\P{C}` excludes every category-C scalar (all
+            // controls included), so `new` can't reject here and the
+            // `.unwrap()` is safe. This fuzzes the multibyte round-trip.
+            body in "\\P{C}{0,50}",
+            author in arb_nickname(),
+        ) {
+            let _guard = ::habilis_network_test_tracing::init();
+            let body = MessageBody::try_new(&body).expect("the fixture body is within the body size limit");
+            let expected = body.clone();
+            let message = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
+            let bytes = message.serialize().expect("the fixture message is well formed, so it serializes");
+            let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
+            prop_assert_eq!(&parsed.body, &expected);
+                }
+
+        #[test]
+        fn prop_serialized_size_within_limit(
+            body in arb_ascii_body(),
+        ) {
+            let _guard = ::habilis_network_test_tracing::init();
+            let message = Message::new_app(
+                &super::sid(),
+                &Nickname::from("nick-name"),
+                AppFrameParams {
+                    tag: AppTag::try_new("app_msg").expect("a valid app tag"),
+                    to: None,
+                    corr: None,
+                    body: MessageBody::try_new(&body).expect("the fixture body is within the body size limit"),
+                },
+            );
+            if let Ok(bytes) = message.serialize() {
+                prop_assert!(bytes.len() <= MAX_MESSAGE_SIZE);
+            }
+                }
+    }
+}
+
+/// The wire form of a signed message, captured from the code at the base commit with a fixed key
+/// (`SecretKey::from_bytes(&[7; 32])`). A change that moves one byte of it is a wire change.
+// The verified.rs doctests repeat this literal, so a change to it touches both files.
+const SIGNED_WIRE: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"4add2e3a115a5e480369cac972fab7faa194cc381ec75ccf36840623e57ce83c5d043bf794a93e21050867070a697f02de794fd17d49bafcdd659215cb6eb30e","ext":{}}"#;
+
+/// The same message with no `pubkey` and no `sig` key: the canonical pre-signing form.
+const UNSIGNED_WIRE: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","ext":{}}"#;
+
+/// [`UNSIGNED_WIRE`] with both keys present and empty.
+const EMPTY_KEYS_WIRE: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"","sig":"","ext":{}}"#;
+
+/// [`SIGNED_WIRE`] with the `sig` key removed: a key and no signature.
+const KEY_ONLY_WIRE: &str = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","ext":{}}"#;
+
+const SIGNED_PUBKEY: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+/// The canonical bytes of [`SIGNED_WIRE`], hex, one line per piece: a 4-byte little-endian length,
+/// then the field.
+const SIGNED_CANONICAL_HEX: &str = concat!(
+    "10000000686162696c69732d6d6573682f6d7367",
+    "0400000031382e30",
+    "2400000030303030303030302d303030302d303030302d303030302d303030303030303030303031",
+    "1e0000007b2274797065223a22617070222c22746167223a226170705f6d7367227d",
+    "3e0000004835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b67774736",
+    "09000000616c6963652d626f74",
+    "0800000000f1536500000000",
+    "0d00000068656c6c6f2c20676f6c64656e",
+    "4000000065613461366336336532396335323061626566353530376231333265633566393935343737366165626562653762393234323165656136393134343664323263",
+    "040000006e756c6c",
+    "020000007b7d",
+);
+/// The canonical bytes of [`UNSIGNED_WIRE`]. The `pubkey` field is the empty `00000000`.
+const UNSIGNED_CANONICAL_HEX: &str = concat!(
+    "10000000686162696c69732d6d6573682f6d7367",
+    "0400000031382e30",
+    "2400000030303030303030302d303030302d303030302d303030302d303030303030303030303031",
+    "1e0000007b2274797065223a22617070222c22746167223a226170705f6d7367227d",
+    "3e0000004835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b67774736",
+    "09000000616c6963652d626f74",
+    "0800000000f1536500000000",
+    "0d00000068656c6c6f2c20676f6c64656e",
+    "00000000",
+    "040000006e756c6c",
+    "020000007b7d",
+);
+
+fn hex(bytes: &[u8]) -> String {
+    identity::encode_hex(bytes)
+}
+
+#[test]
+fn a_message_of_version_15_is_refused_and_the_error_names_both_versions() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let previous = SIGNED_WIRE.replacen(r#""v":"18.0""#, r#""v":"15.0""#, 1);
+    let Err(error) = Message::parse(previous.as_bytes()) else {
+        panic!("a 18.0 build parsed a message of version 15.0");
+    };
+    assert!(
+        matches!(&error, MessageError::UnsupportedVersion(version) if version == "15.0"),
+        "the refusal is an unsupported version: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "unsupported protocol version: 15.0 (this build reads 18.0)",
+        "the error names the wire version and the version of this build"
+    );
+}
+
+#[test]
+fn a_message_of_version_16_is_refused_and_the_error_names_both_versions() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let previous = SIGNED_WIRE.replacen(r#""v":"18.0""#, r#""v":"16.0""#, 1);
+    let Err(error) = Message::parse(previous.as_bytes()) else {
+        panic!("a 18.0 build parsed a message of version 16.0");
+    };
+    assert!(
+        matches!(&error, MessageError::UnsupportedVersion(version) if version == "16.0"),
+        "the refusal is an unsupported version: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "unsupported protocol version: 16.0 (this build reads 18.0)",
+        "the error names the wire version and the version of this build"
+    );
+}
+
+/// Golden: the bytes of a signed message are fixed. The JSON text, the signed bytes, the content
+/// hash, and the dedup key each equal a literal captured at the base commit.
+#[test]
+fn a_signed_message_keeps_its_wire_form() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let parsed = Message::parse(SIGNED_WIRE.as_bytes()).expect("the signed literal parses");
+    assert!(
+        parsed.verify_signature(),
+        "the literal carries a valid signature"
+    );
+    assert_eq!(
+        parsed
+            .author_key()
+            .expect("the parsed message is signed, so it carries an author key")
+            .to_string(),
+        SIGNED_PUBKEY,
+        "the parsed author key matches the signed key"
+    );
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&parsed))
+            .expect("the parsed signed message has a wire form that serializes"),
+        SIGNED_WIRE,
+        "the signed message keeps its wire form"
+    );
+    assert_eq!(
+        hex(&parsed.canonical_bytes()),
+        SIGNED_CANONICAL_HEX,
+        "the canonical bytes keep their hex form"
+    );
+    assert_eq!(
+        parsed.content_hash().to_string(),
+        "5ee62b82484108cab5d53b4596de38cdd387ef482b901af36a9e1cf9e907b0d2",
+        "the content hash keeps its hex form"
+    );
+    assert_eq!(
+        hex(parsed.dedup_key().as_bytes()),
+        "c7ba26a2ed0d21f0e8913dd8b4456086",
+        "the dedup key keeps its hex form"
+    );
+}
+
+/// Golden: a message with no `pubkey` key and no `sig` key parses, reads as unsigned, and does
+/// not verify. Its JSON stays free of the two keys.
+#[test]
+fn a_message_with_no_key_fields_parses_as_unsigned() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let parsed = Message::parse(UNSIGNED_WIRE.as_bytes()).expect("the unsigned literal parses");
+    assert!(
+        parsed.signer.is_none(),
+        "a message with no key fields parses as unsigned"
+    );
+    assert!(
+        !parsed.verify_signature(),
+        "an unsigned message does not verify"
+    );
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&parsed))
+            .expect("the parsed signed message has a wire form that serializes"),
+        UNSIGNED_WIRE,
+        "the unsigned message keeps its wire form"
+    );
+    assert_eq!(
+        hex(&parsed.canonical_bytes()),
+        UNSIGNED_CANONICAL_HEX,
+        "the unsigned canonical bytes keep their hex form"
+    );
+    assert_eq!(
+        parsed.content_hash().to_string(),
+        "66de54570ad12bae1887cd1124aa7f66c75bb203bd8a12c50547eb369c0d6efc",
+        "the unsigned content hash keeps its hex form"
+    );
+}
+
+/// Golden: `"pubkey": ""` and `"sig": ""` parse as the unsigned form. The keys do not come back on
+/// serialize, and the signed bytes equal those of a message with no key fields.
+#[test]
+fn empty_key_fields_parse_as_unsigned_and_serialize_without_the_keys() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let parsed = Message::parse(EMPTY_KEYS_WIRE.as_bytes()).expect("empty key fields parse");
+    assert!(
+        parsed.signer.is_none(),
+        "empty key fields parse as unsigned"
+    );
+    assert!(
+        !parsed.verify_signature(),
+        "a message with empty key fields does not verify"
+    );
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&parsed))
+            .expect("the parsed signed message has a wire form that serializes"),
+        UNSIGNED_WIRE,
+        "empty key fields are left out of the wire form"
+    );
+    assert_eq!(
+        hex(&parsed.canonical_bytes()),
+        UNSIGNED_CANONICAL_HEX,
+        "empty key fields keep the unsigned canonical form"
+    );
+}
+
+/// A key with no signature is a parse error, and so is a signature with no key: a message holds
+/// both or neither. This is a decision of wave 2 (the parser only: no sender emits either, so
+/// no emitted byte moves). Before it, the key-only literal parsed, kept the key, and did not
+/// verify.
+#[test]
+fn a_key_with_no_signature_is_rejected_and_so_is_a_signature_with_no_key() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let no_sig = Message::parse(KEY_ONLY_WIRE.as_bytes()).expect_err("a key with no signature");
+    assert_eq!(
+        no_sig.to_string(),
+        "pubkey without a signature",
+        "a key with no signature is named in the error"
+    );
+
+    let sig_only = SIGNED_WIRE.replace(&format!(r#""pubkey":"{SIGNED_PUBKEY}","#), "");
+    assert!(
+        !sig_only.contains("pubkey"),
+        "a signature with no key does not show a key"
+    );
+    let no_key = Message::parse(sig_only.as_bytes()).expect_err("a signature with no key");
+    assert_eq!(
+        no_key.to_string(),
+        "signature without a pubkey",
+        "a signature with no key is named in the error"
+    );
+}
+
+mod verified {
+    use super::super::{Message, MessageKind, Verified};
+    use super::SIGNED_WIRE;
+    use crate::identity::Identity;
+
+    fn message(body: &str) -> Message {
+        Message::fixture(MessageKind::app_broadcast("app_msg"), body)
+    }
+
+    #[test]
+    fn a_signed_message_verifies_and_keeps_its_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let identity = Identity::generate();
+        let key = identity.author_key();
+        let verified = message("hello").sign(&identity);
+        assert_eq!(verified.key(), key, "a verified message keeps its key");
+        let back = verified
+            .into_message()
+            .verify()
+            .expect("a signed message verifies");
+        assert_eq!(
+            back.author_key(),
+            Some(key),
+            "the parsed message keeps its author key"
+        );
+    }
+
+    #[test]
+    fn an_unsigned_message_is_given_back_by_verify() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let unsigned = message("hello");
+        let back = unsigned
+            .clone()
+            .verify()
+            .expect_err("an unsigned message does not verify");
+        assert_eq!(
+            back.body.as_str(),
+            unsigned.body.as_str(),
+            "an unsigned message is given back by verify with its body"
+        );
+        assert!(
+            back.signer.is_none(),
+            "an unsigned message is given back with no signer"
+        );
+    }
+
+    #[test]
+    fn a_tampered_body_fails_verify_and_is_given_back() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut tampered = message("hello").sign(&Identity::generate()).into_message();
+        tampered.body = "tampered".into();
+        let back = tampered
+            .verify()
+            .expect_err("a tampered body does not verify");
+        assert_eq!(
+            back.body.as_str(),
+            "tampered",
+            "a tampered body fails verify and is given back"
+        );
+    }
+
+    #[test]
+    fn a_fixture_keeps_the_signature_as_parsed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let signed = message("hello").sign(&Identity::generate());
+        let wire = signed.serialize().expect("serialize");
+        let parsed = Message::parse(wire.as_bytes()).expect("parses");
+
+        let unmodified = Verified::fixture_with_signature(parsed.clone());
+        assert_eq!(
+            unmodified.serialize().expect("serialize").as_bytes(),
+            wire.as_bytes(),
+            "the original signature is kept"
+        );
+        assert!(
+            unmodified.into_message().verify().is_ok(),
+            "a fixture keeps the signature as parsed"
+        );
+
+        let mut tampered = parsed;
+        tampered.body = "tampered".into();
+        let forged = Verified::fixture_with_signature(tampered);
+        let replayed: Message =
+            Message::parse(forged.serialize().expect("serialize").as_bytes()).expect("parses");
+        assert!(
+            replayed.verify().is_err(),
+            "a body edited after signing does not verify at the receiver"
+        );
+    }
+
+    #[test]
+    fn verify_canonical_refuses_an_edited_clone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let original = message("hello").sign(&Identity::generate()).into_message();
+        let (_, canonical) = original
+            .clone()
+            .verify_canonical()
+            .expect("the original verifies");
+        assert_eq!(
+            canonical,
+            original.canonical_bytes(),
+            "the canonical bytes are the original's"
+        );
+
+        let mut edited = original;
+        edited.body = "edited".into();
+        assert!(
+            edited.clone().verify_canonical().is_err(),
+            "an edited clone does not verify, so no proof is made over its bytes"
+        );
+        assert_ne!(
+            edited.canonical_bytes(),
+            canonical,
+            "an edited clone has different canonical bytes"
+        );
+    }
+
+    #[test]
+    fn verified_serializes_to_the_same_bytes_as_its_message() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let parsed = Message::parse(SIGNED_WIRE.as_bytes()).expect("the signed literal parses");
+        let verified = parsed.verify().expect("the golden signature verifies");
+        assert_eq!(
+            serde_json::to_string(&verified).expect("a verified message serializes to JSON"),
+            SIGNED_WIRE,
+            "a verified message serializes to the same bytes as its message"
+        );
+    }
+}
+
+const RECIPIENT_HEX: &str = "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12";
+
+fn recipient() -> AuthorKey {
+    AuthorKey::decode_hex(RECIPIENT_HEX).expect("a lowercase 64-char key")
+}
+
+/// A directed frame names its recipient by author key, as 64 lowercase hex digits. The
+/// nickname of the author stays a label. Wire change: the `to` of an `app` frame and of a
+/// `pong` frame was a nickname.
+#[test]
+fn a_directed_frame_names_its_recipient_by_key_on_the_wire() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let tag = AppTag::try_new("app_msg").expect("a valid app tag");
+    let app = Message::new_app(
+        &sid(),
+        &nick("alice"),
+        AppFrameParams::new(tag, Some(recipient()), None, MessageBody::from("hi")),
+    );
+    let wire = String::from_utf8(app.serialize().expect("serialize")).expect("a frame is UTF-8");
+    assert!(
+        wire.contains(&format!("\"to\":\"{RECIPIENT_HEX}\"")),
+        "the app frame names its recipient by key: {wire}"
+    );
+    let parsed = Message::parse(wire.as_bytes()).expect("the wire form parses");
+    assert_eq!(
+        sole_addressee(&parsed.kind),
+        Some(&recipient()),
+        "the parsed frame names the same key"
+    );
+    let pong = Message::new_pong(&sid(), &nick("alice"), recipient(), &MessageId::random());
+    let pong_wire =
+        String::from_utf8(pong.serialize().expect("serialize")).expect("a frame is UTF-8");
+    assert!(
+        pong_wire.contains(&format!("\"to\":\"{RECIPIENT_HEX}\"")),
+        "the pong names its recipient by key: {pong_wire}"
+    );
+}
+
+/// The old form, a nickname as the recipient, is a parse error: a nickname is a label and
+/// names no member.
+#[test]
+fn a_nickname_as_the_recipient_of_a_frame_is_refused_at_parse() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let pong_probe = format!(r#""probe":"{FIXTURE_ID}","#);
+    for (kind, extra) in [
+        ("app", r#""tag":"app_msg","#),
+        ("pong", pong_probe.as_str()),
+    ] {
+        let json = format!(
+            r#"{{"v":"18.0","id":"{FIXTURE_ID}","type":"{kind}",{extra}"to":"bob","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"","ext":{{}}}}"#
+        );
+        assert!(
+            Message::parse(json.as_bytes()).is_err(),
+            "a {kind} frame to a nickname parses"
+        );
+    }
+}
+
+/// A peer of the old wire sends a directed frame whose recipient is a nickname. The new build
+/// names the cause: the version of the frame. A parse error on the recipient would hide it.
+#[test]
+fn a_frame_of_wire_version_12_0_is_refused_by_its_version() {
+    let _guard = ::habilis_network_test_tracing::init();
+    for (kind, extra) in [("app", r#""tag":"app_msg","#), ("pong", r#""probe":"x","#)] {
+        let json = format!(
+            r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"{kind}",{extra}"to":"bob","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"","ext":{{}}}}"#
+        );
+        let refused = Message::parse(json.as_bytes()).expect_err("a 12.0 frame parses");
+        assert!(
+            matches!(&refused, MessageError::UnsupportedVersion(version) if version == "12.0"),
+            "the {kind} frame of the old wire was not refused by its version: {refused:?}"
+        );
+    }
+}
+
+/// A frame of the `13.0` wire is refused by its version. The frame is a chat `digest`, the kind that
+/// `13.0` still carried, so the parse fails on the kind too: the version is the cause to name.
+#[test]
+fn a_frame_of_wire_version_13_0_is_refused_by_its_version() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let frame = r#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"digest","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"[]","ext":{}}"#;
+    let refused = Message::parse(frame.as_bytes()).expect_err("a 13.0 frame parses");
+    assert!(
+        matches!(&refused, MessageError::UnsupportedVersion(version) if version == "13.0"),
+        "the 13.0 frame was not refused by its version: {refused:?}"
+    );
+}
+
+/// A frame of the `17.0` wire is refused by its version. The frame is a `state` slice, which `17.0`
+/// carried, so a `17.0` peer and an `18.0` peer must not read each other's frames silently.
+#[test]
+fn a_17_0_frame_is_refused() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let frame = r#"{"v":"17.0","id":"00000000-0000-0000-0000-000000000001","type":"state","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"{\"version\":1,\"value\":{}}","ext":{}}"#;
+    let refused = Message::parse(frame.as_bytes()).expect_err("a 17.0 frame parses");
+    assert!(
+        matches!(&refused, MessageError::UnsupportedVersion(version) if version == "17.0"),
+        "the 17.0 frame was not refused by its version: {refused:?}"
+    );
+}
+
+/// The four slice-repair kinds, with their goldens. Each one is unicast and carries a signed `to`.
+mod slice_repair_kinds {
+    use super::{Message, MessageError, MessageKind, key_of_seed};
+    use crate::digest::{DigestEntry, DigestPage, DigestRoot};
+    use crate::identity::Identity;
+    use crate::{Channel, ContentHash};
+
+    fn zero_hash() -> ContentHash {
+        ContentHash::decode_hex(&"0".repeat(64)).expect("a hash")
+    }
+
+    fn wire_of(kind: MessageKind, body: &str) -> String {
+        let message = Message::fixture(kind, body);
+        let bytes = message
+            .serialize()
+            .expect("the fixture message is well formed, so it serializes");
+        String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON")
+    }
+
+    /// One message of each slice kind, each addressed to the key `4`.
+    fn each_kind() -> Vec<MessageKind> {
+        let state = DigestRoot::new(zero_hash(), 1).expect("one page");
+        let meta = DigestRoot::new(ContentHash::of(b"meta"), 2).expect("two pages");
+        let entries = vec![DigestEntry::new(key_of_seed(1), 1, zero_hash())];
+        let page = DigestPage::build(&entries, 1, 0, 1).expect("a page of one row");
+        vec![
+            MessageKind::SliceRoot {
+                to: key_of_seed(4),
+                state,
+                meta,
+            },
+            MessageKind::SlicePull {
+                to: key_of_seed(4),
+                channel: Channel::State,
+                keys: vec![key_of_seed(1), key_of_seed(2)],
+            },
+            MessageKind::SlicePageRequest {
+                to: key_of_seed(4),
+                channel: Channel::Meta,
+                index: 3,
+            },
+            MessageKind::SlicePage {
+                to: key_of_seed(4),
+                channel: Channel::State,
+                page,
+            },
+        ]
+    }
+
+    /// Each kind parses back from its signed frame, and the signature verifies. The type in the
+    /// frame is the same text that the display of the kind prints.
+    #[test]
+    fn each_kind_parses_back_and_verifies() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for kind in each_kind() {
+            let display = kind.to_string();
+            let signed = Message::fixture(kind, "{}").sign(&Identity::fixed_secret([7; 32]));
+            let bytes = signed
+                .serialize()
+                .expect("a signed slice frame serializes")
+                .into_bytes();
+            let wire: serde_json::Value = serde_json::from_slice(&bytes).expect("a frame is JSON");
+            assert_eq!(
+                wire["type"], display,
+                "the wire type of the frame differs from the display of the kind"
+            );
+            let parsed = Message::parse(&bytes).expect("a slice frame parses back");
+            let verified = parsed
+                .verify()
+                .expect("the signature of a slice frame verifies");
+            assert_eq!(
+                verified.serialize().expect("serialize").into_bytes(),
+                bytes,
+                "the parsed frame does not serialize to the same bytes"
+            );
+        }
+    }
+
+    /// A slice kind names its addressee as an author key. A nickname in that place is a parse error.
+    #[test]
+    fn a_nickname_in_the_addressee_of_a_slice_kind_is_refused_at_parse() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for kind in each_kind() {
+            let display = kind.to_string();
+            let frame = Message::fixture(kind, "{}")
+                .sign(&Identity::fixed_secret([7; 32]))
+                .serialize()
+                .expect("a signed slice frame serializes")
+                .into_bytes();
+            let addressee = key_of_seed(4).to_string();
+            let text = String::from_utf8(frame.to_vec()).expect("a frame is text");
+            let renamed = text.replacen(&format!(r#""to":"{addressee}""#), r#""to":"bob""#, 1);
+            assert_ne!(
+                renamed, text,
+                "the {display} frame names its addressee in the form it expects"
+            );
+            let refused = Message::parse(renamed.as_bytes());
+            assert!(
+                matches!(refused, Err(MessageError::Source { .. })),
+                "a {display} frame to a nickname is not refused as a source error: {refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snap_wire_slice_root() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let state = DigestRoot::new(zero_hash(), 1).expect("one page");
+        let meta = DigestRoot::new(ContentHash::of(b"meta"), 2).expect("two pages");
+        let kind = MessageKind::SliceRoot {
+            to: key_of_seed(4),
+            state,
+            meta,
+        };
+        insta::assert_snapshot!(wire_of(kind, "{}"));
+    }
+
+    #[test]
+    fn snap_wire_slice_pull() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let kind = MessageKind::SlicePull {
+            to: key_of_seed(4),
+            channel: Channel::State,
+            keys: vec![key_of_seed(1), key_of_seed(2)],
+        };
+        insta::assert_snapshot!(wire_of(kind, "{}"));
+    }
+
+    #[test]
+    fn snap_wire_slice_page_request() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let kind = MessageKind::SlicePageRequest {
+            to: key_of_seed(4),
+            channel: Channel::Meta,
+            index: 3,
+        };
+        insta::assert_snapshot!(wire_of(kind, "{}"));
+    }
+
+    #[test]
+    fn snap_wire_slice_page() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let entries = vec![DigestEntry::new(key_of_seed(1), 1, zero_hash())];
+        let page = DigestPage::build(&entries, 1, 0, 1).expect("a page of one row");
+        let kind = MessageKind::SlicePage {
+            to: key_of_seed(4),
+            channel: Channel::State,
+            page,
+        };
+        insta::assert_snapshot!(wire_of(kind, "{}"));
+    }
+}
+/// The golden key signs the unsigned fixture to the signed fixture, byte for byte: the signature is
+/// deterministic, so this pins the signed bytes as well as the wire form.
+#[test]
+fn the_golden_key_signs_the_unsigned_fixture_to_the_signed_fixture() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let unsigned = Message::parse(UNSIGNED_WIRE.as_bytes()).expect("the unsigned literal parses");
+    let signed = unsigned.sign(&identity::Identity::fixed_secret([7; 32]));
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&signed)).expect("the signed message has a wire form"),
+        SIGNED_WIRE,
+        "the golden key does not sign the fixture to the golden wire form"
+    );
+}
+
+/// Golden: the chat digest kind is gone. A `digest` frame at the current version is not a message
+/// kind, so it fails in the JSON, not in the version, and the text names the unknown kind.
+#[test]
+fn a_digest_frame_is_not_a_message_kind_any_more() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let frame = r#"{"v":"18.0","id":"00000000-0000-0000-0000-000000000001","type":"digest","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"[]","ext":{}}"#;
+    let refused = Message::parse(frame.as_bytes()).expect_err("a digest frame parses");
+    assert!(
+        matches!(&refused, MessageError::Source { .. })
+            && format!("{refused:?}").contains("unknown variant `digest`"),
+        "a digest frame at 18.0 was not refused as an unknown kind: {refused:?}"
+    );
+}
+
+/// A frame of the `14.0` wire, the one before this change, is refused by its version. The frame still
+/// carries the `seq` and `prev` fields. A control frame of the same fields at the current version parses.
+#[test]
+fn a_frame_of_wire_version_14_0_is_refused_by_its_version() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let fields = r#""type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","ext":{}"#;
+    let old = format!(r#"{{"v":"14.0","id":"00000000-0000-0000-0000-000000000001",{fields}}}"#);
+    let refused = Message::parse(old.as_bytes()).expect_err("a 14.0 frame parses");
+    assert!(
+        matches!(&refused, MessageError::UnsupportedVersion(version) if version == "14.0"),
+        "the 14.0 frame was not refused by its version: {refused:?}"
+    );
+    let current = format!(r#"{{"v":"18.0","id":"00000000-0000-0000-0000-000000000001",{fields}}}"#);
+    assert!(
+        Message::parse(current.as_bytes()).is_ok(),
+        "the control frame of the same fields at 15.0 does not parse"
+    );
+}
+
+/// The signed wire form of the `14.0` build, captured before the wire change: it carries `seq` and
+/// `prev`. Kept so that the old frame is refused by its version, as the `13.0` test does.
+const OLD_14_0_SIGNED_WIRE: &str = r#"{"v":"14.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"7f640d1c198f65d7c272b7206ce3d7ed31c289eca9e09a1c8e28adf770ec02499a7a4b68d837c774a3b8d4bd9a6358e2bd67278f98dbac3ce5fe2e60e5f99006","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+
+/// A frame of the `14.0` wire is refused by its version, exactly: the version is the cause to name.
+#[test]
+fn the_old_14_0_signed_literal_is_refused_by_its_version() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let refused = Message::parse(OLD_14_0_SIGNED_WIRE.as_bytes()).expect_err("a 14.0 frame parses");
+    assert!(
+        matches!(&refused, MessageError::UnsupportedVersion(version) if version == "14.0"),
+        "the 14.0 golden was not refused by its version: {refused:?}"
+    );
+}

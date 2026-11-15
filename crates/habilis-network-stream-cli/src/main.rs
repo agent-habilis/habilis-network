@@ -15,12 +15,20 @@
 //! The bytes ride a direct path by default (the relay only with
 //! `--transport udp,webrtc,relay`), never gossip, and the reader paces the writer.
 
+use std::io::ErrorKind;
+#[cfg(unix)]
+use std::mem;
+#[cfg(unix)]
+use std::ptr;
+use std::{fmt, future, io, process, thread};
+use tokio::signal;
+#[cfg(unix)]
+use tokio::signal::unix;
 mod args;
 
 use std::io::{IsTerminal as _, Write as _};
 
 use anyhow::{Context as _, Result, bail};
-use clap::Parser as _;
 use habilis_network_stream::{Producer, StreamHash, StreamNode};
 use tokio::sync::mpsc;
 
@@ -31,12 +39,12 @@ const CHUNK: usize = 64 * 1024;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    use clap::Parser as _;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "habilis_network=warn".into());
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "habilis_network=warn".into()),
-        )
-        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .with_writer(io::stderr)
         .init();
 
     run(&Args::parse()).await
@@ -54,10 +62,10 @@ async fn run(args: &Args) -> Result<()> {
         let outcome = until_stopped(read(args, &node, &hash)).await;
         (node, outcome)
     } else {
-        if std::io::stdin().is_terminal() {
+        if io::stdin().is_terminal() {
             bail!("pipe data in to stream it, or pass a hash to read one");
         }
-        let node = StreamNode::bind(&args.opts()).await?;
+        let node = StreamNode::bind(&args.options()).await?;
         let outcome = until_stopped(produce(args, &node)).await;
         (node, outcome)
     };
@@ -69,7 +77,7 @@ async fn run(args: &Args) -> Result<()> {
         () = node.close() => {}
         _ = stop_signal() => {}
     }
-    outcome.unwrap_or_else(|code| std::process::exit(code))
+    outcome.unwrap_or_else(|code| process::exit(code))
 }
 
 /// `work`'s outcome, or the exit code of the signal that stopped it. Either
@@ -85,13 +93,13 @@ async fn until_stopped(work: impl Future<Output = Result<()>>) -> Result<Result<
 /// with the exit code a shell gives each: 128 plus the signal number. SIGHUP
 /// is left alone when the process inherited it ignored, as under `nohup`;
 /// Ctrl-C is not, even when inherited ignored as in a background job, and
-/// `examples/tail/tail.sh` relies on that. A handler that cannot be installed
+/// `examples/tail/tail.ts` relies on that. A handler that cannot be installed
 /// never fires, as the default action then still applies.
 async fn stop_signal() -> i32 {
     let interrupt = async {
-        match tokio::signal::ctrl_c().await {
+        match signal::ctrl_c().await {
             Ok(()) => 130,
-            Err(_) => std::future::pending().await,
+            Err(_) => future::pending().await,
         }
     };
     #[cfg(unix)]
@@ -99,7 +107,7 @@ async fn stop_signal() -> i32 {
         use tokio::signal::unix::SignalKind;
         let hangup = async {
             if hangup_ignored() {
-                std::future::pending().await
+                future::pending().await
             } else {
                 unix_signal(SignalKind::hangup(), 129).await
             }
@@ -110,7 +118,7 @@ async fn stop_signal() -> i32 {
         }
     };
     #[cfg(not(unix))]
-    let others = std::future::pending::<i32>();
+    let others: future::Pending<i32> = future::pending();
     tokio::select! {
         code = interrupt => code,
         code = others => code,
@@ -127,21 +135,21 @@ async fn stop_signal() -> i32 {
 )]
 fn hangup_ignored() -> bool {
     // SAFETY: `sigaction` is plain data, and all-zero is a valid value of it.
-    let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+    let mut old: libc::sigaction = unsafe { mem::zeroed() };
     // SAFETY: a null new action only reads the current one into `old`.
-    let read = unsafe { libc::sigaction(libc::SIGHUP, std::ptr::null(), &raw mut old) } == 0;
+    let read = unsafe { libc::sigaction(libc::SIGHUP, ptr::null(), &raw mut old) } == 0;
     read && old.sa_sigaction == libc::SIG_IGN
 }
 
 /// Resolves with `code` at the first `kind` signal.
 #[cfg(unix)]
-async fn unix_signal(kind: tokio::signal::unix::SignalKind, code: i32) -> i32 {
-    match tokio::signal::unix::signal(kind) {
+async fn unix_signal(kind: unix::SignalKind, code: i32) -> i32 {
+    match unix::signal(kind) {
         Ok(mut signals) => {
             signals.recv().await;
             code
         }
-        Err(_) => std::future::pending().await,
+        Err(_) => future::pending().await,
     }
 }
 
@@ -149,7 +157,7 @@ async fn unix_signal(kind: tokio::signal::unix::SignalKind, code: i32) -> i32 {
 async fn read(args: &Args, node: &StreamNode, hash: &StreamHash) -> Result<()> {
     let mut reader = node.open(hash).await?;
     note(args, "reading");
-    let mut stdout = std::io::stdout().lock();
+    let mut stdout = io::stdout().lock();
     while let Some(chunk) = reader.read().await? {
         let written = stdout.write_all(&chunk).and_then(|()| stdout.flush());
         // Whoever reads our stdout stopped (`| head`). Rust ignores SIGPIPE,
@@ -157,7 +165,7 @@ async fn read(args: &Args, node: &StreamNode, hash: &StreamHash) -> Result<()> {
         // with exit 0 (ripgrep's choice, not the 141 a killed `cat` gets).
         // The producer then sees its reader leave.
         if let Err(error) = &written
-            && error.kind() == std::io::ErrorKind::BrokenPipe
+            && error.kind() == ErrorKind::BrokenPipe
         {
             note(args, "stdout closed; leaving the stream");
             return Ok(());
@@ -183,7 +191,7 @@ async fn produce(args: &Args, node: &StreamNode) -> Result<()> {
 
 async fn pump(
     producer: &mut Producer,
-    mut stdin: mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    mut stdin: mpsc::Receiver<io::Result<Vec<u8>>>,
 ) -> Result<()> {
     while let Some(chunk) = stdin.recv().await {
         producer.write(&chunk.context("reading stdin")?).await?;
@@ -194,22 +202,22 @@ async fn pump(
 /// Stdin on its own thread, since tokio's `io-std` stays off. A small bounded
 /// channel, so a slow reader holds stdin back instead of the process holding
 /// the whole input.
-fn spawn_stdin() -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
+fn spawn_stdin() -> mpsc::Receiver<io::Result<Vec<u8>>> {
     let (tx, rx) = mpsc::channel(4);
-    std::thread::spawn(move || forward(std::io::stdin().lock(), &tx));
+    thread::spawn(move || forward(io::stdin().lock(), &tx));
     rx
 }
 
 /// Send `input` down `tx` in chunks until its end, or its first error. An
 /// `Interrupted` read is retried, not sent.
-fn forward(mut input: impl std::io::Read, tx: &mpsc::Sender<std::io::Result<Vec<u8>>>) {
-    let mut buf = vec![0_u8; CHUNK];
+fn forward(mut input: impl io::Read, tx: &mpsc::Sender<io::Result<Vec<u8>>>) {
+    let mut buffer = vec![0_u8; CHUNK];
     loop {
-        let chunk = match input.read(&mut buf) {
+        let chunk = match input.read(&mut buffer) {
             Ok(0) => break,
-            Ok(len) => Ok(buf[..len].to_vec()),
+            Ok(len) => Ok(buffer[..len].to_vec()),
             // A signal landed mid-read; nothing was lost, so read again.
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
             Err(error) => Err(error),
         };
         let failed = chunk.is_err();
@@ -251,17 +259,17 @@ fn note(args: &Args, text: &str) {
 /// One line to stderr. Best effort: once the terminal is gone the write
 /// fails, and `eprintln!` would panic there, skipping the node close that
 /// tells the peer the stream was abandoned.
-fn say(line: std::fmt::Arguments<'_>) {
-    let _ = writeln!(std::io::stderr(), "{line}");
+fn say(line: fmt::Arguments<'_>) {
+    let _ = writeln!(io::stderr(), "{line}");
 }
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::io::{Error, ErrorKind, Read};
 
     use tokio::sync::mpsc;
 
+    use std::{io, thread};
     /// Returns `Interrupted` once, then `data`, then the end.
     struct InterruptedOnce {
         interrupted: bool,
@@ -269,13 +277,13 @@ mod tests {
     }
 
     impl Read for InterruptedOnce {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             if !self.interrupted {
                 self.interrupted = true;
                 return Err(Error::from(ErrorKind::Interrupted));
             }
-            let len = self.data.len().min(buf.len());
-            buf[..len].copy_from_slice(&self.data[..len]);
+            let len = self.data.len().min(buffer.len());
+            buffer[..len].copy_from_slice(&self.data[..len]);
             self.data = &self.data[len..];
             Ok(len)
         }
@@ -285,17 +293,21 @@ mod tests {
     /// failed input: the stream must carry on, not end in an error.
     #[test]
     fn an_interrupted_read_is_retried() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (tx, mut rx) = mpsc::channel(4);
         let input = InterruptedOnce {
             interrupted: false,
             data: b"after the signal",
         };
-        std::thread::spawn(move || super::forward(input, &tx));
+        thread::spawn(move || super::forward(input, &tx));
         let mut got = Vec::new();
         while let Some(chunk) = rx.blocking_recv() {
             got.extend(chunk.expect("an interrupted read is not an error"));
         }
-        assert_eq!(got, b"after the signal");
+        assert_eq!(
+            got, b"after the signal",
+            "an interrupted read is retried and returns the bytes"
+        );
     }
 
     /// Any other failure is sent once and ends the input: the producer then
@@ -304,16 +316,18 @@ mod tests {
     fn a_failed_read_ends_the_stream_as_an_error() {
         struct Failing;
         impl Read for Failing {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
                 Err(Error::other("the disk went away"))
             }
         }
+        let _guard = ::habilis_network_test_tracing::init();
         let (tx, mut rx) = mpsc::channel(4);
-        std::thread::spawn(move || super::forward(Failing, &tx));
+        thread::spawn(move || super::forward(Failing, &tx));
         let first = rx.blocking_recv().expect("the error is sent");
         assert_eq!(
             first.expect_err("a failed read is an error").to_string(),
-            "the disk went away"
+            "the disk went away",
+            "a failed read reports the disk error"
         );
         assert!(rx.blocking_recv().is_none(), "nothing follows the error");
     }

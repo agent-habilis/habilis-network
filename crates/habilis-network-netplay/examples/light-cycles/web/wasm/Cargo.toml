@@ -53,6 +53,7 @@ warnings = "deny"
 unsafe_code = "deny"
 
 [lints.clippy]
+allow_attributes = "deny"
 pedantic = { level = "warn", priority = -1 }
 wildcard_enum_match_arm = "warn"
 module_name_repetitions = "allow"

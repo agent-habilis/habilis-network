@@ -5,38 +5,24 @@
 //! upstream, no `align-self`, one `flex` number for both grow and shrink,
 //! no reflow beyond what a fresh `layout()` call recomputes.
 
-use crate::tui::node::{Arena, NodeId, Tag, TuiNode};
-use crate::tui::width::{Wrap, string_width, wrap_text};
+use crate::tui::arena::Arena;
+
+use crate::tui::node_id::NodeId;
+
+use crate::tui::tag::Tag;
+
+use crate::tui::tui_node::TuiNode;
+use crate::tui::width::{string_width, wrap_text};
+use crate::tui::wrap::Wrap;
 use crate::view::{Align, Border, Direction, Justify};
+use std::iter::Enumerate;
+use std::slice;
 
-/// Bumped once per [`LayoutState::layout`] call. The measure cache is keyed
-/// on `(epoch, avail_w, avail_h)` so a node measured once per frame at a
-/// given available size is never re-measured for it — without this,
-/// `measure` recurses the whole subtree from both a parent's own measure
-/// call and its arrange call: `2^depth` cost. See the port report on
-/// `visage-tui/src/layout/index.ts:60-66`.
-#[derive(Debug, Default)]
-pub struct LayoutState {
-    epoch: i64,
-}
-
-impl LayoutState {
-    #[must_use]
-    pub fn new() -> Self {
-        Self { epoch: 0 }
-    }
-
-    pub fn layout(&mut self, arena: &mut Arena, root: NodeId, width: i32, height: i32) {
-        self.epoch += 1;
-        arrange(arena, self.epoch, root, 0, 0, width, height);
-    }
-}
-
-fn frame_of(node: &TuiNode) -> i32 {
+pub(crate) fn frame_of(node: &TuiNode) -> i32 {
     i32::from(node.border != Border::None)
 }
 
-fn is_text(tag: Tag) -> bool {
+pub(crate) fn is_text(tag: Tag) -> bool {
     matches!(tag, Tag::Text)
 }
 
@@ -44,15 +30,15 @@ fn is_text(tag: Tag) -> bool {
 /// cells; `basis` is unused today but named to match the upstream
 /// signature, so a future percentage feature has exactly one place to
 /// change.
-fn resolve_dim(value: i32, _basis: i32) -> i32 {
+pub(crate) fn resolve_dim(value: i32, _basis: i32) -> i32 {
     if value < 0 { -1 } else { value }
 }
 
-fn text_of(node: &TuiNode) -> String {
+pub(crate) fn text_of(node: &TuiNode) -> String {
     node.text.clone().unwrap_or_default()
 }
 
-fn measure(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32) {
+pub(crate) fn measure(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32) {
     {
         let node = arena.get(id);
         if node.m_epoch == epoch && node.m_avail_w == avail_w && node.m_avail_h == avail_h {
@@ -60,14 +46,14 @@ fn measure(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32
         }
     }
     let (tag, visible) = {
-        let node = arena.get_mut(id);
+        let node = arena.node_mut(id);
         node.m_epoch = epoch;
         node.m_avail_w = avail_w;
         node.m_avail_h = avail_h;
         (node.tag, node.visible)
     };
     if tag == Tag::Hole || !visible {
-        let node = arena.get_mut(id);
+        let node = arena.node_mut(id);
         node.mw = 0;
         node.mh = 0;
         return;
@@ -79,7 +65,7 @@ fn measure(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32
     }
 }
 
-fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
+pub(crate) fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
     let (own_w, own_h, wrap, text) = {
         let node = arena.get(id);
         (
@@ -90,13 +76,13 @@ fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
         )
     };
     let wrap_width = if own_w >= 0 { own_w } else { avail_w };
-    let lines = wrap_text(&text, usize::try_from(wrap_width.max(0)).unwrap_or(0), wrap);
-    let widest = lines
+    let lines: Vec<String> =
+        wrap_text(&text, usize::try_from(wrap_width.max(0)).unwrap_or(0), wrap).collect();
+    let widths = lines
         .iter()
-        .map(|l| i32::try_from(string_width(l)).unwrap_or(i32::MAX))
-        .max()
-        .unwrap_or(0);
-    let node = arena.get_mut(id);
+        .map(|l| i32::try_from(string_width(l)).unwrap_or(i32::MAX));
+    let widest = widths.max().unwrap_or(0);
+    let node = arena.node_mut(id);
     let line_count = i32::try_from(lines.len()).unwrap_or(i32::MAX);
     node.lines = Some(lines);
     node.mw = if own_w >= 0 {
@@ -107,10 +93,11 @@ fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
     node.mh = if own_h >= 0 { own_h } else { line_count };
 }
 
-fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32) {
+pub(crate) fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32) {
     let (own_w, own_h, frame, pad_h, pad_v, direction, gap, children) = {
         let node = arena.get(id);
         let frame = frame_of(node);
+        let children: Vec<_> = arena.children(id).collect();
         (
             resolve_dim(node.width, avail_w),
             resolve_dim(node.height, avail_h),
@@ -119,7 +106,7 @@ fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h:
             2 * frame + i32::from(node.padding.top) + i32::from(node.padding.bottom),
             node.direction,
             i32::from(node.gap),
-            arena.children(id).collect::<Vec<_>>(),
+            children,
         )
     };
     let _ = frame;
@@ -148,7 +135,7 @@ fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h:
         main += gap * (count - 1);
     }
 
-    let node = arena.get_mut(id);
+    let node = arena.node_mut(id);
     node.mw = if own_w >= 0 {
         own_w
     } else {
@@ -161,18 +148,21 @@ fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h:
     };
 }
 
-// `x`/`y`/`w`/`h` are the conventional short names for a rectangle's
-// geometry, matching the ported upstream signature — spelling them out
-// (`width`, `height`, ...) at every call site would make the arithmetic
-// below harder to read, not easier.
-#[allow(clippy::many_single_char_names)]
-fn arrange(arena: &mut Arena, epoch: i64, id: NodeId, x: i32, y: i32, w: i32, h: i32) {
+pub(crate) fn arrange(
+    arena: &mut Arena,
+    epoch: i64,
+    id: NodeId,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+) {
     {
-        let node = arena.get_mut(id);
-        node.lx = x;
-        node.ly = y;
-        node.lw = w;
-        node.lh = h;
+        let node = arena.node_mut(id);
+        node.lx = left;
+        node.ly = top;
+        node.lw = width;
+        node.lh = height;
     }
     let (tag, visible) = {
         let n = arena.get(id);
@@ -191,8 +181,9 @@ fn arrange(arena: &mut Arena, epoch: i64, id: NodeId, x: i32, y: i32, w: i32, h:
             )
         };
         if needs_wrap {
-            let lines = wrap_text(&text, usize::try_from(w.max(0)).unwrap_or(0), wrap);
-            arena.get_mut(id).lines = Some(lines);
+            let lines: Vec<String> =
+                wrap_text(&text, usize::try_from(width.max(0)).unwrap_or(0), wrap).collect();
+            arena.node_mut(id).lines = Some(lines);
         }
         return;
     }
@@ -204,15 +195,14 @@ fn arrange(arena: &mut Arena, epoch: i64, id: NodeId, x: i32, y: i32, w: i32, h:
         arena,
         epoch,
         id,
-        x + frame + i32::from(pad.left),
-        y + frame + i32::from(pad.top),
-        (w - 2 * frame - i32::from(pad.left) - i32::from(pad.right)).max(0),
-        (h - 2 * frame - i32::from(pad.top) - i32::from(pad.bottom)).max(0),
+        left + frame + i32::from(pad.left),
+        top + frame + i32::from(pad.top),
+        (width - 2 * frame - i32::from(pad.left) - i32::from(pad.right)).max(0),
+        (height - 2 * frame - i32::from(pad.top) - i32::from(pad.bottom)).max(0),
     );
 }
 
-#[allow(clippy::too_many_lines)]
-fn arrange_children(
+pub(crate) fn arrange_children(
     arena: &mut Arena,
     epoch: i64,
     node_id: NodeId,
@@ -229,7 +219,7 @@ fn arrange_children(
             (n.tag, n.visible)
         };
         if tag == Tag::Hole || !visible {
-            let n = arena.get_mut(child);
+            let n = arena.node_mut(child);
             n.lx = cx;
             n.ly = cy;
             n.lw = 0;
@@ -252,8 +242,7 @@ fn arrange_children(
 
     let mut main: Vec<i32> = Vec::with_capacity(kids.len());
     let mut flex_total: u32 = 0;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let mut used = gap * (kids.len() as i32 - 1);
+    let mut used = gap * (i32::try_from(kids.len()).unwrap_or(i32::MAX) - 1);
     for &kid in &kids {
         measure(arena, epoch, kid, cw, ch);
         let n = arena.get(kid);
@@ -272,8 +261,7 @@ fn arrange_children(
     for m in &main {
         slack -= m;
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let kids_len = kids.len() as i32;
+    let kids_len = i32::try_from(kids.len()).unwrap_or(i32::MAX);
     slack -= gap * (kids_len - 1);
 
     let mut offset = 0;
@@ -286,9 +274,10 @@ fn arrange_children(
             Justify::Start | Justify::Between => {}
         }
     }
-    let mut pos = (if row { cx } else { cy }) + offset;
+    let mut position = (if row { cx } else { cy }) + offset;
 
-    for (i, &kid) in kids.iter().enumerate() {
+    let indexed_kids: Enumerate<slice::Iter<'_, NodeId>> = kids.iter().enumerate();
+    for (i, &kid) in indexed_kids {
         let main_size = main[i].max(0);
         if row {
             measure(arena, epoch, kid, main_size, ch);
@@ -322,11 +311,15 @@ fn arrange_children(
         }
 
         if row {
-            arrange(arena, epoch, kid, pos, cross_pos, main_size, cross_size);
+            arrange(
+                arena, epoch, kid, position, cross_pos, main_size, cross_size,
+            );
         } else {
-            arrange(arena, epoch, kid, cross_pos, pos, cross_size, main_size);
+            arrange(
+                arena, epoch, kid, cross_pos, position, cross_size, main_size,
+            );
         }
-        pos += main_size + spacing;
+        position += main_size + spacing;
     }
 }
 
@@ -336,24 +329,25 @@ fn arrange_children(
 /// remainder is then handed out one cell at a time to the *earliest* flex
 /// children — arbitrary, but stable, which is what stops a layout's
 /// flexed columns jittering between frames with the same inputs.
-fn distribute_flex(
+pub(crate) fn distribute_flex(
     arena: &Arena,
     kids: &[NodeId],
     main: &mut [i32],
     leftover: i32,
     flex_total: u32,
 ) {
-    let share = f64::from(leftover) / f64::from(flex_total);
     let mut flexed = Vec::new();
     let mut handed = 0;
-    for (i, &kid) in kids.iter().enumerate() {
+    let indexed_kids: Enumerate<slice::Iter<'_, NodeId>> = kids.iter().enumerate();
+    for (i, &kid) in indexed_kids {
         let flex = arena.get(kid).flex;
         if flex == 0 {
             continue;
         }
         flexed.push(i);
-        #[allow(clippy::cast_possible_truncation)]
-        let cells = (share * f64::from(flex)).trunc() as i32;
+        // A child's flex is at most `flex_total`, so its share never exceeds `leftover`.
+        let cells = i32::try_from(i64::from(leftover) * i64::from(flex) / i64::from(flex_total))
+            .unwrap_or(0);
         main[i] += cells;
         handed += cells;
     }
@@ -374,101 +368,136 @@ fn distribute_flex(
 
 #[cfg(test)]
 mod tests {
-    use super::LayoutState;
-    use crate::tui::node::{Arena, Tag};
+    use crate::tui::arena::Arena;
+    use crate::tui::layout_state::LayoutState;
+    use crate::tui::tag::Tag;
     use crate::view::{Direction, Justify};
-    use habilis_network_test_tracing::test;
 
+    use crate::view;
+    use crate::view::Border;
     #[test]
     fn a_row_of_two_fixed_children_places_them_side_by_side() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
-        arena.get_mut(root).direction = Direction::Row;
+        arena.node_mut(root).direction = Direction::Row;
         let a = arena.create(Tag::Box);
-        arena.get_mut(a).width = 5;
-        arena.get_mut(a).height = 3;
+        arena.node_mut(a).width = 5;
+        arena.node_mut(a).height = 3;
         let b = arena.create(Tag::Box);
-        arena.get_mut(b).width = 7;
-        arena.get_mut(b).height = 3;
+        arena.node_mut(b).width = 7;
+        arena.node_mut(b).height = 3;
         arena.append(root, a);
         arena.append(root, b);
 
         LayoutState::new().layout(&mut arena, root, 20, 10);
 
-        assert_eq!((arena.get(a).lx, arena.get(a).lw), (0, 5));
-        assert_eq!((arena.get(b).lx, arena.get(b).lw), (5, 7));
+        assert_eq!(
+            (arena.get(a).lx, arena.get(a).lw),
+            (0, 5),
+            "the first fixed child is placed at the left edge with its width"
+        );
+        assert_eq!(
+            (arena.get(b).lx, arena.get(b).lw),
+            (5, 7),
+            "the second fixed child is placed after the first"
+        );
     }
 
     #[test]
     fn one_flexed_child_absorbs_the_leftover_space() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
-        arena.get_mut(root).direction = Direction::Row;
+        arena.node_mut(root).direction = Direction::Row;
         let fixed = arena.create(Tag::Box);
-        arena.get_mut(fixed).width = 10;
+        arena.node_mut(fixed).width = 10;
         let flexed = arena.create(Tag::Box);
-        arena.get_mut(flexed).flex = 1;
+        arena.node_mut(flexed).flex = 1;
         arena.append(root, fixed);
         arena.append(root, flexed);
 
         LayoutState::new().layout(&mut arena, root, 30, 5);
 
-        assert_eq!(arena.get(fixed).lw, 10);
-        assert_eq!(arena.get(flexed).lw, 20);
+        assert_eq!(arena.get(fixed).lw, 10, "the fixed child keeps its width");
+        assert_eq!(
+            arena.get(flexed).lw,
+            20,
+            "the flexed child absorbs the leftover width"
+        );
     }
 
     #[test]
     fn justify_end_pushes_children_to_the_far_edge() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.direction = Direction::Row;
             n.justify = Justify::End;
         }
         let a = arena.create(Tag::Box);
-        arena.get_mut(a).width = 4;
+        arena.node_mut(a).width = 4;
         arena.append(root, a);
 
         LayoutState::new().layout(&mut arena, root, 10, 3);
 
-        assert_eq!(arena.get(a).lx, 6);
+        assert_eq!(
+            arena.get(a).lx,
+            6,
+            "justify end pushes the child to the far edge"
+        );
     }
 
     #[test]
     fn padding_and_border_shrink_the_content_box() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         {
-            let n = arena.get_mut(root);
-            n.border = crate::view::Border::Single;
-            n.padding = crate::view::Padding::all(1);
+            let n = arena.node_mut(root);
+            n.border = Border::Single;
+            n.padding = view::Padding::all(1);
         }
         let child = arena.create(Tag::Box);
-        arena.get_mut(child).flex = 1;
+        arena.node_mut(child).flex = 1;
         arena.append(root, child);
 
         LayoutState::new().layout(&mut arena, root, 10, 10);
 
         // 1 cell of border + 1 cell of padding on each side.
-        assert_eq!((arena.get(child).lx, arena.get(child).ly), (2, 2));
-        assert_eq!((arena.get(child).lw, arena.get(child).lh), (6, 6));
+        assert_eq!(
+            (arena.get(child).lx, arena.get(child).ly),
+            (2, 2),
+            "padding and border place the child inside the box"
+        );
+        assert_eq!(
+            (arena.get(child).lw, arena.get(child).lh),
+            (6, 6),
+            "padding and border shrink the child's box"
+        );
     }
 
     #[test]
     fn a_hole_child_is_skipped_and_occupies_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
-        arena.get_mut(root).direction = Direction::Row;
+        arena.node_mut(root).direction = Direction::Row;
         let hole = arena.create(Tag::Hole);
         let a = arena.create(Tag::Box);
-        arena.get_mut(a).width = 5;
+        arena.node_mut(a).width = 5;
         arena.append(root, hole);
         arena.append(root, a);
 
         LayoutState::new().layout(&mut arena, root, 20, 5);
 
-        assert_eq!(arena.get(a).lx, 0); // the hole claimed no space before it
-        assert_eq!((arena.get(hole).lw, arena.get(hole).lh), (0, 0));
+        assert_eq!(arena.get(a).lx, 0, "a hole child is skipped at the start"); // the hole claimed no space before it
+        assert_eq!(
+            (arena.get(hole).lw, arena.get(hole).lh),
+            (0, 0),
+            "a hole child occupies no space"
+        );
     }
 }

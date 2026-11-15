@@ -43,25 +43,46 @@ static BUILD_VERSION: OnceLock<&'static str> = OnceLock::new();
 /// Register the consumer's build stamp. Idempotent: the first caller wins and
 /// later calls are ignored, so a test that spins up several in-process daemons
 /// cannot panic on a re-set.
-pub fn set_build_version(version: &'static str) {
+///
+/// # Examples
+///
+/// A build string set at start is the one that the build reports.
+///
+/// ```
+/// use habilis_network_util::version::{build_string, set_build_string};
+///
+/// set_build_string("1.2.3");
+/// assert_eq!(build_string(), "1.2.3");
+/// ```
+pub fn set_build_string(version: &'static str) {
     let _ = BUILD_VERSION.set(version);
 }
 
 /// The consumer's stamp, or this engine's own [`VERSION`] when nothing
 /// registered one. The fallback keeps a direct engine embedder truthful rather
 /// than blank.
+///
+/// # Examples
+///
+/// The build string is never empty.
+///
+/// ```
+/// use habilis_network_util::version::build_string;
+///
+/// assert!(!build_string().is_empty());
+/// ```
 #[must_use]
-pub fn build_version() -> &'static str {
+pub fn build_string() -> &'static str {
     BUILD_VERSION.get().copied().unwrap_or(VERSION)
 }
 
 #[cfg(test)]
 mod tests {
     use super::VERSION;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn version_carries_crate_version_and_git_stamp() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             VERSION.starts_with(env!("CARGO_PKG_VERSION")),
             "version must lead with the crate version: {VERSION}"

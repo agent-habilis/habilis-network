@@ -17,16 +17,15 @@
 //! configured for that name in their own terminal theme, rather than
 //! forcing a specific RGB value that might clash with it.
 
-use std::pin::Pin;
-
-use visage_rust_tui::component::{ComponentCoroutine, Yield};
-use visage_rust_tui::reactive::Signal;
+use crate::grid::{GRID_H, GRID_W};
+use crate::outcome::Outcome;
+use crate::sim;
+use crate::snapshot::Snapshot;
+use crate::ui_component::UiComponent;
+use std::mem;
+use visage_rust_tui::signal::Signal;
 use visage_rust_tui::tui::color::palette;
 use visage_rust_tui::view::{Align, Border, BoxProps, Direction, Justify, Padding, View};
-
-use crate::app::Snapshot;
-use crate::grid::{GRID_H, GRID_W};
-use crate::sim::Outcome;
 
 /// Named ANSI colors usable as a player color, in assignment order.
 /// `0` (black) and the near-background/foreground indices are skipped —
@@ -49,8 +48,10 @@ const GRID_STEP: u8 = 8;
 
 /// A claimed cell. Full block, so trails read as solid light.
 const TRAIL: char = '█';
+
 /// An empty cell on a ruled intersection.
 const RULE: char = '·';
+
 const EMPTY: char = ' ';
 
 fn color_for(roster_index: usize) -> i32 {
@@ -70,19 +71,11 @@ fn dim() -> i32 {
 /// `View::component`'s nested-instance isolation, which pays off when
 /// *most* of a tree stays still and only a small part changes.
 #[must_use]
-pub fn app(snapshot: Signal<Snapshot>) -> Pin<Box<ComponentCoroutine>> {
-    Box::pin(
-        #[coroutine]
-        move || {
-            loop {
-                let current = snapshot.get();
-                yield Yield::View(render(&current));
-            }
-        },
-    )
+pub fn app(snapshot: Signal<Snapshot>) -> UiComponent {
+    UiComponent { snapshot }
 }
 
-fn render(s: &Snapshot) -> View {
+pub(crate) fn render(s: &Snapshot) -> View {
     View::boxed(
         BoxProps {
             direction: Direction::Column,
@@ -113,7 +106,7 @@ fn players(s: &Snapshot) -> View {
                     fg: color_for(i),
                     ..BoxProps::default()
                 },
-                vec![View::text(label)],
+                vec![View::text(&label)],
             )
         })
         .collect();
@@ -142,11 +135,6 @@ pub fn status_line(s: &Snapshot) -> String {
     if s.desynced {
         return "DESYNCED".to_owned();
     }
-    // Ahead of the waiting states on purpose: a lobby that *cannot* start
-    // must not keep reporting that it is about to.
-    if let Some(blocked) = &s.blocked {
-        return blocked.to_uppercase();
-    }
     if s.waiting {
         return if s.present > 1 {
             format!("{} PLAYERS READY", s.present)
@@ -157,21 +145,30 @@ pub fn status_line(s: &Snapshot) -> String {
     if s.syncing {
         return "SYNCING".to_owned();
     }
-    match crate::sim::outcome(&s.world) {
+    match sim::outcome(&s.world) {
         Outcome::InProgress => String::new(),
-        Outcome::Winner(i) => format!(
-            "{} WINS",
-            s.roster
-                .get(i)
-                .map_or("?".to_owned(), |(_, nick)| nick.to_uppercase())
-        ),
+        Outcome::Winner(i) => format!("{} WINS", player_label(&s.roster, i).to_uppercase()),
         Outcome::Draw => "DRAW".to_owned(),
     }
 }
 
+/// The name of the player at `slot`, or `?` for a slot that the roster does not hold. A nickname
+/// is a label that two live keys can share, so a nickname that the roster holds twice carries the
+/// slot too.
+fn player_label(roster: &[(String, String)], slot: usize) -> String {
+    let Some((_, nick)) = roster.get(slot) else {
+        return "?".to_owned();
+    };
+    let users = roster.iter().filter(|(_, other)| other == nick).count();
+    if users > 1 {
+        format!("{nick} #{}", slot + 1)
+    } else {
+        nick.clone()
+    }
+}
+
 fn status(s: &Snapshot) -> View {
-    let alarming = s.desynced || s.blocked.is_some();
-    let color = if alarming { palette(1) } else { palette(6) };
+    let color = if s.desynced { palette(1) } else { palette(6) };
     View::boxed(
         BoxProps {
             direction: Direction::Row,
@@ -180,7 +177,7 @@ fn status(s: &Snapshot) -> View {
             fg: color,
             ..BoxProps::default()
         },
-        vec![View::text(status_line(s))],
+        vec![View::text(&status_line(s))],
     )
 }
 
@@ -188,7 +185,7 @@ fn status(s: &Snapshot) -> View {
 /// looking at, so it carries the attract message instead — the browser
 /// overlays the same words on the same empty grid.
 fn arena(s: &Snapshot) -> View {
-    let body = if s.waiting {
+    let body: Vec<View> = if s.waiting {
         vec![View::boxed(
             BoxProps {
                 direction: Direction::Column,
@@ -199,20 +196,13 @@ fn arena(s: &Snapshot) -> View {
                 ..BoxProps::default()
             },
             vec![
-                View::text(attract_headline(s)),
+                View::text(&attract_headline(s)),
                 View::boxed(
                     BoxProps {
                         fg: dim(),
                         ..BoxProps::default()
                     },
-                    // Pointless advice when the lobby is blocked — sharing
-                    // the code again fixes nothing, and the status line
-                    // above is already carrying the actual reason.
-                    vec![View::text(if s.blocked.is_some() {
-                        ""
-                    } else {
-                        "SHARE THE ROOM CODE BELOW"
-                    })],
+                    vec![View::text("SHARE THE ROOM CODE BELOW")],
                 ),
             ],
         )]
@@ -235,12 +225,8 @@ fn arena(s: &Snapshot) -> View {
 
 /// The big line in the middle of an empty arena.
 ///
-/// A blocked lobby must not read as an imminent match: "GET READY" for
-/// something that can never start is worse than saying nothing.
 fn attract_headline(s: &Snapshot) -> String {
-    if s.blocked.is_some() {
-        "CANNOT START".to_owned()
-    } else if s.present > 1 {
+    if s.present > 1 {
         "GET READY".to_owned()
     } else {
         "WAITING FOR A PLAYER".to_owned()
@@ -261,9 +247,9 @@ fn controls(s: &Snapshot) -> View {
             ..BoxProps::default()
         },
         vec![
-            View::text("↑↓←→ OR WASD".to_owned()),
-            View::text(format!("MATCH {}", s.match_number)),
-            View::text(room_label(&s.room)),
+            View::text("↑↓←→ OR WASD"),
+            View::text(&format!("MATCH {}", s.match_number)),
+            View::text(&room_label(&s.room)),
         ],
     )
 }
@@ -326,7 +312,7 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
     if run.is_empty() {
         return;
     }
-    let text = View::text(std::mem::take(run));
+    let text = View::text(&mem::take(run));
     spans.push(match owner {
         Some(o) if o > 0 => View::boxed(
             BoxProps {
@@ -349,8 +335,72 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
 
 #[cfg(test)]
 mod tests {
-    use super::room_label;
-    use habilis_network_test_tracing::test;
+    use crate::cycle::Cycle;
+    use crate::dir::Dir;
+    use crate::snapshot::Snapshot;
+    use crate::world::World;
+
+    /// A finished match: only the cycle at `survivor` is alive, and the roster lists `nicks`.
+    fn finished_match(nicks: &[&str], survivor: usize) -> Snapshot {
+        let cycles = (0..nicks.len())
+            .map(|index| Cycle {
+                x: 0,
+                y: 0,
+                dir: Dir::Up,
+                alive: index == survivor,
+            })
+            .collect();
+        let slots = nicks.iter().enumerate();
+        let roster: Vec<(String, String)> = slots
+            .map(|(index, nick)| (format!("key-{index}"), (*nick).to_owned()))
+            .collect();
+        Snapshot {
+            match_number: 1,
+            room: String::new(),
+            world: World {
+                cycles,
+                ..World::default()
+            },
+            roster,
+            my_pubkey: String::new(),
+            present: nicks.len(),
+            waiting: false,
+            desynced: false,
+            syncing: false,
+        }
+    }
+
+    /// Two live keys can use one nickname, so a winner line with the nickname alone does not say
+    /// which of the two won. The slot of the roster tells them apart, and it is the same on every
+    /// peer because the roster is sorted.
+    #[test]
+    fn the_winner_line_tells_two_players_of_one_nickname_apart() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let second = finished_match(&["bob", "bob", "alice"], 1);
+        assert_eq!(
+            super::status_line(&second),
+            "BOB #2 WINS",
+            "the second bob wins, and the line says which bob"
+        );
+        let first = finished_match(&["bob", "bob", "alice"], 0);
+        assert_eq!(
+            super::status_line(&first),
+            "BOB #1 WINS",
+            "the first bob wins, and the line says which bob"
+        );
+    }
+
+    /// A nickname that one player uses needs no slot: the line stays as it was.
+    #[test]
+    fn the_winner_line_keeps_a_nickname_that_one_player_uses() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let winner = finished_match(&["bob", "bob", "alice"], 2);
+        assert_eq!(
+            super::status_line(&winner),
+            "ALICE WINS",
+            "a nickname of one player is shown alone"
+        );
+    }
 
     /// Regression: the room code used to be uppercased for display, but
     /// `crypto::topic_seed` hashes the topic byte-for-byte. A player who
@@ -358,7 +408,16 @@ mod tests {
     /// forever. The label may shout; the code may not.
     #[test]
     fn the_room_code_is_shown_exactly_as_given() {
-        assert_eq!(room_label("Gadget-Plover"), "ROOM Gadget-Plover");
-        assert_eq!(room_label("volt-paddle"), "ROOM volt-paddle");
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            super::room_label("Gadget-Plover"),
+            "ROOM Gadget-Plover",
+            "the room code is shown exactly as given, with its case"
+        );
+        assert_eq!(
+            super::room_label("volt-paddle"),
+            "ROOM volt-paddle",
+            "a lower-case room code is shown as given"
+        );
     }
 }

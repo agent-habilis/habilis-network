@@ -43,8 +43,6 @@ export interface HudDto {
   waiting: boolean
   /** A peer's state checksum disagreed with ours. Should never happen. */
   desynced: boolean
-  /** Why the lobby cannot start a match, when waiting will not fix it. */
-  blocked: string | null
   /** The session is up but still aligning frame numbers with its peers. */
   syncing: boolean
   outcome: OutcomeDto

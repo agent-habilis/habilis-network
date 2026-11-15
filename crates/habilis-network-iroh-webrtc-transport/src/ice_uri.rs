@@ -39,7 +39,7 @@
 ///
 /// The throw comes from the *constructor*, so one bad URI costs the whole peer
 /// connection rather than that one server — which is how a bad entry leaves a
-/// browser with no WebRTC at all, quietly falling back to the relay. A `stun:`
+/// browser with no `WebRTC` at all, quietly falling back to the relay. A `stun:`
 /// query is meaningless anyway (RFC 7064 defines none), so it is stripped
 /// rather than dropped: that recovers the server the caller meant.
 #[must_use]
@@ -60,23 +60,23 @@ pub fn accept_ice_uri(uri: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::accept_ice_uri;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn accepts_stun() {
+        let _guard = ::habilis_network_test_tracing::init();
         for uri in [
             "stun:stun1.l.google.com:19302",
             "stun:stun.cloudflare.com:3478",
             "stuns:example.com:5349",
             "stun:example.com",
         ] {
-            assert_eq!(accept_ice_uri(uri).as_deref(), Some(uri), "{uri}");
+            assert_eq!(super::accept_ice_uri(uri).as_deref(), Some(uri), "{uri}");
         }
     }
 
     #[test]
     fn refuses_turn_by_policy() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Not "we happen to configure none" — the scheme cannot get through.
         for uri in [
             "turn:example.com:3478",
@@ -84,22 +84,25 @@ mod tests {
             "turn:167.235.241.140:3478?transport=udp",
             "turns:example.com:5349?transport=tcp",
         ] {
-            assert_eq!(accept_ice_uri(uri), None, "{uri} must be refused");
+            assert_eq!(super::accept_ice_uri(uri), None, "{uri} must be refused");
         }
     }
 
     #[test]
     fn strips_a_query_safari_would_throw_on() {
+        let _guard = ::habilis_network_test_tracing::init();
         // RFC 7064 gives `stun:` no query at all, so this is meaningless rather
         // than merely redundant — stripping recovers the intended server.
         assert_eq!(
-            accept_ice_uri("stun:example.com:3478?transport=udp").as_deref(),
-            Some("stun:example.com:3478")
+            super::accept_ice_uri("stun:example.com:3478?transport=udp").as_deref(),
+            Some("stun:example.com:3478"),
+            "a query that safari would reject is stripped from the stun uri"
         );
     }
 
     #[test]
     fn refuses_junk() {
+        let _guard = ::habilis_network_test_tracing::init();
         for uri in [
             "",
             "example.com:3478",
@@ -109,7 +112,7 @@ mod tests {
             "stun",
             "stun:?transport=udp",
         ] {
-            assert_eq!(accept_ice_uri(uri), None, "{uri}");
+            assert_eq!(super::accept_ice_uri(uri), None, "{uri}");
         }
     }
 }

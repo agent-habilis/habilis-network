@@ -28,6 +28,7 @@ export type Command =
    */
   | { readonly t: 'open'; readonly id: number; readonly opts: WireOpts; readonly lib: string }
   | { readonly t: 'send'; readonly id: number; readonly to: string | null; readonly text: string }
+  | { readonly t: 'sendToKey'; readonly id: number; readonly key: string; readonly text: string }
   | { readonly t: 'stateMerge'; readonly id: number; readonly json: string }
   | { readonly t: 'close'; readonly id: number }
 
@@ -46,7 +47,13 @@ export type Reply = OpenReply | string | null
 export type FromWorker =
   | { readonly t: 'ok'; readonly id: number; readonly value: Reply }
   | { readonly t: 'err'; readonly id: number; readonly message: string }
-  | { readonly t: 'msg'; readonly from: string; readonly directed: boolean; readonly text: string }
+  | {
+      readonly t: 'msg'
+      readonly from: string
+      readonly key: string
+      readonly directed: boolean
+      readonly text: string
+    }
   | { readonly t: 'roster'; readonly json: string }
   | { readonly t: 'state'; readonly json: string }
   /** A failure with nobody waiting on it. The mesh stays open. */
