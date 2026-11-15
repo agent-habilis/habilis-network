@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use habilis_network_chunks::Root;
-use habilis_network_doc::{ChunkPointer, structure_units};
+use habilis_network_doc::ChunkPointer;
 use habilis_network_util::clock::Instant;
 use habilis_network_util::tuning::{
     CHUNK_FETCH_REFUSED_RETRY, CHUNK_FETCH_RETRY, CHUNK_FETCHES_MAX, CHUNK_SOURCES_MAX,
@@ -273,7 +273,7 @@ fn resolve(
     };
     // The scan comes before the parse: the parsed value can take up to 486 bytes for each unit. A pointer that this
     // node took names at most the cap of units, so bytes that count what the pointer names are under the cap too.
-    if u64::try_from(structure_units(&plain)) != Ok(pointer.units()) {
+    if u64::try_from(habilis_network_doc::structure_units(&plain)) != Ok(pointer.units()) {
         return Resolution::Refused(Refusal {
             reason: "the units of the bytes differ from the pointer",
             for_good: true,
@@ -319,7 +319,7 @@ mod tests {
     use std::sync::Mutex;
 
     use habilis_network_chunks::{CHUNK_BYTES_USIZE, Root};
-    use habilis_network_doc::{ChunkPointer, structure_units};
+    use habilis_network_doc::ChunkPointer;
     use habilis_network_util::clock::Instant;
     use habilis_network_util::tuning::{
         CHUNK_FETCH_REFUSED_RETRY, CHUNK_FETCH_RETRY, CHUNK_FETCHES_MAX, CHUNK_SOURCES_MAX,
@@ -797,7 +797,8 @@ mod tests {
             let harness = Harness::spawn().await;
             let author = Identity::generate();
             let plain = serde_json::to_vec(&serde_json::json!([1, 2, 3])).expect("JSON");
-            let units = u64::try_from(structure_units(&plain)).expect("a count");
+            let units =
+                u64::try_from(habilis_network_doc::structure_units(&plain)).expect("a count");
             let now = Instant::now();
             let mut state = finish_with_units(&harness, &author, &plain, units, now).await;
             let listed: Vec<_> = state.syncing(Channel::State).collect();

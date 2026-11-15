@@ -4,7 +4,7 @@ use habilis_network_chunks::Root;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::structure::structure_units;
+use crate::structure;
 
 /// The key that only a chunk pointer may carry at the top of a slice value.
 pub(crate) const CHUNKS_KEY: &str = "$chunks";
@@ -51,7 +51,7 @@ impl ChunkPointer {
     /// so they agree.
     pub fn of(root: Root, bytes: &[u8]) -> Self {
         let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        let units = u64::try_from(structure_units(bytes)).unwrap_or(u64::MAX);
+        let units = u64::try_from(structure::structure_units(bytes)).unwrap_or(u64::MAX);
         Self::new(root, size, units)
     }
 

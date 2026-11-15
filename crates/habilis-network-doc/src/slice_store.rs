@@ -33,8 +33,7 @@ use serde_json::{Map, Value, json};
 use crate::chunk_pointer::{CHUNKS_KEY, ChunkPointer};
 use crate::pending_slices::PendingSlices;
 use crate::slice_value::SliceValue;
-use crate::structure::structure_units;
-use crate::wire;
+use crate::{structure, wire};
 
 /// The default time a key stays gone, after a signed goodbye or a replaced run. It must cover
 /// `QUIET_TTL` plus `ALIVE_TIMEOUT`: a peer that missed the goodbye keeps the old slice until it
@@ -1283,7 +1282,7 @@ impl SliceStore {
                 limit: self.limits.max_value_bytes,
             });
         }
-        let units = structure_units(encoded.as_bytes());
+        let units = structure::structure_units(encoded.as_bytes());
         if units > tuning::SLICE_VALUE_UNITS_MAX {
             return Err(SliceError::ValueTooComplex {
                 units,
