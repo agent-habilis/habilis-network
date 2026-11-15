@@ -401,13 +401,6 @@ fn leave_label(mesh: &MeshSpec) -> String {
 
 /// The chunk store of this run: in the folder of the node under the runtime base, and in memory when there is no
 /// runtime base.
-#[cfg_attr(
-    not(feature = "host"),
-    expect(
-        clippy::unnecessary_wraps,
-        reason = "the same signature as the version for a target with files"
-    )
-)]
 fn open_chunks(
     runtime_base: Option<&path::Path>,
     mesh: &MeshId,
