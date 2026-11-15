@@ -1089,12 +1089,8 @@ fn shed_and_wait_mid_rewalk_closes_the_monitor_probe_endpoint() {
 
     let errors = testing::errors_through_runtime_drop(async {
         let endpoint = loopback_endpoint().await;
-        let monitor = lookup::spawn_relay_monitor(
-            endpoint.clone(),
-            vec![rung],
-            watch::channel(None).0,
-            false,
-        );
+        let monitor =
+            lookup::spawn_relay_monitor(endpoint.clone(), vec![rung], watch::channel(None).0, None);
         // Let the walk bind its probe and start waiting for the relay.
         tokio_time::sleep(std_Duration::from_millis(200)).await;
         let rendezvous = Rendezvous {
