@@ -287,6 +287,8 @@ Each probe closes its endpoint before the walk returns.
 The peer endpoint and the beacon follow their rung with one loop.
 A rung is alive when the relay status says that the relay connection is up, and the net report has a preferred relay.
 After 2 failed reads in a row, the member walks the ladder.
+A walk that finds no rung keeps the member on its rung, the beacon too, and the next failed reads walk again.
+The beacon is not demoted to no relay by a short full outage, because the peers are not.
 A peer endpoint moves its relay map in place.
 The beacon publishes the new rung through the watch channel, and the event loop re-homes the beacon on it.
 
