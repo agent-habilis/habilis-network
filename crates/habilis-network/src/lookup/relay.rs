@@ -42,12 +42,11 @@ use n0_future::{task as n0future_task, time as n0future_time};
 /// dial: a creator-independent bootstrap that needs no address lookup to
 /// reach the rendezvous.
 ///
-/// Rungs 0..10 are our fleet (the `relay-server` stacks of the homelab repo):
-/// one host after the other, each on both of our domains. A dead host costs
-/// two rung probes, and a dead domain leaves the other domain of the same
-/// host as the next rung. Rungs 0..2 are the legacy `relay.*` names of
-/// nyc-macmini2. Rungs 10..14 are iroh `defaults::prod` (NA-east, NA-west,
-/// EU, AP).
+/// Rungs 0..10 are our relays: each relay name on both of our domains. Each
+/// URL must reach its own relay process. iroh opens one relay session per
+/// URL, and a relay drops the older session of an endpoint id, so two URLs of
+/// one process make an endpoint drop its own session. Rungs 10..14 are iroh
+/// `defaults::prod`.
 ///
 /// Hardcoded, **not** `defaults::prod::default_relay_map()`, so members on
 /// different iroh versions still agree on the *same* ladder. Relay infra is
@@ -60,20 +59,20 @@ pub const RENDEZVOUS_RELAY_LADDER: &[&str] = &[
     // dotted host, so a browser member could reach none of them. Our rungs
     // have a second reason: Cloudflare routes by exact Host header and 404s
     // the dotted form (including the /relay websocket upgrade).
-    "https://relay.agent-habilis.com/", // nyc-macmini2, legacy name
+    "https://relay.agent-habilis.com/",
     "https://relay.habilis.network/",
-    "https://nyc-relay1.agent-habilis.com/", // do-nyc-droplet1
+    "https://nyc-relay1.agent-habilis.com/",
     "https://nyc-relay1.habilis.network/",
-    "https://nyc-relay2.agent-habilis.com/", // nyc-macmini2
+    "https://nyc-relay2.agent-habilis.com/",
     "https://nyc-relay2.habilis.network/",
-    "https://nyc-relay3.agent-habilis.com/", // nyc-pi2
+    "https://nyc-relay3.agent-habilis.com/",
     "https://nyc-relay3.habilis.network/",
-    "https://slz-relay1.agent-habilis.com/", // slz-pi1
+    "https://slz-relay1.agent-habilis.com/",
     "https://slz-relay1.habilis.network/",
-    "https://use1-1.relay.n0.iroh.link/", // n0 NA-east
-    "https://usw1-1.relay.n0.iroh.link/", // n0 NA-west
-    "https://euc1-1.relay.n0.iroh.link/", // n0 EU
-    "https://aps1-1.relay.n0.iroh.link/", // n0 AP
+    "https://use1-1.relay.n0.iroh.link/",
+    "https://usw1-1.relay.n0.iroh.link/",
+    "https://euc1-1.relay.n0.iroh.link/",
+    "https://aps1-1.relay.n0.iroh.link/",
 ];
 
 /// Parsed once; `RelayUrl` clones are `Arc`-backed (cheap).
