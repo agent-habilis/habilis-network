@@ -35,6 +35,8 @@ export const ABI = {
   habilis_network_mesh_nickname: { args: ['ptr'], returns: 'ptr' },
 
   habilis_network_msg_send: { args: ['ptr', 'cstr', 'cstr'], returns: 'i32' },
+  /** The key is 64 lowercase hex digits. Two members can use one nickname; a key names one. */
+  habilis_network_msg_send_to_key: { args: ['ptr', 'cstr', 'cstr'], returns: 'i32' },
   /**
    * 1 = a message is in `buf` and `out`, 0 = timeout, -1 = failure, -2 = `buf`
    * too small: the message stays queued and `out.len` says how big to retry.
@@ -46,9 +48,8 @@ export const ABI = {
   habilis_network_mesh_peers_json: { args: ['ptr', 'buf', 'usize'], returns: 'isize' },
   /**
    * Bound because the header declares it, and never called: `mesh.peers` needs
-   * the whole roster anyway, and this one excludes self where the roster
-   * document's own `count` includes it. Calling both would be two sources of
-   * truth that disagree by one.
+   * the whole roster anyway, and this count is the roster document's own
+   * `count`, self included. Calling both would read one fact twice.
    */
   habilis_network_mesh_peer_count: { args: ['ptr'], returns: 'isize' },
 

@@ -50,7 +50,13 @@ typedef struct habilis_network_mesh habilis_network_mesh;
  * lookups.
  *
  * String fields are NUL-terminated or NULL. `max_peers == 0` takes the engine's
- * default active-view cap.
+ * default active-view cap (G, 32). `max_direct == 0` takes the default ceiling
+ * of direct connections (C, 64): the WebRTC sessions and unicast connections
+ * together. A newcomer past C evicts the least valuable peer.
+ *
+ * The struct has no size field. It is 80 bytes on a 64-bit target (`nostr_urls`
+ * is at offset 72): rebuild every caller that was built with an older header,
+ * because the library reads the whole struct.
  */
 typedef struct {
   const char *mesh;
@@ -67,23 +73,41 @@ typedef struct {
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
                              default. Needs "relay" in `lookup` */
   size_t max_peers;
+  size_t max_direct;
   const char *nostr_urls; /* comma-separated ws:// or wss:// Nostr relays;
                              NULL = the pinned public list. Needs "nostr" in
                              `lookup` */
 } habilis_network_opts;
 
 /*
- * Metadata for one received message. The text lands NUL-terminated in the
- * caller's buffer; `len` is its length in bytes, excluding the NUL.
+ * Metadata for one received message, with the key of its author. The text lands
+ * NUL-terminated in the caller's buffer; `len` is its length in bytes, excluding
+ * the NUL. Two members can use one nickname only if no member key proved it, so
+ * a nickname can name two authors; the key names one, and
+ * habilis_network_msg_send_to_key() sends to it.
+ *
+ * The struct has no size field: the caller allocates it with this header. It has
+ * 144 bytes and alignment 8 on a 64-bit target (140 bytes with a 4-byte size_t):
+ *
+ *   offset   0  char nick[64]   the author's nickname, truncated to 63 bytes
+ *   offset  64  char key[65]    64 lowercase hex digits and the NUL
+ *   offset 129  3 bytes of padding
+ *   offset 132  int directed
+ *   offset 136  size_t len
+ *
+ * This layout replaced one of 80 bytes that had no key (nick at 0, directed at 64,
+ * len at 72). Every caller built with the old header must be rebuilt: an old
+ * caller allocates 80 bytes, and habilis_network_msg_recv() writes 144.
  */
 typedef struct {
-  char nick[64];  /* the author's nickname, truncated to 63 bytes if longer */
+  char nick[64];
+  char key[65];
   int directed;   /* 1 = addressed to us specifically, 0 = broadcast */
   size_t len;
 } habilis_network_msg;
 
 /* Create or join a mesh. NULL on failure. */
-habilis_network_mesh *habilis_network_mesh_open(const habilis_network_opts *opts);
+habilis_network_mesh *habilis_network_mesh_open(const habilis_network_opts *options);
 
 /* Identity of this membership, borrowed for the handle's lifetime. */
 const char *habilis_network_mesh_id(const habilis_network_mesh *handle);
@@ -93,6 +117,10 @@ const char *habilis_network_mesh_nickname(const habilis_network_mesh *handle);
 /*
  * Send one message, a NUL-terminated UTF-8 text. `to` NULL broadcasts to the
  * whole mesh; otherwise it is a peer nickname and only that peer receives it.
+ * The nickname resolves to one key: the live key of the nickname, else the quiet
+ * key of a peer that can return. A nickname that names no key, and a nickname
+ * that two or more keys use, are refused; a nickname that a member key proved
+ * is never the second of those.
  * A message must fit one frame: habilis_network_max_msg() bytes always do, most text
  * fits well past that, and a message that does not fit is refused, not split.
  * Bulk bytes belong on a stream.
@@ -100,39 +128,49 @@ const char *habilis_network_mesh_nickname(const habilis_network_mesh *handle);
 int habilis_network_msg_send(habilis_network_mesh *handle, const char *to, const char *text);
 
 /*
+ * Send one message to the member that holds an author key. `key` is 64 lowercase
+ * hex digits: the `key` of a received habilis_network_msg, or of a roster row.
+ * Two members can use a nickname that no member key proved, and habilis_network_msg_send()
+ * refuses such a nickname while both are there; a key always names one member. 0 on success, -1 on failure: a text that is
+ * not a key, or a message that does not fit one frame, is refused.
+ */
+int habilis_network_msg_send_to_key(habilis_network_mesh *handle, const char *key, const char *text);
+
+/*
  * Take the next inbound message, waiting up to `timeout_ms`. Returns 1 with the
- * text NUL-terminated in `buf` and `out` filled, 0 on timeout, -1 on failure,
- * or -2 when the text does not fit in `cap`: nothing is written to `buf`, the
+ * text NUL-terminated in `buffer` and `out` filled, 0 on timeout, -1 on failure,
+ * or -2 when the text does not fit in `cap`: nothing is written to `buffer`, the
  * message stays queued, and `out->len` holds its length — retry with a buffer
  * of at least `out->len + 1` bytes.
  */
-long habilis_network_msg_recv(habilis_network_mesh *handle, char *buf, size_t cap, int timeout_ms,
+long habilis_network_msg_recv(habilis_network_mesh *handle, char *buffer, size_t cap, int timeout_ms,
                      habilis_network_msg *out);
 
 /*
- * The shared state document — a JSON object every peer in the mesh converges on
- * (a CRDT underneath, so concurrent writers merge instead of clobbering).
+ * The shared state: one signed slice per member. Each member writes only its own slice, and every
+ * member reads every slice.
  *
- * habilis_network_mesh_state_merge() applies an RFC 7386 merge document: present keys are set,
- * keys set to null are removed, everything else is left alone.
+ * habilis_network_mesh_state_merge() applies an RFC 7386 merge document to this member's own slice:
+ * present keys are set, keys set to null are removed, everything else is left alone. It returns -1
+ * when the write is past the rate limit of this member, or when the slice is too large for a frame.
  *
- * habilis_network_mesh_state_json() writes the merged document into `buf` and returns the length
- * it needs, excluding the NUL. When that does not fit in `cap`, nothing is
- * written — retry with a bigger buffer. -1 on failure.
+ * habilis_network_mesh_state_json() writes the state into `buffer`: a JSON object keyed by the lowercase
+ * hex of each member's key, whose value is that member's slice. It returns the length it needs,
+ * excluding the NUL. When that does not fit in `cap`, nothing is written — retry with a bigger buffer.
+ * -1 on failure.
  */
 int habilis_network_mesh_state_merge(habilis_network_mesh *handle, const char *json);
-long habilis_network_mesh_state_json(habilis_network_mesh *handle, char *buf, size_t cap);
+long habilis_network_mesh_state_json(habilis_network_mesh *handle, char *buffer, size_t cap);
 
 /* The live peer roster as JSON. Same length/`cap` convention as above. */
-long habilis_network_mesh_peers_json(habilis_network_mesh *handle, char *buf, size_t cap);
+long habilis_network_mesh_peers_json(habilis_network_mesh *handle, char *buffer, size_t cap);
 
 /*
- * How many peers other than you are in the mesh right now; 0 means you are
+ * How many members are in the mesh right now, you included; 1 means you are
  * alone. -1 on failure.
  *
- * Deliberately NOT the roster JSON's own "count" field, which includes you and
- * so never reads 0. This is the question a sender waiting for company has, and
- * the answer it can loop on.
+ * The same number as the roster JSON's "count" field. A sender waiting for
+ * company loops until it reads 2 or more.
  */
 long habilis_network_mesh_peer_count(habilis_network_mesh *handle);
 
@@ -168,7 +206,7 @@ typedef struct {
 } habilis_network_stream_opts;
 
 /* Stand up a stream node. NULL on failure. */
-habilis_network_streams *habilis_network_streams_bind(const habilis_network_stream_opts *opts);
+habilis_network_streams *habilis_network_streams_bind(const habilis_network_stream_opts *options);
 
 /* A node that can reach the producer of `hash` (its lookups and relay policy). */
 habilis_network_streams *habilis_network_streams_bind_for(const char *hash);
@@ -191,7 +229,7 @@ const char *habilis_network_stream_hash(const habilis_network_producer *producer
  * away). Once a consumer has attached, the call runs until every byte is out,
  * paced by the consumer.
  */
-int habilis_network_stream_write(habilis_network_producer *producer, const uint8_t *buf, size_t len,
+int habilis_network_stream_write(habilis_network_producer *producer, const uint8_t *buffer, size_t len,
                         int timeout_ms);
 
 /*
@@ -207,11 +245,11 @@ habilis_network_reader *habilis_network_stream_open(habilis_network_streams *str
 
 /*
  * Read the next bytes, waiting up to `timeout_ms`. Returns how many bytes were
- * written to `buf` (> 0), 0 on timeout, -1 on failure (the producer refused or
+ * written to `buffer` (> 0), 0 on timeout, -1 on failure (the producer refused or
  * abandoned the stream, or the link was lost), or -2 at the end of the stream.
  * Bytes that do not fit in `cap` wait for the next call.
  */
-long habilis_network_stream_read(habilis_network_reader *reader, uint8_t *buf, size_t cap, int timeout_ms);
+long habilis_network_stream_read(habilis_network_reader *reader, uint8_t *buffer, size_t cap, int timeout_ms);
 
 /* Free a reader, giving up the stream. NULL is a no-op. */
 int habilis_network_reader_close(habilis_network_reader *reader);

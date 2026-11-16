@@ -15,3 +15,6 @@ workspace = true
 # Unicode range tables in v1.
 unicode-segmentation = "1"
 unicode-width = "0.2"
+
+[dev-dependencies]
+habilis-network-test-tracing.workspace = true

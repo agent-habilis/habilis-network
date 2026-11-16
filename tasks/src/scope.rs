@@ -5,10 +5,11 @@
 //! mean the same thing by construction.
 
 use clap::Args;
-use xshell::{Shell, cmd};
+use xshell::Shell;
 
-use crate::util::output;
+use crate::util::{metadata, output};
 
+use std::error;
 #[derive(Args, Clone, Default)]
 pub(crate) struct Scope {
     /// Only this crate. Repeatable; omit for the whole workspace.
@@ -46,7 +47,7 @@ impl Scope {
     /// Cargo would reject it too, but only once per step and only after the
     /// steps before it had already built. One typo should cost one error, and
     /// the error should say what the valid names are.
-    pub(crate) fn validate(&self, sh: &Shell) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn validate(&self, sh: &Shell) -> Result<(), Box<dyn error::Error>> {
         if self.packages.is_empty() {
             return Ok(());
         }
@@ -67,22 +68,12 @@ impl Scope {
 
 /// The workspace member names, from cargo rather than a list here that would
 /// drift the first time a crate is added.
-fn members(sh: &Shell) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    #[derive(serde::Deserialize)]
-    struct Metadata {
-        packages: Vec<Package>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Package {
-        name: String,
-    }
-
-    let json = cmd!(sh, "cargo metadata --no-deps --format-version 1")
-        .quiet()
-        .ignore_stderr()
-        .read()?;
-    let metadata: Metadata = serde_json::from_str(&json)?;
-    let mut names: Vec<String> = metadata.packages.into_iter().map(|pkg| pkg.name).collect();
+fn members(sh: &Shell) -> Result<Vec<String>, Box<dyn error::Error>> {
+    let mut names: Vec<String> = metadata(sh)?
+        .packages
+        .into_iter()
+        .map(|pkg| pkg.name)
+        .collect();
     names.sort();
     Ok(names)
 }

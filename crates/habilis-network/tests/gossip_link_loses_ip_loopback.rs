@@ -1,0 +1,196 @@
+//! A gossip link on a pair that never sent unicast loses its direct IP path, and
+//! the pair recovers.
+//!
+//! Direct connections are on demand: a pair is offered a `WebRTC` session only
+//! after a send, and its path is watched only while a pooled connection exists. A
+//! pair that only gossips has neither. This test pins what remains for it: the
+//! relay policy closes a gossip link that stays on the relay, and the pair must
+//! then find another direct path (a `WebRTC` session) and form its link again.
+//!
+//! Two members on a local relay, the default transport list (`udp,webrtc,multihop`,
+//! the relay for lookup only). Nothing is sent between them before the block: the
+//! only traffic is the engine's own gossip.
+
+#![cfg(all(feature = "host", feature = "iroh-test-utils"))]
+
+use std::time::{Duration, Instant};
+
+use habilis_network::iroh::RelayUrl;
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, Membership, Messaging, Request,
+};
+use habilis_network::protocol::Lookup;
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use habilis_network::net::test_relay;
+use tokio::time;
+/// Past the point where the relay policy closes a gossip link that stayed on the
+/// relay: the probe deadline of 15 s, and a margin. A broadcast sent before it can
+/// still arrive over the relay, which proves nothing about recovery.
+const SETTLE: Duration = Duration::from_secs(45);
+
+/// Long enough, after that, for an ICE round and for the link to form again.
+const RECOVERY_DEADLINE: Duration = Duration::from_mins(2);
+
+struct Member {
+    membership: Membership,
+    _events: UnboundedReceiver<String>,
+    seen: Vec<Inbound>,
+}
+
+impl Member {
+    async fn open(options: &membership::JoinOptions) -> Self {
+        let (sink, events) = membership::json_sink();
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
+        Self {
+            membership,
+            _events: events,
+            seen: Vec::new(),
+        }
+    }
+
+    async fn create(nick: &str, relay: &RelayUrl) -> Self {
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options.relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
+    }
+
+    async fn join(nick: &str, creator: &Self) -> Self {
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
+    }
+
+    async fn roster_len(&self) -> usize {
+        let json = self
+            .membership
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
+            .await
+            .unwrap_or_default();
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
+            .and_then(|roster| roster["peers"].as_array().map(Vec::len))
+            .unwrap_or(0)
+    }
+
+    fn ports(&self) -> Vec<u16> {
+        self.membership.node.bound_ports().to_vec()
+    }
+
+    async fn block_ip_to(&self, ports: Vec<u16>) {
+        self.membership
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
+            })
+            .await
+            .expect("the loop answers");
+    }
+
+    async fn broadcast(&self, text: &str) {
+        let body = membership::msg_body(text).expect("fits one frame");
+        self.membership
+            .request(|reply| {
+                Request::Messaging(Messaging::Send {
+                    to: None,
+                    body,
+                    reply,
+                })
+            })
+            .await
+            .expect("the loop answers")
+            .expect("sent");
+    }
+
+    fn saw(&mut self, text: &str) -> bool {
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen.push(message);
+        }
+        self.seen.iter().any(|message| message.text == text)
+    }
+}
+
+#[test]
+fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
+    let guard = habilis_network_test_tracing::init();
+    // The test cuts IP on purpose, so the pair stays meshed with no link for a while. The census
+    // calls that a silent partition once the gap outlasts a heal, so that WARN is expected here.
+    // Whether it comes depends on timing, so it is optional. The broadcast after the loss is the
+    // real check, and it stays asserted below.
+    guard.allow_warn("habilis_network::lifecycle", "silent partition");
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let mut bob = Member::join("bob", &alice).await;
+
+        let linking = Instant::now();
+        while alice.roster_len().await != 1 || bob.roster_len().await != 1 {
+            assert!(
+                linking.elapsed() < Duration::from_mins(1),
+                "the pair never linked"
+            );
+            time::sleep(Duration::from_millis(500)).await;
+        }
+
+        // Both ends lose IP to each other. Nothing has been sent between them.
+        alice.block_ip_to(bob.ports()).await;
+        bob.block_ip_to(alice.ports()).await;
+
+        // Let the relay policy act first, and note what the rosters read meanwhile.
+        let mut lowest = usize::MAX;
+        let settling = Instant::now();
+        while settling.elapsed() < SETTLE {
+            lowest = lowest
+                .min(alice.roster_len().await)
+                .min(bob.roster_len().await);
+            time::sleep(Duration::from_millis(500)).await;
+        }
+        eprintln!("lowest roster during the settle: {lowest}");
+
+        // The link may have closed and formed again; what must hold is that a
+        // broadcast arrives. A fresh text each time, so a late one is not mistaken
+        // for it.
+        let started = Instant::now();
+        let mut attempt = 0_u32;
+        let arrived = loop {
+            attempt += 1;
+            let text = format!("after the loss, try {attempt}");
+            alice.broadcast(&text).await;
+            let tried = Instant::now();
+            let mut seen = false;
+            while tried.elapsed() < Duration::from_secs(5) {
+                if bob.saw(&text) {
+                    seen = true;
+                    break;
+                }
+                time::sleep(Duration::from_millis(250)).await;
+            }
+            if seen {
+                break true;
+            }
+            if started.elapsed() >= RECOVERY_DEADLINE {
+                break false;
+            }
+        };
+
+        assert!(
+            arrived,
+            "no broadcast reached bob within {RECOVERY_DEADLINE:?} of the IP loss; \
+         the roster of alice is {} and bob's is {}",
+            alice.roster_len().await,
+            bob.roster_len().await
+        );
+
+        for member in [alice, bob] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
+}

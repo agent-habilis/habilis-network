@@ -38,7 +38,10 @@ planned for this crate.
 - **Replay window.** A signal is valid for ±120 s, and the engine remembers
   each nonce it has seen in memory. So a node that restarts inside those
   120 s accepts one replay of a signal it saw before the restart. A wall
-  clock that is wrong by more than 120 s blocks signalling.
+  clock that is wrong by more than 120 s blocks signalling. A relay can
+  have a shorter window than ours: strfry refuses an ephemeral event that
+  is older than 60 s. The client logs a warning when a relay refuses an
+  event as `expired`, `too early` or `too old`.
 - **Who can reach the room.** On an open mesh the id is the bearer
   credential: anyone who holds it can derive the room tag and send offers,
   so they can fill a node's direct slots, the same as over the iroh relay.
@@ -57,6 +60,14 @@ On 2026-09-24:
 - With `probe cadence`, 10 nodes published 90 events in 30 s on one tag:
   - `nos.lol` and `relay.primal.net` delivered 81 of 81 events to every node.
   - `relay.damus.io` delivered 4–5 of 81.
+
+On 2026-11-15, with the same 32 candidates:
+- 21 forwarded the event, with round trips from 67 ms to 4.2 s. Three
+  connected and returned no echo (`relay.damus.io`, `strfry.shock.network`,
+  `relay-rpi.edufeed.org`), and eight did not connect.
+- The probe ends with the list to pin: the fastest forwarding relay of each
+  operator (found by apex domain), and no test host. `staging.yabu.me` and
+  `top.testrelay.top` were dropped from the pinned list by that rule.
 
 ## Tests
 

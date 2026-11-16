@@ -1,1466 +1,2729 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+mod collection_sizes;
+mod event_loop_state;
+
+mod gossip_msgs;
+mod idle_counters;
+mod key_of_error;
+mod latch;
+mod mesh_secrets;
+mod ping_round;
+mod proof_book;
+mod proof_exchange;
+mod socket_bytes;
+mod state_init;
+mod wire_out_tally;
+
+mod beacon_note;
+mod direct_counts;
+mod direct_state;
+#[cfg(feature = "multihop")]
+mod parked_link_states;
+mod peer_info_flood;
+mod reach;
+mod rendezvous_flag;
+mod rival_flag;
+mod roster_entry;
+mod roster_snapshot;
+mod standing;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+mod test_drop;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+mod test_hold;
+
 use std::time::Duration;
 
-use n0_future::time::Instant as TokioInstant;
+use iroh::EndpointId;
 
-use bytes::Bytes;
-use iroh::{EndpointAddr, EndpointId};
-use serde::Serialize;
+use crate::util::clock;
 
-use super::message_log::MessageLog;
-#[cfg(feature = "host")]
-use crate::daemon::state_file::StateFile;
-use crate::protocol::identity::Identity;
-use crate::protocol::mesh::Mesh;
-use crate::protocol::{Message, Nickname, ShardGroup};
-use crate::util::bounded_fifo_set::BoundedFifoSet;
-use crate::util::bounded_queue::BoundedQueue;
-use crate::util::clock::Instant;
-use crate::util::cooldown::Cooldown;
+use crate::util::tuning;
 
-use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP, RECLAIM_WINDOW_SECS,
-    RELINK_COOLDOWN_SECS, SEEN_IDS_CAP,
-};
+pub use event_loop_state::EventLoopState;
+pub(crate) use event_loop_state::{ChannelDocs, LiveRun, PendingSuspend};
+#[cfg(test)]
+pub(crate) use event_loop_state::{PENDING_SEAL_KEY_TTL, PENDING_SEAL_KEYS_CAP};
 
-/// `RELINK_COOLDOWN_SECS` as a `Duration` — the window both per-endpoint
-/// throttles (`relink`, `peerinfo`) use.
-const RELINK_COOLDOWN: Duration = Duration::from_secs(RELINK_COOLDOWN_SECS);
+pub(crate) use collection_sizes::CollectionSizes;
+pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
+#[cfg(all(unix, feature = "host"))]
+pub(crate) use idle_counters::note_ppid_wake;
+pub(crate) use idle_counters::{IdleCounters, note_sampler_wake};
+pub(crate) use latch::Latch;
+pub(crate) use mesh_secrets::MeshSecrets;
+pub(crate) use ping_round::PingRound;
+pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
+pub(crate) use state_init::{FrameOverheads, RunKeys, StateInit};
+#[cfg(test)]
+pub(crate) use wire_out_tally::FrameClass;
+#[cfg(test)]
+pub(crate) use wire_out_tally::app_frame_with_tag;
+pub(crate) use wire_out_tally::{Arrival, FrameShape, WireOut, WireOutTally, by_arrival, by_class};
 
-/// How we currently reach a peer: `Direct` when we hold a live gossip
-/// link to its self-advertised endpoint, else `Gossip` (relayed). Derived
-/// from `linked_endpoints` without surfacing the node id — see
-/// `peer_endpoints`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Reach {
-    Direct,
-    Gossip,
+pub(crate) use beacon_note::BeaconNote;
+pub(crate) use direct_counts::DirectCounts;
+pub(crate) use direct_state::DirectState;
+pub use key_of_error::KeyOfError;
+#[cfg(feature = "multihop")]
+pub(crate) use parked_link_states::ParkedLinkStates;
+pub(crate) use peer_info_flood::PeerInfoFlood;
+pub use reach::Reach;
+pub(crate) use rendezvous_flag::RendezvousFlag;
+pub(crate) use rival_flag::RivalFlag;
+pub use roster_entry::RosterEntry;
+pub use roster_snapshot::RosterSnapshot;
+pub(crate) use standing::Standing;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use test_drop::TestDrop;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) use test_hold::TestHold;
+/// How long after it let go of the rendezvous a node wants it again. Every node waits the same
+/// period, plus a share of up to half of it that the id of the node fixes: the pubkey bytes are
+/// uniform, so n members do not come back together.
+fn rendezvous_return_after(local: EndpointId) -> Duration {
+    let period = tuning::rendezvous_periodic_return();
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&local.as_bytes()[..8]);
+    let share_ms = u64::from_le_bytes(prefix) % (clock::millis_saturating(period) / 2).max(1);
+    period + Duration::from_millis(share_ms)
 }
 
-/// One peer in a [`RosterSnapshot`]. `last_seen_secs_ago` is
-/// `None` until the peer's first heartbeat is timed; `quiet` marks a
-/// peer heartbeat-evicted past `ALIVE_TIMEOUT_SECS` (still returnable);
-/// `reach` is `direct` only while we hold a live link to it; `transport`
-/// is the lane a directed frame to this peer would take right now (the
-/// live [`crate::transport`] send decision — distinct from `reach`, which
-/// is a gossip-overlay link fact). Serialized directly into the
-/// consumer's roster surfaces.
-#[derive(Debug, Clone, Serialize)]
-pub struct RosterEntry {
-    pub nickname: Nickname,
-    pub last_seen_secs_ago: Option<u64>,
-    pub quiet: bool,
-    pub reach: Reach,
-    pub transport: crate::transport::Lane,
-}
-
-/// Live peer roster: every known peer (active + quiet) sorted
-/// most-recently-seen first, plus `count == peers.len() + 1` (the
-/// `+1` is self — same definition as the statusline `peer_count`).
-#[derive(Debug, Clone, Serialize)]
-pub struct RosterSnapshot {
-    pub peers: Vec<RosterEntry>,
-    pub count: usize,
-}
-
-/// What a linked peer's selected data path is, as last observed. A link
-/// starts on the relay and migrates to a direct path once iroh punches one,
-/// so a value taken at `NeighborUp` is a first reading, refreshed by the
-/// census.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DirectState {
-    /// A probe (or a `WebRTC` negotiation) is in flight; the peer is held off
-    /// the overlay until it reports.
-    Pending,
-    /// A hole-punched IP path or a custom transport (`WebRTC`, multihop).
-    Direct,
-    /// The relay is the only active path.
-    RelayOnly,
-}
-
-impl DirectState {
-    /// From a `conn_path` reading; `None` when the reading proves nothing.
-    /// `Mixed` is such a reading: iroh keeps the relay path open beside a
-    /// punched one, and `conn_path` cannot tell which is selected, so a mixed
-    /// link is neither proven direct nor known relay-only.
-    pub(crate) fn from_summary(summary: crate::gossip::PathSummary) -> Option<Self> {
-        use crate::gossip::PathSummary;
-        match summary {
-            PathSummary::Direct => Some(Self::Direct),
-            PathSummary::Relay => Some(Self::RelayOnly),
-            PathSummary::Mixed | PathSummary::Unknown => None,
-        }
-    }
-}
-
-/// Link counts by [`DirectState`], for the census line.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DirectCounts {
-    pub(crate) direct: usize,
-    pub(crate) relay_only: usize,
-    pub(crate) pending: usize,
-}
-
-/// All mutable state owned by the event loop.
-///
-/// Grouped into a single struct so handlers and timer ticks can take
-/// `&mut EventLoopState` instead of each borrowing half a dozen
-/// independent locals.
-///
-/// The peer-tracking fields are deliberately one-per-layer (see the
-/// Concept Glossary in AGENTS.md): `linked_endpoints` (transport),
-/// `peers` (membership roster), `surfaced` (presentation gate),
-/// `quiet` (heartbeat-evicted). Never conflate them — they are keyed
-/// differently (node id vs nickname) and have different lifetimes.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent lifecycle edges (gossip_open/rendezvous_linked/announced/meshed/degraded) plus the one-shot resident_memory_warned latch; each tracks a distinct transition, not a config bundle worth a sub-struct"
-)]
-#[derive(Debug)]
-pub struct EventLoopState {
-    /// Transport layer: the **live** gossip neighbor links, written only
-    /// by `NeighborUp`/`NeighborDown` (a received `PeerInfo` is a dial
-    /// hint, not a link). Link *truth* matters: the silent-partition WARN
-    /// and the healer's re-bridge gate read this set, and an optimistic
-    /// entry for a link that never formed has no `NeighborDown` to remove
-    /// it — a permanent ghost that suppressed both (the 2026-06-12
-    /// roster-collapse). Bounded by `HyParView`'s `active_view_capacity`.
-    /// Distinct from `peers` — links are asymmetric and node-id
-    /// keyed; the roster is symmetric and nickname keyed.
-    pub(crate) linked_endpoints: HashSet<EndpointId>,
-    /// Whether each known peer's data path is direct or relay-only: the
-    /// `conn_path` snapshot `NeighborUp` logs, or a probe verdict. Keyed like
-    /// `peer_endpoints` and pruned with it (`forget_peer_endpoint`), not on
-    /// `NeighborDown`: the verdict describes the pooled connection, which
-    /// outlives the gossip link. Feeds the census and the roster; when the
-    /// relay is lookup only it is also what the send lanes consult before
-    /// carrying payload.
-    pub(crate) direct: HashMap<EndpointId, DirectState>,
-    /// Mirrors `TransportPolicy::relay`, set once at loop start.
-    pub(crate) relay_transport: bool,
-    /// Where a direct-path probe reports its verdict; the loop's receiver
-    /// grafts on it (`transport::probe::on_outcome`). A detached sender until
-    /// the real loop installs its channel.
-    pub(crate) direct_proven:
-        tokio::sync::mpsc::UnboundedSender<crate::transport::probe::DirectOutcome>,
-    /// Where a path watcher reports a change of the selected path to a peer
-    /// the race covers (`transport::probe::on_path_change`).
-    pub(crate) path_changes:
-        tokio::sync::mpsc::UnboundedSender<crate::transport::probe::PathChange>,
-    /// The pooled connection each watched peer's watcher follows, by stable
-    /// id (`None` while its dial runs), so a replaced connection gets a fresh
-    /// watcher and a stale one's reports are dropped.
-    pub(crate) path_watchers: HashMap<EndpointId, Option<usize>>,
-    /// The last selected path kind each watcher reported, for the alive
-    /// tick's nudge of peers riding `WebRTC`.
-    pub(crate) path_kinds: HashMap<EndpointId, crate::transport::probe::PathKind>,
-    /// Re-bridge memory: every peer `EndpointId` we've ever linked to,
-    /// kept *across* `NeighborDown` (unlike `linked_endpoints`). When a
-    /// node loses all links because the rendezvous/relay is unreachable,
-    /// the healer re-dials these directly — iroh still holds their cached
-    /// addresses — so the re-bridge no longer depends on the rendezvous.
-    /// Bounded FIFO (cap `KNOWN_ENDPOINTS_CAP`) so it can't grow without limit.
-    pub(crate) known_endpoints: BoundedFifoSet<EndpointId>,
-    /// The endpoint each signing key proved in its `PeerInfo`: the only
-    /// point-to-point target an anti-entropy answer may take, since a
-    /// nickname is a label any signer can claim.
-    pub(crate) proven_endpoints: crate::transport::endpoint_proof::ProvenEndpoints,
-    /// Our own `PeerInfo` proof, made once: it is the same for the session.
-    pub(crate) peer_info_proof: Option<String>,
-    /// Per-endpoint re-link throttle: caps re-dialing + re-flooding a peer
-    /// learned via `PeerInfo` to once per window. Tracked *across*
-    /// `NeighborDown` (unlike `linked_endpoints`), so a flapping/unstable peer
-    /// is re-linked at most once per `RELINK_COOLDOWN_SECS` — the choke that
-    /// stops one bad node's flap from amplifying into a mesh-wide connection
-    /// storm. Bounded by construction (see [`Cooldown`]).
-    pub(crate) relink: Cooldown<EndpointId>,
-    /// Per-endpoint `PeerInfo` re-flood throttle. `relink` only throttles the
-    /// *inbound* re-dial in `handle_peer_info`; this throttles the *outbound*
-    /// re-flood every `NeighborUp` would otherwise trigger (`gossip::recv`).
-    /// Without it a single flapping link re-floods the whole mesh on every
-    /// up-transition — the residual amplifier behind the soak's ~7.4k-per-host
-    /// `neighbor up` storm. Kept separate from `relink` so the two throttles
-    /// stay independently reasoned (and a new neighbor still gets exactly one
-    /// re-flood).
-    pub(crate) peerinfo: Cooldown<EndpointId>,
-    /// When we last flooded our `PeerInfo`, whatever triggered it. Stamped by
-    /// `broadcast_peer_info`; read by the `joined` re-flood gate.
-    pub(crate) peerinfo_flooded_at: Option<Instant>,
-    /// When each author's digest was last served. Keyed on the pubkey rather
-    /// than the nickname, which an author picks freely.
-    digest_serves: Cooldown<String>,
-    /// When each asker's state or meta digest was last served, per plane. A
-    /// new node sends a digest pair for every peer it sees, all with the same
-    /// heads, and every holder hears each one; the plane is in the key so the
-    /// asker's re-ask at its first real-peer link, answered point-to-point,
-    /// is not refused by the gossip answer before it.
-    pub(crate) state_digest_serves: crate::gossip::antientropy::ServeBudget,
-    /// This node's own fast rounds of state digests while it backfills.
-    pub(crate) fast_rounds: crate::gossip::antientropy::FastRounds,
-    /// Membership layer: the peer roster. Nickname-keyed set of
-    /// other peers, feeding the state file's `peer_count`
-    /// (`peers.len() + 1`). Excludes self. Driven by
-    /// `joined`/`left` presence messages (they reach every peer
-    /// via gossip; `NeighborUp`/`PeerInfo` are asymmetric for
-    /// bootstrap links), by implicit heartbeats from any received
-    /// message (self-heal for a missed Joined), and by the sweeper's
-    /// eviction of peers gone silent past `ALIVE_TIMEOUT_SECS`.
-    pub(crate) peers: HashSet<Nickname>,
-    /// Implicit-heartbeat tracker: nickname -> last time we heard
-    /// anything from that peer. Drives sweep-based eviction.
-    pub(crate) last_seen: HashMap<Nickname, Instant>,
-    /// Bridge from membership back to transport: nickname -> the endpoint id
-    /// that nickname last self-advertised in a signed `PeerInfo`. That
-    /// signature is the only thing tying a nickname to an endpoint (the
-    /// signing key is deliberately not the transport key), so this is the one
-    /// place the roster can tell whether a peer is a live link.
-    /// Last-writer-wins (a restart re-advertises a new endpoint under the same
-    /// name). Pruned with `peers`, so it stays bounded by the roster.
-    /// Feeds only the derived `reach` boolean in `roster_snapshot` — the node
-    /// id never leaves this layer.
-    pub(crate) peer_endpoints: HashMap<Nickname, EndpointAddr>,
-    /// The mesh's rendezvous endpoint id, once known. Paired with
-    /// `rendezvous_linked` so `reach_of` can count the rendezvous link as a
-    /// live link to the beacon: the beacon gossips *as* the rendezvous, so a
-    /// joiner's only link to it is that pseudo-node link (kept out of
-    /// `linked_endpoints` by design). `None` until the loop learns it.
-    pub(crate) rendezvous_id: Option<EndpointId>,
-    /// Heartbeat layer: peers we've evicted as quiet (silent
-    /// past `ALIVE_TIMEOUT_SECS`) but who may still reappear. Any
-    /// message from a nickname in this set triggers a symmetric
-    /// `peer_return` event and re-inclusion in `peers`. Bounded FIFO
-    /// (cap `QUIET_CAP`): drained on return, so without the cap a churn /
-    /// sybil stream of one-shot nicknames would grow it without bound.
-    pub(crate) quiet: BoundedFifoSet<Nickname>,
-    /// Recency companion to `quiet`: nickname -> the `last_seen` instant a
-    /// quiet peer had when it was evicted, so [`roster_snapshot`] can still
-    /// report how long ago it was last heard (the eviction drops its
-    /// `last_seen` entry). Pruned to `quiet`'s membership on every sweep, so
-    /// it stays bounded by `QUIET_CAP`; `roster_snapshot` only reads it for
-    /// peers currently in `quiet`, so a stale entry never surfaces.
-    pub(crate) quiet_since: HashMap<Nickname, Instant>,
-    /// Presentation layer: peers for whom we have *surfaced* an
-    /// arrival (synthetic `joined`, real `Presence::Joined`, or
-    /// `peer_return`). Gates departure surfacing so a peer whose
-    /// join we never showed never produces a `went quiet` / `has left`
-    /// line — keeps the join-horizon view symmetric. Presentation-only:
-    /// the roster (`peers`) stays complete for
-    /// anti-entropy/membership; `surfaced ⊆ peers` only governs
-    /// what the operator/agent is shown.
-    pub(crate) surfaced: HashSet<Nickname>,
-    /// Last time we broadcast anything. Lets idle daemons suppress
-    /// their `Alive` keepalive when they're already chatty.
-    pub(crate) last_sent_at: Instant,
-    /// Wall-clock unix seconds when this daemon started — its join
-    /// instant. The node still receives & relays older messages
-    /// (anti-entropy keeps the mesh's set uniform), but messages
-    /// stamped before this are never *surfaced* (printed / `poll` /
-    /// `fetch` / library API): the operator/agent view starts at join.
-    pub(crate) joined_at: i64,
-    /// Goes false when the receiver stream terminally ends; IPC
-    /// keeps working for `msg` / `poll` after that.
-    pub(crate) gossip_open: bool,
-    /// Whether the gossip overlay currently links us to the co-hosted
-    /// rendezvous (its `NeighborUp`/`NeighborDown` arms drive it). Gates
-    /// the healer's connect-probe: probing the rendezvous while a live
-    /// link exists makes the beacon's gossip *adopt* the probe
-    /// connection and then mark the peer down when the probe handle
-    /// drops — one rendezvous-link flap per heal tick, forever (the
-    /// 2026-05-30 soak's residual flap).
-    pub(crate) rendezvous_linked: bool,
-    /// Whether the held rendezvous `WebRTC` session has already survived one
-    /// heal tick without producing a link — the arming half of the stale
-    /// detach in `negotiate_rendezvous_session`.
-    pub(crate) rendezvous_session_stale: bool,
-    /// Whether an IP-capable node's rendezvous JSEP offer is armed. IP
-    /// capability normally means the punch inside the bootstrap connection
-    /// reaches the rendezvous — but it says nothing about the *beacon*: a
-    /// browser-held rendezvous has no UDP to punch to. The first linkless
-    /// heal tick sets this instead of offering; the second offers. Cleared
-    /// on the rendezvous `NeighborUp`, so a healthy mesh never offers.
-    pub(crate) rendezvous_offer_fallback: bool,
-    /// Whether this mesh's rendezvous answers JSEP. Only a public beacon does
-    /// (`beacon::build_rendezvous_endpoint`); a private ladder rendezvous has
-    /// no `WebRTC` handle, so an offer to it can never attach, and the offer
-    /// fallback must never arm there.
-    pub(crate) rendezvous_answers_jsep: bool,
-    /// Whether the previous rival probe read the public rendezvous as free.
-    /// A claim needs two: a single free verdict may have landed inside a
-    /// live beacon's rival-re-check release window, and claiming on it is
-    /// what created rival copies that shed each other indefinitely. Both
-    /// must fall in one arbitration, so every reopen or settle of the
-    /// rendezvous identity clears it (`forget_rendezvous_verdict`).
-    pub(crate) rendezvous_probe_read_free: bool,
-    /// Whether grafting the rendezvous must wait for an attached `WebRTC`
-    /// session — true for a webrtc-shaped node on a lookup-only mesh; see
-    /// `transport::webrtc::rendezvous_graftable`.
-    pub(crate) rendezvous_graft_needs_session: bool,
-    /// Peers whose `PeerInfo` said they need a data channel. The shape of a
-    /// peer's address says the same only when it carries a relay.
-    pub(crate) lane_peers: HashSet<EndpointId>,
-    /// Whether anything can reach the rendezvous (`RendezvousParams`). Without
-    /// one, the signal ALPN has nothing to ride and offers go over Nostr.
-    pub(crate) has_rendezvous: bool,
-    /// The Nostr carrier, on a mesh with the Nostr lookup.
-    pub(crate) nostr: Option<crate::transport::webrtc::nostr::NostrSignal>,
-    /// When each peer was last heard over Nostr.
-    pub(crate) nostr_seen: HashMap<EndpointId, Instant>,
-    /// When each peer was last woken with a `Hello` on its own tag.
-    pub(crate) nostr_poked: HashMap<EndpointId, Instant>,
-    /// When the next `Hello` goes out; `None` without the carrier.
-    pub(crate) next_hello: Option<TokioInstant>,
-    pub(crate) hellos_sent: u32,
-    /// How many relays the carrier holds now.
-    pub(crate) nostr_width: usize,
-    /// Hold the wide relay set until then: the end of the last offer round,
-    /// plus a cooldown.
-    pub(crate) nostr_wide_until: Option<Instant>,
-    /// Whether this node runs IP transports (`TransportOpts::ip`, and never
-    /// on wasm). The local half of every `WebRTC` lane decision — read from
-    /// here, not from the endpoint address, which is empty whenever the relay
-    /// link is down.
-    pub(crate) local_udp_transport: bool,
-    /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
-    /// The announce is deferred to the first `NeighborUp` so it isn't
-    /// lost into an unconnected overlay; subsequent neighbors only get
-    /// a (log-invisible) `PeerInfo` re-send.
-    pub(crate) announced: bool,
-    /// Set once we have a link to a *real peer* (a non-
-    /// rendezvous `NeighborUp`). `announced` flips on any neighbor —
-    /// including the rendezvous relay — which is too early to deliver
-    /// user content (the relay path may not be converged). Outbound
-    /// user messages are buffered until `meshed`, then flushed, so the
-    /// first message after a join can't be a lost one-shot.
-    pub(crate) meshed: bool,
-    /// The unicast (point-to-point) connection pool: dials + reuses a QUIC
-    /// connection to each addressable peer so a directed message goes
-    /// p2p instead of flooding the gossip mesh. Interior-mutable (Arc), so the
-    /// send helpers reach it through `&EventLoopState`. `new` installs a
-    /// detached pool; the real loop replaces it with an endpoint-backed one.
-    /// Independent of `linked_endpoints` by design (unicast can reach a
-    /// non-neighbor). See [`crate::transport`].
-    pub(crate) unicast_pool: crate::transport::UnicastPool,
-    /// The multi-hop transport handle, when the `--multihop` flag registered it
-    /// on the peer endpoint. Owns the routing table (fed from received
-    /// `LinkState` frames) and the underlay endpoint. `None` when multihop is off
-    /// or on a non-peer (beacon/rendezvous) endpoint. See
-    /// [`habilis_network_iroh_multihop_transport`].
-    #[cfg(feature = "host")]
-    pub(crate) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
-    /// The `WebRTC` transport handle, when one is registered on this peer's
-    /// endpoint. Portable — it is the browser's only direct path, and an
-    /// opportunistic extra one for a native peer. `None` on the beacon.
-    pub(crate) webrtc: Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
-    /// Who may start a JSEP round, and how many may run at once.
-    ///
-    /// `has_session` only flips at *attach*, so without an in-flight record a
-    /// membership event and a re-flood of the same `PeerInfo` both start a
-    /// negotiation with the same peer, and the loser fails on duplicate attach
-    /// after paying a full gathering budget.
-    ///
-    /// Shared with the signal *acceptor* on the Router, not owned by the loop,
-    /// so the direct-peer ceiling is one number for this node rather than one
-    /// per role. See [`crate::transport::SignalAdmission`].
-    pub(crate) webrtc_admission: crate::transport::SignalAdmission,
-    /// How far ICE may reach when this peer gathers candidates. Host-only on a
-    /// loopback mesh, which promises to make no external network call —
-    /// `IceConfig::default()` would query two public STUN servers.
-    pub(crate) webrtc_ice: crate::transport::IceProfile,
-    /// Monotonic sequence for *our own* emitted link-state vectors, so peers keep
-    /// the freshest and drop reorders.
-    ///
-    /// `host`-only with the multihop transport that consumes the vectors: a
-    /// browser peer emits none, so it has no sequence to keep.
-    #[cfg(feature = "host")]
-    pub(crate) link_state_seq: u64,
-    /// When `Some(deadline)` and not yet elapsed, the event loop runs
-    /// a fast `beacon::ensure` burst (event-driven failover). Armed by
-    /// `arm_reclaim`, mostly on `NeighborDown` — the beacon may have just
-    /// died — so a survivor claims the freed rendezvous port in ~1s rather
-    /// than waiting for the next 15s heal tick.
-    pub(crate) reclaim_until: Option<Instant>,
-    /// When `Some(deadline)`, the next rival re-check *shed* of an
-    /// `EagerProbed` public beacon: at the deadline the holder drops its
-    /// co-host and lets probe-before-claim re-arbitrate, so a same-id
-    /// rival that claimed inside our probe window is finally found and
-    /// yielded to (see `event_loop::shed_rival_beacon_if_due`). `None`
-    /// while not holding a shed-eligible beacon.
-    pub(crate) next_rival_recheck: Option<Instant>,
-    /// How many rival re-check sheds have run. Round 0 (the claim made at
-    /// startup, before any shed) schedules the *fast first* re-check with
-    /// the deterministic endpoint-id tie-break offset — the likeliest
-    /// rival started within seconds of us; later rounds run the steady
-    /// jittered cadence.
-    pub(crate) rival_recheck_rounds: u32,
-    /// Consecutive due sheds held back because a data-channel peer depends
-    /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed and by a
-    /// fresh claim (`beacon_arm::schedule_rival_recheck`).
-    pub(crate) rival_recheck_deferrals: u32,
-    /// Recently-seen message ids, for duplicate suppression. Gossip
-    /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
-    /// re-sends, the rendezvous double-path) can deliver the same message
-    /// twice; `mark_seen` drops the repeat before it reaches the log /
-    /// inbound push channel / agent. Bounded (`SEEN_IDS_CAP`, 2× the message log)
-    /// so it always covers the retention window.
-    pub(crate) seen: BoundedFifoSet<[u8; 16]>,
-    /// User messages sent before we had a real-peer link (no gossip
-    /// path yet — a bare `broadcast` would be a lost one-shot). Drained in
-    /// FIFO order once `meshed` flips, each routed through the send decision;
-    /// the parsed frame rides beside its wire bytes so the flush never
-    /// re-parses what this node just serialized. A bounded FIFO queue (cap
-    /// `PENDING_OUTBOUND_CAP`) so the backlog can't grow without limit.
-    pub(crate) pending_outbound: BoundedQueue<(Message, Bytes)>,
-    #[cfg(feature = "host")]
-    pub(crate) state_file: Option<StateFile>,
-    /// Whether the event loop is serving IPC yet. Starts `false` (the
-    /// pre-loop state-file write reports "identity up, not yet serving");
-    /// flipped `true` once the loop is draining, so a state-file reader
-    /// (a readiness gate) can gate on a write that means the daemon will answer.
-    pub(crate) ready: bool,
-    /// When advertising (`create --advertise`), the directory's
-    /// re-broadcast task reads the live peer count from here.
-    /// Mirrors `peer_count` (`peers.len() + 1`), refreshed
-    /// alongside every `write_peer_count`. `None` for the common
-    /// non-advertising case (no shared counter to maintain).
-    pub(crate) live_count: Option<Arc<AtomicUsize>>,
-    pub(crate) message_log: MessageLog,
-    /// Shard groups already reassembled + surfaced, so a body is surfaced
-    /// once even if a shard is re-fetched (via anti-entropy) after its id aged
-    /// out of [`seen`](Self::seen). Bounded — groups are rare and short-lived.
-    pub(crate) reassembled_groups: BoundedFifoSet<ShardGroup>,
-    /// Partial multipart bodies buffering toward reassembly — dedicated and
-    /// byte-budgeted, decoupled from the message log so log eviction can
-    /// never break reassembly. Swept for stale groups on the prune tick.
-    pub(crate) reassembly: super::reassembly::ReassemblyStore,
-    /// Serialized frames of our recent big (unlogged) outbound shard groups —
-    /// the re-serve source for peers' `shard/repair` requests (big groups
-    /// skip the message log, so anti-entropy can't heal them).
-    pub(crate) shard_cache: super::reassembly::ShardCache,
-    /// The `state` channel: an automerge CRDT plus the signed change frames that
-    /// carried it (the re-serve store). Convergence and card authorization live
-    /// in [`super::doc`]; reconciliation is heads-based anti-entropy. This is the
-    /// document a consumer's `state get` surface reads.
-    pub(crate) state_doc: super::doc::MeshDoc,
-    /// The `meta` channel's document — a second, independent shared-state channel.
-    /// Gates foreign-card writes (unlike `state`), since a `meta` card carries a
-    /// peer's cryptographic identity.
-    pub(crate) meta_doc: super::doc::MeshDoc,
-    /// Rolling start index for the **chat** anti-entropy digest window: each
-    /// round advertises `message_log[digest_cursor ..]` (up to
-    /// `ANTIENTROPY_DIGEST_MAX_IDS`), then advances/wraps so a log larger
-    /// than one digest is swept over several rounds. (State/meta reconcile by
-    /// automerge heads and need no cursor.)
-    pub(crate) digest_cursor: usize,
-    /// This member's signing identity (Ed25519). Shared with the
-    /// send path so messages we author are signed before broadcast.
-    /// The public key is the durable identity; the nickname is a
-    /// non-unique display label (see `docs/history-integrity.md`).
-    pub(crate) identity: Arc<Identity>,
-    /// Our own per-author log cursor (Phase 2): `self_seq` is the next
-    /// `Msg` sequence number to emit, `self_prev` the content hash of our
-    /// last sent `Msg` (`None` until the first). Advanced on every send so
-    /// our `Msg` stream is a `seq`+`prev` hash chain.
-    pub(crate) self_seq: u64,
-    pub(crate) self_prev: Option<String>,
-    /// Phase 2 fork detection: per author pubkey (hex), the content hash
-    /// seen at each `Msg` `seq`. A *different* hash at an already-seen
-    /// `(pubkey, seq)` is cryptographic proof of equivocation → a `fork`
-    /// event. Order-independent (gossip delivers out of order).
-    pub(crate) author_seqs: HashMap<String, HashMap<u64, String>>,
-    /// Author pubkeys already flagged as forked, so one `fork` event fires
-    /// per offending key rather than per message.
-    pub(crate) forked: HashSet<String>,
-    /// Cross-author DAG (Phase 3): `by_hash` maps each known `Msg`'s content
-    /// hash to its timestamp (for the `ts ≥ max(parents.ts)` backdating
-    /// rule); `dag_heads` is the current tip set (hashes with no observed
-    /// child) — the `parents` stamped on the next `Msg` we author. Both are
-    /// pruned alongside the message-log eviction.
-    pub(crate) by_hash: HashMap<String, i64>,
-    pub(crate) dag_heads: HashSet<String>,
-    /// When the last *verified* inbound gossip message arrived — the
-    /// starvation watchdog's signal. Keyed on messages, not neighbor
-    /// events: the roster-collapse showed links can look alive (or flap)
-    /// while no traffic flows, and traffic is what membership feeds on.
-    pub(crate) last_inbound_at: Instant,
-    /// When the watchdog last ran a starvation recovery, if ever.
-    /// Paired with `recovery_trips` to back off repeated attempts so a
-    /// legitimately-last-survivor node settles into a sparse retry
-    /// instead of warning every threshold period.
-    pub(crate) last_recovery_at: Option<Instant>,
-    /// Consecutive starvation recoveries without any inbound in between
-    /// (drives the backoff; reset by `note_inbound`).
-    pub(crate) recovery_trips: u32,
-    /// `meshed` was cleared by a fault path (starvation recovery / hard
-    /// resume edge) rather than never having been set. Gates
-    /// `note_inbound`'s meshed-restore so a fresh joiner's pre-mesh
-    /// inbound never flips `meshed` early; only a degraded node heals
-    /// on traffic. See [`Self::note_degraded`].
-    pub(crate) degraded: bool,
-    /// Latch for the warn-only resident-memory leak signal: set once this
-    /// process's resident memory first crosses `tuning::resident_memory_warn_mb`,
-    /// so the `warn` fires exactly once per process rather than every prune
-    /// tick. Purely observability — never gates behavior (see
-    /// `timers::tick_prune`).
-    pub(crate) resident_memory_warned: bool,
-    /// Active ping round, if one is in flight. Armed by the
-    /// `Ping` IPC command, filled by inbound `Pong`s, and finalized
-    /// into a `ping_report` when its `deadline` elapses. One at a time:
-    /// a fresh ping replaces any in-flight round. Boxed to keep the
-    /// rarely-set round off the hot event-loop future's stack size.
-    pub(crate) ping_round: Option<Box<PingRound>>,
-    /// The raw mesh password when the mesh is password-protected (`None`
-    /// otherwise). Handed to the blob server on its first offload so every
-    /// blob ticket inherits the same password — a scraped ticket then can't be
-    /// redeemed without it. Kept out of logs (`Password` redacts its `Debug`).
-    pub(crate) mesh_password: Option<crate::protocol::crypto::Password>,
-    /// The invite-only **creator's** mesh (secrets and all), retained so the
-    /// `invite` IPC command can mint. `Some` only on the creator; set from
-    /// [`EventLoopConfig`] after construction, so `new` defaults it to `None`
-    /// and the many test call sites need no new argument.
-    pub(crate) mint_mesh: Option<Mesh>,
-    /// Symmetric key for broadcast-chat app bodies on a passworded
-    /// mesh, `derive_secret(mesh_key, "broadcast")` — domain-separated from
-    /// the state/meta doc keys. `None` ⇒ chat stays plaintext. Wiped on drop.
-    pub(crate) broadcast_key: Option<zeroize::Zeroizing<[u8; 32]>>,
-    /// Where the event loop's wakeups went since the last census.
-    pub(crate) idle: IdleCounters,
-}
-
-/// Wakeup attribution for the idle-cost work: one counter per `select!` arm,
-/// reported as a delta on each `mesh census` line and reset there.
-///
-/// Plain `u64`, not atomics — the event loop owns `&mut EventLoopState`, so a
-/// bump is an increment with no synchronization. That matters more than it
-/// looks: the arms being measured fire up to 150×/min, and the cheapest thing
-/// that could observe them (a `debug!` per tick) costs a write per wakeup and
-/// would price its own instrumentation into the measurement.
-///
-/// Counting arms rather than timers is deliberate. It splits timer work from
-/// inbound traffic, which is the split that says whether an idle daemon is
-/// paying for its own housekeeping or for the peers talking to it.
-#[derive(Clone, Copy, Default, Debug)]
-pub(crate) struct IdleCounters {
-    /// Every loop iteration, whichever arm won. The denominator for the rest.
-    pub wakeups: u64,
-    pub prune: u64,
-    pub alive: u64,
-    pub sweep: u64,
-    pub heal: u64,
-    pub reclaim: u64,
-    pub antientropy: u64,
-    pub state_refresh: u64,
-    pub linkstate: u64,
-    /// Arms driven by something other than a maintenance timer — inbound
-    /// gossip/unicast, IPC, HTTP, deadlines. Summed rather than split per arm:
-    /// on an idle daemon this should read 0, and a non-zero value means the
-    /// run was not idle, which is the only bit worth reporting.
-    pub external: u64,
-    /// Signed frames put on the wire by a maintenance tick. The direct cost
-    /// driver behind `user` CPU: each one is an Ed25519 signature plus a
-    /// serialization.
-    pub broadcasts: u64,
-}
-
-impl IdleCounters {
-    /// Read the counters and zero them, so each census line carries the
-    /// interval's own work rather than a running total a reader has to
-    /// difference (and that a rotated log would corrupt).
-    pub(crate) fn take(&mut self) -> Self {
-        std::mem::take(self)
-    }
-}
-
-/// An in-flight RTT round. `t1` is when the probe was broadcast;
-/// `pongs` records each peer's local arrival instant so RTT is
-/// `arrival - t1`; the round is emitted and cleared at `deadline`.
-#[derive(Debug)]
-pub struct PingRound {
-    pub t1: TokioInstant,
-    pub deadline: TokioInstant,
-    pub pongs: HashMap<Nickname, TokioInstant>,
-    /// When set (the in-process `ping` request), the finalized RTT rows are
-    /// delivered here instead of only emitted as a `ping_report` event — the
-    /// in-process driver has no event stream to read the report from. `None`
-    /// for the CLI/IPC path, which consumes the event.
-    pub resp: Option<tokio::sync::oneshot::Sender<Vec<(Nickname, u64)>>>,
-}
-
-/// The mesh's secret material, grouped so [`EventLoopState::new`] can take
-/// both by value (the stretched key must be owned here so it drops/zeroizes
-/// once the per-channel keys are derived) without blowing its argument budget.
-#[derive(Default)]
-pub(crate) struct MeshSecrets {
-    pub password: Option<crate::protocol::crypto::Password>,
-    pub key: Option<zeroize::Zeroizing<[u8; 32]>>,
-}
-
-/// Everything [`EventLoopState::new`] needs beyond the clock, grouped for the
-/// same reason [`MeshSecrets`] is: the argument budget. `now` stays separate
-/// because tests pin it to a deterministic instant.
-pub(crate) struct StateInit {
-    #[cfg(feature = "host")]
-    pub(crate) state_file: Option<StateFile>,
-    pub(crate) identity: Arc<Identity>,
-    pub secrets: MeshSecrets,
-    /// The `meta` channel's per-peer write gate; `None` leaves it free-form.
-    pub per_peer_gate: Option<crate::doc::SelfWriteGate>,
-    /// The negotiation-slot table the Router's signal acceptor was built with.
-    ///
-    /// Taken at construction rather than assigned afterwards, because the cap
-    /// only means anything if the dialing and answering sides count against the
-    /// *same* table. Defaulting it here and overwriting it later left a second
-    /// ceiling briefly existing and enforcing nothing.
-    pub(crate) webrtc_admission: crate::transport::SignalAdmission,
-    /// How far ICE may reach, derived from the mesh's own lookups so it cannot
-    /// disagree with them.
-    pub(crate) webrtc_ice: crate::transport::IceProfile,
-}
-
-impl EventLoopState {
-    /// Build a fresh event-loop state. `now` is passed explicitly so
-    /// tests can pin a deterministic instant. `secrets` is taken by value (not
-    /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
-    /// per-channel keys are derived, rather than lingering in the caller.
-    pub(crate) fn new(init: StateInit, now: Instant) -> Self {
-        let StateInit {
-            #[cfg(feature = "host")]
-            state_file,
-            identity,
-            secrets,
-            per_peer_gate,
-            webrtc_admission,
-            webrtc_ice,
-        } = init;
-        let MeshSecrets {
-            password: mesh_password,
-            key: mesh_key,
-        } = secrets;
-        // Per-channel encryption keys, domain-separated from each other and from
-        // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
-        // broadcast chat stay plaintext, exactly as before.
-        let state_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"state-doc"))
-        });
-        let meta_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"meta-doc"))
-        });
-        let broadcast_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"broadcast"))
-        });
-        Self {
-            linked_endpoints: HashSet::new(),
-            direct: HashMap::new(),
-            relay_transport: false,
-            direct_proven: tokio::sync::mpsc::unbounded_channel().0,
-            path_changes: tokio::sync::mpsc::unbounded_channel().0,
-            path_watchers: HashMap::new(),
-            path_kinds: HashMap::new(),
-            known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
-            proven_endpoints: crate::transport::endpoint_proof::ProvenEndpoints::new(
-                KNOWN_ENDPOINTS_CAP,
-            ),
-            peer_info_proof: None,
-            relink: Cooldown::new(RELINK_COOLDOWN),
-            peerinfo: Cooldown::new(RELINK_COOLDOWN),
-            peerinfo_flooded_at: None,
-            digest_serves: Cooldown::new(Duration::from_secs(
-                habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
-            )),
-            state_digest_serves: crate::gossip::antientropy::ServeBudget::default(),
-            fast_rounds: crate::gossip::antientropy::FastRounds::default(),
-            peers: HashSet::new(),
-            last_seen: HashMap::new(),
-            peer_endpoints: HashMap::new(),
-            rendezvous_id: None,
-            quiet: BoundedFifoSet::new(QUIET_CAP),
-            quiet_since: HashMap::new(),
-            surfaced: HashSet::new(),
-            last_sent_at: now,
-            joined_at: crate::util::clock::unix_secs(),
-            gossip_open: true,
-            rendezvous_linked: false,
-            rendezvous_session_stale: false,
-            rendezvous_offer_fallback: false,
-            rendezvous_answers_jsep: true,
-            rendezvous_probe_read_free: false,
-            rendezvous_graft_needs_session: false,
-            lane_peers: HashSet::new(),
-            has_rendezvous: true,
-            nostr: None,
-            nostr_seen: HashMap::new(),
-            nostr_poked: HashMap::new(),
-            next_hello: None,
-            hellos_sent: 0,
-            nostr_width: 0,
-            nostr_wide_until: None,
-            local_udp_transport: true,
-            announced: false,
-            meshed: false,
-            unicast_pool: crate::transport::UnicastPool::disconnected(),
-            #[cfg(feature = "host")]
-            multihop: None,
-            webrtc: None,
-            webrtc_admission,
-            webrtc_ice,
-            #[cfg(feature = "host")]
-            link_state_seq: 0,
-            reclaim_until: None,
-            next_rival_recheck: None,
-            rival_recheck_rounds: 0,
-            rival_recheck_deferrals: 0,
-            seen: BoundedFifoSet::new(SEEN_IDS_CAP),
-            pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
-            #[cfg(feature = "host")]
-            state_file,
-            ready: false,
-            live_count: None,
-            message_log: MessageLog::new(MESSAGE_LOG_SIZE),
-            reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
-            reassembly: super::reassembly::ReassemblyStore::default(),
-            shard_cache: super::reassembly::ShardCache::default(),
-            state_doc: super::doc::MeshDoc::new_ungated().with_key(state_key),
-            meta_doc: match per_peer_gate {
-                Some(gate) => super::doc::MeshDoc::new_gated(gate),
-                None => super::doc::MeshDoc::new_ungated(),
-            }
-            .with_key(meta_key),
-            digest_cursor: 0,
-            identity,
-            self_seq: 0,
-            self_prev: None,
-            author_seqs: HashMap::new(),
-            forked: HashSet::new(),
-            by_hash: HashMap::new(),
-            dag_heads: HashSet::new(),
-            last_inbound_at: now,
-            last_recovery_at: None,
-            recovery_trips: 0,
-            degraded: false,
-            resident_memory_warned: false,
-            ping_round: None,
-            mesh_password,
-            mint_mesh: None,
-            broadcast_key,
-            idle: IdleCounters::default(),
-        }
-    }
-
-    /// Write `peer_count = peers.len() + 1` (we add 1
-    /// for self) to the state file, if configured, carrying the current
-    /// `ready` flag, and mirror the count into the advertise counter, if
-    /// present. No-op for neither.
-    pub(crate) fn write_peer_count(&self) {
-        let count = self.peers.len() + 1;
-        #[cfg(feature = "host")]
-        if let Some(sf) = self.state_file.as_ref() {
-            sf.write(count, self.ready);
-        }
-        if let Some(live) = self.live_count.as_ref() {
-            live.store(count, Ordering::Relaxed);
-        }
-    }
-
-    /// Snapshot the live roster (active peers + quiet evictees),
-    /// sorted most-recently-seen first. Backs a consumer's roster surfaces, the MCP
-    /// `mesh_info` roster, and the task sender's target picker /
-    /// nickname validation.
-    #[must_use]
-    pub fn roster_snapshot(&self) -> RosterSnapshot {
-        let now = Instant::now();
-        let secs_since = |seen: &Instant| now.duration_since(*seen).as_secs();
-        let mut peers: Vec<RosterEntry> = self
-            .peers
-            .iter()
-            .map(|nick| RosterEntry {
-                nickname: nick.clone(),
-                // Active peers: their live `last_seen`.
-                last_seen_secs_ago: self.last_seen.get(nick).map(secs_since),
-                quiet: false,
-                reach: self.reach_of(nick),
-                transport: crate::transport::lane_for(nick, self),
-            })
-            .chain(self.quiet.iter().map(|nick| RosterEntry {
-                nickname: nick.clone(),
-                // Quiet peers: their last-heard instant, retained in
-                // `quiet_since` (the eviction drops `last_seen`). A quiet
-                // peer has no live link, so it is always `Gossip`.
-                last_seen_secs_ago: self.quiet_since.get(nick).map(secs_since),
-                quiet: true,
-                reach: Reach::Gossip,
-                transport: crate::transport::lane_for(nick, self),
-            }))
-            .collect();
-        // Most-recently-seen first; unknown recency (no heartbeat yet) sorts last.
-        peers.sort_by_key(|entry| entry.last_seen_secs_ago.unwrap_or(u64::MAX));
-        RosterSnapshot {
-            peers,
-            count: self.peers.len() + 1,
-        }
-    }
-
-    /// `Direct` only when this nickname's last self-advertised endpoint is a
-    /// live link right now; otherwise `Gossip`. A live link is a neighbor in
-    /// `linked_endpoints`, or the rendezvous itself when we're linked to it —
-    /// the beacon gossips *as* the rendezvous, so a joiner's only link to the
-    /// beacon is that one. A peer we haven't yet seen a `PeerInfo` from (or
-    /// whose link dropped) reads `Gossip` and flips to `Direct` once its next
-    /// advertisement lands.
-    fn reach_of(&self, nick: &Nickname) -> Reach {
-        let linked = self.peer_endpoints.get(nick).is_some_and(|endpoint| {
-            self.linked_endpoints.contains(&endpoint.id)
-                || (self.rendezvous_id == Some(endpoint.id) && self.rendezvous_linked)
-        });
-        if linked { Reach::Direct } else { Reach::Gossip }
-    }
-
-    /// `true` if we re-dialed + re-flooded `peer` within the last
-    /// `RELINK_COOLDOWN_SECS` of `now`, so the caller should skip re-linking
-    /// it again. Breaks the flap → re-dial → re-flood loop that otherwise
-    /// turns one unstable peer into a mesh-wide CPU storm.
-    pub(crate) fn relink_on_cooldown(&self, peer: EndpointId, now: Instant) -> bool {
-        self.relink.on_cooldown(&peer, now)
-    }
-
-    /// Record a re-link of `peer` at `now`.
-    pub(crate) fn note_relink(&mut self, peer: EndpointId, now: Instant) {
-        self.relink.note(peer, now);
-    }
-
-    /// `true` if a `NeighborUp` for `peer` already made us re-flood our own
-    /// `PeerInfo` within the cooldown window of `now`, so the caller should
-    /// skip re-flooding again. This is what stops a flapping link from
-    /// re-broadcasting our address to the whole mesh on *every* up-transition
-    /// (see `peerinfo`); a genuinely new neighbor, having no entry, still gets
-    /// exactly one re-flood.
-    pub(crate) fn peerinfo_on_cooldown(&self, peer: EndpointId, now: Instant) -> bool {
-        self.peerinfo.on_cooldown(&peer, now)
-    }
-
-    /// Record a `PeerInfo` re-flood triggered by `peer` at `now`.
-    pub(crate) fn note_peerinfo(&mut self, peer: EndpointId, now: Instant) {
-        self.peerinfo.note(peer, now);
-    }
-
-    /// Whether a `joined` received at `now` re-floods our `PeerInfo`. A first
-    /// sighting (`joined_new`) always does: the newcomer linked to the
-    /// rendezvous, so no `NeighborUp` on this loop will send it our address.
-    /// A re-announce does only once per window since any flood: one newcomer
-    /// makes every member re-announce, and a per-trigger key would let each
-    /// member flood once per re-announce it hears (N²).
-    pub(crate) fn joined_refloods_peerinfo(&self, joined_new: bool, now: Instant) -> bool {
-        joined_new
-            || self
-                .peerinfo_flooded_at
-                .is_none_or(|at| now.duration_since(at) >= RELINK_COOLDOWN)
-    }
-
-    /// Drop `nick`'s dial hint and, with it, the path verdict keyed on that
-    /// endpoint. The two share a key space: the verdict describes the pooled
-    /// connection, which outlives a gossip link but not the peer.
-    pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
-        let addr = self.peer_endpoints.remove(nick)?;
-        self.proven_endpoints.forget_endpoint(addr.id);
-        self.direct.remove(&addr.id);
-        self.lane_peers.remove(&addr.id);
-        self.nostr_seen.remove(&addr.id);
-        self.nostr_poked.remove(&addr.id);
-        self.path_watchers.remove(&addr.id);
-        self.path_kinds.remove(&addr.id);
-        Some(addr)
-    }
-
-    /// A `NeighborDown` for `peer`: the gossip link is gone, the path verdict
-    /// stays. It describes the pooled unicast connection, which outlives the
-    /// link; erasing it parked every directed frame on a link flap until the
-    /// alive tick re-probed (about 40 s with the relink cooldown).
-    pub(crate) fn unlink(&mut self, peer: EndpointId) {
-        self.linked_endpoints.remove(&peer);
-    }
-
-    /// Open the fast `beacon::ensure` burst; the only writer of
-    /// [`Self::reclaim_until`].
-    pub(crate) fn arm_reclaim(&mut self, now: Instant) {
-        self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
-    }
-
-    /// The rendezvous arbitration was reopened or settled, so the previous
-    /// probe's free reading describes a world that is gone. Pairing it with
-    /// one fresh reading claims on what is effectively a single probe, which
-    /// is the rival copy the two-verdict rule exists to stop.
-    pub(crate) fn forget_rendezvous_verdict(&mut self) {
-        self.rendezvous_probe_read_free = false;
-    }
-
-    /// A probe reported no direct path to `peer`. A peer that proved itself
-    /// another way while the probe ran (its inbound graft landed), or that
-    /// left meanwhile, keeps what it has.
-    pub(crate) fn demote_unproven(&mut self, peer: EndpointId) -> bool {
-        match self.direct.get_mut(&peer) {
-            Some(verdict @ DirectState::Pending) => {
-                *verdict = DirectState::RelayOnly;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Record `message` as seen and report whether it was *already* seen.
-    /// `true` => this is a duplicate delivery the caller must drop. Keys on
-    /// the author-bound [`Message::dedup_key`], so a forgery reusing a
-    /// victim's id hashes to a different key and cannot suppress the genuine
-    /// message. Delegates to the bounded [`BoundedFifoSet`], inverting its
-    /// "was newly inserted" answer into "was a duplicate".
-    pub(crate) fn mark_seen(&mut self, message: &Message) -> bool {
-        !self.seen.insert(message.dedup_key())
-    }
-
-    /// Try to reassemble the sharded body the `trigger` shard belongs to:
-    /// buffer it in the dedicated [`reassembly`](Self::reassembly) store and,
-    /// when it completes its group (and the group has not been surfaced
-    /// before), return the synthesized logical [`Message`] — a surfacing view
-    /// whose `id` is the group, so sender and receivers name it alike.
-    ///
-    /// Small (logged) groups get a second completion path off the message
-    /// log: their shards are all retained there, so a shard healed by
-    /// anti-entropy *after* the store's stale-group TTL reaped the partial
-    /// buffer still completes the body — dedup (`seen`) means the healed
-    /// shard is the only one re-ingested, and the store alone would sit on
-    /// 1-of-N forever.
-    pub(crate) fn reassemble(&mut self, trigger: &Message) -> Option<Message> {
-        let shard = trigger.shard.as_ref()?;
-        if self.reassembled_groups.contains(&shard.group) {
-            return None;
-        }
-        match self.reassembly.ingest(trigger, Instant::now()) {
-            super::reassembly::ShardIngest::Complete(logical) => {
-                self.reassembled_groups.insert(shard.group.clone());
-                Some(*logical)
-            }
-            super::reassembly::ShardIngest::Buffered | super::reassembly::ShardIngest::Dropped => {
-                let logical = self.reassemble_from_log(trigger)?;
-                // The store may still hold a partial buffer for this group
-                // (e.g. just the trigger, post-TTL) — release its budget.
-                self.reassembly.forget(&trigger.pubkey, &shard.group);
-                self.reassembled_groups.insert(shard.group.clone());
-                Some(logical)
-            }
-        }
-    }
-
-    /// The log-backed completion path for a **small** (logged) group: scan
-    /// the message log for this author's shards and synthesize when every
-    /// slot is present. Mirrors the store's synthesis exactly.
-    fn reassemble_from_log(&self, trigger: &Message) -> Option<Message> {
-        let shard = trigger.shard.as_ref()?;
-        if !crate::protocol::message::shard_fits_log(trigger) {
-            return None;
-        }
-        let slots = self
-            .message_log
-            .collect_shards(&shard.group, &trigger.pubkey, shard.total);
-        if slots.iter().any(Option::is_none) {
-            return None; // a shard is still missing
-        }
-        let mut body = String::new();
-        for slot in &slots {
-            body.push_str(slot.expect("every slot filled above").body.as_str());
-        }
-        // The concatenation of valid bodies is itself valid (no new control
-        // chars), but fail closed rather than surface a malformed body.
-        let body = crate::protocol::MessageBody::new(body).ok()?;
-        let envelope = slots[0].expect("shard 0 present").clone();
-        Some(super::reassembly::synthesize_from(
-            envelope,
-            body,
-            &shard.group,
-        ))
-    }
-
-    /// Record a `conn_path` reading for `peer`; a reading that proves nothing
-    /// leaves what was known — a probe verdict or a gated link — in place.
-    ///
-    /// When the relay is lookup only, a `Relay` reading is one of those: the
-    /// lanes never ride the relay, so what admitted this peer was the accept
-    /// gate or the probe, and `conn_path` cannot see which path iroh selected
-    /// underneath. Demoting on it would stop every payload lane to a peer that
-    /// is proven direct. `gossip::recv` gates its own call for this reason;
-    /// the census tick in `daemon::timers` does not, so the gate lives here.
-    pub(crate) fn observe_path(&mut self, peer: EndpointId, summary: crate::gossip::PathSummary) {
-        if !self.relay_transport && summary == crate::gossip::PathSummary::Relay {
-            return;
-        }
-        if let Some(state) = DirectState::from_summary(summary) {
-            self.direct.insert(peer, state);
-        }
-    }
-
-    /// How many linked peers sit in each [`DirectState`], for the census.
-    pub(crate) fn direct_counts(&self) -> DirectCounts {
-        let mut counts = DirectCounts::default();
-        for state in self.direct.values() {
-            match state {
-                DirectState::Direct => counts.direct += 1,
-                DirectState::RelayOnly => counts.relay_only += 1,
-                DirectState::Pending => counts.pending += 1,
-            }
-        }
-        counts
-    }
-
-    /// Whether a gossip broadcast can reach anyone right now. `meshed` is the
-    /// strict answer (a real-peer link), but it is stricter than the overlay:
-    /// a node whose only neighbor is the rendezvous relay already exchanges
-    /// presence over that link, and a peer behind the same relay (a browser
-    /// tab, say) may never form a direct link at all. Document plumbing —
-    /// heads digests, change frames — is small and reconciled by anti-entropy,
-    /// so it rides the relay link too. User content keeps waiting on `meshed`.
-    /// A degraded node is excluded: its overlay is suspected dead, and the
-    /// relay link alone is no proof it recovered.
-    pub(crate) fn overlay_reachable(&self) -> bool {
-        self.meshed || (self.rendezvous_linked && !self.degraded)
-    }
-
-    /// Mark the mesh degraded: a fault path (starvation recovery, hard
-    /// resume edge) cleared `meshed`, so outbound user content buffers in
-    /// `pending_outbound` instead of broadcasting into a dead overlay.
-    /// `note_inbound` undoes it on the first proof of live traffic.
-    pub(crate) fn note_degraded(&mut self) {
-        self.meshed = false;
-        self.degraded = true;
-    }
-
-    /// Record a verified inbound gossip message: refresh the starvation
-    /// watchdog's signal and disarm its backoff. Called *before* dedup —
-    /// a duplicate delivery still proves the mesh carries traffic. Also
-    /// the moment a *degraded* node turns healthy again: inbound traffic
-    /// is proof of a live path, so `meshed` is restored (the caller
-    /// flushes `pending_outbound` on the flip). A fresh joiner that has
-    /// never meshed is NOT flipped here — pre-mesh, relayed traffic can
-    /// arrive before the overlay can carry our outbound, so the first
-    /// real-peer `NeighborUp` keeps that job. Returns `true` on the
-    /// degraded→meshed edge.
-    pub(crate) fn note_inbound(&mut self, now: Instant) -> bool {
-        self.last_inbound_at = now;
-        self.recovery_trips = 0;
-        self.last_recovery_at = None;
-        if self.degraded {
-            self.degraded = false;
-            self.meshed = true;
-            return true;
-        }
-        false
-    }
-
-    /// Should the heal tick run a starvation recovery *now*? True only
-    /// when this node has been part of a mesh (`announced`) and knows at
-    /// least one real peer to re-dial, yet has received **nothing** for
-    /// over `threshold` — the roster-collapse signature, keyed on
-    /// traffic rather than the (fallible) link view. Repeated trips back
-    /// off 1-2-4-8× so a genuinely-last-survivor node retries sparsely.
-    /// Deliberately NOT gated on `meshed`: recovery clears `meshed`, so
-    /// that gate would disarm the watchdog after a single attempt.
-    pub(crate) fn starvation_due(&self, now: Instant, threshold: Duration) -> bool {
-        if !self.announced || self.known_endpoints.is_empty() {
-            return false;
-        }
-        if now.duration_since(self.last_inbound_at) <= threshold {
-            return false;
-        }
-        let backoff = threshold.saturating_mul(1 << self.recovery_trips.min(3));
-        self.last_recovery_at
-            .is_none_or(|at| now.duration_since(at) > backoff)
-    }
-
-    /// Record that a starvation recovery ran at `now` (arms the backoff).
-    pub(crate) fn note_recovery(&mut self, now: Instant) {
-        self.recovery_trips = self.recovery_trips.saturating_add(1);
-        self.last_recovery_at = Some(now);
-    }
-
-    /// Record a `Msg`'s `(pubkey, seq, content-hash)` for fork detection.
-    /// Returns `true` **exactly once** per offending key — when a *different*
-    /// content hash is first seen at an already-recorded `(pubkey, seq)`,
-    /// which is cryptographic proof the author equivocated (signed two
-    /// conflicting messages at one seq). Order-independent. The caller emits
-    /// a `fork` event on `true`; the message itself is still processed.
-    pub(crate) fn note_msg_seq(&mut self, pubkey: &str, seq: u64, hash: String) -> bool {
-        let seen = self.author_seqs.entry(pubkey.to_owned()).or_default();
-        match seen.get(&seq) {
-            Some(existing) if *existing != hash => {} // conflict → fall through
-            Some(_) => return false,                  // same message, already recorded
-            None => {
-                seen.insert(seq, hash);
-                return false;
-            }
-        }
-        // Equivocation: flag the key, returning true only on first detection.
-        self.forked.insert(pubkey.to_owned())
-    }
-
-    /// The `parents` to stamp on the next `Msg` we author: the current DAG
-    /// tips, sorted (deterministic) and capped to [`MAX_DAG_PARENTS`] to
-    /// bound message size. Usually a single head on a quiet mesh.
-    #[must_use]
-    pub fn dag_parents(&self) -> Vec<String> {
-        let mut heads: Vec<String> = self.dag_heads.iter().cloned().collect();
-        heads.sort_unstable();
-        heads.truncate(MAX_DAG_PARENTS);
-        heads
-    }
-
-    /// Fold a content `Msg` (hash `hash`, `parents`, timestamp `ts`) into the
-    /// DAG — for messages we receive *and* ones we author. Returns `true` if
-    /// `ts` is **before** a known parent's timestamp (a backdating violation
-    /// to flag). Updates `by_hash` and moves the tip set: the named parents
-    /// are no longer tips, and `hash` becomes one. Unknown parents are left
-    /// alone (the set converges via anti-entropy).
-    pub fn note_dag(&mut self, hash: String, parents: &[String], ts: i64) -> bool {
-        let mut backdated = false;
-        for parent in parents {
-            if let Some(&parent_ts) = self.by_hash.get(parent)
-                && ts < parent_ts
-            {
-                backdated = true;
-            }
-            self.dag_heads.remove(parent);
-        }
-        self.by_hash.insert(hash.clone(), ts);
-        self.dag_heads.insert(hash);
-        backdated
-    }
-
-    /// Prune an evicted message's content hash from the DAG indexes, keeping
-    /// `by_hash`/`dag_heads` bounded alongside the message-log `VecDeque`.
-    pub fn forget_hash(&mut self, hash: &str) {
-        self.by_hash.remove(hash);
-        self.dag_heads.remove(hash);
-    }
-
-    /// Prune an evicted `Msg`'s `(pubkey, seq)` from the fork-detection
-    /// index, bounding `author_seqs`/`forked` to the message-log window: an
-    /// identity whose messages have all aged out drops off both maps (so a
-    /// sybil that fires once and vanishes is forgotten).
-    ///
-    /// Only drops the slot when `hash` is the one we recorded for that
-    /// `(pubkey, seq)`. A fork retains *two* messages at one `(pubkey, seq)`;
-    /// evicting the twin we did **not** record must not clear the recorded
-    /// evidence, or a later anti-entropy resend of the still-retained twin
-    /// would re-detect the equivocation as a fresh first sighting.
-    pub fn forget_msg_seq(&mut self, pubkey: &str, seq: u64, hash: &str) {
-        if let Some(seqs) = self.author_seqs.get_mut(pubkey)
-            && seqs.get(&seq).is_some_and(|recorded| recorded == hash)
-        {
-            seqs.remove(&seq);
-            if seqs.is_empty() {
-                self.author_seqs.remove(pubkey);
-                self.forked.remove(pubkey);
-            }
-        }
-    }
-}
-
-/// Max `parents` stamped on a `Msg` — bounds the wire size of the causal
-/// links. A quiet mesh has one head; this only bites under heavy concurrency.
-const MAX_DAG_PARENTS: usize = 16;
-
-// ── Consumer surface ───────────────────────────────────────────────────────
-//
-// The application driver (`NodeApp` / `NodeDriver`) is handed `&mut
-// EventLoopState` on every hook, but it is not a free-for-all: the fields are
-// crate-private and each thing an app legitimately needs is a named method.
-// Two reasons. The types are the smaller one — several fields are
-// `pub(crate)` collections in private modules, so a consumer could touch the
-// field but never name it. The larger one is that a bare field says nothing
-// about the invariant around it, and the doc pair below is the example: every
-// consumer that wanted one wrote the same `match channel` first.
-impl EventLoopState {
-    /// The shared document for `channel`. Replaces a `match` on
-    /// [`Channel`](crate::protocol::Channel) at every call site.
-    #[must_use]
-    pub fn doc(&self, channel: crate::protocol::Channel) -> &crate::doc::MeshDoc {
-        match channel {
-            crate::protocol::Channel::State => &self.state_doc,
-            crate::protocol::Channel::Meta => &self.meta_doc,
-        }
-    }
-
-    /// Mutable [`Self::doc`], for applying a local change before broadcast.
-    pub fn doc_mut(&mut self, channel: crate::protocol::Channel) -> &mut crate::doc::MeshDoc {
-        match channel {
-            crate::protocol::Channel::State => &mut self.state_doc,
-            crate::protocol::Channel::Meta => &mut self.meta_doc,
-        }
-    }
-
-    /// This member's signing identity.
-    #[must_use]
-    pub fn identity(&self) -> &Arc<Identity> {
-        &self.identity
-    }
-
-    /// The roster, as a set of nicknames. See [`Self::roster_snapshot`] for the
-    /// richer per-peer view.
-    #[must_use]
-    pub fn peers(&self) -> &HashSet<Nickname> {
-        &self.peers
-    }
-
-    /// A peer's last known endpoint id, if one has been learned.
-    #[must_use]
-    pub fn peer_endpoint(&self, nickname: &Nickname) -> Option<EndpointId> {
-        self.peer_endpoints
-            .get(nickname.as_str())
-            .map(|addr| addr.id)
-    }
-
-    /// Whether this member has meshed (has at least one gossip neighbour).
-    #[must_use]
-    pub fn is_meshed(&self) -> bool {
-        self.meshed
-    }
-
-    /// Whether the gossip topic is currently open for broadcast.
-    #[must_use]
-    pub fn is_gossip_open(&self) -> bool {
-        self.gossip_open
-    }
-
-    /// The multi-hop transport handle, when `--multihop` registered one.
-    #[cfg(feature = "host")]
-    #[must_use]
-    pub fn multihop(&self) -> Option<&habilis_network_iroh_multihop_transport::MultihopHandle> {
-        self.multihop.as_ref()
-    }
-
-    /// The Argon2id-derived broadcast key, for a password-protected mesh.
-    #[must_use]
-    pub fn broadcast_key(&self) -> Option<&[u8; 32]> {
-        self.broadcast_key.as_deref()
-    }
-
-    /// The raw mesh password, retained for blob-ticket keying.
-    #[must_use]
-    pub fn mesh_password(&self) -> Option<&crate::protocol::crypto::Password> {
-        self.mesh_password.as_ref()
-    }
-
-    /// The creator's invite-minting mesh; `Some` only on the creator of an
-    /// invite-only mesh.
-    #[must_use]
-    pub fn mint_mesh(&self) -> Option<&Mesh> {
-        self.mint_mesh.as_ref()
-    }
-
-    /// Stamp the next position on this author's hash chain, advancing it.
-    /// `prev` is the content hash of the message just authored.
-    pub fn advance_chain(&mut self, prev: String) {
-        self.self_seq += 1;
-        self.self_prev = Some(prev);
-    }
-
-    /// This author's current chain position — the `seq` the next message takes
-    /// and the hash it points back to.
-    #[must_use]
-    pub fn chain_head(&self) -> (u64, Option<&str>) {
-        (self.self_seq, self.self_prev.as_deref())
-    }
-
-    /// Arm a ping round, replacing any already in flight.
-    pub fn arm_ping_round(&mut self, round: PingRound) {
-        self.ping_round = Some(Box::new(round));
-    }
-
-    /// Take the in-flight ping round, if one is armed — the round is finalized
-    /// exactly once, so the caller consumes it.
-    pub fn take_ping_round(&mut self) -> Option<Box<PingRound>> {
-        self.ping_round.take()
-    }
-
-    /// Sender-side cache of serialized shard frames, for answering repair
-    /// requests.
-    pub fn shard_cache_mut(&mut self) -> &mut super::reassembly::ShardCache {
-        &mut self.shard_cache
-    }
-
-    /// Receiver-side partial-body store.
-    pub fn reassembly_mut(&mut self) -> &mut super::reassembly::ReassemblyStore {
-        &mut self.reassembly
-    }
-
-    /// The anti-entropy message log — the retained window a reconnecting peer
-    /// recovers from. Returns any message evicted by the push.
-    pub fn message_log_mut(&mut self) -> &mut MessageLog {
-        &mut self.message_log
-    }
-
-    /// Whether this author's digest may be served now.
-    ///
-    /// Answering one costs up to `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts,
-    /// so without a per-peer gate a single crafted digest buys that from every
-    /// member — an amplifier that grows with the mesh. Serving at most one per
-    /// window per author bounds it to the honest cadence.
-    pub fn admit_digest(&mut self, pubkey: &str, now: Instant) -> bool {
-        if self.digest_serves.on_cooldown(&pubkey.to_owned(), now) {
-            return false;
-        }
-        self.digest_serves.note(pubkey.to_owned(), now);
-        true
-    }
-
-    /// Record a peer's endpoint address, learned from its published card.
-    ///
-    /// The whole address, not just the id: the retry pass has to know whether a
-    /// peer advertises IP, and rebuilding a bare address from the id there made
-    /// every native peer look like a browser.
-    pub fn note_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
-        self.peer_endpoints.insert(nickname, endpoint);
-    }
-
-    /// Mark the gossip topic closed without a real stream end — how the
-    /// adversarial suite makes the heal arm's resubscribe path observable.
-    /// Feature-gated: no production caller may forge this.
-    #[cfg(feature = "adversarial")]
-    pub fn sever_gossip(&mut self) {
-        self.gossip_open = false;
-    }
-
-    /// Frames queued for send while the topic was closed.
-    pub fn pending_outbound_mut(&mut self) -> &mut BoundedQueue<(Message, Bytes)> {
-        &mut self.pending_outbound
-    }
-}
+/// The most link vectors that wait for the binding of their author: one per author, and a mesh
+/// holds fewer members than this. A flood of authors that never bind cannot grow the park.
+#[cfg(feature = "multihop")]
+const MAX_PARKED_LINK_STATES: usize = 256;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DirectCounts, DirectState, Duration, EndpointId, EventLoopState, Instant,
-        KNOWN_ENDPOINTS_CAP, Message, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
+        DirectCounts, DirectState, Duration, EndpointId, EventLoopState, KeyOfError, PingRound,
+        Reach, RivalFlag,
     };
-    use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::daemon::state::{BeaconNote, PeerInfoFlood, RendezvousFlag, Standing};
+    use crate::protocol::{
+        AppFrameParams, AuthorKey, MeshId, Message, MessageBody, MessageId, Nickname, UnixSecs,
+    };
+    use crate::testing::{
+        endpoint_id, fresh_state, fresh_state_with_book, fresh_state_without_member_key, nick,
+        test_key,
+    };
+
+    /// The seal key of a key is kept only for a key that is a peer, quiet or named, so the roster
+    /// bounds the map. The accessor reads it, and the key leaves with the roster entry.
+    #[test]
+    fn a_seal_key_is_kept_for_a_known_key_only_and_leaves_with_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (peer, quiet, named, stranger) = (
+            test_key("peer"),
+            test_key("quiet"),
+            test_key("named"),
+            test_key("stranger"),
+        );
+        state.peers.insert(peer);
+        state.quiet.insert(quiet);
+        state.names.insert(named, nick("named"));
+        let seal = x25519_dalek::PublicKey::from([3u8; 32]);
+
+        for key in [peer, quiet, named, stranger] {
+            state.note_seal_key(key, seal, Instant::now());
+        }
+
+        for kept in [peer, quiet, named] {
+            assert_eq!(
+                state.seal_key_of(&kept),
+                Some(&seal),
+                "a known key keeps its seal key"
+            );
+        }
+        assert_eq!(
+            state.seal_key_of(&stranger),
+            None,
+            "a key that nobody knows keeps none"
+        );
+        assert_eq!(
+            state.seal_keys.len(),
+            3,
+            "the map holds the known keys only"
+        );
+
+        state.forget_key(peer);
+        assert_eq!(
+            state.seal_key_of(&peer),
+            None,
+            "the seal key leaves with its key"
+        );
+    }
+
+    /// The queue of the seal keys that wait for a join is bounded and short-lived: it holds 64 keys,
+    /// the oldest goes first, and a key older than 90 s is dropped. A key that said goodbye is a
+    /// replay, so it does not wait.
+    #[test]
+    fn the_seal_keys_that_wait_for_a_join_are_few_and_fresh_and_never_a_goodbye() {
+        use super::{PENDING_SEAL_KEY_TTL, PENDING_SEAL_KEYS_CAP};
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let now = Instant::now();
+        let seal = x25519_dalek::PublicKey::from([2u8; 32]);
+        let keys: Vec<AuthorKey> = (0..=PENDING_SEAL_KEYS_CAP)
+            .map(|number| test_key(&format!("waiting {number}")))
+            .collect();
+
+        for key in &keys {
+            state.note_seal_key(*key, seal, now);
+        }
+        assert_eq!(
+            state.pending_seal_key_count(),
+            PENDING_SEAL_KEYS_CAP,
+            "the queue passed its cap"
+        );
+        state.apply_pending_seal_key(keys[0], now);
+        assert_eq!(
+            state.seal_key_of(&keys[0]),
+            None,
+            "the oldest key stayed when the queue was full"
+        );
+        state.apply_pending_seal_key(keys[1], now + PENDING_SEAL_KEY_TTL);
+        assert_eq!(
+            state.seal_key_of(&keys[1]),
+            Some(&seal),
+            "a key at the age of the TTL was dropped"
+        );
+        let late = keys[2];
+        state.apply_pending_seal_key(late, now + PENDING_SEAL_KEY_TTL + Duration::from_secs(1));
+        assert_eq!(
+            state.seal_key_of(&late),
+            None,
+            "a key past the TTL was applied"
+        );
+
+        let gone = test_key("goodbye");
+        state.note_stranger_left(gone);
+        state.note_seal_key(gone, seal, now);
+        state.peers.insert(gone);
+        state.apply_pending_seal_key(gone, now);
+        assert_eq!(
+            state.seal_key_of(&gone),
+            None,
+            "a key that said goodbye kept a seal key"
+        );
+    }
+
+    /// The proof of a session is signed by the member key, over the session key, the nickname and
+    /// the mesh. The session key signs frames, so a proof signed by it would prove nothing.
+    #[test]
+    fn the_proof_of_a_session_is_signed_by_the_member_key() {
+        use crate::protocol::identity;
+        let state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let proof = state
+            .own_proof(&nick("alice"), &mesh, 7)
+            .expect("a member key");
+        assert_eq!(
+            proof.identity,
+            state
+                .member_identity
+                .as_ref()
+                .expect("a member key")
+                .public(),
+            "the member key signs the proof"
+        );
+        assert!(
+            identity::verify_proof(&proof, &state.identity.author_key(), "alice", mesh.as_ref()),
+            "the proof binds the session key, the nickname and the mesh"
+        );
+    }
+
+    /// A receiver holds the proof in a `joined` frame when it verifies for the author, and holds
+    /// nothing for a proof of another nickname or for an empty body.
+    #[test]
+    fn a_joined_frame_proof_is_held_when_it_verifies() {
+        let sender = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let key = sender.identity.author_key();
+        let own: Message = Message::new_joined_with_proof(
+            &mesh,
+            &nick("alice"),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
+        );
+        receiver.note_joined_proof(&own.sign(&sender.identity), &mesh, &nick("reader"), true);
+        assert!(
+            receiver.proofs.proof_of(&key).is_some(),
+            "the proof is held"
+        );
+
+        let mut other = fresh_state();
+        let forged = Message::new_joined_with_proof(
+            &mesh,
+            &nick("bob"),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
+        );
+        other.note_joined_proof(&forged.sign(&sender.identity), &mesh, &nick("reader"), true);
+        assert!(
+            other.proofs.proof_of(&key).is_none(),
+            "a proof of another nickname is not held"
+        );
+        let thief = fresh_state();
+        let stolen = Message::new_joined_with_proof(
+            &mesh,
+            &nick("alice"),
+            &sender
+                .own_proof(&nick("alice"), &mesh, 1)
+                .expect("a member key"),
+        )
+        .sign(&thief.identity);
+        other.note_joined_proof(&stolen, &mesh, &nick("reader"), true);
+        assert!(
+            other
+                .proofs
+                .proof_of(&thief.identity.author_key())
+                .is_none(),
+            "a proof body of another session, replayed under a new key, is not held"
+        );
+        let empty = Message::new_joined(&mesh, &nick("alice")).sign(&sender.identity);
+        other.note_joined_proof(&empty, &mesh, &nick("reader"), true);
+        assert!(
+            other.proofs.proof_of(&key).is_none(),
+            "an empty body holds no proof"
+        );
+    }
+
+    /// A proof request for this node gets one answer with a proof that verifies. A request for
+    /// another node gets none, and the answers stop at the per-minute cap.
+    #[test]
+    fn a_proof_request_is_answered_once_in_the_cap() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let asker = AuthorKey::from([200u8; 32]);
+        let now = Instant::now();
+        assert!(
+            state
+                .proof_answer(&AuthorKey::from([7u8; 32]), &asker, &me, &mesh, now)
+                .is_none(),
+            "a request for another node gets no answer"
+        );
+        let answer: messages::Verified = state
+            .proof_answer(&state.identity.author_key(), &asker, &me, &mesh, now)
+            .expect("a request for this node gets an answer");
+        let proof = answer.joined_proof().expect("the answer holds a proof");
+        assert!(
+            protocol::identity::verify_proof(
+                &proof,
+                &state.identity.author_key(),
+                "alice",
+                mesh.as_ref()
+            ),
+            "the proof in the answer verifies"
+        );
+        let askers: Vec<AuthorKey> = (1..=100u8)
+            .map(|index| AuthorKey::from([index; 32]))
+            .collect();
+        let mut answered = 0;
+        for other in &askers {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, now)
+                .is_some()
+            {
+                answered += 1;
+            }
+        }
+        assert_eq!(answered + 1, 30, "the answers stop at the per-minute cap");
+    }
+
+    /// A node with no member key answers no proof request, and it spends no slot of the cap: a
+    /// slot spent for it would count a refusal for an answer that the node could never send.
+    #[test]
+    fn a_node_with_no_member_key_spends_no_slot_of_the_answer_cap() {
+        let mut state = fresh_state_without_member_key();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let asker = AuthorKey::from([200u8; 32]);
+        let now = Instant::now();
+        let own = state.identity.author_key();
+
+        for _ in 0..2 {
+            assert!(
+                state.proof_answer(&own, &asker, &me, &mesh, now).is_none(),
+                "a node with no member key has no answer to give"
+            );
+        }
+
+        assert_eq!(
+            state.proofs.answers_refused(),
+            0,
+            "no answer was refused, because none was ever possible"
+        );
+    }
+
+    /// An alive frame from a roster member whose session has no proof asks once. An alive frame
+    /// from a stranger asks never, and a held proof asks never.
+    #[test]
+    fn an_alive_frame_without_a_proof_asks_once() {
+        let mut state = fresh_state();
+        let peer = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let alive: messages::Verified =
+            Message::new_alive(&mesh, &nick("bob")).sign(&peer.identity);
+        assert!(
+            state.proof_request_for(&alive, &me, &mesh).is_none(),
+            "a stranger gets no request"
+        );
+        state.peers.insert(alive.key());
+        let request = state
+            .proof_request_for(&alive, &me, &mesh)
+            .expect("a roster member without a proof is asked");
+        assert_eq!(
+            request.kind,
+            protocol::MessageKind::ProofRequest {
+                to: peer.identity.author_key()
+            },
+            "the request names the member"
+        );
+        state.note_proof_request_sent(&alive.key(), None);
+        assert!(
+            state.proof_request_for(&alive, &me, &mesh).is_none(),
+            "after a send the session waits for its back-off"
+        );
+    }
+
+    /// A member that crashed never says goodbye, so its session must not stay live for ever: when
+    /// the book is full, the sessions of members that left the roster make room for new ones.
+    #[test]
+    fn crashed_members_do_not_fill_the_proof_book() {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let mut newest = None;
+        for index in 0..QUIET_CAP + 100 {
+            let member = protocol::identity::Identity::generate();
+            let session = protocol::identity::Identity::generate();
+            let name = nick(&format!("peer-{index}"));
+            let proof: protocol::identity::IdentityProof =
+                member.prove(&session.author_key(), name.as_ref(), mesh.as_ref(), 1);
+            let joined = Message::new_joined_with_proof(&mesh, &name, &proof).sign(&session);
+            receiver.note_joined_proof(&joined, &mesh, &nick("reader"), true);
+            newest = Some(session.author_key());
+        }
+        let newest: AuthorKey = newest.expect("the loop ran");
+        assert!(
+            receiver.proofs.proof_of(&newest).is_some(),
+            "the newest session verifies after more crashes than the cap"
+        );
+    }
+
+    /// A node that joins a mesh of 96 is asked by every peer in the same minute. Each asker gets
+    /// its answer: the node-wide cap grows with the roster.
+    #[test]
+    fn every_asker_of_a_mesh_of_96_is_answered() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        for index in 0..96 {
+            state.peers.insert(test_key(&format!("peer-{index}")));
+        }
+        let now = Instant::now();
+        let mut answered = 0;
+        for index in 0..96u8 {
+            let asker = AuthorKey::from([index; 32]);
+            if state
+                .proof_answer(&state.identity.author_key(), &asker, &me, &mesh, now)
+                .is_some()
+            {
+                answered += 1;
+            }
+        }
+        assert_eq!(answered, 96, "every asker of a mesh of 96 gets its answer");
+    }
+
+    /// A member restarts and its `joined` frame is lost. Its first frame is an `alive`, which the gate
+    /// refuses the roster, for the nickname is bound. The session is asked for its proof all the same,
+    /// since the proof is the way in; a stranger under a free nickname is no member of the roster and
+    /// gets no request.
+    #[test]
+    fn a_session_of_a_bound_nickname_that_missed_its_joined_frame_is_asked_for_its_proof() {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let bound = fresh_state();
+        let restarted = fresh_state();
+        let stranger = fresh_state();
+        let me = nick("reader");
+        receiver.peers.insert(bound.identity.author_key());
+        let proof = protocol::identity::Identity::generate().prove(
+            &bound.identity.author_key(),
+            "alice",
+            mesh.as_ref(),
+            1,
+        );
+        assert!(
+            receiver.proofs.accept(
+                &bound.identity.author_key(),
+                &nick("alice"),
+                &mesh,
+                proof,
+                |_| true
+            ),
+            "the nickname alice is bound to the member of the first session"
+        );
+        let alive_of = |sender: &EventLoopState, name: &str| -> messages::Verified {
+            Message::new_alive(&mesh, &nick(name)).sign(&sender.identity)
+        };
+
+        assert!(
+            receiver
+                .proof_request_for(&alive_of(&restarted, "alice"), &me, &mesh)
+                .is_some(),
+            "a session of the bound nickname with no proof is asked"
+        );
+        assert!(
+            receiver
+                .proof_request_for(&alive_of(&stranger, "carol"), &me, &mesh)
+                .is_none(),
+            "a stranger under a free nickname is not asked"
+        );
+    }
+
+    /// A restart makes a second session of one member under one nickname. The proof is keyed by the
+    /// session key, and a member holds one session, the newest: the proof of the run 2 session
+    /// replaces the proof of the run 1 session, and the caller hears of the one that went.
+    #[test]
+    fn the_session_of_a_newer_run_replaces_the_session_of_the_same_member() {
+        let first = fresh_state();
+        let second = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let shared = nick("alice");
+        let member = protocol::identity::Identity::generate();
+        let (old, new) = (first.identity.author_key(), second.identity.author_key());
+        for (sender, run) in [(&first, 1), (&second, 2)] {
+            receiver.peers.insert(sender.identity.author_key());
+            let proof = member.prove(&sender.identity.author_key(), "alice", mesh.as_ref(), run);
+            let joined =
+                Message::new_joined_with_proof(&mesh, &shared, &proof).sign(&sender.identity);
+            receiver.note_joined_proof(&joined, &mesh, &nick("reader"), true);
+        }
+
+        assert!(
+            receiver.proofs.proof_of(&old).is_none(),
+            "the old session is dropped"
+        );
+        assert!(
+            receiver.proofs.proof_of(&new).is_some(),
+            "the new session is held"
+        );
+        assert_eq!(
+            receiver.proofs.take_replaced(),
+            [old],
+            "the old session is reported"
+        );
+    }
+
+    /// A receiver binds a nickname to the member key whose proof it held first. The proof of another
+    /// member for the same nickname is not held, while the session of the first is in the roster. The
+    /// binding is the view of one receiver and not a global order: each of the two members is the
+    /// other for the other one, and both hear the join error.
+    #[test]
+    fn a_second_member_cannot_prove_a_nickname_that_a_roster_session_binds() {
+        let (first, second) = (fresh_state(), fresh_state());
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let shared = nick("alice");
+        receiver.peers.insert(first.identity.author_key());
+        receiver.peers.insert(second.identity.author_key());
+        let joined_first: messages::Verified = first.own_joined(&mesh, &shared);
+        let joined_second: messages::Verified = second.own_joined(&mesh, &shared);
+
+        receiver.note_joined_proof(&joined_first, &mesh, &nick("reader"), true);
+        receiver.note_joined_proof(&joined_second, &mesh, &nick("reader"), true);
+
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&first.identity.author_key())
+                .is_some(),
+            "the first member binds the nickname"
+        );
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&second.identity.author_key())
+                .is_none(),
+            "the second member's proof for the same nickname is not held"
+        );
+        assert_eq!(receiver.proofs.bound_refused(), 1, "the refusal is counted");
+    }
+
+    /// The nickname of this node is bound to its member key. The first proof of another member for
+    /// it is the join error of this node, told once for each session.
+    #[test]
+    fn a_proof_of_another_member_for_our_nickname_is_the_join_error_once() {
+        let mut ours = fresh_state();
+        let other = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let mine = nick("alice");
+        let joined: messages::Verified = other.own_joined(&mesh, &mine);
+
+        assert!(
+            ours.note_joined_proof(&joined, &mesh, &mine, true),
+            "the first proof of another member for our nickname is told"
+        );
+        assert!(
+            !ours.note_joined_proof(&joined, &mesh, &mine, true),
+            "the same session is told once"
+        );
+        assert!(
+            ours.proofs.proof_of(&other.identity.author_key()).is_none(),
+            "the proof is not held: our nickname is not up for binding"
+        );
+        let ours_joined: messages::Verified = ours.own_joined(&mesh, &mine);
+        assert!(
+            !ours.note_joined_proof(&ours_joined, &mesh, &mine, true),
+            "a proof of our own member key is no error"
+        );
+    }
+
+    /// The proof of a session names the nickname that it proved. A session of our own member that proved `bob`
+    /// has no proof for our nickname `alice`: its frames under `alice` are not admitted on the proof for `bob`.
+    #[test]
+    fn a_proof_for_another_nickname_does_not_admit_a_session_under_our_nickname() {
+        let mut ours = fresh_state();
+        let mut session = fresh_state();
+        session.member_identity = ours.member_identity.clone();
+        let mesh = MeshId::from("💬test");
+        let (mine, other_name) = (nick("alice"), nick("bob"));
+        let for_bob: messages::Verified = session.own_joined(&mesh, &other_name);
+        assert!(
+            !ours.note_joined_proof(&for_bob, &mesh, &mine, true),
+            "a proof of our own member for another nickname is no error"
+        );
+        assert!(
+            ours.proofs
+                .proof_of(&session.identity.author_key())
+                .is_some(),
+            "the proof for bob is held"
+        );
+        let as_alice: messages::Verified = Message::new_alive(&mesh, &mine).sign(&session.identity);
+
+        assert!(
+            !ours.admits_session(&as_alice, &mine),
+            "the session that proved bob was admitted under our nickname on the proof for bob"
+        );
+    }
+
+    /// The same for the report of a newer run of our own member: a proof for another nickname with a higher
+    /// run does not show that a newer run of this member is active under our nickname.
+    #[test]
+    fn a_proof_for_another_nickname_is_no_newer_run_under_our_nickname() {
+        let mut ours = fresh_state();
+        let session = protocol::identity::Identity::generate();
+        let member = ours
+            .member_identity
+            .clone()
+            .expect("a test state has a member key");
+        let mesh = MeshId::from("💬test");
+        let (mine, other_name) = (nick("alice"), nick("bob"));
+        let proof = member.prove(&session.author_key(), "bob", mesh.as_ref(), 6);
+        let for_bob: messages::Verified =
+            Message::new_joined_with_proof(&mesh, &other_name, &proof).sign(&session);
+        assert!(
+            !ours.note_joined_proof(&for_bob, &mesh, &mine, true),
+            "a proof of our own member for another nickname is no error"
+        );
+        let as_alice: messages::Verified = Message::new_alive(&mesh, &mine).sign(&session);
+
+        assert_eq!(
+            ours.newer_run_of_our_member(&as_alice, &mine),
+            None,
+            "a proof for bob with a higher run was taken as a newer run of our member under our nickname"
+        );
+    }
+
+    /// A nickname is a label that two live sessions can share. A request names one session, and only
+    /// that session answers it: the other one holds the same nickname and stays silent.
+    #[test]
+    fn a_request_names_one_session_when_two_live_sessions_share_a_nickname() {
+        let (first, mut second) = (fresh_state(), fresh_state());
+        let mut joiner = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let (shared, joiner_name) = (nick("alice"), nick("bob"));
+        joiner.peers.insert(first.identity.author_key());
+        joiner.peers.insert(second.identity.author_key());
+        let alive: messages::Verified = Message::new_alive(&mesh, &shared).sign(&first.identity);
+
+        let request = joiner
+            .proof_request_for(&alive, &joiner_name, &mesh)
+            .expect("the joiner asks the first session");
+        let protocol::MessageKind::ProofRequest { to } = &request.kind else {
+            panic!("the joiner sent a proof request");
+        };
+        let now = Instant::now();
+        let asker = request.key();
+
+        assert!(
+            second
+                .proof_answer(to, &asker, &shared, &mesh, now)
+                .is_none(),
+            "the second session shares the nickname and is not the one that was asked"
+        );
+    }
+
+    /// Two nodes, end to end at state level: a joiner that missed the `joined` frame of a member
+    /// sees its alive frame, asks once, gets the answer, and holds a proof that verifies. The
+    /// restart half (a new session replaces the old one) waits for the gate.
+    #[test]
+    fn a_joiner_that_missed_the_joined_frame_ends_up_with_the_proof() {
+        let mut member = fresh_state();
+        let mut joiner = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let (member_name, joiner_name) = (nick("alice"), nick("bob"));
+        joiner.peers.insert(member.identity.author_key());
+        let alive: messages::Verified =
+            Message::new_alive(&mesh, &member_name).sign(&member.identity);
+
+        let request = joiner
+            .proof_request_for(&alive, &joiner_name, &mesh)
+            .expect("the joiner asks for the proof");
+        joiner.note_proof_request_sent(&alive.key(), None);
+        let protocol::MessageKind::ProofRequest { to } = &request.kind else {
+            panic!("the joiner sent a proof request");
+        };
+        let answer: messages::Verified = member
+            .proof_answer(to, &request.key(), &member_name, &mesh, Instant::now())
+            .expect("the member answers the request for itself");
+        joiner.note_joined_proof(&answer, &mesh, &nick("reader"), true);
+
+        let held = joiner.proofs.proof_of(&member.identity.author_key());
+        assert!(
+            held.is_some(),
+            "the joiner holds the proof of the member session"
+        );
+        assert!(
+            joiner
+                .proof_request_for(&alive, &joiner_name, &mesh)
+                .is_none(),
+            "the next alive frame of the session asks for nothing"
+        );
+    }
+
+    /// A joiner starts with a small roster, so its answer cap starts at 30. The askers it refused
+    /// ask again 30 s later, when the roster has grown, and every one of the 96 is answered.
+    #[test]
+    fn askers_refused_in_the_first_seconds_are_answered_after_the_roster_grows() {
+        let mut state = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let askers: Vec<AuthorKey> = (0..96u8)
+            .map(|index| AuthorKey::from([index; 32]))
+            .collect();
+        let start = Instant::now();
+        let mut answered = Vec::new();
+        for other in &askers {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, start)
+                .is_some()
+            {
+                answered.push(*other);
+            }
+        }
+        assert_eq!(
+            answered.len(),
+            30,
+            "a small roster answers 30 in the first minute"
+        );
+        for index in 0..96 {
+            state.peers.insert(test_key(&format!("peer-{index}")));
+        }
+        let retry_at = start + Duration::from_secs(30);
+        let mut refused: Vec<AuthorKey> = Vec::new();
+        for other in &askers {
+            if !answered.contains(other) {
+                refused.push(*other);
+            }
+        }
+        for other in &refused {
+            if state
+                .proof_answer(&state.identity.author_key(), other, &me, &mesh, retry_at)
+                .is_some()
+            {
+                answered.push(*other);
+            }
+        }
+        assert_eq!(
+            answered.len(),
+            96,
+            "the retries of the refused askers are answered"
+        );
+    }
+
+    /// The `joined` frame a node announces carries the proof of its session, and a receiver holds
+    /// it: the first join needs no request.
+    #[test]
+    fn the_joined_frame_of_a_node_carries_its_proof() {
+        let sender = fresh_state();
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let joined: messages::Verified = sender.own_joined(&mesh, &nick("alice"));
+        receiver.note_joined_proof(&joined, &mesh, &nick("reader"), true);
+        assert!(
+            receiver
+                .proofs
+                .proof_of(&sender.identity.author_key())
+                .is_some(),
+            "the receiver holds the proof from the first frame"
+        );
+    }
+
+    /// A node with no member key (a target with no files, such as wasm) sends an empty `joined`
+    /// body: a proof made with a key of this start would prove nothing across restarts. It answers
+    /// no proof request either.
+    #[test]
+    fn a_node_with_no_member_key_sends_an_empty_joined_body() {
+        let mut state = fresh_state();
+        state.member_identity = None;
+        let mesh = MeshId::from("💬test");
+        let me = nick("alice");
+        let joined: messages::Verified = state.own_joined(&mesh, &me);
+        assert!(joined.joined_proof().is_none(), "the joined body is empty");
+        let asker = AuthorKey::from([9u8; 32]);
+        assert!(
+            state
+                .proof_answer(
+                    &state.identity.author_key(),
+                    &asker,
+                    &me,
+                    &mesh,
+                    Instant::now()
+                )
+                .is_none(),
+            "a node with no member key answers no request"
+        );
+    }
+    use crate::util::clock::Instant;
+    use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
+    use n0_future::time::Instant as TokioInstant;
+
+    use crate::protocol::messages;
+    use crate::transport::probe::PathKind;
+    use crate::transport::{Lane, PayloadPath};
+    use crate::util::tuning;
+    use crate::{lookup, protocol};
+    use iroh::address_lookup::memory;
+    use std::net;
+    fn lower_and_higher() -> (EndpointId, EndpointId) {
+        let first = endpoint_id(1);
+        let second = endpoint_id(2);
+        if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        }
+    }
+
+    /// Two holders of one rendezvous that share an overlay, one dependent on each: the lower
+    /// holder's flag must end the split now, not after the wait for the dependent.
+    #[test]
+    fn a_flag_from_a_lower_holder_makes_us_yield_at_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        let now = Instant::now();
+
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from([9u8; 32]),
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
+
+        assert!(
+            state.beacon_notes.contains(&BeaconNote::YieldToLower),
+            "a lower holder's flag makes us yield at once"
+        );
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(now),
+            "the re-check comes due at the current instant"
+        );
+    }
+
+    /// The winner keeps its beacon. Its re-check is pushed one steady round, not dropped: a
+    /// holder that never re-checks never finds a co-host it does not know of.
+    #[test]
+    fn a_flag_from_a_higher_holder_pushes_our_re_check_out() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        state.rival_recheck_rounds = 2;
+        state.rival_recheck_deferrals = 1;
+        let now = Instant::now();
+
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
+
+        assert!(
+            !state.beacon_notes.contains(&BeaconNote::YieldToLower),
+            "a higher holder's flag does not make us yield"
+        );
+        let next = state
+            .next_rival_recheck
+            .expect("the re-check is pushed out, not dropped");
+        assert!(next > now, "a steady round out, not due");
+        assert_eq!(state.rival_recheck_rounds, 2, "the rounds stay");
+        assert_eq!(state.rival_recheck_deferrals, 1, "the deferrals stay");
+    }
+
+    /// The longest wait that the first round of a re-check can have: its fast base plus the
+    /// offset of the id.
+    fn brisk_wait() -> Duration {
+        tuning::rival_recheck_first() + tuning::RIVAL_RECHECK_OFFSET_SPAN
+    }
+
+    /// A holder that has found no member has a re-check an hour or two out. A sign that another
+    /// group may exist is all it has to go on: the re-check comes back to the fast base, and the
+    /// rounds start from it again.
+    #[test]
+    fn a_sign_of_a_second_group_brings_the_re_check_to_the_brisk_base() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        state.rival_recheck_rounds = 7;
+        let now = Instant::now();
+        state.next_rival_recheck = Some(now + Duration::from_hours(1));
+
+        state.note_second_group_sign(endpoint_id(1), now);
+
+        let next = state.next_rival_recheck.expect("a re-check is armed");
+        assert!(
+            next <= now + brisk_wait(),
+            "the re-check is due within the fast base"
+        );
+        assert_eq!(state.rival_recheck_rounds, 0, "the rounds start again");
+    }
+
+    /// A burst of members that arrive must not shed the beacon again and again.
+    #[test]
+    fn a_second_sign_inside_one_steady_interval_changes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        state.next_rival_recheck = Some(far);
+        state.note_second_group_sign(endpoint_id(1), now);
+        assert!(
+            state.next_rival_recheck.is_some_and(|next| next < far),
+            "the first sign counts"
+        );
+
+        state.next_rival_recheck = Some(far);
+        state.rival_recheck_rounds = 3;
+        state.note_second_group_sign(endpoint_id(1), now + Duration::from_secs(10));
+
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(far),
+            "a second sign inside one steady interval keeps the first re-check time"
+        );
+        assert_eq!(
+            state.rival_recheck_rounds, 3,
+            "the round count does not move on a second sign inside one interval"
+        );
+    }
+
+    #[test]
+    fn a_sign_changes_nothing_while_we_do_not_hold_the_beacon() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        state.next_rival_recheck = Some(far);
+
+        state.note_second_group_sign(endpoint_id(1), now);
+
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(far),
+            "a sign while we do not hold the beacon leaves the re-check time alone"
+        );
+    }
+
+    /// A loopback room has no re-check, and the creator never has one: a sign arms nothing.
+    #[test]
+    fn a_sign_arms_no_re_check_where_none_applies() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        state.next_rival_recheck = None;
+
+        state.note_second_group_sign(endpoint_id(1), Instant::now());
+
+        assert_eq!(
+            state.next_rival_recheck, None,
+            "no re-check is armed where none applies"
+        );
+    }
+
+    #[test]
+    fn a_sign_does_not_push_out_a_re_check_that_is_due_sooner() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        state.rival_recheck_rounds = 4;
+        let now = Instant::now();
+        let soon = now + Duration::from_secs(1);
+        state.next_rival_recheck = Some(soon);
+
+        state.note_second_group_sign(endpoint_id(1), now);
+
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(soon),
+            "a sign does not push out a re-check that is due sooner"
+        );
+        assert_eq!(
+            state.rival_recheck_rounds, 4,
+            "the round count does not advance for a re-check that is not due"
+        );
+    }
+
+    /// A flag is remembered only from a proven sender that is not us, and moves our re-check
+    /// only while we hold the beacon.
+    #[test]
+    fn a_flag_that_does_not_count_changes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let signer = AuthorKey::from([9u8; 32]);
+        let now = Instant::now();
+
+        let mut no_flag = fresh_state();
+        no_flag
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        no_flag.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: false,
+            },
+            now,
+        );
+
+        let mut unproven = fresh_state();
+        unproven
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        unproven.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: false,
+                held: true,
+            },
+            now,
+        );
+
+        let mut ourselves = fresh_state();
+        ourselves
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        ourselves.note_rival_beacon_flag(
+            high,
+            signer,
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
+
+        for state in [&no_flag, &unproven, &ourselves] {
+            assert!(
+                !state.beacon_notes.contains(&BeaconNote::YieldToLower),
+                "a flag that does not count does not make us yield"
+            );
+            assert_eq!(
+                state.next_rival_recheck, None,
+                "a flag that does not count arms no re-check"
+            );
+            assert!(
+                !state.rival_holder_known(),
+                "a flag that does not count is not remembered as a rival holder"
+            );
+        }
+    }
+
+    /// A node that does not hold the rendezvous still learns who does: it is what keeps it from
+    /// probing to claim. Its own re-check has nothing to move.
+    #[test]
+    fn a_flag_read_while_we_do_not_hold_is_remembered() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from([9u8; 32]),
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
+
+        assert!(
+            state.rival_holder_known(),
+            "a flag read while we do not hold the beacon is remembered"
+        );
+        assert!(
+            !state.beacon_notes.contains(&BeaconNote::YieldToLower),
+            "a flag read while we do not hold the beacon does not make us yield"
+        );
+        assert_eq!(
+            state.next_rival_recheck, None,
+            "a flag read while we do not hold the beacon arms no re-check"
+        );
+    }
+
+    /// A member that let go of the rendezvous and reads a holder that no member of its mesh hosts
+    /// owes a return, and the debt opens the reclaim window that pays it.
+    #[test]
+    fn a_holder_outside_the_mesh_owes_a_return_to_a_released_member() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.linked_endpoints.insert(endpoint_id(1));
+        assert!(!state.rendezvous_wanted(), "enough links: it let go");
+
+        state.note_holder_outside_mesh(Instant::now());
+
+        assert!(state.rendezvous_wanted(), "a return is owed");
+        assert!(state.reclaim_until.is_some(), "the reclaim ticker pays it");
+    }
+
+    /// The healthy case, which every released member reads on every heal tick: the holder is a
+    /// member of our own mesh, and its flag is known. Nothing is owed, or the mesh would visit the
+    /// rendezvous for ever.
+    #[test]
+    fn a_holder_of_our_own_mesh_owes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from([9u8; 32]),
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
+        assert!(
+            state.rival_holder_known(),
+            "a holder of our own mesh still records a rival flag"
+        );
+
+        state.note_holder_outside_mesh(Instant::now());
+
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "no comeback window is owed on our own mesh"
+        );
+        assert!(
+            !state.rendezvous_wanted(),
+            "the rendezvous is not wanted on our own mesh"
+        );
+    }
+
+    /// A member that still holds the link, or hosts the beacon, or wants the rendezvous anyway
+    /// (it has fewer links than the release count) owes nothing: a joiner would otherwise stay
+    /// a dwell longer at every start.
+    #[test]
+    fn a_member_that_has_the_link_or_wants_it_anyway_owes_no_return() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut linked = fresh_state();
+        linked.rendezvous_release_links = 1;
+        linked.linked_endpoints.insert(endpoint_id(1));
+        linked.rendezvous_flags.insert(RendezvousFlag::Linked);
+        linked.note_holder_outside_mesh(Instant::now());
+        assert!(
+            linked.rendezvous_comeback_until.is_none(),
+            "it holds the link"
+        );
+
+        let mut host = fresh_state();
+        host.rendezvous_release_links = 1;
+        host.linked_endpoints.insert(endpoint_id(1));
+        host.rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        host.note_holder_outside_mesh(Instant::now());
+        assert!(host.rendezvous_comeback_until.is_none(), "it hosts it");
+
+        let mut joiner = fresh_state();
+        joiner.note_holder_outside_mesh(Instant::now());
+        assert!(
+            joiner.rendezvous_comeback_until.is_none(),
+            "it wants it anyway"
+        );
+    }
+
+    /// A debt that is owed is not moved by the next read: the window runs out on its own, and a
+    /// read after it owes once again. Without this a node that reads the holder on every heal
+    /// tick would hold the debt open for ever.
+    #[test]
+    fn a_second_read_inside_the_window_does_not_move_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.linked_endpoints.insert(endpoint_id(1));
+        let first = Instant::now();
+        state.note_holder_outside_mesh(first);
+        let due = state.rendezvous_comeback_until;
+        assert!(due.is_some(), "the first read opens a comeback window");
+
+        state.note_holder_outside_mesh(first + Duration::from_secs(5));
+
+        assert_eq!(
+            state.rendezvous_comeback_until, due,
+            "a second read keeps the deadline of the window"
+        );
+    }
+
+    /// A holder that crashes never says that it let go. Its flag goes with the member.
+    #[test]
+    fn the_flag_of_a_forgotten_member_is_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from([1u8; 32]),
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from([2u8; 32]),
+            endpoint_id(7),
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
+
+        state.forget_rival_holder(low);
+
+        assert!(state.rival_holder_known(), "the other holder stays");
+        state.forget_rival_holder(endpoint_id(7));
+        assert!(
+            !state.rival_holder_known(),
+            "a forgotten member takes its rival flag with it"
+        );
+    }
+
+    /// A holder that sends its flag again and again must not keep our re-check away: the push
+    /// happens once per holder, and exists only to hold our release until the higher one yields.
+    #[test]
+    fn a_holder_that_repeats_its_flag_pushes_our_re_check_out_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        let first = Instant::now();
+
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            first,
+        );
+        let pushed = state.next_rival_recheck;
+        assert!(pushed.is_some_and(|due| due > first), "pushed out once");
+
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            first + Duration::from_secs(5),
+        );
+
+        assert_eq!(
+            state.next_rival_recheck, pushed,
+            "the repeat changes nothing"
+        );
+    }
+
+    /// The push is to at least a steady round out. A re-check that is already later stays.
+    #[test]
+    fn a_push_never_brings_a_later_re_check_closer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        let now = Instant::now();
+        let far = now + Duration::from_secs(100_000);
+        state.next_rival_recheck = Some(far);
+
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
+
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(far),
+            "a later push never brings the re-check closer"
+        );
+    }
+
+    /// The holder says it let go (a `PeerInfo` without the flag), or the member leaves: the
+    /// rendezvous is no longer known to be held by it.
+    #[test]
+    fn a_holder_stops_counting_when_it_drops_the_flag_or_leaves() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let signer = AuthorKey::from([9u8; 32]);
+        let mut state = fresh_state();
+        state.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
+        assert!(
+            state.rival_holder_known(),
+            "a holder counts until it drops the flag or leaves"
+        );
+
+        state.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: false,
+            },
+            Instant::now(),
+        );
+        assert!(!state.rival_holder_known(), "no flag takes it out");
+
+        state.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(low));
+        state.forget_peer_endpoint("bob");
+        assert!(
+            !state.rival_holder_known(),
+            "the roster removal takes it out"
+        );
+    }
+
+    /// The accessor hands out the book that the state was built with, not a copy of it: an address
+    /// written through it is in the book of the endpoint.
+    #[test]
+    fn the_address_book_of_the_state_is_the_book_it_was_given() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let book = memory::MemoryLookup::new();
+        let state = fresh_state_with_book(book.clone());
+        let bob = endpoint_id(1);
+        assert!(
+            book.get_endpoint_info(bob).is_none(),
+            "the book starts empty"
+        );
+
+        lookup::add_peer_addr(
+            state.address_book(),
+            iroh::EndpointAddr::new(bob).with_ip_addr("192.0.2.1:4000".parse().expect("address")),
+        );
+
+        assert!(
+            book.get_endpoint_info(bob).is_some(),
+            "an address written through the accessor reaches the book of the endpoint"
+        );
+    }
+
+    /// The address of a peer goes to the book of the endpoint and to the pool together, so the
+    /// state of a pruned endpoint drops both. A linked endpoint is a reconnect target and keeps
+    /// its entry until the link ends.
+    #[test]
+    fn a_pruned_endpoint_leaves_the_address_book_and_a_linked_one_stays() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let book = memory::MemoryLookup::new();
+        let mut state = fresh_state_with_book(book.clone());
+        let (pruned, linked) = (endpoint_id(1), endpoint_id(2));
+        for endpoint in [pruned, linked] {
+            let address = iroh::EndpointAddr::new(endpoint)
+                .with_ip_addr("192.0.2.1:4000".parse().expect("address"));
+            lookup::add_peer_addr(state.address_book(), address.clone());
+            state.unicast_pool.note_addr(&address);
+        }
+        state.linked_endpoints.insert(linked);
+
+        state.release_unbound_endpoint(pruned);
+        state.release_unbound_endpoint(linked);
+
+        assert!(
+            book.get_endpoint_info(pruned).is_none(),
+            "the book lost the entry of the pruned endpoint"
+        );
+        assert!(
+            book.get_endpoint_info(linked).is_some(),
+            "the linked endpoint is a reconnect target and keeps its entry"
+        );
+    }
+
+    /// Seat `key` in the roster under `nickname`, live or quiet.
+    fn seat(state: &mut EventLoopState, key: AuthorKey, nickname: &str, live: bool) {
+        state.names.insert(key, nick(nickname));
+        if live {
+            state.peers.insert(key);
+        } else {
+            state.quiet.insert(key);
+        }
+    }
+
+    /// A nickname maps to the one live key that uses it. It names no key when no live key uses
+    /// it, and none when two or more do: the engine never picks one of them.
+    #[test]
+    fn key_of_names_the_one_live_key_of_a_nickname_and_refuses_the_rest() {
+        let mut state = fresh_state();
+        let (alone, first, second, gone) = (
+            test_key("alone"),
+            test_key("twin#first"),
+            test_key("twin#second"),
+            test_key("gone"),
+        );
+        seat(&mut state, alone, "alone", true);
+        seat(&mut state, first, "twin", true);
+        seat(&mut state, second, "twin", true);
+        seat(&mut state, gone, "gone", false);
+
+        assert_eq!(
+            state.key_of(&nick("alone")),
+            Ok(alone),
+            "one live key uses the nickname"
+        );
+        assert_eq!(
+            state.key_of(&nick("twin")),
+            Err(KeyOfError::Ambiguous),
+            "two live keys use the nickname"
+        );
+        assert_eq!(
+            state.key_of(&nick("nobody")),
+            Err(KeyOfError::Unknown),
+            "no key uses the nickname"
+        );
+        assert_eq!(
+            state.key_of(&nick("gone")),
+            Err(KeyOfError::Unknown),
+            "a quiet key is no live key"
+        );
+    }
+
+    /// A quiet key does not make a nickname ambiguous, and the live key under it is named.
+    #[test]
+    fn a_quiet_key_of_a_nickname_does_not_hide_its_live_key_from_key_of() {
+        let mut state = fresh_state();
+        let (live, quiet) = (test_key("twin#live"), test_key("twin#quiet"));
+        seat(&mut state, live, "twin", true);
+        seat(&mut state, quiet, "twin", false);
+
+        assert_eq!(
+            state.key_of(&nick("twin")),
+            Ok(live),
+            "the quiet key is no user of the nickname"
+        );
+    }
+
+    /// A live key maps back to its nickname. A quiet key and a key we never saw map to none.
+    #[test]
+    fn nickname_of_names_a_live_key_and_no_other() {
+        let mut state = fresh_state();
+        let (live, quiet) = (test_key("live"), test_key("quiet"));
+        seat(&mut state, live, "live", true);
+        seat(&mut state, quiet, "quiet", false);
+
+        assert_eq!(
+            state.nickname_of(&live),
+            Some(nick("live")),
+            "a live key maps to its nickname"
+        );
+        assert_eq!(
+            state.nickname_of(&quiet),
+            None,
+            "a quiet key is no live key"
+        );
+        assert_eq!(
+            state.nickname_of(&test_key("stranger")),
+            None,
+            "a key we never saw has no nickname"
+        );
+    }
+
+    /// A row reads `Direct` when the address that a send to its key dials is a live link. The
+    /// second live key of a nickname owns no dial hint, and its retained endpoint is the address
+    /// of a send to it, so the row reads the link of that endpoint.
+    #[test]
+    fn the_reach_of_a_row_follows_the_address_that_a_send_to_its_key_dials() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second, lonely) = (
+            test_key("bob#first"),
+            test_key("bob#second"),
+            test_key("lonely"),
+        );
+        let (first_endpoint, second_endpoint) = (endpoint_id(1), endpoint_id(2));
+        for (key, name) in [(first, "bob"), (second, "bob"), (lonely, "lonely")] {
+            state.names.insert(key, nick(name));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+        state.retain_refused_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+        state.linked_endpoints.insert(second_endpoint);
+
+        let snapshot = state.roster_snapshot();
+        let reach_of_key = |key: AuthorKey| {
+            let row = snapshot.peers.iter().find(|entry| entry.key == key);
+            row.expect("the row of a shown live key").reach
+        };
+
+        assert_eq!(
+            reach_of_key(second),
+            Reach::Direct,
+            "the retained endpoint of the second key is linked"
+        );
+        assert_eq!(
+            reach_of_key(first),
+            Reach::Gossip,
+            "the hint of the first key is not linked"
+        );
+        assert_eq!(
+            reach_of_key(lonely),
+            Reach::Gossip,
+            "a key with no address reads gossip"
+        );
+    }
+
+    /// The roster keeps the name of a quiet key, because a quiet peer may return and a line about
+    /// it still prints its name. A key that left the roster has no name: `forget_key` drops it.
+    #[test]
+    fn a_quiet_key_keeps_its_known_nickname_and_a_forgotten_key_has_none() {
+        let mut state = fresh_state();
+        let (live, quiet, gone) = (test_key("live"), test_key("quiet"), test_key("gone"));
+        seat(&mut state, live, "live", true);
+        seat(&mut state, quiet, "quiet", false);
+        seat(&mut state, gone, "gone", true);
+        state.forget_key(gone);
+
+        assert_eq!(
+            state.known_nickname_of(&live),
+            Some(nick("live")),
+            "a live key has its name"
+        );
+        assert_eq!(
+            state.known_nickname_of(&quiet),
+            Some(nick("quiet")),
+            "a quiet key keeps its name"
+        );
+        assert_eq!(
+            state.known_nickname_of(&gone),
+            None,
+            "a forgotten key has no name"
+        );
+        assert_eq!(
+            state.known_nickname_of(&test_key("stranger")),
+            None,
+            "a key we never saw has no name"
+        );
+    }
+
+    /// `live_keys` lists the keys that are live peers now: not the quiet ones, and not a key that
+    /// left. Two live keys that share a nickname are two entries.
+    #[test]
+    fn live_keys_lists_only_the_live_peers() {
+        let mut state = fresh_state();
+        let (first, second, quiet, gone) = (
+            test_key("twin#first"),
+            test_key("twin#second"),
+            test_key("quiet"),
+            test_key("gone"),
+        );
+        seat(&mut state, first, "twin", true);
+        seat(&mut state, second, "twin", true);
+        seat(&mut state, quiet, "quiet", false);
+        seat(&mut state, gone, "gone", true);
+        state.forget_key(gone);
+
+        let mut listed: Vec<AuthorKey> = state.live_keys().copied().collect();
+        listed.sort();
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(
+            listed, expected,
+            "the live set must hold the two live keys only"
+        );
+    }
+
+    /// `addressee_key` is the key that a send by nickname goes to: the one live key, else the one
+    /// quiet key, because a peer that went quiet may return. A live key wins over a quiet key of
+    /// the same nickname, two keys of one rank are ambiguous, and a nickname that nobody uses is
+    /// unknown.
+    #[test]
+    fn addressee_key_takes_the_live_key_then_the_only_quiet_key() {
+        let mut state = fresh_state();
+        let (sleeper, live, quiet, first, second) = (
+            test_key("sleeper"),
+            test_key("mixed#live"),
+            test_key("mixed#quiet"),
+            test_key("snooze#first"),
+            test_key("snooze#second"),
+        );
+        seat(&mut state, sleeper, "sleeper", false);
+        seat(&mut state, live, "mixed", true);
+        seat(&mut state, quiet, "mixed", false);
+        seat(&mut state, first, "snooze", false);
+        seat(&mut state, second, "snooze", false);
+
+        assert_eq!(
+            state.addressee_key(&nick("sleeper")),
+            Ok(sleeper),
+            "the only key of the nickname is quiet, and it may return"
+        );
+        assert_eq!(
+            state.addressee_key(&nick("mixed")),
+            Ok(live),
+            "a live key wins over a quiet key of the same nickname"
+        );
+        assert_eq!(
+            state.addressee_key(&nick("snooze")),
+            Err(KeyOfError::Ambiguous),
+            "two quiet keys use the nickname"
+        );
+        assert_eq!(
+            state.addressee_key(&nick("nobody")),
+            Err(KeyOfError::Unknown),
+            "no key uses the nickname"
+        );
+    }
+
+    /// A card in the meta channel names the endpoint of its key before the `PeerInfo` of that key
+    /// comes. `note_key_endpoint` binds it as the dial hint of the key, so a send to the key is
+    /// deliverable at once, and the `PeerInfo` that follows finds the same binding.
+    #[test]
+    fn a_card_endpoint_makes_the_key_deliverable_before_its_peer_info() {
+        let mut state = fresh_state();
+        let bob = test_key("bob");
+        let endpoint = endpoint_id(61);
+        seat(&mut state, bob, "bob", true);
+        assert!(
+            state.address_of(&bob).is_none(),
+            "no address before the card"
+        );
+
+        state.note_key_endpoint(bob, iroh::EndpointAddr::new(endpoint));
+
+        assert_eq!(
+            state.address_of(&bob).map(|address| address.id),
+            Some(endpoint),
+            "a send to the key has no address after its card"
+        );
+        assert_eq!(
+            state.hint_owner.get(&nick("bob")),
+            Some(&bob),
+            "the hint belongs to the key of the card"
+        );
+        state.bind_peer_endpoint(bob, nick("bob"), iroh::EndpointAddr::new(endpoint));
+        assert_eq!(
+            state.address_of(&bob).map(|address| address.id),
+            Some(endpoint),
+            "the PeerInfo that follows moved the address"
+        );
+    }
+
+    /// Two live keys share a nickname and the first owns the dial hint. The card of the second
+    /// binds no hint: a directed send to the nickname must not reach a node that only borrowed
+    /// the label. The endpoint waits for the second key, which a send to that key dials.
+    #[test]
+    fn the_card_endpoint_of_a_second_live_key_of_a_nickname_is_refused_not_bound() {
+        let mut state = fresh_state();
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint) = (endpoint_id(62), endpoint_id(63));
+        seat(&mut state, first, "bob", true);
+        seat(&mut state, second, "bob", true);
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+
+        state.note_key_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+
+        assert_eq!(
+            state
+                .peer_endpoints
+                .get(&nick("bob"))
+                .map(|address| address.id),
+            Some(first_endpoint),
+            "the hint of the nickname moved to the second key"
+        );
+        assert_eq!(
+            state
+                .refused_endpoints
+                .get(&second)
+                .map(|address| address.id),
+            Some(second_endpoint),
+            "the endpoint of the second key was not kept"
+        );
+        assert_eq!(
+            state.address_of(&second).map(|address| address.id),
+            Some(second_endpoint),
+            "a send to the second key does not dial its own endpoint"
+        );
+        assert_eq!(
+            state.address_of(&first).map(|address| address.id),
+            Some(first_endpoint),
+            "the first key lost its endpoint"
+        );
+    }
+
+    /// The endpoints that sync code released wait for the teardown of the pool in a bounded list: fed 10 times its
+    /// cap of endpoints, it holds the cap (the first ones), and the others wait in the orphan set, where the sweep
+    /// queues them again after the drain. The orphan set has its own cap: the oldest of the waiting ones fall back to
+    /// the idle sweep of the pool.
+    #[test]
+    fn the_endpoints_that_wait_for_the_teardown_stay_inside_their_cap_at_10_times_the_cap() {
+        let mut state = fresh_state();
+        let cap = 256;
+        let endpoints: Vec<EndpointId> = (0..10 * cap)
+            .map(|index| {
+                let mut bytes = [3u8; 32];
+                bytes[..4].copy_from_slice(&u32::try_from(index).unwrap_or(0).to_le_bytes());
+                iroh::SecretKey::from_bytes(&bytes).public()
+            })
+            .collect();
+
+        for endpoint in &endpoints {
+            state.release_unbound_endpoint(*endpoint);
+        }
+
+        let waiting = state.take_teardown_pending();
+        assert_eq!(waiting.len(), cap, "the list holds its cap");
+        assert!(
+            waiting.contains(&endpoints[0]) && !waiting.contains(&endpoints[endpoints.len() - 1]),
+            "the first endpoints are queued and the last one waits"
+        );
+        assert_eq!(
+            state.orphaned_endpoints.len(),
+            super::event_loop_state::ORPHANED_ENDPOINTS_MAX,
+            "the endpoints that found the list full wait in the orphan set, up to its cap"
+        );
+        assert!(
+            state.take_teardown_pending().is_empty(),
+            "the list is empty after it was taken"
+        );
+    }
+
+    /// The orphan set is bounded: fed 10 times its cap of linked endpoints that no nickname binds, it holds the cap, and
+    /// the oldest fall back to the idle sweep of the pool.
+    #[test]
+    fn the_orphan_set_stays_inside_its_cap_at_10_times_the_cap() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoints: Vec<EndpointId> = (0..10 * cap)
+            .map(|index| {
+                let mut bytes = [5u8; 32];
+                bytes[..4].copy_from_slice(&u32::try_from(index).unwrap_or(0).to_le_bytes());
+                iroh::SecretKey::from_bytes(&bytes).public()
+            })
+            .collect();
+
+        for endpoint in &endpoints {
+            state.linked_endpoints.insert(*endpoint);
+            state.release_unbound_endpoint(*endpoint);
+        }
+
+        assert_eq!(
+            state.orphaned_endpoints.len(),
+            cap,
+            "the orphan set holds more than its cap"
+        );
+        assert!(
+            state
+                .orphaned_endpoints
+                .contains(&endpoints[endpoints.len() - 1])
+                && !state.orphaned_endpoints.contains(&endpoints[0]),
+            "the newest is kept and the oldest was dropped"
+        );
+    }
+
+    /// The orphan set drops an orphan when it is full, and the state of that orphan goes with it: its address, direct
+    /// path, proof and backoff are cleaned at the eviction, so no eviction leaves state that nothing finds again. That
+    /// holds for an orphan whose link has ended since it came in (it waits for the next sweep, and the flood evicts it
+    /// first), and for a linked one when more endpoints are linked than the set holds (`--max-peers` is not capped).
+    #[test]
+    fn the_orphan_that_a_full_set_drops_loses_its_state_with_it() {
+        use super::direct_state::DirectState;
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoint_at = |index: u32| {
+            let mut bytes = [11u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        let mut state = fresh_state();
+
+        // `cap - 1` linked orphans, and one orphan whose link ended: the only one that is not linked
+        let lost_link = endpoint_at(0);
+        state.linked_endpoints.insert(lost_link);
+        state.release_unbound_endpoint(lost_link);
+        state.direct.insert(lost_link, DirectState::Direct);
+        state.linked_endpoints.remove(&lost_link);
+        for index in 1..u32::try_from(cap).expect("a small number") {
+            let linked = endpoint_at(index);
+            state.linked_endpoints.insert(linked);
+            state.release_unbound_endpoint(linked);
+        }
+        assert_eq!(state.orphaned_endpoints.len(), cap, "the set is full");
+        // one more linked orphan: the set drops the only orphan that is not linked, the one that lost its link
+        let newcomer = endpoint_at(u32::try_from(cap).expect("a small number"));
+        state.linked_endpoints.insert(newcomer);
+        state.release_unbound_endpoint(newcomer);
+
+        assert!(
+            !state.orphaned_endpoints.contains(&lost_link),
+            "the orphan that lost its link was not the one dropped"
+        );
+        assert!(
+            !state.direct.contains_key(&lost_link),
+            "the orphan that a full set dropped kept its direct state: no sweep finds it any more"
+        );
+
+        // every orphan is linked now: the next newcomer makes the set drop a LINKED one, and that one loses its state
+        let linked_with_state: EndpointId = *state
+            .orphaned_endpoints
+            .oldest()
+            .expect("the set holds endpoints");
+        state.direct.insert(linked_with_state, DirectState::Direct);
+        let last = endpoint_at(u32::try_from(cap).expect("a small number") + 1);
+        state.linked_endpoints.insert(last);
+        state.release_unbound_endpoint(last);
+        let with_state: Vec<EndpointId> = state.direct.keys().copied().collect();
+        let dropped: Vec<EndpointId> = with_state
+            .into_iter()
+            .filter(|endpoint| !state.orphaned_endpoints.contains(endpoint))
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "an orphan that the set dropped kept its direct state: {dropped:?}"
+        );
+    }
+
+    /// The pooled connection and the dial cooldown of a dropped orphan need the async pool, which the drop cannot
+    /// call: the drop queues the teardown, as every other release of an unbound endpoint does. With no queue the
+    /// connection stays open until the idle sweep of the pool finds it, and the cooldown refuses the next dial of
+    /// an endpoint that nothing holds any more.
+    #[test]
+    fn the_orphan_that_a_full_set_drops_waits_for_the_teardown_of_the_pool() {
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoint_at = |index: u32| {
+            let mut bytes = [17u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        let mut state = fresh_state();
+        for index in 0..u32::try_from(cap).expect("a small number") {
+            let linked = endpoint_at(index);
+            state.linked_endpoints.insert(linked);
+            state.release_unbound_endpoint(linked);
+        }
+        assert!(
+            state.take_teardown_pending().is_empty(),
+            "a linked orphan queues no teardown: it keeps its pool until its link ends"
+        );
+        assert_eq!(state.orphaned_endpoints.len(), cap, "the set is full");
+
+        let newcomer = endpoint_at(u32::try_from(cap).expect("a small number"));
+        state.linked_endpoints.insert(newcomer);
+        state.release_unbound_endpoint(newcomer);
+
+        assert_eq!(
+            state.take_teardown_pending(),
+            vec![endpoint_at(0)],
+            "the oldest orphan was dropped, and its pooled connection waits for no teardown"
+        );
+    }
+
+    /// An orphan that another key bound again before the full set dropped it keeps its state: the endpoint is bound, as
+    /// the callers of `forget_endpoint_state` and the drain of the teardown check, and the nickname that binds it needs
+    /// its address, direct path and proof for a dial. The set forgets the endpoint; the state stays.
+    #[test]
+    fn an_orphan_that_another_key_bound_again_keeps_its_state_when_a_full_set_drops_it() {
+        use super::direct_state::DirectState;
+        let cap = super::event_loop_state::ORPHANED_ENDPOINTS_MAX;
+        let endpoint_at = |index: u32| {
+            let mut bytes = [13u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        let mut state = fresh_state();
+
+        // the only orphan that is not linked, and so the one that a flood drops: a hint binds it again
+        let rebound = endpoint_at(0);
+        state.linked_endpoints.insert(rebound);
+        state.release_unbound_endpoint(rebound);
+        state.direct.insert(rebound, DirectState::Direct);
+        state.linked_endpoints.remove(&rebound);
+        state
+            .peer_endpoints
+            .insert(nick("carol"), iroh::EndpointAddr::new(rebound));
+        for index in 1..u32::try_from(cap).expect("a small number") {
+            let linked = endpoint_at(index);
+            state.linked_endpoints.insert(linked);
+            state.release_unbound_endpoint(linked);
+        }
+        let newcomer = endpoint_at(u32::try_from(cap).expect("a small number"));
+        state.linked_endpoints.insert(newcomer);
+        state.release_unbound_endpoint(newcomer);
+
+        assert!(
+            !state.orphaned_endpoints.contains(&rebound),
+            "the orphan that another key bound again was not the one dropped"
+        );
+        assert!(
+            state.direct.contains_key(&rebound),
+            "the set deleted the state of an endpoint that another key bound again"
+        );
+    }
+
+    /// A full orphan set drops an orphan that is not linked, never a linked one: the state of a linked orphan (its
+    /// address, its direct path, its proof) is cleaned only when its link ends, and the set is walked for that. The
+    /// linked endpoints are far fewer than the cap, so there is always an unlinked orphan to drop.
+    #[test]
+    fn a_full_orphan_set_keeps_its_linked_orphan() {
+        let mut state = fresh_state();
+        let linked = {
+            let mut bytes = [7u8; 32];
+            bytes[..4].copy_from_slice(&0u32.to_le_bytes());
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        state.linked_endpoints.insert(linked);
+        state.release_unbound_endpoint(linked);
+        assert!(
+            state.orphaned_endpoints.contains(&linked),
+            "the linked endpoint is an orphan"
+        );
+
+        // more unlinked endpoints than the queue and the orphan set hold together: the first ones fill the queue, the
+        // rest go to the orphan set, which overflows
+        let flood = super::event_loop_state::ORPHANED_ENDPOINTS_MAX + 512;
+        for index in 1..=u32::try_from(flood).expect("a small number") {
+            let mut bytes = [7u8; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            state.release_unbound_endpoint(iroh::SecretKey::from_bytes(&bytes).public());
+        }
+
+        assert!(
+            state.orphaned_endpoints.contains(&linked),
+            "the full orphan set dropped its linked orphan: its state is cleaned by no link loss any more"
+        );
+        assert_eq!(
+            state.orphaned_endpoints.len(),
+            super::event_loop_state::ORPHANED_ENDPOINTS_MAX,
+            "the orphan set holds its cap"
+        );
+    }
+
+    /// The retained endpoints are bounded: a flood of signed `PeerInfo` frames with fresh keys under a bound
+    /// nickname keeps the cap and no more, and the oldest key goes first.
+    #[test]
+    fn the_retained_endpoints_keep_their_cap_and_drop_the_oldest() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::REFUSED_ENDPOINTS_CAP;
+        let keys: Vec<AuthorKey> = (0..10 * cap)
+            .map(|index| test_key(&format!("flood-{index}")))
+            .collect();
+        for key in &keys {
+            state.retain_refused_endpoint(*key, iroh::EndpointAddr::new(endpoint_id(90)));
+        }
+
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "10 times the cap of fresh keys left more than the cap"
+        );
+        assert!(
+            !state.refused_endpoints.contains_key(&keys[0]),
+            "the oldest key is still retained"
+        );
+        assert!(
+            state
+                .refused_endpoints
+                .contains_key(keys.last().expect("a last key")),
+            "the newest key is not retained"
+        );
+    }
+
+    /// A key that is retained again after its endpoint was released has one place in the queue, the newest.
+    /// The stale place at the head must not make the next key at the cap release the endpoint that the key
+    /// holds now, while older keys stay.
+    #[test]
+    fn a_key_that_is_retained_again_does_not_lose_its_endpoint_to_its_stale_place() {
+        let mut state = fresh_state();
+        let cap = super::event_loop_state::REFUSED_ENDPOINTS_CAP;
+        let keys: Vec<AuthorKey> = (0..=cap + 1)
+            .map(|index| test_key(&format!("again-{index}")))
+            .collect();
+        let again = keys[0];
+        let address = iroh::EndpointAddr::new(endpoint_id(91));
+        state.retain_refused_endpoint(again, address.clone());
+        state.release_refused_endpoint(&again);
+        for key in &keys[1..cap] {
+            state.retain_refused_endpoint(*key, address.clone());
+        }
+        state.retain_refused_endpoint(again, address.clone());
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "the map is at its cap before the key that pushes the oldest out"
+        );
+
+        state.retain_refused_endpoint(keys[cap], address);
+
+        assert!(
+            state.refused_endpoints.contains_key(&again),
+            "the key that was retained again lost its endpoint to its stale place in the queue"
+        );
+        assert!(
+            !state.refused_endpoints.contains_key(&keys[1]),
+            "the oldest key that is still retained was not the one to go"
+        );
+        assert_eq!(
+            state.refused_endpoints.len(),
+            cap,
+            "the cap holds after the newest key"
+        );
+    }
+
+    /// A card binds nothing for a key that said goodbye, since a key never speaks again and the
+    /// card is a replay, and nothing for a key that no roster holds: no name, no hint.
+    #[test]
+    fn a_card_endpoint_binds_nothing_for_a_departed_key_or_a_stranger() {
+        let mut state = fresh_state();
+        let (departed, stranger) = (test_key("departed"), test_key("stranger"));
+        seat(&mut state, departed, "departed", true);
+        state.note_left(departed);
+
+        state.note_key_endpoint(departed, iroh::EndpointAddr::new(endpoint_id(64)));
+        state.note_key_endpoint(stranger, iroh::EndpointAddr::new(endpoint_id(65)));
+
+        assert!(
+            state.address_of(&departed).is_none() && state.address_of(&stranger).is_none(),
+            "a card bound an endpoint for a departed key or a stranger"
+        );
+        assert!(
+            state.peer_endpoints.is_empty() && state.refused_endpoints.is_empty(),
+            "a card left a hint or a retained endpoint behind"
+        );
+    }
+
+    /// The member list of the transport plane has one row for each key. Two live keys that use
+    /// one nickname are two rows, the hint of a nickname that no key uses yet is a row, and an
+    /// endpoint that two rows name is listed once.
+    #[test]
+    fn the_member_list_has_one_row_for_each_key_and_one_for_each_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second) = (test_key("bob#first"), test_key("bob#second"));
+        let (first_endpoint, second_endpoint, card_endpoint) =
+            (endpoint_id(1), endpoint_id(2), endpoint_id(3));
+        seat(&mut state, first, "bob", true);
+        seat(&mut state, second, "bob", true);
+        state.bind_peer_endpoint(first, nick("bob"), iroh::EndpointAddr::new(first_endpoint));
+        state.retain_refused_endpoint(second, iroh::EndpointAddr::new(second_endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("carol"), iroh::EndpointAddr::new(card_endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("dave"), iroh::EndpointAddr::new(first_endpoint));
+
+        let mut listed: Vec<EndpointId> = state
+            .member_addresses()
+            .iter()
+            .map(|address| address.id)
+            .collect();
+        listed.sort_unstable();
+        let mut want = vec![first_endpoint, second_endpoint, card_endpoint];
+        want.sort_unstable();
+
+        assert_eq!(listed, want, "the member list is not one row for each key");
+    }
+
+    /// A key that renamed keeps its hint under the old nickname until the sweep prunes it. The
+    /// member list follows `address_of`: the key is listed once, by the address that a send to it
+    /// dials, and the stale hint under the old nickname is not a second row.
+    #[test]
+    fn a_key_that_renamed_is_one_row_of_the_member_list() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("renamer");
+        let (old_endpoint, new_endpoint) = (endpoint_id(1), endpoint_id(2));
+        seat(&mut state, key, "old-name", true);
+        state.bind_peer_endpoint(key, nick("old-name"), iroh::EndpointAddr::new(old_endpoint));
+        state.names.insert(key, nick("new-name"));
+        state.bind_peer_endpoint(key, nick("new-name"), iroh::EndpointAddr::new(new_endpoint));
+
+        let listed: Vec<EndpointId> = state
+            .member_addresses()
+            .iter()
+            .map(|address| address.id)
+            .collect();
+
+        assert_eq!(
+            listed,
+            vec![new_endpoint],
+            "the key is one row, by the address that a send to it dials"
+        );
+        assert_eq!(
+            state.address_of(&key).map(|address| address.id),
+            Some(new_endpoint),
+            "the member list and the send route agree"
+        );
+    }
+
+    /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
+    /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
+    #[test]
+    fn a_proven_pair_on_the_relay_is_raced_again_when_its_link_goes_down() {
+        use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let address = iroh::EndpointAddr::new(bob)
+            .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+        let node = |direct: Option<DirectState>, kind: PathKind| {
+            let mut node = fresh_state();
+            node.names.insert(test_key("bob"), nick("bob"));
+            node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
+            node.direct.extend(direct.map(|verdict| (bob, verdict)));
+            node.path_kinds.insert(bob, kind);
+            node
+        };
+
+        let mut proven = node(Some(DirectState::Direct), PathKind::Relay);
+        assert_eq!(
+            proven.relay_race_on_link_loss(bob, now),
+            Some(address.clone()),
+            "the relay race returns the address to dial again"
+        );
+        assert!(
+            proven.lane_session_wanted(bob, now),
+            "the offer is not held back"
+        );
+        assert_eq!(
+            proven.relay_race_on_link_loss(endpoint_id(2), now),
+            None,
+            "an unknown peer"
+        );
+        for (direct, kind, why) in [
+            (Some(DirectState::Direct), PathKind::Ip, "UDP still holds"),
+            (
+                Some(DirectState::RelayOnly),
+                PathKind::Relay,
+                "never proven",
+            ),
+            (None, PathKind::Relay, "no verdict"),
+        ] {
+            assert_eq!(
+                node(direct, kind).relay_race_on_link_loss(bob, now),
+                None,
+                "{why}"
+            );
+        }
+    }
+
+    /// The recursion rule closes a gossip link on the gossip rung, and no re-graft follows (see
+    /// `a_pair_that_rides_the_gossip_rung_is_not_regrafted`). The pair must be raced again then,
+    /// or nothing brings a link back while the IP path is gone.
+    #[test]
+    fn a_proven_pair_on_the_gossip_rung_is_raced_again_when_its_link_goes_down() {
+        use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let address = iroh::EndpointAddr::new(bob)
+            .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+        let mut node = fresh_state();
+        node.names.insert(test_key("bob"), nick("bob"));
+        node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
+        node.direct.insert(bob, DirectState::Direct);
+        node.path_kinds.insert(bob, PathKind::Gossip);
+
+        assert_eq!(
+            node.relay_race_on_link_loss(bob, now),
+            Some(address),
+            "the gossip rung race returns the address to dial again"
+        );
+        assert!(
+            node.lane_session_wanted(bob, now),
+            "the offer is not held back"
+        );
+    }
+
+    /// A proven pair that loses its link is re-grafted in about a second, whatever the other links
+    /// of the node are,
+    /// not at the heal tick (10 to 15 s). A pair that flaps is paced by the relink cooldown.
+    #[test]
+    fn a_proven_peer_that_lost_its_link_is_regrafted_in_about_a_second() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (bob, carol) = (endpoint_id(1), endpoint_id(2));
+        let now = Instant::now();
+        let after = |millis: u64| now + Duration::from_millis(millis);
+        let lost = |peers_left: &[EndpointId], verdict: DirectState| {
+            let mut node = fresh_state();
+            node.direct.insert(bob, verdict);
+            for peer in peers_left {
+                node.link(*peer);
+            }
+            node
+        };
+
+        let mut centered = lost(&[], DirectState::Direct);
+        assert!(
+            centered.plan_regraft_on_link_loss(bob, now, 0.0),
+            "a centered jitter regrafts the peer at once"
+        );
+        assert!(centered.take_regrafts_due(after(900)).is_empty(), "not yet");
+        assert_eq!(centered.take_regrafts_due(after(1100)), vec![bob], "due");
+        assert!(
+            centered.take_regrafts_due(after(1200)).is_empty(),
+            "taken once"
+        );
+
+        let mut early = lost(&[], DirectState::Direct);
+        assert!(
+            early.plan_regraft_on_link_loss(bob, now, -1.0),
+            "an early jitter does not regraft the peer yet"
+        );
+        assert_eq!(
+            early.take_regrafts_due(after(750)),
+            vec![bob],
+            "jitter down"
+        );
+        let mut late = lost(&[], DirectState::Direct);
+        assert!(
+            late.plan_regraft_on_link_loss(bob, now, 1.0),
+            "a late jitter still regrafts the peer"
+        );
+        assert!(late.take_regrafts_due(after(1250)).is_empty(), "jitter up");
+        assert_eq!(
+            late.take_regrafts_due(after(1350)),
+            vec![bob],
+            "only the peer that lost its link is due for a regraft"
+        );
+
+        let mut back = lost(&[], DirectState::Direct);
+        back.plan_regraft_on_link_loss(bob, now, 0.0);
+        back.link(bob);
+        assert!(
+            back.take_regrafts_due(after(1100)).is_empty(),
+            "the link came back"
+        );
+
+        let mut other_link = lost(&[carol], DirectState::Direct);
+        assert!(
+            other_link.plan_regraft_on_link_loss(bob, now, 0.0),
+            "a proven pair is grafted again whatever the other links are"
+        );
+        let mut unproven = lost(&[], DirectState::RelayOnly);
+        assert!(
+            !unproven.plan_regraft_on_link_loss(bob, now, 0.0),
+            "never proven"
+        );
+        let mut flapping = lost(&[], DirectState::Direct);
+        flapping.note_relink(bob, now);
+        assert!(
+            !flapping.plan_regraft_on_link_loss(bob, now, 0.0),
+            "on the relink cooldown"
+        );
+    }
+
+    /// A pair that reads as the relay is raced again by `relay_race_on_link_loss`, and its graft
+    /// follows the attach. A quick re-graft would dial the relay for nothing and arm the backoff.
+    #[test]
+    fn a_pair_that_reads_as_the_relay_is_not_regrafted_quickly() {
+        use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let lost = |kind: PathKind| {
+            let mut node = fresh_state();
+            node.direct.insert(bob, DirectState::Direct);
+            node.path_kinds.insert(bob, kind);
+            node
+        };
+
+        assert!(
+            !lost(PathKind::Relay).plan_regraft_on_link_loss(bob, now, 0.0),
+            "the relay reading belongs to the race"
+        );
+        assert!(
+            lost(PathKind::Ip).plan_regraft_on_link_loss(bob, now, 0.0),
+            "an IP path is grafted again"
+        );
+    }
+
+    /// A gossip link on the gossip rung is closed by the recursion rule, so a graft of the pair
+    /// only makes the gossip layer dial a link that dies.
+    #[test]
+    fn a_pair_that_rides_the_gossip_rung_is_not_regrafted() {
+        use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let mut node = fresh_state();
+        node.direct.insert(bob, DirectState::Direct);
+        node.path_kinds.insert(bob, PathKind::Gossip);
+
+        assert!(
+            node.rides_gossip_rung(bob),
+            "the pair is seen to ride the gossip rung"
+        );
+        assert!(
+            !node.plan_regraft_on_link_loss(bob, now, 0.0),
+            "no re-graft is planned for a pair on the gossip rung"
+        );
+    }
+
+    /// The release rule's two answers, on a node that lets go at two links.
+    fn two_link_node() -> EventLoopState {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 2;
+        state
+    }
+
+    #[test]
+    fn a_node_below_the_release_count_wants_the_rendezvous() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
+        state.linked_endpoints.insert(endpoint_id(1));
+        assert!(
+            state.rendezvous_wanted(),
+            "a node below the release count wants the rendezvous"
+        );
+        assert!(
+            !state.should_release_rendezvous(Instant::now()),
+            "one link is not enough"
+        );
+    }
+
+    #[test]
+    fn a_node_at_the_release_count_lets_go_and_stops_wanting_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        assert!(
+            state.should_release_rendezvous(Instant::now()),
+            "a node at the release count lets go of the rendezvous"
+        );
+
+        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
+        assert!(
+            !state.rendezvous_wanted(),
+            "enough links: no graft, no offer"
+        );
+        assert!(
+            !state.should_release_rendezvous(Instant::now()),
+            "nothing left to let go of"
+        );
+    }
+
+    /// Gossip ends the link some time after the release, and the heal tick and
+    /// every link event ask again meanwhile. A node already released must not be
+    /// due again, or it tells gossip to leave a second time and logs it twice.
+    #[test]
+    fn a_node_that_has_released_is_not_due_again_while_the_link_is_still_up() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        assert!(
+            state.should_release_rendezvous(Instant::now()),
+            "the first release is due while the link is up"
+        );
+
+        state.mark_rendezvous_released(endpoint_id(9));
+
+        assert!(
+            !state.should_release_rendezvous(Instant::now()),
+            "a node that released is not due again while its link stays up"
+        );
+    }
+
+    /// A mesh that split into islands, each with links enough, never visits the rendezvous on its
+    /// own: nothing is owed and no link is below the count. Each node comes back once in a long
+    /// while, and the beacon introduces the islands to each other.
+    #[test]
+    fn a_node_that_let_go_wants_the_rendezvous_again_when_its_return_falls_due() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
+        assert!(
+            !state.rendezvous_wanted(),
+            "it let go a moment ago: no visit yet"
+        );
+        assert!(
+            state.rendezvous_return_due.is_some(),
+            "a release sets the time of its return"
+        );
+
+        state.rendezvous_return_due = Some(Instant::now());
+        state.pay_periodic_return(Instant::now(), endpoint_id(9));
+
+        assert!(
+            state.rendezvous_wanted(),
+            "a return that fell due is wanted although the links are enough"
+        );
+    }
+
+    /// A return that fell due and found no link is not wanted for ever: the visit is bounded
+    /// like an owed one, or a member whose visit cannot link grafts and offers at every tick.
+    #[test]
+    fn a_return_that_fell_due_and_got_no_link_is_not_wanted_after_the_comeback_window() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        let window = tuning::RENDEZVOUS_COMEBACK;
+        state.rendezvous_return_due = Instant::now().checked_sub(window + Duration::from_secs(1));
+
+        assert!(
+            !state.rendezvous_wanted(),
+            "a return that fell due a window ago and found no link is wanted for ever"
+        );
+    }
+
+    /// The periodic return is paid on the heal tick as an owed one: wanted for the comeback
+    /// window, due again one period later, and not paid twice.
+    #[test]
+    fn a_periodic_return_that_fell_due_is_paid_once_and_set_again_one_period_later() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let local = endpoint_id(9);
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(local);
+        let now = Instant::now();
+        state.rendezvous_return_due = Some(now);
+
+        state.pay_periodic_return(now, local);
+
+        assert!(state.rendezvous_wanted(), "the visit is wanted now");
+        let period = tuning::RENDEZVOUS_PERIODIC_RETURN;
+        let next = state.rendezvous_return_due.expect("it is set again");
+        assert!(next >= now + period, "the next return is a period away");
+        let owed_until = state.rendezvous_comeback_until;
+
+        state.pay_periodic_return(now + Duration::from_secs(1), local);
+
+        assert_eq!(
+            state.rendezvous_comeback_until, owed_until,
+            "a return that is not due is not paid again"
+        );
+        state.rendezvous_comeback_until = now.checked_sub(Duration::from_secs(1));
+        assert!(!state.rendezvous_wanted(), "the visit ends with its window");
+    }
+
+    #[test]
+    fn the_return_of_a_node_that_let_go_falls_due_one_period_later_at_the_earliest() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let period = tuning::RENDEZVOUS_PERIODIC_RETURN;
+        for seed in 1..=8 {
+            let after = super::rendezvous_return_after(endpoint_id(seed));
+            assert!(
+                after >= period,
+                "seed {seed}: {after:?} is before the period"
+            );
+            assert!(
+                after <= period + period / 2,
+                "seed {seed}: {after:?} is later than half a period more"
+            );
+        }
+        assert_ne!(
+            super::rendezvous_return_after(endpoint_id(1)),
+            super::rendezvous_return_after(endpoint_id(2)),
+            "two members do not come back together"
+        );
+    }
+
+    #[test]
+    fn a_visit_that_the_period_asked_for_lasts_its_dwell_time_before_the_node_lets_go() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        let now = Instant::now();
+        state.rendezvous_return_due = Some(now);
+
+        state.note_rendezvous_link_up(now);
+
+        assert!(
+            !state.should_release_rendezvous(now),
+            "the visit lasts its dwell time: the beacon needs it to introduce the islands"
+        );
+        let after_dwell = now + tuning::RENDEZVOUS_DWELL;
+        assert!(
+            state.should_release_rendezvous(after_dwell),
+            "the node still lets go once the dwell the period asked for has passed"
+        );
+    }
+
+    #[test]
+    fn a_link_that_comes_up_before_the_return_is_due_asks_for_no_dwell() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        let now = Instant::now();
+
+        state.note_rendezvous_link_up(now);
+
+        assert!(
+            state.should_release_rendezvous(now),
+            "the node lets go at once when no dwell is owed"
+        );
+    }
+
+    #[test]
+    fn a_link_that_comes_back_ends_the_wait_for_the_return() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.mark_rendezvous_released(endpoint_id(9));
+        assert!(
+            state.rendezvous_return_due.is_some(),
+            "the return is due while the rendezvous link is down"
+        );
+
+        state.note_rendezvous_link_up(Instant::now());
+
+        assert!(
+            state.rendezvous_return_due.is_none(),
+            "the link coming back clears the owed return"
+        );
+    }
+
+    #[test]
+    fn a_node_that_falls_below_the_count_comes_back() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        assert!(
+            !state.rendezvous_wanted(),
+            "a node that falls below the count stops wanting the rendezvous"
+        );
+
+        state.linked_endpoints.remove(&endpoint_id(2));
+
+        assert!(
+            state.rendezvous_wanted(),
+            "falling below the count makes the node want the rendezvous again"
+        );
+    }
+
+    #[test]
+    fn the_node_that_hosts_the_rendezvous_keeps_its_link() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
+        for seed in 1..=5 {
+            state.linked_endpoints.insert(endpoint_id(seed));
+        }
+        assert!(
+            !state.should_release_rendezvous(Instant::now()),
+            "its link keeps the beacon's gossip view non-empty for a joiner"
+        );
+        assert!(
+            state.rendezvous_wanted(),
+            "hosting the rendezvous keeps the node wanting it"
+        );
+    }
+
+    #[test]
+    fn an_owed_return_makes_a_node_with_enough_links_want_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.owe_rendezvous_return(Instant::now());
+        assert!(
+            state.rendezvous_wanted(),
+            "an owed return makes a node with enough links want the rendezvous"
+        );
+    }
+
+    /// A debt with an end: a node refused again and again at the rendezvous
+    /// stops offering when the return it owed expires.
+    #[test]
+    fn an_owed_return_ends_at_its_deadline() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        let long_ago = Instant::now()
+            .checked_sub(tuning::RENDEZVOUS_COMEBACK + Duration::from_secs(1))
+            .expect("a past instant");
+        state.owe_rendezvous_return(long_ago);
+
+        assert!(
+            !state.rendezvous_wanted(),
+            "past the deadline the node no longer wants the rendezvous"
+        );
+    }
+
+    /// A node that came back stays its dwell time before it lets go again, and
+    /// lets go on its own once the time has passed, with no link event to
+    /// trigger it.
+    #[test]
+    fn a_node_that_came_back_lets_go_again_after_its_dwell_time() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.owe_rendezvous_return(Instant::now());
+        let now = Instant::now();
+        state.note_rendezvous_link_up(now);
+        assert!(
+            state.rendezvous_flags.contains(&RendezvousFlag::Linked),
+            "the rendezvous link stays up after the return"
+        );
+        assert!(
+            !state.should_release_rendezvous(now),
+            "the visit has just begun"
+        );
+
+        let later = now + tuning::RENDEZVOUS_DWELL + Duration::from_secs(1);
+
+        assert!(
+            state.should_release_rendezvous(later),
+            "the dwell time has passed and the links are enough"
+        );
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "the debt was paid by the visit"
+        );
+    }
+
+    /// A first visit has no dwell: a joiner lets go as soon as it has the links.
+    #[test]
+    fn a_first_visit_has_no_dwell_time() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.note_rendezvous_link_up(Instant::now());
+        assert!(
+            state.should_release_rendezvous(Instant::now()),
+            "a first visit has no dwell time and lets go at once"
+        );
+    }
 
     /// An unsigned chat message carrying `id` — enough to exercise
     /// `mark_seen`, which keys on `dedup_key()` (`SHA-256(pubkey ‖ id)`).
-    fn msg_with_id(id: &MessageId) -> Message {
+    fn msg_with_id(id: &MessageId) -> messages::Verified {
+        plain_with_id(id).sign(&protocol::Identity::generate())
+    }
+
+    fn plain_with_id(id: &MessageId) -> Message {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &nick("author-nick"),
-            AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: None,
-                corr: None,
-                body: MessageBody::from("body"),
-            },
+            AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from("body"),
+            ),
         );
         message.id = id.clone();
         message
-    }
-
-    #[test]
-    fn note_msg_seq_detects_equivocation_once() {
-        let mut state = fresh_state();
-        let key = "alice-key";
-        // First sighting at a seq → recorded, no fork.
-        assert!(!state.note_msg_seq(key, 0, "hashA".into()));
-        // Same message again (same hash) → no fork.
-        assert!(!state.note_msg_seq(key, 0, "hashA".into()));
-        // Different hash at the SAME seq → fork, reported exactly once.
-        assert!(
-            state.note_msg_seq(key, 0, "hashB".into()),
-            "conflict is a fork"
-        );
-        assert!(
-            !state.note_msg_seq(key, 0, "hashC".into()),
-            "already flagged: one event per key"
-        );
-    }
-
-    #[test]
-    fn note_msg_seq_is_per_key_and_per_seq() {
-        let mut state = fresh_state();
-        assert!(!state.note_msg_seq("alice", 0, "h0".into()));
-        // A new seq for the same author is just the next entry, not a fork.
-        assert!(!state.note_msg_seq("alice", 1, "h1".into()));
-        // A different key reusing seq 0 with its own hash is independent.
-        assert!(!state.note_msg_seq("bob", 0, "other".into()));
-        // But a conflict on alice's seq 0 still fires.
-        assert!(state.note_msg_seq("alice", 0, "h0-prime".into()));
-    }
-
-    #[test]
-    fn forget_msg_seq_prunes_author_and_fork_flag() {
-        let mut state = fresh_state();
-        state.note_msg_seq("alice", 0, "h0".into());
-        assert!(state.note_msg_seq("alice", 0, "h0-prime".into()), "fork");
-        assert!(state.forked.contains("alice"));
-        // Evicting the *recorded* twin (hash "h0") drops alice from both maps.
-        state.forget_msg_seq("alice", 0, "h0");
-        assert!(!state.author_seqs.contains_key("alice"));
-        assert!(
-            !state.forked.contains("alice"),
-            "fork flag pruned with author"
-        );
-    }
-
-    #[test]
-    fn forget_msg_seq_keeps_evidence_when_other_twin_evicted() {
-        // A fork keeps two twins at one (pubkey, seq). Evicting the twin we did
-        // NOT record must not clear the recorded slot / fork flag — otherwise a
-        // later resend of the still-retained twin re-detects the fork as new.
-        let mut state = fresh_state();
-        state.note_msg_seq("alice", 0, "recorded".into());
-        assert!(state.note_msg_seq("alice", 0, "twin".into()), "fork fires");
-        assert!(state.forked.contains("alice"));
-        // Evict the non-recorded twin ("twin"): the slot for "recorded" stays.
-        state.forget_msg_seq("alice", 0, "twin");
-        assert!(
-            state.author_seqs.contains_key("alice"),
-            "recorded slot retained"
-        );
-        assert!(state.forked.contains("alice"), "fork flag retained");
-        // A resend of the recorded twin does not re-fire the fork (already
-        // flagged), proving the evidence survived the eviction.
-        assert!(!state.note_msg_seq("alice", 0, "twin".into()));
-    }
-
-    #[test]
-    fn note_dag_moves_tip_set() {
-        let mut state = fresh_state();
-        // First message (no parents) becomes the sole tip.
-        assert!(!state.note_dag("h1".into(), &[], 100));
-        assert_eq!(state.dag_parents(), vec!["h1".to_string()]);
-        // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
-        assert!(!state.note_dag("h2".into(), &["h1".to_string()], 101));
-        assert_eq!(state.dag_parents(), vec!["h2".to_string()]);
-    }
-
-    #[test]
-    fn note_dag_keeps_concurrent_tips() {
-        let mut state = fresh_state();
-        state.note_dag("a".into(), &[], 1);
-        state.note_dag("b".into(), &[], 1); // concurrent: no shared parent
-        assert_eq!(state.dag_parents(), vec!["a".to_string(), "b".to_string()]);
-    }
-
-    #[test]
-    fn note_dag_flags_backdating() {
-        let mut state = fresh_state();
-        state.note_dag("parent".into(), &[], 200);
-        // Child claims an earlier timestamp than a parent it references.
-        assert!(state.note_dag("child".into(), &["parent".to_string()], 100));
-        // A forward timestamp is fine.
-        assert!(!state.note_dag("ok".into(), &["parent".to_string()], 300));
-    }
-
-    #[test]
-    fn forget_hash_prunes_dag() {
-        let mut state = fresh_state();
-        state.note_dag("h".into(), &[], 1);
-        state.forget_hash("h");
-        assert!(state.dag_parents().is_empty());
     }
 
     /// A valid (curve-point) `EndpointId` derived deterministically from
@@ -1470,65 +2733,327 @@ mod tests {
     // `bounded_fifo_set`; these only assert the state wires the right cap.
     #[test]
     fn known_endpoints_field_is_capped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let first = endpoint_id(0);
         state.known_endpoints.insert(first);
         for index in 0..KNOWN_ENDPOINTS_CAP {
-            state
-                .known_endpoints
-                .insert(endpoint_id(u8::try_from(index + 1).unwrap()));
+            state.known_endpoints.insert(endpoint_id(
+                u8::try_from(index + 1).expect("the cap is 64, so the index fits a u8"),
+            ));
         }
-        assert!(state.known_endpoints.len() <= KNOWN_ENDPOINTS_CAP);
+        assert!(
+            state.known_endpoints.len() <= KNOWN_ENDPOINTS_CAP,
+            "the endpoints cache never grows past its cap"
+        );
         assert!(
             !state.known_endpoints.contains(&first),
             "oldest evicted past the cap"
         );
     }
 
+    /// A card names a nickname and no key. The hint goes to the one key that answers to the
+    /// nickname, to no key when none does, and nowhere when two live keys do: the card does not
+    /// say which of them it is.
+    #[test]
+    fn a_card_hint_goes_to_the_only_key_of_its_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let first = iroh::EndpointAddr::new(endpoint_id(1));
+        let second = iroh::EndpointAddr::new(endpoint_id(2));
+
+        state.note_peer_endpoint(nick("carol"), first.clone());
+        assert_eq!(
+            state.peer_endpoints.get("carol"),
+            Some(&first),
+            "a card before any frame of the peer binds the hint"
+        );
+        assert!(
+            !state.hint_owner.contains_key("carol"),
+            "a hint with no key has no owner"
+        );
+
+        state.peer_for_test("bob");
+        state.note_peer_endpoint(nick("bob"), first.clone());
+        assert_eq!(
+            state.hint_owner.get("bob"),
+            Some(&test_key("bob")),
+            "the one key of the nickname owns the hint"
+        );
+
+        let other = AuthorKey::from_bytes([77; 32]);
+        state.names.insert(other, nick("bob"));
+        state.peers.insert(other);
+        state.note_peer_endpoint(nick("bob"), second);
+        assert_eq!(
+            state.peer_endpoints.get("bob"),
+            Some(&first),
+            "a card moved the hint of a nickname that two live keys use"
+        );
+    }
+
+    /// A card names a nickname and no key. A live key and a quiet key can share a nickname, and
+    /// only the live one answers there: the hint goes to it, as a send by nickname does.
+    #[test]
+    fn a_card_hint_goes_to_the_live_key_when_a_quiet_key_shares_the_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let live = test_key("bob");
+        state.peer_for_test("bob");
+        let quiet = AuthorKey::from_bytes([77; 32]);
+        state.names.insert(quiet, nick("bob"));
+        state.quiet.insert(quiet);
+        let card = iroh::EndpointAddr::new(endpoint_id(1));
+
+        state.note_peer_endpoint(nick("bob"), card.clone());
+
+        assert_eq!(
+            state.peer_endpoints.get("bob"),
+            Some(&card),
+            "a quiet key made the card of a nickname that one live key uses ambiguous"
+        );
+        assert_eq!(
+            state.hint_owner.get("bob"),
+            Some(&live),
+            "the live key does not own the hint"
+        );
+    }
+
+    /// The dial hint of a nickname has one owner. The roster has a row for each live key, and only
+    /// the owner reads `Direct`.
+    #[test]
+    fn only_the_key_that_owns_the_hint_reads_direct() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let linked = endpoint_id(1);
+        state.linked_endpoints.insert(linked);
+        let (owner, other) = (test_key("bob"), AuthorKey::from_bytes([77; 32]));
+        for key in [owner, other] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(linked));
+
+        let snapshot = state.roster_snapshot();
+        let mut reaches: Vec<Reach> = snapshot.peers.iter().map(|row| row.reach).collect();
+        reaches.sort_by_key(|reach| matches!(reach, Reach::Gossip));
+        assert_eq!(
+            reaches,
+            vec![Reach::Direct, Reach::Gossip],
+            "one row reads Direct (the owner) and the other reads Gossip: {snapshot:?}"
+        );
+    }
+
+    /// Two live peers use one nickname. The roster JSON names the key of each row, in the field
+    /// `key` (64 lowercase hex digits), so a client of the roster can send to one of them by key.
+    #[test]
+    fn the_roster_json_of_two_peers_with_one_nickname_names_both_keys() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second) = (test_key("twin#first"), test_key("twin#second"));
+        for key in [first, second] {
+            state.names.insert(key, nick("twin"));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+
+        let json = serde_json::to_value(state.roster_snapshot()).expect("a roster serializes");
+
+        let rows = json["peers"]
+            .as_array()
+            .expect("the roster has a peers array");
+        let key_of = |row: &serde_json::Value| row["key"].as_str().map(str::to_owned);
+        let mut keys: Vec<String> = rows.iter().filter_map(key_of).collect();
+        keys.sort();
+        let mut want = vec![first.to_string(), second.to_string()];
+        want.sort();
+        assert_eq!(
+            keys, want,
+            "the rows of the roster do not name both keys: {json}"
+        );
+    }
+
+    /// The dial hint of a nickname has one owner, and the lane of a row is the lane of that hint.
+    /// A quiet key under the same nickname owns no hint, so its row reads no lane.
+    #[test]
+    fn only_the_key_that_owns_the_hint_reads_its_lane() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let bob = endpoint_id(1);
+        let (owner, quiet) = (test_key("bob"), test_key("bob#quiet"));
+        for key in [owner, quiet] {
+            state.names.insert(key, nick("bob"));
+        }
+        state.peers.insert(owner);
+        state.surfaced.insert(owner);
+        state.quiet.insert(quiet);
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(bob));
+        state.direct.insert(bob, DirectState::Direct);
+
+        let snapshot = state.roster_snapshot();
+        let mut lanes: Vec<(bool, Lane)> = snapshot
+            .peers
+            .iter()
+            .map(|row| (row.quiet, row.transport))
+            .collect();
+        lanes.sort_by_key(|(is_quiet, _)| *is_quiet);
+
+        assert_eq!(
+            lanes,
+            vec![(false, Lane::Unicast), (true, Lane::Unreachable)],
+            "the quiet key read the lane of the hint that the live key owns: {snapshot:?}"
+        );
+    }
+
+    /// A directed send to a roster row needs a row that one live peer owns: a quiet row has a
+    /// dead endpoint, and a nickname of two live peers is refused by the engine.
+    #[test]
+    fn the_addressees_of_a_roster_are_the_live_nicknames_that_one_peer_uses() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peer_for_test("solo");
+        state.surfaced_for_test("solo");
+        for key in [test_key("twin#first"), test_key("twin#second")] {
+            state.names.insert(key, nick("twin"));
+            state.peers.insert(key);
+            state.surfaced.insert(key);
+        }
+        state.quiet_for_test("gone");
+        // One live key and one quiet key under one nickname are one member.
+        state.peer_for_test("mixed");
+        state.surfaced_for_test("mixed");
+        let quiet_twin = test_key("mixed#quiet");
+        state.names.insert(quiet_twin, nick("mixed"));
+        state.quiet.insert(quiet_twin);
+
+        let snapshot = state.roster_snapshot();
+        let mut addressed: Vec<&str> = snapshot.addressees().map(Nickname::as_str).collect();
+        addressed.sort_unstable();
+        let shared: Vec<&str> = snapshot
+            .ambiguous_nicknames()
+            .map(Nickname::as_str)
+            .collect();
+
+        assert_eq!(
+            addressed,
+            vec!["mixed", "solo"],
+            "a quiet row and a nickname of two live peers are no addressee: {snapshot:?}"
+        );
+        assert_eq!(
+            shared,
+            vec!["twin"],
+            "only the nickname of two live peers is ambiguous: {snapshot:?}"
+        );
+    }
+
+    /// A live peer that is not shown yet has no row, but a send to its nickname still counts it. A
+    /// nickname that a shown peer and an unshown live peer use is ambiguous, and no lobby packet is
+    /// sent to it.
+    #[test]
+    fn a_nickname_of_a_shown_peer_and_an_unshown_live_peer_is_no_addressee() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peer_for_test("solo");
+        state.surfaced_for_test("solo");
+        let shown = test_key("bob#shown");
+        let hidden = test_key("bob#hidden");
+        for key in [shown, hidden] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.surfaced.insert(shown);
+
+        let snapshot = state.roster_snapshot();
+        let addressed: Vec<&str> = snapshot.addressees().map(Nickname::as_str).collect();
+        let shared: Vec<&str> = snapshot
+            .ambiguous_nicknames()
+            .map(Nickname::as_str)
+            .collect();
+
+        assert_eq!(
+            addressed,
+            vec!["solo"],
+            "the engine refuses a send to bob, so the lobby must not address it: {snapshot:?}"
+        );
+        assert_eq!(
+            shared,
+            vec!["bob"],
+            "the unshown live peer counts toward the ambiguity: {snapshot:?}"
+        );
+    }
+
     #[test]
     fn roster_reach_tags_only_live_links_direct() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let linked_ep = endpoint_id(1);
         let stale_ep = endpoint_id(2);
         // A peer whose advertised endpoint is a live link → direct.
-        state.peers.insert(nick("linked"));
-        state
-            .peer_endpoints
-            .insert(nick("linked"), iroh::EndpointAddr::new(linked_ep));
+        state.peer_for_test("linked");
+        state.surfaced_for_test("linked");
+        state.bind_peer_endpoint(
+            test_key("linked"),
+            nick("linked"),
+            iroh::EndpointAddr::new(linked_ep),
+        );
         state.linked_endpoints.insert(linked_ep);
         // Advertised, but the endpoint is not (any longer) a live link → gossip.
-        state.peers.insert(nick("unlinked"));
-        state
-            .peer_endpoints
-            .insert(nick("unlinked"), iroh::EndpointAddr::new(stale_ep));
+        state.peer_for_test("unlinked");
+        state.surfaced_for_test("unlinked");
+        state.bind_peer_endpoint(
+            test_key("unlinked"),
+            nick("unlinked"),
+            iroh::EndpointAddr::new(stale_ep),
+        );
         // No PeerInfo seen yet → no binding → gossip.
-        state.peers.insert(nick("unknown"));
+        state.peer_for_test("unknown");
+        state.surfaced_for_test("unknown");
         // Quiet evictees are never live-linked → gossip.
-        state.quiet.insert(nick("quiet"));
+        state.quiet_for_test("quiet");
 
         let snapshot = state.roster_snapshot();
         let reach = |name: &str| {
-            snapshot
+            let found = snapshot
                 .peers
                 .iter()
-                .find(|entry| entry.nickname.as_str() == name)
+                .find(|entry| entry.nickname.as_str() == name);
+            found
                 .unwrap_or_else(|| panic!("{name} missing from roster"))
                 .reach
         };
-        assert_eq!(reach("linked"), Reach::Direct);
-        assert_eq!(reach("unlinked"), Reach::Gossip);
-        assert_eq!(reach("unknown"), Reach::Gossip);
-        assert_eq!(reach("quiet"), Reach::Gossip);
+        assert_eq!(
+            reach("linked"),
+            Reach::Direct,
+            "a linked peer reads as direct"
+        );
+        assert_eq!(
+            reach("unlinked"),
+            Reach::Gossip,
+            "an unlinked peer reads as gossip reach"
+        );
+        assert_eq!(
+            reach("unknown"),
+            Reach::Gossip,
+            "an unknown peer reads as gossip reach"
+        );
+        assert_eq!(
+            reach("quiet"),
+            Reach::Gossip,
+            "a quiet peer reads as gossip reach"
+        );
     }
 
     #[test]
     fn direct_state_follows_conn_path_readings_and_counts() {
         use crate::gossip::PathSummary;
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         // The mapping only reaches `RelayOnly` on a mesh whose relay may carry
         // payload; the lookup-only half is
         // `a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh`.
-        state.relay_transport = true;
+        state.relay_transport = PayloadPath::RelayAllowed;
         state.observe_path(endpoint_id(1), PathSummary::Direct);
         state.observe_path(endpoint_id(2), PathSummary::Relay);
         state.direct.insert(endpoint_id(3), DirectState::Pending);
@@ -1538,7 +3063,8 @@ mod tests {
                 direct: 1,
                 relay_only: 1,
                 pending: 1
-            }
+            },
+            "the direct counts track each path reading"
         );
     }
 
@@ -1547,22 +3073,28 @@ mod tests {
     #[test]
     fn a_mixed_or_unknown_reading_never_changes_what_is_known() {
         use crate::gossip::PathSummary;
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.observe_path(endpoint_id(1), PathSummary::Mixed);
         state.observe_path(endpoint_id(2), PathSummary::Unknown);
-        assert!(state.direct.is_empty());
+        assert!(
+            state.direct.is_empty(),
+            "a mixed reading leaves the direct map empty"
+        );
         state.direct.insert(endpoint_id(3), DirectState::Direct);
         state.observe_path(endpoint_id(3), PathSummary::Mixed);
         state.observe_path(endpoint_id(3), PathSummary::Unknown);
         assert_eq!(
             state.direct.get(&endpoint_id(3)),
-            Some(&DirectState::Direct)
+            Some(&DirectState::Direct),
+            "peer 3 keeps its direct state through a mixed reading"
         );
         state.direct.insert(endpoint_id(4), DirectState::RelayOnly);
         state.observe_path(endpoint_id(4), PathSummary::Mixed);
         assert_eq!(
             state.direct.get(&endpoint_id(4)),
-            Some(&DirectState::RelayOnly)
+            Some(&DirectState::RelayOnly),
+            "peer 4 keeps its relay-only state through an unknown reading"
         );
     }
 
@@ -1575,8 +3107,9 @@ mod tests {
     #[test]
     fn a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh() {
         use crate::gossip::PathSummary;
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.relay_transport = false;
+        state.relay_transport = PayloadPath::DirectOnly;
         state.direct.insert(endpoint_id(1), DirectState::Direct);
         state.observe_path(endpoint_id(1), PathSummary::Relay);
         assert_eq!(
@@ -1587,11 +3120,12 @@ mod tests {
 
         // With the relay allowed as transport the reading is real news: the
         // peer is reachable, over the relay, and the lanes may use it.
-        state.relay_transport = true;
+        state.relay_transport = PayloadPath::RelayAllowed;
         state.observe_path(endpoint_id(1), PathSummary::Relay);
         assert_eq!(
             state.direct.get(&endpoint_id(1)),
-            Some(&DirectState::RelayOnly)
+            Some(&DirectState::RelayOnly),
+            "a relay reading does not demote a proven peer"
         );
     }
 
@@ -1601,71 +3135,93 @@ mod tests {
         // it is the rendezvous link (kept out of `linked_endpoints`). The
         // beacon's `PeerInfo` advertises the rendezvous endpoint, so the
         // roster must still tag it `direct` while we're rendezvous-linked.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let rendezvous_ep = endpoint_id(7);
         state.rendezvous_id = Some(rendezvous_ep);
-        state.peers.insert(nick("beacon"));
-        state
-            .peer_endpoints
-            .insert(nick("beacon"), iroh::EndpointAddr::new(rendezvous_ep));
+        state.peer_for_test("beacon");
+        state.surfaced_for_test("beacon");
+        state.bind_peer_endpoint(
+            test_key("beacon"),
+            nick("beacon"),
+            iroh::EndpointAddr::new(rendezvous_ep),
+        );
 
         let reach = |current: &EventLoopState| {
-            current
-                .roster_snapshot()
+            let roster = current.roster_snapshot();
+            let beacon = roster
                 .peers
                 .iter()
-                .find(|entry| entry.nickname.as_str() == "beacon")
-                .expect("beacon in roster")
-                .reach
+                .find(|entry| entry.nickname.as_str() == "beacon");
+            beacon.expect("beacon in roster").reach
         };
 
-        state.rendezvous_linked = true;
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         assert_eq!(reach(&state), Reach::Direct, "linked rendezvous → direct");
 
-        state.rendezvous_linked = false;
+        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
         assert_eq!(reach(&state), Reach::Gossip, "rendezvous down → gossip");
     }
 
     #[test]
     fn roster_transport_mirrors_the_send_decision() {
         use crate::transport::Lane;
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         // Known endpoint while meshed → unicast (the send path would dial it).
-        state.peers.insert(nick("dialable"));
-        state
-            .peer_endpoints
-            .insert(nick("dialable"), iroh::EndpointAddr::new(endpoint_id(1)));
+        state.peer_for_test("dialable");
+        state.surfaced_for_test("dialable");
+        state.bind_peer_endpoint(
+            test_key("dialable"),
+            nick("dialable"),
+            iroh::EndpointAddr::new(endpoint_id(1)),
+        );
         state.direct.insert(endpoint_id(1), DirectState::Direct);
         // No PeerInfo yet → nothing to dial → unreachable for directed frames.
-        state.peers.insert(nick("unknown"));
+        state.peer_for_test("unknown");
+        state.surfaced_for_test("unknown");
 
         let lane = |current: &EventLoopState, name: &str| {
-            current
-                .roster_snapshot()
+            let roster = current.roster_snapshot();
+            let entry = roster
                 .peers
                 .iter()
-                .find(|entry| entry.nickname.as_str() == name)
+                .find(|entry| entry.nickname.as_str() == name);
+            entry
                 .unwrap_or_else(|| panic!("{name} missing from roster"))
                 .transport
         };
-        assert_eq!(lane(&state, "dialable"), Lane::Unicast);
-        assert_eq!(lane(&state, "unknown"), Lane::Unreachable);
+        assert_eq!(
+            lane(&state, "dialable"),
+            Lane::Unicast,
+            "a dialable peer takes the unicast lane"
+        );
+        assert_eq!(
+            lane(&state, "unknown"),
+            Lane::Unreachable,
+            "an unknown peer has no lane"
+        );
 
         // Unmeshed: the known endpoint is reached via the multihop transport (iroh
         // picks a direct path when meshed, else the multihop one), so the column
         // reads `multihop` rather than a direct `unicast`.
-        state.meshed = false;
-        assert_eq!(lane(&state, "dialable"), Lane::Multihop);
+        state.standing.remove(&Standing::Meshed);
+        assert_eq!(
+            lane(&state, "dialable"),
+            Lane::Multihop,
+            "the lane follows the send decision for a dialable peer"
+        );
     }
 
     #[test]
     fn quiet_field_is_capped() {
         // `quiet` is drained only on return, so the cap is what stops a churn /
         // sybil stream of one-shot nicknames from growing it without bound.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         for index in 0..(QUIET_CAP + 5) {
-            state.quiet.insert(nick(&format!("ghost-{index}")));
+            state.quiet_for_test(&format!("ghost-{index}"));
         }
         assert!(
             state.quiet.len() <= QUIET_CAP,
@@ -1678,6 +3234,7 @@ mod tests {
     fn mark_seen_delegates_dedup() {
         // Smoke test the `EventLoopState` -> `BoundedFifoSet` delegation; the
         // bounded-FIFO/eviction logic itself is covered in `habilis-network-util`.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let message = msg_with_id(&MessageId::random());
         assert!(
@@ -1687,31 +3244,236 @@ mod tests {
         assert!(state.mark_seen(&message), "second sighting is a duplicate");
     }
 
-    /// **One digest per peer per window.**
-    ///
-    /// Serving a digest costs up to `ANTIENTROPY_MAX_RESEND` mesh-wide
-    /// broadcasts. With the budget counted per digest and nothing per peer, one
-    /// small crafted frame bought 64 floods from every member that received it,
-    /// so the cost grew with the mesh rather than with the attacker.
+    /// A key that renamed owns a dial hint under each nickname it used. When it departs, every one
+    /// of them goes, and the call gives back the address of each.
     #[test]
-    fn a_peer_is_served_one_digest_per_window() {
+    fn a_departed_key_takes_every_dial_hint_it_owns() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        let now = Instant::now();
-        let window =
-            Duration::from_secs(habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS);
+        let key = test_key("swift-cedar");
+        let (old_endpoint, new_endpoint) = (endpoint_id(31), endpoint_id(32));
+        state.peers.insert(key);
+        state.names.insert(key, nick("swift-cedar"));
+        state.bind_peer_endpoint(
+            key,
+            nick("swift-cedar"),
+            iroh::EndpointAddr::new(old_endpoint),
+        );
+        state.names.insert(key, nick("calm-otter"));
+        state.bind_peer_endpoint(
+            key,
+            nick("calm-otter"),
+            iroh::EndpointAddr::new(new_endpoint),
+        );
 
-        assert!(state.admit_digest("aa", now), "the first is served");
+        let given_back = state.forget_key(key);
+        let left: Vec<&Nickname> = state.peer_endpoints.keys().collect();
+
+        assert_eq!(given_back.len(), 2, "one address for each hint that went");
+        for used in [old_endpoint, new_endpoint] {
+            assert!(
+                given_back.contains(&iroh::EndpointAddr::new(used)),
+                "the address of a hint that went was not given back"
+            );
+        }
         assert!(
-            !state.admit_digest("aa", now),
-            "a second digest inside the window must not buy another round of resends"
+            state.peer_endpoints.is_empty(),
+            "a hint under a previous nickname of the departed key stayed: {left:?}"
         );
         assert!(
-            state.admit_digest("bb", now),
-            "one peer's flood must not deny another peer service"
+            state.hint_owner.is_empty(),
+            "the owner of a hint that went stayed"
+        );
+    }
+
+    /// A `PeerInfo` whose proof the table refuses (a replay of an older stamp, for an endpoint a
+    /// newer key holds) makes no trust, even for a key of the roster. An endpoint has one trusted
+    /// signer: the key that takes it over displaces the trust of the one before.
+    #[test]
+    fn only_an_accepted_proof_makes_a_signer_trusted_and_an_endpoint_has_one_trusted_signer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (older, newer) = (test_key("swift-cedar"), test_key("calm-otter"));
+        let endpoint = endpoint_id(34);
+        state.peers.insert(older);
+        state.peers.insert(newer);
+
+        state.note_proven_endpoint(newer, endpoint, UnixSecs::from(10));
+        state.note_proven_endpoint(older, endpoint, UnixSecs::from(3));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&older),
+            None,
+            "a refused replay made the older key trusted for the endpoint"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&newer),
+            Some(endpoint),
+            "the accepted proof of the newer key makes it trusted"
+        );
+
+        state.note_proven_endpoint(older, endpoint, UnixSecs::from(20));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&older),
+            Some(endpoint),
+            "a newer stamp takes the endpoint back"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&newer),
+            None,
+            "the key that lost the endpoint stayed trusted for it"
+        );
+    }
+
+    /// A process that restarts keeps its endpoint and makes a new key. When its clock is behind the
+    /// old one, the new `PeerInfo` carries an older stamp. The old key is quiet by then, so it
+    /// holds nothing against the new key: the new key takes the endpoint, whatever the stamp.
+    /// Assumption: the peers of a mesh are cooperative, so no guard against a replay of an old
+    /// `PeerInfo` is kept for a holder that is not live.
+    #[test]
+    fn a_restarted_process_with_a_clock_behind_takes_its_endpoint_from_the_quiet_old_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (old, new) = (test_key("bob#old"), test_key("bob#new"));
+        let endpoint = endpoint_id(61);
+        state.peers.insert(old);
+        state.note_proven_endpoint(old, endpoint, UnixSecs::from(1000));
+        assert_eq!(
+            state.proven_endpoints.trusted(&old),
+            Some(endpoint),
+            "the old key is trusted for the endpoint before the restart"
+        );
+
+        state.peers.remove(&old);
+        state.quiet.insert(old);
+        state.peers.insert(new);
+        state.note_proven_endpoint(new, endpoint, UnixSecs::from(400));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&new),
+            Some(endpoint),
+            "the new key of a restarted process stayed untrusted while its clock was behind"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&old),
+            None,
+            "the quiet old key kept the trust in the endpoint"
+        );
+    }
+
+    /// A holder that is live keeps its endpoint against a proof that is not newer than its own.
+    /// This is the rule for a live holder, and it does not change.
+    #[test]
+    fn a_live_key_keeps_its_endpoint_against_an_older_stamp_of_another_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (holder, other) = (test_key("bob#holder"), test_key("bob#other"));
+        let endpoint = endpoint_id(62);
+        state.peers.insert(holder);
+        state.peers.insert(other);
+        state.note_proven_endpoint(holder, endpoint, UnixSecs::from(1000));
+
+        state.note_proven_endpoint(other, endpoint, UnixSecs::from(400));
+        state.note_proven_endpoint(other, endpoint, UnixSecs::from(1000));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&holder),
+            Some(endpoint),
+            "a live holder lost its endpoint to a stamp that is not newer"
+        );
+        assert_eq!(
+            state.proven_endpoints.trusted(&other),
+            None,
+            "a key took the endpoint of a live holder with a stamp that is not newer"
+        );
+    }
+
+    /// After a takeover the stored stamp is the stamp of the new key, not the larger stamp of the
+    /// old holder. Else a second restart with a clock still behind would be refused as the first
+    /// one was.
+    #[test]
+    fn the_stamp_of_a_takeover_replaces_the_stamp_of_the_old_holder() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second, third) = (test_key("bob#1"), test_key("bob#2"), test_key("bob#3"));
+        let endpoint = endpoint_id(63);
+        state.quiet.insert(first);
+        state.peers.insert(second);
+        state.peers.insert(third);
+        state.peers.insert(first);
+        state.note_proven_endpoint(first, endpoint, UnixSecs::from(1000));
+        state.peers.remove(&first);
+
+        state.note_proven_endpoint(second, endpoint, UnixSecs::from(400));
+        state.note_proven_endpoint(third, endpoint, UnixSecs::from(450));
+
+        assert_eq!(
+            state.proven_endpoints.trusted(&third),
+            Some(endpoint),
+            "the stamp of the old holder still guarded the endpoint after the takeover"
+        );
+    }
+
+    /// A live key that renamed no longer answers to its old nickname. The hint under the old name
+    /// is no address of the key: a send to the key follows the hint of its current name, or its
+    /// proof. A key with no name on record yet has no address either.
+    #[test]
+    fn a_hint_under_the_old_nickname_of_a_live_key_that_renamed_is_no_address_of_the_key() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("swift-cedar");
+        state.peers.insert(key);
+        state.bind_peer_endpoint(
+            key,
+            nick("swift-cedar"),
+            iroh::EndpointAddr::new(endpoint_id(35)),
         );
         assert!(
-            state.admit_digest("aa", now + window + Duration::from_millis(1)),
-            "the honest cadence resumes after the window"
+            state.address_of(&key).is_none(),
+            "the owner has no name on record yet"
+        );
+
+        state.names.insert(key, nick("swift-cedar"));
+        assert_eq!(
+            state.address_of(&key).map(|address| address.id),
+            Some(endpoint_id(35)),
+            "the owner still uses the nickname"
+        );
+
+        state.names.insert(key, nick("calm-otter"));
+        assert!(
+            state.address_of(&key).is_none(),
+            "the owner renamed, and the old nickname still has a hint"
+        );
+    }
+
+    /// A departed key makes no claim to the rendezvous any more. Another nickname can still bind
+    /// its endpoint, and then the endpoint keeps its state, so the claim of the key goes with the
+    /// key itself.
+    #[test]
+    fn a_departed_key_drops_its_rendezvous_claim_while_another_nickname_binds_its_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let key = test_key("swift-cedar");
+        let endpoint = endpoint_id(33);
+        state.peers.insert(key);
+        state.names.insert(key, nick("swift-cedar"));
+        state.bind_peer_endpoint(key, nick("swift-cedar"), iroh::EndpointAddr::new(endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("calm-otter"), iroh::EndpointAddr::new(endpoint));
+        state.rival_holders.insert(key, endpoint);
+
+        state.forget_key(key);
+
+        assert!(
+            state.endpoint_is_bound(endpoint),
+            "the other nickname still binds the endpoint"
+        );
+        assert!(
+            !state.rival_holders.contains_key(&key),
+            "the departed key still holds the rendezvous"
         );
     }
 
@@ -1720,12 +3482,13 @@ mod tests {
         // Two messages sharing an id but signed by different keys must NOT
         // dedup against each other — the fix for the id-collision suppression
         // attack. Distinct pubkeys ⇒ distinct `dedup_key`s.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let id = MessageId::random();
-        let mut victim = msg_with_id(&id);
-        victim.pubkey = "aa".repeat(32);
-        let mut attacker = msg_with_id(&id);
-        attacker.pubkey = "bb".repeat(32);
+        let victim =
+            messages::Verified::fixture_unchecked(plain_with_id(&id), AuthorKey::from([0xaa; 32]));
+        let attacker =
+            messages::Verified::fixture_unchecked(plain_with_id(&id), AuthorKey::from([0xbb; 32]));
         assert!(!state.mark_seen(&victim), "victim's message is fresh");
         assert!(
             !state.mark_seen(&attacker),
@@ -1741,6 +3504,7 @@ mod tests {
     // `cpu-runaway-membership-amplifier`.
     #[test]
     fn relink_cooldown_caps_a_flapping_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let peer = endpoint_id(7);
         let start = Instant::now();
 
@@ -1773,52 +3537,172 @@ mod tests {
         assert_eq!(relinks, 1, "the cooldown caps re-links to once per window");
 
         // Past the window a genuine re-link is allowed again (no permanent lockout).
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
-        assert!(!cooled.relink_on_cooldown(peer, later));
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
+        assert!(
+            !cooled.relink_on_cooldown(peer, later),
+            "a cooled peer stays on cooldown at the later time"
+        );
+    }
+
+    // The arrival flood goes out on the first `NeighborUp`, in the same milliseconds in
+    // which the endpoint gets its home relay, so it can carry no relay. Every later
+    // flood is gated by the window, and the receiver keeps the first address it saw. A
+    // changed address of our own must therefore call for a flood of its own.
+    #[test]
+    fn a_changed_own_address_is_due_a_flood_and_an_unchanged_one_is_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let id = endpoint_id(1);
+        let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
+        let ip: net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
+        let other_ip: net::SocketAddr = "192.0.2.2:4000".parse().expect("an address");
+        let without_relay = iroh::EndpointAddr::new(id).with_ip_addr(ip);
+        let with_relay = without_relay.clone().with_relay_url(relay.clone());
+
+        let mut state = fresh_state();
+        assert!(
+            !state.address_flood_due(&with_relay),
+            "before the first flood there is nothing to repair"
+        );
+
+        state.last_flooded_addr = Some(without_relay.clone());
+        assert!(
+            !state.address_flood_due(&without_relay),
+            "an address that did not change is not flooded again"
+        );
+        assert!(
+            state.address_flood_due(&with_relay),
+            "the relay arrived after the flood"
+        );
+
+        state.last_flooded_addr = Some(with_relay.clone());
+        assert!(
+            !state.address_flood_due(&with_relay),
+            "the flooded address is the current one"
+        );
+        assert!(
+            state.address_flood_due(
+                &iroh::EndpointAddr::new(id)
+                    .with_relay_url(relay)
+                    .with_ip_addr(other_ip)
+            ),
+            "an IP address changed"
+        );
+        assert!(
+            state.address_flood_due(&iroh::EndpointAddr::new(id).with_ip_addr(ip)),
+            "the relay was lost"
+        );
+    }
+
+    #[test]
+    fn the_order_of_the_addresses_does_not_make_an_address_differ() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let id = endpoint_id(1);
+        let first: net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
+        let second: net::SocketAddr = "192.0.2.2:4000".parse().expect("an address");
+        let mut state = fresh_state();
+        state.last_flooded_addr = Some(
+            iroh::EndpointAddr::new(id)
+                .with_ip_addr(first)
+                .with_ip_addr(second),
+        );
+        assert!(
+            !state.address_flood_due(
+                &iroh::EndpointAddr::new(id)
+                    .with_ip_addr(second)
+                    .with_ip_addr(first)
+            ),
+            "reordering the addresses floods nothing new"
+        );
     }
 
     // The residual flap amplifier the re-link cooldown did NOT cover: every
     // `NeighborUp` re-floods our own `PeerInfo` to the whole mesh, and a
-    // flapping link re-triggers `NeighborUp` on each up-transition, so without
-    // a second cooldown one bad node re-floods the mesh ~once per flap (the
-    // ~7.4k-per-host `neighbor up` storm seen in the distributed soak). The
-    // PeerInfo cooldown collapses that to once per window per endpoint while
-    // still letting a genuinely new neighbor get exactly one re-flood.
+    // flapping link re-triggers `NeighborUp` on each up-transition. Every flood
+    // is also answered by a graft from each peer that hears it, and a graft at
+    // a full view evicts a neighbor, so a window per neighbor lets the floods
+    // cascade. The window is per flood: one flapping peer, or five peers, flood
+    // once per window.
     #[test]
-    fn peerinfo_cooldown_caps_a_flapping_peer() {
-        let peer = endpoint_id(7);
+    fn neighbors_up_in_one_window_flood_peerinfo_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
 
-        // The pre-fix `NeighborUp` arm re-flooded unconditionally when
-        // `announced`, so 100 flaps == 100 mesh-wide PeerInfo broadcasts. The
-        // gate below replays the same 100 flaps and counts what now actually
-        // re-floods.
-        let mut state = fresh_state();
-        let mut refloods = 0;
+        let mut flapping = fresh_state();
+        let mut flapping_refloods = 0;
         for index in 0..100u32 {
             let now = start + Duration::from_millis(u64::from(index) * 10);
-            if !state.peerinfo_on_cooldown(peer, now) {
-                state.note_peerinfo(peer, now);
-                refloods += 1;
+            if flapping.neighbor_up_refloods_peerinfo(now) {
+                flapping.peerinfo_flood = Some(PeerInfoFlood::at(now));
+                flapping_refloods += 1;
             }
         }
         assert_eq!(
-            refloods, 1,
-            "the cooldown caps PeerInfo re-floods to one per window (was 100, one per flap)"
+            flapping_refloods, 1,
+            "a flapping peer floods once per window"
         );
 
-        // A genuinely different neighbor in the same window still gets its own
-        // re-flood (the choke targets the *flapping* endpoint, not all peers).
-        let fresh_peer = endpoint_id(8);
-        assert!(!state.peerinfo_on_cooldown(fresh_peer, start));
+        let mut state = fresh_state();
+        let mut refloods = 0;
+        for index in 0..5u64 {
+            let now = start + Duration::from_millis(index * 10);
+            if state.neighbor_up_refloods_peerinfo(now) {
+                state.peerinfo_flood = Some(PeerInfoFlood::at(now));
+                refloods += 1;
+            }
+        }
+        assert_eq!(refloods, 1, "five neighbors flood once per window");
 
-        // Past the window the flapping peer may re-flood once more (no permanent silence).
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
-        assert!(!state.peerinfo_on_cooldown(peer, later));
+        // Past the window a neighbor up floods once more (no permanent silence).
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
+        assert!(
+            state.neighbor_up_refloods_peerinfo(later),
+            "the first neighbor up in a window re-floods peer info"
+        );
+    }
+
+    // A neighbor that comes up inside the window of a flood does not make a
+    // flood of its own. It must not wait for another `NeighborUp`: the flood is
+    // paid once the window ends.
+    #[test]
+    fn a_held_back_neighbor_up_floods_peerinfo_when_the_window_ends() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut state = fresh_state();
+        state.peerinfo_flood = Some(PeerInfoFlood::at(start));
+
+        assert!(
+            !state.neighbor_up_refloods_peerinfo(start + Duration::from_secs(1)),
+            "a held-back neighbor up does not re-flood inside the window"
+        );
+        state.defer_peerinfo();
+
+        assert!(
+            !state.take_deferred_peerinfo(start + Duration::from_secs(1)),
+            "the deferred flood is not due inside the window"
+        );
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
+        assert!(
+            state.take_deferred_peerinfo(later),
+            "due once the window ends"
+        );
+        assert!(!state.take_deferred_peerinfo(later), "paid once");
+    }
+
+    #[test]
+    fn nothing_is_due_when_no_neighbor_up_was_held_back() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut state = fresh_state();
+        state.peerinfo_flood = Some(PeerInfoFlood::at(start));
+        assert!(
+            !state.take_deferred_peerinfo(start + RELINK_COOLDOWN + Duration::from_secs(1)),
+            "an empty deferral yields no flood"
+        );
     }
 
     #[test]
     fn joined_refloods_peerinfo_once_per_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut state = fresh_state();
 
@@ -1827,36 +3711,168 @@ mod tests {
         for index in 0..20u64 {
             let now = start + Duration::from_millis(index * 10);
             if state.joined_refloods_peerinfo(false, now) {
-                state.peerinfo_flooded_at = Some(now);
+                state.peerinfo_flood = Some(PeerInfoFlood::at(now));
                 refloods += 1;
             }
         }
         assert_eq!(refloods, 1, "once per window, not once per peer");
 
         // A first sighting inside the window is not throttled.
-        assert!(state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)));
+        assert!(
+            state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)),
+            "a newcomer's joined re-floods peer info"
+        );
 
         // Past the window a re-announce floods once more (no permanent silence).
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
-        assert!(state.joined_refloods_peerinfo(false, later));
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
+        assert!(
+            state.joined_refloods_peerinfo(false, later),
+            "a joined that is not new still re-floods once the window is open"
+        );
     }
 
     // A `NeighborDown` drops the gossip link, not the pooled unicast
     // connection the verdict describes. Erasing the verdict with the link
     // parked every directed frame on a flap until the alive tick re-probed.
+    /// A session to a gossip neighbor is not a unit of the ceiling, because the gossip link
+    /// holds the peer anyway. The ledger learns of a neighbor when the link comes up, and that
+    /// the peer is not one when it goes down.
+    #[test]
+    fn a_session_counts_against_the_ceiling_only_while_its_peer_is_not_a_neighbor() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let bob = endpoint_id(1);
+        state.webrtc_admission.note_success(bob);
+        assert_eq!(
+            state.webrtc_admission.direct_units(),
+            1,
+            "one direct unit counts against the ceiling"
+        );
+
+        state.link(bob);
+        assert_eq!(state.webrtc_admission.direct_units(), 0, "a neighbor");
+
+        state.unlink(bob);
+        assert_eq!(state.webrtc_admission.direct_units(), 1, "no longer one");
+    }
+
+    /// A meshed member that lost every link is a silent partition once the gap outlasts a heal,
+    /// not before: a link closed on purpose, or a heal on its way, shows the same zero.
+    #[test]
+    fn a_meshed_member_without_links_is_a_silent_partition_only_after_a_heal() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (bob, roster) = (endpoint_id(1), 3);
+        let after = tuning::silent_partition_after();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+
+        state.link(bob);
+        let far = Instant::now() + after + Duration::from_secs(1);
+        assert!(!state.silent_partition_due(roster, far), "a link is up");
+
+        state.unlink(bob);
+        assert!(
+            !state.silent_partition_due(roster, Instant::now()),
+            "the gap is young"
+        );
+        assert!(
+            state.silent_partition_due(roster, far),
+            "the gap outlasted a heal"
+        );
+        assert!(
+            !state.silent_partition_due(0, far),
+            "there is nobody to be apart from"
+        );
+        state.standing.remove(&Standing::Meshed);
+        assert!(!state.silent_partition_due(roster, far), "never meshed");
+        state.standing.insert(Standing::Meshed);
+
+        // An unlink of a peer that was not linked leaves the clock where it was.
+        state.unlink(endpoint_id(2));
+        assert!(
+            state.silent_partition_due(roster, far),
+            "the clock did not restart"
+        );
+
+        // A link clears the gap, and the next loss starts a new one.
+        state.link(bob);
+        state.unlink(bob);
+        assert!(
+            !state.silent_partition_due(roster, Instant::now()),
+            "a new gap is young"
+        );
+    }
+
+    /// A degraded node that a relayed frame heals while it holds no link is meshed with zero links.
+    /// It never lost a link, so no unlink started the gap: the heal starts it, and the census calls
+    /// the state a silent partition once the gap outlasts a heal.
+    #[test]
+    fn a_degraded_node_that_heals_without_a_link_starts_counting_the_gap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let roster = 3;
+        let after = tuning::silent_partition_after();
+        let mut state = fresh_state();
+        state.note_degraded();
+        let healed_at = Instant::now();
+
+        assert!(state.note_inbound(healed_at), "the first inbound heals it");
+
+        assert!(
+            !state.silent_partition_due(roster, healed_at),
+            "the gap is young"
+        );
+        assert!(
+            state.silent_partition_due(roster, healed_at + after + Duration::from_secs(1)),
+            "meshed with no link for longer than a heal"
+        );
+    }
+
+    /// A heal does not restart a gap that already runs: the unlink that began it is the start.
+    #[test]
+    fn a_heal_does_not_restart_a_gap_that_already_runs() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (bob, roster) = (endpoint_id(1), 3);
+        let after = tuning::silent_partition_after();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        state.link(bob);
+        state.unlink(bob);
+        let began = Instant::now();
+        state.note_degraded();
+
+        assert!(
+            state.note_inbound(began + after / 2),
+            "the first inbound heals it"
+        );
+
+        assert!(
+            state.silent_partition_due(roster, began + after + Duration::from_secs(1)),
+            "the heal restarted the clock"
+        );
+    }
+
     #[test]
     fn unlinking_a_peer_keeps_its_path_verdict() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
         state.linked_endpoints.insert(bob);
         state.direct.insert(bob, DirectState::Direct);
         state.unlink(bob);
-        assert!(state.linked_endpoints.is_empty());
-        assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
+        assert!(
+            state.linked_endpoints.is_empty(),
+            "unlinking a peer empties the linked set"
+        );
+        assert_eq!(
+            state.direct.get(&bob),
+            Some(&DirectState::Direct),
+            "unlinking a peer keeps its path verdict"
+        );
     }
 
     #[test]
     fn a_late_unproven_verdict_only_demotes_a_pending_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let pending = endpoint_id(1);
         let proven = endpoint_id(2);
@@ -1864,45 +3880,193 @@ mod tests {
         state.direct.insert(pending, DirectState::Pending);
         state.direct.insert(proven, DirectState::Direct);
 
-        assert!(state.demote_unproven(pending));
-        assert_eq!(state.direct.get(&pending), Some(&DirectState::RelayOnly));
-        assert!(!state.demote_unproven(proven));
-        assert_eq!(state.direct.get(&proven), Some(&DirectState::Direct));
-        assert!(!state.demote_unproven(gone));
-        assert!(!state.direct.contains_key(&gone));
+        assert!(
+            state.demote_unproven(pending),
+            "a late unproven verdict demotes a pending peer"
+        );
+        assert_eq!(
+            state.direct.get(&pending),
+            Some(&DirectState::RelayOnly),
+            "the pending peer reads as relay-only after the verdict"
+        );
+        assert!(
+            !state.demote_unproven(proven),
+            "a proven peer is not demoted by a late unproven verdict"
+        );
+        assert_eq!(
+            state.direct.get(&proven),
+            Some(&DirectState::Direct),
+            "the proven peer keeps its direct state"
+        );
+        assert!(
+            !state.demote_unproven(gone),
+            "an unknown peer is not demoted"
+        );
+        assert!(
+            !state.direct.contains_key(&gone),
+            "an unknown peer gets no direct entry"
+        );
     }
 
     #[test]
     fn forgetting_a_peer_endpoint_drops_its_path_verdict() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(
-            state.forget_peer_endpoint("bob").map(|addr| addr.id),
-            Some(bob)
+            state.forget_peer_endpoint("bob").map(|address| address.id),
+            Some(bob),
+            "forgetting a peer endpoint returns its address id"
         );
-        assert!(state.direct.is_empty());
-        assert!(state.forget_peer_endpoint("bob").is_none());
+        assert!(
+            state.direct.is_empty(),
+            "forgetting a peer endpoint leaves no path verdict"
+        );
+        assert!(
+            state.forget_peer_endpoint("bob").is_none(),
+            "a second forget finds nothing"
+        );
+    }
+
+    /// Two nicknames can bind one endpoint (a node that restarted under a new name). The goodbye
+    /// of one must leave the state of the endpoint to the other.
+    #[test]
+    fn forgetting_one_of_two_nicknames_that_bind_an_endpoint_keeps_its_state() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(1);
+        state.bind_peer_endpoint(
+            test_key("old-bob"),
+            nick("old-bob"),
+            iroh::EndpointAddr::new(shared),
+        );
+        state.bind_peer_endpoint(
+            test_key("new-bob"),
+            nick("new-bob"),
+            iroh::EndpointAddr::new(shared),
+        );
+        state.direct.insert(shared, DirectState::Direct);
+
+        state.forget_peer_endpoint("old-bob");
+        assert!(
+            state.direct.contains_key(&shared) && state.endpoint_is_bound(shared),
+            "the goodbye of one nickname dropped the state of an endpoint that another binds"
+        );
+
+        state.forget_peer_endpoint("new-bob");
+        assert!(
+            state.direct.is_empty() && !state.endpoint_is_bound(shared),
+            "the last nickname that binds an endpoint left its state behind"
+        );
+    }
+
+    /// A key owns the hint of a nickname, and another key of the nickname is refused a hint for
+    /// the same endpoint (a node that restarted with a new signing key). The state of the endpoint
+    /// stays while the refused endpoint waits for its key.
+    #[test]
+    fn forgetting_a_hint_keeps_the_state_of_an_endpoint_that_a_refused_key_retains() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(1);
+        state.bind_peer_endpoint(
+            test_key("old-bob"),
+            nick("bob"),
+            iroh::EndpointAddr::new(shared),
+        );
+        state.retain_refused_endpoint(test_key("new-bob"), iroh::EndpointAddr::new(shared));
+        state.direct.insert(shared, DirectState::Direct);
+
+        state.forget_peer_endpoint("bob");
+
+        assert!(
+            state.direct.contains_key(&shared),
+            "the state of an endpoint that a retained endpoint names was dropped"
+        );
+        assert!(
+            state.endpoint_is_bound(shared),
+            "a retained endpoint is not counted as bound"
+        );
+    }
+
+    /// A refused signer that advertises a new endpoint replaces the retained one. The address of
+    /// the displaced endpoint was handed to the book and the pool, and it goes unless a hint or
+    /// another refused signer still names it.
+    #[test]
+    fn a_replaced_refused_endpoint_leaves_the_book_unless_another_signer_names_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (first, second, shared) = (
+            iroh::EndpointAddr::new(endpoint_id(1)),
+            iroh::EndpointAddr::new(endpoint_id(2)),
+            iroh::EndpointAddr::new(endpoint_id(3)),
+        );
+        for address in [&first, &second, &shared] {
+            state.unicast_pool.note_addr(address);
+        }
+        state.retain_refused_endpoint(test_key("rival"), first.clone());
+        state.retain_refused_endpoint(test_key("other"), shared.clone());
+        state.retain_refused_endpoint(test_key("rival"), shared.clone());
+
+        assert!(
+            !state.unicast_pool.remembers_address(&first),
+            "the displaced endpoint stayed in the book"
+        );
+        state.retain_refused_endpoint(test_key("rival"), second.clone());
+        assert!(
+            state.unicast_pool.remembers_address(&shared),
+            "the displaced endpoint left the book while another signer retains it"
+        );
+        assert!(
+            state.unicast_pool.remembers_address(&second),
+            "the new retained endpoint is not in the book"
+        );
+    }
+
+    // After a failover the rendezvous keeps its id, but a refusal from the old
+    // holder says nothing about the new one: the wait starts over.
+    #[test]
+    fn a_new_rendezvous_verdict_starts_the_refusal_wait_over() {
+        use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let rendezvous = endpoint_id(7);
+        state.rendezvous_id = Some(rendezvous);
+        let hub = WebRtcHandle::new(WebRtcTransport::new(endpoint_id(0)));
+        state.webrtc_admission.note_refused(rendezvous);
+        assert!(
+            state.webrtc_admission.try_admit(rendezvous, &hub).is_err(),
+            "the refusal makes us wait"
+        );
+
+        state.forget_rendezvous_verdict();
+
+        assert!(
+            state.webrtc_admission.try_admit(rendezvous, &hub).is_ok(),
+            "a new verdict ends the wait"
+        );
     }
 
     // A departed peer read as riding WebRTC was nudged on every alive tick.
     #[test]
     fn forgetting_a_peer_endpoint_drops_its_path_watch() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
-        state
-            .peer_endpoints
-            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
         state.path_watchers.insert(bob, Some(7));
-        state
-            .path_kinds
-            .insert(bob, crate::transport::probe::PathKind::WebRtc);
+        state.path_kinds.insert(bob, PathKind::WebRtc);
         state.forget_peer_endpoint("bob");
-        assert!(state.path_watchers.is_empty());
-        assert!(state.path_kinds.is_empty());
+        assert!(
+            state.path_watchers.is_empty(),
+            "forgetting a peer endpoint drops its path watchers"
+        );
+        assert!(
+            state.path_kinds.is_empty(),
+            "forgetting a peer endpoint drops its path kinds"
+        );
     }
 
     // `arms_reclaim` fires on any peer loss while the mesh is beaconless, and
@@ -1910,15 +4074,74 @@ mod tests {
     // ordinary churn starve the two-verdict rule until nobody claims.
     #[test]
     fn only_a_rendezvous_change_drops_a_free_verdict() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.rendezvous_probe_read_free = true;
+        state.rendezvous_flags.insert(RendezvousFlag::ProbeReadFree);
 
         state.arm_reclaim(Instant::now());
-        assert!(state.rendezvous_probe_read_free);
-        assert!(state.reclaim_until.is_some());
+        assert!(
+            state
+                .rendezvous_flags
+                .contains(&RendezvousFlag::ProbeReadFree),
+            "the free-read verdict holds before the rendezvous changes"
+        );
+        assert!(
+            state.reclaim_until.is_some(),
+            "the reclaim window is open after the rendezvous changes"
+        );
 
         state.forget_rendezvous_verdict();
-        assert!(!state.rendezvous_probe_read_free);
+        assert!(
+            !state
+                .rendezvous_flags
+                .contains(&RendezvousFlag::ProbeReadFree),
+            "the rendezvous change drops the free-read verdict"
+        );
+    }
+
+    // The probe wait ends at the three events that reopen the rendezvous: the reclaim window
+    // opens, the arbitration is forgotten, and the rendezvous gets a new address. The address of
+    // any other peer does not end it.
+    #[test]
+    fn the_events_that_reopen_the_rendezvous_end_the_probe_wait() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let now = Instant::now();
+        let rendezvous = endpoint_id(9);
+        let stranger = endpoint_id(8);
+        let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
+
+        let mut state = fresh_state();
+        state.rendezvous_id = Some(rendezvous);
+        state.probe_backoff.note_verdict(true, now, 0.0);
+        assert!(!state.probe_backoff.due(now), "the wait is on");
+
+        state.arm_reclaim(now);
+        assert!(state.probe_backoff.due(now), "the reclaim window");
+
+        state.probe_backoff.note_verdict(true, now, 0.0);
+        state.forget_rendezvous_verdict();
+        assert!(state.probe_backoff.due(now), "the arbitration is forgotten");
+
+        state.probe_backoff.note_verdict(true, now, 0.0);
+        state.note_peer_endpoint(nick("stranger"), iroh::EndpointAddr::new(stranger));
+        state.note_peer_endpoint(
+            nick("stranger"),
+            iroh::EndpointAddr::new(stranger).with_relay_url(relay.clone()),
+        );
+        assert!(
+            !state.probe_backoff.due(now),
+            "a new address of another peer"
+        );
+
+        state.note_peer_endpoint(nick("host"), iroh::EndpointAddr::new(rendezvous));
+        state.note_peer_endpoint(
+            nick("host"),
+            iroh::EndpointAddr::new(rendezvous).with_relay_url(relay),
+        );
+        assert!(
+            state.probe_backoff.due(now),
+            "a new address of the rendezvous"
+        );
     }
 
     // Under a long flap storm against a steady peer set, every collection *we*
@@ -1928,6 +4151,7 @@ mod tests {
     // `handle_peer_info` make, for many flaps over simulated hours.
     #[test]
     fn app_state_stays_bounded_under_flap_churn() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let start = Instant::now();
         // A small, *steady* roster (the soak's shape: ~10 members, ~7.4k flaps),
@@ -1938,8 +4162,8 @@ mod tests {
             let now = start + Duration::from_millis(u64::from(index) * 100);
             let peer = peers[index as usize % peers.len()];
             // NeighborUp → PeerInfo reflood gate + (via handle_peer_info) link.
-            if !state.peerinfo_on_cooldown(peer, now) {
-                state.note_peerinfo(peer, now);
+            if state.neighbor_up_refloods_peerinfo(now) {
+                state.peerinfo_flood = Some(PeerInfoFlood::at(now));
             }
             if !state.relink_on_cooldown(peer, now) {
                 state.note_relink(peer, now);
@@ -1958,11 +4182,6 @@ mod tests {
             state.relink.len()
         );
         assert!(
-            state.peerinfo.len() <= peers.len(),
-            "peerinfo flat: {}",
-            state.peerinfo.len()
-        );
-        assert!(
             state.linked_endpoints.len() <= peers.len(),
             "linked_endpoints flat"
         );
@@ -1974,6 +4193,7 @@ mod tests {
 
     #[test]
     fn relink_cooldown_is_per_peer_and_bounded() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let start = Instant::now();
         let flapping = endpoint_id(7);
@@ -1981,8 +4201,14 @@ mod tests {
 
         // One peer's cooldown never gates a different peer.
         state.note_relink(flapping, start);
-        assert!(state.relink_on_cooldown(flapping, start));
-        assert!(!state.relink_on_cooldown(other, start));
+        assert!(
+            state.relink_on_cooldown(flapping, start),
+            "a flapping peer is on cooldown at the start"
+        );
+        assert!(
+            !state.relink_on_cooldown(other, start),
+            "another peer is not on cooldown"
+        );
 
         // Many distinct peers re-linked across more than a full window:
         // expired entries are pruned, so the map never accumulates them all.
@@ -1991,30 +4217,11 @@ mod tests {
             state.note_relink(endpoint_id(seed), when);
         }
         assert!(
-            state.relink.len() <= usize::try_from(RELINK_COOLDOWN_SECS).unwrap() + 1,
+            state.relink.len()
+                <= usize::try_from(RELINK_COOLDOWN.as_secs())
+                    .expect("a cooldown in whole seconds fits a usize")
+                    + 1,
             "expired cooldown entries are pruned (map stays bounded)"
-        );
-    }
-
-    #[test]
-    fn dedup_window_covers_the_retention_window() {
-        use crate::util::tuning::MESSAGE_LOG_SIZE;
-
-        // The cap relationship itself is asserted at compile time where both
-        // consts live; this covers the behaviour it exists for.
-        let mut state = fresh_state();
-        let earliest = msg_with_id(&MessageId::random());
-        assert!(!state.mark_seen(&earliest));
-        // Mark a full buffer's worth of later messages.
-        for _ in 1..MESSAGE_LOG_SIZE {
-            state.mark_seen(&msg_with_id(&MessageId::random()));
-        }
-        // The earliest is still within the dedup window, so an anti-entropy
-        // resend of it (while it is still retained in the log) is dropped as
-        // a duplicate rather than surfaced a second time.
-        assert!(
-            state.mark_seen(&earliest),
-            "a resend of a still-retained message must be deduped, not re-surfaced"
         );
     }
 
@@ -2025,53 +4232,89 @@ mod tests {
     // by construction, not starved.
     #[test]
     fn starvation_due_requires_announce_known_peers_and_silence() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let past_threshold = Instant::now() + STARVE + Duration::from_secs(1);
         assert!(
             !state.starvation_due(past_threshold, STARVE),
             "never announced => never starved"
         );
-        state.announced = true;
+        state.standing.insert(Standing::Announced);
         assert!(
             !state.starvation_due(past_threshold, STARVE),
             "no known peers => alone, not starved"
         );
         state.known_endpoints.insert(endpoint_id(1));
-        assert!(state.starvation_due(past_threshold, STARVE));
+        assert!(
+            state.starvation_due(past_threshold, STARVE),
+            "starvation is due after the threshold with known peers and silence"
+        );
         // Fresh inbound disarms it until the threshold passes again.
         state.note_inbound(past_threshold);
-        assert!(!state.starvation_due(past_threshold, STARVE));
-        assert!(state.starvation_due(past_threshold + STARVE + Duration::from_secs(1), STARVE));
+        assert!(
+            !state.starvation_due(past_threshold, STARVE),
+            "starvation is not due before the threshold"
+        );
+        assert!(
+            state.starvation_due(past_threshold + STARVE + Duration::from_secs(1), STARVE),
+            "starvation is due again past the threshold plus the window"
+        );
     }
 
     #[test]
     fn starvation_recovery_backs_off_then_resets_on_inbound() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.announced = true;
+        state.standing.insert(Standing::Announced);
         state.known_endpoints.insert(endpoint_id(1));
         let first = Instant::now() + STARVE + Duration::from_secs(1);
-        assert!(state.starvation_due(first, STARVE));
+        assert!(
+            state.starvation_due(first, STARVE),
+            "starvation is due at the first silence"
+        );
         state.note_recovery(first);
         // One trip: the next attempt waits 2x the threshold, not 1x.
-        assert!(!state.starvation_due(first + STARVE + Duration::from_secs(1), STARVE));
+        assert!(
+            !state.starvation_due(first + STARVE + Duration::from_secs(1), STARVE),
+            "starvation is not due again inside the backoff"
+        );
         let second = first + (STARVE * 2) + Duration::from_secs(1);
-        assert!(state.starvation_due(second, STARVE));
+        assert!(
+            state.starvation_due(second, STARVE),
+            "the second starvation is due at its time"
+        );
         state.note_recovery(second);
         // Two trips: 4x.
-        assert!(!state.starvation_due(second + (STARVE * 2) + Duration::from_secs(1), STARVE));
-        assert!(state.starvation_due(second + (STARVE * 4) + Duration::from_secs(1), STARVE));
+        assert!(
+            !state.starvation_due(second + (STARVE * 2) + Duration::from_secs(1), STARVE),
+            "the backoff doubles after the second trip"
+        );
+        assert!(
+            state.starvation_due(second + (STARVE * 4) + Duration::from_secs(1), STARVE),
+            "the backoff quadruples after the second trip"
+        );
         // Any inbound resets the backoff to the base threshold.
         let healed = second + (STARVE * 4) + Duration::from_secs(2);
         state.note_inbound(healed);
-        assert_eq!(state.recovery_trips, 0);
-        assert!(!state.starvation_due(healed + STARVE, STARVE));
-        assert!(state.starvation_due(healed + STARVE + Duration::from_secs(1), STARVE));
+        assert_eq!(
+            state.recovery_trips, 0,
+            "an inbound message resets the recovery trips"
+        );
+        assert!(
+            !state.starvation_due(healed + STARVE, STARVE),
+            "no starvation is due right after healing"
+        );
+        assert!(
+            state.starvation_due(healed + STARVE + Duration::from_secs(1), STARVE),
+            "starvation is due again a threshold after healing"
+        );
     }
 
     #[test]
     fn starvation_backoff_caps_at_eight_threshold() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.announced = true;
+        state.standing.insert(Standing::Announced);
         state.known_endpoints.insert(endpoint_id(1));
         let mut last_recovery = Instant::now() + STARVE + Duration::from_secs(1);
         // Trip well past the cap (`recovery_trips.min(3)` => 8x ceiling).
@@ -2096,24 +4339,229 @@ mod tests {
     // job — while a degraded node heals on the first proof of traffic.
     #[test]
     fn note_inbound_restores_meshed_only_when_degraded() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let now = Instant::now();
         assert!(
             !state.note_inbound(now),
             "pre-mesh inbound never flips meshed"
         );
-        assert!(!state.meshed);
-        state.meshed = true;
+        assert!(
+            !state.standing.contains(&Standing::Meshed),
+            "meshed stays off while nothing is degraded"
+        );
+        state.standing.insert(Standing::Meshed);
         assert!(!state.note_inbound(now), "healthy meshed: no edge");
-        assert!(state.meshed);
+        assert!(
+            state.standing.contains(&Standing::Meshed),
+            "a degraded node is meshed again by an inbound message"
+        );
         state.note_degraded();
-        assert!(!state.meshed);
+        assert!(
+            !state.standing.contains(&Standing::Meshed),
+            "the degraded state drops meshed again"
+        );
         assert!(
             state.note_inbound(now),
             "degraded node heals on first inbound (caller flushes)"
         );
-        assert!(state.meshed);
-        assert!(!state.degraded);
+        assert!(
+            state.standing.contains(&Standing::Meshed),
+            "an inbound message restores meshed"
+        );
+        assert!(
+            !state.standing.contains(&Standing::Degraded),
+            "an inbound message clears degraded"
+        );
+    }
+
+    /// The second probe of a round is due at the middle of the window, and only once.
+    #[test]
+    fn the_second_probe_is_due_at_the_middle_of_the_window_and_only_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let t1 = TokioInstant::now();
+        let first = Message::new_ping(&MeshId::from("test"), &nick("alice"));
+        let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
+
+        assert_eq!(
+            round.second_probe_at(),
+            Some(t1 + Duration::from_secs(5)),
+            "the second probe is due at the middle of the window"
+        );
+        let second = Message::new_ping(&MeshId::from("test"), &nick("alice"));
+        round.probes.insert(second.id, t1 + Duration::from_secs(5));
+        assert_eq!(
+            round.second_probe_at(),
+            None,
+            "the second probe is sent only once"
+        );
+    }
+
+    /// A pong reads its RTT from the probe it names, so a peer that answers only the second
+    /// probe gets a true RTT.
+    #[test]
+    fn a_pong_reads_its_rtt_from_the_probe_it_names() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let t1 = TokioInstant::now();
+        let mesh = MeshId::from("test");
+        let first = Message::new_ping(&mesh, &nick("alice"));
+        let second = Message::new_ping(&mesh, &nick("alice"));
+        let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
+        round
+            .probes
+            .insert(second.id.clone(), t1 + Duration::from_secs(5));
+
+        let at = t1 + Duration::from_secs(5) + Duration::from_millis(30);
+        assert!(
+            round.record_pong(test_key("bob"), nick("bob"), &second.id, at),
+            "a pong from bob is recorded against the probe it names"
+        );
+        assert!(
+            round.record_pong(
+                test_key("carol"),
+                nick("carol"),
+                &first.id,
+                t1 + Duration::from_millis(40)
+            ),
+            "a pong from carol is recorded against the first probe"
+        );
+
+        assert_eq!(
+            round.pongs[&test_key("bob")].rtt,
+            Duration::from_millis(30),
+            "bob's round trip reads 30 ms from its probe"
+        );
+        assert_eq!(
+            round.pongs[&test_key("carol")].rtt,
+            Duration::from_millis(40),
+            "carol's round trip reads 40 ms from its probe"
+        );
+    }
+
+    /// The first pong of a peer is the one kept: the answer to the second probe does not replace
+    /// it.
+    #[test]
+    fn the_first_pong_of_a_peer_is_kept() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let t1 = TokioInstant::now();
+        let mesh = MeshId::from("test");
+        let first = Message::new_ping(&mesh, &nick("alice"));
+        let second = Message::new_ping(&mesh, &nick("alice"));
+        let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
+        round
+            .probes
+            .insert(second.id.clone(), t1 + Duration::from_secs(5));
+
+        round.record_pong(
+            test_key("bob"),
+            nick("bob"),
+            &first.id,
+            t1 + Duration::from_millis(10),
+        );
+        round.record_pong(
+            test_key("bob"),
+            nick("bob"),
+            &second.id,
+            t1 + Duration::from_secs(5) + Duration::from_millis(20),
+        );
+
+        assert_eq!(
+            round.pongs[&test_key("bob")].rtt,
+            Duration::from_millis(10),
+            "the first pong from bob is kept against a later one"
+        );
+    }
+
+    /// A pong that names no probe of the round, such as the answer to a round that is over, is
+    /// dropped.
+    #[test]
+    fn a_pong_that_names_no_probe_of_the_round_is_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let t1 = TokioInstant::now();
+        let first = Message::new_ping(&MeshId::from("test"), &nick("alice"));
+        let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
+
+        assert!(
+            !round.record_pong(
+                test_key("bob"),
+                nick("bob"),
+                &MessageId::random(),
+                t1 + Duration::from_millis(5)
+            ),
+            "a pong naming an unknown probe is not recorded"
+        );
+        assert!(
+            round.pongs.is_empty(),
+            "no pong is recorded for an unknown probe"
+        );
+    }
+
+    /// No frame repairs a member that missed a `PeerInfo`; only the flood of its sender does. A
+    /// meshed node floods its own again once the refresh period has passed since its last flood:
+    /// at least 5 min, and 5 s for each live member, spread by a factor drawn with each flood.
+    #[test]
+    fn the_peerinfo_refresh_is_due_after_the_period_of_the_roster_and_not_before() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let flooded = Instant::now();
+        let after = |wait: Duration| flooded + wait;
+        assert!(
+            !state.peerinfo_refresh_due(after(Duration::from_hours(9))),
+            "a refresh was due before the first flood"
+        );
+
+        // The spread is fixed, so that the period is the same in every run.
+        let flood = PeerInfoFlood {
+            at: flooded,
+            spread: 1.0,
+        };
+        state.peerinfo_flood = Some(flood);
+        let least = tuning::PEERINFO_REFRESH_MIN;
+        assert!(
+            !state.peerinfo_refresh_due(after(least.saturating_sub(Duration::from_secs(1)))),
+            "a refresh was due before the period"
+        );
+        assert!(
+            state.peerinfo_refresh_due(after(least)),
+            "no refresh was due at the period"
+        );
+
+        state.peerinfo_flood = Some(PeerInfoFlood {
+            spread: 1.25,
+            ..flood
+        });
+        assert!(
+            !state.peerinfo_refresh_due(after(least)),
+            "the spread of 1.25 did not delay the refresh"
+        );
+        assert!(
+            state.peerinfo_refresh_due(after(least.mul_f64(1.25))),
+            "no refresh was due at the spread period"
+        );
+
+        state.peerinfo_flood = Some(PeerInfoFlood {
+            spread: 1.0,
+            ..flood
+        });
+        for index in 0..100 {
+            state.peers.insert(test_key(&format!("member-{index}")));
+        }
+        let grown = tuning::PEERINFO_REFRESH_PER_PEER * 101;
+        assert!(
+            !state.peerinfo_refresh_due(after(least)),
+            "a roster of 101 members refreshed at the least period"
+        );
+        assert!(
+            state.peerinfo_refresh_due(after(grown)),
+            "no refresh was due at the period of 101 members"
+        );
+
+        state.standing.remove(&Standing::Meshed);
+        assert!(
+            !state.peerinfo_refresh_due(after(grown)),
+            "a node that is not meshed refreshed"
+        );
     }
 
     /// A departed peer leaves every per-peer map, the lane flag included.

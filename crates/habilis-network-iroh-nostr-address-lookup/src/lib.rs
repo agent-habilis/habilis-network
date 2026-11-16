@@ -4,6 +4,7 @@
 //! The crate knows nothing about meshes. A caller picks the tags, ranks the
 //! relays, and seals its own payload into each event's `content`.
 
+use n0_future::time;
 mod conn;
 mod event;
 mod pool;
@@ -23,7 +24,7 @@ pub use pool::Pool;
 /// Seconds since the Unix epoch, on the portable clock (std on a host,
 /// `Date.now()` in a browser, where `std::time::SystemTime::now` panics).
 pub(crate) fn unix_now() -> u64 {
-    n0_future::time::SystemTime::now()
-        .duration_since(n0_future::time::SystemTime::UNIX_EPOCH)
+    time::SystemTime::now()
+        .duration_since(time::SystemTime::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
 }

@@ -17,6 +17,7 @@
 
 use std::path::Path;
 
+use std::fs;
 /// Dependency-name prefixes that would mean the seam has collapsed. Prefixes,
 /// not exact names: `agent-share` covers every sibling in this workspace,
 /// `habilis-network` covers the destination workspace's crates, and `iroh` covers
@@ -30,23 +31,40 @@ const FORBIDDEN: &[&str] = &["agent-share", "habilis-network", "iroh"];
 /// Lines that name the package rather than a dependency. Everything else in a
 /// `[dependencies]`-shaped line begins with the crate being depended on.
 fn is_metadata(line: &str) -> bool {
-    line.starts_with('#')
-        || line.starts_with('[')
-        || line.starts_with("name")
-        || line.starts_with("repository")
-        || line.starts_with("description")
+    let marker = line.starts_with('#') || line.starts_with('[');
+    let key = ["name", "repository", "description"]
+        .iter()
+        .any(|key| line.starts_with(key));
+    marker || key
 }
 
 fn manifest() -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
         .expect("this crate has a Cargo.toml")
 }
 
+/// Test-only helpers that a dev-dependency table may name although the name starts with a forbidden
+/// prefix. `habilis-network-test-tracing` fails a unit test on a WARN or ERROR event. It depends on
+/// `tracing` and `tokio` and knows no network type, and a dev-dependency is never linked into the
+/// library, so the seam stays where it is. The same name in `[dependencies]` still fails.
+const DEV_ONLY_HELPERS: &[&str] = &["habilis-network-test-tracing"];
+
 #[test]
 fn the_crate_does_not_know_about_the_network_layer() {
+    let mut dev_only = false;
     for line in manifest().lines() {
         let line = line.trim();
+        if line.starts_with('[') {
+            dev_only = line.ends_with("dev-dependencies]");
+        }
         if is_metadata(line) {
+            continue;
+        }
+        if dev_only
+            && DEV_ONLY_HELPERS
+                .iter()
+                .any(|helper| line.starts_with(helper))
+        {
             continue;
         }
         for forbidden in FORBIDDEN {
@@ -86,7 +104,7 @@ fn no_obviously_host_only_dependency_crept_in() {
     }
 }
 
-/// bao is what this crate exists to *replace*, and a stray dependency on it
+/// Bao is what this crate exists to *replace*, and a stray dependency on it
 /// would mean someone reached for position-bound hashes again.
 ///
 /// The distinction is the crate's whole premise: BLAKE3 threads a chunk counter

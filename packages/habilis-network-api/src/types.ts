@@ -8,9 +8,12 @@ export type Lookup = 'mdns' | 'dht' | 'relay' | 'nostr'
 
 /**
  * One path a mesh's payload may ride. A list needs `udp` or `webrtc`; a
- * browser has no UDP, so it needs `webrtc` or `relay`.
+ * browser has no UDP, so it needs `webrtc` or `relay`. `multihop` (native only,
+ * and it needs `udp` or `webrtc` next to it) reaches a peer with no direct path
+ * through other members. `gossip` (it needs the same) reaches a peer with no
+ * other path through the frames of the mesh's gossip topic.
  */
-export type Transport = 'udp' | 'webrtc' | 'relay'
+export type Transport = 'udp' | 'webrtc' | 'multihop' | 'gossip' | 'relay'
 
 export interface JoinOpts {
   /**
@@ -46,8 +49,10 @@ export interface JoinOpts {
    * id.
    */
   nostrUrls?: string[]
-  /** Active-view cap. Omit for the engine default. */
+  /** Active-view cap (G). Omit for the engine default, 32. */
   maxPeers?: number
+  /** Ceiling of direct connections (C). Omit for the engine default, 64. */
+  maxDirect?: number
 }
 
 export interface CreateOpts {
@@ -79,7 +84,10 @@ export interface CreateOpts {
    * list. Needs `'nostr'` in `lookup`, and is part of the mesh id.
    */
   nostrUrls?: string[]
+  /** Active-view cap (G). Omit for the engine default, 32. */
   maxPeers?: number
+  /** Ceiling of direct connections (C). Omit for the engine default, 64. */
+  maxDirect?: number
 }
 
 /**
@@ -97,7 +105,10 @@ export type Lane = 'unicast' | 'multihop' | 'relay-only' | 'unreachable'
 export type Reach = 'direct' | 'gossip'
 
 export interface Peer {
+  /** A label. Two live peers can use one, so it names no peer; `key` does. */
   nick: string
+  /** The author key: 64 lowercase hex digits. `sendToKey` takes it. */
+  key: string
   reach: Reach
   transport: Lane
   /** Heartbeat-evicted, but still known and still returnable. */
@@ -111,7 +122,10 @@ export interface Peer {
  * the mesh; they take a stream.
  */
 export interface Message {
+  /** The author's nickname. Two live peers can use one, so it names no author. */
   from: string
+  /** The author's key: 64 lowercase hex digits. A reply goes to this key with `sendToKey`. */
+  key: string
   text: string
   /** True when the message was addressed to us alone. */
   directed: boolean
@@ -119,11 +133,15 @@ export interface Message {
 
 export type MeshEvent =
   | { kind: 'ready' }
-  | { kind: 'joined'; nick: string }
-  | { kind: 'left'; nick: string }
+  /**
+   * `key` is the author key, 64 lowercase hex digits. Two live peers can share a nickname, so
+   * `nick` alone cannot tell the events of the two apart: `key` can.
+   */
+  | { kind: 'joined'; nick: string; key: string }
+  | { kind: 'left'; nick: string; key: string }
   /** Heartbeat-evicted but still in the roster (`quiet: true`) — not `left`. */
-  | { kind: 'quiet'; nick: string }
-  | { kind: 'returned'; nick: string }
+  | { kind: 'quiet'; nick: string; key: string }
+  | { kind: 'returned'; nick: string; key: string }
   /** A peer's per-author hash chain forked: two signed messages at one seq. */
   | { kind: 'fork'; nick: string; pubkey: string; seq: number }
   | { kind: 'info'; message: string }
@@ -131,11 +149,16 @@ export type MeshEvent =
   | { kind: 'closed'; reason: string }
 
 export interface StateDoc {
-  /** The converged document. A CRDT underneath, so concurrent writers merge. */
-  readonly value: Record<string, unknown>
+  /**
+   * The shared state: one slice per member, keyed by the lowercase hex of the author key (64
+   * digits): the session key of the member, the same key as `Peer.key` and `Message.key`, not the
+   * persistent member key that signs the proof of a session. Each member writes only its own slice,
+   * and every member reads every slice.
+   */
+  readonly value: Record<string, Record<string, unknown>>
   /** Apply an RFC 7386 merge patch: set present keys, delete null keys, leave the rest. */
   merge(patch: Record<string, unknown>): Promise<void>
-  changes(signal?: AbortSignal): AsyncIterable<Record<string, unknown>>
+  changes(signal?: AbortSignal): AsyncIterable<Record<string, Record<string, unknown>>>
 }
 
 export interface Mesh extends AsyncDisposable {
@@ -156,6 +179,13 @@ export interface Mesh extends AsyncDisposable {
   readonly maxMsg: number
 
   send(text: string, opts?: { to?: string }): Promise<void>
+
+  /**
+   * Send to the one peer that holds an author key (64 lowercase hex digits): the `key` of a
+   * `Message` or of a `Peer`. `send` with `to` refuses a nickname that two live peers use; a
+   * key names one peer.
+   */
+  sendToKey(key: string, text: string): Promise<void>
 
   /**
    * Every message from the moment this iterator was created. Each call gets

@@ -4,7 +4,7 @@
 //!
 //! Load-bearing on wasm, not a nicety. On `wasm32-unknown-unknown` the `std`
 //! constructors route to `sys/time/unsupported.rs` and **panic**
-//! (`"time not implemented on this platform"`) — and [`unix_secs`] stamps every
+//! (`"time not implemented on this platform"`) — and [`UnixSecs::now`](crate::unix_secs::UnixSecs::now) stamps every
 //! `Message`, so a browser peer could not author a single frame. A panic is
 //! invisible to `cargo check`, which is why the wasm CI leg is green today
 //! while nothing has ever actually run there.
@@ -26,29 +26,26 @@ use std::time::Duration;
 
 use web_time::UNIX_EPOCH;
 
-/// Seconds since the Unix epoch, or 0 if the system clock is set
-/// before 1970 or beyond the year 2554 (i64 fits >290 billion
-/// seconds, far beyond any real system clock).
-#[must_use]
-pub fn unix_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|since_epoch| i64::try_from(since_epoch.as_secs()).ok())
-        .unwrap_or(0)
-}
-
 /// Nanoseconds since the Unix epoch. Returns 0 on pre-1970 clocks
 /// or after the year 2262 (i64 nanosecond overflow). Only used by
 /// tests today (unique tmp-file suffixes); gated on `test-fixtures`
 /// to avoid a dead-code lint in release builds.
+///
+/// # Examples
+///
+/// The clock reads the time since the Unix epoch, in nanoseconds.
+///
+/// ```
+/// use habilis_network_util::clock::unix_nanos;
+///
+/// assert!(unix_nanos() > 0);
+/// ```
 #[cfg(any(test, feature = "test-fixtures"))]
 #[must_use]
 pub fn unix_nanos() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|since_epoch| i64::try_from(since_epoch.as_nanos()).ok())
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok();
+    since_epoch
+        .and_then(|elapsed| i64::try_from(elapsed.as_nanos()).ok())
         .unwrap_or(0)
 }
 
@@ -60,6 +57,61 @@ pub fn unix_nanos() -> i64 {
 /// `u64` past ~584 million years — but a silent wrap in a log field is worse
 /// than a clamp.
 #[must_use]
-pub fn millis_saturating(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+pub const fn millis_saturating(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_mul(1000)
+        .saturating_add(duration.subsec_millis() as u64)
+}
+
+/// Milliseconds since the Unix epoch, 0 on a clock before 1970. Portable: it reads the clock of the
+/// browser on wasm32.
+#[must_use]
+pub fn unix_millis() -> u64 {
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok();
+    since_epoch.map_or(0, millis_saturating)
+}
+
+#[cfg(test)]
+mod millis_saturating_tests {
+    use std::time::Duration;
+
+    const ONE_SECOND: u64 = super::millis_saturating(Duration::from_secs(1));
+
+    #[test]
+    fn it_counts_the_whole_seconds_and_the_subsecond_part() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(ONE_SECOND, 1000, "one second is a thousand milliseconds");
+        assert_eq!(
+            super::millis_saturating(Duration::ZERO),
+            0,
+            "a zero duration is zero milliseconds"
+        );
+        assert_eq!(
+            super::millis_saturating(Duration::from_millis(1500)),
+            1500,
+            "a second and a half is 1500 milliseconds"
+        );
+        // A part of a millisecond is cut, as `Duration::as_millis` cuts it.
+        assert_eq!(
+            super::millis_saturating(Duration::new(2, 999_999_999)),
+            2999,
+            "a sub-millisecond part is truncated"
+        );
+    }
+
+    #[test]
+    fn it_saturates_where_a_u64_of_milliseconds_overflows() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            super::millis_saturating(Duration::from_secs(u64::MAX)),
+            u64::MAX,
+            "milliseconds saturate where a u64 would overflow"
+        );
+        assert_eq!(
+            super::millis_saturating(Duration::MAX),
+            u64::MAX,
+            "the largest duration saturates to u64 max"
+        );
+    }
 }

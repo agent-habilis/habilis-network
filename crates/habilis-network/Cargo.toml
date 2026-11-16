@@ -28,7 +28,7 @@ test-fixtures = ["habilis-network-protocol/test-fixtures"]
 # Off by default. Exposes the engine internals (crafted-message + state-doc
 # constructors) the app's `harness::adversarial` shim reaches so the adversarial
 # suite can inject malicious wire messages. Never enabled in a normal build.
-adversarial = ["test-fixtures", "habilis-network-protocol/adversarial", "habilis-network-doc/adversarial"]
+adversarial = ["test-fixtures", "habilis-network-protocol/adversarial"]
 # Off by default. Gates out the daemon's `std::process::exit` on the quit path
 # so the daemon returns cleanly and the app's dhat heap profiler (installed in
 # `main`) can flush `dhat-heap.json`. The app's `dhat-heap` feature forwards to
@@ -56,11 +56,12 @@ iroh-test-utils = [
     "dep:iroh-relay",
     "iroh-relay/server",
     "habilis-network-iroh-webrtc-transport/test-hooks",
+    "habilis-network-iroh-multihop-transport?/test-hooks",
 ]
 # Off by default. The blob-offload side-channel: a `habilis-mesh/blob/1` ALPN
 # server, a ticket, and fetch/offload, for handing a peer a payload too large to
 # ride a gossip frame. `agent-gossip` enables it for A2A payload offload; the
-# consumers that don't (mallorca, agent-share) pay neither the code size nor the
+# consumers that don't (agent-share) pay neither the code size nor the
 # spool directory.
 #
 # Implies `host`: it spools to disk and stands up its own iroh endpoint, and a
@@ -76,12 +77,17 @@ blob = ["host"]
 # builds unconditionally: IpcMessage is in the event loop signatures, so
 # gating it needs ipc.rs split by dependency first.)
 default = ["host", "mdns", "dht"]
+# The multihop transport: reach a peer with no direct path through other peers.
+# On under `host`, and the only way the crate is in the graph. The crate builds
+# for wasm32 (a gate row checks it), so a browser build can turn this on without
+# `host`. Nothing in the browser endpoint uses it yet.
+multihop = ["dep:habilis-network-iroh-multihop-transport"]
 # Both need real UDP sockets, so each implies `host`.
 mdns = ["host", "dep:iroh-mdns-address-lookup"]
 dht = ["host", "dep:iroh-mainline-address-lookup"]
 # On by default, and the coarsest gate here: the parts of the engine that need
 # an operating system. Turning it off leaves the portable engine — gossip, the
-# CRDT documents, the protocol and identity types, address lookup — which is
+# slice store, the protocol and identity types, address lookup — which is
 # what a browser needs and all it can have. `interprocess`, `libc`, signals,
 # processes and the filesystem have no wasm32 equivalent.
 #
@@ -94,9 +100,9 @@ host = [
     "habilis-network-protocol/host",
     "habilis-network-doc/host",
     "habilis-network-logging/host",
-    "dep:habilis-network-iroh-multihop-transport",
+    "multihop",
     "dep:interprocess",
-    "dep:libc",
+    "dep:rustix",
     # Base tokio is the portable floor (`sync`, `macros`, `time`, `rt`); these
     # are the pieces with no wasm32 equivalent. `net` in particular drags in
     # `mio`, which refuses to build for wasm32 at all.
@@ -112,6 +118,8 @@ host = [
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+parking_lot = "0.12"
+memchr = "2"
 anyhow.workspace = true
 bytes.workspace = true
 tracing.workspace = true
@@ -127,20 +135,25 @@ web-time.workspace = true
 n0-future.workspace = true
 # The multi-hop iroh custom transport: reach a peer with no direct path by
 # relaying its QUIC packets through intermediate peers. Registered on the
-# peer endpoint (the `--multihop` flag).
+# peer endpoint (the mesh policy's `multihop`).
 habilis-network-iroh-multihop-transport = { workspace = true, optional = true }
+# Gossip as an iroh custom transport. The recursion rule of the connection hook needs it; the
+# transport itself is wired by Phase 6 step 10.
+habilis-network-iroh-gossip-transport = { workspace = true }
+# The transport ids, re-exported from `net` so a consumer names a path kind
+# without a copy of its own. Already in the build through the gossip transport.
+habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util" }
 # Leaf crate: runtime dirs, clock, tuning dials, bounded containers, build stamp.
 habilis-network-util = { path = "../habilis-network-util", default-features = false, features = ["async-io"] }
 # Wire vocabulary: messages, mesh ids, nicknames, identity, sealing, invites.
 habilis-network-protocol = { path = "../habilis-network-protocol", default-features = false }
-# Shared-state CRDT (owns automerge), the tracing sink (owns
+# Shared-state slice store, the tracing sink (owns
 # tracing-subscriber), multipart reassembly, and the directory ad codec.
 habilis-network-doc = { path = "../habilis-network-doc", default-features = false }
 habilis-network-logging = { path = "../habilis-network-logging", default-features = false }
 bs58.workspace = true
 sha2.workspace = true
 rand.workspace = true
-libc = { workspace = true, optional = true }
 # mDNS + mainline-DHT address-lookup providers were extracted from iroh core
 # in the 1.0 line; these companion crates restore the `--mdns` / `--dht` legs.
 # From the workspace, because they are forked to pin iroh — see the iroh family
@@ -150,7 +163,7 @@ iroh-mainline-address-lookup = { workspace = true, optional = true }
 # Argon2id password stretching for `--password` (mesh hash verifier + ticket
 # handshake tokens). default-features off: no `password-hash` string format —
 # we only need the raw `hash_password_into` KDF.
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 futures-util.workspace = true
 # The Nostr lookup and JSEP carrier, on both targets: a browser's WebSocket
 # natively, tokio-websockets on a host.
@@ -161,7 +174,7 @@ url.workspace = true
 # directed body. The AEAD key is derived from the ECDH secret via the in-tree
 # `crypto::derive_secret` (SHA-256), so no HKDF dep. Both crates are pure-Rust
 # (no `unsafe`, which the workspace denies).
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
 # Best-effort wiping of retained secrets (the mesh password + derived channel
 # keys) on drop, so they don't linger in process memory / core dumps.
@@ -171,6 +184,9 @@ interprocess = { version = "2", features = ["tokio"], optional = true }
 [dev-dependencies]
 habilis-network-util = { path = "../habilis-network-util", default-features = false, features = ["test-fixtures", "async-io"] }
 habilis-network-protocol = { path = "../habilis-network-protocol", default-features = false, features = ["test-fixtures"] }
+# `MultihopHandle::refuse_hop_for_test`: the event loop's test makes the gate refuse a hop.
+habilis-network-iroh-multihop-transport = { workspace = true, features = ["test-hooks"] }
+habilis-network-iroh-gossip-transport = { workspace = true, features = ["test-fixtures"] }
 
 # The WebRTC lane is not optional: it is the browser's only way onto the mesh.
 # Only the backend differs by target — str0m natively, the platform's own
@@ -180,6 +196,9 @@ habilis-network-protocol = { path = "../habilis-network-protocol", default-featu
 # Split by target rather than by our own `host` feature, because which backend
 # compiles is a property of the target: a `--no-default-features` *native*
 # build still wants str0m, not the browser hub.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, optional = true }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 habilis-network-iroh-webrtc-transport = { path = "../habilis-network-iroh-webrtc-transport", features = ["native"] }
 # iroh's own defaults, re-added by name because the workspace entry turns them
@@ -192,9 +211,12 @@ iroh = { workspace = true, features = [
     "unstable-net-report",
 ] }
 iroh-gossip.workspace = true
+# The interface table, for one bind address per subnet (`lookup::subnet_binds`). The version of
+# the copy that `iroh` already pulls in through `netwatch`, so the graph has no second one.
+netdev = "0.45.0"
 # Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
 # the copy already in the graph, not a second one.
-iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4", default-features = false, optional = true }
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "e970dd25148386850feaffbac044bba64765fe73", default-features = false, optional = true }
 
 # The browser needs the endpoint and the relay transport and nothing else:
 # iroh's defaults (portmapper, fast-apple-datapath, metrics) are host-only and
@@ -210,6 +232,10 @@ web-sys = { workspace = true, features = ["Document", "VisibilityState", "Window
 # so leaving these unscoped makes `cargo check --target wasm32-unknown-unknown`
 # fail before it reaches any code of ours.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
+# The unit tests of the daemon setup bind on a relay of this machine (`test_relay::spawn_plain`)
+# with no `iroh-test-utils`: a test must not reach the real relay and its DNS.
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "e970dd25148386850feaffbac044bba64765fe73", default-features = false, features = ["server"] }
 habilis-network-iroh-nostr-address-lookup = { path = "../habilis-network-iroh-nostr-address-lookup", features = ["test-relay"] }
 proptest.workspace = true
 insta.workspace = true
@@ -229,3 +255,12 @@ wasm-bindgen-test = "0.3"
 [[example]]
 name = "mesh_peer"
 required-features = ["host"]
+
+[[example]]
+name = "mesh_peer_load"
+required-features = ["host", "iroh-test-utils"]
+
+# Builds the blob types from outside the crate, so it needs the `blob` feature that exposes them.
+[[test]]
+name = "blob_constructors"
+required-features = ["blob"]

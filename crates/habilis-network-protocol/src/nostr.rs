@@ -8,10 +8,11 @@
 //! what makes `from` true. Without it anyone holding the mesh id could offer
 //! as another member and tear down that member's session.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::fmt;
 use std::net::SocketAddr;
 
-use anyhow::{Context as _, Result, bail, ensure};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use iroh_base::{EndpointId, SecretKey, Signature};
@@ -19,14 +20,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 
-use crate::crypto::derive_secret;
-use crate::mesh::NostrChoice;
-use crate::seal::{open_symmetric, seal_symmetric};
+use crate::crypto::{SymmetricKey, derive_secret};
+use crate::meshes::NostrChoice;
+use crate::nostr_error::NostrError;
+use crate::seal_error::{open_symmetric, seal_symmetric};
 use crate::topic::TopicId;
 
 /// Public relays that forwarded ephemeral events in the probe of 2026-09-24
-/// (`cargo run -p habilis-network-iroh-nostr-address-lookup --example probe`), fastest first. `relay.damus.io`
-/// forwarded too but rate-limits bursts, so it is left out.
+/// and again in the probe of 2026-11-15 (`cargo run -p
+/// habilis-network-iroh-nostr-address-lookup --example probe`), fastest first.
+/// One relay per operator, and no test host: the probe prints this rule's
+/// result. `relay.damus.io` forwarded in the first probe but rate-limits
+/// bursts, and it showed no echo in the second, so it is left out.
 pub const PINNED_RELAYS: &[&str] = &[
     "wss://relay-can.zombi.cloudrodion.com",
     "wss://nostr.islandarea.net",
@@ -34,7 +39,6 @@ pub const PINNED_RELAYS: &[&str] = &[
     "wss://nostr-relay.corb.net",
     "wss://schnorr.me",
     "wss://nostr-01.uid.ovh",
-    "wss://top.testrelay.top",
     "wss://basspistol.org",
     "wss://offchain.pub",
     "wss://relay.primal.net",
@@ -43,7 +47,6 @@ pub const PINNED_RELAYS: &[&str] = &[
     "wss://nos.lol",
     "wss://nostr.sathoarder.com",
     "wss://relay02.lnfi.network",
-    "wss://staging.yabu.me",
     "wss://yabu.me/v2",
 ];
 
@@ -57,7 +60,7 @@ const MAX_SEEN: usize = 4096;
 
 /// The most addresses a signal may carry. A real peer has a few; every one of
 /// them lands in each receiver's address book for the sender.
-const MAX_ADDRS: usize = 8;
+pub(crate) const MAX_ADDRS: usize = 8;
 
 /// Signed together with the body, so no other protocol that signs with the
 /// endpoint key can be made to produce a valid signal.
@@ -67,23 +70,27 @@ const SIGNATURE_DOMAIN: &[u8] = b"habilis-network/nostr-signal/1";
 #[derive(Clone)]
 pub struct NostrKeys {
     room_tag: [u8; 32],
-    seal_key: [u8; 32],
-    relay_seed: [u8; 32],
+    seal_key: SymmetricKey,
+    relay_seed: SymmetricKey,
 }
 
-impl std::fmt::Debug for NostrKeys {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for NostrKeys {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("NostrKeys").finish_non_exhaustive()
     }
 }
 
 impl NostrKeys {
+    /// The Nostr keys of the mesh that the topic id names.
     #[must_use]
     pub fn derive(topic: &TopicId) -> Self {
         Self {
-            room_tag: derive_secret(topic.as_bytes(), b"nostr-room"),
-            seal_key: derive_secret(topic.as_bytes(), b"nostr-seal"),
-            relay_seed: derive_secret(topic.as_bytes(), b"nostr-relays"),
+            room_tag: *derive_secret(topic.as_bytes(), b"nostr-room"),
+            seal_key: SymmetricKey::from_zeroizing(derive_secret(topic.as_bytes(), b"nostr-seal")),
+            relay_seed: SymmetricKey::from_zeroizing(derive_secret(
+                topic.as_bytes(),
+                b"nostr-relays",
+            )),
         }
     }
 
@@ -97,7 +104,7 @@ impl NostrKeys {
     /// id without the room tag.
     #[must_use]
     pub fn self_tag(&self, member: &EndpointId) -> [u8; 32] {
-        derive_secret(&self.room_tag, member.as_bytes())
+        *derive_secret(&self.room_tag, member.as_bytes())
     }
 
     /// The relays of `choice`, ranked the same way by every member.
@@ -114,7 +121,7 @@ impl NostrKeys {
                 .collect(),
             NostrChoice::Custom(urls) => urls.clone(),
         };
-        rank_relays(urls, &self.relay_seed)
+        rank_relays(urls, self.relay_seed.as_bytes())
     }
 }
 
@@ -130,13 +137,15 @@ pub fn rank_relays(mut urls: Vec<Url>, seed: &[u8; 32]) -> Vec<Url> {
         hasher.update(url.as_str().as_bytes());
         hasher.finalize().into()
     };
-    urls.sort_by_cached_key(|url| std::cmp::Reverse(score(url)));
+    urls.sort_by_cached_key(|url| Reverse(score(url)));
     urls.dedup();
     urls
 }
 
+/// What a signal says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum SignalKind {
     /// "I am here": on the room tag to everyone, or on a member's self tag to
     /// wake it.
@@ -152,13 +161,17 @@ pub enum SignalKind {
 /// One signal, in the clear. Only [`seal`] and [`Opener::open`] see it on the
 /// wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Signal {
+    /// What the signal says.
     pub kind: SignalKind,
+    /// The member that sent the signal.
     pub from: EndpointId,
     /// Set on directed signals; a receiver refuses one addressed elsewhere.
     pub to: Option<EndpointId>,
     /// The sender's clock, in seconds since the Unix epoch.
     pub ts: u64,
+    /// A random value that tells this signal from every other.
     pub nonce: [u8; 16],
     /// The offer an answer or refusal replies to.
     pub re: Option<[u8; 16]>,
@@ -171,6 +184,7 @@ pub struct Signal {
 }
 
 impl Signal {
+    /// A signal of `kind` from `from`, sent at `now`, with no addressee yet.
     #[must_use]
     pub fn new(kind: SignalKind, from: EndpointId, now: u64) -> Self {
         Self {
@@ -278,6 +292,7 @@ pub struct Opener {
 }
 
 impl Opener {
+    /// An opener for the signals of the mesh `keys` name, addressed to `me`.
     #[must_use]
     pub fn new(keys: NostrKeys, me: EndpointId) -> Self {
         Self {
@@ -294,44 +309,58 @@ impl Opener {
     /// # Errors
     /// Any check fails: wrong mesh, tampered, forged, stale, for another
     /// member, from ourselves, or already seen.
-    pub fn open(&mut self, content: &str, now: u64) -> Result<Signal> {
-        let sealed = BASE64.decode(content).context("content is not base64")?;
+    pub fn open(&mut self, content: &str, now: u64) -> Result<Signal, NostrError> {
+        let sealed = BASE64.decode(content).map_err(|_| NostrError::NotBase64)?;
         let plain =
-            open_symmetric(&self.keys.seal_key, &sealed).context("not sealed for this mesh")?;
-        let envelope: Envelope = serde_json::from_slice(&plain).context("malformed envelope")?;
-        let body: Body = serde_json::from_str(&envelope.body).context("malformed signal body")?;
-        let from = EndpointId::from_bytes(&body.from).context("sender is not an endpoint id")?;
+            open_symmetric(&self.keys.seal_key, &sealed).map_err(|_| NostrError::NotSealed)?;
+        let envelope: Envelope =
+            serde_json::from_slice(&plain).map_err(|_| NostrError::Malformed {
+                step: "malformed envelope",
+            })?;
+        let body: Body =
+            serde_json::from_str(&envelope.body).map_err(|_| NostrError::Malformed {
+                step: "malformed signal body",
+            })?;
+        let from = EndpointId::from_bytes(&body.from).map_err(|_| NostrError::Malformed {
+            step: "sender is not an endpoint id",
+        })?;
         let signature: [u8; 64] = BASE64
             .decode(&envelope.signature)
-            .context("signature is not base64")?
+            .map_err(|_| NostrError::Malformed {
+                step: "signature is not base64",
+            })?
             .try_into()
-            .map_err(|_| anyhow::anyhow!("signature is not 64 bytes"))?;
+            .map_err(|_| NostrError::Malformed {
+                step: "signature is not 64 bytes",
+            })?;
         from.verify(
             &signed_message(&self.keys.room_tag, &envelope.body),
             &Signature::from_bytes(&signature),
         )
-        .map_err(|_| anyhow::anyhow!("signature does not match the sender"))?;
-        ensure!(
-            body.version == VERSION,
-            "unknown signal version {}",
-            body.version
-        );
-        ensure!(
-            body.ts.abs_diff(now) <= REPLAY_WINDOW_SECS,
-            "signal is {} s off our clock",
-            body.ts.abs_diff(now)
-        );
-        ensure!(from != self.me, "our own signal");
+        .map_err(|_| NostrError::BadSignature)?;
+        if body.version != VERSION {
+            return Err(NostrError::UnknownVersion(body.version));
+        }
+        if body.ts.abs_diff(now) > REPLAY_WINDOW_SECS {
+            return Err(NostrError::ClockSkew {
+                seconds: body.ts.abs_diff(now),
+            });
+        }
+        if from == self.me {
+            return Err(NostrError::OwnSignal);
+        }
         check_shape(&body)?;
         let to = body
             .to
             .map(|to| EndpointId::from_bytes(&to))
             .transpose()
-            .context("addressee is not an endpoint id")?;
+            .map_err(|_| NostrError::Malformed {
+                step: "addressee is not an endpoint id",
+            })?;
         if let Some(to) = to
             && to != self.me
         {
-            bail!("signal addressed to another member");
+            return Err(NostrError::AddressedElsewhere);
         }
         self.seen
             .retain(|_, ts| ts.abs_diff(now) <= 2 * REPLAY_WINDOW_SECS);
@@ -346,10 +375,9 @@ impl Opener {
             // replay of the evicted entry to 120 s.
             self.seen.remove(&oldest);
         }
-        ensure!(
-            self.seen.insert((from, body.nonce), body.ts).is_none(),
-            "replayed signal"
-        );
+        if self.seen.insert((from, body.nonce), body.ts).is_some() {
+            return Err(NostrError::Replayed);
+        }
         Ok(Signal {
             kind: body.kind,
             from,
@@ -367,7 +395,7 @@ impl Opener {
 /// What each kind must and must not carry. Checked at the seal, so no
 /// handler downstream meets a directed kind with no addressee (which every
 /// member on the room tag would answer) or an answer that names no offer.
-fn check_shape(body: &Body) -> Result<()> {
+fn check_shape(body: &Body) -> Result<(), NostrError> {
     let (to, envelope, re) = match body.kind {
         SignalKind::Hello => (None, Some(false), Some(false)),
         SignalKind::Offer => (Some(true), Some(true), Some(false)),
@@ -375,18 +403,17 @@ fn check_shape(body: &Body) -> Result<()> {
         SignalKind::Refuse => (Some(true), Some(false), Some(true)),
     };
     let matches = |want: Option<bool>, has: bool| want.is_none_or(|want| want == has);
-    ensure!(
-        matches(to, body.to.is_some())
-            && matches(envelope, body.envelope.is_some())
-            && matches(re, body.re.is_some()),
-        "malformed {:?}: wrong fields for its kind",
-        body.kind
-    );
-    ensure!(
-        body.addrs.len() <= MAX_ADDRS,
-        "signal carries {} addresses, the ceiling is {MAX_ADDRS}",
-        body.addrs.len()
-    );
+    if !(matches(to, body.to.is_some())
+        && matches(envelope, body.envelope.is_some())
+        && matches(re, body.re.is_some()))
+    {
+        return Err(NostrError::WrongFields { kind: body.kind });
+    }
+    if body.addrs.len() > MAX_ADDRS {
+        return Err(NostrError::TooManyAddresses {
+            count: body.addrs.len(),
+        });
+    }
     Ok(())
 }
 
@@ -408,7 +435,7 @@ mod tests {
         let mut signal = Signal::new(SignalKind::Offer, from.public(), NOW);
         signal.to = Some(to.public());
         signal.envelope = Some(r#"{"type":"offer","v":1,"endpoint_id":"x","sdp":"v=0"}"#.into());
-        signal.addrs = vec!["192.0.2.1:4433".parse().unwrap()];
+        signal.addrs = vec!["192.0.2.1:4433".parse().expect("valid in this test")];
         signal
     }
 
@@ -419,7 +446,7 @@ mod tests {
         let mut opener = Opener::new(keys(), bob.public());
         let signal_back = opener
             .open(&seal(&keys(), &alice, &signal), NOW + 3)
-            .unwrap();
+            .expect("valid in this test");
         assert_eq!(signal_back, signal);
     }
 
@@ -430,7 +457,7 @@ mod tests {
         let other = NostrKeys::derive(&TopicId::from_bytes([5u8; 32]));
         let error = Opener::new(other, bob.public())
             .open(&sealed, NOW)
-            .unwrap_err()
+            .expect_err("the signal is refused")
             .to_string();
         assert!(error.contains("not sealed for this mesh"), "{error}");
     }
@@ -450,21 +477,21 @@ mod tests {
             ts: NOW,
             nonce: claimed.nonce,
             re: None,
-            envelope: claimed.envelope.clone(),
+            envelope: claimed.envelope,
             addrs: Vec::new(),
             webrtc: false,
         })
-        .unwrap();
+        .expect("valid in this test");
         let signature = mallory.sign(&signed_message(&keys().room_tag, &body));
         let envelope = serde_json::to_vec(&Envelope {
             body,
             signature: BASE64.encode(signature.to_bytes()),
         })
-        .unwrap();
+        .expect("valid in this test");
         let forged = BASE64.encode(seal_symmetric(&keys().seal_key, &envelope));
         let error = Opener::new(keys(), bob.public())
             .open(&forged, NOW)
-            .unwrap_err()
+            .expect_err("the signal is refused")
             .to_string();
         assert!(error.contains("signature does not match"), "{error}");
     }
@@ -473,7 +500,7 @@ mod tests {
     fn a_tampered_body_is_refused() {
         let (alice, bob) = (member(), member());
         let sealed = seal(&keys(), &alice, &offer(&alice, &bob));
-        let mut tampered = BASE64.decode(&sealed).unwrap();
+        let mut tampered = BASE64.decode(&sealed).expect("valid in this test");
         let last = tampered.len() - 1;
         tampered[last] ^= 1;
         assert!(
@@ -489,7 +516,10 @@ mod tests {
         let sealed = seal(&keys(), &alice, &offer(&alice, &bob));
         let mut opener = Opener::new(keys(), bob.public());
         for now in [NOW + REPLAY_WINDOW_SECS + 1, NOW - REPLAY_WINDOW_SECS - 1] {
-            let error = opener.open(&sealed, now).unwrap_err().to_string();
+            let error = opener
+                .open(&sealed, now)
+                .expect_err("the signal is refused")
+                .to_string();
             assert!(error.contains("off our clock"), "{error}");
         }
         assert!(opener.open(&sealed, NOW + REPLAY_WINDOW_SECS).is_ok());
@@ -501,7 +531,7 @@ mod tests {
         let sealed = seal(&keys(), &alice, &offer(&alice, &bob));
         let error = Opener::new(keys(), carol.public())
             .open(&sealed, NOW)
-            .unwrap_err()
+            .expect_err("the signal is refused")
             .to_string();
         assert!(error.contains("another member"), "{error}");
     }
@@ -512,7 +542,7 @@ mod tests {
         let hello = Signal::new(SignalKind::Hello, alice.public(), NOW);
         let error = Opener::new(keys(), alice.public())
             .open(&seal(&keys(), &alice, &hello), NOW)
-            .unwrap_err()
+            .expect_err("the signal is refused")
             .to_string();
         assert!(error.contains("own signal"), "{error}");
     }
@@ -540,8 +570,11 @@ mod tests {
             }
             let sealed = seal(&keys(), &alice, &signal);
             let mut opener = Opener::new(keys(), bob.public());
-            opener.open(&sealed, NOW).unwrap();
-            let error = opener.open(&sealed, NOW + 1).unwrap_err().to_string();
+            opener.open(&sealed, NOW).expect("valid in this test");
+            let error = opener
+                .open(&sealed, NOW + 1)
+                .expect_err("the signal is refused")
+                .to_string();
             assert!(error.contains("replayed"), "{kind:?}: {error}");
         }
     }
@@ -576,7 +609,7 @@ mod tests {
     fn dropping_one_relay_leaves_the_order_of_the_rest() {
         let urls: Vec<Url> = PINNED_RELAYS
             .iter()
-            .map(|url| url.parse().unwrap())
+            .map(|url| url.parse().expect("valid in this test"))
             .collect();
         let seed = [9u8; 32];
         let full = rank_relays(urls.clone(), &seed);
@@ -630,7 +663,7 @@ mod tests {
             .collect();
         let error = Opener::new(keys(), bob.public())
             .open(&seal(&keys(), &alice, &hello), NOW)
-            .unwrap_err()
+            .expect_err("the signal is refused")
             .to_string();
         assert!(error.contains("addresses"), "{error}");
     }
@@ -642,7 +675,9 @@ mod tests {
         let mut opener = Opener::new(keys(), bob.public());
         for _ in 0..(MAX_SEEN + 100) {
             let hello = Signal::new(SignalKind::Hello, alice.public(), NOW);
-            opener.open(&seal(&keys(), &alice, &hello), NOW).unwrap();
+            opener
+                .open(&seal(&keys(), &alice, &hello), NOW)
+                .expect("valid in this test");
         }
         assert!(opener.seen.len() <= MAX_SEEN, "{}", opener.seen.len());
     }
@@ -655,9 +690,13 @@ mod tests {
         let hello = Signal::new(SignalKind::Hello, alice.public(), NOW);
         let sealed = seal(&keys(), &alice, &hello);
         let envelope: Envelope = serde_json::from_slice(
-            &open_symmetric(&keys().seal_key, &BASE64.decode(&sealed).unwrap()).unwrap(),
+            &open_symmetric(
+                &keys().seal_key,
+                &BASE64.decode(&sealed).expect("valid in this test"),
+            )
+            .expect("valid in this test"),
         )
-        .unwrap();
+        .expect("valid in this test");
         let body = envelope.body.replacen('{', r#"{"extra":1,"#, 1);
         let signature = alice.sign(&signed_message(&keys().room_tag, &body));
         let resealed = BASE64.encode(seal_symmetric(
@@ -666,11 +705,11 @@ mod tests {
                 body,
                 signature: BASE64.encode(signature.to_bytes()),
             })
-            .unwrap(),
+            .expect("valid in this test"),
         ));
         let error = Opener::new(keys(), bob.public())
             .open(&resealed, NOW)
-            .unwrap_err()
+            .expect_err("the signal is refused")
             .to_string();
         assert!(error.contains("malformed signal body"), "{error}");
     }

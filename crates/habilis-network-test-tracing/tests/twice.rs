@@ -1,0 +1,32 @@
+//! A second live guard on one thread would count every event twice, so it panics
+//! and says why.
+
+use std::panic::AssertUnwindSafe;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+#[test]
+fn a_second_live_guard_on_one_thread_panics() {
+    let (done, wait) = mpsc::channel();
+    thread::Builder::new()
+        .name("twice_probe".to_owned())
+        .spawn(move || {
+            let outcome = habilis_network_test_tracing::catch_panic(AssertUnwindSafe(|| {
+                let _first = habilis_network_test_tracing::init();
+                let _second = habilis_network_test_tracing::init();
+            }));
+            let failure = outcome.err();
+            let message = failure.and_then(|err| {
+                let text: Option<&String> = err.downcast_ref();
+                text.cloned()
+            });
+            let _: Result<(), _> = done.send(message);
+        })
+        .expect("spawn");
+    let text = wait
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the second init never returns")
+        .expect("the second init must panic");
+    assert!(text.contains("init() twice in one test"), "{text}");
+}

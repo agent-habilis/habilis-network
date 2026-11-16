@@ -1,0 +1,205 @@
+use std::io;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+
+use iroh::EndpointId;
+use iroh::endpoint::Builder;
+use iroh::endpoint::presets::{Minimal, Preset};
+use iroh::endpoint::transports::{CustomEndpoint, CustomTransport};
+use iroh_base::CustomAddr;
+use n0_watcher::Watchable;
+use tokio::sync::mpsc;
+
+use super::driver;
+use super::inbound_packet::InboundPacket;
+use super::negotiated_session::NegotiatedSession;
+use super::session_handle::SessionHandle;
+use super::session_registry::SessionRegistry;
+use super::web_rtc_endpoint::WebRtcEndpoint;
+use crate::attach_error::AttachError;
+use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
+
+use std::fmt;
+/// Factory for the `WebRTC` datagram lane of one iroh endpoint.
+///
+/// Sessions (one data channel per remote peer) are negotiated out of band
+/// via [`crate::offer`]/[`crate::answer`] and adopted with [`Self::attach`];
+/// iroh then sees the remote as reachable at its `WebRTC` [`CustomAddr`] and
+/// runs QUIC over the channel like over any other path.
+///
+/// # Examples
+///
+/// A new transport has its own endpoint id and no session.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::WebRtcTransport;
+/// use iroh_base::SecretKey;
+///
+/// let id = SecretKey::from_bytes(&[1u8; 32]).public();
+/// let transport = WebRtcTransport::new(id);
+/// assert_eq!(transport.local_id(), id);
+/// assert_eq!(transport.session_count(), 0);
+/// ```
+pub struct WebRtcTransport {
+    local_id: EndpointId,
+    // the transport and the endpoint share the session registry
+    registry: Arc<SessionRegistry>,
+    inbound_tx: mpsc::Sender<InboundPacket>,
+    inbound_rx: Mutex<Option<mpsc::Receiver<InboundPacket>>>,
+    local_addrs: Watchable<Vec<CustomAddr>>,
+}
+
+impl WebRtcTransport {
+    /// A transport for `local_id`, with no sessions yet.
+    #[must_use]
+    // the transport is shared by the endpoint builder and the caller
+    pub fn new(local_id: EndpointId) -> Arc<Self> {
+        let (inbound_tx, inbound_rx) = mpsc::channel(IN_QUEUE);
+        // the transport is shared by the endpoint builder and the caller
+        Arc::new(Self {
+            local_id,
+            registry: SessionRegistry::new(),
+            inbound_tx,
+            inbound_rx: Mutex::new(Some(inbound_rx)),
+            local_addrs: Watchable::new(vec![custom_addr(local_id)]),
+        })
+    }
+
+    /// The endpoint id of this node.
+    #[must_use]
+    pub fn local_id(&self) -> EndpointId {
+        self.local_id
+    }
+
+    /// Adopts a negotiated session for `remote` and starts its driver.
+    ///
+    /// # Errors
+    /// # Errors
+    /// [`AttachError::AlreadyAttached`] when a live session for `remote` already
+    /// exists, or [`AttachError::Retired`] when the session ends before it is recorded.
+    pub fn attach(
+        &self,
+        remote: EndpointId,
+        session: NegotiatedSession,
+    ) -> Result<(), AttachError> {
+        let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
+        // the drop counter is shared with the session handles
+        let dropped_tx = Arc::new(AtomicU64::new(0));
+        // Claim the slot *before* spawning. The driver retires its own
+        // generation when it ends, and a session that fails immediately does
+        // that while this call is still returning — against an empty registry,
+        // that removal is lost and the record below becomes permanent.
+        let reservation = self
+            .registry
+            .reserve(remote)
+            .ok_or(AttachError::AlreadyAttached(remote))?;
+        let generation = reservation.generation();
+        let task = tokio::spawn(driver::drive_session(
+            session,
+            remote,
+            generation,
+            Arc::clone(&self.registry),
+            out_rx,
+            self.inbound_tx.clone(),
+            Arc::clone(&dropped_tx),
+        ));
+        // `None` means the driver already failed and retired its own
+        // generation while this spawn was returning. The handle drops, which
+        // aborts the task rather than recording a session nothing pumps.
+        let guard = reservation
+            .fulfil(SessionHandle::new(out_tx, dropped_tx, task))
+            .ok_or(AttachError::Retired(remote))?;
+        guard.commit();
+        tracing::debug!(%remote, "webrtc session attached");
+        Ok(())
+    }
+
+    /// Tears down the session for `remote`, if any. Returns whether one
+    /// existed. A later [`Self::attach`] may replace it.
+    pub fn detach(&self, remote: &EndpointId) -> bool {
+        self.registry.remove(remote)
+    }
+
+    /// Tests only: drop every session at once, which aborts their driver tasks
+    /// without a close, as a process that died leaves them. The far ends find out
+    /// only when ICE consent times out.
+    #[cfg(feature = "test-hooks")]
+    #[must_use]
+    pub fn abort_sessions(&self) -> usize {
+        self.registry.clear()
+    }
+
+    /// Whether a session with `remote` is open.
+    #[must_use]
+    pub fn has_session(&self, remote: &EndpointId) -> bool {
+        self.registry.is_live(remote)
+    }
+
+    /// The number of open sessions.
+    #[must_use]
+    pub fn session_count(&self) -> usize {
+        self.registry.live_len()
+    }
+
+    /// The remote ids of every live session.
+    pub fn live_peer_ids(&self) -> impl Iterator<Item = EndpointId> {
+        self.registry.live_ids().into_iter()
+    }
+
+    /// A builder preset that makes this the endpoint's *only* transport
+    /// (no IP, no relay) — for tests and single-purpose peers like a browser
+    /// tab. A consumer that wants `WebRTC` to stay additive calls
+    /// `Builder::add_custom_transport` directly instead.
+    pub fn preset(self: &Arc<Self>) -> impl Preset {
+        ExclusivePreset {
+            factory: Arc::clone(self),
+        }
+    }
+}
+
+impl fmt::Debug for WebRtcTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sessions = self.registry.live_len();
+        formatter
+            .debug_struct("WebRtcTransport")
+            .field("local_id", &self.local_id)
+            .field("sessions", &sessions)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CustomTransport for WebRtcTransport {
+    fn bind(&self) -> io::Result<Box<dyn CustomEndpoint>> {
+        let receiver = {
+            let mut slot = self
+                .inbound_rx
+                .lock()
+                .expect("inbound receiver mutex poisoned");
+            slot.take()
+                .ok_or_else(|| io::Error::other("WebRtcTransport is already bound to an endpoint"))
+        }?;
+        Ok(Box::new(WebRtcEndpoint::new(
+            custom_addr(self.local_id),
+            self.local_addrs.clone(),
+            receiver,
+            Arc::clone(&self.registry),
+        )))
+    }
+}
+
+struct ExclusivePreset {
+    // the preset holds the transport it installs
+    factory: Arc<WebRtcTransport>,
+}
+
+impl Preset for ExclusivePreset {
+    fn apply(self, builder: Builder) -> Builder {
+        // `Minimal` supplies the mandatory TLS crypto provider.
+        let base = Minimal
+            .apply(builder)
+            .clear_ip_transports()
+            .clear_relay_transports();
+        base.clear_address_lookup()
+            .add_custom_transport(self.factory)
+    }
+}

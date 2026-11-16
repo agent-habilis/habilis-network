@@ -1,0 +1,1042 @@
+//! The iroh custom transport: the three traits, and the handle that owns them.
+//!
+//! The transport exists before the endpoint, and the gossip topic after it, so a
+//! handle is made without a sink and the engine attaches one once the topic is
+//! joined. Before that, the path is not valid and a packet is dropped, which QUIC
+//! treats as loss.
+
+use std::collections::HashSet;
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
+use iroh::EndpointId;
+use iroh::address_lookup::AddressLookup;
+use iroh::endpoint::transports::{
+    CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
+};
+use iroh_base::CustomAddr;
+use n0_future::time::Instant;
+use tokio::sync::mpsc;
+
+use crate::budget::Budget;
+use crate::counters::{Counters, Stats};
+use crate::delivery::Delivery;
+use crate::frame_sink::FrameSink;
+use crate::shared::{INBOUND_CAP, Packet, Shared, locked};
+use crate::{frame, gossip_addr, parse_gossip_addr};
+
+use iroh::endpoint::transports;
+
+use crate::{gossip_ladder, gossip_lookup, gossip_sink};
+use iroh_gossip::api;
+/// A handle to a gossip transport. Clone-cheap. Register `custom_transport()` on
+/// the endpoint builder, and `attach` a sink once the topic is joined.
+///
+/// # Examples
+///
+/// A handle is made for one application id, which it reports back.
+///
+/// ```
+/// use habilis_network_iroh_gossip_transport::GossipHandle;
+/// use iroh::SecretKey;
+///
+/// let app_id = SecretKey::from_bytes(&[2u8; 32]).public();
+/// let handle = GossipHandle::new(app_id);
+/// assert_eq!(handle.app_id(), app_id);
+/// ```
+#[derive(Debug, Clone)]
+pub struct GossipHandle {
+    // the handle and its transport share one state, cloned into each
+    pub(crate) shared: Arc<Shared>,
+    inbound: mpsc::Sender<Packet>,
+    // the endpoint's transport and this handle share one instance
+    transport: Arc<GossipTransport>,
+}
+
+impl GossipHandle {
+    /// A handle with no sink. The path is not valid until `attach` is called.
+    #[must_use]
+    pub fn new(app_id: EndpointId) -> Self {
+        // shared by the handle, the transport and the receive task
+        let shared = Arc::new(Shared {
+            app_id,
+            local_addr: gossip_addr(app_id),
+            sink: Mutex::new(None),
+            attached: AtomicBool::new(false),
+            blocked: Mutex::new(HashSet::new()),
+            budget: Mutex::new(None),
+            established: Mutex::new(HashSet::new()),
+            counters: Counters::default(),
+        });
+        let (inbound, receiver) = mpsc::channel(INBOUND_CAP);
+        // the handle keeps a clone while the endpoint's transport holds another
+        let transport = Arc::new(GossipTransport {
+            shared: Arc::clone(&shared),
+            inbound: Mutex::new(Some(receiver)),
+        });
+        Self {
+            shared,
+            inbound,
+            transport,
+        }
+    }
+
+    /// This member's app endpoint id.
+    #[must_use]
+    pub fn app_id(&self) -> EndpointId {
+        self.shared.app_id
+    }
+
+    /// Send frames on `sender`, the mesh topic, from now on.
+    ///
+    /// The engine calls this when it joins the topic, and again where it replaces
+    /// the topic's sender after a resubscribe.
+    pub fn attach_gossip(&self, sender: api::GossipSender) {
+        // the sink is a trait object: the handle stores it and the receive task calls it
+        self.attach(Arc::new(gossip_sink::GossipSink::spawn(sender)));
+    }
+
+    /// The address lookup, for `Builder::address_lookup`: it answers the first dial
+    /// of a peer with the gossip address.
+    #[must_use]
+    pub fn address_lookup(&self) -> impl AddressLookup + use<> {
+        gossip_lookup::GossipLookup {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    /// The path selector that keeps gossip below every direct path and above the relay, for
+    /// `Builder::path_selector`. Install it wherever [`Self::custom_transport`] is registered
+    /// and no other selector is: iroh's default treats a custom transport as primary, and the
+    /// mesh topic would carry the bytes of a pair that has an IP path.
+    #[must_use]
+    // trait object: the endpoint builder takes the selector by Arc
+    pub fn path_selector(&self) -> Arc<dyn transports::PathSelector> {
+        // trait object: the endpoint builder takes the selector by Arc
+        Arc::new(gossip_ladder::GossipLadder::new(self.app_id()))
+    }
+
+    /// Allow frames to `dst`, or stop them. The engine calls this when the selected
+    /// path of a pair changes: a pair that a higher rung carries has no use for the
+    /// flood. A destination that was never named is allowed, so that a handshake to
+    /// a new peer is not dropped.
+    pub fn allow(
+        &self,
+        dst: EndpointId,
+        // true lets frames to dst through, false stops them
+        allowed: bool,
+    ) {
+        let mut blocked = locked(&self.shared.blocked);
+        if allowed {
+            blocked.remove(&dst);
+        } else {
+            blocked.insert(dst);
+        }
+    }
+
+    /// Whether frames to `dst` are allowed: the last call of [`Self::allow`], and true for a
+    /// destination that was never named.
+    #[must_use]
+    pub fn is_allowed(&self, dst: EndpointId) -> bool {
+        !locked(&self.shared.blocked).contains(&dst)
+    }
+
+    /// Whether `dst` was last told to be established, by [`Self::set_established`].
+    #[must_use]
+    pub fn is_established(&self, dst: EndpointId) -> bool {
+        locked(&self.shared.established).contains(&dst)
+    }
+
+    /// Limit the bytes per second that this node puts on the topic, or lift the
+    /// limit with `None`. See [`crate::DEFAULT_BUDGET_BYTES_PER_SEC`].
+    pub fn set_budget(&self, bytes_per_sec: Option<u64>) {
+        *locked(&self.shared.budget) = bytes_per_sec.map(|rate| Budget::new(rate, Instant::now()));
+    }
+
+    /// Tell the handle whether `dst` has an established connection. Frames to a
+    /// destination that has none are handshakes: they are not charged to the
+    /// budget, so a new pair is not starved by a bulk flow. The engine calls this
+    /// from where it knows the connections.
+    pub fn set_established(
+        &self,
+        dst: EndpointId,
+        // true marks dst as connected, false as not connected
+        established: bool,
+    ) {
+        let mut destinations = locked(&self.shared.established);
+        if established {
+            destinations.insert(dst);
+        } else {
+            destinations.remove(&dst);
+        }
+    }
+
+    /// The topic missed messages for this member (`Event::Lagged`). The receive loop
+    /// calls this, and so must the engine's split of the mesh topic.
+    pub fn note_lagged(&self) {
+        self.shared.counters.lagged();
+    }
+
+    /// The engine's split dropped a mesh message because its queue to the event loop was
+    /// full (see [`Stats::forward_dropped`](crate::Stats)).
+    pub fn note_forward_dropped(&self) {
+        self.shared.counters.forward_dropped();
+    }
+
+    /// What this handle has counted so far.
+    #[must_use]
+    pub fn stats(&self) -> Stats {
+        self.shared.counters.snapshot()
+    }
+
+    /// The transport, for `Builder::add_custom_transport`.
+    #[must_use]
+    // trait object: the endpoint builder takes the transport by Arc
+    pub fn custom_transport(&self) -> Arc<dyn CustomTransport> {
+        // the endpoint and the handle share the one transport
+        Arc::clone(&self.transport) as Arc<dyn CustomTransport>
+    }
+
+    /// Send frames to `sink` from now on, and make the path valid.
+    pub fn attach<S: FrameSink + 'static>(&self, sink: Arc<S>) {
+        *locked(&self.shared.sink) = Some(sink);
+        self.shared.attached.store(true, Ordering::SeqCst);
+    }
+
+    /// Stop sending. The path is not valid again until the next `attach`.
+    pub fn detach(&self) {
+        self.shared.attached.store(false, Ordering::SeqCst);
+        *locked(&self.shared.sink) = None;
+    }
+
+    /// A frame from the topic. Never blocks: the engine's receive loop calls this.
+    #[must_use]
+    pub fn deliver(&self, frame: &[u8]) -> Delivery {
+        let counters = &self.shared.counters;
+        counters.arrived(frame.len());
+        let Ok(frame) = frame::decode(frame) else {
+            counters.malformed();
+            return Delivery::Malformed;
+        };
+        if frame.dst != self.shared.app_id {
+            counters.not_for_us();
+            return Delivery::NotForUs;
+        }
+        let packet = Packet {
+            remote: gossip_addr(frame.src),
+            bytes: frame.datagram.to_vec(),
+        };
+        if self.inbound.try_send(packet).is_err() {
+            counters.queue_full();
+            return Delivery::QueueFull;
+        }
+        counters.queued();
+        Delivery::Queued
+    }
+}
+
+#[derive(Debug)]
+struct GossipTransport {
+    // the state the handle and its sender share
+    shared: Arc<Shared>,
+    /// Taken by the single `bind` call. `None` afterwards.
+    inbound: Mutex<Option<mpsc::Receiver<Packet>>>,
+}
+
+impl CustomTransport for GossipTransport {
+    fn bind(&self) -> io::Result<Box<dyn CustomEndpoint>> {
+        let inbound = locked(&self.inbound)
+            .take()
+            .ok_or_else(|| io::Error::other("gossip transport already bound"))?;
+        let local = n0_watcher::Watchable::new(vec![self.shared.local_addr.clone()]);
+        Ok(Box::new(GossipEndpoint {
+            shared: Arc::clone(&self.shared),
+            inbound,
+            local,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct GossipEndpoint {
+    // the state the handle and its sender share
+    shared: Arc<Shared>,
+    inbound: mpsc::Receiver<Packet>,
+    local: n0_watcher::Watchable<Vec<CustomAddr>>,
+}
+
+impl CustomEndpoint for GossipEndpoint {
+    fn watch_local_addrs(&self) -> n0_watcher::Direct<Vec<CustomAddr>> {
+        self.local.watch()
+    }
+
+    // trait object: the endpoint calls the sender through this Arc
+    fn create_sender(&self) -> Arc<dyn CustomSender> {
+        // the sender is shared with the endpoint, which calls it from its tasks
+        Arc::new(GossipSender {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+
+    fn poll_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &mut [io::IoSliceMut<'_>],
+        metas: &mut [noq_udp::RecvMeta],
+        recv_infos: &mut [RecvInfo],
+    ) -> Poll<io::Result<usize>> {
+        let cap: usize = bufs.len().min(metas.len());
+        let cap = cap.min(recv_infos.len());
+        if cap == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        loop {
+            let mut batch = Vec::with_capacity(cap);
+            match self.inbound.poll_recv_many(cx, &mut batch, cap) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(0) => {
+                    return Poll::Ready(Err(io::Error::other("gossip inbound closed")));
+                }
+                Poll::Ready(_) => {}
+            }
+            let mut count = 0;
+            for packet in batch {
+                let len = packet.bytes.len();
+                if bufs[count].len() < len {
+                    // Larger than the buffer iroh handed us: dropped, as a NIC
+                    // drops a jumbo frame on a path with a smaller MTU.
+                    self.shared.counters.dropped_oversized_in();
+                    continue;
+                }
+                bufs[count][..len].copy_from_slice(&packet.bytes);
+                recv_infos[count] =
+                    RecvInfo::new(packet.remote, Some(self.shared.local_addr.clone()));
+                metas[count].len = len;
+                metas[count].stride = len;
+                count += 1;
+            }
+            if count > 0 {
+                return Poll::Ready(Ok(count));
+            }
+            // Everything dequeued was too large. Poll the queue again: that
+            // either finds more or returns `Pending` with this task's waker
+            // registered, so there is no busy loop and no manual wake.
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GossipSender {
+    // the state the handle and its tasks share
+    shared: Arc<Shared>,
+}
+
+impl CustomSender for GossipSender {
+    /// Valid only for a gossip address, and only while a sink is attached: a path
+    /// that cannot carry a packet must not be selected.
+    fn is_valid_send_addr(&self, address: &CustomAddr) -> bool {
+        parse_gossip_addr(address).is_some() && self.shared.path_is_valid()
+    }
+
+    fn poll_send(
+        &self,
+        _cx: &mut Context<'_>,
+        dst: &CustomAddr,
+        _src: Option<&CustomAddr>,
+        transmit: &Transmit<'_>,
+    ) -> Poll<io::Result<()>> {
+        let Some(dst) = parse_gossip_addr(dst) else {
+            return Poll::Ready(Err(io::Error::other("not a gossip address")));
+        };
+        // A GSO batch is several datagrams; each is one QUIC packet and one frame.
+        for datagram in habilis_network_iroh_transport_util::datagrams(transmit) {
+            self.shared.send_datagram(dst, datagram);
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Wake;
+    use std::time::Duration;
+
+    use iroh::endpoint::presets;
+    use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+    use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
+
+    use bytes::Bytes;
+
+    use super::{
+        Arc, Context, CustomTransport, Delivery, EndpointId, FrameSink, GossipHandle, Mutex,
+        Ordering, Poll, RecvInfo, gossip_addr, io,
+    };
+    use crate::frame::Frame;
+    use crate::hub::Hub;
+    use crate::shared::{INBOUND_CAP, locked};
+    use crate::{GOSSIP_TRANSPORT_ID, frame};
+
+    use iroh::endpoint::{Connection, Connection as iroh_Connection};
+    use std::{panic, task};
+    use tokio::{io as tokio_io, time};
+    const ECHO_ALPN: &[u8] = b"habilis-network-gossip/test-echo/0";
+
+    fn secret(seed: u8) -> SecretKey {
+        SecretKey::from_bytes(&[seed; 32])
+    }
+
+    /// A sink that keeps what it is given.
+    #[derive(Debug, Default)]
+    struct Recorder(Mutex<Vec<Bytes>>);
+
+    impl FrameSink for Recorder {
+        fn try_send(&self, frame: Bytes) -> bool {
+            locked(&self.0).push(frame);
+            true
+        }
+    }
+
+    /// A sink whose liveness check panics, as a foreign call may.
+    #[derive(Debug)]
+    struct Panicking;
+
+    impl FrameSink for Panicking {
+        fn try_send(&self, _frame: Bytes) -> bool {
+            true
+        }
+
+        fn is_alive(&self) -> bool {
+            panic!("the liveness check panics")
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct Echo;
+
+    impl ProtocolHandler for Echo {
+        async fn accept(&self, connection: iroh_Connection) -> Result<(), AcceptError> {
+            // One echo per stream, until the client closes the connection.
+            while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                tokio_io::copy(&mut recv, &mut send).await?;
+                send.finish()?;
+            }
+            Ok(())
+        }
+    }
+
+    /// An endpoint whose only transport is gossip.
+    async fn endpoint(secret: SecretKey, handle: &GossipHandle) -> Endpoint {
+        let transport = handle.custom_transport();
+        let builder = Endpoint::builder(presets::Minimal)
+            .secret_key(secret)
+            .relay_mode(RelayMode::Disabled)
+            .add_custom_transport(transport);
+        builder
+            .clear_ip_transports()
+            .clear_relay_transports()
+            .bind()
+            .await
+            .expect("bind an endpoint with gossip only")
+    }
+
+    fn dial(id: EndpointId) -> EndpointAddr {
+        EndpointAddr::from_parts(id, [TransportAddr::Custom(gossip_addr(id))])
+    }
+
+    async fn echo_once(connection: &Connection, message: &[u8]) {
+        let (mut send, mut recv) = connection.open_bi().await.expect("open a stream");
+        send.write_all(message).await.expect("write");
+        send.finish().expect("finish");
+        let echoed = time::timeout(Duration::from_secs(10), recv.read_to_end(1024))
+            .await
+            .expect("the echo timed out")
+            .expect("read the echo");
+        assert_eq!(echoed, message, "the echo returns the message");
+    }
+
+    /// Two nodes with gossip as the only transport, joined by an in-memory flood.
+    async fn pair() -> (
+        Hub,
+        (Endpoint, GossipHandle),
+        (Endpoint, GossipHandle),
+        Router,
+    ) {
+        let hub = Hub::new();
+        let alice_handle = GossipHandle::new(secret(1).public());
+        let bob_handle = GossipHandle::new(secret(2).public());
+        hub.join(&alice_handle);
+        hub.join(&bob_handle);
+        let alice = endpoint(secret(1), &alice_handle).await;
+        let bob = endpoint(secret(2), &bob_handle).await;
+        let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
+        (hub, (alice, alice_handle), (bob, bob_handle), router)
+    }
+
+    #[test]
+    fn a_quic_echo_completes_with_gossip_as_the_only_transport() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (_hub, (alice, _), (bob, _), router) = pair().await;
+
+            let target = dial(bob.id());
+            let connection =
+                time::timeout(Duration::from_secs(10), alice.connect(target, ECHO_ALPN))
+                    .await
+                    .expect("connect timed out")
+                    .expect("connect over gossip");
+
+            echo_once(&connection, b"hello over gossip").await;
+            let selected_is_gossip: bool = connection.paths().iter().any(|path| {
+                path.is_selected()
+                    && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == GOSSIP_TRANSPORT_ID)
+            });
+            assert!(selected_is_gossip, "the selected path is not gossip");
+            connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
+    }
+
+    #[test]
+    fn a_path_is_not_valid_until_a_sink_is_attached() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        let endpoint = handle.transport.bind().expect("bind");
+        let sender = endpoint.create_sender();
+        let to_bob = gossip_addr(secret(2).public());
+
+        assert!(!sender.is_valid_send_addr(&to_bob), "before attach");
+        // the test reads the recorder after the handle takes a clone
+        handle.attach(Arc::new(Recorder::default()));
+        assert!(sender.is_valid_send_addr(&to_bob), "after attach");
+        handle.detach();
+        assert!(!sender.is_valid_send_addr(&to_bob), "after detach");
+    }
+
+    #[test]
+    fn a_panic_in_the_liveness_check_does_not_poison_the_sink_lock() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        // a sink that panics, to see the handle survive it
+        handle.attach(Arc::new(Panicking));
+
+        let outcome = habilis_network_test_tracing::catch_panic(panic::AssertUnwindSafe(|| {
+            handle.shared.path_is_valid()
+        }));
+
+        assert!(outcome.is_err(), "the liveness check should panic");
+        assert!(
+            !handle.shared.sink.is_poisoned(),
+            "a panic in the liveness check poisoned the sink lock"
+        );
+    }
+
+    /// The guard is on the frame, and the frame holds 3774 bytes of datagram.
+    #[test]
+    fn a_datagram_over_the_frame_budget_is_dropped_by_the_sender() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(Arc::clone(&recorder));
+        let bob = secret(2).public();
+
+        handle
+            .shared
+            .send_datagram(bob, &vec![1u8; frame::MAX_DATAGRAM_LEN + 1]);
+        assert!(locked(&recorder.0).is_empty(), "3775 bytes");
+        handle
+            .shared
+            .send_datagram(bob, &vec![1u8; frame::MAX_DATAGRAM_LEN]);
+        assert_eq!(locked(&recorder.0).len(), 1, "3774 bytes");
+    }
+
+    #[derive(Default)]
+    struct CountingWaker(AtomicUsize);
+
+    impl Wake for CountingWaker {
+        // the Wake contract takes the task as an Arc
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// An empty queue returns `Pending` and wakes nobody; a delivered frame wakes
+    /// the task once and is then read. A busy loop would show as wakes with no push.
+    #[test]
+    fn an_empty_queue_is_pending_and_a_delivery_wakes_the_task() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = secret(1).public();
+        let handle = GossipHandle::new(me);
+        let mut endpoint = handle.transport.bind().expect("bind");
+        // the Wake contract hands the waker out as an Arc
+        let waker = Arc::new(CountingWaker::default());
+        let std_waker = task::Waker::from(Arc::clone(&waker));
+        let mut cx = Context::from_waker(&std_waker);
+        let mut storage = [0u8; 2048];
+        let mut bufs = [io::IoSliceMut::new(&mut storage)];
+        let mut metas = [noq_udp::RecvMeta::default()];
+        let mut infos = [RecvInfo::new(gossip_addr(me), None)];
+
+        let first = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(first.is_pending(), "an empty queue");
+        assert_eq!(
+            waker.0.load(Ordering::SeqCst),
+            0,
+            "woken with nothing queued"
+        );
+
+        let from_bob = (Frame {
+            dst: me,
+            src: secret(2).public(),
+            datagram: &[5u8; 100],
+        })
+        .encode()
+        .expect("a frame");
+        assert_eq!(
+            handle.deliver(&from_bob),
+            Delivery::Queued,
+            "a delivery from bob is accepted"
+        );
+        assert_eq!(waker.0.load(Ordering::SeqCst), 1, "one wake per delivery");
+
+        let second = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(matches!(second, Poll::Ready(Ok(1))), "{second:?}");
+        assert_eq!(
+            metas[0].len, 100,
+            "the delivery reports the frame length of one hundred"
+        );
+    }
+
+    #[test]
+    fn a_frame_for_another_member_or_a_bad_frame_is_not_queued() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        let frame = Frame {
+            dst: secret(3).public(),
+            src: secret(2).public(),
+            datagram: &[1],
+        };
+        let for_carol = frame.encode().expect("frame");
+
+        assert_eq!(
+            handle.deliver(&for_carol),
+            Delivery::NotForUs,
+            "a frame for another member is not queued"
+        );
+        assert_eq!(
+            handle.deliver(b"{\"kind\":\"chat\"}"),
+            Delivery::Malformed,
+            "a bad frame is not queued"
+        );
+    }
+
+    /// A frame with a forged source arrives for a connection that exists. It must
+    /// not move the connection or stop it: QUIC authenticates every packet. This
+    /// test was green on its first run; it stays as a guard.
+    #[test]
+    fn a_forged_source_does_not_move_or_break_an_established_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (hub, (alice, alice_handle), (bob, _), router) = pair().await;
+            let connection = alice
+                .connect(dial(bob.id()), ECHO_ALPN)
+                .await
+                .expect("connect over gossip");
+            echo_once(&connection, b"before").await;
+
+            let real = hub.sent().next().expect("a frame was sent");
+            let real = frame::decode(&real).expect("a frame");
+            let frame = Frame {
+                dst: alice_handle.app_id(),
+                src: secret(9).public(),
+                datagram: real.datagram,
+            };
+            let forged = frame.encode().expect("a frame");
+            for _ in 0..5 {
+                let _ = alice_handle.deliver(&forged);
+            }
+
+            echo_once(&connection, b"after").await;
+            assert!(connection.close_reason().is_none(), "the connection closed");
+            let open = connection.paths();
+            let chosen = open.iter().filter(iroh::endpoint::Path::is_selected);
+            let selected: Vec<_> = chosen.map(|path| path.remote_addr().clone()).collect();
+            assert_eq!(
+                selected,
+                [TransportAddr::Custom(gossip_addr(bob.id()))],
+                "the selected path moved"
+            );
+            connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
+    }
+
+    /// A frame is counted where it leaves and where it arrives, and the two ends
+    /// agree with what the flood carried.
+    #[test]
+    fn an_echo_moves_the_counters_of_both_ends() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (hub, (alice, alice_handle), (bob, bob_handle), router) = pair().await;
+            let connection = alice
+                .connect(dial(bob.id()), ECHO_ALPN)
+                .await
+                .expect("connect over gossip");
+            echo_once(&connection, b"count me").await;
+
+            let (alice_stats, bob_stats) = (alice_handle.stats(), bob_handle.stats());
+            assert!(
+                alice_stats.frames_out > 0 && bob_stats.frames_out > 0,
+                "{alice_stats:?} {bob_stats:?}"
+            );
+            assert!(
+                alice_stats.queued > 0 && bob_stats.queued > 0,
+                "{alice_stats:?} {bob_stats:?}"
+            );
+            let sent: Vec<_> = hub.sent().collect();
+            assert_eq!(
+                alice_stats.frames_out + bob_stats.frames_out,
+                sent.len() as u64,
+                "an echo moves the frame counters of both ends"
+            );
+            let flooded: usize = sent.iter().map(Bytes::len).sum();
+            assert_eq!(
+                alice_stats.bytes_out + bob_stats.bytes_out,
+                flooded as u64,
+                "an echo moves the byte counters of both ends"
+            );
+            assert_eq!(
+                alice_stats.frames_in, bob_stats.frames_out,
+                "alice reads what bob sent"
+            );
+            assert_eq!(
+                bob_stats.frames_in, alice_stats.frames_out,
+                "bob reads what alice sent"
+            );
+            connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
+    }
+
+    #[test]
+    fn a_dropped_datagram_is_counted_by_its_reason() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        let bob = secret(2).public();
+
+        handle.shared.send_datagram(bob, &[1u8; 100]);
+        // the test reads the recorder after the handle takes a clone
+        handle.attach(Arc::new(Recorder::default()));
+        handle
+            .shared
+            .send_datagram(bob, &vec![1u8; frame::MAX_DATAGRAM_LEN + 1]);
+        handle.shared.send_datagram(bob, &[]);
+        handle.shared.send_datagram(bob, &[1u8; 100]);
+
+        let stats = handle.stats();
+        assert_eq!(
+            stats.dropped_no_sink, 1,
+            "a datagram with no sink is counted as no sink"
+        );
+        assert_eq!(
+            stats.dropped_too_large, 1,
+            "a too-large datagram is counted as too large"
+        );
+        assert_eq!(
+            stats.dropped_empty, 1,
+            "an empty datagram is counted as empty"
+        );
+        assert_eq!(stats.frames_out, 1, "one frame is counted as out");
+        assert_eq!(
+            stats.bytes_out,
+            (frame::HEADER_LEN + 100) as u64,
+            "the bytes out match the frame length"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_arrives_is_counted_by_what_became_of_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = secret(1).public();
+        let handle = GossipHandle::new(me);
+        let for_me = (Frame {
+            dst: me,
+            src: secret(2).public(),
+            datagram: &[1u8; 50],
+        })
+        .encode()
+        .expect("frame");
+        let frame = Frame {
+            dst: secret(3).public(),
+            src: secret(2).public(),
+            datagram: &[1],
+        };
+        let for_carol = frame.encode().expect("frame");
+
+        let _ = handle.deliver(&for_me);
+        let _ = handle.deliver(&for_carol);
+        let _ = handle.deliver(b"{}");
+        for _ in 0..INBOUND_CAP {
+            let _ = handle.deliver(&for_me);
+        }
+
+        let stats = handle.stats();
+        assert_eq!(
+            stats.frames_in,
+            INBOUND_CAP as u64 + 3,
+            "a frame that arrives is counted as in"
+        );
+        assert_eq!(
+            stats.queued, INBOUND_CAP as u64,
+            "the queue holds its capacity"
+        );
+        assert_eq!(
+            stats.queue_full, 1,
+            "a frame that finds the queue full is counted as queue full"
+        );
+        assert_eq!(
+            stats.not_for_us, 1,
+            "a frame for another member is counted as not for us"
+        );
+        assert_eq!(
+            stats.malformed, 1,
+            "a malformed frame is counted as malformed"
+        );
+        assert_eq!(
+            stats.bytes_in,
+            (INBOUND_CAP as u64 + 1) * (frame::HEADER_LEN as u64 + 50)
+                + (frame::HEADER_LEN as u64 + 1)
+                + 2,
+            "the bytes in match the arrived frames"
+        );
+    }
+
+    /// A destination that the engine does not allow gets no frame, and the drop is
+    /// counted. The others are not affected, and allowing it again lets frames go.
+    #[test]
+    fn a_destination_that_is_not_allowed_gets_no_frame() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(Arc::clone(&recorder));
+        let (bob, carol) = (secret(2).public(), secret(3).public());
+
+        handle.allow(bob, false);
+        handle.shared.send_datagram(bob, &[1u8; 100]);
+        handle.shared.send_datagram(carol, &[1u8; 100]);
+
+        let sent = locked(&recorder.0).clone();
+        assert_eq!(sent.len(), 1, "only the frame to carol");
+        assert_eq!(
+            frame::decode(&sent[0]).expect("a frame").dst,
+            carol,
+            "a destination that is not allowed gets no frame"
+        );
+        assert_eq!(
+            handle.stats().dropped_not_allowed,
+            1,
+            "the disallowed destination is counted as not allowed"
+        );
+
+        handle.allow(bob, true);
+        handle.shared.send_datagram(bob, &[1u8; 100]);
+        assert_eq!(locked(&recorder.0).len(), 2, "allowed again");
+    }
+
+    /// A destination that was never named is allowed: its handshake must pass.
+    #[test]
+    fn a_destination_that_was_never_named_is_allowed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(Arc::clone(&recorder));
+
+        handle.shared.send_datagram(secret(9).public(), &[1u8; 100]);
+
+        assert_eq!(
+            locked(&recorder.0).len(),
+            1,
+            "a destination that was never named is allowed"
+        );
+        assert_eq!(
+            handle.stats().dropped_not_allowed,
+            0,
+            "an allowed destination is not counted as not allowed"
+        );
+    }
+
+    /// A dial by id alone reaches the peer: the lookup supplies the gossip address.
+    #[test]
+    fn a_dial_by_id_alone_is_resolved_by_the_gossip_lookup() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let hub = Hub::new();
+            let (alice_handle, bob_handle) = (
+                GossipHandle::new(secret(1).public()),
+                GossipHandle::new(secret(2).public()),
+            );
+            hub.join(&alice_handle);
+            hub.join(&bob_handle);
+            let build = |key: SecretKey, handle: GossipHandle| async move {
+                let builder = Endpoint::builder(presets::Minimal);
+                let builder = builder.secret_key(key);
+                let builder = builder.relay_mode(RelayMode::Disabled);
+                let builder = builder.add_custom_transport(handle.custom_transport());
+                let builder = builder.address_lookup(handle.address_lookup());
+                let builder = builder.clear_ip_transports();
+                builder.clear_relay_transports().bind().await.expect("bind")
+            };
+            let alice = build(secret(1), alice_handle).await;
+            let bob = build(secret(2), bob_handle).await;
+            let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
+
+            let target = bob.id();
+            let connection =
+                time::timeout(Duration::from_secs(10), alice.connect(target, ECHO_ALPN))
+                    .await
+                    .expect("connect timed out")
+                    .expect("connect by id");
+
+            echo_once(&connection, b"found by id").await;
+            connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
+    }
+
+    /// A frame to a destination with an established connection is charged to the
+    /// budget and dropped when the budget is out. A frame to any other destination
+    /// is a handshake: it is sent, and counted as exempt.
+    #[test]
+    fn an_established_destination_is_charged_and_a_handshake_is_exempt() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(Arc::clone(&recorder));
+        let (bob, carol) = (secret(2).public(), secret(3).public());
+        handle.set_budget(Some(1000));
+        handle.set_established(bob, true);
+
+        // A 100-byte datagram is a 166-byte frame: six fit in 1000 bytes.
+        for _ in 0..8 {
+            handle.shared.send_datagram(bob, &[1u8; 100]);
+        }
+        assert_eq!(locked(&recorder.0).len(), 6, "six frames fit the burst");
+        assert_eq!(
+            handle.stats().dropped_budget,
+            2,
+            "an established destination is charged the budget"
+        );
+
+        // Carol has no connection: her handshake passes with the budget spent.
+        handle.shared.send_datagram(carol, &[1u8; 100]);
+        assert_eq!(locked(&recorder.0).len(), 7, "the handshake passed");
+        assert_eq!(
+            handle.stats().exempt_frames,
+            1,
+            "a handshake is exempt from the budget"
+        );
+
+        // Once she has a connection, her frames are charged and refused.
+        handle.set_established(carol, true);
+        handle.shared.send_datagram(carol, &[1u8; 100]);
+        assert_eq!(locked(&recorder.0).len(), 7, "charged, and refused");
+        assert_eq!(
+            handle.stats().dropped_budget,
+            3,
+            "a charged destination is counted as budget dropped"
+        );
+    }
+
+    #[test]
+    fn without_a_budget_nothing_is_dropped_for_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(Arc::clone(&recorder));
+        let bob = secret(2).public();
+        handle.set_established(bob, true);
+
+        for _ in 0..100 {
+            handle.shared.send_datagram(bob, &[1u8; 1000]);
+        }
+
+        assert_eq!(
+            locked(&recorder.0).len(),
+            100,
+            "without a budget nothing is queued past the limit"
+        );
+        assert_eq!(
+            handle.stats().dropped_budget,
+            0,
+            "without a budget nothing is dropped for bytes"
+        );
+    }
+
+    /// A packet larger than the buffer iroh offers is dropped, counted, and does
+    /// not stop the next one.
+    #[test]
+    fn an_oversized_packet_is_counted_and_the_next_one_is_read() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = secret(1).public();
+        let handle = GossipHandle::new(me);
+        let mut endpoint = handle.transport.bind().expect("bind");
+        // the Wake contract hands the waker out as an Arc
+        let waker = Arc::new(CountingWaker::default());
+        let std_waker = task::Waker::from(Arc::clone(&waker));
+        let mut cx = Context::from_waker(&std_waker);
+        let mut storage = [0u8; 50];
+        let mut bufs = [io::IoSliceMut::new(&mut storage)];
+        let mut metas = [noq_udp::RecvMeta::default()];
+        let mut infos = [RecvInfo::new(gossip_addr(me), None)];
+        let big = (Frame {
+            dst: me,
+            src: secret(2).public(),
+            datagram: &[5u8; 100],
+        })
+        .encode()
+        .expect("a frame");
+        let small = (Frame {
+            dst: me,
+            src: secret(2).public(),
+            datagram: &[5u8; 40],
+        })
+        .encode()
+        .expect("a frame");
+
+        assert_eq!(
+            handle.deliver(&big),
+            Delivery::Queued,
+            "an oversized packet is refused"
+        );
+        let first = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(
+            first.is_pending(),
+            "the only packet was too large: {first:?}"
+        );
+        assert_eq!(
+            handle.stats().dropped_oversized_in,
+            1,
+            "an oversized packet is counted as oversized"
+        );
+
+        assert_eq!(
+            handle.deliver(&small),
+            Delivery::Queued,
+            "the next packet is accepted after the oversized one"
+        );
+        let second = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(matches!(second, Poll::Ready(Ok(1))), "{second:?}");
+        assert_eq!(
+            handle.stats().dropped_oversized_in,
+            1,
+            "the oversized count stays at one after the next packet"
+        );
+    }
+}

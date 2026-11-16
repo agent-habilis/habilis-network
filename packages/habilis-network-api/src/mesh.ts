@@ -27,12 +27,12 @@ function freeze<T>(value: T): T {
 export async function openMesh(open: Opener): Promise<Mesh> {
   const messages = new Fanout<Message>()
   const events = new Fanout<MeshEvent>()
-  const changes = new Fanout<Record<string, unknown>>()
+  const changes = new Fanout<Record<string, Record<string, unknown>>>()
 
   let peers: Peer[] = []
   let rosterJson = ''
   let stateJson = ''
-  let stateValue: Record<string, unknown> = {}
+  let stateValue: Record<string, Record<string, unknown>> = {}
   // Sticky lifecycle: an `events()` iterator is always created *after* open, so
   // a live `ready` would be unobservable. Events that describe a state are
   // replayed per iterator; events that describe a transition are not.
@@ -77,7 +77,7 @@ export async function openMesh(open: Opener): Promise<Mesh> {
       return
     }
     stateJson = json
-    stateValue = freeze(next as Record<string, unknown>)
+    stateValue = freeze(next as Record<string, Record<string, unknown>>)
     changes.push(stateValue)
   }
 
@@ -93,7 +93,8 @@ export async function openMesh(open: Opener): Promise<Mesh> {
   }
 
   const sink: BackendSink = {
-    msg: (msg) => messages.push({ from: msg.from, text: msg.text, directed: msg.directed }),
+    msg: (msg) =>
+      messages.push({ from: msg.from, key: msg.key, text: msg.text, directed: msg.directed }),
     roster: (json) => applyRoster(json, announcePresence),
     state: applyState,
     presence: (event) => events.push(event),
@@ -139,6 +140,10 @@ export async function openMesh(open: Opener): Promise<Mesh> {
     send: async (text, opts) => {
       refuseIfClosed()
       await backend.send(opts?.to ?? null, text)
+    },
+    sendToKey: async (key, text) => {
+      refuseIfClosed()
+      await backend.sendToKey(key, text)
     },
     messages: (signal) => messages.iterate(signal),
     events: (signal) => {

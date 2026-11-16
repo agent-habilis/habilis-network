@@ -19,19 +19,28 @@
 //! path as gossip (`gossip::ingest`), so signature-verify, the mesh gate, and
 //! cross-transport dedup are identical on both planes.
 
-mod accept;
+use tokio::sync::oneshot;
 mod admission;
-mod direct_gossip;
-pub(crate) mod endpoint_proof;
+pub(crate) mod ceiling;
+mod direct_only_gossip;
+pub(crate) mod graft_backoff;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
-pub(crate) mod path;
+pub(crate) mod outbox;
+pub(crate) mod payload_path;
 mod pool;
 pub(crate) mod probe;
+pub(crate) mod proven_endpoints;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) mod redial;
+mod unicast_acceptor;
 // The JSEP exchange that fills `lookup::TransportHandles::webrtc`. Portable:
 // a browser peer negotiates with a CLI peer over the same envelope, and only
 // the backend behind it differs.
 pub(crate) mod webrtc;
+// The `WebRTC` leg of the multihop underlay: built with the `multihop` feature.
+#[cfg(feature = "multihop")]
+pub(crate) mod underlay_webrtc;
 
 /// Messages flowing from the IPC listener to the event loop, generic over the
 /// app's command type `C`: the command, plus the channel the loop sends its raw
@@ -42,25 +51,32 @@ pub(crate) mod webrtc;
 /// portable is what lets the event loop's IPC `select!` arm compile everywhere
 /// and simply never fire — a browser binds no socket, so its receiver is always
 /// `None`. Only the socket *server* needs `interprocess`.
-pub(crate) type IpcMessage<C> = (C, tokio::sync::oneshot::Sender<String>);
+pub(crate) type IpcMessage<Cmd> = (Cmd, oneshot::Sender<String>);
+mod mesh_sender;
 mod send;
-pub(crate) mod sender;
 
-pub(crate) use accept::UnicastAcceptor;
 pub use admission::SignalAdmission;
-pub(crate) use direct_gossip::DirectOnlyGossip;
+pub(crate) use direct_only_gossip::DirectOnlyGossip;
+pub use mesh_sender::MeshSender;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) use outbox::Resend;
 #[cfg(feature = "blob")]
-pub(crate) use path::{PROBE_DEADLINE, refuse_relayed};
-pub(crate) use path::{RELAY_REFUSED, payload_allowed_on};
+pub(crate) use payload_path::{PROBE_DEADLINE, refuse_relayed};
+pub(crate) use payload_path::{PayloadPath, RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
-pub(crate) use send::HeldForDirect;
-pub use send::Lane;
-pub(crate) use send::lane_for;
-pub use send::{deliver, deliver_in_background};
-pub(crate) use send::{send_best_effort, unicast_answer_target};
-pub use sender::MeshSender;
+#[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+pub(crate) use send::resolve;
+pub use send::{
+    Delivered, Lane, PendingSend, SendError, deliver, deliver_in_background, deliver_to,
+    deliver_to_in_background,
+};
+pub(crate) use send::{
+    can_unicast, directed_endpoint, lane_for, note_held, note_unproven, send_best_effort,
+    send_dialing_back,
+};
+pub(crate) use unicast_acceptor::{UnicastAcceptor, UnicastFrame};
 pub use webrtc::MAX_DIRECT_PEERS;
-pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor};
+pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, UdpTransport, WebRtcSignalAcceptor};
 
 /// ALPN for the unicast channel — a raw bidirectional QUIC stream with its own
 /// protocol identity, distinct from `GOSSIP_ALPN` and the application's own bridge ALPN.

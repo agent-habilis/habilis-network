@@ -2,6 +2,9 @@
 
 Byte streams between two peers, addressed by a hash. It does not use gossip.
 
+A mesh with only the gossip rung does not carry streams. A stream node refuses the
+`gossip` and `multihop` transports when it binds, because it never joins a mesh.
+
 A producer creates a stream and gives its hash to one consumer. The consumer
 opens the stream with that hash. The bytes go over one QUIC stream on a direct
 path: hole-punched UDP, or a WebRTC data channel when a browser is on either

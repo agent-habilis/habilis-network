@@ -9,9 +9,9 @@
  * - `nick` — this peer's nickname.
  * - `relay` — a custom relay URL (repeatable); with `topic` it is part of
  *   the derived id, so the native side must pass the same.
- * - `transport` — what payload may ride, `udp,webrtc` (the default),
- *   `webrtc`, or either with `relay` (id-changing, same rule). A tab needs
- *   `webrtc` or `relay`.
+ * - `transport` — what payload may ride, `udp,webrtc,multihop,gossip` (the default),
+ *   `webrtc`, or any with `relay` (id-changing, same rule). A tab needs
+ *   `webrtc` or `relay`, and ignores `multihop`.
  * - `log` — an `EnvFilter` for the engine's tracing, to the console.
  *
  * DOM contract (what a driver asserts on):
@@ -106,6 +106,18 @@ function mirrorConsole(): void {
     }
     // The time of day as the native log spells it, so the two line up.
     const stamped = `${new Date().toISOString().slice(11, 23)}Z ${line}`
+    full.push(stamped)
+    pending.push(stamped)
+  }
+  // A Rust panic reaches the page through console.error. Without this the dump of a failed run
+  // never shows one: the router task that panicked just stops, and nothing else says why.
+  // The stack of that panic is a JS Error stack, and V8 keeps ten frames by default: a panic deep
+  // in the executor would then end at the panic hook and never name the call that caused it.
+  Object.assign(Error, { stackTraceLimit: 100 })
+  const originalError = console.error.bind(console)
+  console.error = (...parts: unknown[]) => {
+    originalError(...parts)
+    const stamped = `${new Date().toISOString().slice(11, 23)}Z ERROR ${parts.map(String).join(' ')}`
     full.push(stamped)
     pending.push(stamped)
   }

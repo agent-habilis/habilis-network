@@ -13,8 +13,9 @@
 //! subtle and worth inheriting rather than rediscovering.
 
 use crate::config::Config;
-use crate::frame::{Frame, InputStatus, NULL_FRAME};
+use crate::frame::{Frame, InputStatus};
 
+use std::fmt;
 /// Ring-buffer capacity, in frames.
 ///
 /// Bounds how far back a late input can still be filed. Must comfortably
@@ -30,13 +31,14 @@ struct Slot<I> {
 impl<I: Default> Default for Slot<I> {
     fn default() -> Self {
         Self {
-            frame: NULL_FRAME,
+            frame: Frame::NULL,
             input: I::default(),
         }
     }
 }
 
 /// One player's input history, with prediction for the frames not yet known.
+#[derive(Clone)]
 pub(crate) struct InputQueue<T: Config> {
     /// Frame-indexed ring. A slot is live iff its frame is within
     /// `[tail_frame, last_added_frame]`.
@@ -60,7 +62,7 @@ pub(crate) struct InputQueue<T: Config> {
     /// numbering would compare the two and reject every ordinary input.
     last_user_added_frame: Frame,
     /// Earliest frame where a real input contradicted our guess, or
-    /// [`NULL_FRAME`] if every guess so far held up.
+    /// [`Frame::NULL`] if every guess so far held up.
     first_incorrect_frame: Frame,
     /// Last frame the simulation asked for, so we know when a prediction has
     /// caught up with reality.
@@ -68,19 +70,20 @@ pub(crate) struct InputQueue<T: Config> {
     /// Frames of deliberate local input delay. Trades responsiveness for a
     /// lower chance of ever needing to predict.
     frame_delay: usize,
-    /// The guess currently in flight. `frame == NULL_FRAME` means we are not
+    /// The guess currently in flight. `frame == Frame::NULL` means we are not
     /// predicting — everything asked for so far was real.
     prediction: Slot<T::Input>,
 }
 
-impl<T: Config> std::fmt::Debug for InputQueue<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("InputQueue")
+impl<T: Config> fmt::Debug for InputQueue<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("InputQueue");
+        debug
             .field("length", &self.length)
             .field("last_added_frame", &self.last_added_frame)
-            .field("first_incorrect_frame", &self.first_incorrect_frame)
-            .field("predicting", &(self.prediction.frame != NULL_FRAME))
+            .field("first_incorrect_frame", &self.first_incorrect_frame);
+        debug
+            .field("predicting", &(self.prediction.frame != Frame::NULL))
             .finish_non_exhaustive()
     }
 }
@@ -93,10 +96,10 @@ impl<T: Config> InputQueue<T> {
             tail: 0,
             length: 0,
             first_frame: true,
-            last_added_frame: NULL_FRAME,
-            last_user_added_frame: NULL_FRAME,
-            first_incorrect_frame: NULL_FRAME,
-            last_requested_frame: NULL_FRAME,
+            last_added_frame: Frame::NULL,
+            last_user_added_frame: Frame::NULL,
+            first_incorrect_frame: Frame::NULL,
+            last_requested_frame: Frame::NULL,
             frame_delay: 0,
             prediction: Slot::default(),
         }
@@ -114,10 +117,10 @@ impl<T: Config> InputQueue<T> {
         self.last_added_frame
     }
 
-    /// The oldest frame still held, or [`NULL_FRAME`] when empty.
+    /// The oldest frame still held, or [`Frame::NULL`] when empty.
     fn tail_frame(&self) -> Frame {
         if self.length == 0 {
-            NULL_FRAME
+            Frame::NULL
         } else {
             self.inputs[self.tail].frame
         }
@@ -127,11 +130,12 @@ impl<T: Config> InputQueue<T> {
     /// rolled back and re-simulated. Everything before `frame` is settled.
     pub(crate) fn reset_prediction(&mut self, frame: Frame) {
         debug_assert!(
-            self.first_incorrect_frame == NULL_FRAME || frame <= self.first_incorrect_frame
+            self.first_incorrect_frame == Frame::NULL || frame <= self.first_incorrect_frame,
+            "no incorrect frame is recorded, or the reset starts at or before it"
         );
-        self.prediction.frame = NULL_FRAME;
-        self.first_incorrect_frame = NULL_FRAME;
-        self.last_requested_frame = NULL_FRAME;
+        self.prediction.frame = Frame::NULL;
+        self.first_incorrect_frame = Frame::NULL;
+        self.last_requested_frame = Frame::NULL;
     }
 
     /// The input for `frame`: the real one if we have it, otherwise a guess.
@@ -140,12 +144,12 @@ impl<T: Config> InputQueue<T> {
     /// caller bug — the session must roll back first.
     pub(crate) fn input(&mut self, frame: Frame) -> (T::Input, InputStatus) {
         debug_assert!(
-            self.first_incorrect_frame == NULL_FRAME,
+            self.first_incorrect_frame == Frame::NULL,
             "asked for an input while a misprediction is outstanding; roll back first"
         );
         self.last_requested_frame = frame;
 
-        if self.prediction.frame == NULL_FRAME {
+        if self.prediction.frame == Frame::NULL {
             if let Some(input) = self.confirmed(frame) {
                 return (input, InputStatus::Confirmed);
             }
@@ -160,14 +164,14 @@ impl<T: Config> InputQueue<T> {
             // already predicted past. Stamping the requested frame here
             // would then mismatch that arrival and lose the misprediction
             // — which is exactly the case rollback exists to handle.
-            let fills_at = if self.last_added_frame == NULL_FRAME {
-                0
+            let fills_at = if self.last_added_frame == Frame::NULL {
+                Frame::ZERO
             } else {
                 self.last_added_frame + 1
             };
             self.prediction = Slot {
                 frame: fills_at,
-                input: if self.last_added_frame == NULL_FRAME {
+                input: if self.last_added_frame == Frame::NULL {
                     T::Input::default()
                 } else {
                     self.inputs[self.prev_head()].input
@@ -191,7 +195,10 @@ impl<T: Config> InputQueue<T> {
             return None;
         }
         let slot = self.inputs[(self.tail + offset) % QUEUE_LEN];
-        debug_assert_eq!(slot.frame, frame);
+        debug_assert_eq!(
+            slot.frame, frame,
+            "the input slot holds the frame that was asked for"
+        );
         Some(slot.input)
     }
 
@@ -201,18 +208,18 @@ impl<T: Config> InputQueue<T> {
 
     /// Record a real input for `frame`, applying this queue's frame delay.
     ///
-    /// Returns the frame it was actually filed under, or [`NULL_FRAME`] if it
+    /// Returns the frame it was actually filed under, or [`Frame::NULL`] if it
     /// was dropped (which happens when the delay shrinks and the input lands
     /// behind what we already have).
     pub(crate) fn add_input(&mut self, frame: Frame, input: T::Input) -> Frame {
         debug_assert!(
-            self.last_user_added_frame == NULL_FRAME || frame == self.last_user_added_frame + 1,
+            self.last_user_added_frame == Frame::NULL || frame == self.last_user_added_frame + 1,
             "inputs must be added in consecutive frame order"
         );
         self.last_user_added_frame = frame;
         let target = self.advance_queue_head(frame);
-        if target == NULL_FRAME {
-            return NULL_FRAME;
+        if target == Frame::NULL {
+            return Frame::NULL;
         }
         self.add_delayed_input(target, input);
         target
@@ -222,7 +229,7 @@ impl<T: Config> InputQueue<T> {
     /// frame the caller's input should occupy.
     fn advance_queue_head(&mut self, frame: Frame) -> Frame {
         let mut expected = if self.first_frame {
-            0
+            Frame::ZERO
         } else {
             self.inputs[self.prev_head()].frame + 1
         };
@@ -231,7 +238,7 @@ impl<T: Config> InputQueue<T> {
         if expected > delayed {
             // The delay shrank and this input belongs in the past. Drop it;
             // the frame it would have occupied already has an input.
-            return NULL_FRAME;
+            return Frame::NULL;
         }
         // The delay grew: repeat the last input to bridge the gap so the
         // queue stays frame-contiguous. Filed through `add_delayed_input`
@@ -268,20 +275,23 @@ impl<T: Config> InputQueue<T> {
         self.push(Slot { frame, input });
         self.last_added_frame = frame;
 
-        if self.prediction.frame == NULL_FRAME {
+        if self.prediction.frame == Frame::NULL {
             return;
         }
-        debug_assert_eq!(frame, self.prediction.frame);
+        debug_assert_eq!(
+            frame, self.prediction.frame,
+            "the prediction is at the frame being added"
+        );
         // The guess was wrong: remember the earliest frame it went wrong at.
-        if self.first_incorrect_frame == NULL_FRAME && self.prediction.input != input {
+        if self.first_incorrect_frame == Frame::NULL && self.prediction.input != input {
             self.first_incorrect_frame = frame;
         }
         if self.prediction.frame == self.last_requested_frame
-            && self.first_incorrect_frame == NULL_FRAME
+            && self.first_incorrect_frame == Frame::NULL
         {
             // Reality caught up and we were right the whole way. Stop
             // predicting.
-            self.prediction.frame = NULL_FRAME;
+            self.prediction.frame = Frame::NULL;
         } else {
             self.prediction.frame += 1;
         }
@@ -291,120 +301,187 @@ impl<T: Config> InputQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::InputQueue;
-    use crate::frame::{InputStatus, NULL_FRAME};
-    use crate::testutil::{TestGame, TestInput};
+    use crate::frame::{Frame, InputStatus};
+    use crate::test_game::{TestGame, TestInput};
 
     fn queue() -> InputQueue<TestGame> {
-        InputQueue::<TestGame>::new()
+        InputQueue::new()
     }
 
     #[test]
     fn a_known_input_comes_back_confirmed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
-        queue.add_input(0, TestInput(7));
-        assert_eq!(queue.input(0), (TestInput(7), InputStatus::Confirmed));
-        assert_eq!(queue.first_incorrect_frame(), NULL_FRAME);
+        queue.add_input(Frame::new(0), TestInput(7));
+        assert_eq!(
+            queue.input(Frame::new(0)),
+            (TestInput(7), InputStatus::Confirmed),
+            "a known input comes back confirmed"
+        );
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::NULL,
+            "a known input leaves no misprediction"
+        );
     }
 
     #[test]
     fn an_unknown_input_is_predicted_by_repeating_the_last_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
-        queue.add_input(0, TestInput(7));
-        let _ = queue.input(0);
+        queue.add_input(Frame::new(0), TestInput(7));
+        let _ = queue.input(Frame::new(0));
         // Frame 1 hasn't arrived; the guess is "same as frame 0".
-        assert_eq!(queue.input(1), (TestInput(7), InputStatus::Predicted));
+        assert_eq!(
+            queue.input(Frame::new(1)),
+            (TestInput(7), InputStatus::Predicted),
+            "an unknown input is predicted by repeating the last one"
+        );
     }
 
     #[test]
     fn the_very_first_frame_predicts_the_default_input() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         assert_eq!(
-            queue.input(0),
-            (TestInput::default(), InputStatus::Predicted)
+            queue.input(Frame::new(0)),
+            (TestInput::default(), InputStatus::Predicted),
+            "the very first frame predicts the default input"
         );
     }
 
     #[test]
     fn a_prediction_that_turns_out_right_reports_no_misprediction() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
-        queue.add_input(0, TestInput(7));
-        let _ = queue.input(0);
-        let _ = queue.input(1); // predicts 7
-        queue.add_input(1, TestInput(7)); // and 7 is what actually happened
-        assert_eq!(queue.first_incorrect_frame(), NULL_FRAME);
+        queue.add_input(Frame::new(0), TestInput(7));
+        let _ = queue.input(Frame::new(0));
+        let _ = queue.input(Frame::new(1)); // predicts 7
+        queue.add_input(Frame::new(1), TestInput(7)); // and 7 is what actually happened
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::NULL,
+            "a right prediction reports no misprediction"
+        );
     }
 
     #[test]
     fn a_prediction_that_turns_out_wrong_reports_the_frame_it_broke_at() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
-        queue.add_input(0, TestInput(7));
-        let _ = queue.input(0);
-        let _ = queue.input(1); // predicts 7
-        queue.add_input(1, TestInput(9)); // but the player did something else
-        assert_eq!(queue.first_incorrect_frame(), 1);
+        queue.add_input(Frame::new(0), TestInput(7));
+        let _ = queue.input(Frame::new(0));
+        let _ = queue.input(Frame::new(1)); // predicts 7
+        queue.add_input(Frame::new(1), TestInput(9)); // but the player did something else
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::new(1),
+            "a wrong prediction reports the frame it broke at"
+        );
     }
 
     #[test]
     fn only_the_earliest_misprediction_is_reported() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
-        queue.add_input(0, TestInput(1));
-        let _ = queue.input(0);
-        let _ = queue.input(1);
-        let _ = queue.input(2);
-        queue.add_input(1, TestInput(2)); // wrong here
-        queue.add_input(2, TestInput(3)); // and here, but 1 is what we roll back to
-        assert_eq!(queue.first_incorrect_frame(), 1);
+        queue.add_input(Frame::new(0), TestInput(1));
+        let _ = queue.input(Frame::new(0));
+        let _ = queue.input(Frame::new(1));
+        let _ = queue.input(Frame::new(2));
+        queue.add_input(Frame::new(1), TestInput(2)); // wrong here
+        queue.add_input(Frame::new(2), TestInput(3)); // and here, but 1 is what we roll back to
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::new(1),
+            "only the earliest misprediction is reported"
+        );
     }
 
     #[test]
     fn resetting_prediction_clears_the_misprediction() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
-        queue.add_input(0, TestInput(1));
-        let _ = queue.input(0);
-        let _ = queue.input(1);
-        queue.add_input(1, TestInput(2));
-        assert_eq!(queue.first_incorrect_frame(), 1);
+        queue.add_input(Frame::new(0), TestInput(1));
+        let _ = queue.input(Frame::new(0));
+        let _ = queue.input(Frame::new(1));
+        queue.add_input(Frame::new(1), TestInput(2));
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::new(1),
+            "resetting prediction clears the misprediction"
+        );
 
-        queue.reset_prediction(1);
-        assert_eq!(queue.first_incorrect_frame(), NULL_FRAME);
+        queue.reset_prediction(Frame::new(1));
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::NULL,
+            "after the reset no frame is reported as incorrect"
+        );
         // The real input is still there — the rollback re-reads it as truth.
-        assert_eq!(queue.input(1), (TestInput(2), InputStatus::Confirmed));
+        assert_eq!(
+            queue.input(Frame::new(1)),
+            (TestInput(2), InputStatus::Confirmed),
+            "after the reset the frame reads its real input"
+        );
     }
 
     #[test]
     fn frame_delay_files_an_input_later_than_it_was_made() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         queue.set_frame_delay(3);
-        assert_eq!(queue.add_input(0, TestInput(5)), 3);
+        assert_eq!(
+            queue.add_input(Frame::new(0), TestInput(5)),
+            Frame::new(3),
+            "frame delay files an input later than it was made"
+        );
         // A second add must be accepted too: the caller counts from 0 while
         // the ring counts from 0 + delay, and conflating the two rejects
         // every input after the first.
-        assert_eq!(queue.add_input(1, TestInput(6)), 4);
+        assert_eq!(
+            queue.add_input(Frame::new(1), TestInput(6)),
+            Frame::new(4),
+            "the second delayed input is filed one frame later"
+        );
         // The delayed frames before it are filled so the queue stays
         // contiguous, and they read as the default input.
         assert_eq!(
-            queue.input(0),
-            (TestInput::default(), InputStatus::Confirmed)
+            queue.input(Frame::new(0)),
+            (TestInput::default(), InputStatus::Confirmed),
+            "the frame before the delay reads the default input"
         );
-        assert_eq!(queue.input(3), (TestInput(5), InputStatus::Confirmed));
+        assert_eq!(
+            queue.input(Frame::new(3)),
+            (TestInput(5), InputStatus::Confirmed),
+            "the delayed input is readable at its filed frame"
+        );
     }
 
     #[test]
     fn the_ring_ages_out_old_frames_instead_of_corrupting() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         // Push well past the ring's capacity.
         let span = i32::try_from(super::QUEUE_LEN).expect("the ring length fits an i32") * 2;
-        for frame in 0..span {
-            queue.add_input(frame, TestInput(frame));
+        for number in 0..span {
+            queue.add_input(Frame::new(number), TestInput(number));
         }
-        let newest = span - 1;
-        assert_eq!(queue.last_added_frame(), newest);
+        let newest = Frame::new(span - 1);
+        assert_eq!(
+            queue.last_added_frame(),
+            newest,
+            "the ring ages out old frames"
+        );
         // Recent frames survive intact...
         assert_eq!(
             queue.input(newest),
-            (TestInput(newest), InputStatus::Confirmed)
+            (TestInput(newest.get()), InputStatus::Confirmed),
+            "the newest frame reads back its input"
         );
         // ...and an ancient one is simply gone, not silently wrong.
-        assert!(queue.confirmed(0).is_none());
+        assert!(
+            queue.confirmed(Frame::ZERO).is_none(),
+            "the oldest frame is no longer confirmed"
+        );
     }
 }

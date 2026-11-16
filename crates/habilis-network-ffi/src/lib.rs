@@ -4,16 +4,28 @@
 //! The **third consumer** of the engine, and the first non-Rust one: it exposes
 //! an opaque handle plus blocking text/JSON calls (see `include/habilis_network.h`) so a
 //! C program can create or join a mesh, exchange broadcast and directed
-//! messages, and read/write the shared automerge state document — in-process,
+//! messages, and read/write the shared state — in-process,
 //! with no daemon and no socket.
 //!
 //! It also exposes byte streams: a producer creates one and hands its hash to
 //! one consumer, over a direct QUIC path rather than gossip.
 //!
-//! [`mesh`] is the blocking handle over `habilis_network::membership`, [`stream`] the
+//! `mesh` is the blocking handle over `habilis_network::membership`, `stream` the
 //! blocking handles over `habilis-network-stream`; [`ffi`] is the thin unsafe shim over
 //! both.
+//!
+//! # Example
+//!
+//! ```c
+//! habilis_network_opts opts = {0};
+//! habilis_network_mesh *mesh = habilis_network_mesh_open(&opts);
+//! if (mesh != NULL) {
+//!     habilis_network_mesh_close(mesh);
+//! }
+//! ```
+
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
 
 pub mod ffi;
-pub mod mesh;
-pub mod stream;
+pub(crate) mod mesh;
+pub(crate) mod streams;

@@ -12,24 +12,51 @@
 //!
 //! Who offers is the caller's rule, as for the ALPN (the lower id, in
 //! `negotiate_session`). Here two peers offering to each other at once each
-//! refuse the other as `InFlight` and both rounds run to their deadline.
+//! give up their own offer for the one of the lower id (`preempt_offer`), as on the ALPN.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use crate::protocol::nostr::{NostrKeys, Opener, Signal, SignalKind, seal};
 use anyhow::{Context as _, Result};
 use habilis_network_iroh_nostr_address_lookup::Pool;
 use habilis_network_iroh_webrtc_transport::{SignalEnvelope, WebRtcHandle};
+use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{Endpoint, EndpointId, SecretKey};
+use n0_future::time::timeout;
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
 use super::super::LOG_TARGET;
 use super::super::admission::{Refusal, SignalAdmission};
-use super::{
-    CapRefused, IceProfile, SignalDeadlines, build_answer, build_offer, register_session_addr,
-};
+use super::signal_deadlines::SignalDeadlines;
+use super::web_rtc_signal_acceptor::register_session_addr;
+use super::{IceProfile, build_answer, build_offer, nudge_acceptor};
+
+use crate::protocol;
+use crate::protocol::meshes::NostrChoice;
+use crate::util::unix_secs;
+use n0_future::task;
+use std::{error, fmt};
+/// The peer answered an offer with a refusal: it is at its direct-peer
+/// ceiling. A marker error, so the caller tells a refusal (which quiets the
+/// peer for a while) from a failure (which is retried).
+#[derive(Debug)]
+pub(crate) struct CapRefused(pub(crate) EndpointId);
+
+impl fmt::Display for CapRefused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} is at its direct-peer cap", self.0)
+    }
+}
+
+impl error::Error for CapRefused {}
+
+/// Whether `error` is a [`CapRefused`].
+pub(crate) fn is_cap_refusal(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CapRefused>().is_some()
+}
 
 /// Relays a node holds while it has no link, so a newcomer's first events
 /// reach the relays incumbents listen on.
@@ -41,18 +68,18 @@ pub(crate) const LINKED_WIDTH: usize = 1;
 /// When the `Hello`s go out, in seconds since the service started: fast while
 /// a newcomer is likely alone, then every [`HELLO_STEADY`].
 const HELLO_SCHEDULE_SECS: [u64; 9] = [0, 1, 3, 5, 10, 15, 20, 25, 30];
-const HELLO_STEADY: std::time::Duration = std::time::Duration::from_mins(1);
+const HELLO_STEADY: Duration = Duration::from_mins(1);
 /// A `Hello`'s addresses are explicit, so a slow probe is a failed one; the
 /// data channel is the fallback.
-const IP_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+const IP_PROBE_DEADLINE: Duration = Duration::from_secs(3);
 /// At most one wake-up `Hello` to a given peer this often.
-const POKE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+const POKE_EVERY: Duration = Duration::from_secs(30);
 /// A peer heard over Nostr this recently is offered to over Nostr.
-const SEEN_FRESH: std::time::Duration = std::time::Duration::from_mins(5);
+const SEEN_FRESH: Duration = Duration::from_mins(5);
 const HELLO_BACKLOG: usize = 64;
 /// How long a node stays linked before it narrows to one relay, so a link
 /// that flaps does not flap the relay set with it.
-const LINK_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+const LINK_SETTLE: Duration = Duration::from_secs(10);
 /// Addresses a `Hello` carries; the codec refuses more.
 const MAX_HELLO_ADDRS: usize = 8;
 
@@ -66,14 +93,11 @@ pub(crate) struct NostrParams {
 
 impl NostrParams {
     /// `None` when the mesh has no Nostr lookup.
-    pub(crate) fn for_mesh(
-        lookups: &crate::protocol::LookupOpts,
-        topic: &[u8; 32],
-    ) -> Option<Self> {
-        if lookups.nostr == crate::protocol::mesh::NostrChoice::Disabled {
+    pub(crate) fn for_mesh(lookups: &protocol::LookupOpts, topic: &[u8; 32]) -> Option<Self> {
+        if lookups.nostr == NostrChoice::Disabled {
             return None;
         }
-        let keys = NostrKeys::derive(&crate::protocol::TopicId::from_bytes(*topic));
+        let keys = NostrKeys::derive(&protocol::TopicId::from_bytes(*topic));
         let relays = keys.ranked_relays(&lookups.nostr);
         Some(Self { keys, relays })
     }
@@ -89,8 +113,8 @@ pub(crate) struct NostrSignal {
     inner: Arc<Inner>,
 }
 
-impl std::fmt::Debug for NostrSignal {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for NostrSignal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NostrSignal")
             .field("local", &self.inner.local)
@@ -104,6 +128,8 @@ struct Inner {
     secret: SecretKey,
     local: EndpointId,
     endpoint: Endpoint,
+    /// The address book of `endpoint`, where an attached session's address goes.
+    book: MemoryLookup,
     handle: WebRtcHandle,
     admission: SignalAdmission,
     ice: IceProfile,
@@ -112,12 +138,13 @@ struct Inner {
     answers: bool,
     /// Offer rounds waiting for their answer.
     replies: Replies,
-    _dispatch: n0_future::task::AbortOnDropHandle<()>,
+    _dispatch: task::AbortOnDropHandle<()>,
 }
 
 /// What a [`NostrSignal`] needs from the node it serves.
 pub(crate) struct NostrSignalParts {
     pub(crate) endpoint: Endpoint,
+    pub(crate) book: MemoryLookup,
     pub(crate) handle: WebRtcHandle,
     pub(crate) admission: SignalAdmission,
     pub(crate) ice: IceProfile,
@@ -151,9 +178,9 @@ impl NostrSignal {
         // Bounded: `Hello`s repeat on a timer, so one dropped while the loop
         // is busy costs nothing.
         let (hellos_tx, hellos) = mpsc::channel(HELLO_BACKLOG);
-        let inner = Arc::new_cyclic(|weak: &std::sync::Weak<Inner>| {
-            let dispatch = n0_future::task::spawn(dispatch(
-                weak.clone(),
+        let inner = Arc::new_cyclic(|weak: &Weak<Inner>| {
+            let dispatch = task::spawn(dispatch(
+                Weak::clone(weak),
                 events,
                 Opener::new(parts.keys.clone(), local),
                 hellos_tx,
@@ -164,13 +191,14 @@ impl NostrSignal {
                 secret,
                 local,
                 endpoint: parts.endpoint,
+                book: parts.book,
                 handle: parts.handle,
                 admission: parts.admission,
                 ice: parts.ice,
                 deadlines,
                 answers: parts.answers,
                 replies: Replies::default(),
-                _dispatch: n0_future::task::AbortOnDropHandle::new(dispatch),
+                _dispatch: task::AbortOnDropHandle::new(dispatch),
             }
         });
         (Self { inner }, hellos)
@@ -206,9 +234,7 @@ impl NostrSignal {
     /// negotiation that does not complete.
     pub(crate) async fn offer(&self, peer: EndpointId) -> Result<()> {
         let inner = &self.inner;
-        match n0_future::time::timeout(inner.deadlines.round, Box::pin(self.offer_round(peer)))
-            .await
-        {
+        match timeout(inner.deadlines.round, Box::pin(self.offer_round(peer))).await {
             Ok(result) => result,
             Err(_elapsed) => {
                 anyhow::bail!(
@@ -228,7 +254,7 @@ impl NostrSignal {
         // Registered before the offer goes out, so the answer cannot beat it.
         let (_pending, reply) = expect_reply(&inner.replies, signal.nonce, peer);
         self.send(&signal);
-        let reply = n0_future::time::timeout(inner.deadlines.exchange, reply)
+        let reply = timeout(inner.deadlines.exchange, reply)
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
@@ -247,11 +273,8 @@ impl NostrSignal {
                 .context("an answer with no envelope")?,
         )
         .context("parse signal answer")?;
-        offer
-            .with_answer(answer)
-            .complete(peer, &inner.handle)
-            .await?;
-        register_session_addr(&inner.endpoint, peer);
+        offer.answer(answer).complete(peer, &inner.handle).await?;
+        register_session_addr(&inner.book, peer);
         tracing::debug!(target: LOG_TARGET, %peer, "webrtc session attached (offerer, nostr)");
         Ok(())
     }
@@ -304,18 +327,25 @@ fn expect_reply(
 /// the loop turns into a gossip graft.
 pub(crate) mod discovery {
     use iroh::{EndpointAddr, TransportAddr};
+    use std::time::Duration;
 
     use super::{
         EndpointId, HELLO_SCHEDULE_SECS, HELLO_STEADY, IP_PROBE_DEADLINE, JOINING_WIDTH,
         LINK_SETTLE, LINKED_WIDTH, LOG_TARGET, MAX_HELLO_ADDRS, NostrSignal, POKE_EVERY,
         SEEN_FRESH, Signal, SignalAdmission, SignalKind,
     };
-    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::{DirectState, EventLoopState};
     use crate::transport::probe::DirectOutcome;
+    use crate::transport::webrtc::lane_needs::local_needs_webrtc_lane;
+    use crate::transport::webrtc::udp_transport::UdpTransport;
     use crate::util::clock::Instant;
     use n0_future::time::Instant as TokioInstant;
 
+    use crate::lookup;
+    use crate::transport::webrtc::session_policy;
+    use crate::transport::{admission, payload_path};
+    use n0_future::task;
     /// Announce ourselves, and schedule the next announce.
     pub(crate) fn announce(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         let Some(nostr) = state.nostr.clone() else {
@@ -323,8 +353,8 @@ pub(crate) mod discovery {
             return;
         };
         let mut hello = nostr.signal(SignalKind::Hello);
-        hello.webrtc = !state.local_udp_transport;
-        if state.local_udp_transport {
+        hello.webrtc = local_needs_webrtc_lane(state.local_udp_transport);
+        if state.local_udp_transport == UdpTransport::Present {
             hello.addrs = ctx
                 .endpoint
                 .addr()
@@ -339,9 +369,7 @@ pub(crate) mod discovery {
         let next = HELLO_SCHEDULE_SECS
             .get(sent as usize + 1)
             .zip(HELLO_SCHEDULE_SECS.get(sent as usize))
-            .map_or(HELLO_STEADY, |(next, now)| {
-                std::time::Duration::from_secs(next - now)
-            });
+            .map_or(HELLO_STEADY, |(next, now)| Duration::from_secs(next - now));
         if next == HELLO_STEADY {
             // A Hello on our own tag, which we subscribe to: its echo is what
             // tells the pool a relay still carries directed events, which the
@@ -389,7 +417,7 @@ pub(crate) mod discovery {
             return HelloAction::Graft;
         }
         let addr = hello_addr(hello);
-        if !hello.webrtc && !crate::transport::webrtc::peer_needs_lane(state, peer, &addr) {
+        if !hello.webrtc && !session_policy::peer_needs_lane(state, peer, &addr) {
             // No addresses from a peer with IP means it has not found its own
             // yet; its next `Hello` is a second or two away.
             if addr.is_empty() || state.direct.get(&peer) == Some(&DirectState::Pending) {
@@ -430,21 +458,35 @@ pub(crate) mod discovery {
             state.lane_peers.remove(&peer);
         }
         state.known_endpoints.insert(peer);
+        // A `Hello` on our own tag is a poke: a newcomer that cannot offer (a higher id) asks us to.
+        let addressed = hello.to == Some(ctx.endpoint.id());
         match hello_action(state, ctx.endpoint.id(), hello, now) {
             HelloAction::Nothing => {}
             HelloAction::Graft => {
-                let _ = state
-                    .direct_proven
-                    .send(DirectOutcome { peer, direct: true });
+                let _ = state.direct_proven.send(DirectOutcome {
+                    peer,
+                    direct: true,
+                    answered: false,
+                });
             }
-            HelloAction::Probe => probe_then_offer(state, ctx, hello_addr(hello)),
-            HelloAction::Offer => offer(state, peer),
+            HelloAction::Probe => {
+                if may_start(state, ctx.max_peers, peer, addressed) {
+                    probe_then_offer(state, ctx, hello_addr(hello));
+                }
+            }
+            HelloAction::Offer => {
+                if may_start(state, ctx.max_peers, peer, addressed)
+                    && wants_a_session(state, peer, &hello_addr(hello))
+                {
+                    offer(state, peer);
+                }
+            }
             HelloAction::Poke => {
                 state.nostr_poked.insert(peer, now);
                 if let Some(nostr) = state.nostr.as_ref() {
                     let mut wake = nostr.signal(SignalKind::Hello);
                     wake.to = Some(peer);
-                    wake.webrtc = !state.local_udp_transport;
+                    wake.webrtc = local_needs_webrtc_lane(state.local_udp_transport);
                     nostr.send(&wake);
                 }
             }
@@ -462,38 +504,69 @@ pub(crate) mod discovery {
             .retain(|_, at| now.duration_since(*at) < SEEN_FRESH);
     }
 
+    /// The gates of `negotiate_session` that a `Hello` can meet: the peer did not evict us lately
+    /// (a proactive dial to it is left alone), and the node holds room for one more link. A poke
+    /// (`addressed`, on our own tag) skips the room gate and leaves the decision to admission, whose
+    /// table evicts the oldest session: a newcomer with the highest id can only poke, and if every
+    /// member it reaches held a full view nobody would offer and it would never link. The cold-pair
+    /// gate (`retry::held_back`) is not one of them: it waits for a send, and on a mesh with no
+    /// rendezvous the `Hello` is the first sign of the peer, so nothing else could start the pair.
+    pub(crate) fn may_start(
+        state: &EventLoopState,
+        max_peers: usize,
+        peer: EndpointId,
+        addressed: bool,
+    ) -> bool {
+        !state.webrtc_admission.evicted_recently(peer)
+            && (addressed || state.linked_endpoints.len() < max_peers)
+    }
+
+    /// Whether a data channel to `peer` is still worth a round: the pair needs the lane, or UDP
+    /// has not won and the path is not proven.
+    fn wants_a_session(state: &EventLoopState, peer: EndpointId, addr: &EndpointAddr) -> bool {
+        let needs_lane = session_policy::peer_needs_lane(state, peer, addr);
+        let proven = state.direct.get(&peer) == Some(&DirectState::Direct);
+        session_policy::wants_session(needs_lane, state.pair_path_kind(peer), proven)
+    }
+
     /// Try the peer's IP addresses; if they fail and we are the lower id,
     /// offer a data channel over Nostr.
     fn probe_then_offer(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, addr: EndpointAddr) {
         let peer = addr.id;
-        let _ = crate::lookup::add_peer_addr(ctx.endpoint, addr);
+        let may_offer = ctx.endpoint.id() < peer && wants_a_session(state, peer, &addr);
+        lookup::add_peer_addr(&state.address_book, addr);
         state.direct.insert(peer, DirectState::Pending);
         let pool = state.unicast_pool.clone();
         let proven = state.direct_proven.clone();
-        let fallback = (ctx.endpoint.id() < peer)
+        let fallback = may_offer
             .then(|| Some((state.nostr.clone()?, state.webrtc.clone()?)))
             .flatten();
         let admission = state.webrtc_admission.clone();
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             let direct = match pool.warm_or_dial(peer).await {
-                Ok(conn) => crate::transport::path::wait_direct(&conn, IP_PROBE_DEADLINE).await,
+                Ok(conn) => payload_path::wait_direct(&conn, IP_PROBE_DEADLINE).await,
                 Err(_) => false,
             };
             if direct {
                 tracing::info!(target: LOG_TARGET, %peer, "linked over IP, found through nostr");
-                let _ = proven.send(DirectOutcome { peer, direct: true });
+                let _ = proven.send(DirectOutcome {
+                    peer,
+                    direct: true,
+                    answered: false,
+                });
                 return;
             }
             let attached = match fallback {
-                Some((nostr, handle)) => match admission.try_admit(peer, &handle) {
+                Some((nostr, handle)) => match admission.try_admit_offer(peer, &handle) {
                     // Its own task, tracked, so shutdown can abort the round.
                     Ok(guard) => {
+                        let epoch = guard.epoch();
                         let round_admission = admission.clone();
-                        let round = n0_future::task::spawn(async move {
+                        let round = task::spawn(async move {
                             let _guard = guard;
                             run_offer(&nostr, &round_admission, peer).await
                         });
-                        admission.track(peer, round.abort_handle());
+                        admission.track(peer, epoch, round.abort_handle());
                         round.await.unwrap_or(false)
                     }
                     Err(_) => false,
@@ -503,6 +576,7 @@ pub(crate) mod discovery {
             let _ = proven.send(DirectOutcome {
                 peer,
                 direct: attached,
+                answered: false,
             });
         });
     }
@@ -512,11 +586,11 @@ pub(crate) mod discovery {
         let Some(handle) = state.webrtc.clone() else {
             return;
         };
-        let Ok(guard) = state.webrtc_admission.try_admit(peer, &handle) else {
+        let Ok(guard) = state.webrtc_admission.try_admit_offer(peer, &handle) else {
             return;
         };
         // A `Hello` offers only to a pair that needs the lane.
-        spawn_offer(state, peer, guard, super::super::Offer::Lane);
+        spawn_offer(state, peer, guard, super::super::offer::Offer::Lane);
     }
 
     /// Run an admitted offer round over Nostr and report an attach as a proven
@@ -524,8 +598,8 @@ pub(crate) mod discovery {
     pub(crate) fn spawn_offer(
         state: &mut EventLoopState,
         peer: EndpointId,
-        guard: crate::transport::admission::AdmissionGuard,
-        offer: super::super::Offer,
+        guard: admission::AdmissionGuard,
+        offer: super::super::offer::Offer,
     ) {
         let Some(nostr) = state.nostr.clone() else {
             return;
@@ -533,27 +607,43 @@ pub(crate) mod discovery {
         let admission = state.webrtc_admission.clone();
         let proven = state.direct_proven.clone();
         let pool = state.unicast_pool.clone();
-        let task = n0_future::task::spawn(async move {
+        let epoch = guard.epoch();
+        let task = task::spawn(async move {
             let _guard = guard;
             let inner = &nostr.inner;
             if run_offer(&nostr, &admission, peer).await
-                && super::super::keeps_session(offer, &inner.endpoint, &pool, &inner.handle, peer)
-                    .await
+                && super::super::offer::keeps_session(
+                    offer,
+                    &inner.endpoint,
+                    &pool,
+                    &inner.handle,
+                    peer,
+                )
+                .await
             {
-                let _ = proven.send(DirectOutcome { peer, direct: true });
+                let _ = proven.send(DirectOutcome {
+                    peer,
+                    direct: true,
+                    answered: false,
+                });
             }
         });
-        state.webrtc_admission.track(peer, task.abort_handle());
+        state
+            .webrtc_admission
+            .track(peer, epoch, task.abort_handle());
     }
 
     async fn run_offer(nostr: &NostrSignal, admission: &SignalAdmission, peer: EndpointId) -> bool {
         match Box::pin(nostr.offer(peer)).await {
             Ok(()) => {
+                // The peer took the round: it is not refusing us, so its wait starts over.
+                admission.note_success(peer);
+                admission.sync_gossip();
                 tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached (nostr)");
                 true
             }
             Err(error) => {
-                if super::super::is_cap_refusal(&error) {
+                if super::is_cap_refusal(&error) {
                     admission.note_refused(peer);
                 }
                 tracing::debug!(target: LOG_TARGET, %peer, %error, "nostr offer failed");
@@ -645,13 +735,13 @@ fn deliver_reply(replies: &Replies, reply: Signal) {
 }
 
 fn now() -> u64 {
-    u64::try_from(crate::util::clock::unix_secs()).unwrap_or(0)
+    u64::try_from(unix_secs::UnixSecs::now().as_secs()).unwrap_or(0)
 }
 
 /// Open every event the pool delivers and route it: replies to the round
 /// waiting on them, offers to an answer, hellos to the caller.
 async fn dispatch(
-    inner: std::sync::Weak<Inner>,
+    inner: Weak<Inner>,
     mut events: mpsc::UnboundedReceiver<habilis_network_iroh_nostr_address_lookup::Event>,
     mut opener: Opener,
     hellos: mpsc::Sender<Signal>,
@@ -673,6 +763,8 @@ async fn dispatch(
                 deliver_reply(&inner.replies, signal);
             }
             SignalKind::Offer => answer(&inner, signal),
+            // A kind this build does not know: a newer peer's, ignored.
+            _ => {}
         }
     }
 }
@@ -690,12 +782,22 @@ fn answer(inner: &Arc<Inner>, offer: Signal) {
     if inner.handle.has_session(&remote) && inner.handle.detach(&remote) {
         tracing::debug!(target: LOG_TARGET, %remote, "detached a half-dead session on a fresh nostr offer");
     }
+    // Glare: when the lower id offers while our own offer to it runs, ours is
+    // given up and the offer of the lower id is answered.
+    if remote < inner.local && inner.admission.preempt_offer(remote) {
+        tracing::debug!(target: LOG_TARGET, %remote, "gave up our offer for the offer of the lower id");
+    }
     let guard = match inner.admission.try_admit(remote, &inner.handle) {
         Ok(guard) => guard,
         Err(reason) => {
             // Self-limiting, though it looks like an amplifier: the offerer
             // notes the refusal and cools off, so one offer earns one Refuse.
-            if reason == Refusal::AtCap {
+            // The other refusals are sent too, so the offerer fails at once and does not
+            // wait out its round: the ALPN closes the connection for each of them.
+            if matches!(
+                reason,
+                Refusal::AtCapacity | Refusal::Evicted | Refusal::Denied | Refusal::ShuttingDown
+            ) {
                 let mut refuse = Signal::new(SignalKind::Refuse, inner.local, now());
                 refuse.to = Some(remote);
                 refuse.re = Some(offer.nonce);
@@ -706,7 +808,8 @@ fn answer(inner: &Arc<Inner>, offer: Signal) {
         }
     };
     let this = Arc::clone(inner);
-    let task = n0_future::task::spawn(async move {
+    let epoch = guard.epoch();
+    let task = task::spawn(async move {
         let _guard = guard;
         let round = async {
             let envelope: SignalEnvelope = serde_json::from_str(
@@ -727,9 +830,19 @@ fn answer(inner: &Arc<Inner>, offer: Signal) {
             publish(&this, &reply);
             answer.complete(remote, &this.handle).await
         };
-        match n0_future::time::timeout(this.deadlines.round, Box::pin(round)).await {
+        match timeout(this.deadlines.round, Box::pin(round)).await {
             Ok(Ok(())) => {
-                register_session_addr(&this.endpoint, remote);
+                this.admission.note_success(remote);
+                this.admission.report_answered(remote);
+                register_session_addr(&this.book, remote);
+                this.admission.sync_gossip();
+                // A connection that we dialed before the attach moves onto the
+                // session only after a path event of our own endpoint; see the
+                // signal acceptor.
+                let endpoint = this.endpoint.clone();
+                task::spawn(async move {
+                    nudge_acceptor::nudge_session(&endpoint, remote).await;
+                });
                 tracing::debug!(target: LOG_TARGET, %remote, "webrtc session attached (answerer, nostr)");
             }
             Ok(Err(error)) => {
@@ -740,7 +853,7 @@ fn answer(inner: &Arc<Inner>, offer: Signal) {
             }
         }
     });
-    inner.admission.track(remote, task.abort_handle());
+    inner.admission.track(remote, epoch, task.abort_handle());
 }
 
 fn publish(inner: &Inner, signal: &Signal) {
@@ -762,12 +875,27 @@ mod tests {
     use habilis_network_iroh_webrtc_transport::WebRtcTransport;
     use iroh::endpoint::presets;
     use iroh::{EndpointAddr, RelayMode, TransportAddr};
+    use tokio::time::sleep;
 
     use super::*;
     use crate::protocol::TopicId;
     use crate::transport::MAX_DIRECT_PEERS;
 
+    use crate::{lookup, testing, transport};
+    use std::net;
     const ECHO_ALPN: &[u8] = b"test/nostr-echo";
+
+    /// The test guard, told what closing an endpoint with no IP transport logs: its only transport
+    /// is the data channel, and closing it reads as the loss of every transport.
+    fn quiet_guard() -> ::habilis_network_test_tracing::Guard {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.allow_warn(
+            "iroh::socket::transports",
+            "All transports failed to receive",
+        );
+        guard.allow_error("noq::endpoint", "All transports failed to receive");
+        guard
+    }
 
     fn quick() -> SignalDeadlines {
         SignalDeadlines {
@@ -807,7 +935,14 @@ mod tests {
 
     async fn node_with(relay: &TestRelay, topic: [u8; 32], cap: usize, answers: bool) -> Node {
         let (endpoint, handle) = webrtc_only().await;
-        node_on(endpoint, handle, relay, topic, cap, answers)
+        node_on(
+            endpoint,
+            handle,
+            relay,
+            topic,
+            SignalAdmission::new(cap),
+            answers,
+        )
     }
 
     /// An endpoint with loopback UDP beside the `WebRTC` session, the shape of
@@ -823,7 +958,7 @@ mod tests {
             .add_custom_transport(handle.transport())
             .path_selector(handle.path_selector())
             .alpns(vec![
-                crate::transport::UNICAST_ALPN.to_vec(),
+                transport::UNICAST_ALPN.to_vec(),
                 super::super::NUDGE_ALPN.to_vec(),
             ])
             .bind()
@@ -845,10 +980,10 @@ mod tests {
         let addrs = endpoint
             .bound_sockets()
             .into_iter()
-            .filter(std::net::SocketAddr::is_ipv4)
+            .filter(net::SocketAddr::is_ipv4)
             .map(|socket| {
-                TransportAddr::Ip(std::net::SocketAddr::new(
-                    std::net::Ipv4Addr::LOCALHOST.into(),
+                TransportAddr::Ip(net::SocketAddr::new(
+                    net::Ipv4Addr::LOCALHOST.into(),
                     socket.port(),
                 ))
             });
@@ -860,13 +995,16 @@ mod tests {
         handle: WebRtcHandle,
         relay: &TestRelay,
         topic: [u8; 32],
-        cap: usize,
+        admission: SignalAdmission,
         answers: bool,
     ) -> Node {
-        let admission = SignalAdmission::new(cap);
+        // Closed at the end of the test, so the guard does not read a drop as an error.
+        let closing = endpoint.clone();
+        ::habilis_network_test_tracing::at_end(async move { closing.close().await });
         let (signal, _hellos) = NostrSignal::start_with(
             NostrSignalParts {
                 endpoint: endpoint.clone(),
+                book: lookup::address_book(&endpoint),
                 handle: handle.clone(),
                 admission: admission.clone(),
                 ice: IceProfile { host_only: true },
@@ -891,9 +1029,9 @@ mod tests {
             if relay.connections() >= 1 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        sleep(Duration::from_millis(300)).await;
     }
 
     async fn offer(from: &Node, to: &Node) -> Result<()> {
@@ -975,36 +1113,39 @@ mod tests {
         let (pending, _reply_rx) =
             expect_reply(&replies, [8u8; 16], SecretKey::generate().public());
         drop(pending);
-        assert!(replies.lock().unwrap().is_empty());
+        assert!(replies.lock().expect("replies map poisoned").is_empty());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_nostr_round_attaches_a_session_with_no_iroh_path() {
-        let relay = TestRelay::spawn().await.unwrap();
-        let alice = node(&relay, [1u8; 32], MAX_DIRECT_PEERS).await;
-        let bob = node(&relay, [1u8; 32], MAX_DIRECT_PEERS).await;
-        settled(&relay).await;
+    #[test]
+    fn a_nostr_round_attaches_a_session_with_no_iroh_path() {
+        let guard = quiet_guard();
+        ::habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+            let relay = TestRelay::spawn().await.expect("test relay");
+            let alice = node(&relay, [1u8; 32], MAX_DIRECT_PEERS).await;
+            let bob = node(&relay, [1u8; 32], MAX_DIRECT_PEERS).await;
+            settled(&relay).await;
 
-        offer(&alice, &bob).await.expect("the nostr round attaches");
-        assert!(alice.handle.has_session(&bob.endpoint.id()));
-        for _ in 0..50 {
-            if bob.handle.has_session(&alice.endpoint.id()) {
-                break;
+            offer(&alice, &bob).await.expect("the nostr round attaches");
+            assert!(alice.handle.has_session(&bob.endpoint.id()));
+            for _ in 0..50 {
+                if bob.handle.has_session(&alice.endpoint.id()) {
+                    break;
+                }
+                sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert!(bob.handle.has_session(&alice.endpoint.id()));
-        echo(&alice, &bob).await;
+            assert!(bob.handle.has_session(&alice.endpoint.id()));
+            echo(&alice, &bob).await;
+        });
     }
 
     /// One Nostr offer round from `from` to `to` as the event loop runs it,
     /// with UDP pooled beside it. Returns once the round has let go of its
     /// admission slot: whether a session is left, and whether the round
     /// reported a proven path.
-    async fn race_round(from: &Node, to: &Node, offer: super::super::Offer) -> (bool, bool) {
+    async fn race_round(from: &Node, to: &Node, offer: super::super::offer::Offer) -> (bool, bool) {
         let peer = to.endpoint.id();
-        let mut state = crate::testing::fresh_state();
-        let pool = crate::transport::UnicastPool::new(from.endpoint.clone(), false);
+        let mut state = testing::fresh_state();
+        let pool = transport::UnicastPool::new(from.endpoint.clone(), false);
         pool.note_addr(&loopback_addr(&to.endpoint));
         state.unicast_pool = pool;
         state.nostr = Some(from.signal.clone());
@@ -1021,7 +1162,7 @@ mod tests {
             if !from.admission.negotiating(peer) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
         }
         assert!(!from.admission.negotiating(peer), "the round must end");
         let proven = proven_rx
@@ -1035,126 +1176,185 @@ mod tests {
     /// once, so the session the round attached must be detached, not kept
     /// holding a direct-peer slot. A lane round on the same pair is the
     /// control: it keeps its session, so the race round did attach one.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_udp_race_over_nostr_detaches_the_session_once_udp_won() {
-        let relay = TestRelay::spawn().await.unwrap();
-        let (alice_endpoint, alice_handle) = udp_and_webrtc().await;
-        let alice = node_on(
-            alice_endpoint,
-            alice_handle,
-            &relay,
-            [9u8; 32],
-            MAX_DIRECT_PEERS,
-            true,
-        );
-        let (bob_endpoint, bob_handle) = udp_and_webrtc().await;
-        let bob = node_on(
-            bob_endpoint,
-            bob_handle,
-            &relay,
-            [9u8; 32],
-            MAX_DIRECT_PEERS,
-            true,
-        );
-        settled(&relay).await;
+    #[test]
+    fn a_udp_race_over_nostr_detaches_the_session_once_udp_won() {
+        let guard = quiet_guard();
+        ::habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+            let relay = TestRelay::spawn().await.expect("test relay");
+            let (alice_endpoint, alice_handle) = udp_and_webrtc().await;
+            let alice = node_on(
+                alice_endpoint,
+                alice_handle,
+                &relay,
+                [9u8; 32],
+                SignalAdmission::new(MAX_DIRECT_PEERS),
+                true,
+            );
+            let (bob_endpoint, bob_handle) = udp_and_webrtc().await;
+            let bob = node_on(
+                bob_endpoint,
+                bob_handle,
+                &relay,
+                [9u8; 32],
+                SignalAdmission::new(MAX_DIRECT_PEERS),
+                true,
+            );
+            settled(&relay).await;
 
-        let (race_kept, race_proven) = race_round(&alice, &bob, super::super::Offer::UdpRace).await;
-        assert!(!race_kept, "udp won, so the data channel must be detached");
-        assert!(!race_proven, "a detached session proves no path");
+            let (race_kept, race_proven) =
+                race_round(&alice, &bob, super::super::offer::Offer::UdpRace).await;
+            assert!(!race_kept, "udp won, so the data channel must be detached");
+            assert!(!race_proven, "a detached session proves no path");
 
-        let (lane_kept, lane_proven) = race_round(&alice, &bob, super::super::Offer::Lane).await;
-        assert!(
-            lane_kept && lane_proven,
-            "a lane round keeps its session (kept {lane_kept}, proven {lane_proven})"
-        );
+            let (lane_kept, lane_proven) =
+                race_round(&alice, &bob, super::super::offer::Offer::Lane).await;
+            assert!(
+                lane_kept && lane_proven,
+                "a lane round keeps its session (kept {lane_kept}, proven {lane_proven})"
+            );
+        });
     }
 
     /// Alice lost her half; her signed re-offer must replace Bob's stale half
     /// rather than be refused as "already have a session".
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_signed_reoffer_replaces_a_half_dead_session() {
-        let relay = TestRelay::spawn().await.unwrap();
-        let alice = node(&relay, [2u8; 32], MAX_DIRECT_PEERS).await;
-        let bob = node(&relay, [2u8; 32], MAX_DIRECT_PEERS).await;
-        settled(&relay).await;
-        offer(&alice, &bob).await.expect("first round");
-        for _ in 0..50 {
-            if bob.handle.has_session(&alice.endpoint.id()) {
-                break;
+    #[test]
+    fn a_signed_reoffer_replaces_a_half_dead_session() {
+        let guard = quiet_guard();
+        ::habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+            let relay = TestRelay::spawn().await.expect("test relay");
+            let alice = node(&relay, [2u8; 32], MAX_DIRECT_PEERS).await;
+            let bob = node(&relay, [2u8; 32], MAX_DIRECT_PEERS).await;
+            settled(&relay).await;
+            offer(&alice, &bob).await.expect("first round");
+            for _ in 0..50 {
+                if bob.handle.has_session(&alice.endpoint.id()) {
+                    break;
+                }
+                sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
 
-        assert!(alice.handle.detach(&bob.endpoint.id()));
-        offer(&alice, &bob).await.expect("the re-offer attaches");
-        echo(&alice, &bob).await;
+            assert!(alice.handle.detach(&bob.endpoint.id()));
+            offer(&alice, &bob).await.expect("the re-offer attaches");
+            echo(&alice, &bob).await;
+        });
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_answerer_at_its_cap_refuses() {
-        let relay = TestRelay::spawn().await.unwrap();
-        let alice = node(&relay, [3u8; 32], MAX_DIRECT_PEERS).await;
-        let bob = node(&relay, [3u8; 32], 0).await;
-        settled(&relay).await;
-        let error = offer(&alice, &bob).await.expect_err("bob is at his cap");
-        assert!(super::super::is_cap_refusal(&error), "{error:#}");
+    #[test]
+    fn an_answerer_at_its_cap_refuses() {
+        let guard = quiet_guard();
+        ::habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+            let relay = TestRelay::spawn().await.expect("test relay");
+            let alice = node(&relay, [3u8; 32], MAX_DIRECT_PEERS).await;
+            // A route table refuses a newcomer at its cap; a plain table evicts the oldest
+            // session instead, so a cap of 0 would admit.
+            let (endpoint, handle) = webrtc_only().await;
+            let bob = node_on(
+                endpoint,
+                handle,
+                &relay,
+                [3u8; 32],
+                SignalAdmission::new_route_table(0),
+                true,
+            );
+            settled(&relay).await;
+            let error = offer(&alice, &bob).await.expect_err("bob is at his cap");
+            assert!(is_cap_refusal(&error), "{error:#}");
+        });
     }
 
     /// The dispatcher runs every event through the opener: an offer sealed for
     /// another mesh is dropped before it reaches admission.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_offer_from_another_mesh_is_dropped_before_admission() {
-        let relay = TestRelay::spawn().await.unwrap();
-        let bob = node(&relay, [4u8; 32], MAX_DIRECT_PEERS).await;
-        let stranger = node(&relay, [5u8; 32], MAX_DIRECT_PEERS).await;
-        settled(&relay).await;
-        // The stranger's keys, Bob's tag: the seal cannot open.
-        let mut forged = stranger.signal.signal(SignalKind::Offer);
-        forged.to = Some(bob.endpoint.id());
-        forged.envelope = Some("{}".into());
-        let content = seal(
-            &stranger.signal.inner.keys,
-            &stranger.signal.inner.secret,
-            &forged,
-        );
-        let bobs_tag = bob.signal.inner.keys.self_tag(&bob.endpoint.id());
-        for _ in 0..5 {
-            stranger
-                .signal
-                .inner
-                .pool
-                .publish(&bobs_tag, content.clone());
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(bob.admission.in_flight(), 0);
+    #[test]
+    fn an_offer_from_another_mesh_is_dropped_before_admission() {
+        let guard = quiet_guard();
+        ::habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+            let relay = TestRelay::spawn().await.expect("test relay");
+            let bob = node(&relay, [4u8; 32], MAX_DIRECT_PEERS).await;
+            let stranger = node(&relay, [5u8; 32], MAX_DIRECT_PEERS).await;
+            settled(&relay).await;
+            // The stranger's keys, Bob's tag: the seal cannot open.
+            let mut forged = stranger.signal.signal(SignalKind::Offer);
+            forged.to = Some(bob.endpoint.id());
+            forged.envelope = Some("{}".into());
+            let content = seal(
+                &stranger.signal.inner.keys,
+                &stranger.signal.inner.secret,
+                &forged,
+            );
+            let bobs_tag = bob.signal.inner.keys.self_tag(&bob.endpoint.id());
+            for _ in 0..5 {
+                stranger
+                    .signal
+                    .inner
+                    .pool
+                    .publish(&bobs_tag, content.clone());
+                sleep(Duration::from_millis(100)).await;
+            }
+            sleep(Duration::from_millis(300)).await;
+            assert_eq!(bob.admission.in_flight(), 0);
+        });
     }
 
     /// A node with `WebRTC` off answers no offer: the session would attach
     /// into a transport its endpoint never registered.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_node_with_webrtc_off_answers_no_offer() {
-        let relay = TestRelay::spawn().await.unwrap();
-        let alice = node(&relay, [6u8; 32], MAX_DIRECT_PEERS).await;
-        let bob = node_with(&relay, [6u8; 32], MAX_DIRECT_PEERS, false).await;
-        settled(&relay).await;
-        assert!(offer(&alice, &bob).await.is_err(), "no answer comes");
-        assert!(!bob.handle.has_session(&alice.endpoint.id()));
+    #[test]
+    fn a_node_with_webrtc_off_answers_no_offer() {
+        let guard = quiet_guard();
+        ::habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+            let relay = TestRelay::spawn().await.expect("test relay");
+            let alice = node(&relay, [6u8; 32], MAX_DIRECT_PEERS).await;
+            let bob = node_with(&relay, [6u8; 32], MAX_DIRECT_PEERS, false).await;
+            settled(&relay).await;
+            assert!(offer(&alice, &bob).await.is_err(), "no answer comes");
+            assert!(!bob.handle.has_session(&alice.endpoint.id()));
+        });
     }
 
     mod discovery_rules {
         use std::time::Duration;
 
-        use super::super::discovery::{HelloAction, hello_action, prune, target_width};
+        use super::super::discovery::{HelloAction, hello_action, may_start, prune, target_width};
         use super::*;
         use crate::testing::{endpoint_id, fresh_state};
         use crate::util::clock::Instant;
 
+        use crate::daemon::state::DirectState;
         fn hello(from: EndpointId, addrs: &[&str], webrtc: bool) -> Signal {
             let mut hello = Signal::new(SignalKind::Hello, from, now());
-            hello.addrs = addrs.iter().map(|addr| addr.parse().unwrap()).collect();
+            hello.addrs = addrs
+                .iter()
+                .map(|addr| addr.parse().expect("a socket address"))
+                .collect();
             hello.webrtc = webrtc;
             hello
+        }
+
+        /// A member with a full view still offers to a newcomer that pokes it. The newcomer has the
+        /// higher id, so it cannot offer itself; a room-tag `Hello` from it is refused for want of
+        /// room, but a poke on our own tag is let through to admission.
+        #[test]
+        fn a_full_member_still_offers_when_a_newcomer_pokes_it() {
+            let mut state = fresh_state();
+            let local = endpoint_id(1);
+            let newcomer = endpoint_id(9);
+            let max_peers = 2;
+            state.linked_endpoints.insert(endpoint_id(20));
+            state.linked_endpoints.insert(endpoint_id(21));
+
+            let action = hello_action(&state, local, &hello(newcomer, &[], true), Instant::now());
+            assert_eq!(
+                action,
+                HelloAction::Offer,
+                "the lower id offers to a lane peer"
+            );
+            assert!(
+                !may_start(&state, max_peers, newcomer, false),
+                "a room-tag Hello from a newcomer meets a full view"
+            );
+            assert!(
+                may_start(&state, max_peers, newcomer, true),
+                "a poke on our own tag is let through to admission"
+            );
         }
 
         /// A proven path to a peer that never made it into the overlay (a
@@ -1164,9 +1364,7 @@ mod tests {
         fn a_direct_but_unlinked_peer_is_grafted_again() {
             let mut state = fresh_state();
             let peer = endpoint_id(9);
-            state
-                .direct
-                .insert(peer, crate::daemon::state::DirectState::Direct);
+            state.direct.insert(peer, DirectState::Direct);
             let unlinked = hello_action(
                 &state,
                 endpoint_id(1),

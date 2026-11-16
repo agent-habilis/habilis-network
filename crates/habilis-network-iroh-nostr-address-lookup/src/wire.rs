@@ -43,9 +43,20 @@ pub(crate) fn event(event: &Event) -> String {
 /// A frame from a relay. Anything we do not act on is `Other`.
 #[derive(Debug)]
 pub(crate) enum FromRelay {
-    Event { sub_id: String, event: Event },
-    Ok { accepted: bool, reason: String },
-    Closed { sub_id: String, reason: String },
+    Event {
+        sub_id: String,
+        event: Event,
+    },
+    Ok {
+        accepted: bool,
+        reason: String,
+    },
+    Closed {
+        sub_id: String,
+        reason: String,
+    },
+    /// The relay finished the stored events of a REQ: it serves us.
+    Eose,
     Other,
 }
 
@@ -72,6 +83,7 @@ pub(crate) fn parse(text: &str) -> FromRelay {
             sub_id: string(1).unwrap_or_default(),
             reason: string(2).unwrap_or_default(),
         },
+        Some("EOSE") => FromRelay::Eose,
         _ => FromRelay::Other,
     }
 }
@@ -85,9 +97,16 @@ pub(crate) enum Verdict {
     Retire,
     /// Harmless: the relay already has it.
     Duplicate,
+    /// The relay refused the event as outside its time window. Its window can
+    /// be shorter than our replay window (strfry refuses an ephemeral event
+    /// older than 60 s, ours is ±120 s), so this one is worth a warning.
+    Stale,
     /// Anything else: log it and carry on.
     Other,
 }
+
+/// Words a relay uses to say an event is outside its time window.
+const STALE_WORDS: [&str; 3] = ["expired", "too early", "too old"];
 
 pub(crate) fn classify(reason: &str) -> Verdict {
     let prefix = reason.split(':').next().unwrap_or_default();
@@ -95,7 +114,14 @@ pub(crate) fn classify(reason: &str) -> Verdict {
         "rate-limited" => Verdict::RateLimited,
         "blocked" | "restricted" | "auth-required" | "pow" => Verdict::Retire,
         "duplicate" => Verdict::Duplicate,
-        _ => Verdict::Other,
+        _ => {
+            let lowercase = reason.to_lowercase();
+            if STALE_WORDS.iter().any(|word| lowercase.contains(word)) {
+                Verdict::Stale
+            } else {
+                Verdict::Other
+            }
+        }
     }
 }
 
@@ -120,13 +146,41 @@ mod tests {
         assert_eq!(classify(""), Verdict::Other);
     }
 
+    /// A relay's time window can be shorter than our replay window, and the
+    /// refusal then names it in free text.
+    #[test]
+    fn a_refusal_that_names_a_time_window_is_stale() {
+        for stale in [
+            "invalid: event expired",
+            "error: created_at too early",
+            "invalid: Event is too old",
+            "EXPIRED",
+        ] {
+            assert_eq!(classify(stale), Verdict::Stale, "{stale}");
+        }
+        // The words count only when no prefix we act on is present.
+        for (reason, verdict) in [
+            ("rate-limited: too old a client", Verdict::RateLimited),
+            ("blocked: your key expired", Verdict::Retire),
+            ("restricted: too early for members", Verdict::Retire),
+            ("duplicate: too old to matter", Verdict::Duplicate),
+        ] {
+            assert_eq!(
+                classify(reason),
+                verdict,
+                "a prefix we act on wins over the words: {reason}"
+            );
+        }
+    }
+
     #[test]
     fn a_req_carries_kinds_tags_and_since() {
         let filter = Filter {
             kinds: vec![20_001],
             tags: vec!["ab".into()],
         };
-        let value: Value = serde_json::from_str(&req("s1", &filter, 1000)).unwrap();
+        let value: Value =
+            serde_json::from_str(&req("s1", &filter, 1000)).expect("the REQ is JSON");
         assert_eq!(
             value,
             serde_json::json!(["REQ", "s1", {"kinds": [20001], "#x": ["ab"], "since": 880}])
@@ -148,7 +202,8 @@ mod tests {
             parse(r#"["CLOSED","s1","blocked: no"]"#),
             FromRelay::Closed { sub_id, reason } if sub_id == "s1" && reason == "blocked: no"
         ));
-        assert!(matches!(parse(r#"["EOSE","s1"]"#), FromRelay::Other));
+        assert!(matches!(parse(r#"["EOSE","s1"]"#), FromRelay::Eose));
+        assert!(matches!(parse(r#"["NOTICE","hi"]"#), FromRelay::Other));
         assert!(matches!(parse("not json"), FromRelay::Other));
     }
 }

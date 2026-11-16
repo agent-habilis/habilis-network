@@ -65,7 +65,12 @@ export function ffiOpener(wire: WireOpts, deps: OpenerDeps = {}): Opener {
           break
         }
         case 'msg': {
-          sink.msg({ from: message.from, directed: message.directed, text: message.text })
+          sink.msg({
+            from: message.from,
+            key: message.key,
+            directed: message.directed,
+            text: message.text,
+          })
           break
         }
         case 'roster': {
@@ -121,6 +126,9 @@ export function ffiOpener(wire: WireOpts, deps: OpenerDeps = {}): Opener {
       maxMsg: reply.maxMsg,
       send: async (to, text) => {
         await request({ t: 'send', to, text })
+      },
+      sendToKey: async (key, text) => {
+        await request({ t: 'sendToKey', key, text })
       },
       stateMerge: async (json) => (await request({ t: 'stateMerge', json })) as string,
       close: async () => {
@@ -180,6 +188,7 @@ export function joinWire(opts: JoinOpts): WireOpts {
     relayUrls: listWire(opts.relayUrls),
     nostrUrls: listWire(opts.nostrUrls),
     maxPeers: opts.maxPeers ?? 0,
+    maxDirect: opts.maxDirect ?? 0,
   }
 }
 
@@ -194,6 +203,7 @@ export function createWire(opts: CreateOpts): WireOpts {
     relayUrls: listWire(opts.relayUrls),
     nostrUrls: listWire(opts.nostrUrls),
     maxPeers: opts.maxPeers ?? 0,
+    maxDirect: opts.maxDirect ?? 0,
   }
 }
 

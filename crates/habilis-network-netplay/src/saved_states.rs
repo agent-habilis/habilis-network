@@ -6,19 +6,22 @@
 //! one so the oldest confirmed frame is still reachable while the newest is
 //! being written.
 
-use crate::frame::{Frame, NULL_FRAME};
+use crate::frame::Frame;
 use crate::request::StateCell;
 
+use std::fmt;
+#[derive(Clone)]
 pub(crate) struct SavedStates<S> {
     cells: Vec<StateCell<S>>,
     head: usize,
 }
 
-impl<S> std::fmt::Debug for SavedStates<S> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<S> fmt::Debug for SavedStates<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let capacity = self.cells.len();
         formatter
             .debug_struct("SavedStates")
-            .field("capacity", &self.cells.len())
+            .field("capacity", &capacity)
             .field("head", &self.head)
             .finish_non_exhaustive()
     }
@@ -50,7 +53,7 @@ impl<S> SavedStates<S> {
 
     /// The cell holding `frame`, if it is still inside the window.
     pub(crate) fn by_frame(&self, frame: Frame) -> Option<StateCell<S>> {
-        if frame == NULL_FRAME {
+        if frame == Frame::NULL {
             return None;
         }
         self.cells

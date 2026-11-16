@@ -10,20 +10,24 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 use futures_util::{SinkExt as _, StreamExt as _};
+use n0_future::task::AbortOnDropHandle;
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 use tokio_websockets::{Message, ServerBuilder};
 use url::Url;
 
 use crate::event::{Event, TAG};
 
+use std::{mem, sync};
+use tokio::net;
 /// A running test relay. Dropping it stops the listener and every connection.
 #[derive(Debug)]
 pub struct TestRelay {
     url: Url,
     shared: Arc<Mutex<State>>,
-    _accept: n0_future::task::AbortOnDropHandle<()>,
+    _accept: AbortOnDropHandle<()>,
 }
 
 #[derive(Debug, Default)]
@@ -43,7 +47,7 @@ struct State {
 struct Conn {
     outbound: mpsc::UnboundedSender<String>,
     subs: HashMap<String, Sub>,
-    task: Option<tokio::task::AbortHandle>,
+    task: Option<AbortHandle>,
 }
 
 #[derive(Debug)]
@@ -74,15 +78,16 @@ impl TestRelay {
             .parse()
             .context("a socket address makes a valid URL")?;
         let shared = Arc::new(Mutex::new(State::default()));
-        let accept = tokio::spawn(accept_loop(listener, shared.clone()));
+        let accept = tokio::spawn(accept_loop(listener, Arc::clone(&shared)));
         Ok(Self {
             url,
             shared,
-            _accept: n0_future::task::AbortOnDropHandle::new(accept),
+            _accept: AbortOnDropHandle::new(accept),
         })
     }
 
     #[must_use]
+    /// The `ws://` address the relay listens on.
     pub fn url(&self) -> Url {
         self.url.clone()
     }
@@ -150,7 +155,7 @@ impl TestRelay {
     /// Close every connection without a close frame, as a crash or a network
     /// drop does. The listener keeps accepting.
     pub fn drop_connections(&self) {
-        let conns = std::mem::take(&mut self.state().conns);
+        let conns = mem::take(&mut self.state().conns);
         for conn in conns.into_values() {
             if let Some(task) = conn.task {
                 task.abort();
@@ -158,7 +163,7 @@ impl TestRelay {
         }
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+    fn state(&self) -> sync::MutexGuard<'_, State> {
         self.shared.lock().expect("test relay mutex poisoned")
     }
 }
@@ -181,7 +186,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Mutex<State>>) {
             );
             id
         };
-        let task = tokio::spawn(serve(stream, id, shared.clone(), outbound_rx));
+        let task = tokio::spawn(serve(stream, id, Arc::clone(&shared), outbound_rx));
         if let Some(conn) = shared
             .lock()
             .expect("test relay mutex poisoned")
@@ -194,7 +199,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Mutex<State>>) {
 }
 
 async fn serve(
-    stream: tokio::net::TcpStream,
+    stream: net::TcpStream,
     id: u64,
     shared: Arc<Mutex<State>>,
     mut outbound: mpsc::UnboundedReceiver<String>,

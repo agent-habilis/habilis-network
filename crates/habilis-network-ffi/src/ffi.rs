@@ -1,6 +1,6 @@
 //! The C ABI. `include/habilis_network.h` is the hand-written declaration of everything
 //! here — change one, change the other; `tests/ffi_smoke.rs` is what catches a
-//! mismatch from this side. The out-of-tree consumer is `mallorca`, which links
+//! mismatch from this side. An out-of-tree consumer links
 //! the `staticlib`, so no check in this workspace sees a break there.
 //!
 //! Conventions, uniform across the surface: a pointer-returning call yields NULL
@@ -12,113 +12,44 @@
     reason = "this module *is* the C ABI: raw pointers from the foreign caller, and a boxed handle it owns"
 )]
 
+mod habilis_network_mesh;
+use std::{fmt, panic, ptr, slice, str};
+mod habilis_network_msg;
+mod habilis_network_opts;
+mod habilis_network_producer;
+mod habilis_network_reader;
+mod habilis_network_stream_opts;
+mod habilis_network_streams;
+
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_long};
 use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::mesh::{Inbound, MAX_MSG, Mesh, Opts};
-use crate::stream::{Read, ReadEnd, Streams, Writer};
+use crate::mesh::{Inbound, JoinOptions, MAX_MSG, Mesh};
+use crate::streams::{Read, Streams};
+
+pub use habilis_network_mesh::HabilisNetworkMesh;
+pub use habilis_network_msg::HabilisNetworkMsg;
+pub use habilis_network_opts::HabilisNetworkOpts;
+pub use habilis_network_producer::HabilisNetworkProducer;
+pub use habilis_network_reader::HabilisNetworkReader;
+pub use habilis_network_stream_opts::HabilisNetworkStreamOpts;
+pub use habilis_network_streams::HabilisNetworkStreams;
 
 /// Capacity of [`HabilisNetworkMsg::nick`], including the NUL. A minted nickname is two
 /// short words; a longer chosen one is truncated to 63 bytes.
 const NICK_CAP: usize = 64;
+
+/// Capacity of [`HabilisNetworkMsg::key`]: the 64 hex digits of an author key and the NUL.
+const KEY_CAP: usize = 65;
 
 thread_local! {
     /// The reason for the most recent failure on this thread. Held as a
     /// `CString` so [`habilis_network_last_error`] can hand out a borrowed pointer; valid
     /// until this thread's next `mesh_*` call.
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
-}
-
-/// The mesh selectors, mirroring `habilis_network_opts` in the header. String fields are
-/// NUL-terminated C strings or NULL; `max_peers == 0` takes the engine default.
-#[repr(C)]
-#[derive(Debug)]
-pub struct HabilisNetworkOpts {
-    pub mesh: *const c_char,
-    pub topic: *const c_char,
-    pub nick: *const c_char,
-    pub name: *const c_char,
-    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`, `nostr`; NULL ⇒ none
-    /// (a loopback mesh on create).
-    pub lookup: *const c_char,
-    /// Comma-separated transports, any of `udp`, `webrtc`, `relay`; NULL ⇒
-    /// `udp,webrtc`, so all data stays peer to peer.
-    pub transport: *const c_char,
-    /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
-    pub relay_urls: *const c_char,
-    pub max_peers: usize,
-    /// Comma-separated custom Nostr relays; NULL ⇒ the pinned public list.
-    pub nostr_urls: *const c_char,
-}
-
-/// The layout `packages/habilis-network-ffi/src/dlopen/opts-struct.ts` hand-encodes,
-/// pinned here so the two sides are coupled by a compile error rather than by
-/// copied comments. `bun:ffi` and Deno's FFI cannot marshal a struct, so that
-/// file writes these exact offsets into a byte buffer; koffi (Node) names the
-/// fields instead and does not depend on this block.
-///
-/// Adding or reordering a field breaks a linked C consumer silently — it keeps
-/// passing the old layout — so a failure here is the signal to bump
-/// `OPTS_BYTES` in that file, its offset constants, and the CHANGELOG entry
-/// together. 64-bit little-endian, the same scope the TypeScript claims.
-const _: () = {
-    use std::mem::{align_of, offset_of, size_of};
-
-    assert!(
-        size_of::<HabilisNetworkOpts>() == 72,
-        "opts-struct.ts OPTS_BYTES"
-    );
-    assert!(align_of::<HabilisNetworkOpts>() == 8);
-    assert!(offset_of!(HabilisNetworkOpts, mesh) == 0);
-    assert!(offset_of!(HabilisNetworkOpts, topic) == 8);
-    assert!(offset_of!(HabilisNetworkOpts, nick) == 16);
-    assert!(offset_of!(HabilisNetworkOpts, name) == 24);
-    assert!(offset_of!(HabilisNetworkOpts, lookup) == 32);
-    assert!(offset_of!(HabilisNetworkOpts, transport) == 40);
-    assert!(offset_of!(HabilisNetworkOpts, relay_urls) == 48);
-    assert!(offset_of!(HabilisNetworkOpts, max_peers) == 56);
-    assert!(offset_of!(HabilisNetworkOpts, nostr_urls) == 64);
-};
-
-/// One received message's metadata, mirroring `habilis_network_msg` in the header. The
-/// text itself lands in the caller's own buffer, NUL-terminated; `len` says how
-/// many bytes it has, excluding the NUL.
-#[repr(C)]
-#[derive(Debug)]
-pub struct HabilisNetworkMsg {
-    pub nick: [c_char; NICK_CAP],
-    pub directed: c_int,
-    pub len: usize,
-}
-
-/// The layout `packages/habilis-network-ffi/src/msg.ts` hand-decodes, pinned like
-/// `HabilisNetworkOpts` above.
-const _: () = {
-    use std::mem::{align_of, offset_of, size_of};
-
-    assert!(size_of::<HabilisNetworkMsg>() == 80, "msg.ts MSG_BYTES");
-    assert!(align_of::<HabilisNetworkMsg>() == 8);
-    assert!(offset_of!(HabilisNetworkMsg, nick) == 0);
-    assert!(offset_of!(HabilisNetworkMsg, directed) == 64);
-    assert!(offset_of!(HabilisNetworkMsg, len) == 72);
-};
-
-/// The opaque handle behind `habilis_network_mesh *`. Holds the [`Mesh`] plus
-/// NUL-terminated copies of the identity strings, so [`habilis_network_mesh_id`] /
-/// [`habilis_network_mesh_nickname`] can hand out pointers that stay valid for the
-/// handle's lifetime.
-#[expect(
-    missing_debug_implementations,
-    reason = "wraps Mesh, which owns a tokio Runtime and so has no Debug impl"
-)]
-pub struct HabilisNetworkMesh {
-    mesh: Mesh,
-    id: CString,
-    nick: CString,
-    name: CString,
 }
 
 fn set_error(message: &str) {
@@ -135,8 +66,9 @@ fn clear_error() {
 
 /// Run `body`, converting a panic into `fallback` plus an error message. Every
 /// entry point goes through this: unwinding into C is undefined behaviour.
+// C boundary: each extern "C" entry point runs its body through this helper.
 fn guard<T>(fallback: T, body: impl FnOnce() -> T) -> T {
-    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+    match panic::catch_unwind(AssertUnwindSafe(body)) {
         Ok(value) => value,
         Err(_panic) => {
             set_error("a panic crossed the FFI boundary");
@@ -156,11 +88,11 @@ unsafe fn borrowed_field(
     handle: *const HabilisNetworkMesh,
     field: impl FnOnce(&HabilisNetworkMesh) -> *const c_char,
 ) -> *const c_char {
-    guard(std::ptr::null(), || {
+    guard(ptr::null(), || {
         // SAFETY: live handle or NULL, forwarded from this function's contract.
         match unsafe { handle.as_ref() } {
             Some(handle) => field(handle),
-            None => std::ptr::null(),
+            None => ptr::null(),
         }
     })
 }
@@ -177,7 +109,7 @@ unsafe fn borrowed_field(
 unsafe fn json_out(
     name: &str,
     handle: *mut HabilisNetworkMesh,
-    buf: *mut c_char,
+    buffer: *mut c_char,
     cap: usize,
     render: impl FnOnce(&Mesh) -> anyhow::Result<String>,
 ) -> c_long {
@@ -190,7 +122,7 @@ unsafe fn json_out(
         };
         match render(&handle.mesh) {
             // SAFETY: `buf`/`cap` are the caller's buffer, forwarded likewise.
-            Ok(json) => unsafe { copy_out(&json, buf, cap) },
+            Ok(json) => unsafe { copy_out(&json, buffer, cap) },
             Err(error) => {
                 set_error(&format!("{error:#}"));
                 -1
@@ -223,20 +155,27 @@ unsafe fn optional_str(ptr: *const c_char) -> Result<Option<&'static str>, ()> {
 /// Split a comma-separated C list into its parsed entries. NULL and the empty
 /// string are the empty list; a name that is not one of the type's choices
 /// puts that type's own message (`unknown lookup ...`) in the error slot.
-fn comma_list<T: std::str::FromStr>(text: Option<&str>) -> Result<Vec<T>, ()>
+fn comma_list<T: str::FromStr>(text: Option<&str>) -> Result<Vec<T>, ()>
 where
-    T::Err: std::fmt::Display,
+    T::Err: fmt::Display,
 {
-    text.unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
+    let entries = text.unwrap_or_default().split(',');
+    let trimmed = entries.map(str::trim).filter(|entry| !entry.is_empty());
+    trimmed
         .map(|entry| {
-            entry.parse::<T>().map_err(|error| {
+            let parsed: Result<T, _> = entry.parse();
+            parsed.map_err(|error| {
                 set_error(&error.to_string());
             })
         })
         .collect()
+}
+
+/// The comma-separated URLs of `text`, each trimmed.
+fn url_list(text: &str) -> Vec<String> {
+    let parts = text.split(',');
+    let trimmed = parts.map(str::trim);
+    trimmed.map(str::to_owned).collect()
 }
 
 /// Copy `text` into a caller buffer, NUL-terminating it. Returns the length
@@ -245,18 +184,19 @@ where
 ///
 /// # Safety
 /// `buf` is NULL, or writable for `cap` bytes.
-unsafe fn copy_out(text: &str, buf: *mut c_char, cap: usize) -> c_long {
+unsafe fn copy_out(text: &str, buffer: *mut c_char, cap: usize) -> c_long {
     let bytes = text.as_bytes();
     let needed = bytes.len();
-    if !buf.is_null() && needed < cap {
+    if !buffer.is_null() && needed < cap {
+        let destination: *mut u8 = buffer.cast();
         // SAFETY: `needed + 1 <= cap` bytes are writable per the contract above,
         // and the source is a distinct Rust-owned allocation.
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), needed);
-            buf.add(needed).write(0);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), destination, needed);
+            buffer.add(needed).write(0);
         }
     }
-    // Lengths here are JSON documents bounded by the automerge doc / roster
+    // Lengths here are JSON documents bounded by the roster
     // size, never anywhere near `c_long::MAX`.
     c_long::try_from(needed).unwrap_or(c_long::MAX)
 }
@@ -266,12 +206,24 @@ unsafe fn copy_out(text: &str, buf: *mut c_char, cap: usize) -> c_long {
 fn write_nick(field: &mut [c_char; NICK_CAP], nick: &str) {
     let bytes = nick.as_bytes();
     let take = bytes.len().min(NICK_CAP - 1);
+    let destination: *mut u8 = field.as_mut_ptr().cast();
     // SAFETY: `take < NICK_CAP` elements are written into an array of that size,
     // from a distinct Rust-owned allocation.
     unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), field.as_mut_ptr().cast::<u8>(), take);
+        ptr::copy_nonoverlapping(bytes.as_ptr(), destination, take);
     }
     field[take] = 0;
+}
+
+/// Fill `HabilisNetworkMsg::key` with the 64 hex digits of an author key, NUL-terminated.
+fn write_key(field: &mut [c_char; KEY_CAP], hex: &[u8; 64]) {
+    let destination: *mut u8 = field.as_mut_ptr().cast();
+    // SAFETY: the 64 hex bytes fit the first 64 elements of an array of 65, from a distinct
+    // array.
+    unsafe {
+        ptr::copy_nonoverlapping(hex.as_ptr(), destination, hex.len());
+    }
+    field[hex.len()] = 0;
 }
 
 /// Create or join a mesh and return an owned handle, or NULL on failure.
@@ -282,59 +234,63 @@ fn write_nick(field: &mut [c_char; NICK_CAP], nick: &str) {
 /// [`habilis_network_mesh_close`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn habilis_network_mesh_open(
-    opts: *const HabilisNetworkOpts,
+    options: *const HabilisNetworkOpts,
 ) -> *mut HabilisNetworkMesh {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
-        if opts.is_null() {
+        if options.is_null() {
             set_error("habilis_network_mesh_open: opts is NULL");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         }
         // SAFETY: non-NULL and readable per the contract above.
-        let opts = unsafe { &*opts };
+        let options = unsafe { &*options };
         // SAFETY: same contract, applied to each optional string field.
         let strings = unsafe {
             (
-                optional_str(opts.mesh),
-                optional_str(opts.topic),
-                optional_str(opts.nick),
-                optional_str(opts.name),
+                optional_str(options.mesh),
+                optional_str(options.topic),
+                optional_str(options.nick),
+                optional_str(options.name),
             )
         };
         let (Ok(mesh), Ok(topic), Ok(nick), Ok(name)) = strings else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         // SAFETY: NUL-terminated or NULL, per the header contract, for each
         // of the four comma lists.
         let lists = unsafe {
             (
-                optional_str(opts.lookup),
-                optional_str(opts.transport),
-                optional_str(opts.relay_urls),
-                optional_str(opts.nostr_urls),
+                optional_str(options.lookup),
+                optional_str(options.transport),
+                optional_str(options.relay_urls),
+                optional_str(options.nostr_urls),
             )
         };
         let (Ok(lookup), Ok(transport), Ok(relay_urls), Ok(nostr_urls)) = lists else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
-        let url_list = |urls: Option<&str>| -> Vec<String> {
-            urls.map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-                .unwrap_or_default()
-        };
-        let parsed = Opts {
-            mesh: mesh.map(str::to_owned),
-            topic: topic.map(str::to_owned),
-            nick: nick.map(str::to_owned),
-            name: name.map(str::to_owned),
-            lookup,
-            transport,
-            relay_urls: url_list(relay_urls),
-            nostr_urls: url_list(nostr_urls),
-            max_peers: opts.max_peers,
-        };
+        let relay_urls: Vec<String> = relay_urls.map(url_list).unwrap_or_default();
+        let nostr_urls: Vec<String> = nostr_urls.map(url_list).unwrap_or_default();
+        let mesh_name = mesh.map(str::to_owned);
+        let topic_name = topic.map(str::to_owned);
+        let nick_name = nick.map(str::to_owned);
+        let display_name = name.map(str::to_owned);
+        let base: JoinOptions = JoinOptions::default()
+            .mesh(mesh_name)
+            .topic(topic_name)
+            .nick(nick_name)
+            .name(display_name);
+        let limited = base
+            .lookup(lookup)
+            .transport(transport)
+            .relay_urls(relay_urls)
+            .nostr_urls(nostr_urls);
+        let parsed: JoinOptions = limited
+            .max_peers(options.max_peers)
+            .max_direct(options.max_direct);
         match Mesh::open(&parsed) {
             Ok(opened) => {
                 // The nickname the engine settled on — not `nick` above, which is
@@ -351,7 +307,7 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             }
             Err(error) => {
                 set_error(&format!("{error:#}"));
-                std::ptr::null_mut()
+                ptr::null_mut()
             }
         }
     })
@@ -424,8 +380,80 @@ pub unsafe extern "C" fn habilis_network_msg_send(
     })
 }
 
+/// Send one message to the member that holds an author key, given as 64 lowercase hex digits
+/// (the `key` of a received message or of a roster row). Two live members can use one
+/// nickname; a key names one member. Returns 0, or -1 on failure: a text that is not a key, or
+/// a message that does not fit one frame, is refused.
+///
+/// # Safety
+/// `handle` must be live; `key` and `text` NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn habilis_network_msg_send_to_key(
+    handle: *mut HabilisNetworkMesh,
+    key: *const c_char,
+    text: *const c_char,
+) -> c_int {
+    guard(-1, || {
+        clear_error();
+        // SAFETY: live handle or NULL, per the contract above.
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            set_error("habilis_network_msg_send_to_key: handle is NULL");
+            return -1;
+        };
+        // SAFETY: same contract, applied to the two strings.
+        let (Ok(key), Ok(text)) = (unsafe { (optional_str(key), optional_str(text)) }) else {
+            return -1;
+        };
+        let Some(key) = key else {
+            set_error("habilis_network_msg_send_to_key: key is NULL");
+            return -1;
+        };
+        let Some(text) = text else {
+            set_error("habilis_network_msg_send_to_key: text is NULL");
+            return -1;
+        };
+        report(handle.mesh.send_to_key(key, text))
+    })
+}
+
+/// The next queued message, waiting up to `timeout_ms`: `Ok(None)` on timeout, and `Err` once the
+/// reason is in the error slot.
+fn dequeue(handle: &mut HabilisNetworkMesh, timeout_ms: c_int) -> Result<Option<Inbound>, ()> {
+    let timeout = Duration::from_millis(u64::try_from(timeout_ms.max(0)).unwrap_or(0));
+    handle.mesh.recv(timeout).map_err(|error| {
+        set_error(&format!("{error:#}"));
+    })
+}
+
+/// Hand `message` to the caller's buffer. Returns 1 with the text NUL-terminated in `buffer`, or
+/// -2 when the text does not fit in `cap`: nothing is written, and the message stays queued for
+/// the retry. Not a failure, so the error slot stays clear.
+///
+/// # Safety
+/// `buffer` must be writable for `cap` bytes.
+unsafe fn deliver(
+    handle: &mut HabilisNetworkMesh,
+    message: Inbound,
+    buffer: *mut c_char,
+    cap: usize,
+) -> c_long {
+    if message.text.len() >= cap {
+        handle.mesh.keep(message);
+        return -2;
+    }
+    let text = message.text;
+    let destination: *mut u8 = buffer.cast();
+    // SAFETY: `text.len() + 1 <= cap` bytes are writable per the contract above, and the source
+    // is a distinct Rust-owned allocation.
+    unsafe {
+        ptr::copy_nonoverlapping(text.as_ptr(), destination, text.len());
+        buffer.add(text.len()).write(0);
+    }
+    1
+}
+
 /// Take the next inbound message, waiting up to `timeout_ms`. Returns 1 with
-/// the text NUL-terminated in `buf` and `out` filled, 0 on timeout, -1 on
+/// the text NUL-terminated in `buf` and `out` filled (nickname, key, directed flag, length), 0 on timeout, -1 on
 /// failure, or -2 when the text does not fit in `cap`: nothing is written, the
 /// message stays queued, and `out->len` holds its length — retry with a buffer
 /// of at least `out->len + 1` bytes.
@@ -436,7 +464,7 @@ pub unsafe extern "C" fn habilis_network_msg_send(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn habilis_network_msg_recv(
     handle: *mut HabilisNetworkMesh,
-    buf: *mut c_char,
+    buffer: *mut c_char,
     cap: usize,
     timeout_ms: c_int,
     out: *mut HabilisNetworkMsg,
@@ -448,42 +476,27 @@ pub unsafe extern "C" fn habilis_network_msg_recv(
             set_error("habilis_network_msg_recv: handle is NULL");
             return -1;
         };
-        if out.is_null() || buf.is_null() {
+        if out.is_null() || buffer.is_null() {
             set_error("habilis_network_msg_recv: buf or out is NULL");
             return -1;
         }
-        let timeout = Duration::from_millis(u64::try_from(timeout_ms.max(0)).unwrap_or(0));
-        let msg = match handle.mesh.recv(timeout) {
-            Ok(Some(msg)) => msg,
+        let message = match dequeue(handle, timeout_ms) {
+            Ok(Some(message)) => message,
             Ok(None) => return 0,
-            Err(error) => {
-                set_error(&format!("{error:#}"));
-                return -1;
-            }
+            Err(()) => return -1,
         };
         let mut meta = HabilisNetworkMsg {
             nick: [0; NICK_CAP],
-            directed: c_int::from(msg.directed),
-            len: msg.text.len(),
+            key: [0; KEY_CAP],
+            directed: c_int::from(message.directed),
+            len: message.text.len(),
         };
-        write_nick(&mut meta.nick, &msg.nick);
-        if msg.text.len() >= cap {
-            // SAFETY: non-NULL (checked) and writable per the contract above.
-            unsafe { out.write(meta) }
-            // Not a failure: the message waits, and `out->len` says how big a
-            // buffer the retry needs, so the error slot stays clear.
-            handle.mesh.keep(msg);
-            return -2;
-        }
-        let Inbound { text, .. } = msg;
-        // SAFETY: `text.len() + 1 <= cap` bytes are writable per the contract
-        // above, and the source is a distinct Rust-owned allocation.
-        unsafe {
-            std::ptr::copy_nonoverlapping(text.as_ptr(), buf.cast::<u8>(), text.len());
-            buf.add(text.len()).write(0);
-            out.write(meta);
-        }
-        1
+        write_nick(&mut meta.nick, &message.nick);
+        write_key(&mut meta.key, &message.key.hex());
+        // SAFETY: non-NULL (checked) and writable per the contract above.
+        unsafe { out.write(meta) }
+        // SAFETY: `buffer` is non-NULL (checked) and writable for `cap` bytes per the contract.
+        unsafe { deliver(handle, message, buffer, cap) }
     })
 }
 
@@ -526,7 +539,7 @@ pub unsafe extern "C" fn habilis_network_mesh_state_merge(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn habilis_network_mesh_state_json(
     handle: *mut HabilisNetworkMesh,
-    buf: *mut c_char,
+    buffer: *mut c_char,
     cap: usize,
 ) -> c_long {
     // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
@@ -535,7 +548,7 @@ pub unsafe extern "C" fn habilis_network_mesh_state_json(
         json_out(
             "habilis_network_mesh_state_json",
             handle,
-            buf,
+            buffer,
             cap,
             Mesh::state_json,
         )
@@ -550,7 +563,7 @@ pub unsafe extern "C" fn habilis_network_mesh_state_json(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn habilis_network_mesh_peers_json(
     handle: *mut HabilisNetworkMesh,
-    buf: *mut c_char,
+    buffer: *mut c_char,
     cap: usize,
 ) -> c_long {
     // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
@@ -559,15 +572,15 @@ pub unsafe extern "C" fn habilis_network_mesh_peers_json(
         json_out(
             "habilis_network_mesh_peers_json",
             handle,
-            buf,
+            buffer,
             cap,
             Mesh::peers_json,
         )
     }
 }
 
-/// The number of peers **other than you** in the mesh right now; `0` means you
-/// are alone. -1 on failure.
+/// The number of members in the mesh right now, **you included**; `1` means you
+/// are alone. It is the `count` of the roster JSON. -1 on failure.
 ///
 /// # Safety
 /// `handle` must be a live handle from [`habilis_network_mesh_open`], or NULL.
@@ -615,58 +628,6 @@ pub unsafe extern "C" fn habilis_network_mesh_close(handle: *mut HabilisNetworkM
     })
 }
 
-/// How a stream node reaches peers, mirroring `habilis_network_stream_opts` in the
-/// header: the same three lists `habilis_network_opts` carries, without the mesh
-/// selectors a stream has no use for.
-#[repr(C)]
-#[derive(Debug)]
-pub struct HabilisNetworkStreamOpts {
-    pub lookup: *const c_char,
-    pub transport: *const c_char,
-    pub relay_urls: *const c_char,
-}
-
-/// Pinned like `HabilisNetworkOpts`: a reordered field would silently misread a
-/// caller's struct.
-const _: () = {
-    use std::mem::{align_of, offset_of, size_of};
-
-    assert!(size_of::<HabilisNetworkStreamOpts>() == 24);
-    assert!(align_of::<HabilisNetworkStreamOpts>() == 8);
-    assert!(offset_of!(HabilisNetworkStreamOpts, lookup) == 0);
-    assert!(offset_of!(HabilisNetworkStreamOpts, transport) == 8);
-    assert!(offset_of!(HabilisNetworkStreamOpts, relay_urls) == 16);
-};
-
-/// The opaque handle behind `habilis_network_streams *`.
-#[expect(
-    missing_debug_implementations,
-    reason = "wraps Streams, which owns a tokio Runtime and so has no Debug impl"
-)]
-pub struct HabilisNetworkStreams {
-    streams: Streams,
-}
-
-/// The opaque handle behind `habilis_network_producer *`, with a NUL-terminated copy of
-/// the hash so [`habilis_network_stream_hash`] can lend it out.
-#[expect(
-    missing_debug_implementations,
-    reason = "wraps Writer, which holds a tokio Runtime and so has no Debug impl"
-)]
-pub struct HabilisNetworkProducer {
-    writer: Writer,
-    hash: CString,
-}
-
-/// The opaque handle behind `habilis_network_reader *`.
-#[expect(
-    missing_debug_implementations,
-    reason = "wraps ReadEnd, which holds a tokio Runtime and so has no Debug impl"
-)]
-pub struct HabilisNetworkReader {
-    reader: ReadEnd,
-}
-
 fn timeout_of(timeout_ms: c_int) -> Duration {
     Duration::from_millis(u64::try_from(timeout_ms.max(0)).unwrap_or(0))
 }
@@ -678,37 +639,35 @@ fn timeout_of(timeout_ms: c_int) -> Duration {
 /// NULL or NUL-terminated. Release the node with [`habilis_network_streams_close`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn habilis_network_streams_bind(
-    opts: *const HabilisNetworkStreamOpts,
+    options: *const HabilisNetworkStreamOpts,
 ) -> *mut HabilisNetworkStreams {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
-        if opts.is_null() {
+        if options.is_null() {
             set_error("habilis_network_streams_bind: opts is NULL");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         }
         // SAFETY: non-NULL and readable per the contract above.
-        let opts = unsafe { &*opts };
+        let options = unsafe { &*options };
         // SAFETY: NUL-terminated or NULL, per the header contract.
         let lists = unsafe {
             (
-                optional_str(opts.lookup),
-                optional_str(opts.transport),
-                optional_str(opts.relay_urls),
+                optional_str(options.lookup),
+                optional_str(options.transport),
+                optional_str(options.relay_urls),
             )
         };
         let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
-        let parsed = habilis_network_stream::StreamOpts {
-            lookup,
-            transport,
-            relay_urls: relay_urls
-                .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-                .unwrap_or_default(),
-        };
+        let relay_urls: Vec<String> = relay_urls.map(url_list).unwrap_or_default();
+        let parsed = habilis_network_stream::StreamOpts::default()
+            .lookup(lookup)
+            .transport(transport)
+            .relay_urls(relay_urls);
         boxed(Streams::bind(&parsed).map(|streams| HabilisNetworkStreams { streams }))
     })
 }
@@ -722,12 +681,12 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
 pub unsafe extern "C" fn habilis_network_streams_bind_for(
     hash: *const c_char,
 ) -> *mut HabilisNetworkStreams {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
         // SAFETY: NUL-terminated or NULL, per the contract above.
         let Ok(Some(hash)) = (unsafe { optional_str(hash) }) else {
             set_error("habilis_network_streams_bind_for: hash is NULL or not UTF-8");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         boxed(Streams::bind_for(hash).map(|streams| HabilisNetworkStreams { streams }))
     })
@@ -765,12 +724,12 @@ pub unsafe extern "C" fn habilis_network_streams_close(
 pub unsafe extern "C" fn habilis_network_stream_create(
     handle: *mut HabilisNetworkStreams,
 ) -> *mut HabilisNetworkProducer {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
         // SAFETY: live handle or NULL, per the contract above.
         let Some(handle) = (unsafe { handle.as_ref() }) else {
             set_error("habilis_network_stream_create: handle is NULL");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         boxed(
             handle
@@ -793,11 +752,11 @@ pub unsafe extern "C" fn habilis_network_stream_create(
 pub unsafe extern "C" fn habilis_network_stream_hash(
     handle: *const HabilisNetworkProducer,
 ) -> *const c_char {
-    guard(std::ptr::null(), || {
+    guard(ptr::null(), || {
         // SAFETY: live handle or NULL, per the contract above.
         match unsafe { handle.as_ref() } {
             Some(handle) => handle.hash.as_ptr(),
-            None => std::ptr::null(),
+            None => ptr::null(),
         }
     })
 }
@@ -812,7 +771,7 @@ pub unsafe extern "C" fn habilis_network_stream_hash(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn habilis_network_stream_write(
     handle: *mut HabilisNetworkProducer,
-    buf: *const u8,
+    buffer: *const u8,
     len: usize,
     timeout_ms: c_int,
 ) -> c_int {
@@ -823,7 +782,7 @@ pub unsafe extern "C" fn habilis_network_stream_write(
             set_error("habilis_network_stream_write: handle is NULL");
             return -1;
         };
-        if len > 0 && buf.is_null() {
+        if len > 0 && buffer.is_null() {
             set_error("habilis_network_stream_write: buf is NULL with a non-zero len");
             return -1;
         }
@@ -831,7 +790,7 @@ pub unsafe extern "C" fn habilis_network_stream_write(
             &[][..]
         } else {
             // SAFETY: readable for `len` bytes per the contract above.
-            unsafe { std::slice::from_raw_parts(buf, len) }
+            unsafe { slice::from_raw_parts(buffer, len) }
         };
         match handle.writer.write(bytes, timeout_of(timeout_ms)) {
             Ok(true) => 1,
@@ -876,17 +835,17 @@ pub unsafe extern "C" fn habilis_network_stream_open(
     handle: *mut HabilisNetworkStreams,
     hash: *const c_char,
 ) -> *mut HabilisNetworkReader {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
         // SAFETY: live handle or NULL, per the contract above.
         let Some(handle) = (unsafe { handle.as_ref() }) else {
             set_error("habilis_network_stream_open: handle is NULL");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         // SAFETY: NUL-terminated or NULL, per the contract above.
         let Ok(Some(hash)) = (unsafe { optional_str(hash) }) else {
             set_error("habilis_network_stream_open: hash is NULL or not UTF-8");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         boxed(
             handle
@@ -907,7 +866,7 @@ pub unsafe extern "C" fn habilis_network_stream_open(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn habilis_network_stream_read(
     handle: *mut HabilisNetworkReader,
-    buf: *mut u8,
+    buffer: *mut u8,
     cap: usize,
     timeout_ms: c_int,
 ) -> c_long {
@@ -918,13 +877,13 @@ pub unsafe extern "C" fn habilis_network_stream_read(
             set_error("habilis_network_stream_read: handle is NULL");
             return -1;
         };
-        if buf.is_null() || cap == 0 {
+        if buffer.is_null() || cap == 0 {
             set_error("habilis_network_stream_read: buf is NULL or cap is 0");
             return -1;
         }
         // SAFETY: writable for `cap` bytes per the contract above.
-        let buf = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
-        match handle.reader.read(buf, timeout_of(timeout_ms)) {
+        let buffer = unsafe { slice::from_raw_parts_mut(buffer, cap) };
+        match handle.reader.read(buffer, timeout_of(timeout_ms)) {
             Ok(Read::Bytes(read)) => c_long::try_from(read).unwrap_or(c_long::MAX),
             Ok(Read::Timeout) => 0,
             Ok(Read::End) => -2,
@@ -958,7 +917,7 @@ fn boxed<T>(made: anyhow::Result<T>) -> *mut T {
         Ok(value) => Box::into_raw(Box::new(value)),
         Err(error) => {
             set_error(&format!("{error:#}"));
-            std::ptr::null_mut()
+            ptr::null_mut()
         }
     }
 }
@@ -967,10 +926,10 @@ fn boxed<T>(made: anyhow::Result<T>) -> *mut T {
 /// call succeeded. Borrowed until this thread's next `mesh_*` call.
 #[unsafe(no_mangle)]
 pub extern "C" fn habilis_network_last_error() -> *const c_char {
-    guard(std::ptr::null(), || {
+    guard(ptr::null(), || {
         LAST_ERROR.with_borrow(|slot| match slot {
             Some(message) => message.as_ptr(),
-            None => std::ptr::null(),
+            None => ptr::null(),
         })
     })
 }
@@ -979,7 +938,7 @@ pub extern "C" fn habilis_network_last_error() -> *const c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn habilis_network_version() -> *const c_char {
     static VERSION: OnceLock<CString> = OnceLock::new();
-    guard(std::ptr::null(), || {
+    guard(ptr::null(), || {
         VERSION
             .get_or_init(|| {
                 CString::new(habilis_network::VERSION).unwrap_or_else(|_| CString::default())

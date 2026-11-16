@@ -39,6 +39,8 @@ path = "src/lib.rs"
 # comes back there for `std::io` and threading on the host.
 blake3.workspace = true
 anyhow.workspace = true
+# Checked conversions between numbers and floats, so a count or a version needs no `as` cast.
+num-traits = "0.2"
 
 # Browser-only. Kept under a target cfg rather than a feature so a native build
 # never sees `wasm-bindgen` at all, and `tests/isolation.rs` stays honest about
@@ -78,3 +80,6 @@ default = []
 # `-C target-feature=+simd128`; the flag is *assumed*, not detected, so a build
 # without it produces a module that fails validation.
 wasm-simd = ["blake3/wasm32_simd"]
+
+[dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }

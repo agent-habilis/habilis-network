@@ -1,0 +1,217 @@
+//! The routing discriminator of a message: the kind of frame it carries.
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+use super::{AppTag, Channel, CorrId, MessageId, PresenceSubtype};
+use crate::AuthorKey;
+use crate::digest::{DigestPage, DigestRoot};
+
+/// Message kind — the frame's routing discriminator. The engine owns the
+/// infrastructure kinds (presence, peer-info, ping/pong, channel
+/// events, link-state); all application payloads ride the single generic
+/// [`App`](MessageKind::App) variant, distinguished by its opaque `tag`.
+/// - `App`: an application payload — the body is a whole serialized app object
+///   (e.g. a broadcast chat message, a task leg, a directed JSON-RPC envelope),
+///   opaque to this layer and dispatched on `tag`.
+/// - `Presence`: agent lifecycle (joined/left), empty body.
+/// - `PeerInfo`: infrastructure — carries endpoint address for mesh formation. Not user-visible.
+///
+/// # Examples
+///
+/// A frame that is not an application frame has no app tag.
+///
+/// ```
+/// use habilis_network_protocol::messages::MessageKind;
+///
+/// assert!(MessageKind::State.app_tag().is_none());
+/// assert!(!MessageKind::Meta.is_app("chat"));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum MessageKind {
+    /// An application payload. `tag` is the wire discriminant the app dispatches
+    /// on (the engine treats it opaquely); `to` is the directed addressee
+    /// (`None` for a broadcast); `corr` correlates a request with its reply for
+    /// the pending-call registry (`None` for fire-and-forget). Everything else
+    /// the payload needs (task id, method, params) rides inside `body`.
+    App {
+        /// The application tag, which routes the frame to its app handler.
+        tag: AppTag,
+        /// The recipient, when the message is directed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<AuthorKey>,
+        /// The correlation id of a request or reply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        corr: Option<CorrId>,
+    },
+    /// A presence change of a member.
+    Presence {
+        /// What changed.
+        subtype: PresenceSubtype,
+    },
+    /// The identity of a peer.
+    PeerInfo,
+    /// Liveness probe broadcast by a node running an RTT round. Every
+    /// receiver auto-responds with a `Pong` addressed back to the
+    /// pinger. Plumbing like `PeerInfo`: never logged or surfaced
+    /// via `poll`/`fetch` — only the originator's `ping_report` event surfaces.
+    Ping,
+    /// Response to a `Ping`, addressed to the original pinger (`to`). `probe` is
+    /// the id of the `Ping` it answers: a round sends more than one probe, and the
+    /// pinger reads the RTT from the probe that the pong names, and drops a pong
+    /// that names none of its own. Same plumbing treatment as `Ping`.
+    Pong {
+        /// The member that sent the probe, by author key.
+        to: AuthorKey,
+        /// The probe that this pong answers.
+        probe: MessageId,
+    },
+    /// Sent to `to` alone by a member that holds no proof for the current session of `to`; it asks
+    /// `to` for that proof. Never gossiped, empty body. Addressed by author key, like `Pong`: a
+    /// nickname is a label that two live sessions can share, and only the asked session answers.
+    ProofRequest {
+        /// The session whose proof is asked for, by author key.
+        to: AuthorKey,
+    },
+    /// The digest roots of both channels, sent by unicast to a linked neighbor on the backfill tick.
+    /// One message carries both roots, so the difference is found in one round.
+    SliceRoot {
+        /// The neighbor that the root is sent to, by author key.
+        to: AuthorKey,
+        /// The root of the `state` channel.
+        state: DigestRoot,
+        /// The root of the `meta` channel.
+        meta: DigestRoot,
+    },
+    /// A pull of slices: the keys that the asker wants of one channel, at most one page of them. The
+    /// holder answers with the signed slice frames of those keys, by unicast.
+    SlicePull {
+        /// The holder that is asked, by author key.
+        to: AuthorKey,
+        /// The channel of the slices.
+        channel: Channel,
+        /// The keys whose slices are wanted.
+        keys: Vec<AuthorKey>,
+    },
+    /// A request for one page of the digest of one channel, when the roots of the two sides differ.
+    SlicePageRequest {
+        /// The holder that is asked, by author key.
+        to: AuthorKey,
+        /// The channel of the digest.
+        channel: Channel,
+        /// The index of the page, from zero.
+        index: usize,
+    },
+    /// One page of the digest of one channel, the answer to a [`SlicePageRequest`](MessageKind::SlicePageRequest).
+    SlicePage {
+        /// The asker that the page answers, by author key.
+        to: AuthorKey,
+        /// The channel of the digest.
+        channel: Channel,
+        /// The page.
+        page: DigestPage,
+    },
+    /// A durable `state`-channel event: one signed slice of its author, a
+    /// version and a value. Carried on the gossip topic like everything else; the
+    /// store keeps the newest slice of each author. Signed like any message, and
+    /// not surfaced through poll or fetch.
+    State,
+    /// A durable event on the **meta** channel: a second shared-state channel,
+    /// with the same frame shape as [`State`](MessageKind::State). The split is
+    /// application convention (`meta` for mesh metadata, `state` for the task).
+    Meta,
+    /// A multihop-routing **link-state** advertisement: the author's own measured
+    /// links + underlay address (`body` is a serialized
+    /// `habilis_network_iroh_multihop_transport::LinkVector`). Broadcast
+    /// plumbing like `Ping` — never logged, never surfaced, never
+    /// chain/DAG-folded; every node folds the freshest vector per origin into its
+    /// routing graph. Ephemeral (a fresh vector supersedes the old by `seq`), so
+    /// it rides gossip rather than a durable channel log.
+    #[serde(rename = "linkstate")]
+    LinkState,
+}
+
+impl fmt::Display for MessageKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MessageKind::App { tag, .. } => write!(f, "{tag}"),
+            MessageKind::Presence { .. } => write!(f, "presence"),
+            MessageKind::PeerInfo => write!(f, "peerinfo"),
+            MessageKind::Ping => write!(f, "ping"),
+            MessageKind::Pong { .. } => write!(f, "pong"),
+            MessageKind::ProofRequest { .. } => write!(f, "proof_request"),
+            MessageKind::State => write!(f, "state"),
+            MessageKind::Meta => write!(f, "meta"),
+            MessageKind::LinkState => write!(f, "linkstate"),
+            MessageKind::SliceRoot { .. } => write!(f, "sliceroot"),
+            MessageKind::SlicePull { .. } => write!(f, "slicepull"),
+            MessageKind::SlicePageRequest { .. } => write!(f, "slicepagerequest"),
+            MessageKind::SlicePage { .. } => write!(f, "slicepage"),
+        }
+    }
+}
+
+impl MessageKind {
+    /// The app-payload tag if this is an [`App`](MessageKind::App) frame, else
+    /// `None`. The one accessor app code uses to dispatch on payload type
+    /// without destructuring, now that the app-frame kinds share one variant.
+    #[must_use]
+    pub fn app_tag(&self) -> Option<&AppTag> {
+        match self {
+            MessageKind::App { tag, .. } => Some(tag),
+            MessageKind::Presence { .. }
+            | MessageKind::PeerInfo
+            | MessageKind::Ping
+            | MessageKind::Pong { .. }
+            | MessageKind::ProofRequest { .. }
+            | MessageKind::State
+            | MessageKind::Meta
+            | MessageKind::LinkState
+            | MessageKind::SliceRoot { .. }
+            | MessageKind::SlicePull { .. }
+            | MessageKind::SlicePageRequest { .. }
+            | MessageKind::SlicePage { .. } => None,
+        }
+    }
+
+    /// `true` iff this is an [`App`](MessageKind::App) frame with tag `tag`.
+    #[must_use]
+    pub fn is_app(&self, tag: &str) -> bool {
+        self.app_tag().is_some_and(|value| value.as_str() == tag)
+    }
+
+    /// A broadcast [`App`](MessageKind::App) kind (no addressee, no correlation)
+    /// with tag `tag` — the test/fixture ergonomic for what used to be a bare
+    /// unit variant per app tag.
+    ///
+    /// # Panics
+    /// `tag` is not a valid [`AppTag`]. A fixture names a fixed literal.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    #[must_use]
+    pub fn app_broadcast(tag: &str) -> Self {
+        MessageKind::App {
+            tag: AppTag::try_new(tag).expect("a valid app tag"),
+            to: None,
+            corr: None,
+        }
+    }
+
+    /// A directed [`App`](MessageKind::App) kind addressed to `to`, tag `tag`,
+    /// with an optional correlation id — the test ergonomic for the former
+    /// directed app variants.
+    ///
+    /// # Panics
+    /// `tag` is not a valid [`AppTag`]. A fixture names a fixed literal.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    #[must_use]
+    pub fn app_to(tag: &str, to: AuthorKey, corr: Option<CorrId>) -> Self {
+        MessageKind::App {
+            tag: AppTag::try_new(tag).expect("a valid app tag"),
+            to: Some(to),
+            corr,
+        }
+    }
+}

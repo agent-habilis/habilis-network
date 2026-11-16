@@ -5,88 +5,46 @@
 //! from disk after a bearer-secret handshake. One endpoint, per-blob capability
 //! (the secret is stored with the blob), kept for the daemon's lifetime.
 
-use std::io::Read as _;
+use crate::transport;
+use tokio::{task, time};
+mod blob_server;
+mod serve_limits;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use iroh::Endpoint;
 use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt as _;
+use sha2::Sha256;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
-use crate::lookup::build_endpoint;
-use crate::protocol::crypto::{Password, TicketAuth, ct_eq};
-use crate::protocol::mesh::LookupOpts;
+pub use blob_server::BlobServer;
+pub(crate) use serve_limits::ServeLimits;
+
+use crate::lookup;
+use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
+use crate::protocol::meshes::LookupOpts;
+use crate::transport::PayloadPath;
 use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::store::BlobStore;
 use super::ticket::BlobTicket;
 use super::{
-    BAD_SECRET, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN, UNKNOWN_BLOB,
-    wait_online,
+    BAD_SECRET, BlobDigest, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN, TOO_SLOW,
+    UNKNOWN_BLOB, wait_online,
 };
-
-/// What one fetch may cost before the requester has proved anything.
-///
-/// Everything up to the bearer-secret check runs on a peer's schedule: the
-/// handshake, opening a stream, and sending the 64-byte request. A peer that
-/// connects and then stops parks a task for good, and nothing bounded how many
-/// such tasks there could be. Injectable so tests need not wait real seconds.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ServeLimits {
-    /// Deadline covering the whole pre-authentication phase.
-    pub(crate) pre_auth: Duration,
-    /// Serves in flight at once. A backstop under the deadline: the deadline
-    /// is what frees a parked task, this caps how many can park meanwhile.
-    pub(crate) max_inflight: usize,
-}
-
-impl ServeLimits {
-    pub(crate) const DEFAULT: Self = Self {
-        // Generous against a slow link, and a legitimate fetcher sends its
-        // request immediately after connecting.
-        pre_auth: Duration::from_secs(10),
-        max_inflight: 64,
-    };
-}
+use std::fs::File;
+use tokio::fs::File as tokio_File;
+use tokio::time::{Instant, Instant as tokio_Instant};
 
 /// Chunk size for hashing and streaming — bounded, so memory is constant
 /// regardless of blob size.
 const CHUNK: usize = 64 * 1024;
-
-/// The producer side of the blob channel. Owns the serving endpoint and the
-/// content-addressed store; both live for the daemon's process lifetime.
-pub struct BlobServer {
-    endpoint: Endpoint,
-    store: Arc<Mutex<BlobStore>>,
-    lookups: LookupOpts,
-    /// The mesh password, when the mesh is password-protected. Every minted
-    /// ticket inherits it, so a scraped ticket can't be redeemed without the
-    /// password. `None` ⇒ bare bearer-secret tickets (status quo).
-    password: Option<Password>,
-    /// `TransportPolicy::relay`. Off, a fetch whose selected path is the
-    /// relay is refused before any byte.
-    relay_transport: bool,
-    /// Serves currently in flight. The accept loop holds the counter it
-    /// actually reads; this handle exists so a test can observe that a peer
-    /// which connects and then goes quiet cannot accumulate them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "observed only by the serve-ceiling test")
-    )]
-    inflight: Arc<AtomicUsize>,
-}
-
-impl std::fmt::Debug for BlobServer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlobServer").finish_non_exhaustive()
-    }
-}
 
 impl BlobServer {
     /// Bind the serving endpoint (its own `BLOB_ALPN` identity, separate from
@@ -99,7 +57,18 @@ impl BlobServer {
         lookups: LookupOpts,
         spool_dir: PathBuf,
         password: Option<Password>,
-        relay_transport: bool,
+        relay_transport: PayloadPath,
+    ) -> Result<Self, super::BlobError> {
+        Self::start_checked(lookups, spool_dir, password, relay_transport)
+            .await
+            .map_err(super::BlobError::internal)
+    }
+
+    async fn start_checked(
+        lookups: LookupOpts,
+        spool_dir: PathBuf,
+        password: Option<Password>,
+        relay_transport: PayloadPath,
     ) -> Result<Self> {
         Self::start_with_limits(
             lookups,
@@ -117,25 +86,33 @@ impl BlobServer {
         lookups: LookupOpts,
         spool_dir: PathBuf,
         password: Option<Password>,
-        relay_transport: bool,
+        relay_transport: PayloadPath,
         limits: ServeLimits,
     ) -> Result<Self> {
+        // A ticket carries no Nostr, so a producer on such a mesh would mint tickets that decode as
+        // loopback-only: no other machine could use them.
+        ensure!(
+            !lookups.is_nostr_only(),
+            "a blob ticket carries no Nostr: add mdns, dht or relay to the lookups"
+        );
         let endpoint =
             // `TransportHandles::default()` — IP and relay only. The blob
             // server is a side-channel endpoint of its own; the mesh's custom
             // transports belong to the mesh endpoint, not to this one.
-            build_endpoint(
+            lookup::build_endpoint(
                 &lookups,
                 None,
                 None,
                 vec![super::BLOB_ALPN.to_vec()],
-                crate::lookup::TransportHandles::default(),
+                lookup::TransportHandles::default(),
             )
             .await?;
         if !lookups.is_loopback() {
             wait_online(&endpoint).await;
         }
-        let store = Arc::new(Mutex::new(BlobStore::new(spool_dir)?));
+        // the accept loop and the server share the store
+        let store = Arc::new(Mutex::new(BlobStore::try_new(spool_dir)?));
+        // the accept loop, its serve tasks and the server share the count
         let inflight = Arc::new(AtomicUsize::new(0));
         spawn_accept_loop(
             endpoint.clone(),
@@ -157,8 +134,26 @@ impl BlobServer {
     /// The serving endpoint's dialable address, for tests that connect to it
     /// directly rather than through a ticket.
     #[cfg(test)]
-    pub(crate) fn addr(&self) -> iroh::EndpointAddr {
+    pub(crate) fn address(&self) -> iroh::EndpointAddr {
         self.endpoint.addr()
+    }
+
+    /// The address of the serving endpoint as it changes: the IP addresses and the home relay.
+    /// A ticket holds the address at the time of [`Self::register`], so a caller that keeps
+    /// the server for a long time reads this to learn of a later change.
+    ///
+    /// `register` of a blob that is already spooled takes the dedup path and mints a ticket with
+    /// the current address of the endpoint, so the cheap refresh loop is: the address changed,
+    /// `register` again, publish the new ticket.
+    #[must_use]
+    pub fn watch_addr(&self) -> impl iroh::Watcher<Value = iroh::EndpointAddr> + use<> {
+        self.endpoint.watch_addr()
+    }
+
+    /// Waits until the serving endpoint is connected to a home relay. It has no time limit: a
+    /// server with the relay disabled never returns, so a caller bounds it with a timeout.
+    pub async fn online(&self) {
+        self.endpoint.online().await;
     }
 
     /// Serves in flight right now.
@@ -176,13 +171,23 @@ impl BlobServer {
     ///
     /// # Errors
     /// The file is unreadable, exceeds `MAX_BLOB_BYTES`, or snapshotting fails.
-    pub async fn register(&self, path: &Path, content_id: ContentId) -> Result<BlobTicket> {
+    pub async fn register(
+        &self,
+        path: &Path,
+        content_id: ContentId,
+    ) -> Result<BlobTicket, super::BlobError> {
+        self.register_checked(path, content_id)
+            .await
+            .map_err(super::BlobError::internal)
+    }
+
+    async fn register_checked(&self, path: &Path, content_id: ContentId) -> Result<BlobTicket> {
         let (sha256, size) = hash_file(path.to_path_buf()).await?;
         if size > MAX_BLOB_BYTES {
             bail!("file too large to offload ({size} bytes > {MAX_BLOB_BYTES})");
         }
         let ticket = |registered: super::store::Registered| BlobTicket {
-            addr: self.endpoint.addr(),
+            address: self.endpoint.addr(),
             secret: registered.ticket_secret,
             sha256,
             size,
@@ -194,19 +199,21 @@ impl BlobServer {
         // paying the ~100ms Argon2 stretch again. (A benign race with a
         // concurrent offload of the same content is caught by `snapshot`'s own
         // dedup below.)
-        if let Some(existing) = self.store.lock().await.registered(&sha256) {
+        if let Some(existing) = self.store.lock().await.claim(&sha256, &content_id) {
             return Ok(ticket(existing));
         }
-        let mut salt = [0u8; SECRET_LEN];
-        rand::rng().fill_bytes(&mut salt);
+        let mut salt_bytes = Zeroizing::new([0u8; SECRET_LEN]);
+        rand::rng().fill_bytes(&mut *salt_bytes);
+        let salt = TicketSecret::from(salt_bytes);
         let compare = match self.password.clone() {
             Some(password) => {
                 // ~100ms of Argon2id off the async worker (mirrors mesh join).
-                tokio::task::spawn_blocking(move || TicketAuth::blob(&salt, Some(&password)).token)
+                let stretch_salt = salt.clone();
+                task::spawn_blocking(move || TicketAuth::blob(&stretch_salt, Some(&password)).token)
                     .await
                     .context("blob token stretch task panicked")?
             }
-            None => salt,
+            None => salt.clone(),
         };
         let registered = self.store.lock().await.snapshot(
             path,
@@ -224,8 +231,9 @@ impl BlobServer {
         Ok(ticket(registered))
     }
 
-    /// Drop every blob owned by `content_id` — whatever sweep the application
-    /// runs when a content group is done with.
+    /// Release `content_id`'s hold on its blobs — whatever sweep the
+    /// application runs when a content group is done with. A blob another group
+    /// also offloaded stays until that group is evicted too.
     pub async fn evict_content(&self, content_id: &ContentId) {
         self.store.lock().await.evict_content(content_id);
     }
@@ -241,10 +249,12 @@ impl BlobServer {
 /// task so a slow transfer never blocks the next.
 fn spawn_accept_loop(
     endpoint: Endpoint,
+    // the accept loop hands each serve a clone of the shared store
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
+    // the accept loop and each serve share the in-flight count
     inflight: Arc<AtomicUsize>,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
 ) {
     tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
@@ -273,13 +283,16 @@ fn spawn_accept_loop(
 /// spawned-within-spawned `while let`.
 async fn handle_incoming(
     incoming: Incoming,
+    // each serve holds a clone of the shared store
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
+    // each serve and the accept loop share the in-flight count
     inflight: Arc<AtomicUsize>,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
 ) {
     if let Err(error) = serve_connection(incoming, &store, limits, relay_transport).await {
-        tracing::debug!(%error, "blob serve connection ended");
+        let cause = format!("{error:#}");
+        tracing::debug!(target: "habilis_network::blob", %cause, "blob serve connection ended");
     }
     inflight.fetch_sub(1, Ordering::Relaxed);
 }
@@ -289,30 +302,32 @@ async fn serve_connection(
     incoming: Incoming,
     store: &Mutex<BlobStore>,
     limits: ServeLimits,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
 ) -> Result<()> {
     // One deadline across everything the requester controls. The secret that
     // authorizes this fetch is inside the request we are waiting for, so none
     // of it can be gated on the peer having proved anything.
-    let deadline = tokio::time::Instant::now() + limits.pre_auth;
-    let conn = tokio::time::timeout_at(deadline, incoming)
+    let deadline = tokio_Instant::now() + limits.pre_auth;
+    let connection = time::timeout_at(deadline, incoming)
         .await
         .context("no connection within the pre-authentication deadline")??;
     // Before the request is read, so a refused fetch costs no spool read and
     // the consumer sees the coded close instead of a size. The punch wait gets
     // what is left of the deadline: nested under the outer timer it could
     // outlive it, and a drop closes as `DONE`, not as a refusal.
-    crate::transport::refuse_relayed(
-        &conn,
+    transport::refuse_relayed(
+        &connection,
         relay_transport,
-        deadline.saturating_duration_since(tokio::time::Instant::now()),
+        deadline.saturating_duration_since(tokio_Instant::now()),
         RELAY_REFUSED_CODE,
     )
     .await?;
-    let (send, recv) = tokio::time::timeout_at(deadline, conn.accept_bi())
+    let (send, recv) = time::timeout_at(deadline, connection.accept_bi())
         .await
         .context("no fetch request within the pre-authentication deadline")??;
-    serve_stream(&conn, send, recv, store, deadline).await
+    let result = serve_stream(&connection, send, recv, store, deadline, limits).await;
+    tracing::debug!(target: "habilis_network::blob", failed = result.is_err(), close = ?connection.close_reason(), "blob serve ended");
+    result
 }
 
 /// The fetch protocol, producer side. Reads the fixed 64-byte request
@@ -320,92 +335,140 @@ async fn serve_connection(
 /// streams `size ‖ <bytes>` from the spool file. A bad secret or unknown hash
 /// closes the connection with a coded reason.
 async fn serve_stream(
-    conn: &Connection,
+    connection: &Connection,
     mut send: SendStream,
     mut recv: RecvStream,
     store: &Mutex<BlobStore>,
-    deadline: tokio::time::Instant,
+    deadline: Instant,
+    limits: ServeLimits,
 ) -> Result<()> {
-    let mut request = [0u8; HASH_LEN + SECRET_LEN];
+    let mut request = Zeroizing::new([0u8; HASH_LEN + SECRET_LEN]);
     // Still inside the pre-auth deadline: a peer that opens a stream and then
     // sends 63 bytes is the same parked task as one that sends none.
-    match tokio::time::timeout_at(deadline, recv.read_exact(&mut request)).await {
+    match time::timeout_at(deadline, recv.read_exact(&mut *request)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) | Err(_) => return Ok(()),
     }
-    let mut hash = [0u8; HASH_LEN];
-    hash.copy_from_slice(&request[..HASH_LEN]);
-    let mut token = [0u8; SECRET_LEN];
-    token.copy_from_slice(&request[HASH_LEN..]);
+    let mut hash_bytes = [0u8; HASH_LEN];
+    hash_bytes.copy_from_slice(&request[..HASH_LEN]);
+    let hash = BlobDigest::from(hash_bytes);
+    let mut token_bytes = Zeroizing::new([0u8; SECRET_LEN]);
+    token_bytes.copy_from_slice(&request[HASH_LEN..]);
+    let token = TicketSecret::from(token_bytes);
 
     // Resolve under the lock, then release it before streaming from disk.
     let served = {
         let guard = store.lock().await;
         match guard.get(&hash) {
             None => None,
-            Some(entry) if ct_eq(&token, &entry.secret) => Some((entry.path.clone(), entry.size)),
+            Some(entry) if ct_eq(token.as_bytes(), entry.secret.as_bytes()) => {
+                Some((entry.path.clone(), entry.size))
+            }
             Some(_) => {
-                conn.close(BAD_SECRET.into(), b"bad secret");
+                connection.close(BAD_SECRET.into(), b"bad secret");
                 return Ok(());
             }
         }
     };
     let Some((path, size)) = served else {
-        conn.close(UNKNOWN_BLOB.into(), b"unknown blob");
+        connection.close(UNKNOWN_BLOB.into(), b"unknown blob");
         return Ok(());
     };
 
-    send.write_all(&size.to_le_bytes()).await?;
-    stream_file(&path, &mut send).await?;
-    let _ = send.finish();
-    // Let the consumer read the tail before CONNECTION_CLOSE races it on a fast link.
-    let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
-    conn.close(DONE.into(), b"done");
+    let transfer = async {
+        send.write_all(&size.to_le_bytes()).await?;
+        stream_file(&path, &mut send).await?;
+        let _ = send.finish();
+        // Let the consumer receive the tail before CONNECTION_CLOSE races it.
+        wait_acknowledged(connection, &send, limits.ack_stall).await;
+        anyhow::Ok(())
+    };
+    let finished = time::timeout(serve_budget(size, limits), transfer).await;
+    let (code, reason): (u32, &[u8]) = if let Ok(outcome) = finished {
+        outcome?;
+        (DONE, b"done")
+    } else {
+        tracing::debug!(target: "habilis_network::blob", size, "blob serve ran past its time budget");
+        (TOO_SLOW, b"serve budget")
+    };
+    connection.close(code.into(), reason);
     Ok(())
+}
+
+/// The longest that the send of a file of `size` bytes may take: the stall window plus the time
+/// that the file needs at the slowest rate that a serve accepts.
+pub(super) fn serve_budget(size: u64, limits: ServeLimits) -> Duration {
+    let slowest = Duration::from_secs(size / limits.min_bytes_per_second.max(1));
+    limits.ack_stall.saturating_add(slowest)
+}
+
+/// Wait until the consumer has acknowledged every byte of the stream, or the connection ends, or a
+/// window of `stall` passes with no acknowledgement. The whole file sits in the send buffer, so
+/// the time that this takes is the time that the link needs, and a cap on that time cuts a file
+/// that a slow link carries. A window with an acknowledgement in it starts the next window.
+async fn wait_acknowledged(connection: &Connection, send: &SendStream, stall: Duration) {
+    loop {
+        let before = acknowledgements(connection);
+        if time::timeout(stall, send.stopped()).await.is_ok() {
+            return;
+        }
+        if acknowledgements(connection) == before {
+            return;
+        }
+    }
+}
+
+/// The count of acknowledgement frames that the consumer has sent on this connection.
+fn acknowledgements(connection: &Connection) -> u64 {
+    let frames = connection.stats().frame_rx;
+    frames.acks + frames.path_acks
 }
 
 /// Stream `path` to `send` in bounded chunks — constant memory.
 async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
-    let mut file = tokio::fs::File::open(path)
+    use tokio::io::AsyncReadExt as _;
+    let mut file = tokio_File::open(path)
         .await
         .with_context(|| format!("opening spooled blob {} failed", path.display()))?;
-    let mut buf = vec![0u8; CHUNK];
+    let mut buffer = vec![0u8; CHUNK];
     loop {
         let read = file
-            .read(&mut buf)
+            .read(&mut buffer)
             .await
             .context("reading spooled blob failed")?;
         if read == 0 {
             break;
         }
-        send.write_all(&buf[..read]).await?;
+        send.write_all(&buffer[..read]).await?;
     }
     Ok(())
 }
 
 /// Read + SHA-256-hash a file off the async runtime (`spawn_blocking`), never
 /// loading it whole. Returns the digest and byte length.
-async fn hash_file(path: PathBuf) -> Result<([u8; HASH_LEN], u64)> {
-    tokio::task::spawn_blocking(move || {
-        let mut file = std::fs::File::open(&path)
-            .with_context(|| format!("opening {} failed", path.display()))?;
+async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
+    use sha2::Digest;
+    use std::io::Read as _;
+    task::spawn_blocking(move || {
+        let mut file =
+            File::open(&path).with_context(|| format!("opening {} failed", path.display()))?;
         let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; CHUNK];
+        let mut buffer = vec![0u8; CHUNK];
         let mut size = 0u64;
         loop {
             let read = file
-                .read(&mut buf)
+                .read(&mut buffer)
                 .context("reading file for hashing failed")?;
             if read == 0 {
                 break;
             }
-            hasher.update(&buf[..read]);
+            hasher.update(&buffer[..read]);
             size += read as u64;
         }
         let digest = hasher.finalize();
         let mut sha256 = [0u8; HASH_LEN];
         sha256.copy_from_slice(&digest);
-        Ok((sha256, size))
+        Ok((BlobDigest::from(sha256), size))
     })
     .await
     .context("blob hash task panicked")?

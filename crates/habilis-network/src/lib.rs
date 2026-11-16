@@ -6,6 +6,8 @@
 //! (`publish = false`); a consumer crate depends on it and re-exports
 //! the curated public surface.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 // ── Role-based public facade ──────────────────────────────────────────────
 //
 // The modules below are grouped by what a consumer needs, not by the engine's
@@ -39,7 +41,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod lookup;
 
 // Extracted leaf crates. Each owns one dependency the engine would otherwise
-// carry unconditionally — automerge, tracing-subscriber — and each depends only
+// carry unconditionally, such as tracing-subscriber, and each depends only
 // on `habilis-network-protocol`/`-util`, never back on this crate. Aliased so
 // engine code keeps its `crate::doc::…` paths.
 pub(crate) use habilis_network_doc as doc;
@@ -56,26 +58,27 @@ pub mod protocol {
     // is how a surface nobody chose ends up needing a cross-repo grep to
     // shrink. Adding a name below is now a deliberate line.
     pub use habilis_network_protocol::{
-        AdvertiseRequiresReachable, AppFrameParams, AppTag, BodyError, Channel, ChoiceError,
-        CorrId, DEFAULT_DIRECTORY, DirectorySelection, IdError, Identity, InviteTicket, JoinTarget,
-        JoinTargetError, Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError,
-        MeshName, Message, MessageBody, MessageId, MessageKind, NameError, Nickname, NicknameError,
-        OptFlag, Password, PresenceSubtype, RelayChoice, RelayLadder, RelayLadderError,
-        RelaySelection, Shard, ShardGroup, TicketAuth, TopicId, Transport, TransportPolicy,
-        base58check, crypto, ct_eq, directory, encode_pubkey, identity, invite, iroh_base, mesh,
-        message, nickname, nostr, peer_addr, reassembly, resolve_lookups, resolver, seal,
-        seal_to_body, sole_addressee, validate_advertise,
+        AdvertiseRequiresReachable, AppFrameParams, AppTag, AuthorKey, Authored, BodyError,
+        Channel, ChoiceError, ContentHash, CorrId, DEFAULT_DIRECTORY, DedupKey, DirectorySelection,
+        IdError, Identity, InviteTicket, JoinTarget, JoinTargetError, LockedMesh, Lookup,
+        LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, Message,
+        MessageBody, MessageId, MessageKind, NameError, Nickname, NicknameError, OptFlag, Password,
+        PresenceSubtype, Proof, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Seed,
+        Shard, ShardGroup, Signer, SymmetricKey, TicketAuth, TicketSecret, TopicId, Transport,
+        TransportPolicy, UnixSecs, UnlockError, Verified, base58check, crypto, ct_eq, directory,
+        encode_pubkey, identity, invite, iroh_base, meshes, messages, nickname_error, nostr,
+        peer_addr_error, reassembly, resolve_lookups, resolver, seal_error, seal_to_body,
+        sole_addressee, validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
-    pub use habilis_network_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};
+    pub use habilis_network_protocol::{BuildMsgParams, build_msg_bytes};
 }
 
 /// Creator-minted invites. The redeem + decode primitives back
 /// `resolver::JoinTarget::Invite`; `mint` is re-exported for consumers
 /// through [`ops::invite`](crate::ops::invite).
 pub(crate) use habilis_network_protocol::directory;
-pub(crate) use habilis_network_protocol::invite;
-pub(crate) use habilis_network_protocol::resolver;
+pub(crate) use habilis_network_protocol::{invite, resolver};
 
 pub(crate) use habilis_network_protocol::reassembly;
 
@@ -94,8 +97,8 @@ pub(crate) mod testing;
 pub mod util {
     // Listed rather than a glob, for the reason given on [`protocol`].
     pub use habilis_network_util::{
-        bounded_fifo_set, bounded_queue, clock, consts, cooldown, logs, mesh_prefix,
-        resident_memory, tuning, version,
+        bounded_fifo_set, bounded_queue, clock, consts, cooldown, log_config as logs, mesh_prefix,
+        process_usage, resident_memory, tuning, unix_secs, version,
     };
     // The runtime-directory helpers are `host`-gated in the leaf crate: they
     // are filesystem and uid work a browser has no equivalent of. The glob
@@ -105,12 +108,12 @@ pub mod util {
         ensure_mesh_runtime_dir, ensure_parent_private, ensure_runtime_base, is_under_runtime_base,
         mesh_runtime_dir, runtime_base,
     };
-    // `bounded_read` is gated on `habilis-network-util`'s `async-io`, which this crate
+    // `line_read` is gated on `habilis-network-util`'s `async-io`, which this crate
     // turns on unconditionally in its manifest — so it is always here, and a
     // `#[cfg(feature = "async-io")]` would be checking a feature *this* crate
     // does not have and silently never fire. `process` is gated on `host`,
     // which both crates do have, and this one forwards.
-    pub use habilis_network_util::bounded_read;
+    pub use habilis_network_util::line_read;
     #[cfg(feature = "host")]
     pub use habilis_network_util::process;
 
@@ -172,6 +175,14 @@ pub use iroh_mainline_address_lookup;
 /// [`iroh_mainline_address_lookup`], gated on `mdns`.
 #[cfg(feature = "mdns")]
 pub use iroh_mdns_address_lookup;
+
+/// The `x25519-dalek` crate that the seal keys of this engine come from.
+/// `protocol::Identity::seal_public` returns an `x25519_dalek::PublicKey`, and
+/// `protocol::seal_to_body` takes one. A consumer that names its own
+/// `x25519-dalek` can get a second copy of the crate in the graph, and the two
+/// `PublicKey` types then do not match. Take the type from here:
+/// `habilis_network::x25519_dalek::PublicKey`.
+pub use x25519_dalek;
 
 // Shared config for the crate's `proptest!` blocks. Overrides the default
 // failure-persistence path so regression seeds land in

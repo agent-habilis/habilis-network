@@ -1,0 +1,268 @@
+//! The recursion rule: a connection whose selected path is the gossip rung is closed.
+//!
+//! The gossip links (the `GOSSIP_ALPN` connections) carry the frames. If one of
+//! them were on the gossip path, its packets would ride frames that ride the same
+//! connection, and nothing would ever be delivered. Path selection cannot prevent it,
+//! because iroh picks one path per remote for all connections, so the connection
+//! is closed and the gossip layer dials again.
+
+use iroh::TransportAddr;
+use iroh::endpoint::Connection;
+
+use crate::GOSSIP_TRANSPORT_ID;
+
+use n0_future::task;
+/// Whether the selected path of `connection` is the gossip rung.
+///
+/// # Examples
+///
+/// It reads the selected path of a live connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::selected_is_gossip;
+/// use iroh::endpoint::Connection;
+///
+/// # fn demo(connection: &Connection) -> bool {
+/// selected_is_gossip(connection)
+/// # }
+/// ```
+#[must_use]
+pub fn selected_is_gossip(connection: &Connection) -> bool {
+    connection.paths().iter().any(|path| {
+        path.is_selected()
+            && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == GOSSIP_TRANSPORT_ID)
+    })
+}
+
+/// Close `connection` with `code` as soon as its selected path is the gossip rung,
+/// now or after a path change, and call `on_close` once when it does. The watch
+/// holds the connection weakly and ends when the connection closes.
+///
+/// It does not depend on any relay or mesh policy: the rule holds whatever the policy
+/// says.
+///
+/// # Examples
+///
+/// It watches a live connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::watch_recursion;
+/// use iroh::endpoint::Connection;
+///
+/// # fn demo(connection: &Connection) {
+/// watch_recursion(connection, 1, || println!("the connection closed"));
+/// # }
+/// ```
+pub fn watch_recursion(
+    connection: &Connection,
+    code: u32,
+    on_close: impl FnOnce() + Send + 'static,
+) {
+    use n0_future::StreamExt as _;
+    let weak = connection.weak_handle();
+    let mut events = connection.path_events();
+    task::spawn(async move {
+        loop {
+            let Some(live) = weak.upgrade() else {
+                return;
+            };
+            if live.close_reason().is_some() {
+                return;
+            }
+            if selected_is_gossip(&live) {
+                live.close(code.into(), b"a gossip link on the gossip path");
+                on_close();
+                return;
+            }
+            // Do not hold the connection while waiting: the watch must not keep a
+            // link open that the gossip layer has dropped.
+            drop(live);
+            if events.next().await.is_none() {
+                return;
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use iroh::endpoint::{ConnectionError, presets};
+    use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+    use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
+    use tokio::sync::oneshot;
+
+    use super::{selected_is_gossip, watch_recursion};
+    use crate::hub::Hub;
+    use crate::{GossipHandle, gossip_addr};
+
+    use iroh::endpoint;
+    use tokio::time;
+    const ALPN: &[u8] = b"habilis-network-gossip/test-recursion/0";
+    const CODE: u32 = 77;
+
+    fn secret(seed: u8) -> SecretKey {
+        SecretKey::from_bytes(&[seed; 32])
+    }
+
+    /// Reports how its connection was closed.
+    #[derive(Debug, Clone)]
+    // the router owns the handler; the test keeps a clone to take the sender out
+    struct CloseProbe(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
+
+    impl ProtocolHandler for CloseProbe {
+        async fn accept(&self, connection: endpoint::Connection) -> Result<(), AcceptError> {
+            let reason = connection.closed().await;
+            if let Some(tx) = self.0.lock().expect("probe lock").take() {
+                let _ = tx.send(reason);
+            }
+            Ok(())
+        }
+    }
+
+    async fn gossip_only_endpoint(key: SecretKey, handle: &GossipHandle) -> Endpoint {
+        let transport = handle.custom_transport();
+        let builder = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .add_custom_transport(transport);
+        builder
+            .clear_ip_transports()
+            .clear_relay_transports()
+            .bind()
+            .await
+            .expect("bind")
+    }
+
+    /// A connection on the gossip path is closed with the code, at both ends, and the
+    /// callback runs once.
+    #[test]
+    fn a_connection_on_the_gossip_path_is_closed_with_the_code() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let hub = Hub::new();
+            let (alice_handle, bob_handle) = (
+                GossipHandle::new(secret(1).public()),
+                GossipHandle::new(secret(2).public()),
+            );
+            hub.join(&alice_handle);
+            hub.join(&bob_handle);
+            let alice = gossip_only_endpoint(secret(1), &alice_handle).await;
+            let bob = gossip_only_endpoint(secret(2), &bob_handle).await;
+            let (tx, rx) = oneshot::channel();
+            let router = Router::builder(bob.clone())
+                // the router owns the handler; the test keeps a clone to take the sender out
+                .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
+                .spawn();
+            let target =
+                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]);
+            let connection = alice
+                .connect(target, ALPN)
+                .await
+                .expect("connect over gossip");
+            assert!(
+                selected_is_gossip(&connection),
+                "the test connection is on gossip"
+            );
+            let (called, called_rx) = oneshot::channel();
+
+            watch_recursion(&connection, CODE, move || {
+                let _ = called.send(());
+            });
+
+            let at_bob = time::timeout(Duration::from_secs(5), rx)
+                .await
+                .expect("the connection was not closed")
+                .expect("the probe reported");
+            assert!(
+                matches!(&at_bob, ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == u64::from(CODE)),
+                "{at_bob:?}"
+            );
+            time::timeout(Duration::from_secs(5), called_rx)
+                .await
+                .expect("the callback did not run")
+                .expect("the callback ran");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
+    }
+
+    /// The watch holds the connection weakly: when the gossip layer drops the last handle,
+    /// the task ends and releases its callback, and nothing is closed.
+    #[test]
+    fn the_watch_ends_when_the_last_handle_of_the_connection_is_dropped() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let loopback = |key: SecretKey| async move {
+                let builder = Endpoint::builder(presets::Minimal);
+                let builder = builder.secret_key(key);
+                let builder = builder.relay_mode(RelayMode::Disabled);
+                let builder = builder
+                    .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .expect("bind address");
+                builder.bind().await.expect("bind")
+            };
+            let (alice, bob) = (loopback(secret(5)).await, loopback(secret(6)).await);
+            let (tx, _rx) = oneshot::channel();
+            let router = Router::builder(bob.clone())
+                // the router owns the handler; the test keeps a clone to take the sender out
+                .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
+                .spawn();
+            let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
+            let (callback_ran, watch_ended): (oneshot::Sender<()>, oneshot::Receiver<()>) =
+                oneshot::channel();
+            // The task owns the callback, and the callback owns `callback_ran`: `watch_ended`
+            // fails once the task has ended and dropped it without calling it.
+            watch_recursion(&connection, CODE, move || {
+                let _ = callback_ran.send(());
+            });
+
+            drop(connection);
+
+            let ended = time::timeout(Duration::from_secs(5), watch_ended)
+                .await
+                .expect("the watch task did not end");
+            assert!(ended.is_err(), "the callback ran: {ended:?}");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
+    }
+
+    /// A connection on IP is left alone.
+    #[test]
+    fn a_connection_on_ip_is_left_open() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let loopback = |key: SecretKey| async move {
+                let builder = Endpoint::builder(presets::Minimal);
+                let builder = builder.secret_key(key);
+                let builder = builder.relay_mode(RelayMode::Disabled);
+                let builder = builder
+                    .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .expect("bind address");
+                builder.bind().await.expect("bind")
+            };
+            let (alice, bob) = (loopback(secret(3)).await, loopback(secret(4)).await);
+            let (tx, _rx) = oneshot::channel();
+            let router = Router::builder(bob.clone())
+                // the router owns the handler; the test keeps a clone to take the sender out
+                .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
+                .spawn();
+            let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
+            assert!(
+                !selected_is_gossip(&connection),
+                "a connection on ip is left open"
+            );
+
+            watch_recursion(&connection, CODE, || panic!("closed a connection on IP"));
+            time::sleep(Duration::from_millis(800)).await;
+
+            assert!(
+                connection.close_reason().is_none(),
+                "the IP connection was closed"
+            );
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
+    }
+}

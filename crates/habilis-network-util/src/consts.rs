@@ -11,6 +11,8 @@
 //! a hidden CLI flag, and its doc was restated on the accessor in `tuning` that
 //! read it. The two copies had already drifted.
 
+use std::time::Duration;
+
 // The runtime base for per-mesh files is per-user and computed at runtime —
 // see [`crate::runtime_base`] / [`crate::ensure_runtime_base`].
 // It used to be a hardcoded shared product-named const; that let other
@@ -19,7 +21,7 @@
 
 // Mesh ids and tickets carry no sigil and no `://` separator: both are bare
 // Base58Check, told apart by the kind byte inside the payload (see
-// `protocol::mesh`, `blob::ticket`, `invite::ticket`). They used to be branded
+// `protocol::meshes`, `blob::ticket`, `invite::ticket`). They used to be branded
 // with an emoji glyph, which cost a percent-encode in every URL, a non-ASCII
 // component in every runtime path, and a variation-selector workaround in both
 // ticket decoders. Being pure ASCII, an id now drops into a path, a URL, or a
@@ -28,7 +30,7 @@
 /// Default lifetime of a minted invite ticket when `--ttl` is omitted (24h).
 /// A finite window by default so a forgotten invite stops admitting; the
 /// creator can override, and `--ttl none`/`0` mints a no-expiry invite.
-pub const INVITE_DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
+pub const INVITE_DEFAULT_TTL: Duration = Duration::from_hours(24);
 
 /// Maximum size in bytes of a serialized mesh message. A network-wide
 /// wire contract (must be uniform across members), so it lives here.
@@ -48,15 +50,8 @@ pub const MAX_MESSAGE_SIZE: usize = 3840;
 /// `Message::parse`. Sized with ~2x headroom over the most shards a
 /// budget-respecting body can need ([`REASSEMBLY_GROUP_MAX_BYTES`] divided by
 /// a worst-case per-shard body budget; pinned by a unit test in
-/// `protocol::message::shard`).
+/// `protocol::messages::shard`).
 pub const MAX_SHARD_TOTAL: u32 = 65_536;
-
-/// Largest shard group whose frames still enter the message log (and thus
-/// heal via anti-entropy) — exactly the old 16-shard behavior. A bigger
-/// group's shards skip the log so one huge body can't evict the mesh's whole
-/// anti-entropy history; those transfers are transport-reliable instead
-/// (QUIC streams on the unicast connection).
-pub const LOGGED_SHARD_GROUP_MAX_TOTAL: u32 = 16;
 
 /// Upper bound on a logical (possibly multipart) body the daemon will accept
 /// from a caller — a **local input + surfacing bound, not a wire bound** (the
@@ -101,16 +96,14 @@ pub const REASSEMBLY_TOTAL_BUDGET_BYTES: usize = 6 * MAX_LOGICAL_BODY_BYTES;
 /// (swept on the 1-minute prune tick). Only progress refreshes the clock —
 /// a duplicate slot does not, so an attacker can't keepalive a dead group
 /// with resends — and a slow-but-live transfer is never reaped mid-flight.
-pub const REASSEMBLY_STALE_SECS: u64 = 300;
+pub const REASSEMBLY_STALE: Duration = Duration::from_mins(5);
 
 /// Per-author (pubkey) ceiling on orphan channel changes buffered awaiting
 /// their dependencies. Counted rather than weighed because
 /// [`MAX_MESSAGE_SIZE`] already bounds one frame, so a count *is* a byte
 /// bound and states the limit in the unit the attack is measured in.
 ///
-/// Generous against honest backfill: a holder answers one anti-entropy digest
-/// with at most [`crate::tuning::ANTIENTROPY_MAX_RESEND`] frames, and those are spread across
-/// whichever authors wrote them.
+/// Generous against honest backfill, which can carry many changes of one author at once.
 pub const DOC_PENDING_AUTHOR_MAX: usize = 128;
 
 /// Global backstop across all authors — pubkeys are free (Sybil), so the
@@ -119,12 +112,30 @@ pub const DOC_PENDING_AUTHOR_MAX: usize = 128;
 /// stream flush a joiner's honest backfill.
 pub const DOC_PENDING_TOTAL_MAX: usize = 512;
 
+/// Entry budget of the same store. The byte budget counts size, so blobs of a
+/// few bytes would grow the map without a limit. 4096 entries leave 1 `MiB` per
+/// blob inside `MAX_BLOB_STORE_BYTES`, so a normal blob never meets this cap,
+/// and the map holds at most about 4 `MiB`. The oldest blob goes first, the same
+/// as under the byte budget.
+#[cfg(feature = "host")]
+pub const MAX_BLOB_STORE_ENTRIES: usize = 4096;
+
+/// Content groups that one blob entry records as owners. The same file offloaded for many calls
+/// shares one entry, so its owner set would grow with each group. A group past the cap is not
+/// recorded and marks the entry overflowed: the blob then stays when the recorded owners are
+/// released, for the calls that are not recorded, and the store budget (`MAX_BLOB_STORE_ENTRIES`
+/// and `MAX_BLOB_STORE_BYTES`) removes it later, oldest first. The budget can also remove a blob
+/// that still has live owners when the store is full; a fetch of it then fails cleanly. 64 owners
+/// of about 60 bytes each hold about 4 `KiB` per entry.
+#[cfg(feature = "host")]
+pub const MAX_BLOB_OWNERS: usize = 64;
+
 /// Hard ceiling on a partial group's lifetime regardless of activity. The
 /// idle TTL alone lets a hostile stream pin its buffered bytes forever by
 /// trickling one shard per window; this bounds any single group's pin to an
 /// hour (generous — a budget-respecting transfer completes in seconds to
 /// minutes).
-pub const REASSEMBLY_MAX_GROUP_LIFETIME_SECS: u64 = 3600;
+pub const REASSEMBLY_MAX_GROUP_LIFETIME: Duration = Duration::from_hours(1);
 
 /// Fixed overhead one buffered shard charges on top of its body bytes — the
 /// map nodes, cloned keys, and (for shard 0) the retained envelope clone.
@@ -141,19 +152,17 @@ pub const REASSEMBLY_SLOT_MIN_CHARGE_BYTES: usize = 2048;
 /// the receiver asks the author to re-send its missing shards (`shard/repair`
 /// over the gossip RPC). Checked on the 1-minute prune tick; with the 300s
 /// idle TTL this yields several repair rounds before the group is reaped.
-pub const REASSEMBLY_REPAIR_IDLE_SECS: u64 = 60;
+pub const REASSEMBLY_REPAIR_IDLE: Duration = Duration::from_mins(1);
 
 /// Max missing indexes one repair request names (and the serve side honors) —
 /// bounds both the request body and the resend burst; a wider gap heals over
 /// successive rounds.
 pub const REASSEMBLY_REPAIR_MAX_IDXS: usize = 64;
 
-/// Byte budget of the sender-side shard cache — the serialized frames of
-/// recent big (unlogged) outbound groups, kept so a receiver's
-/// `shard/repair` request can be served. Big groups skip the message log
-/// (they must not evict the anti-entropy history), so this cache is their
-/// only re-serve source. Whole-group FIFO eviction; sized to hold one
-/// max-size group.
+/// Byte budget of the sender-side shard cache: the serialized frames of recent outbound groups,
+/// kept so a receiver's `shard/repair` request can be served. Every group is cached, and this cache
+/// is the only re-serve source for a shard. Whole-group FIFO eviction; sized to hold one max-size
+/// group.
 pub const SHARD_CACHE_BUDGET_BYTES: usize = REASSEMBLY_GROUP_MAX_BYTES;
 
 /// Largest single file the blob channel will offload. Streamed from disk on
@@ -174,7 +183,7 @@ pub const MAX_BLOB_STORE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 /// Capacity of the unicast inbound channel — frames the `UNICAST_ALPN` acceptor
 /// forwards to the event loop for `gossip::ingest`. Bounded so a peer flooding a
 /// unicast stream can't back-pressure the loop; over the cap a frame is dropped
-/// (non-blocking `try_send`) and recovered via anti-entropy.
+/// (non-blocking `try_send`).
 pub const UNICAST_INBOX_CAP: usize = 256;
 
 /// Max bytes for one IPC command line: a full logical body in a JSON envelope

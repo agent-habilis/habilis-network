@@ -1,11 +1,12 @@
 //! The pool against in-process relays: delivery, relay health, and how many
 //! sockets it holds.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
-use habilis_network_iroh_nostr_address_lookup::{Event, Pool};
+use habilis_network_iroh_nostr_address_lookup::{Event, Keys, Pool};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::{runtime, time};
 use url::Url;
 
 const TAG: [u8; 32] = [7u8; 32];
@@ -28,7 +29,7 @@ async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
         if check() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        time::sleep(Duration::from_millis(50)).await;
     }
     assert!(check(), "timed out waiting for: {what}");
 }
@@ -38,8 +39,8 @@ async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
 async fn deliver(from: &Pool, to: &mut UnboundedReceiver<Event>, content: &str) -> Event {
     for _ in 0..50 {
         from.publish(&TAG, content.to_owned());
-        if let Ok(Some(got)) = tokio::time::timeout(Duration::from_millis(300), to.recv()).await {
-            assert_eq!(got.content, content);
+        if let Ok(Some(got)) = time::timeout(Duration::from_millis(300), to.recv()).await {
+            assert_eq!(got.content, content, "the delivered content");
             assert_eq!(
                 got.pubkey,
                 from.pubkey(),
@@ -76,7 +77,7 @@ async fn an_event_carried_by_two_relays_arrives_once() {
     .await;
 
     deliver(&alice, &mut bob_rx, "once").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    time::sleep(Duration::from_millis(300)).await;
     assert!(
         bob_rx.try_recv().is_err(),
         "the second relay's copy was dropped"
@@ -117,14 +118,14 @@ async fn a_retired_relay_is_never_dialed_again() {
     // With the first pool gone, nothing holds the old connection: only the
     // hub's memory of the retirement can stop a fresh dial.
     drop(first);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
 
     let (second, _second_rx) = Pool::open(urls(&relays), 1, &[TAG]);
     eventually("second pool on relay 1", || {
         second.connected() == vec![relays[1].url()]
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         relays[0].accepted(),
         dialed,
@@ -196,7 +197,7 @@ async fn two_pools_in_one_process_share_one_socket_per_relay() {
     assert_eq!(relays[0].accepted(), 1);
 
     drop(alice);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    time::sleep(Duration::from_millis(200)).await;
     assert_eq!(relays[0].connections(), 1, "bob still holds the socket");
     drop(bob);
     eventually("the last pool closes the socket", || {
@@ -207,11 +208,11 @@ async fn two_pools_in_one_process_share_one_socket_per_relay() {
 
 /// Like `deliver`, but for up to `secs` seconds.
 async fn deliver_within(secs: u64, from: &Pool, to: &mut UnboundedReceiver<Event>, content: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < deadline {
+    let deadline = time::Instant::now() + Duration::from_secs(secs);
+    while time::Instant::now() < deadline {
         from.publish(&TAG, content.to_owned());
-        if let Ok(Some(got)) = tokio::time::timeout(Duration::from_millis(500), to.recv()).await {
-            assert_eq!(got.content, content);
+        if let Ok(Some(got)) = time::timeout(Duration::from_millis(500), to.recv()).await {
+            assert_eq!(got.content, content, "the delivered content");
             return;
         }
     }
@@ -223,12 +224,14 @@ async fn deliver_within(secs: u64, from: &Pool, to: &mut UnboundedReceiver<Event
 /// inherit a connection nobody drives.
 #[test]
 fn a_pool_survives_the_runtime_that_first_dialed_its_relay() {
-    let relay_runtime = tokio::runtime::Runtime::new().unwrap();
-    let relay = relay_runtime.block_on(TestRelay::spawn()).unwrap();
+    let relay_runtime = runtime::Runtime::new().expect("a tokio runtime");
+    let relay = relay_runtime
+        .block_on(TestRelay::spawn())
+        .expect("spawn test relay");
     let ranking = vec![relay.url()];
 
-    let first_runtime = tokio::runtime::Runtime::new().unwrap();
-    let second_runtime = tokio::runtime::Runtime::new().unwrap();
+    let first_runtime = runtime::Runtime::new().expect("a tokio runtime");
+    let second_runtime = runtime::Runtime::new().expect("a tokio runtime");
     let (first, _first_rx) =
         first_runtime.block_on(async { Pool::open(ranking.clone(), 1, &[TAG]) });
     first_runtime.block_on(eventually("first connected", || {
@@ -261,12 +264,11 @@ async fn a_relay_that_swallows_events_is_passed_over() {
     .await;
     // Both publish, as every member announces: each learns from its own
     // missing echo that relay 0 swallows, and both move on to relay 1.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while tokio::time::Instant::now() < deadline {
+    let deadline = time::Instant::now() + Duration::from_secs(30);
+    while time::Instant::now() < deadline {
         alice.publish(&TAG, "past the swallower".to_owned());
         bob.publish(&TAG, "bob announces".to_owned());
-        if let Ok(Some(got)) = tokio::time::timeout(Duration::from_millis(500), bob_rx.recv()).await
-        {
+        if let Ok(Some(got)) = time::timeout(Duration::from_millis(500), bob_rx.recv()).await {
             assert_eq!(got.content, "past the swallower");
             assert!(bob.connected().contains(&relays[1].url()));
             return;
@@ -289,12 +291,35 @@ async fn a_tampered_copy_is_dropped() {
     .await;
     for _ in 0..5 {
         alice.publish(&TAG, "genuine".to_owned());
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    time::sleep(Duration::from_millis(300)).await;
     if let Ok(event) = bob_rx.try_recv() {
         panic!("a tampered event was delivered: {:?}", event.content);
     }
+}
+
+/// The pool checks the id of an event it receives, not its Schnorr signature:
+/// the Nostr key is random and proves nothing, and the content authenticates
+/// itself. An event with a valid id and a bad signature is delivered.
+#[tokio::test]
+async fn an_event_with_a_valid_id_and_a_bad_signature_is_delivered() {
+    let relays = relays(1).await;
+    let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    eventually("bob connected", || bob.connected().len() == 1).await;
+    time::sleep(Duration::from_millis(200)).await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs();
+    let mut event = Event::sign(&Keys::generate(), now, &TAG, "unsigned".to_owned());
+    event.sig = "00".repeat(64);
+    relays[0].inject(&event);
+    let got = time::timeout(Duration::from_secs(2), bob_rx.recv())
+        .await
+        .expect("an event with a valid id must arrive")
+        .expect("the pool channel is open");
+    assert_eq!(got.content, "unsigned", "the delivered content");
 }
 
 /// A relay that finishes the handshake and hangs up must be dialed with a
@@ -304,7 +329,7 @@ async fn a_relay_that_hangs_up_is_not_hammered() {
     let relays = relays(1).await;
     relays[0].hang_up_on_accept(true);
     let (_pool, _rx) = Pool::open(urls(&relays), 1, &[TAG]);
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    time::sleep(Duration::from_secs(8)).await;
     // Delays of 1, 2 and 4 s put dials at about 0, 1, 3 and 7 s.
     let dials = relays[0].accepted();
     assert!(dials <= 4, "{dials} dials in 8 s");
@@ -317,22 +342,17 @@ async fn a_peer_whose_clock_is_behind_still_reaches_us() {
     let relays = relays(1).await;
     let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
     eventually("bob connected", || bob.connected().len() == 1).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+    time::sleep(Duration::from_millis(200)).await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after the epoch")
         .as_secs();
-    let late = Event::sign(
-        &habilis_network_iroh_nostr_address_lookup::Keys::generate(),
-        now - 5,
-        &TAG,
-        "late".to_owned(),
-    );
+    let late = Event::sign(&Keys::generate(), now - 5, &TAG, "late".to_owned());
     relays[0].inject(&late);
-    let got = tokio::time::timeout(Duration::from_secs(2), bob_rx.recv())
+    let got = time::timeout(Duration::from_secs(2), bob_rx.recv())
         .await
         .expect("an event 5 s behind must arrive")
-        .unwrap();
+        .expect("the pool channel is open");
     assert_eq!(got.content, "late");
 }
 
@@ -358,7 +378,7 @@ async fn an_unexplained_closed_backs_off() {
     let relays = relays(1).await;
     relays[0].refuse_subs(Some("error: too many subscriptions"));
     let (_pool, _rx) = Pool::open(urls(&relays), 1, &[TAG]);
-    tokio::time::sleep(Duration::from_secs(17)).await;
+    time::sleep(Duration::from_secs(17)).await;
     // The first REQ, then retries 5 and 10 s apart (at 5 and 15 s).
     let reqs = relays[0].reqs();
     assert!(reqs <= 3, "{reqs} REQs in 17 s");
@@ -372,9 +392,9 @@ async fn a_publish_made_while_dialing_is_sent() {
     let (_bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
     let (alice, _alice_rx) = Pool::open(urls(&relays), 1, &[TAG]);
     alice.publish(&TAG, "early".to_owned());
-    let got = tokio::time::timeout(Duration::from_secs(3), bob_rx.recv())
+    let got = time::timeout(Duration::from_secs(3), bob_rx.recv())
         .await
         .expect("a publish made while dialing must be sent")
-        .unwrap();
+        .expect("the pool channel is open");
     assert_eq!(got.content, "early");
 }

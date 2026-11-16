@@ -40,4 +40,5 @@ libc.workspace = true
 # processes to meet on, with no network of the machine's own. Only `cargo
 # test` builds with these features; a `cargo build` or `install` does not.
 [dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 habilis-network = { path = "../habilis-network", default-features = false, features = ["host", "iroh-test-utils"] }

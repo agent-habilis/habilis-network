@@ -42,7 +42,7 @@ mesh.
 ```
 crates/habilis-network-netplay/          # the rollback session, lobby and mesh transport — used by both clients
 └── examples/light-cycles/
-    ├── native/                 # terminal client — own cargo workspace, pinned to nightly
+    ├── native/                 # terminal client — own cargo workspace, needs a nightly feature
     │   ├── game/               #   CLI (create/join), game logic, the habilis-network embedding
     │   └── visage-rust-tui/    #   a first-draft Rust port of visage-dom + visage-tui's terminal diffing
     └── web/                    # browser client — own cargo workspace + Bun frontend
@@ -84,8 +84,7 @@ Room codes are case-sensitive — `topic_seed` hashes the string byte for byte,
 so `Volt-Paddle` and `volt-paddle` are different rooms.
 
 If a match will not start, the status line says why (`WAITING`,
-`2 PLAYERS READY`, `SYNCING`, or the reason it is blocked — two players
-sharing a nickname, say). For anything below that, `--log-file game.log` with
+`2 PLAYERS READY`, or `SYNCING`). For anything below that, `--log-file game.log` with
 `RUST_LOG=habilis_network=debug` writes the engine's own log to a file; it cannot go to
 the terminal, which the game's alternate screen owns.
 
@@ -98,7 +97,7 @@ and on macOS `brew install llvm` (Apple's clang has no wasm backend, and
 
 ```sh
 cd crates/habilis-network-netplay/examples/light-cycles/web
-./build-wasm.sh
+bun build-wasm.ts
 bun install
 bun run dev
 # open the URL dev printed (3000, or the next free port) — "create game" or paste a room code to join

@@ -12,77 +12,13 @@
 //! run can never quietly diverge from the full run — there is only one
 //! description of what a crate needs.
 
-/// What a step runs, and how the result is judged.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
-    Lint,
-    Check,
-    Test,
-    /// The same two, against `wasm32-unknown-unknown`. Separate kinds rather
-    /// than a flag on the host ones because the wasm rows are not the host rows
-    /// with a target bolted on: five crates reach that target, each with its
-    /// own feature position, and the check list carries one row the clippy list
-    /// does not.
-    WasmCheck,
-    WasmClippy,
-}
+pub(crate) use kind::Kind;
+pub(crate) use scope::Scope;
+pub(crate) use step::Step;
 
-impl Kind {
-    fn subcommand(self) -> &'static str {
-        match self {
-            Self::Lint | Self::WasmClippy => "clippy",
-            Self::Check | Self::WasmCheck => "check",
-            Self::Test => "test",
-        }
-    }
-
-    /// The participle that heads the status line, matching cargo's own.
-    pub(crate) fn verb(self) -> &'static str {
-        match self {
-            Self::Lint | Self::WasmClippy => "Linting",
-            Self::Check | Self::WasmCheck => "Checking",
-            Self::Test => "Testing",
-        }
-    }
-
-    /// How to name this group of rows when reporting that it had none.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Lint => "clippy",
-            Self::Check => "check",
-            Self::Test => "test",
-            Self::WasmCheck => "wasm check",
-            Self::WasmClippy => "wasm clippy",
-        }
-    }
-
-    fn is_wasm(self) -> bool {
-        matches!(self, Self::WasmCheck | Self::WasmClippy)
-    }
-
-    /// Clippy is only a gate if its findings fail the build.
-    fn denies_warnings(self) -> bool {
-        matches!(self, Self::Lint | Self::WasmClippy)
-    }
-}
-
-/// Which packages a step covers.
-#[derive(Clone, Copy)]
-pub(crate) enum Scope {
-    /// The whole workspace. Narrowed to the `-p` names when the task is scoped.
-    Workspace,
-    /// One crate, because the row exists for something only that crate has —
-    /// a non-default feature, or a target nothing else reaches. Dropped when
-    /// the task is scoped to anything else.
-    Crate(&'static str),
-}
-
-pub(crate) struct Step {
-    pub(crate) kind: Kind,
-    pub(crate) scope: Scope,
-    /// Everything after the package selection.
-    pub(crate) args: &'static [&'static str],
-}
+mod kind;
+mod scope;
+mod step;
 
 /// `.github/workflows/ci.yml`, transcribed. Keep the two in step: if they
 /// disagree, this file is the one that is wrong, because CI is what gates the
@@ -135,6 +71,17 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Workspace,
         args: &["--all-features"],
     },
+    // Gate only: the e2e workflow compiles this set, so CI would catch a break
+    // late. `tasks/mesh` turns on `iroh-test-utils` for the library and nothing
+    // else. No `--all-targets` here, because that builds the dev-dependencies,
+    // and they turn on `test-fixtures` of the protocol crate. That feature adds
+    // `From<&str>` for `Nickname`, so a library that needs it compiles in every
+    // other row and fails only here.
+    Step {
+        kind: Kind::Check,
+        scope: Scope::Crate("habilis-network"),
+        args: &["--features", "iroh-test-utils"],
+    },
     Step {
         kind: Kind::Check,
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
@@ -143,9 +90,8 @@ pub(crate) const STEPS: &[Step] = &[
     // Seven crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: `habilis-network-chunks`'s
     // IndexedDB backend, the whole `web` backend of the WebRTC transport, the
-    // browser socket of the Nostr client, the portable half of the engine,
-    // `habilis-network-netplay`'s simulation, `habilis-network-stream`'s byte streams, and
-    // `habilis-network-wasm`, the browser peer.
+    // browser socket of the Nostr client, the portable half of the engine, `habilis-network-netplay`'s simulation,
+    // `habilis-network-stream`'s byte streams, and `habilis-network-wasm`, the browser peer.
     // Without these rows that code rots silently, and the `#[expect(...)]`
     // attributes inside it are never lint-checked either.
     // `wasm-simd` only changes blake3's codegen, so checking with it on costs
@@ -163,6 +109,14 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmCheck,
         scope: Scope::Crate("habilis-network-iroh-nostr-address-lookup"),
+        args: &[],
+    },
+    // The multihop transport forwards through a browser too, so its crate must
+    // build for the browser by itself: the engine's own rows do not reach it
+    // while `host` is the only thing that turns it on.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("habilis-network-iroh-multihop-transport"),
         args: &[],
     },
     // The engine itself must reach the browser, not merely be avoidable from
@@ -230,6 +184,11 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-multihop-transport"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
         scope: Scope::Crate("habilis-network"),
         args: &["--no-default-features"],
     },
@@ -251,6 +210,44 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmClippy,
         scope: Scope::Crate("habilis-network-bench-wasm"),
+        args: &[],
+    },
+    // Every crate that builds for wasm32 has a row of its own, so the `-D
+    // clippy::disallowed_methods` that every row passes reaches it as a primary package: the rows
+    // above reach these six only as dependencies of another crate.
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-protocol"),
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-util"),
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-transport-util"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-gossip-transport"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-doc"),
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-logging"),
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-test-tracing"),
         args: &[],
     },
     Step {
@@ -293,6 +290,28 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("habilis-network"),
         args: &["--features", "iroh-test-utils", "--all-targets", "--no-run"],
     },
+    // The two gate cells of the send ladder matrix (`tests/send_ladder_matrix.rs`):
+    // the default list with IP blocked, and the pair that goes through a third
+    // member. Every cell is `#[ignore]`, so that no plain `cargo test` runs a cell
+    // next to another test; this row names the two and runs them one at a time,
+    // since each runs three real members. The rest belong to `cargo task matrix`
+    // and its nightly.
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Crate("habilis-network"),
+        args: &[
+            "--features",
+            "iroh-test-utils",
+            "--test",
+            "send_ladder_matrix",
+            "--",
+            "--include-ignored",
+            "--exact",
+            "udp_webrtc_multihop_ip_direct",
+            "udp_webrtc_multihop_ip_webrtc_via_third",
+            "--test-threads=1",
+        ],
+    },
 ];
 
 /// The rows of `kind` that survive a `-p` filter, in table order.
@@ -310,51 +329,88 @@ pub(crate) fn select(kind: Kind, packages: &[String]) -> Vec<&'static Step> {
         .collect()
 }
 
-impl Step {
-    /// The full argument list, ready to hand to cargo.
-    pub(crate) fn command(&self, packages: &[String]) -> Vec<String> {
-        let mut argv = vec![self.kind.subcommand().to_owned()];
+#[cfg(test)]
+mod tests {
+    use xshell::Shell;
 
-        if self.kind.is_wasm() {
-            argv.push("--target".to_owned());
-            argv.push("wasm32-unknown-unknown".to_owned());
-        }
+    use super::{Kind, STEPS, Scope};
+    use crate::util::metadata;
 
-        match self.scope {
-            // A scoped run replaces the whole workspace with the named crates;
-            // an unscoped one keeps `--workspace`.
-            Scope::Workspace if packages.is_empty() => argv.push("--workspace".to_owned()),
-            Scope::Workspace => argv.extend(
-                packages
-                    .iter()
-                    .flat_map(|name| ["-p".to_owned(), name.clone()]),
-            ),
-            Scope::Crate(name) => {
-                argv.push("-p".to_owned());
-                argv.push(name.to_owned());
-            }
-        }
+    /// Workspace members that never build for wasm32, each with its reason. Every other member
+    /// needs a wasm32 clippy row of its own: that row is what puts `-D
+    /// clippy::disallowed_methods` on the crate, with the feature set the crate needs. A new
+    /// crate fails the first test below until it has a row or an entry here.
+    const NATIVE_ONLY: &[(&str, &str)] = &[
+        ("tasks", "the task runner drives the host"),
+        ("chat", "the native chat example"),
+        ("habilis-network-ffi", "the C ABI for native hosts"),
+        ("habilis-network-stream-cli", "a command-line binary"),
+    ];
 
-        argv.extend(self.args.iter().map(|&arg| arg.to_owned()));
-
-        if self.kind.denies_warnings() {
-            argv.push("--".to_owned());
-            argv.push("-D".to_owned());
-            argv.push("warnings".to_owned());
-        }
-
-        argv
+    /// The names of the workspace members, from `cargo metadata`.
+    fn workspace_members() -> Vec<String> {
+        let sh = Shell::new().expect("a shell");
+        metadata(&sh)
+            .expect("cargo metadata runs")
+            .packages
+            .into_iter()
+            .map(|package| package.name)
+            .collect()
     }
 
-    /// The status line: the participle cargo would use, then the part of the
-    /// invocation that says which slice of the workspace this row is.
-    pub(crate) fn describe(&self, packages: &[String]) -> (&'static str, String) {
-        let subject = self
-            .command(packages)
+    /// The crates that have a wasm32 clippy row of their own.
+    fn wasm_clippy_crates() -> Vec<&'static str> {
+        STEPS
+            .iter()
+            .filter(|step| step.kind == Kind::WasmClippy)
+            .filter_map(|step| match step.scope {
+                Scope::Crate(name) => Some(name),
+                Scope::Workspace => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_workspace_crate_that_builds_for_wasm32_has_a_wasm_clippy_row() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let rows = wasm_clippy_crates();
+        let missing: Vec<String> = workspace_members()
             .into_iter()
-            .skip(1)
-            .collect::<Vec<_>>()
-            .join(" ");
-        (self.kind.verb(), subject)
+            .filter(|name| !rows.contains(&name.as_str()))
+            .filter(|name| !NATIVE_ONLY.iter().any(|(native, _)| native == name))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "no wasm32 clippy row, and not native-only: {missing:?}. Add a `Kind::WasmClippy` \
+             step to `STEPS` and a line to `ci.yml`, or list the crate in `NATIVE_ONLY` with a reason"
+        );
+    }
+
+    #[test]
+    fn the_rows_and_the_exemptions_name_workspace_crates_and_do_not_overlap() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let members = workspace_members();
+        let rows = wasm_clippy_crates();
+        let unknown: Vec<&str> = rows
+            .iter()
+            .copied()
+            .chain(NATIVE_ONLY.iter().map(|(name, _)| *name))
+            .filter(|name| !members.iter().any(|member| member == name))
+            .collect();
+        let both: Vec<&str> = NATIVE_ONLY
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| rows.contains(name))
+            .collect();
+
+        assert!(
+            unknown.is_empty(),
+            "names that are no workspace crate: {unknown:?}"
+        );
+        assert!(
+            both.is_empty(),
+            "native-only crates that have a wasm32 row: {both:?}"
+        );
     }
 }

@@ -3,16 +3,23 @@
 //! heartbeat. The `Alive`/sweep heartbeat ticks live in
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
+use crate::daemon::state::{CollectionSizes, Latch, Standing};
 use std::time::Duration;
 
 use iroh::Endpoint;
+use iroh_gossip::net::Gossip;
 
-use super::state::EventLoopState;
+use super::state::{
+    EventLoopState, GossipMsgs, GossipPathBytes, IdleCounters, SocketBytes, WireOut, by_arrival,
+    by_class, by_variant, gossip_msgs_delta, gossip_path_delta, socket_delta,
+};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
-use crate::util::resident_memory;
-use crate::util::tuning;
+use crate::util::{resident_memory, tuning, unix_secs};
 
+use crate::gossip::PathSummary;
+use crate::net;
+use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
 /// that rate-limiter pruning — its original co-tenant — is gone.
@@ -31,38 +38,6 @@ pub(crate) fn tick_prune(state: &mut EventLoopState, sink: &dyn NodeSink) {
     }
 }
 
-/// One-shot leak-visibility signal: if resident memory has crossed
-/// `threshold_mb` (`consts::RESIDENT_MEMORY_WARN_MB`), emit a `warn` (file sink)
-/// plus a JSON `info` event (`--output json` stream) exactly once. Warn-only —
-/// never exits or alters behavior; the distributed soak that crashed a host had
-/// no such in-process signal. `threshold_mb` is passed in (not read here) so the
-/// threshold stays a single source of truth and the latch is unit-testable.
-fn warn_on_high_resident_memory(
-    state: &mut EventLoopState,
-    sink: &dyn NodeSink,
-    threshold_mb: u64,
-) {
-    if threshold_mb == 0 || state.resident_memory_warned {
-        return;
-    }
-    let Some(resident_bytes) = resident_memory::peak_resident_memory_bytes() else {
-        return;
-    };
-    let resident_mb = resident_bytes / (1024 * 1024);
-    if resident_mb >= threshold_mb {
-        state.resident_memory_warned = true;
-        tracing::warn!(
-            target: "habilis_network::lifecycle",
-            resident_mb,
-            threshold_mb,
-            "resident memory crossed the warn threshold (possible leak); not exiting — see consts::RESIDENT_MEMORY_WARN_MB"
-        );
-        sink.emit(NodeEvent::Info(format!(
-            "resident memory {resident_mb} MiB crossed warn threshold {threshold_mb} MiB (possible memory leak)"
-        )));
-    }
-}
-
 /// Re-asserts `peer_count` + `last_updated` into the state
 /// file so external readers can treat a fresh `last_updated` as
 /// liveness. No-op without `--state-file`.
@@ -71,19 +46,23 @@ fn warn_on_high_resident_memory(
 /// roster is non-empty is the silent-partition signature, surfaced at
 /// `warn` for post-freeze diagnosis. At `debug` it also classifies each
 /// live peer link `direct`/`relay`/`mixed` (see
-/// [`crate::gossip::conn_path`]) — this periodic reading is the
+/// [`crate::net::conn_path`]) — this periodic reading is the
 /// representative one (post hole-punch upgrade), unlike the `NeighborUp`
 /// snapshot which skews `relay`. Gated on `debug` being live so the
 /// per-peer `remote_info` round-trips are skipped at the default level.
 ///
-/// Takes `&mut` because it also drains [`IdleCounters`](super::state::IdleCounters)
+/// Takes `&mut` because it also drains [`IdleCounters`]
 /// onto the census line — this tick is the reporting interval for them.
-pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &Endpoint) {
+pub(crate) async fn tick_state_refresh(
+    state: &mut EventLoopState,
+    endpoint: &Endpoint,
+    gossip: &Gossip,
+) {
     state.write_peer_count();
     let roster_len = state.peers.len();
     let link_len = state.linked_endpoints.len();
 
-    // Drained on every path, including the silent-partition return below: a
+    // Drained on every path, so that a
     // counter that survived one census would fold that interval's work into
     // the next line's delta and read as a spike that never happened.
     // `wakeups` is bumped *after* each arm body, so this iteration's own bump
@@ -91,18 +70,17 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     // this one. The two cancel: a line's `wakeups` still equals the sum of its
     // own arm columns. Do not "correct" it by adding one here; that
     // double-counts the census iteration and inflates the total every interval.
-    let idle = state.idle.take();
+    let reading = state.idle.take();
+    let (socket, gossip_path, gossip_msgs) = read_deltas(state, endpoint, gossip);
+    let idle = reading.loop_arms;
+    let ext = idle.ext;
+    let cpu = reading.cpu.unwrap_or_default();
     let links = state.direct_counts();
 
-    if state.meshed && link_len == 0 && roster_len > 0 {
-        tracing::warn!(
-            target: "habilis_network::lifecycle",
-            roster_len,
-            link_len,
-            meshed = state.meshed,
-            "neighbor census: silent partition (meshed but zero peer links)"
-        );
-        return;
+    // A silent partition warns, and the census reading below still comes: the interval of a
+    // partition is the one that a reader of the time series wants most.
+    if state.silent_partition_due(roster_len, Instant::now()) {
+        warn_silent_partition(state, roster_len, link_len);
     }
 
     // Always-on census reading: the cheap counts only (no `remote_info`
@@ -120,28 +98,70 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     // `RUST_LOG` surgery — and the arms being counted fire up to 150×/min,
     // which is far too often to afford a line each. Deltas, not totals: a
     // reader needs no arithmetic, and a rotated log cannot corrupt the series.
+    let meshed = state.standing.contains(&Standing::Meshed);
+    let relay_transport = state.relay_transport.relay_allowed();
+    let direct_units = state.webrtc_admission.direct_units();
+    let over_ceiling = state.webrtc_admission.over_ceiling();
     tracing::info!(
         target: "habilis_network::lifecycle",
         roster_len,
         link_len,
-        meshed = state.meshed,
-        relay_transport = state.relay_transport,
+        meshed,
+        relay_transport,
         links_direct = links.direct,
         links_relay_only = links.relay_only,
         links_pending = links.pending,
         peak_resident_memory_mb = resident_memory::peak_resident_memory_mb().unwrap_or(0),
+        direct_units,
+        over_ceiling,
         idle_wakeups = idle.wakeups,
         idle_prune = idle.prune,
         idle_alive = idle.alive,
         idle_sweep = idle.sweep,
         idle_heal = idle.heal,
         idle_reclaim = idle.reclaim,
-        idle_antientropy = idle.antientropy,
+        idle_backfill = idle.backfill,
         idle_state_refresh = idle.state_refresh,
         idle_linkstate = idle.linkstate,
-        idle_external = idle.external,
+        idle_seed_built = idle.seed_built,
+        idle_external = ext.total(),
+        idle_ext_gossip_rx = ext.gossip_rx,
+        idle_ext_neighbor_up = ext.neighbor_up,
+        idle_ext_neighbor_down = ext.neighbor_down,
+        idle_ext_lagged = ext.lagged,
+        idle_ext_gossip_end = ext.gossip_end,
+        idle_ext_unicast = ext.unicast,
+        idle_ext_path_rx = ext.path_rx,
+        idle_ext_address = ext.address,
+        idle_ext_direct_rx = ext.direct_rx,
+        idle_ext_rung_change = ext.rung_change,
+        idle_ext_rung_report = ext.rung_report,
+        idle_ext_probe_verdict = ext.probe_verdict,
+        idle_ext_ipc = ext.ipc,
+        idle_ext_http = ext.http,
+        idle_ext_session = ext.session,
+        idle_ext_deadlines = ext.deadlines,
+        idle_ext_other = ext.other,
+        // Off the loop: their own tasks, so they are not in `idle_wakeups`.
+        idle_ppid = reading.ppid,
+        idle_sampler = reading.sampler,
+        // Process CPU time of the interval, user and system together; 0 where it is unreadable.
+        cpu_ms = millis_saturating(cpu),
+        idle_duplicates = idle.duplicates,
+        idle_fresh = idle.fresh,
         idle_broadcasts = idle.broadcasts,
+        // A total since the process started, unlike the idle fields above, which are per interval.
+        gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
+    );
+    let join_phase = in_join_phase(state.joined_at, unix_secs::UnixSecs::now());
+    log_wire_census(
+        &idle,
+        &reading.wire_out,
+        socket,
+        gossip_path,
+        &gossip_msgs,
+        join_phase,
     );
 
     // The per-peer conn classification feeds only the DEBUG census
@@ -155,19 +175,19 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     let (mut direct, mut relay, mut other) = (0usize, 0usize, 0usize);
     let linked: Vec<_> = state.linked_endpoints.iter().copied().collect();
     for peer_id in linked {
-        let (conn, relay_url) = crate::gossip::conn_path(endpoint, peer_id).await;
-        match conn {
-            crate::gossip::PathSummary::Direct => direct += 1,
-            crate::gossip::PathSummary::Relay => relay += 1,
-            crate::gossip::PathSummary::Mixed | crate::gossip::PathSummary::Unknown => other += 1,
+        let (connection, relay_url) = net::conn_path(endpoint, peer_id).await;
+        match connection {
+            PathSummary::Direct => direct += 1,
+            PathSummary::Relay => relay += 1,
+            PathSummary::Mixed | PathSummary::Unknown => other += 1,
         }
         // A link that was relayed at `NeighborUp` and has since punched a
         // direct path: refresh the reading the roster and lanes consult.
-        state.observe_path(peer_id, conn);
+        state.observe_path(peer_id, connection);
         tracing::debug!(
             target: "habilis_network::lifecycle",
             endpoint_id = %peer_id,
-            conn = conn.label(),
+            connection = connection.label(),
             relay = relay_url.as_ref().map_or("-", |url| url.as_str()),
             "peer conn path"
         );
@@ -176,7 +196,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         target: "habilis_network::lifecycle",
         roster_len,
         link_len,
-        meshed = state.meshed,
+        meshed,
         direct,
         relay,
         other,
@@ -196,16 +216,15 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
 pub(crate) fn note_tick_gap(
     timer: &'static str,
     last: &mut Instant,
-    last_wall: &mut i64,
+    last_wall: &mut unix_secs::UnixSecs,
     expected: Duration,
 ) -> (Duration, Duration) {
     let now = Instant::now();
     let mono_gap = now.duration_since(*last);
     *last = now;
 
-    let now_wall = crate::util::clock::unix_secs();
-    let wall_gap =
-        Duration::from_secs(u64::try_from(now_wall.saturating_sub(*last_wall)).unwrap_or(0));
+    let now_wall = unix_secs::UnixSecs::now();
+    let wall_gap = now_wall.since(*last_wall);
     *last_wall = now_wall;
 
     let mono_gap_ms = millis_saturating(mono_gap);
@@ -236,42 +255,276 @@ pub(crate) fn note_tick_gap(
     (mono_gap, wall_gap)
 }
 
+/// How long after the join a node is in its join phase, the time of its backfill.
+const JOIN_PHASE: Duration = Duration::from_mins(5);
+
+/// Whether a node that joined at `joined_at` is still in its join phase at `now`.
+fn in_join_phase(joined_at: unix_secs::UnixSecs, now: unix_secs::UnixSecs) -> bool {
+    now.since(joined_at) < JOIN_PHASE
+}
+
+/// What the socket, the gossip transport and the gossip actor of this loop moved since the last
+/// census.
+fn read_deltas(
+    state: &mut EventLoopState,
+    endpoint: &Endpoint,
+    gossip: &Gossip,
+) -> (SocketBytes, GossipPathBytes, GossipMsgs) {
+    let idle = &mut state.idle;
+    (
+        socket_delta(&mut idle.socket_mark, endpoint),
+        gossip_path_delta(&mut idle.gossip_path_mark, state.gossip_handle.as_ref()),
+        gossip_msgs_delta(&mut idle.gossip_msgs_mark, gossip.metrics()),
+    )
+}
+
+fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: usize) {
+    tracing::warn!(
+        target: "habilis_network::lifecycle",
+        roster_len,
+        link_len,
+        meshed = state.standing.contains(&Standing::Meshed),
+        "neighbor census: silent partition (meshed but zero peer links)"
+    );
+}
+
+/// The size of each long-lived collection, on a line of their own, once per call (the 1-minute
+/// tick). The keys are `col_<name>` and `col_<name>_bytes`.
+pub(crate) fn tick_collection_census(state: &EventLoopState) {
+    let sizes = CollectionSizes::read(state);
+    tracing::info!(
+        target: "habilis_network::lifecycle",
+        col_seen = sizes.seen,
+        col_known_endpoints = sizes.known_endpoints,
+        col_quiet = sizes.quiet,
+        col_left_keys = sizes.left_keys,
+        col_proofs = sizes.proofs,
+        col_proofs_refused = sizes.proofs_refused,
+        col_proofs_ties_refused = sizes.proofs_ties_refused,
+        col_proofs_answers_refused = sizes.proofs_answers_refused,
+        col_proofs_bound_refused = sizes.proofs_bound_refused,
+        col_proofs_gate_refused = sizes.proofs_gate_refused,
+        col_reassembled_groups = sizes.reassembled_groups,
+        col_pending_outbound = sizes.pending_outbound,
+        col_reassembly = sizes.reassembly,
+        col_reassembly_bytes = sizes.reassembly_bytes,
+        col_shard_cache = sizes.shard_cache,
+        col_shard_cache_bytes = sizes.shard_cache_bytes,
+        col_peers = sizes.peers,
+        col_last_seen = sizes.last_seen,
+        col_peer_endpoints = sizes.peer_endpoints,
+        col_quiet_since = sizes.quiet_since,
+        col_surfaced = sizes.surfaced,
+        col_direct = sizes.direct,
+        col_linked_endpoints = sizes.linked_endpoints,
+        col_graft_backoff = sizes.graft_backoff,
+        col_refused_endpoints = sizes.refused_endpoints,
+        col_seal_keys = sizes.seal_keys,
+        col_pending_seal_keys = sizes.pending_seal_keys,
+        col_orphaned_endpoints = sizes.orphaned_endpoints,
+        "collection census"
+    );
+}
+
+/// The wire bytes of the interval by kind of frame, on a line of their own: the census line is at
+/// the limit of one function, and a reader of that line takes the last line that names it.
+/// `idle_bin_*` are frames received (first sightings and repeats), `idle_bout*` frames handed to the
+/// transport. The wire total less the body total is the cost of the envelope.
+fn log_wire_census(
+    idle: &IdleCounters,
+    sent: &WireOut,
+    socket: SocketBytes,
+    gossip_path: GossipPathBytes,
+    msgs: &GossipMsgs,
+    join_phase: bool,
+) {
+    tracing::info!(
+        target: "habilis_network::lifecycle",
+        idle_join_phase = join_phase,
+        idle_bin_fresh = %by_class(&idle.wire_in.fresh),
+        idle_bin_dup = %by_class(&idle.wire_in.dup),
+        idle_bin_dup_path = %by_arrival(&idle.wire_in.dup_by_arrival),
+        idle_bin_cdup = %by_class(&idle.wire_in.cdup),
+        idle_bin_tags = %idle.wire_in.tags.top(),
+        idle_bout = %by_class(&sent.bytes),
+        idle_bout_tags = %sent.tags.top(),
+        idle_wire_in = idle.wire_in.wire,
+        idle_body_in = idle.wire_in.body,
+        idle_frames_in = idle.wire_in.frames,
+        idle_wire_out = sent.wire,
+        idle_body_out = sent.body,
+        idle_frames_out = sent.frames,
+        // What the iroh socket moved: the UDP payload of all of QUIC, and the IP and UDP headers of the
+        // received datagrams, which only the host sees. The first census of a process covers the time
+        // since its endpoint started.
+        idle_net_send_ip = socket.send_ip,
+        idle_net_send_relay = socket.send_relay,
+        idle_net_recv_ip = socket.recv_ip,
+        idle_net_recv_relay = socket.recv_relay,
+        idle_net_recv_custom = socket.recv_custom,
+        idle_net_recv_dgrams = socket.recv_datagrams,
+        idle_net_hdr_in = socket.header_bytes_in(),
+        // Paths opened and closed by kind, and the custom paths made: a registered custom path can be
+        // probed and kept alive, so these say whether the mesh has any.
+        idle_net_paths_custom = socket.paths_custom,
+        idle_net_ip_added = socket.ip_paths_added,
+        idle_net_ip_removed = socket.ip_paths_removed,
+        idle_net_relay_added = socket.relay_paths_added,
+        idle_net_relay_removed = socket.relay_paths_removed,
+        idle_net_custom_added = socket.custom_paths_added,
+        idle_net_custom_removed = socket.custom_paths_removed,
+        // The gossip transport: QUIC packets carried as frames on the mesh topic, for a pair with no
+        // other path. All zero when the mesh has none.
+        idle_gt_frames_out = gossip_path.frames_out,
+        idle_gt_bytes_out = gossip_path.bytes_out,
+        idle_gt_frames_in = gossip_path.frames_in,
+        idle_gt_bytes_in = gossip_path.bytes_in,
+        idle_gt_not_for_us = gossip_path.not_for_us,
+        idle_gt_dropped = gossip_path.dropped,
+        // The messages of the iroh-gossip protocol, by variant: the number and the bytes of what the
+        // actor wrote and read, with the 4 bytes of length prefix of each. `gossip` carries our
+        // frames; the others are the membership and the control of the broadcast layer.
+        idle_gm_nout = %by_variant(&msgs.sent),
+        idle_gm_bout = %by_variant(&msgs.sent_bytes),
+        idle_gm_nin = %by_variant(&msgs.recv),
+        idle_gm_bin = %by_variant(&msgs.recv_bytes),
+        idle_gm_ctrl_out = msgs.ctrl_out,
+        idle_gm_data_out = msgs.data_out,
+        idle_gm_ctrl_in = msgs.ctrl_in,
+        idle_gm_data_in = msgs.data_in,
+        "wire census"
+    );
+}
+
+/// One-shot leak-visibility signal: if resident memory has crossed
+/// `threshold_mb` (`consts::RESIDENT_MEMORY_WARN_MB`), emit a `warn` (file sink)
+/// plus a JSON `info` event (`--output json` stream) exactly once. Warn-only —
+/// never exits or alters behavior; the distributed soak that crashed a host had
+/// no such in-process signal. `threshold_mb` is passed in (not read here) so the
+/// threshold stays a single source of truth and the latch is unit-testable.
+fn warn_on_high_resident_memory(
+    state: &mut EventLoopState,
+    sink: &dyn NodeSink,
+    threshold_mb: u64,
+) {
+    if threshold_mb == 0 || state.latches.contains(&Latch::ResidentMemoryWarned) {
+        return;
+    }
+    let Some(resident_bytes) = resident_memory::peak_resident_memory_bytes() else {
+        return;
+    };
+    let resident_mb = resident_bytes / (1024 * 1024);
+    if resident_mb >= threshold_mb {
+        state.latches.insert(Latch::ResidentMemoryWarned);
+        tracing::warn!(
+            target: "habilis_network::lifecycle",
+            resident_mb,
+            threshold_mb,
+            "resident memory crossed the warn threshold (possible leak); not exiting — see consts::RESIDENT_MEMORY_WARN_MB"
+        );
+        sink.emit(NodeEvent::Info(format!(
+            "resident memory {resident_mb} MiB crossed warn threshold {threshold_mb} MiB (possible memory leak)"
+        )));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::testing::fresh_state;
-
-    use super::warn_on_high_resident_memory;
+    use crate::daemon::state::Latch;
+    use crate::testing;
+    use crate::util::unix_secs::UnixSecs;
 
     use crate::gossip::event::CountingSink;
+
+    /// A silent partition warns, and the census reading still comes with it: the interval of a
+    /// partition is the one that a reader of the time series wants most, and its counters are
+    /// drained in the same tick whether the line comes or not.
+    #[cfg(feature = "multihop")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_silent_partition_still_emits_the_census_reading() {
+        use crate::daemon::state::Standing;
+        use crate::util::clock::Instant;
+        use crate::util::tuning;
+        use iroh::endpoint::presets;
+        use iroh_gossip::net::Gossip;
+        // The logs of this thread only: the partition warns, which the guard of the binary would fail.
+        let (captured, _scoped) = testing::LogCapture::start(tracing::Level::INFO);
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .bind()
+            .await
+            .expect("bind a local endpoint");
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let mut state = testing::fresh_state();
+        state.standing.insert(Standing::Meshed);
+        state.peers.insert(testing::test_key("somebody"));
+        let long_ago = Instant::now()
+            .checked_sub(tuning::silent_partition_after() * 2)
+            .expect("the clock runs for longer than a heal");
+        state.start_zero_links_gap_at(long_ago);
+        assert!(
+            state.silent_partition_due(state.peers.len(), Instant::now()),
+            "the premise: the gap outlasted a heal"
+        );
+
+        super::tick_state_refresh(&mut state, &endpoint, &gossip).await;
+
+        let logs = captured.text();
+        endpoint.close().await;
+        assert!(logs.contains("silent partition"), "the warning: {logs}");
+        assert!(
+            logs.contains("mesh census"),
+            "the census reading comes with the warning: {logs}"
+        );
+    }
+
+    /// The join phase is the first 5 minutes after the join, and the census says so.
+    #[test]
+    fn the_join_phase_lasts_5_minutes() {
+        let joined = UnixSecs::from_secs(1_700_000_000);
+        let at = |secs: i64| UnixSecs::from_secs(1_700_000_000 + secs);
+        assert!(super::in_join_phase(joined, at(0)), "at the join");
+        assert!(
+            super::in_join_phase(joined, at(299)),
+            "just before 5 minutes"
+        );
+        assert!(!super::in_join_phase(joined, at(300)), "at 5 minutes");
+        assert!(!super::in_join_phase(joined, at(3_600)), "an hour later");
+    }
 
     // The warn-only resident-memory leak signal: a threshold the live process
     // already exceeds (1 MiB) must fire exactly once and latch, never exit or
     // mutate anything else. A `0` threshold disables it entirely.
     #[test]
     fn resident_memory_warn_fires_once_then_latches() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "resident memory crossed the warn threshold",
+        );
         let sink = CountingSink::new();
-        let mut state = fresh_state();
+        let mut state = testing::fresh_state();
 
         // Real resident memory is tens of MiB ≫ 1, so this crosses immediately.
-        warn_on_high_resident_memory(&mut state, &sink, 1);
+        super::warn_on_high_resident_memory(&mut state, &sink, 1);
         assert!(
-            state.resident_memory_warned,
+            state.latches.contains(&Latch::ResidentMemoryWarned),
             "first crossing latches the warn"
         );
         assert_eq!(sink.count(), 1, "an info event is emitted on the crossing");
 
         // Second tick: latched, so no second event (no per-tick spam).
-        warn_on_high_resident_memory(&mut state, &sink, 1);
+        super::warn_on_high_resident_memory(&mut state, &sink, 1);
         assert_eq!(sink.count(), 1, "warn fires exactly once per process");
     }
 
     #[test]
     fn resident_memory_warn_disabled_by_zero_threshold() {
+        let _guard = ::habilis_network_test_tracing::init();
         let sink = CountingSink::new();
-        let mut state = fresh_state();
-        warn_on_high_resident_memory(&mut state, &sink, 0);
+        let mut state = testing::fresh_state();
+        super::warn_on_high_resident_memory(&mut state, &sink, 0);
         assert!(
-            !state.resident_memory_warned,
+            !state.latches.contains(&Latch::ResidentMemoryWarned),
             "threshold 0 disables the warn"
         );
         assert_eq!(sink.count(), 0, "no event when disabled");

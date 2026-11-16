@@ -1,0 +1,39 @@
+name: Matrix
+
+# The send ladder matrix, every cell: transport list, blocked rungs and a third
+# member (crates/habilis-network/tests/send_ladder_matrix.rs), and then the D11 gate:
+# a node at a ceiling of two direct connections, and a lane pair
+# (crates/habilis-network/tests/d11_gate_loopback.rs). Each test stands up real
+# members on a local relay and waits for them to settle, so a full run takes tens
+# of minutes and runs on a schedule, not on every change. Every test is `#[ignore]`,
+# so no other workflow runs one; `cargo task ci` runs two cells by name, one at a time.
+
+on:
+  schedule:
+    # 03:17 UTC, off the hour so that it does not queue with everyone else's.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    name: Send ladder matrix and D11 gate
+    runs-on: ubuntu-latest
+    # Each cell bounds its own waits, so a healthy run ends well inside this; a
+    # hang ends as a red check.
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+
+      # `--include-ignored --test-threads=1`: every cell and every D11 test, one at a time.
+      - name: Every cell and the D11 gate
+        run: cargo task matrix

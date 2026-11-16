@@ -4,8 +4,7 @@
 //! Distinct from the two other keys in the system: the transport
 //! `EndpointId` (authenticates the *connection*) and the seed-derived
 //! rendezvous key (shared by every member — see [`super::crypto`]). This
-//! is the first **per-author** credential, and the root of
-//! `docs/history-integrity.md`.
+//! is the first **per-author** credential.
 //!
 //! The public key is the durable identity; the [`crate::Nickname`] is a display
 //! label bound to it trust-on-first-use by the receiver.
@@ -15,17 +14,33 @@
 //! restart therefore mints a *new* key, so under the same nickname it is
 //! seen as a new identity (peers that pinned the old key flag it). Stable
 //! cross-restart identity (on-disk persistence) is a documented follow-up;
-//! see `docs/history-integrity.md`.
+//! see the protocol docs.
 
-use anyhow::{Context, Result};
+use std::fmt;
+
+use anyhow::Result;
 use iroh_base::{PublicKey, SecretKey, Signature};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+
+use crate::{AuthorKey, DedupKey, SymmetricKey};
 
 /// A per-peer signing identity — just the secret key. The nickname
 /// it speaks under is carried by the message `author` field and bound to
 /// this key trust-on-first-use by receivers, so it is not stored here.
-#[derive(Debug)]
+///
+/// # Examples
+///
+/// A fresh identity has a public key, and the key encodes to 64 hex characters.
+///
+/// ```
+/// use habilis_network_protocol::identity::{Identity, encode_pubkey};
+///
+/// let identity = Identity::generate();
+/// let text = encode_pubkey(&identity.public());
+/// assert_eq!(text.len(), 64);
+/// ```
+#[derive(Debug, Clone)]
 pub struct Identity {
     secret: SecretKey,
 }
@@ -42,9 +57,42 @@ impl Identity {
         }
     }
 
+    /// The 32-byte seed of this identity, for the state file. It is secret: it never goes on the wire.
+    #[must_use]
+    pub fn seed(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.secret.to_bytes())
+    }
+
+    /// The identity a seed names (see [`Identity::seed`]).
+    #[must_use]
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        Identity {
+            secret: SecretKey::from_bytes(seed),
+        }
+    }
+
+    /// A fixed identity for the golden tests of the wire form.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn fixed_secret(bytes: [u8; 32]) -> Self {
+        Identity {
+            secret: SecretKey::from_bytes(&bytes),
+        }
+    }
+
+    /// The public half of the key.
     #[must_use]
     pub fn public(&self) -> PublicKey {
         self.secret.public()
+    }
+
+    /// The public key as the author key of a message: what [`Message::sign`] puts in the
+    /// message, and what a peer reads back from `Message::author_key`.
+    ///
+    /// [`Message::sign`]: crate::Message::sign
+    #[must_use]
+    pub fn author_key(&self) -> AuthorKey {
+        AuthorKey::from(*self.public().as_bytes())
     }
 
     /// Sign `bytes` (the message's canonical bytes) with our secret.
@@ -58,17 +106,129 @@ impl Identity {
     /// so the signing key and the encryption key never coincide (no key reuse).
     #[must_use]
     pub fn seal_secret(&self) -> x25519_dalek::StaticSecret {
-        x25519_dalek::StaticSecret::from(super::crypto::derive_secret(
-            &self.secret.to_bytes(),
-            SEAL_ENC_LABEL,
-        ))
+        // Two bare arrays on the stack are not wiped, and we do not control either: the one that
+        // iroh's `to_bytes()` returns, and the one that `StaticSecret::from` takes by value below.
+        // Between them the bytes sit in a buffer that wipes itself on drop.
+        let identity_seed = SymmetricKey::from(zeroize::Zeroizing::new(self.secret.to_bytes()));
+        x25519_dalek::StaticSecret::from(*identity_seed.derive(SEAL_ENC_LABEL).as_bytes())
     }
 
     /// The X25519 public key peers seal to us with — published in our card.
     #[must_use]
-    pub fn seal_public(&self) -> [u8; 32] {
-        *x25519_dalek::PublicKey::from(&self.seal_secret()).as_bytes()
+    pub fn seal_public(&self) -> x25519_dalek::PublicKey {
+        x25519_dalek::PublicKey::from(&self.seal_secret())
     }
+}
+
+impl From<&[u8; 32]> for Identity {
+    fn from(seed: &[u8; 32]) -> Self {
+        Self::from_seed(seed)
+    }
+}
+
+/// An identity's proof that a session (its session key) speaks as a nickname on a mesh, for a run.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct IdentityProof {
+    /// The identity key that signed the proof.
+    pub identity: PublicKey,
+    /// The run counter of the session. A newer run of an identity supersedes the older ones.
+    pub run: u64,
+    /// The identity's signature over the session, nickname, mesh and run.
+    pub signature: Signature,
+}
+
+impl IdentityProof {
+    /// The longest wire text of a proof: 64 hex digits of key, 20 digits of run, 128 of signature,
+    /// and 2 separators. A body longer than this is not a proof.
+    pub const MAX_TEXT_LEN: usize = 64 + 20 + 128 + 2;
+
+    /// The wire text of the proof, as `<identity hex>:<run>:<signature hex>`.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            to_hex(self.identity.as_bytes()),
+            self.run,
+            to_hex(&self.signature.to_bytes())
+        )
+    }
+
+    /// Parse the wire text of a proof. A wrong shape, length or digit gives `None`.
+    #[must_use]
+    pub fn decode(text: &str) -> Option<Self> {
+        if text.len() > Self::MAX_TEXT_LEN {
+            return None;
+        }
+        let mut parts = text.split(':');
+        let (identity, run, signature) = (parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() {
+            return None;
+        }
+        let identity: [u8; 32] = parse_hex(identity).ok()?.try_into().ok()?;
+        Some(Self {
+            identity: PublicKey::from_bytes(&identity).ok()?,
+            run: run.parse().ok()?,
+            signature: decode_sig(signature).ok()?,
+        })
+    }
+}
+
+/// What the identity signs: a domain label, then the session key, the nickname and the mesh, each string
+/// behind its length (4 bytes, big endian), then the run. A string with a zero byte in it cannot move a
+/// field boundary, so no two different claims share bytes.
+///
+/// # Panics
+/// If a string is longer than `u32::MAX` bytes: a nickname and a mesh id are far below it.
+fn proof_bytes(session: &AuthorKey, nickname: &str, mesh: &str, run: u64) -> Vec<u8> {
+    let mut bytes = b"habilis-mesh/identity-proof/v2".to_vec();
+    bytes.extend_from_slice(session.as_bytes());
+    for text in [nickname, mesh] {
+        let length = u32::try_from(text.len()).expect("a nickname and a mesh id are short");
+        bytes.extend_from_slice(&length.to_be_bytes());
+        bytes.extend_from_slice(text.as_bytes());
+    }
+    bytes.extend_from_slice(&run.to_be_bytes());
+    bytes
+}
+
+impl Identity {
+    /// Prove that `session` speaks as `nickname` on `mesh`, in run `run`.
+    ///
+    /// # Panics
+    /// If `nickname` or `mesh` is longer than `u32::MAX` bytes: a nickname and a mesh id are far below it.
+    #[must_use]
+    pub fn prove(
+        &self,
+        session: &AuthorKey,
+        nickname: &str,
+        mesh: &str,
+        run: u64,
+    ) -> IdentityProof {
+        IdentityProof {
+            identity: self.public(),
+            run,
+            signature: self.sign(&proof_bytes(session, nickname, mesh, run)),
+        }
+    }
+}
+
+/// Whether `proof` is the identity's proof of `session` as `nickname` on `mesh`, for its run.
+///
+/// # Panics
+/// If `nickname` or `mesh` is longer than `u32::MAX` bytes: a nickname and a mesh id are far below it.
+#[must_use]
+pub fn verify_proof(
+    proof: &IdentityProof,
+    session: &AuthorKey,
+    nickname: &str,
+    mesh: &str,
+) -> bool {
+    verify(
+        &proof.identity,
+        &proof_bytes(session, nickname, mesh, proof.run),
+        &proof.signature,
+    )
 }
 
 /// KDF label deriving the X25519 encryption key from the Ed25519 identity seed —
@@ -82,32 +242,27 @@ pub(crate) fn verify(pubkey: &PublicKey, bytes: &[u8], signature: &Signature) ->
     pubkey.verify(bytes, signature).is_ok()
 }
 
-/// SHA-256 content hash of `bytes`, lowercase hex — the self-certifying
-/// message id used by the per-author backlink (`prev`) and (Phase 3) the
-/// cross-author DAG. Computed from a message's canonical bytes, so it is
-/// recomputable by any receiver and never has to be trusted off the wire.
-#[must_use]
-pub fn content_hash_hex(bytes: &[u8]) -> String {
-    to_hex(&Sha256::digest(bytes))
-}
-
-/// A 16-byte dedup / anti-entropy key binding an author's public key to a
-/// message id: `SHA-256(pubkey ‖ id)[..16]`. Dedup and the digest key on
+/// A 16-byte dedup key binding an author's public key to a
+/// message id: `SHA-256(pubkey ‖ id)[..16]`. Dedup keys on
 /// this, not the bare id, so a peer that signs its own message under a
 /// **victim's** id produces a different key — it can no longer suppress the
-/// victim's genuine message (they hash apart) or hide it from anti-entropy.
-/// 16 bytes keeps the digest wire format unchanged; binding the pubkey (not
+/// victim's genuine message (they hash apart).
+/// 16 bytes keeps the key short; binding the pubkey (not
 /// the content) preserves the fresh-id re-announce path (a new id ⇒ a new
 /// key ⇒ not falsely deduped).
 #[must_use]
-pub(crate) fn dedup_key16(pubkey: &str, id_bytes: &[u8; 16]) -> [u8; 16] {
+pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> DedupKey {
+    use sha2::Digest;
     let mut hasher = Sha256::new();
-    hasher.update(pubkey.as_bytes());
+    // The hex text of the key, as the signed bytes carry it; nothing for an unsigned message.
+    if let Some(author) = author {
+        hasher.update(author.hex());
+    }
     hasher.update(id_bytes);
     let digest = hasher.finalize();
     let mut key = [0u8; 16];
     key.copy_from_slice(&digest[..16]);
-    key
+    DedupKey::from(key)
 }
 
 // ── wire encoding ──────────────────────────────────────────────────────
@@ -116,44 +271,120 @@ pub(crate) fn dedup_key16(pubkey: &str, id_bytes: &[u8; 16]) -> [u8; 16] {
 // hex strings in the JSON envelope, so the `--output json` wire stays
 // inspectable and does not depend on iroh's serde representation.
 
+/// The public key as lowercase hex, 64 characters.
+///
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::identity::{Identity, encode_pubkey};
+///
+/// let identity = Identity::generate();
+/// assert_eq!(encode_pubkey(&identity.public()).len(), 64);
+/// ```
 #[must_use]
 pub fn encode_pubkey(pubkey: &PublicKey) -> String {
     to_hex(pubkey.as_bytes())
 }
 
-/// Parse a hex public key from the wire. Errors on bad hex or length, or
-/// a point that is not a valid Ed25519 key.
-pub(crate) fn decode_pubkey(hex: &str) -> Result<PublicKey> {
-    let bytes: [u8; 32] = from_hex(hex)?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
-    PublicKey::from_bytes(&bytes).context("invalid Ed25519 public key")
-}
-
-#[must_use]
-pub(crate) fn encode_sig(signature: &Signature) -> String {
-    to_hex(&signature.to_bytes())
-}
-
 /// Parse a hex Ed25519 signature (64 bytes) from the wire.
 pub(crate) fn decode_sig(hex: &str) -> Result<Signature> {
-    let bytes: [u8; 64] = from_hex(hex)?
+    let bytes: [u8; 64] = parse_hex(hex)?
         .try_into()
         .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
     Ok(Signature::from_bytes(&bytes))
 }
 
 /// Lowercase hex of `bytes`, the spelling the wire uses for keys and signatures.
+///
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::identity::encode_hex;
+///
+/// assert_eq!(encode_hex(&[0x0a, 0xff]), "0aff");
+/// ```
 #[must_use]
 pub fn encode_hex(bytes: &[u8]) -> String {
     to_hex(bytes)
 }
 
+/// Write `bytes` into `formatter` as lowercase hex, so that a `Display` for a byte-array newtype is
+/// one call.
+///
+/// # Errors
+/// The formatter fails.
+///
+/// # Examples
+///
+/// A caller writes the hex of bytes into any formatter, such as a Display impl.
+///
+/// ```
+/// use std::fmt;
+///
+/// use habilis_network_protocol::identity::write_hex;
+///
+/// struct Hex<'bytes>(&'bytes [u8]);
+///
+/// impl fmt::Display for Hex<'_> {
+///     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+///         write_hex(formatter, self.0)
+///     }
+/// }
+///
+/// assert_eq!(Hex(&[0x0a, 0xff]).to_string(), "0aff");
+/// ```
+pub fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    for byte in bytes {
+        write!(formatter, "{byte:02x}")?;
+    }
+    Ok(())
+}
+
+/// The 32 bytes of a 64-character lowercase hex string, the one spelling the wire carries for a
+/// key or a hash. `None` for any other length, an uppercase digit, or a non-hex character.
+pub(crate) fn decode_lower_hex_32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let mut bytes = [0u8; 32];
+    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        *byte = (digit(pair[0])? << 4) | digit(pair[1])?;
+    }
+    Some(bytes)
+}
+
+/// The 64 ASCII bytes of the lowercase hex of `bytes`, on the stack.
+pub(crate) fn encode_lower_hex_32(bytes: &[u8; 32]) -> [u8; 64] {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = [0u8; 64];
+    for (pair, byte) in text.chunks_exact_mut(2).zip(bytes) {
+        pair[0] = DIGITS[usize::from(byte >> 4)];
+        pair[1] = DIGITS[usize::from(byte & 0x0f)];
+    }
+    text
+}
+
 /// The bytes of a hex string, either case; `None` for odd length or a non-hex
 /// digit.
+///
+/// # Examples
+///
+/// A text that is not hex decodes to None.
+///
+/// ```
+/// use habilis_network_protocol::identity::decode_hex;
+///
+/// assert_eq!(decode_hex("0aff"), Some(vec![0x0a, 0xff]));
+/// assert_eq!(decode_hex("zz"), None);
+/// ```
 #[must_use]
 pub fn decode_hex(hex: &str) -> Option<Vec<u8>> {
-    from_hex(hex).ok()
+    parse_hex(hex).ok()
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -165,7 +396,7 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn from_hex(hex: &str) -> Result<Vec<u8>> {
+fn parse_hex(hex: &str) -> Result<Vec<u8>> {
     // Operate on raw bytes, not `&str` slices: an attacker-controlled
     // `pubkey`/`sig` is arbitrary UTF-8, and byte-indexing a `&str`
     // (`&hex[i..i+2]`) panics if `i` lands inside a multibyte char. Decoding
@@ -193,66 +424,304 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Identity, decode_pubkey, decode_sig, encode_pubkey, encode_sig, verify};
+    /// A proof goes to the wire text and back, and bad text is refused.
+    #[test]
+    fn a_proof_round_trips_through_its_wire_text() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let proof = identity.prove(&session, "alice", "mesh", 12);
+        let text = proof.encode();
+        assert!(
+            text.len() <= super::IdentityProof::MAX_TEXT_LEN,
+            "the text stays in its cap"
+        );
+        let back = super::IdentityProof::decode(&text).expect("the text parses");
+        assert!(
+            super::verify_proof(&back, &session, "alice", "mesh"),
+            "the parsed proof verifies"
+        );
+        assert_eq!(back.run, 12, "the run survives");
+        for bad in [
+            "",
+            "x",
+            "a:b:c",
+            &text[..text.len() - 2],
+            &format!("{text}00"),
+        ] {
+            assert!(
+                super::IdentityProof::decode(bad).is_none(),
+                "refused: {bad:?}"
+            );
+        }
+    }
 
+    /// A proof names the session, the nickname, the mesh and the run: any other value fails.
+    #[test]
+    fn a_proof_binds_the_session_nickname_mesh_and_run() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let proof = identity.prove(&session, "alice", "mesh", 3);
+        assert!(
+            super::verify_proof(&proof, &session, "alice", "mesh"),
+            "the proof verifies"
+        );
+        assert!(
+            !super::verify_proof(&proof, &session, "bob", "mesh"),
+            "another nickname fails"
+        );
+        let other_run = super::IdentityProof { run: 4, ..proof };
+        assert!(
+            !super::verify_proof(&other_run, &session, "alice", "mesh"),
+            "another run fails"
+        );
+    }
+
+    /// The fields of a proof have lengths, so no two claims share bytes: a proof for the nickname `a\0b`
+    /// on the mesh `c` does not verify for the nickname `a` on the mesh `b\0c`.
+    #[test]
+    fn a_proof_does_not_verify_for_another_split_of_the_same_bytes() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let proof = identity.prove(&session, "a\0b", "c", 1);
+        assert!(
+            super::verify_proof(&proof, &session, "a\0b", "c"),
+            "the proof verifies for its own claim"
+        );
+        assert!(
+            !super::verify_proof(&proof, &session, "a", "b\0c"),
+            "the proof of one claim verified for another claim with the same bytes"
+        );
+    }
+
+    /// The bytes that a proof signs are pinned: a change of this literal is a change of the wire format
+    /// (the proof of a `joined` frame), and it must be a decision named in the changelog.
+    #[test]
+    fn the_bytes_of_a_proof_are_pinned() {
+        let session = AuthorKey::from([7u8; 32]);
+        let bytes = super::proof_bytes(&session, "alice", "mesh", 3);
+        let hex = super::to_hex(&bytes);
+        let expected = concat!(
+            "686162696c69732d6d6573682f6964656e746974792d70726f6f662f7632", // the label, v2
+            "0707070707070707070707070707070707070707070707070707070707070707", // the session key
+            "00000005616c696365", // the length of the nickname, then `alice`
+            "000000046d657368",   // the length of the mesh, then `mesh`
+            "0000000000000003",   // the run
+        );
+        assert_eq!(hex, expected, "the signed bytes of a proof changed");
+    }
+
+    /// A proof that was signed over the old bytes (the fields separated by a zero byte, label v1) does not
+    /// verify: wire 14.0 is not released, and no peer holds such a proof.
+    #[test]
+    fn a_proof_over_the_old_separated_bytes_does_not_verify() {
+        let identity = Identity::generate();
+        let session = AuthorKey::from([7u8; 32]);
+        let mut old = b"habilis-mesh/identity-proof/v1".to_vec();
+        old.extend_from_slice(session.as_bytes());
+        old.push(0);
+        old.extend_from_slice(b"alice");
+        old.push(0);
+        old.extend_from_slice(b"mesh");
+        old.push(0);
+        old.extend_from_slice(&3u64.to_be_bytes());
+        let proof = super::IdentityProof {
+            identity: identity.public(),
+            run: 3,
+            signature: identity.sign(&old),
+        };
+        assert!(
+            !super::verify_proof(&proof, &session, "alice", "mesh"),
+            "a proof over the old bytes verified"
+        );
+    }
+
+    /// The identity key is the one a restarted member keeps: its seed round-trips, so the
+    /// same identity comes back from the state file.
+    #[test]
+    fn an_identity_round_trips_through_its_seed() {
+        let identity = Identity::generate();
+        let seed = identity.seed();
+        let back = Identity::from_seed(&seed);
+        assert_eq!(
+            back.author_key(),
+            identity.author_key(),
+            "the same key comes back"
+        );
+    }
+    use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
+    use crate::AuthorKey;
+
+    use crate::crypto;
+    use std::fmt;
     #[test]
     fn sign_verify_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
         let bytes = b"canonical message bytes";
-        let sig = identity.sign(bytes);
-        assert!(verify(&identity.public(), bytes, &sig));
+        let signature = identity.sign(bytes);
+        assert!(
+            verify(&identity.public(), bytes, &signature),
+            "a signature verifies with its key"
+        );
     }
 
     #[test]
     fn tampered_bytes_fail_verification() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
-        let sig = identity.sign(b"original");
-        assert!(!verify(&identity.public(), b"tampered", &sig));
+        let signature = identity.sign(b"original");
+        assert!(
+            !verify(&identity.public(), b"tampered", &signature),
+            "tampered bytes fail verification"
+        );
     }
 
     #[test]
     fn wrong_key_fails_verification() {
+        let _guard = ::habilis_network_test_tracing::init();
         let signer = Identity::generate();
         let other = Identity::generate();
         let bytes = b"hello";
-        let sig = signer.sign(bytes);
-        assert!(!verify(&other.public(), bytes, &sig));
+        let signature = signer.sign(bytes);
+        assert!(
+            !verify(&other.public(), bytes, &signature),
+            "a wrong key fails verification"
+        );
     }
 
     #[test]
     fn pubkey_hex_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
         let hex = encode_pubkey(&identity.public());
-        assert_eq!(hex.len(), 64);
-        assert_eq!(decode_pubkey(&hex).unwrap(), identity.public());
+        assert_eq!(hex.len(), 64, "a public key hex is 64 characters");
+        let key =
+            AuthorKey::decode_hex(&hex).expect("the fixture hex is a valid author key encoding");
+        assert_eq!(
+            key.public_key(),
+            Some(identity.public()),
+            "the public key survives a hex round trip"
+        );
     }
 
     #[test]
     fn sig_hex_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
-        let sig = identity.sign(b"x");
-        let hex = encode_sig(&sig);
-        assert_eq!(hex.len(), 128);
-        assert!(verify(&identity.public(), b"x", &decode_sig(&hex).unwrap()));
+        let signature = identity.sign(b"x");
+        let hex = encode_hex(&signature.to_bytes());
+        assert_eq!(hex.len(), 128, "a signature hex is 128 characters");
+        assert!(
+            verify(
+                &identity.public(),
+                b"x",
+                &decode_sig(&hex).expect("the fixture hex is a valid signature encoding")
+            ),
+            "the signature survives a hex round trip"
+        );
+    }
+
+    /// Golden: the key is `SHA-256(pubkey text ‖ id bytes)[..16]`. The unsigned form hashes an
+    /// empty pubkey text. The values were captured at the base commit.
+    #[test]
+    fn dedup_key16_is_pinned_for_a_fixed_pubkey_and_id() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let pubkey = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+        let mut id = [0u8; 16];
+        id[15] = 1;
+        assert_eq!(
+            encode_hex(dedup_key16(AuthorKey::decode_hex(pubkey).as_ref(), &id).as_bytes()),
+            "c7ba26a2ed0d21f0e8913dd8b4456086",
+            "the dedup key is pinned for a fixed key and id"
+        );
+        assert_eq!(
+            encode_hex(dedup_key16(None, &id).as_bytes()),
+            "7c3ccd10bb7ec37b46d37926ae627426",
+            "the dedup key without a key is pinned"
+        );
+    }
+
+    /// The seal key is the same key as before the secret went through a wiped key: the
+    /// derivation of the plain bytes under the same label.
+    #[test]
+    fn the_seal_secret_is_the_derivation_of_the_identity_seed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let identity = Identity::generate();
+        let by_hand = x25519_dalek::StaticSecret::from(*crypto::derive_secret(
+            &identity.secret.to_bytes(),
+            super::SEAL_ENC_LABEL,
+        ));
+        assert_eq!(
+            identity.seal_secret().to_bytes(),
+            by_hand.to_bytes(),
+            "the seal secret is the derivation of the identity seed"
+        );
+        assert_eq!(
+            identity.seal_public(),
+            x25519_dalek::PublicKey::from(&by_hand),
+            "the seal public key matches the seal secret"
+        );
+    }
+
+    #[test]
+    fn write_hex_writes_the_same_text_as_encode_hex() {
+        struct Hex<'bytes>(&'bytes [u8]);
+        impl fmt::Display for Hex<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                super::write_hex(f, self.0)
+            }
+        }
+        let _guard = ::habilis_network_test_tracing::init();
+        let bytes = [0x00, 0x0f, 0xa5, 0xff];
+        assert_eq!(
+            Hex(&bytes).to_string(),
+            "000fa5ff",
+            "bytes are formatted as lowercase hex"
+        );
+        assert_eq!(
+            Hex(&bytes).to_string(),
+            encode_hex(&bytes),
+            "the hex formatter matches encode_hex"
+        );
     }
 
     #[test]
     fn decode_rejects_bad_hex() {
-        assert!(decode_pubkey("zz").is_err());
-        assert!(decode_pubkey("abc").is_err()); // odd length
-        assert!(decode_sig("00").is_err()); // wrong length
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            AuthorKey::decode_hex("zz").is_none(),
+            "a hex string with non-hex characters is refused as an author key"
+        );
+        assert!(
+            AuthorKey::decode_hex("abc").is_none(),
+            "an odd-length hex string is refused as an author key"
+        ); // odd length
+        assert!(
+            decode_sig("00").is_err(),
+            "a short signature hex is refused"
+        ); // wrong length
     }
 
     #[test]
     fn decode_rejects_non_ascii_hex_without_panicking() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Regression: an inbound `pubkey`/`sig` is arbitrary UTF-8. A
         // multibyte char of even *byte* length (here `aéa` = 0x61 C3 A9 0x61,
         // 4 bytes) positioned so a 2-byte slice splits it used to panic on a
         // non-char-boundary slice — a one-message remote DoS reachable from
         // `verify_signature`. It must now decode byte-wise and return `Err`.
-        assert!(decode_pubkey("aéa").is_err());
-        assert!(decode_sig("aéa").is_err());
+        assert!(
+            AuthorKey::decode_hex("aéa").is_none(),
+            "a non-ascii author hex is refused without a panic"
+        );
+        assert!(
+            decode_sig("aéa").is_err(),
+            "a non-ascii signature hex is refused without a panic"
+        );
         // Pure multibyte input of even byte length, too.
-        assert!(decode_pubkey("€€").is_err()); // 6 bytes, all continuation/non-hex
+        assert!(
+            AuthorKey::decode_hex("€€").is_none(),
+            "a multi-byte author hex is refused without a panic"
+        ); // 6 bytes, all continuation/non-hex
     }
 }

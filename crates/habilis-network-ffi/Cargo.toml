@@ -24,7 +24,7 @@ name = "habilis_network_ffi"
 path = "src/lib.rs"
 # `cdylib` is the artifact C links against (libhabilis_network_ffi.dylib /
 # .so); `rlib` is what `tests/ffi_smoke.rs` links, so the C ABI is exercised from
-# Rust on a host with no C compiler. `staticlib` is what mallorca links against
+# Rust on a host with no C compiler. `staticlib` is what a C consumer links against
 # (a stable .a path, decoupled from the cdylib's dynamic-loader requirements).
 crate-type = ["staticlib", "cdylib", "rlib"]
 

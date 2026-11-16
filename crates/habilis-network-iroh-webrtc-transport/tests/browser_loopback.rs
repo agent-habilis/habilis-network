@@ -27,10 +27,75 @@
 
 mod browser_harness;
 
-use browser_harness::{BULK_BYTES, Pair};
+use browser_harness::{Direction, Pair};
+use futures::future;
+use habilis_network_iroh_webrtc_transport::bench::BULK_BYTES;
+use js_sys::{JSON, Reflect};
+use std::time::Duration;
+use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 wasm_bindgen_test_configure!(run_in_browser);
+
+impl Pair {
+    /// A download of `wanted` bytes — the regression suite's exchange.
+    pub(crate) async fn request(&self, wanted: usize) -> anyhow::Result<()> {
+        self.exchange(Direction::Download, wanted, TRANSFER_DEADLINE)
+            .await
+    }
+
+    /// Every `transport`, `candidate-pair`, `data-channel` and
+    /// `peer-connection` row `getStats` reports, verbatim.
+    ///
+    /// Only ever printed on a failure: when the byte counters disagree with
+    /// what demonstrably crossed the connection, the question is which row the
+    /// reader picked, and that cannot be answered from the two numbers it
+    /// returned.
+    pub(crate) async fn dump_stats(&self) -> String {
+        let Some(peer_connection) = self.client_hub.peer_connection(&self.server_id) else {
+            return "<no live session>".to_owned();
+        };
+        let Ok(report) = wasm_bindgen_futures::JsFuture::from(peer_connection.get_stats()).await
+        else {
+            return "<getStats failed>".to_owned();
+        };
+        let mut rows = Vec::new();
+        let Some(iter) = js_sys::try_iter(&report).ok().flatten() else {
+            return "<report not iterable>".to_owned();
+        };
+        for entry in iter.flatten() {
+            let Ok(pair): Result<js_sys::Array, JsValue> = entry.dyn_into() else {
+                continue;
+            };
+            let Ok(object): Result<js_sys::Object, JsValue> = pair.get(1).dyn_into() else {
+                continue;
+            };
+            let field = Reflect::get(&object, &JsValue::from_str("type")).ok();
+            let kind = field
+                .and_then(|value| value.as_string())
+                .unwrap_or_default();
+            if matches!(
+                kind.as_str(),
+                "transport" | "candidate-pair" | "data-channel" | "peer-connection"
+            ) {
+                rows.push(
+                    JSON::stringify(&object)
+                        .map_or_else(|_| "<unstringifiable>".to_owned(), String::from),
+                );
+            }
+        }
+        rows.join("\n")
+    }
+}
+
+/// How long a transfer may take before we call it stalled. Generous for one
+/// `MiB` over loopback ICE (the drills measured ~2 ms RTT); a stall is
+/// indefinite, so anything in between is not a case we need to distinguish.
+///
+/// The matrix raises this per cell — an 8 `MiB` transfer under a 20× CPU
+/// throttle is slow, not stalled, and a deadline that cannot tell them apart
+/// would report the throttle as the bug.
+pub(crate) const TRANSFER_DEADLINE: Duration = Duration::from_secs(20);
 
 #[wasm_bindgen_test]
 async fn a_small_request_round_trips() {
@@ -100,7 +165,7 @@ async fn concurrent_bulk_transfers_all_complete() {
     }
 
     let outcomes: Vec<_> =
-        futures::future::join_all(pairs.iter().map(|pair| pair.request(BULK_BYTES))).await;
+        future::join_all(pairs.iter().map(|pair| pair.request(BULK_BYTES))).await;
 
     // Every failure, not just the first: which subset stalled is the finding.
     let failures: Vec<String> = outcomes
@@ -126,7 +191,8 @@ async fn concurrent_bulk_transfers_all_complete() {
     // exactly where a lane that silently discards would start doing so — and
     // QUIC would paper over it with retransmits, so the transfers could all
     // pass while the lane was in fact dropping steadily.
-    for (index, pair) in pairs.iter().enumerate() {
+    let indexed_pairs: Vec<(usize, &Pair)> = pairs.iter().enumerate().collect();
+    for (index, pair) in indexed_pairs {
         let counters = pair
             .client_hub
             .session_counters(&pair.server_id)

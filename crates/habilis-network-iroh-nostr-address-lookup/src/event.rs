@@ -6,6 +6,7 @@ use k256::schnorr::{Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use std::fmt;
 /// The tag name every event and filter uses. Trystero uses the same one.
 pub const TAG: &str = "x";
 
@@ -29,8 +30,8 @@ pub struct Keys {
     pubkey: String,
 }
 
-impl std::fmt::Debug for Keys {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Keys {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Keys")
             .field("pubkey", &self.pubkey)
@@ -42,13 +43,15 @@ impl Keys {
     /// # Errors
     /// `bytes` is zero or not below the curve order.
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self> {
-        let signing = SigningKey::from_bytes(bytes).context("invalid secp256k1 secret key")?;
+        let signing =
+            SigningKey::from_bytes(&(*bytes).into()).context("invalid secp256k1 secret key")?;
         let pubkey = hex::encode(signing.verifying_key().to_bytes());
         Ok(Self { signing, pubkey })
     }
 
     /// A fresh key from the workspace `rand`. Not `SigningKey::random`, which
-    /// wants `rand_core` 0.6 and would drag a second `getrandom` onto wasm.
+    /// k256 0.14 deprecates and which takes a `rand_core` 0.10 RNG, while the
+    /// workspace `rand` is 0.9.
     #[must_use]
     pub fn generate() -> Self {
         loop {
@@ -69,13 +72,21 @@ impl Keys {
 
 /// A signed NIP-01 event, in its wire shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Event {
+    /// The SHA-256 of the serialized event, as lowercase hex.
     pub id: String,
+    /// The public key of the author, as lowercase hex.
     pub pubkey: String,
+    /// The creation time, in seconds since the Unix epoch.
     pub created_at: u64,
+    /// The NIP-01 event kind.
     pub kind: u32,
+    /// The tags of the event, each a list of strings.
     pub tags: Vec<Vec<String>>,
+    /// The content of the event.
     pub content: String,
+    /// The Schnorr signature over the id, as lowercase hex.
     pub sig: String,
 }
 
@@ -105,11 +116,43 @@ impl Event {
         }
     }
 
-    /// Check the id and the signature, as a relay does before it forwards.
+    /// An event that names `pubkey` as its author, with a valid id and a
+    /// signature that is not one: what anyone can forge, since the receiver
+    /// checks only the id.
+    #[cfg(test)]
+    pub(crate) fn forged_as(
+        pubkey: &str,
+        created_at: u64,
+        tag: &[u8; 32],
+        content: String,
+    ) -> Self {
+        let kind = kind_for(tag);
+        let tags = vec![vec![TAG.to_owned(), hex::encode(tag)]];
+        let id = compute_id(pubkey, created_at, kind, &tags, &content);
+        Self {
+            id: hex::encode(id),
+            pubkey: pubkey.to_owned(),
+            created_at,
+            kind,
+            tags,
+            content,
+            sig: "00".repeat(64),
+        }
+    }
+
+    /// Check only that the id is the hash of the fields. A receiver that
+    /// authenticates the content some other way uses this: it stops a relay's
+    /// copy that kept the id and changed the content, and it costs one hash
+    /// where [`verify`](Self::verify) also checks a Schnorr signature.
     ///
     /// # Errors
-    /// The id does not match the fields, or the signature does not verify.
-    pub fn verify(&self) -> Result<()> {
+    /// The id does not match the fields.
+    pub fn verify_id(&self) -> Result<()> {
+        self.checked_id().map(|_| ())
+    }
+
+    /// The id the fields hash to, if it is the id the event names.
+    fn checked_id(&self) -> Result<[u8; 32]> {
         let id = compute_id(
             &self.pubkey,
             self.created_at,
@@ -120,8 +163,18 @@ impl Event {
         if hex::encode(id) != self.id {
             bail!("event id does not match its fields");
         }
+        Ok(id)
+    }
+
+    /// Check the id and the signature, as a relay does before it forwards.
+    ///
+    /// # Errors
+    /// The id does not match the fields, or the signature does not verify.
+    pub fn verify(&self) -> Result<()> {
+        let id = self.checked_id()?;
         let pubkey = hex::decode(&self.pubkey).context("pubkey is not hex")?;
-        let key = VerifyingKey::from_bytes(&pubkey).context("pubkey is not an x-only key")?;
+        let key =
+            VerifyingKey::try_from(pubkey.as_slice()).context("pubkey is not an x-only key")?;
         let sig = hex::decode(&self.sig).context("sig is not hex")?;
         let sig = Signature::try_from(sig.as_slice()).context("sig is not 64 bytes")?;
         key.verify_raw(&id, &sig).context("bad signature")?;
@@ -170,12 +223,15 @@ mod tests {
     fn bip340_vector_zero() {
         let mut secret = [0u8; 32];
         secret[31] = 3;
-        let keys = Keys::from_bytes(&secret).unwrap();
+        let keys = Keys::from_bytes(&secret).expect("a valid secret key");
         assert_eq!(
             keys.pubkey(),
             "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
         );
-        let sig = keys.signing.sign_raw(&[0u8; 32], &[0u8; 32]).unwrap();
+        let sig = keys
+            .signing
+            .sign_raw(&[0u8; 32], &[0u8; 32])
+            .expect("a signature");
         assert_eq!(
             hex::encode(sig.to_bytes()),
             "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca8215\
@@ -198,7 +254,7 @@ mod tests {
     fn a_signed_event_verifies_and_a_tampered_one_does_not() {
         let keys = Keys::generate();
         let event = Event::sign(&keys, 1_700_000_000, &[9u8; 32], "hello".to_owned());
-        event.verify().unwrap();
+        event.verify().expect("a valid event");
         assert_eq!(event.tag(), Some(hex::encode([9u8; 32]).as_str()));
 
         let mut tampered = event.clone();
@@ -211,6 +267,32 @@ mod tests {
         let mut forged = event;
         forged.pubkey = Keys::generate().pubkey().to_owned();
         assert!(forged.verify().is_err(), "another key must not verify");
+    }
+
+    /// The receiver authenticates the content by the seal and the endpoint
+    /// signature inside it, so the check it runs on receipt is the id alone: a
+    /// valid id with a bad Schnorr signature passes, a changed content does not.
+    #[test]
+    fn verify_id_accepts_a_bad_signature_and_refuses_a_changed_content() {
+        let keys = Keys::generate();
+        let event = Event::sign(&keys, 1_700_000_000, &[9u8; 32], "hello".to_owned());
+
+        let mut bad_signature = event.clone();
+        bad_signature.sig = "00".repeat(64);
+        bad_signature
+            .verify_id()
+            .expect("the id still matches the fields");
+        assert!(
+            bad_signature.verify().is_err(),
+            "a relay still refuses the bad signature"
+        );
+
+        let mut changed = event;
+        changed.content = "bye".to_owned();
+        assert!(
+            changed.verify_id().is_err(),
+            "a copy with the id kept and the content changed is refused"
+        );
     }
 
     #[test]

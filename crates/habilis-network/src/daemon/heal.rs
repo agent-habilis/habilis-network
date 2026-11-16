@@ -1,27 +1,39 @@
 //! Healing the gossip mesh: the heal tick, the resubscribe path when the
 //! stream ends, and applying a rung change chosen off-loop.
 //!
-//! Split out of `event_loop` for the same reason as `beacon_arm` — this is
+//! Split out of `event_loop` for the same reason as `cohost_arm` — this is
 //! recovery, not the loop, and it reads better without the tick arms around it.
+
+use crate::daemon::state::{RendezvousFlag, Standing};
+use std::mem;
+mod gossip_link;
+mod resubscribe;
+mod resubscribe_env;
 
 use std::time::Duration;
 
 use anyhow::Result;
 
-use iroh::{Endpoint, RelayUrl};
-use iroh_gossip::api::{GossipReceiver, GossipSender};
+use iroh::RelayUrl;
 use tokio::sync::watch;
 
-use super::ctx::HandlerCtx;
-use super::event_loop::{CtxParts, TickGap};
+use super::event_loop::tick_gap::TickGap;
+use super::handler_ctx::HandlerCtx;
 use super::setup;
 use super::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
-use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
-use crate::util::tuning::{RESUBSCRIBE_MAX_ATTEMPTS, heal_stall_threshold_secs};
+use crate::util::tuning::{RESUBSCRIBE_MAX_ATTEMPTS, heal_stall_threshold};
 use crate::{beacon, gossip, lookup};
+
+use crate::transport::webrtc;
+use crate::util::tuning;
+
+use resubscribe::Resubscribe;
+
+pub(super) use gossip_link::GossipLink;
+pub(super) use resubscribe_env::ResubscribeEnv;
 
 /// Monotonic `gap` past `stall_threshold`: the process was throttled
 /// (but not fully frozen) between heal ticks (macOS App Nap / timer
@@ -55,17 +67,22 @@ pub(super) fn is_wall_resume(
 pub(super) async fn run_heal(
     gap: TickGap,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     params: &beacon::RendezvousParams,
 ) {
-    let threshold = Duration::from_secs(heal_stall_threshold_secs());
+    // A periodic return that fell due is owed from this tick, for a bounded time.
+    state.pay_periodic_return(Instant::now(), context.endpoint.id());
+    let threshold = heal_stall_threshold();
     let hard_edge = is_resume(gap.mono, threshold) || is_wall_resume(gap.wall, gap.mono, threshold);
     // A mesh with no rendezvous (Nostr only) has nothing to re-graft or
     // re-assert; the re-bridge below still runs.
     if params.has_rendezvous {
         // A browser-shaped peer's rendezvous link can only ever be admitted on
         // a data channel; keep offering one while the link is down.
-        crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
+        webrtc::rendezvous::negotiate_rendezvous_session(state, context);
+        // A node that came back to a mesh whose links are all up gets no link
+        // event to release on, so the heal tick checks too.
+        gossip::heal::release_rendezvous_if_due(state, context).await;
         if hard_edge {
             tracing::warn!(
                 target: "habilis_network::gossip",
@@ -75,8 +92,11 @@ pub(super) async fn run_heal(
             );
             state.note_degraded();
             // The frozen-era link view is stale by definition; clearing this
-            // re-arms the regular tick's probe until a fresh NeighborUp.
-            state.rendezvous_linked = false;
+            // re-arms the regular tick's probe until a fresh NeighborUp. Every link
+            // is stale too, so a node that had let go of the rendezvous is owed
+            // one return to it.
+            state.rendezvous_flags.remove(&RendezvousFlag::Linked);
+            state.owe_rendezvous_return(Instant::now());
             // A free reading taken before the freeze is stale for the same
             // reason, across the widest gap any of these deadlines can span.
             state.forget_rendezvous_verdict();
@@ -85,19 +105,17 @@ pub(super) async fn run_heal(
             // re-forming; push it out a steady interval so the re-bootstrap
             // settles first.
             if state.next_rival_recheck.is_some() {
-                state.next_rival_recheck = Some(
-                    Instant::now() + Duration::from_secs(crate::util::tuning::rival_recheck_secs()),
-                );
+                state.next_rival_recheck = Some(Instant::now() + tuning::rival_recheck());
             }
             // Re-assert the rendezvous hint (the network changed). The rung
             // is re-validated off-loop by the beacon's liveness self-monitor,
             // so a rung that died during the freeze self-corrects — no inline
             // ladder walk on the event loop here.
-            setup::register_rendezvous(ctx.endpoint, params);
-            if crate::transport::webrtc::rendezvous_graftable(state) {
-                gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
+            setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+            if webrtc::rendezvous::rendezvous_graftable(state) {
+                gossip::heal::tick_heal_hard(context.endpoint, params.id, context.sender).await;
             }
-        } else if state.rendezvous_linked {
+        } else if state.rendezvous_flags.contains(&RendezvousFlag::Linked) {
             // A live rendezvous link has nothing to heal — and healing it
             // anyway is what flapped it once per tick (both heal legs dial
             // `GOSSIP_ALPN`, which the beacon's gossip adopts, superseding
@@ -107,8 +125,16 @@ pub(super) async fn run_heal(
                 target: "habilis_network::gossip",
                 "heal tick: rendezvous linked; idle"
             );
-        } else if crate::transport::webrtc::rendezvous_graftable(state) {
-            gossip::heal::tick_heal(params.id, ctx.sender).await;
+        } else if !state.rendezvous_wanted() {
+            // Enough links to others: the rendezvous was let go of on purpose, and
+            // grafting it now would undo that. A node that falls below the count
+            // comes back through the next tick.
+            tracing::debug!(
+                target: "habilis_network::gossip",
+                "heal tick: rendezvous released; idle"
+            );
+        } else if webrtc::rendezvous::rendezvous_graftable(state) {
+            gossip::heal::tick_heal(params.id, context.sender).await;
         } else {
             // The JSEP offer fired at the top of this tick; the graft waits for
             // the session it needs to survive the beacon's accept gate.
@@ -127,54 +153,28 @@ pub(super) async fn run_heal(
     // (nothing remembered), so it adds no churn. `linked_endpoints` is
     // not cleared on the resume edge, hence the explicit `hard_edge` arm.
     if (hard_edge || state.linked_endpoints.is_empty()) && !state.known_endpoints.is_empty() {
-        gossip::heal::rebridge_known(state, ctx).await;
+        gossip::heal::rebridge_known(state, context).await;
     }
+    // A member of the LAN that was asked to be a neighbor and is still not one is asked again.
+    gossip::lan::ask_unlinked_again(state, context).await;
     // Starvation watchdog: links/heal can look busy while no traffic
     // flows (the roster-collapse signature), so the last word every heal
     // tick is a check on verified *inbound* silence.
-    if state.starvation_due(
-        Instant::now(),
-        Duration::from_secs(crate::util::tuning::starvation_threshold_secs()),
-    ) {
-        gossip::heal::recover_from_starvation(state, ctx).await;
+    if state.starvation_due(Instant::now(), tuning::starvation_threshold()) {
+        gossip::heal::recover_from_starvation(state, context).await;
     }
-}
-/// Outcome of one resubscribe attempt (the heal arm drives one per
-/// tick while the gossip stream is down).
-pub(super) enum Resubscribe {
-    Restored(GossipSender, GossipReceiver),
-    Pending,
-    Fatal,
-}
-/// The resubscribe attempt's read-only environment: the gossip frontend to
-/// re-subscribe through, the rendezvous params to bootstrap from, the shared
-/// ctx-building parts (for its `sink` and to rebuild a [`HandlerCtx`] once the
-/// sender is swapped), and the CLI hard-exit flag for the `Fatal` path.
-pub(super) struct ResubscribeEnv<'a> {
-    pub(super) gossip: &'a iroh_gossip::net::Gossip,
-    pub(super) params: &'a beacon::RendezvousParams,
-    pub(super) parts: &'a CtxParts<'a>,
-    pub(super) exit_on_quit: bool,
-}
-/// The live gossip link a resubscribe mutates: the sender/receiver pair
-/// swapped in on success, and the consecutive-failure counter it resets or
-/// increments.
-pub(super) struct GossipLink<'a> {
-    pub(super) sender: &'a mut MeshSender,
-    pub(super) receiver: &'a mut GossipReceiver,
-    pub(super) attempts: &'a mut u32,
 }
 /// One heal-tick turn while the gossip stream is down: attempt the
 /// resubscribe and, on success, swap in the fresh sender/receiver,
 /// drain the dead subscription's buffer (the actor counts those
 /// messages as delivered — overlay dedup will never re-push them, and
-/// anti-entropy resends of them are deduped too, so the buffer is the
+/// repeats of them are deduped too, so the buffer is the
 /// only copy), then re-enter the overlay via the starvation-recovery
 /// primitive (degraded mesh, throttles cleared, known peers re-dialed,
 /// arrival re-announced). On `Fatal` (the actor itself is gone) the
 /// daemon stops posing as a live member: statusline state file cleared
-/// (a `Left` broadcast is pointless on a dead topic), `exit(1)` on the
-/// CLI path, `Err` for in-process drivers.
+/// (a `Left` broadcast is pointless on a dead topic), then `Err`: the loop releases the beacon
+/// and the endpoints it owns, and on the CLI path exits with code 1 after that.
 pub(super) async fn resubscribe_tick(
     env: &ResubscribeEnv<'_>,
     state: &mut EventLoopState,
@@ -183,16 +183,22 @@ pub(super) async fn resubscribe_tick(
 ) -> Result<()> {
     match try_resubscribe(env, state, link.attempts).await {
         Resubscribe::Restored(new_sender, new_receiver) => {
-            let mut dead_receiver = std::mem::replace(link.receiver, new_receiver);
+            let mut dead_receiver = mem::replace(link.receiver, new_receiver);
+            if let Some(handle) = &state.gossip_handle {
+                handle.attach_gossip(new_sender.clone());
+            }
             link.sender.replace_gossip(new_sender);
-            state.gossip_open = true;
+            state.standing.insert(Standing::GossipOpen);
             // The dead subscription's link view is void; the fresh one
             // emits its own NeighborUps (and re-arms the probe gate).
-            state.rendezvous_linked = false;
-            let ctx = env.parts.ctx(link.sender);
-            gossip::drain_dead_receiver(&mut dead_receiver, state, app, &ctx).await;
-            drop(dead_receiver);
-            gossip::heal::recover_from_starvation(state, &ctx).await;
+            state.rendezvous_flags.remove(&RendezvousFlag::Linked);
+            let context = env.parts.handler_ctx(link.sender);
+            gossip::drain_queued(&mut dead_receiver, state, app, &context).await;
+            // Nothing in the normal path: the guard for a splitter that ended early.
+            if let Some(mut topic_receiver) = dead_receiver.into_dead() {
+                gossip::drain_dead_receiver(&mut topic_receiver, state, app, &context).await;
+            }
+            gossip::heal::recover_from_starvation(state, &context).await;
         }
         Resubscribe::Pending => {}
         Resubscribe::Fatal => {
@@ -203,20 +209,15 @@ pub(super) async fn resubscribe_tick(
             env.parts.sink.emit(NodeEvent::Error(
                 "gossip subscription unrecoverable; shutting down".to_owned(),
             ));
-            #[cfg(not(feature = "dhat-heap"))]
-            if env.exit_on_quit {
-                std::process::exit(1);
-            }
-            #[cfg(feature = "dhat-heap")]
-            let _ = env.exit_on_quit;
             anyhow::bail!("gossip subscription unrecoverable after repeated resubscribe attempts");
         }
     }
     Ok(())
 }
-/// Re-open the gossip topic after its stream terminally ended. The
-/// designed-for remedy, not a workaround: iroh-gossip closes a lagging
-/// subscriber outright and its docs instruct "close and re-open".
+/// Re-open the gossip topic after its stream terminally ended, for example
+/// when the actor dropped the subscription. A lag does not end the stream:
+/// the topic reports it and keeps the subscription (the split counts it),
+/// whatever the docs of iroh-gossip say about closing a lagging subscriber.
 /// Bootstrap is the rendezvous plus every remembered peer so the fresh
 /// subscription re-grafts without waiting for lookups. `Fatal` after
 /// `RESUBSCRIBE_MAX_ATTEMPTS` consecutive failures: a subscribe error
@@ -228,11 +229,17 @@ pub(super) async fn try_resubscribe(
     attempts: &mut u32,
 ) -> Resubscribe {
     let mut bootstrap = Vec::new();
-    if !state.rendezvous_graft_needs_session {
+    if !state
+        .rendezvous_flags
+        .contains(&RendezvousFlag::GraftNeedsSession)
+        && state.rendezvous_wanted()
+    {
         bootstrap.push(env.params.id);
     }
     bootstrap.extend(state.known_endpoints.iter().copied());
-    match env.gossip.subscribe(env.params.topic_id, bootstrap).await {
+    match gossip::split::subscribe_mesh(env.gossip, env.params.topic_id, env.params.id, bootstrap)
+        .await
+    {
         Ok(topic) => {
             *attempts = 0;
             tracing::warn!(
@@ -243,6 +250,7 @@ pub(super) async fn try_resubscribe(
                 "gossip stream restored; rejoining the mesh".to_owned(),
             ));
             let (sender, receiver) = topic.split();
+            let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
             Resubscribe::Restored(sender, receiver)
         }
         Err(error) => {
@@ -271,7 +279,6 @@ pub(super) async fn try_resubscribe(
 pub(super) fn apply_rung_change(
     state: &mut EventLoopState,
     params: &mut beacon::RendezvousParams,
-    endpoint: &Endpoint,
     rendezvous: &mut Option<beacon::Rendezvous>,
     rung_rx: &watch::Receiver<Option<RelayUrl>>,
 ) {
@@ -286,7 +293,7 @@ pub(super) fn apply_rung_change(
             "bootstrap relay rung changed; re-registering rendezvous and re-homing the beacon"
         );
         params.bootstrap_relay = new;
-        setup::register_rendezvous(endpoint, params);
+        setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
         // Release the beacon so `maybe_cohost` → `beacon::ensure` rebuilds it
         // homed on the new rung at the next heal/reclaim tick — `shed`, not a
         // plain drop. The old endpoint is still open and still homed on the
@@ -315,57 +322,214 @@ mod tests {
     use super::{is_resume, is_wall_resume};
     use std::time::Duration;
 
+    #[cfg(feature = "host")]
+    use crate::beacon;
+    #[cfg(feature = "host")]
+    use crate::gossip::split;
+    #[cfg(feature = "host")]
+    use crate::membership;
+    #[cfg(feature = "host")]
+    use crate::protocol::meshes;
+    #[cfg(feature = "host")]
+    use crate::testing;
+    #[cfg(feature = "host")]
+    use crate::transport;
+    #[cfg(feature = "host")]
+    use crate::transport::PayloadPath;
+    #[cfg(feature = "host")]
+    use iroh_gossip::proto;
+    #[cfg(feature = "host")]
+    use std::env;
+    #[cfg(feature = "host")]
+    use std::process;
+    #[cfg(feature = "host")]
+    use tokio::sync::mpsc;
+    #[cfg(feature = "host")]
+    use tokio::sync::watch;
+    /// The test binary runs the test below again, in a process of its own, with this variable set.
+    #[cfg(feature = "host")]
+    const FATAL_CHILD: &str = "HABILIS_TEST_FATAL_RESUBSCRIBE_CHILD";
+
+    /// A gossip actor that is gone ends the daemon, and the loop exits the process only after it
+    /// has released the beacon and closed the endpoints that it owns, on its error path. An exit
+    /// inside the resubscribe skips both. The check runs in a child process, because an exit
+    /// inside the resubscribe ends the process.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_fatal_resubscribe_leaves_the_exit_to_the_loop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::{GossipLink, ResubscribeEnv, resubscribe_tick};
+            use crate::daemon::event_loop::ctx_parts::CtxParts;
+            use crate::testing::LaneNode;
+            use crate::util::tuning::RESUBSCRIBE_MAX_ATTEMPTS;
+
+            if env::var_os(FATAL_CHILD).is_some() {
+                let node = LaneNode::start().await;
+                let topic_id = proto::TopicId::from_bytes([8u8; 32]);
+                let topic = split::subscribe_mesh(
+                    &node.gossip,
+                    topic_id,
+                    iroh::SecretKey::generate().public(),
+                    [],
+                )
+                .await
+                .expect("subscribe while the actor lives");
+                let (gossip_sender, gossip_receiver) = topic.split();
+                let mut sender = transport::MeshSender::new(gossip_sender);
+                let mut receiver = split::spawn_split(gossip_receiver, None);
+                node.stop_gossip().await;
+
+                let secret = iroh::SecretKey::generate();
+                let params = beacon::RendezvousParams {
+                    topic_id,
+                    id: secret.public(),
+                    secret,
+                    bind_ports: Vec::new(),
+                    lookups: meshes::LookupOpts::loopback(),
+                    relay_transport: PayloadPath::DirectOnly,
+                    bootstrap_relay: None,
+                    rung_tx: watch::channel(None).0,
+                    has_rendezvous: true,
+                };
+                let parts = CtxParts {
+                    endpoint: &node.endpoint,
+                    mesh: &node.mesh,
+                    author: &node.author,
+                    identity: &node.identity,
+                    our_pubkey: node.our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &node.sink,
+                };
+                let env = ResubscribeEnv {
+                    gossip: &node.gossip,
+                    params: &params,
+                    parts: &parts,
+                };
+                let mut state = node.state();
+                let (inbound, _unread) = mpsc::channel(1);
+                let mut app = membership::MembershipApp::new(inbound);
+                let mut attempts = 0;
+                let mut outcome = Ok(());
+                for _ in 0..RESUBSCRIBE_MAX_ATTEMPTS {
+                    outcome = resubscribe_tick(
+                        &env,
+                        &mut state,
+                        &mut app,
+                        GossipLink {
+                            sender: &mut sender,
+                            receiver: &mut receiver,
+                            attempts: &mut attempts,
+                        },
+                    )
+                    .await;
+                }
+                println!("FATAL_RETURNED err={}", outcome.is_err());
+                node.endpoint.close().await;
+                return;
+            }
+            let mut command = process::Command::new(env::current_exe().expect("the test binary"));
+            command
+                .args([
+                    "--exact",
+                    "daemon::heal::tests::a_fatal_resubscribe_leaves_the_exit_to_the_loop",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FATAL_CHILD, "1");
+            let output = command.output().expect("run the test binary");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("FATAL_RETURNED err=true"),
+                "the process exited inside the resubscribe, before the loop released its endpoints: {stdout}"
+            );
+        });
+    }
+
     #[test]
     fn is_resume_only_past_threshold() {
+        let _guard = ::habilis_network_test_tracing::init();
         let threshold = Duration::from_mins(1);
         // A normal heal cadence (≤ ~15s) is never a resume.
-        assert!(!is_resume(Duration::from_secs(0), threshold));
-        assert!(!is_resume(Duration::from_secs(15), threshold));
-        assert!(!is_resume(Duration::from_secs(59), threshold));
+        assert!(
+            !is_resume(Duration::from_secs(0), threshold),
+            "a zero gap is no resume"
+        );
+        assert!(
+            !is_resume(Duration::from_secs(15), threshold),
+            "a 15 s gap is no resume"
+        );
+        assert!(
+            !is_resume(Duration::from_secs(59), threshold),
+            "a 59 s gap is no resume"
+        );
         // Exactly at the threshold is not yet a stall (strictly `>`).
-        assert!(!is_resume(Duration::from_mins(1), threshold));
+        assert!(
+            !is_resume(Duration::from_mins(1), threshold),
+            "a one minute gap is still below the threshold"
+        );
         // A multi-minute gap = the process was frozen → hard re-bootstrap.
-        assert!(is_resume(Duration::from_secs(61), threshold));
-        assert!(is_resume(Duration::from_hours(1), threshold));
+        assert!(
+            is_resume(Duration::from_secs(61), threshold),
+            "a 61 s gap is a resume"
+        );
+        assert!(
+            is_resume(Duration::from_hours(1), threshold),
+            "a one hour gap is a resume"
+        );
     }
 
     #[test]
     fn is_resume_respects_injected_threshold() {
         // The subprocess stall regression shortens the threshold via
         // the env knob; the comparison must track whatever is passed.
+        let _guard = ::habilis_network_test_tracing::init();
         let short = Duration::from_secs(4);
-        assert!(!is_resume(Duration::from_secs(3), short));
-        assert!(is_resume(Duration::from_secs(5), short));
+        assert!(
+            !is_resume(Duration::from_secs(3), short),
+            "a 3 s gap is no resume under the injected threshold"
+        );
+        assert!(
+            is_resume(Duration::from_secs(5), short),
+            "a 5 s gap is a resume under the injected threshold"
+        );
     }
 
     #[test]
     fn wall_resume_detects_macos_sleep_signature() {
+        let _guard = ::habilis_network_test_tracing::init();
         let threshold = Duration::from_mins(1);
         // macOS sleep: the monotonic clock froze (a few seconds of
         // real post-wake time) while the wall clock jumped a full day.
         // The monotonic gap alone misses it; the divergence catches it.
         let mono_gap = Duration::from_secs(3);
         let wall_gap = Duration::from_hours(24);
-        assert!(!is_resume(mono_gap, threshold));
-        assert!(is_wall_resume(wall_gap, mono_gap, threshold));
+        assert!(
+            !is_resume(mono_gap, threshold),
+            "a gap with no wall signature is no resume"
+        );
+        assert!(
+            is_wall_resume(wall_gap, mono_gap, threshold),
+            "a wall gap beside a monotonic gap is a wall resume"
+        );
     }
 
     #[test]
     fn wall_resume_ignores_clocks_advancing_together() {
+        let _guard = ::habilis_network_test_tracing::init();
         let threshold = Duration::from_mins(1);
         // Steady operation: wall and monotonic advance in lockstep, so
         // their divergence is ~0 — never a resume, whatever the cadence.
-        assert!(!is_wall_resume(
-            Duration::from_secs(15),
-            Duration::from_secs(15),
-            threshold
-        ));
+        assert!(
+            !is_wall_resume(Duration::from_secs(15), Duration::from_secs(15), threshold),
+            "clocks that advance together are no wall resume"
+        );
         // A wall clock running slightly behind monotonic (NTP step
         // back) saturates to 0 divergence, not a spurious resume.
-        assert!(!is_wall_resume(
-            Duration::from_secs(10),
-            Duration::from_secs(15),
-            threshold
-        ));
+        assert!(
+            !is_wall_resume(Duration::from_secs(10), Duration::from_secs(15), threshold),
+            "a short gap pair is no wall resume"
+        );
     }
 }

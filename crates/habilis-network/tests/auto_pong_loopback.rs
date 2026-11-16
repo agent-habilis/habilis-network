@@ -9,33 +9,42 @@
 
 #![cfg(feature = "host")]
 
+use habilis_network::protocol::messages::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
-    PingRound,
 };
-use habilis_network::net::TransportOpts;
-use habilis_network::protocol::{LookupOpts, Message, MessageKind, Nickname, PresenceSubtype};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::{Notify, oneshot};
 
+use habilis_network::ops;
+use std::{env, fs};
+use tokio::time;
 type Rtts = Vec<(Nickname, u64)>;
+
+/// The last lines of the log, for the message of a failed assertion. The log is
+/// also written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
+fn trace() -> String {
+    let log = habilis_network_test_tracing::captured_logs();
+    if let Ok(path) = env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = fs::write(path, &log);
+    }
+    let lines: Vec<&str> = log.lines().collect();
+    lines[lines.len().saturating_sub(200)..].join("\n")
+}
 
 /// Presence alone forms the mesh; a session request runs one ping round.
 struct Pinger;
 
 #[habilis_network::async_trait]
 impl NodeApp for Pinger {
-    fn classify(&self, _message: &Message) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+    fn classify(&self, _message: &Authored) -> AppClass {
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -56,23 +65,11 @@ impl NodeDriver for Pinger {
 
     async fn handle_session(
         &mut self,
-        resp: Self::Session,
+        response: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
-        let now = tokio::time::Instant::now();
-        state.arm_ping_round(PingRound {
-            t1: now,
-            deadline: now
-                + Duration::from_secs(habilis_network::runtime::tuning::ping_window_secs()),
-            pongs: std::collections::HashMap::new(),
-            resp: Some(resp),
-        });
-        habilis_network::ops::broadcast_msg(
-            ctx.sender,
-            &Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity),
-        )
-        .await;
+        ops::start_ping_round(state, context, Some(response)).await;
         true
     }
 }
@@ -86,15 +83,15 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg } = event
+        if let NodeEvent::Presence { message, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
-            } = msg.kind
+            } = message.kind
         {
             self.peers
                 .lock()
                 .expect("no poison")
-                .push(msg.author.clone());
+                .push(message.author.clone());
             self.changed.notify_waiters();
         }
     }
@@ -112,37 +109,25 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
+// each member's sink is shared with the node that writes to it, and the test reads it
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Pinger> {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let config = setup_mesh(
         SetupKind::Topic {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author,
-            max_peers: 16,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink,
-            multihop: false,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
-    Node::spawn(config, Pinger, None, false)
+    Node::spawn(config, Pinger, None, SignalHandling::Leave)
 }
 
 async fn ping(node: &Node<Pinger>) -> Rtts {
@@ -153,37 +138,80 @@ async fn ping(node: &Node<Pinger>) -> Rtts {
     rx.await.expect("the round is finalized")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn each_peer_linked_only_by_gossip_answers_the_others_ping() {
-    let topic = format!("auto-pong-{}", rand::random::<u64>());
-    let alice_saw = Arc::new(Joined::default());
-    let bob_saw = Arc::new(Joined::default());
-    let alice = spawn(&topic, "alice", Arc::clone(&alice_saw)).await;
-    let bob = spawn(&topic, "bob", Arc::clone(&bob_saw)).await;
+#[test]
+fn each_peer_linked_only_by_gossip_answers_the_others_ping() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let nonce: u64 = rand::random();
+        let topic = format!("auto-pong-{nonce}");
+        // each member's sink is shared with the node that writes to it, and the test reads it
+        let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
+        let bob_saw = Arc::new(Joined::default());
 
-    let deadline = Duration::from_secs(45);
-    let alice_nick = Nickname::new("alice").expect("valid");
-    let bob_nick = Nickname::new("bob").expect("valid");
-    assert!(
-        alice_saw.wait_for(&bob_nick, deadline).await,
-        "alice never saw bob join"
-    );
-    assert!(
-        bob_saw.wait_for(&alice_nick, deadline).await,
-        "bob never saw alice join"
-    );
+        let alice = spawn(&topic, "alice", Arc::clone(&alice_saw)).await;
+        let bob = spawn(&topic, "bob", Arc::clone(&bob_saw)).await;
 
-    let (alice_rtts, bob_rtts) = tokio::join!(ping(&alice), ping(&bob));
-    let answered = |rtts: &Rtts, nick: &Nickname| rtts.iter().any(|(peer, _)| peer == nick);
-    assert!(
-        answered(&alice_rtts, &bob_nick),
-        "bob never answered alice's ping: {alice_rtts:?}"
-    );
-    assert!(
-        answered(&bob_rtts, &alice_nick),
-        "alice never answered bob's ping: {bob_rtts:?}"
-    );
+        let deadline = Duration::from_secs(45);
+        let alice_nick = Nickname::try_new("alice").expect("valid");
+        let bob_nick = Nickname::try_new("bob").expect("valid");
+        assert!(
+            alice_saw.wait_for(&bob_nick, deadline).await,
+            "alice never saw bob join\n{}",
+            trace()
+        );
+        assert!(
+            bob_saw.wait_for(&alice_nick, deadline).await,
+            "bob never saw alice join\n{}",
+            trace()
+        );
 
-    alice.leave().await.expect("alice leaves");
-    bob.leave().await.expect("bob leaves");
+        let (alice_rtts, bob_rtts) = tokio::join!(ping(&alice), ping(&bob));
+        let answered = |rtts: &Rtts, nick: &Nickname| rtts.iter().any(|(peer, _)| peer == nick);
+        assert!(
+            answered(&alice_rtts, &bob_nick),
+            "bob never answered alice's ping: {alice_rtts:?}\n{}",
+            trace()
+        );
+        assert!(
+            answered(&bob_rtts, &alice_nick),
+            "alice never answered bob's ping: {bob_rtts:?}\n{}",
+            trace()
+        );
+
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+    });
+}
+
+/// A probe sent while no link exists reaches nobody, so the first probe of a round is lost. The
+/// second one, sent at the middle of the window, meets a linked peer, and the round holds it.
+#[test]
+fn a_ping_sent_before_any_link_exists_is_answered_after_the_second_probe() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let nonce: u64 = rand::random();
+        let topic = format!("auto-pong-early-{nonce}");
+
+        // each member's sink is shared with the node that writes to it, and the test reads it
+        let alice = spawn(&topic, "alice", Arc::new(Joined::default())).await;
+        // each member's sink is shared with the node that writes to it, and the test reads it
+        let bob = spawn(&topic, "bob", Arc::new(Joined::default())).await;
+        let bob_nick = Nickname::try_new("bob").expect("valid");
+
+        // No wait for `joined`: the round starts before the pair is linked.
+        let rtts = ping(&alice).await;
+
+        assert!(
+            rtts.iter().any(|(peer, _)| *peer == bob_nick),
+            "bob never answered alice's early ping: {rtts:?}\n{}",
+            trace()
+        );
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+    });
 }

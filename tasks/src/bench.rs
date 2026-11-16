@@ -1,13 +1,13 @@
 //! `cargo task benchmark` — bulk throughput over the transports.
 //!
 //! One question: is the iroh↔WebRTC integration the bottleneck? So the cells
-//! are habilis-network over WebRTC in every pairing that exists — browser↔browser,
+//! are habilis-network over `WebRTC` in every pairing that exists — browser↔browser,
 //! browser↔native, native↔native — read against two ceilings: plain iroh on
 //! UDP, and a bare data channel with no QUIC in it at all.
 //!
 //! Every cell moves the same bulk protocol (`habilis_network_iroh_webrtc_transport::
 //! bench`) over one QUIC bi-stream, times it on the receiving side only, and
-//! asserts which path carried it — a cell that claims WebRTC and quietly ran
+//! asserts which path carried it — a cell that claims `WebRTC` and quietly ran
 //! on UDP is a wrong number, not a fast one. The JSEP round is timed
 //! separately and kept out of the throughput window.
 
@@ -18,14 +18,22 @@ use clap::{Args as ClapArgs, ValueEnum};
 use crate::TaskOutcome;
 use crate::util::output;
 
+#[cfg(not(feature = "bench"))]
+use crate::util;
+#[cfg(feature = "bench")]
+mod browser;
+#[cfg(feature = "bench")]
+mod engine;
+#[cfg(feature = "bench")]
+mod gossip;
+#[cfg(feature = "bench")]
+mod multihop;
 #[cfg(feature = "bench")]
 mod native;
 #[cfg(feature = "bench")]
 mod run;
 #[cfg(feature = "bench")]
 mod serve;
-#[cfg(feature = "bench")]
-mod web;
 
 #[derive(ClapArgs)]
 pub(crate) struct Args {
@@ -68,14 +76,14 @@ pub(crate) enum Cell {
     HabilisNetworkChromeNative,
     /// A Safari Technology Preview client, a str0m server in this process.
     HabilisNetworkSafariNative,
-    /// A Safari Technology Preview client, a Chrome server: the two WebRTC
+    /// A Safari Technology Preview client, a Chrome server: the two `WebRTC`
     /// stacks against each other.
     HabilisNetworkSafariChrome,
-    /// Two native endpoints wired as the engine wires them: the WebRTC
+    /// Two native endpoints wired as the engine wires them: the `WebRTC`
     /// transport registered, direct UDP available and preferred. Expected on
     /// `ip`, so it reads as the engine-shaped twin of the iroh baseline.
     HabilisNetworkNativeNative,
-    /// Two native endpoints with WebRTC as their only transport — str0m at
+    /// Two native endpoints with `WebRTC` as their only transport — str0m at
     /// both ends, the one cell that isolates the native double encryption.
     HabilisNetworkNativeNativeWebRtc,
     /// Plain iroh on loopback UDP, no custom transport: the native ceiling.
@@ -88,9 +96,24 @@ pub(crate) enum Cell {
     /// is the channel's own per-message cost; the gap from here to
     /// [`Self::HabilisNetworkChromeChrome`] is the integration's.
     RawChromeChromeDatagram,
+    /// The ladder's UDP rung: plain iroh on loopback, with round trips.
+    LadderUdp,
+    /// The ladder's `WebRTC` rung: str0m at both ends, with round trips.
+    LadderWebRtc,
+    /// The ladder's multihop rung over a direct underlay link.
+    LadderMultihopDirect,
+    /// The ladder's multihop rung through a third member.
+    LadderMultihopThird,
+    /// The ladder's relay rung: no IP transport, a local relay between.
+    LadderRelay,
+    /// One pair on IP with the gossip path open under it: the flood it costs.
+    GossipBackupPath,
+    /// The ladder's gossip rung: a QUIC connection between two members with no IP
+    /// path, carried by the real gossip flood through a third member.
+    LadderGossip,
 }
 
-const CELLS: [Cell; 9] = [
+const CELLS: [Cell; 16] = [
     Cell::HabilisNetworkChromeChrome,
     Cell::HabilisNetworkChromeNative,
     Cell::HabilisNetworkSafariNative,
@@ -100,6 +123,13 @@ const CELLS: [Cell; 9] = [
     Cell::IrohNativeNative,
     Cell::RawChromeChrome,
     Cell::RawChromeChromeDatagram,
+    Cell::LadderUdp,
+    Cell::LadderWebRtc,
+    Cell::LadderMultihopDirect,
+    Cell::LadderMultihopThird,
+    Cell::LadderRelay,
+    Cell::GossipBackupPath,
+    Cell::LadderGossip,
 ];
 
 impl Cell {
@@ -114,6 +144,13 @@ impl Cell {
             Self::IrohNativeNative => "iroh native-native",
             Self::RawChromeChrome => "webrtc chrome-chrome (raw, 64 KiB msgs)",
             Self::RawChromeChromeDatagram => "webrtc chrome-chrome (raw, 1200 B msgs)",
+            Self::LadderUdp => "ladder udp",
+            Self::LadderWebRtc => "ladder webrtc",
+            Self::LadderMultihopDirect => "ladder multihop (direct)",
+            Self::LadderMultihopThird => "ladder multihop (via third)",
+            Self::LadderRelay => "ladder relay",
+            Self::GossipBackupPath => "gossip backup path",
+            Self::LadderGossip => "ladder gossip",
         }
     }
 }
@@ -139,5 +176,5 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     #[cfg(feature = "bench")]
     return run::run(args);
     #[cfg(not(feature = "bench"))]
-    crate::util::reexec_with_feature("bench", "the benchmark", true)
+    util::reexec_with_feature("bench", "the benchmark", true)
 }

@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use tokio_websockets::{ClientBuilder, Limits, Message, WebSocketStream};
 use url::Url;
 
+use rustls::crypto::ring;
 /// A plain or TLS stream behind one type, so the socket type does not depend on
 /// the URL scheme.
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -89,19 +90,16 @@ pub(crate) async fn connect(url: &Url) -> Result<(Sender, Receiver)> {
 
 fn tls_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let roots = rustls::RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-            };
-            let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .expect("ring supports the default TLS versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-            Arc::new(config)
-        })
-        .clone()
+    Arc::clone(CONFIG.get_or_init(|| {
+        let roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        let config =
+            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("ring supports the default TLS versions")
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        Arc::new(config)
+    }))
 }

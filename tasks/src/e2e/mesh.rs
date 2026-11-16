@@ -5,7 +5,7 @@
 //! (`packages/habilis-network-wasm/harness`), driven cell by cell:
 //!
 //! - **policy** — the mesh's `relay_transport`, on or off;
-//! - **paths** — the mesh's transport list: UDP and WebRTC, WebRTC only, or
+//! - **paths** — the mesh's transport list: UDP and `WebRTC`, `WebRTC` only, or
 //!   UDP only, to force the punch, the data channel, and the refusal in turn;
 //! - **join mode** — both derive from a topic, the browser joins the id the
 //!   native side minted, or the browser opens the topic first;
@@ -21,17 +21,19 @@
 //! UDP-only lookup-only cells must not open at all: the tab refuses a mesh it
 //! has no path in, and says why (`BROWSER_HAS_NO_PATH`).
 
+use std::{env, fs, io, mem, thread};
+use tokio::time;
+mod bun_server;
+mod native;
+
 use std::fmt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::TaskOutcome;
-use crate::util::cdp;
 use crate::util::page::{rand_token, wait_ready};
-use crate::util::webdriver;
-use crate::util::{output, repo_root, wait_for};
+use crate::util::{cdp, output, repo_root, target_dir, wait_for, webdriver};
 
 use habilis_network::membership;
 use habilis_network::protocol::{Lookup, Transport};
@@ -39,10 +41,19 @@ use habilis_network::protocol::{Lookup, Transport};
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
-/// A linked pair has to survive the beacon claim (~8 s), a WebRTC
+use habilis_network::net::test_relay;
+use habilis_network::runtime::BROWSER_HAS_NO_PATH;
+use habilis_network::util::tuning;
+use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
+use tokio::runtime::Builder;
+use tokio::time::{Instant, Instant as tokio_Instant};
+
+pub(super) use bun_server::BunServer;
+pub(super) use native::Native;
+/// A linked pair has to survive the beacon claim (~8 s), a `WebRTC`
 /// negotiation or a hole punch, and one alive-tick retry.
-const LINK_TIMEOUT: Duration = Duration::from_mins(4);
-const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+pub(super) const LINK_TIMEOUT: Duration = Duration::from_mins(4);
+pub(super) const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Policy {
@@ -192,27 +203,27 @@ fn cells(quick: bool) -> Vec<Cell> {
 /// Every tracing line the in-process native peer emits, for grep-shaped
 /// assertions (`relay-only path refused`, the census). One global buffer:
 /// the subscriber is process-wide, and cells run serially.
-fn log_buffer() -> &'static Arc<Mutex<String>> {
-    static BUFFER: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
-    BUFFER.get_or_init(|| Arc::new(Mutex::new(String::new())))
+fn log_buffer() -> &'static Mutex<String> {
+    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
+    BUFFER.get_or_init(|| Mutex::new(String::new()))
 }
 
 struct BufferWriter;
 
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+impl io::Write for BufferWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Ok(mut buffer) = log_buffer().lock() {
             buffer.push_str(&String::from_utf8_lossy(buf));
         }
         Ok(buf.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
 
-fn init_logging() {
+pub(super) fn init_logging() {
     use tracing_subscriber::fmt::MakeWriter;
     struct Make;
     impl<'a> MakeWriter<'a> for Make {
@@ -232,101 +243,20 @@ fn init_logging() {
 }
 
 /// Peek without draining — for waiting on a native-side line mid-cell.
-fn logs_contain(needle: &str) -> bool {
+pub(super) fn logs_contain(needle: &str) -> bool {
     log_buffer()
         .lock()
         .is_ok_and(|buffer| buffer.contains(needle))
 }
 
-fn drain_logs() -> String {
+pub(super) fn drain_logs() -> String {
     log_buffer()
         .lock()
-        .map(|mut buffer| std::mem::take(&mut *buffer))
+        .map(|mut buffer| mem::take(&mut *buffer))
         .unwrap_or_default()
 }
 
 // ── the native peer ─────────────────────────────────────────────────────
-
-/// The in-process side of a cell: a live membership plus everything a check
-/// reads — inbound messages, surfaced events, the roster on demand.
-struct Native {
-    membership: membership::Membership,
-    events: tokio::sync::mpsc::UnboundedReceiver<String>,
-    seen_events: Vec<serde_json::Value>,
-    seen_msgs: Vec<membership::Inbound>,
-}
-
-impl Native {
-    async fn open(opts: &membership::Opts) -> Result<Self, Skip> {
-        let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink)
-            .await
-            .map_err(|error| Skip(format!("native peer failed to open: {error:#}")))?;
-        Ok(Self {
-            membership,
-            events,
-            seen_events: Vec::new(),
-            seen_msgs: Vec::new(),
-        })
-    }
-
-    fn pump(&mut self) {
-        while let Ok(json) = self.events.try_recv() {
-            if let Ok(event) = serde_json::from_str(&json) {
-                self.seen_events.push(event);
-            }
-        }
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen_msgs.push(msg);
-        }
-    }
-
-    fn saw_event(&mut self, kind: &str, nick: &str) -> bool {
-        self.pump();
-        self.seen_events.iter().any(|event| {
-            event.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
-                && event.get("nick").and_then(serde_json::Value::as_str) == Some(nick)
-        })
-    }
-
-    fn saw_msg(&mut self, text: &str, directed: bool) -> bool {
-        self.pump();
-        self.seen_msgs
-            .iter()
-            .any(|msg| msg.directed == directed && msg.text == text)
-    }
-
-    async fn request<T>(
-        &self,
-        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> membership::Request,
-    ) -> Result<T, String> {
-        self.membership.request(build).await
-    }
-
-    async fn roster_json(&self) -> String {
-        self.request(|reply| membership::Request::Peers { reply })
-            .await
-            .unwrap_or_default()
-    }
-
-    async fn send(&self, to: Option<&str>, text: &str) -> Result<(), String> {
-        let to = membership::parse_to(to).map_err(|error| error.to_string())?;
-        let body = membership::msg_body(text).map_err(|error| error.to_string())?;
-        self.request(|reply| membership::Request::Send { to, body, reply })
-            .await?
-    }
-
-    async fn state_merge(&self, merge: serde_json::Value) -> Result<(), String> {
-        self.request(|reply| membership::Request::StateMerge { merge, reply })
-            .await?
-    }
-
-    async fn state_json(&self) -> String {
-        self.request(|reply| membership::Request::StateJson { reply })
-            .await
-            .unwrap_or_default()
-    }
-}
 
 /// Every payload lane, both directions: broadcast, directed, state merge.
 /// Send from the native side, retrying inside the payload window. The first
@@ -335,20 +265,20 @@ impl Native {
 /// measures the mesh's steady state, not that race. The receipt checks below
 /// keep their own deadline, so a send that only succeeds at the end of the
 /// window still fails the cell if the frame never lands.
-async fn native_send_with_retry(
+pub(super) async fn native_send_with_retry(
     native: &Native,
     to: Option<&str>,
     text: &str,
 ) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + PAYLOAD_TIMEOUT;
+    let deadline = tokio_Instant::now() + PAYLOAD_TIMEOUT;
     loop {
         let Err(error) = native.send(to, text).await else {
             return Ok(());
         };
-        if tokio::time::Instant::now() >= deadline {
+        if tokio_Instant::now() >= deadline {
             return Err(error);
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -403,63 +333,22 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
     if converged.is_none() {
         return Err(fail("the state documents never converged".to_owned()));
     }
-    let deadline = tokio::time::Instant::now() + PAYLOAD_TIMEOUT;
+    let deadline = tokio_Instant::now() + PAYLOAD_TIMEOUT;
     loop {
         let state = native.state_json().await;
         if state.contains("fromNative") && state.contains("fromBrowser") {
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
+        if tokio_Instant::now() >= deadline {
             return Err(fail(format!(
                 "the native state never converged with the browser's: {state}"
             )));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
 // ── the served page ─────────────────────────────────────────────────────
-
-/// A Bun dev server (the harness page, the chat page), killed when it goes
-/// out of scope. Stderr is discarded — the old piped-but-never-read handle
-/// could only ever stall the child on a full pipe.
-pub(super) struct BunServer {
-    child: Child,
-    pub(super) url: String,
-}
-
-impl Drop for BunServer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl BunServer {
-    pub(super) fn serve(dir: &std::path::Path, script: &str, what: &str) -> Result<Self, Skip> {
-        let port = free_port()?;
-        let child = Command::new("bun")
-            .arg("run")
-            .arg(script)
-            .arg(port.to_string())
-            .current_dir(dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Skip(format!("could not start bun for {what}: {error}")))?;
-        let server = Self {
-            child,
-            url: format!("http://127.0.0.1:{port}"),
-        };
-        let up = wait_for(Duration::from_secs(30), Duration::from_millis(250), || {
-            crate::util::reachable(&server.url).then_some(())
-        });
-        if up.is_none() {
-            return Err(Skip(format!("the {what} server never came up")));
-        }
-        Ok(server)
-    }
-}
 
 pub(super) use crate::util::webdriver::free_port;
 
@@ -473,8 +362,8 @@ impl fmt::Display for CellFailure {
     }
 }
 
-fn native_opts(cell: &Cell, urls: &Urls, selector: NativeSelector<'_>) -> membership::Opts {
-    let mut opts = membership::Opts::default();
+fn native_opts(cell: &Cell, urls: &Urls, selector: NativeSelector<'_>) -> membership::JoinOptions {
+    let mut opts = membership::JoinOptions::default();
     match selector {
         NativeSelector::Topic(topic) => opts.topic = Some(topic.to_owned()),
         NativeSelector::Id(id) => opts.mesh = Some(id.to_owned()),
@@ -502,9 +391,9 @@ fn native_opts(cell: &Cell, urls: &Urls, selector: NativeSelector<'_>) -> member
 }
 
 #[derive(Clone, Copy)]
-enum NativeSelector<'a> {
-    Topic(&'a str),
-    Id(&'a str),
+enum NativeSelector<'topic> {
+    Topic(&'topic str),
+    Id(&'topic str),
     Create,
 }
 
@@ -513,7 +402,7 @@ struct Urls {
     relay: String,
     nostr: String,
     /// The Nostr relay itself, so a cell can check that it was used.
-    nostr_relay: habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay,
+    nostr_relay: TestRelay,
 }
 
 fn page_url(base: &str, cell: &Cell, urls: &Urls, selector: &str, nick: &str) -> String {
@@ -560,7 +449,7 @@ fn refused_by_the_tab(
         (!failed.is_empty()).then_some(failed)
     })
     .ok_or_else(|| CellFailure("the tab opened a mesh it has no path in".to_owned()))?;
-    if !failed.contains(habilis_network::runtime::BROWSER_HAS_NO_PATH) {
+    if !failed.contains(BROWSER_HAS_NO_PATH) {
         return Err(CellFailure(format!(
             "the tab failed for another reason: {failed}"
         )));
@@ -722,7 +611,7 @@ async fn run_cell(
     // first (`reach: "gossip"`), and their own JSEP round and graft follow
     // on the retry ticks. On a lookup-only mesh a directed frame is *held*
     // until then, so the payload checks below need the `unicast` lane.
-    let deadline = tokio::time::Instant::now() + LINK_TIMEOUT;
+    let deadline = tokio_Instant::now() + LINK_TIMEOUT;
     loop {
         let native_roster = native.roster_json().await;
         if !native_roster.contains("\"browser\"") {
@@ -733,12 +622,12 @@ async fn run_cell(
         if native_roster.contains("\"transport\":\"unicast\"") {
             break;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return Err(fail(format!(
                 "the pair rostered but never went direct: {native_roster}"
             )));
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 
     check_payload_lanes(page, &mut native).await?;
@@ -782,14 +671,14 @@ async fn run_cell(
 fn page_send_with_retry(page: &Page, to: Option<&str>, text: &str) -> Result<(), CellFailure> {
     let to = to.map_or_else(|| "null".to_owned(), |nick| format!("'{nick}'"));
     let call = format!("send({to}, '{text}')");
-    let deadline = std::time::Instant::now() + PAYLOAD_TIMEOUT;
+    let deadline = Instant::now() + PAYLOAD_TIMEOUT;
     loop {
         match call_page(page, "harness", &call) {
             Ok(_) => return Ok(()),
-            Err(error) if std::time::Instant::now() >= deadline => {
+            Err(error) if Instant::now() >= deadline => {
                 return Err(CellFailure(error));
             }
-            Err(_) => std::thread::sleep(Duration::from_secs(1)),
+            Err(_) => thread::sleep(Duration::from_secs(1)),
         }
     }
 }
@@ -860,6 +749,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         return Ok(());
     }
 
+    let target = target_dir()?;
     build::ensure_bun("the mesh suite serves its harness with bun")?;
 
     // The suite owns its wasm: a stale glue silently tests the previous
@@ -876,13 +766,13 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // the matrix measures the mesh's steady state, and same-id split repair
     // has the engine's own tests. In-process only — the browser side never
     // claims under the stagger, so its defaults stay untouched.
-    habilis_network::util::tuning::init(habilis_network::util::tuning::Tuning {
-        rival_recheck_first_secs: 3600,
-        rival_recheck_secs: 3600,
-        rival_recheck_meshed_secs: 3600,
-        ..habilis_network::util::tuning::Tuning::DEFAULTS
-    });
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    tuning::init(
+        tuning::Tuning::DEFAULTS
+            .rival_recheck_first(Duration::from_hours(1))
+            .rival_recheck(Duration::from_hours(1))
+            .rival_recheck_meshed(Duration::from_hours(1)),
+    );
+    let runtime = Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
@@ -890,10 +780,10 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // One relay, one Nostr relay and one harness server for the whole sweep;
     // topics and ids are random, so cells never meet each other.
     let (relay_url, _relay_server) = runtime
-        .block_on(habilis_network::net::test_relay::spawn_plain())
+        .block_on(test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let nostr_relay = runtime
-        .block_on(habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay::spawn())
+        .block_on(TestRelay::spawn())
         .map_err(|error| format!("no local Nostr relay: {error:#}"))?;
     let urls = Urls {
         relay: relay_url.to_string(),
@@ -917,7 +807,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     let only = args.page_browser().to_owned();
     // `MESH_CELL=<substring>` narrows the sweep to matching cell labels —
     // for iterating on one failing cell without paying for the rest.
-    let cell_filter = std::env::var("MESH_CELL").ok();
+    let cell_filter = env::var("MESH_CELL").ok();
     let mut failures = 0usize;
     for cell in &cells {
         if let Some(filter) = &cell_filter
@@ -981,11 +871,11 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
                         page.evaluate(expr)
                     )
                 });
-                let dump = repo_root().join("target").join(format!(
+                let dump = target.join(format!(
                     "mesh-cell-{}.log",
                     cell.label().replace([' ', '/'], "_")
                 ));
-                let _ = std::fs::write(&dump, format!("{}\n{logs}", browser.join("\n")));
+                let _ = fs::write(&dump, format!("{}\n{logs}", browser.join("\n")));
                 output::detail(&format!("full log: {}", dump.display()));
             }
         }

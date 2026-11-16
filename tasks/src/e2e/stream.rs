@@ -16,14 +16,16 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::TaskOutcome;
-use crate::util::output;
-use crate::util::{repo_root, wait_for};
+use crate::util::{output, repo_root, wait_for};
 
 use super::mesh::{BunServer, launch_page};
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
-type Failure = Box<dyn std::error::Error>;
+use habilis_network::net::test_relay;
+use std::{env, error, fs, thread};
+use tokio::runtime;
+type Failure = Box<dyn error::Error>;
 
 /// Lookup over the relay, JSEP and the direct path on a cold pair; generous
 /// like the mesh suite's link budget, for the same reason.
@@ -82,7 +84,7 @@ impl Cli {
             .arg("--robot")
             .env(
                 "RUST_LOG",
-                std::env::var("RUST_LOG").unwrap_or_else(|_| "habilis_network=info".to_owned()),
+                env::var("RUST_LOG").unwrap_or_else(|_| "habilis_network=info".to_owned()),
             )
             .stdin(if matches!(input, Input::Nothing) {
                 Stdio::null()
@@ -99,7 +101,7 @@ impl Cli {
             Input::Bytes(bytes) => {
                 let mut pipe = pipe
                     .ok_or_else(|| Skip("habilis-network-stream has no stdin pipe".to_owned()))?;
-                std::thread::spawn(move || {
+                thread::spawn(move || {
                     let _ = pipe.write_all(&bytes);
                 });
                 None
@@ -117,7 +119,7 @@ impl Cli {
             .take()
             .ok_or_else(|| Skip("habilis-network-stream has no stderr pipe".to_owned()))?;
         let (bytes_tx, bytes) = mpsc::channel();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let mut buf = [0_u8; 4096];
             while let Ok(len) = stdout.read(&mut buf)
                 && len > 0
@@ -125,7 +127,7 @@ impl Cli {
             {}
         });
         let (stderr_tx, stderr_lines) = mpsc::channel();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if stderr_tx.send(line).is_err() {
                     break;
@@ -298,12 +300,12 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     output::status("Building", "habilis-network-stream");
     let cli_binary = build::build_binary("habilis-network-stream-cli", "habilis-network-stream")?;
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
     let (relay_url, _relay_server) = runtime
-        .block_on(habilis_network::net::test_relay::spawn_plain())
+        .block_on(test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let server = BunServer::serve(
         &repo_root().join("packages/habilis-network-stream-web"),
@@ -699,9 +701,9 @@ fn fail<T>(cli: &mut Cli, page: Option<&Page>, reason: &str) -> Result<T, Failur
             page.console()
         );
     }
-    let dump = cli.transcript() + &browser;
+    let dump = format!("{}{browser}", cli.transcript());
     let path = repo_root().join("target/stream-e2e.log");
-    let _ = std::fs::write(&path, dump);
+    let _ = fs::write(&path, dump);
     output::detail(&format!("full log: {}", path.display()));
     Err(format!("stream e2e failed: {reason}").into())
 }

@@ -22,6 +22,9 @@ use crate::event::{Event, Keys, kind_for};
 use crate::unix_now;
 use crate::wire::{self, Filter};
 
+use crate::conn::Health;
+use n0_future::{task, time};
+use std::mem;
 /// Choosing again on a timer is what notices an echo that is overdue.
 const RECHOOSE_EVERY: Duration = Duration::from_secs(5);
 /// A relay that has not echoed our event this long after we sent it is taken
@@ -43,10 +46,18 @@ const SWALLOW_RECONNECT: Duration = if cfg!(test) {
     Duration::from_mins(1)
 };
 const SEEN_CAPACITY: usize = 4096;
+/// How many ids of the events this pool sent it remembers, to tell an echo of
+/// its own event from a forged event that carries its public key. At the
+/// announce cadence this reaches back well past the echo deadline.
+const SENT_CAPACITY: usize = 256;
 
 enum Command {
     Width(usize),
-    Publish { tag: [u8; 32], frame: String },
+    Publish {
+        tag: [u8; 32],
+        id: String,
+        frame: String,
+    },
 }
 
 /// A subscription to a set of tags on a ranked relay list.
@@ -55,7 +66,7 @@ pub struct Pool {
     keys: Keys,
     commands: mpsc::UnboundedSender<Command>,
     connected: watch::Receiver<Vec<Url>>,
-    _task: n0_future::task::AbortOnDropHandle<()>,
+    _task: task::AbortOnDropHandle<()>,
 }
 
 impl Pool {
@@ -81,7 +92,7 @@ impl Pool {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (connected_tx, connected) = watch::channel(Vec::new());
         if ranking.is_empty() {
-            tracing::warn!(target: "habilis_network::nostr", "a pool with no relays reaches no one");
+            tracing::warn!(target: "habilis_network::lookup", "a pool with no relays reaches no one");
         }
         let chooser = Chooser {
             hub: Hub::global(),
@@ -92,15 +103,16 @@ impl Pool {
             subscribed: tags.iter().copied().collect(),
             leases: Vec::new(),
             owed_echo: HashMap::new(),
+            sent: SentIds::default(),
         };
         let keys = Keys::generate();
         let own = keys.pubkey().to_owned();
-        let task = n0_future::task::spawn(run(chooser, own, command_rx, out_tx, connected_tx));
+        let task = task::spawn(run(chooser, own, command_rx, out_tx, connected_tx));
         let pool = Self {
             keys,
             commands,
             connected,
-            _task: n0_future::task::AbortOnDropHandle::new(task),
+            _task: task::AbortOnDropHandle::new(task),
         };
         (pool, out_rx)
     }
@@ -110,6 +122,7 @@ impl Pool {
         let event = Event::sign(&self.keys, unix_now(), tag, content);
         let _ = self.commands.send(Command::Publish {
             tag: *tag,
+            id: event.id.clone(),
             frame: wire::event(&event),
         });
     }
@@ -149,6 +162,53 @@ struct Chooser {
     leases: Vec<(Url, Lease)>,
     /// When each relay was first sent an event it has not yet echoed.
     owed_echo: HashMap<Url, Instant>,
+    /// The ids of the events this pool sent lately.
+    sent: SentIds,
+}
+
+/// The ids of the last [`SENT_CAPACITY`] events a pool sent. An echo is an
+/// event whose id is here: the public key alone proves nothing, because the
+/// receiver checks only the id of an event, so anyone can forge one that
+/// carries our key.
+#[derive(Debug, Default)]
+struct SentIds {
+    order: VecDeque<String>,
+    ids: HashSet<String>,
+}
+
+impl SentIds {
+    fn insert(&mut self, id: String) {
+        if self.ids.insert(id.clone()) {
+            self.order.push_back(id);
+            if self.order.len() > SENT_CAPACITY
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.ids.remove(&oldest);
+            }
+        }
+    }
+
+    /// What `event` is to the pool whose key is `own`.
+    fn receipt(&self, own: &str, event: &Event) -> Receipt {
+        if self.ids.contains(&event.id) {
+            Receipt::Echo
+        } else if event.pubkey == own {
+            Receipt::Forged
+        } else {
+            Receipt::Foreign
+        }
+    }
+}
+
+/// What a received event is to a pool.
+#[derive(Debug, PartialEq, Eq)]
+enum Receipt {
+    /// An event this pool sent, come back: the proof its relay forwards.
+    Echo,
+    /// An event that carries this pool's key but that it did not send.
+    Forged,
+    /// Another member's event.
+    Foreign,
 }
 
 impl Chooser {
@@ -157,7 +217,7 @@ impl Chooser {
     /// and win their rank back when they recover. Retired relays are skipped,
     /// and a lease whose connection died is replaced.
     fn choose(&mut self, events: &mpsc::UnboundedSender<(Url, Event)>) {
-        let mut old = std::mem::take(&mut self.leases);
+        let mut old = mem::take(&mut self.leases);
         let mut usable = 0;
         for url in &self.ranking {
             if usable >= self.width {
@@ -231,7 +291,7 @@ impl Chooser {
     fn connected(&self) -> Vec<Url> {
         self.leases
             .iter()
-            .filter(|(url, lease)| lease.health() == crate::conn::Health::Up && !self.swallows(url))
+            .filter(|(url, lease)| lease.health() == Health::Up && !self.swallows(url))
             .map(|(url, _)| url.clone())
             .collect()
     }
@@ -247,7 +307,7 @@ async fn run(
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let mut changes = chooser.hub.changes();
     let mut seen = Seen::default();
-    let mut rechoose = n0_future::time::interval(RECHOOSE_EVERY);
+    let mut rechoose = time::interval(RECHOOSE_EVERY);
     chooser.choose(&events_tx);
     loop {
         tokio::select! {
@@ -257,25 +317,42 @@ async fn run(
                     chooser.width = width;
                     chooser.choose(&events_tx);
                 }
-                Some(Command::Publish { tag, frame }) => chooser.publish(&tag, &frame),
+                Some(Command::Publish { tag, id, frame }) => {
+                    chooser.sent.insert(id);
+                    chooser.publish(&tag, &frame);
+                }
             },
             delivery = events.recv() => {
                 let Some((relay, event)) = delivery else { return };
-                // Checked before anything else: a relay can forward a copy
-                // with the content changed and the id kept, and marking that id
-                // seen would drop the good copies other relays carry.
-                if let Err(error) = event.verify() {
-                    tracing::debug!(target: "habilis_network::nostr", %relay, %error, "dropped an invalid event");
+                // Only the id is checked, and before anything else: a relay can
+                // forward a copy with the content changed and the id kept, and
+                // marking that id seen would drop the good copies other relays
+                // carry. The Schnorr signature is not checked on receipt: the
+                // Nostr key is random and proves nothing, and the content
+                // authenticates itself (the seal, and the endpoint signature
+                // inside it). Signing stays on send, since relays require it.
+                if let Err(error) = event.verify_id() {
+                    tracing::debug!(target: "habilis_network::lookup", %relay, %error, "dropped an invalid event");
                     continue;
                 }
                 // Our own events come back on the tags we publish to; each is
-                // proof that relay forwards.
-                if event.pubkey == own {
-                    if chooser.echoed(&relay) {
-                        chooser.choose(&events_tx);
+                // proof that relay forwards. It is recognized by its id, one we
+                // sent: the public key alone proves nothing, since only the id
+                // is checked and anyone can put our key on an event.
+                match chooser.sent.receipt(&own, &event) {
+                    Receipt::Echo => {
+                        if chooser.echoed(&relay) {
+                            chooser.choose(&events_tx);
+                        }
                     }
-                } else if seen.insert(&event.id) && out.send(event).is_err() {
-                    return;
+                    Receipt::Forged => {
+                        tracing::debug!(target: "habilis_network::lookup", %relay, "dropped an event that carries our key but that we did not send");
+                    }
+                    Receipt::Foreign => {
+                        if seen.insert(&event.id) && out.send(event).is_err() {
+                            return;
+                        }
+                    }
                 }
             }
             health = changes.changed() => {
@@ -327,6 +404,7 @@ mod tests {
     use super::*;
     use crate::test_relay::TestRelay;
 
+    use tokio::time;
     const TAG: [u8; 32] = [3u8; 32];
 
     async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
@@ -334,9 +412,51 @@ mod tests {
             if check() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            time::sleep(Duration::from_millis(50)).await;
         }
         assert!(check(), "timed out waiting for: {what}");
+    }
+
+    /// Only the id of an event is checked on receipt, so anyone can forge an
+    /// event that carries our public key. It must not count as the echo that
+    /// proves a relay forwards: only an event whose id we sent does.
+    #[test]
+    fn only_an_event_we_sent_is_an_echo() {
+        let ours = Keys::generate();
+        let theirs = Keys::generate();
+        let own = ours.pubkey();
+        let mut sent = SentIds::default();
+
+        let ours_sent = Event::sign(&ours, unix_now(), &TAG, "ours".to_owned());
+        sent.insert(ours_sent.id.clone());
+        assert_eq!(sent.receipt(own, &ours_sent), Receipt::Echo);
+
+        let forged = Event::forged_as(own, unix_now(), &TAG, "forged".to_owned());
+        forged
+            .verify_id()
+            .expect("the id of a forged event is valid");
+        assert_eq!(
+            sent.receipt(own, &forged),
+            Receipt::Forged,
+            "a valid id with our key, that we did not send, is not an echo"
+        );
+
+        let foreign = Event::sign(&theirs, unix_now(), &TAG, "theirs".to_owned());
+        assert_eq!(sent.receipt(own, &foreign), Receipt::Foreign);
+    }
+
+    #[test]
+    fn the_sent_ids_are_bounded() {
+        let mut sent = SentIds::default();
+        for index in 0..=SENT_CAPACITY {
+            sent.insert(format!("id{index}"));
+        }
+        assert_eq!(sent.ids.len(), SENT_CAPACITY, "the set stops growing");
+        assert!(
+            !sent.ids.contains("id0"),
+            "the oldest id is forgotten first"
+        );
+        assert!(sent.ids.contains(&format!("id{SENT_CAPACITY}")));
     }
 
     /// A rate-limited relay is out of the count, but past its wait it gets our
@@ -344,8 +464,8 @@ mod tests {
     /// socket. (The unit-test build shortens the first wait to a second.)
     #[tokio::test]
     async fn a_rate_limited_relay_comes_back_without_a_new_socket() {
-        let first = TestRelay::spawn().await.unwrap();
-        let second = TestRelay::spawn().await.unwrap();
+        let first = TestRelay::spawn().await.expect("spawn test relay");
+        let second = TestRelay::spawn().await.expect("spawn test relay");
         first.refuse_events(Some("rate-limited: slow down"));
         let (pool, _rx) = Pool::open(vec![first.url(), second.url()], 1, &[TAG]);
         eventually("connected to the first", || {
@@ -366,7 +486,7 @@ mod tests {
             if pool.connected() == vec![first.url()] {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         assert_eq!(
             pool.connected(),
@@ -382,7 +502,7 @@ mod tests {
     /// timeout. (The unit-test build shortens both deadlines.)
     #[tokio::test]
     async fn a_relay_that_keeps_swallowing_is_dialed_again() {
-        let relay = TestRelay::spawn().await.unwrap();
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
         relay.swallow_events(true);
         let (pool, _rx) = Pool::open(vec![relay.url()], 1, &[TAG]);
         eventually("connected", || pool.connected() == vec![relay.url()]).await;
@@ -392,7 +512,7 @@ mod tests {
             if relay.accepted() > dials {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            time::sleep(Duration::from_millis(200)).await;
         }
         panic!("the swallowing relay was never dialed again");
     }

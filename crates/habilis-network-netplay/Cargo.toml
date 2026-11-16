@@ -53,6 +53,7 @@ tokio = { workspace = true, default-features = false, features = ["sync"] }
 tracing.workspace = true
 
 [dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 proptest.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The loopback integration test drives two real nodes, which needs a runtime.

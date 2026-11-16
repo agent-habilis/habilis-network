@@ -1,7 +1,7 @@
 # habilis-network — Architecture
 
 This document describes the architecture of the habilis-network workspace at version 0.6.0.
-The wire protocol described here is message version `12.0`.
+The wire protocol described here is message version `14.0`.
 The style follows ASD-STE100 Simplified Technical English.
 
 ## Abstract
@@ -9,7 +9,7 @@ The style follows ASD-STE100 Simplified Technical English.
 habilis-network is a serverless gossip-network engine written in Rust.
 Peers find each other through mDNS, the mainline DHT, or a relay.
 They form a partial mesh over iroh QUIC links.
-Across this mesh they exchange signed messages and a shared CRDT document.
+Across this mesh they exchange signed messages and a shared state. Each member writes its own signed slice of that state.
 No server holds the network together, and no member is special.
 The engine runs inside the calling process, so a mesh join is a function call, not a daemon install.
 The same engine runs on a host and in a browser.
@@ -34,7 +34,7 @@ Three unrelated consumers enforce this claim:
    The `gossip-*` skills of Claude Code are thin shells over this CLI.
    The CLI embeds the engine and drives it over an IPC socket.
 2. **agent-share** — file sharing over the same engine.
-3. **mallorca** — an Odin application that links `habilis-network-ffi` as a static library.
+3. **A C host application** — links `habilis-network-ffi` as a static library.
 
 ```mermaid
 graph LR
@@ -42,8 +42,8 @@ graph LR
         SKILLS["Claude Code skills"] --> CLI["agent-gossip CLI"]
         CLI -->|"IPC socket"| E1["habilis-network engine"]
     end
-    subgraph "Desktop app"
-        APP["mallorca (Odin)"] --> FFI["habilis-network-ffi (C ABI)"]
+    subgraph "C host"
+        APP["C host application"] --> FFI["habilis-network-ffi (C ABI)"]
         FFI --> E2["habilis-network engine"]
     end
     subgraph "Browser tab"
@@ -60,7 +60,6 @@ All instances meet on one mesh.
 ### 1.3 Provenance and naming
 
 The workspace is a hard fork of `agent-habilis/agent-gossip` at commit `f81b0529`.
-`FORKED.md` records the fork contract.
 The wire byte-domains still say `habilis-mesh` to keep wire compatibility with the upstream network.
 The engine word for a network is **mesh**.
 The user-facing word in the CLI is **gossip**, and that word never reaches the wire.
@@ -73,7 +72,7 @@ The user-facing word in the CLI is **gossip**, and that word never reaches the w
    The full lifecycle is three function calls.
 3. **Application-agnostic core.** All application payloads ride one generic message kind.
    The engine dispatches on an opaque tag.
-4. **The browser is a full peer.** A browser build keeps gossip, the CRDT documents, identity, and the node runtime.
+4. **The browser is a full peer.** A browser build keeps gossip, the shared state, identity, and the node runtime.
    It is the same peer that a CLI runs, not a reduced stand-in.
 5. **One crate names iroh.** Fork pins ride dependency edges, and no `[patch.crates-io]` table exists.
    A consumer restates no pin.
@@ -95,7 +94,7 @@ graph TD
     ffi --> engine
     wasm --> engine
     stream --> engine
-    engine["habilis-network<br>the engine"] --> doc["habilis-network-doc<br>CRDT channels"]
+    engine["habilis-network<br>the engine"] --> doc["habilis-network-doc<br>slice channels"]
     engine --> logging["habilis-network-logging<br>tracing sink"]
     engine --> mh["habilis-network-iroh-multihop-transport"]
     engine --> webrtc["habilis-network-iroh-webrtc-transport"]
@@ -114,7 +113,7 @@ The engine depends on `habilis-network-iroh-webrtc-transport` on both targets: t
 |---|---|
 | `habilis-network-util` | Host helpers: runtime directories, clock, tuning dials, bounded containers, every constant. |
 | `habilis-network-protocol` | Wire vocabulary: messages, mesh ids, identity, sealing, invites, multipart reassembly, the directory ad codec. Depends on `iroh-base` only. |
-| `habilis-network-doc` | The `state` and `meta` CRDT channels (automerge). |
+| `habilis-network-doc` | The `state` and `meta` slice channels: one signed slice for each author, and the slice store. |
 | `habilis-network-logging` | Tracing sink and directive filter. |
 | `habilis-network` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
 | `habilis-network-ffi` | A C-ABI shim, so a non-Rust process joins a mesh or opens byte streams in-process. |
@@ -147,12 +146,13 @@ The Nostr lookup has no feature: it runs on both targets, so a browser and a nat
 
 ## 4. Identity and cryptography
 
-### 4.1 Three keys
+### 4.1 Four keys
 
 | Key | Where it lives | What it authenticates |
 |---|---|---|
 | iroh `EndpointId` (Ed25519) | Minted per endpoint at build time | The connection (QUIC-TLS). |
-| Author `Identity` (Ed25519) | `habilis-network-protocol/src/identity.rs` | Every message the member authors. In-process and ephemeral: a restart mints a new key. |
+| Session `Identity` (Ed25519) | `habilis-network-protocol/src/identity.rs` | Every message that one run of the member authors. New at each start. |
+| Member `Identity` (Ed25519) | `<state>.key` (mode 0600), see section 7.7 | One thing only: the proof that a session belongs to the member. It survives a restart. A host with no files (the browser) has none. |
 | Rendezvous key | Derived from the mesh seed | The bootstrap anchor. Every member can derive it. |
 
 ### 4.2 Derivations
@@ -179,6 +179,8 @@ The Nostr lookup derives three more values from the topic id, not from the seed,
 
 The mesh id is a bare Base58Check string, called the **join id** in user-facing text.
 The decoded wire format is: one version byte, the 32-byte seed, the name length and name, the configuration length and configuration.
+The configuration holds the lookup byte, the transport byte, and a feature byte that is present only when a feature is on.
+A password, an invite and the Nostr lookup are features, so a build that predates one refuses the id with an upgrade error instead of reading it as a mesh without it.
 No peer address is ever stored, so the mesh is creator-independent.
 The id carries the seed, so the id **is** the bearer credential.
 For this reason the logs print the derived topic id and never the mesh id.
@@ -206,6 +208,15 @@ A fresh ephemeral X25519 key agrees with the static key of the recipient, and Ch
 The ephemeral key gives forward secrecy.
 Sender authenticity comes from the Ed25519 signature of the frame, which covers the ciphertext.
 A relay forwards the frame and can verify the signature, but it cannot open the body.
+The app decides by tag which directed bodies are sealed, through `NodeApp::seals`.
+The engine seals such a body in `app_frame`, before it signs, and the receiver opens it by the same rule.
+On a passworded mesh the engine seals every broadcast body with the mesh key.
+A node tells its static key in its signed `PeerInfo`, as the Base58 text `seal`.
+The key is required: a node refuses a `PeerInfo` that names none.
+The engine keeps the key of each known author key, and `EventLoopState::seal_key_of` reads it.
+The key of a signer that is not known yet waits for its join: 64 keys at most, for 90 s at most.
+A key that no `PeerInfo` named has no seal key.
+The key adds 58 bytes to each `PeerInfo` frame.
 
 ## 5. Bootstrap
 
@@ -231,7 +242,7 @@ sequenceDiagram
     B->>B: hold the connection until iroh selects a direct path
     B->>J: accept, graft into HyParView views
     J->>M: broadcast Presence(joined)
-    M->>J: PeerInfo and digests flow back
+    M->>J: PeerInfo and the backfill of each member flow back
 ```
 
 The beacon shuffles the joiner into the full mesh through HyParView membership.
@@ -239,10 +250,17 @@ On a mesh whose relay is lookup only, the beacon reads nothing from the joiner's
 A joiner that never punches one never links.
 On the first gossip link the joiner announces itself once.
 Later links only re-send `PeerInfo`, behind a cooldown, so a flapping link cannot re-flood the mesh.
+A node does not repair a `PeerInfo` that a member missed.
+Without it, a member trusts no endpoint of the sender: it sends no pong to the sender, and it drops the link-state vectors of the sender.
+So a meshed node also floods its `PeerInfo` again when no flood has gone out for a refresh period.
+The period is the larger of 5 minutes and 5 seconds for each live member.
+Each flood draws a random factor between 1.0 and 1.5 that lengthens the next period, so the members do not flood together.
+The factor is never below 1.0, so the whole mesh sends at most 1 refresh per 5 seconds, whatever its size.
+A lost `PeerInfo` is back within one period, that is within 7.5 minutes for a mesh of up to 60 members.
 
 ### 5.3 The relay ladder
 
-`RENDEZVOUS_RELAY_LADDER` is a five-rung list: the project relay first, then four n0 regions.
+`RENDEZVOUS_RELAY_LADDER` is a four-rung list of the n0 regions. The project relay is rung 0 only when `OPERATED_RELAY_IS_RUNG_0` is on. It is off, because the project relay has no QUIC address discovery behind Cloudflare.
 The beacon homes on the first reachable rung, and the joiner pre-registers at the same rung.
 These two choices must agree, or the bootstrap dial finds nothing.
 Setup picks rung 0 without a probe, so readiness never blocks on the network.
@@ -258,12 +276,64 @@ The split keeps bootstrap alive after the creator leaves: any member can take th
 |---|---|---|
 | Port | Ephemeral | A deterministic port ladder from the seed |
 | Discovery | pkarr, by endpoint id, last-writer-wins | None. The ladder is the address. |
-| Co-hosts | Every member, permanently | Exactly one beacon |
+| Co-hosts | Every member, permanently | One beacon: the holder of the lowest live rung |
 
 Two members can claim the beacon role inside each other's probe window.
 A periodic re-arbitration sheds the rival copy, so the single-beacon invariant holds eventually, not at claim time.
+A public holder that knows no member waits on the alone tier of the re-check (`RIVAL_RECHECK_ALONE`, 3600 s, plus up to the same again as jitter).
+A sign of a second group brings the next re-check back to the first-round delay and starts the rounds again from it.
+The first round waits `RIVAL_RECHECK_FIRST` (12 s) plus an offset of up to `RIVAL_RECHECK_OFFSET_SPAN` (8 s) from the endpoint id.
+Two things are a sign: a member that links to the beacon and that the holder does not know, and a LAN member that the holder is not linked to.
+A sign counts once per `RIVAL_RECHECK_MESHED` (300 s), so a burst of arrivals does not shed the beacon again and again.
+A node that nobody approaches keeps the long wait.
+A loopback mesh and the creator have no re-check armed, so a sign changes nothing for them.
+On a LAN, a member that sees a member of its mesh asks it to be a neighbor, at most 8 times a minute (`MAX_LAN_GRAFTS_PER_MINUTE` in `gossip/lan.rs`).
+The mDNS record does not change again, so no event comes for a request that was refused or lost.
+A member that was asked and is still not a neighbor is asked again from the heal tick: after `RETRY_FIRST` (60 s), then every `RETRY_STEADY` (300 s).
+A neighbor is not asked again, and a repeated request counts against the cap of 8.
 The rendezvous endpoint never authors application messages, and it is never a directed target.
 It accepts no unicast, so a member cannot probe it for a direct path; its accept gate is what keeps its link off the relay.
+A member holds the rendezvous link only while it needs it.
+Once it has three links to other members it tells gossip to leave the rendezvous.
+The beacon then learns that the member left on purpose, keeps no claim on it and does not dial it back.
+Gossip closes the link itself. Once the link is closed and the rendezvous is not wanted, the heal tick detaches the `WebRTC` session. A close from the member's side would reach the beacon as a lost connection.
+This frees a direct-peer slot and a place in the beacon's gossip view for the next joiner.
+It comes back in four cases:
+
+- It has fewer than three links (`RENDEZVOUS_RELEASE_LINKS`).
+- For two minutes (`RENDEZVOUS_COMEBACK`) after the sweep removed a silent roster peer, because a partition may have split the mesh and the rendezvous is where the islands meet again.
+- For the same two minutes after a ladder walk or a probe read a holder of the rendezvous that no member of its mesh is known to host.
+A member says that it hosts the rendezvous in its `PeerInfo`, and only a proven sender is believed.
+The flag is dropped when the member goes silent or leaves, because a holder that crashes never says it again.
+- When its periodic return falls due: `RENDEZVOUS_PERIODIC_RETURN` (600 s) after it let go, plus up to half of that from its endpoint id, so that n members do not come back together. The heal tick pays it like an owed return: it is wanted for `RENDEZVOUS_COMEBACK` (120 s) and no longer, and the next one is due a period later.
+The value is the Tuning field `rendezvous_periodic_return`.
+
+A node that came back for the second, third or fourth case stays `RENDEZVOUS_DWELL` (30 s), then lets go again.
+The member that hosts the beacon keeps its link, so that the beacon's view is never empty: a joiner is introduced to the mesh through that view, and without it the mesh splits into islands that never meet.
+
+### 5.5 The loopback ladder
+
+A private mesh has a ladder of eight loopback ports, derived from the seed.
+The lowest live rung wins: the beacon is the member that holds the first rung that no other mesh holds.
+The walk of a member reads the ladder from rung 0, and it never waits:
+
+- It tries to bind the rung. A rung that binds is the beacon.
+- A rung that does not bind is read from the verdict map of the member. A probe task dials the rung from a throwaway endpoint, with no lookups, and reports one of four answers: `Ours` (the beacon of this mesh), `Foreign` (the identity failed: the verifier of the dialer rejected the key of the listener, or iroh says that the identity differs), `Refused` (a listener answered and ended the dial without proving an identity: a close, a refusal, a reset, a version mismatch, or an alert that is not about the key; a holder of this mesh that is bound and not yet serving answers this way) or `NoAnswer` (a timeout, or nothing to dial).
+- `Ours` is a holder that is not this member. The member stays a peer.
+- `Foreign` binds the next rung at once.
+- `Refused` and `NoAnswer` bind nothing in that walk. A rung that has said nothing, or has refused, in two reports that are at least `RECLAIM_WINDOW` (6 s) apart is read as foreign. One report alone is not a window, however late the walk reads it.
+- A busy rung with no fresh reading gets one probe task, one attempt of `RENDEZVOUS_PROBE` (1 s). All busy rungs are probed in parallel, so eight silent rungs resolve in one window, and the event loop never waits for a probe.
+- A reading is fresh for one heal tick (`HEAL_INTERVAL`, 15 s). The time of the first silence is kept across probes, and it restarts after a gap of three heal ticks.
+- A joiner that starts on a silent rung passes it at the first walk after its second report of silence, which comes one heal tick after the first, and binds the next free rung. The reclaim ticks (`RECLAIM_INTERVAL`, 400 ms, for `RECLAIM_WINDOW`) end before that, so in practice it is the heal tick.
+- When every rung is read as foreign, or as silent for the whole window, no member can serve the rendezvous. The member logs a warning and gives its sink one `NodeEvent::Info` that names the number of ports. It repeats both after `NO_RUNG_REPEAT` (300 s) and not before.
+
+A holder checks the ladder at every heal tick:
+
+- A holder above rung 0 asks whether a lower rung answers as `Ours`. It sheds its beacon on that answer only. A rung that says nothing, refuses, or is free is not an answer. After the shed, its next walk reads that rung as the holder. If no member of its mesh is known to host the rendezvous, the member then owes a return to it (section 5.4).
+- A holder asks whether its own rung still answers as `Ours`. It sheds its beacon on the second consecutive reading that is not `Ours`, never on the first, and then claims again. The check does not see a beacon whose endpoint answers while its gossip is wedged.
+- The holder of rung 0 is never asked to yield: the lowest live rung wins.
+
+A loopback mesh has no timed rival re-check. The two checks above are its repair of a second beacon, which can stand up when a host is too loaded to answer.
 
 ### 5.5 The Nostr lookup
 
@@ -326,7 +396,7 @@ flowchart LR
     subgraph Timers
         T1["alive / sweep"]
         T2["heal / reclaim"]
-        T3["anti-entropy"]
+        T3["backfill retry"]
         T4["state refresh"]
         T5["link-state"]
     end
@@ -348,7 +418,7 @@ Peers then see an immediate neighbor-down event instead of an idle timeout.
 `EventLoopState` is layered, and only specific events write each layer:
 
 - **Transport layer** — live gossip links and remembered endpoints. Only neighbor-up and neighbor-down events write the link set. Cooldowns make sure that a flapping peer cannot start a mesh-wide connection storm.
-- **Membership layer** — the roster, keyed by nickname, with last-seen times and self-advertised endpoints.
+- **Membership layer** — the roster, keyed by author key, with the nickname of each key, last-seen times and self-advertised endpoints. A member key binds the nickname that it proved (section 7.7). A nickname that no member key proved is a label, so two live keys can use it.
 - **Heartbeat layer** — the quiet set for peers past the keepalive window.
 - **Presentation layer** — the surfaced subset of the roster, behind the join-horizon gate.
 
@@ -358,10 +428,21 @@ Peers then see an immediate neighbor-down event instead of an idle timeout.
 
 A message is compact one-line JSON.
 The envelope carries a version, an id, a kind, the mesh id, the author nickname, a timestamp, the body, the author public key, and a detached Ed25519 signature.
+On the wire these are two text fields, `pubkey` and `sig`.
+In memory they are one optional pair, `Message::signer`, so a message has both or neither.
+The parser rejects a key with no signature and a signature with no key.
 The signature covers the canonical form of the message with the key and signature fields empty.
 Unknown keys must be ignored, which leaves room for extension.
 
-The parser gates on an **exact** version match, `12.0`.
+The parser gates on an **exact** version match, `18.0`.
+A frame of another version is refused by its version, also when the frame fails to parse on a field that the version changed.
+A `13.0` peer and a `14.0` peer drop every frame of each other.
+Version `13.0` made the recipient of a directed frame an author key: `to` holds 64 lowercase hex digits, and a nickname there is a parse error.
+The `to` field is part of the signed kind, so the signature binds the recipient.
+Version `17.0` made the shared state one signed slice for each author.
+A `16.0` peer sends an automerge change in a `state` or `meta` frame, so a `17.0` build refuses its frames by version.
+Version `18.0` added the digest kinds `SliceRoot`, `SlicePull`, `SlicePageRequest` and `SlicePage`, and removed the resend trailer.
+A `17.0` peer carries no digest kind, so an `18.0` build refuses its frames by version.
 The crypto byte-domains are mixed into every signature and derivation transcript.
 A silent domain change makes verification fail invisibly, and the exact gate turns that into a loud rejection.
 
@@ -371,12 +452,16 @@ A silent domain change makes verification fail invisibly, and the exact gate tur
 |---|---|
 | `App { tag, to, corr }` | Every application payload. The engine dispatches on the opaque tag. |
 | `Presence { joined \| left \| alive }` | Arrival, departure, keepalive. |
-| `PeerInfo` | A signed card with the self-advertised endpoint. |
-| `Digest` | Anti-entropy digest of the message log window. |
-| `Ping`, `Pong { to }` | Reachability rounds. |
-| `State`, `StateDigest` | The free-form CRDT channel and its repair digest. |
-| `Meta`, `MetaDigest` | The gated CRDT channel and its repair digest. |
-| `LinkState` | The multihop link vector. Ephemeral, never logged. |
+| `PeerInfo` | A signed card with the self-advertised endpoint and the seal key. |
+| `Ping`, `Pong { to, probe }` | Reachability rounds. A pong names the ping it answers. |
+| `ProofRequest { to }` | Unicast. A node asks one session, named by its author key, for the proof of its member. The session answers with its `joined` frame. |
+| `State` | One signed slice of its author on the `state` channel. |
+| `Meta` | One signed slice of its author on the `meta` channel. The shape is the same as `State`. By convention it holds the metadata of the mesh. |
+| `SliceRoot { to }` | Unicast to one linked neighbour. It holds the root of the digest of each channel: a hash and the number of pages (section 7.5). |
+| `SlicePageRequest { to, channel, index }` | Unicast. A node asks a neighbour for one page of the digest of one channel. |
+| `SlicePage { to, channel, page }` | Unicast. The answer to a page request. A page lists rows of an author key, a version and a content hash. |
+| `SlicePull { to, channel, keys }` | Unicast. A node asks a neighbour for the slices of the listed author keys. The neighbour answers with the original signed slice frames. |
+| `LinkState` | The multihop link vector. Ephemeral. |
 
 ### 7.3 Size budgets
 
@@ -384,7 +469,7 @@ A silent domain change makes verification fail invisibly, and the exact gate tur
 Gossip drops an oversize message silently, so the engine enforces the budget before send.
 A compile-time assertion in `crates/habilis-network/src/gossip/mod.rs` ties the two constants together.
 A logical body can reach 64 MiB through sharding (section 7.6).
-Bulk transfer is not the job of gossip, because gossip re-broadcasts and logs every frame.
+Bulk transfer is not the job of gossip, because gossip re-broadcasts every frame.
 Oversize payloads go over the `blob` side channel, point to point, on their own ALPN.
 
 ### 7.4 Two planes, one ingest path
@@ -402,6 +487,21 @@ flowchart LR
 
 A broadcast rides gossip.
 A directed message rides the unicast QUIC channel only, and gossip never carries it.
+A directed message names one author key, not a nickname.
+The endpoint of that key is the first source that has one:
+- the dial hint that the key made;
+- the endpoint that the key proved in its `PeerInfo`;
+- the endpoint that the key sent while another live key held its nickname.
+
+A quiet key keeps its endpoint, because a quiet peer can return.
+An endpoint that another key has proved is not an address of the old key.
+The engine can pass a directed frame of another key to `NodeApp::on_app_frame`.
+An app must act on it only if `to` is its own key (`HandlerCtx::our_pubkey`).
+Another key that uses the same nickname must not act on it.
+A relay forwards a directed frame of another key and keeps no copy of it.
+No backfill carries a directed frame.
+The engine keeps no log of messages and no log of tasks.
+A directed send that cannot go returns an error to the caller.
 The bytes are the same canonical message on both planes.
 The receive path is one pipeline for both planes:
 
@@ -411,41 +511,170 @@ flowchart LR
     P --> SE["self-echo drop"] --> RATE["rate check"] --> OBS["lifecycle observe"]
     OBS --> GATE["mesh gate + decrypt"] --> DD["cross-transport dedup"]
     DD --> SH["shard reassembly"] --> UNSEAL["unseal directed body"]
-    UNSEAL --> DIS["dispatch by kind"] --> LOG["message log"]
-    LOG --> APPH["NodeApp::on_app_frame"] --> SINK["NodeSink::emit"]
+    UNSEAL --> DIS["dispatch by kind"]
+    DIS --> APPH["NodeApp::on_app_frame"] --> SINK["NodeSink::emit"]
 ```
 
 Signature verification, the mesh gate, and dedup are identical on both planes because the planes share this path.
 
-### 7.5 Anti-entropy
+### 7.5 Backfill of a newcomer
 
-A periodic `Digest` broadcasts a rolling window of compact message ids.
-A receiver compares the window with its own log and re-sends what the sender misses, under a resend budget.
-The CRDT channels repair differently: their digests carry automerge heads.
-A receiver computes the missing changes and re-broadcasts the original frames with the original signatures intact.
-A cold joiner pulls the whole document history over successive rounds.
+A member sends its own slice of each channel to a newcomer.
+The frame is the original signed frame of the member, so the newcomer checks the signature of the author.
+One frame goes for each channel that the member wrote.
+A member owes the backfill to a peer that joins and to a peer that returns from quiet.
+A send that finds no path keeps the peer owed.
+The retry tick sends again.
+A peer stays owed for 90 s at most.
+A proof answer to the newcomer opens a path, so the slices go at once, with a dial back.
+The backfill starts a newcomer. The digest round repairs the loss that comes after it.
+The sync is pull-only. A node never pushes a slice that it thinks a peer lacks.
+A node sends a frame again only when a peer asks for it: with a pull (below) or with a shard repair (section 7.6).
+
+The digest round has four steps:
+- On each backfill tick (10 s), the node sends one `SliceRoot` frame by unicast to each linked neighbour. Gossip does not carry it.
+- If the root of a neighbour differs from the root of the node, the node waits. The wait is about 1 s plus a random delay of up to 500 ms. The live frames in flight land in this time. Then the node compares the roots again. If they agree now, the round ends.
+- If the roots still differ, the node reads the digest of the neighbour page by page. It reads at most one neighbour on each channel at a time. For each page it sends a `SlicePageRequest`, and the neighbour answers with a `SlicePage`. The node asks for the next page 1.25 s after a page, because a page costs the neighbour two answers.
+- For each page, the node sends one `SlicePull` with all the keys of the page that it would take. The node would take a key in these cases:
+  - The store lacks the key.
+  - The store holds the key at a lower version.
+  - The version is the same, and the hash on the page is lower.
+
+  The node pulls no gone key. It pulls no key of which the store keeps no slice (see section 8.1).
+
+The round takes a root or a page only if it comes by unicast from a roster peer.
+It takes a page only if the node asked for it, from the same connection, within 5 s.
+A request that gets no answer within 5 s ends. The next root of that neighbour starts the reading again.
+
+A page holds as many rows as fit one message: `MAX_MESSAGE_SIZE` less the page overhead of the session, divided by 160 bytes for a row, and at least 1 row.
+A pull holds the keys of one page, so it never holds more keys than a page has rows.
+A page is never sealed, so a sealed store and a plain store of one session have the same row count.
+The row count depends on the mesh id and the nickname of the session, so two nodes can page with different counts.
+A pull holds the keys of one page of the holder. The holder serves at most one of its pages, so the counts do not have to agree.
+A neighbour that gets a pull looks up the first rows of distinct keys and ignores the rest. The asker pulls the rest at its next round.
+
+A node limits the answers that it gives, so one peer cannot take the whole service:
+- A node gives at most 8 answers to one endpoint on one channel in a window of 5 s. A `SlicePull` and a `SlicePageRequest` each count as one answer. A request to another key, or for a page that the node does not have, spends no answer.
+- A node gives at most 32 answers in a window of 5 s, whoever asks.
+- The count is by endpoint, not by author key. An author key costs nothing to make, so a key would let one peer take every answer of a window.
+- A request over the budget gets no answer. The asker asks again at its next round.
+
+A node limits the pulls that it has open:
+- A node has at most 8 times the row count of open pulls for one neighbour, and at most 1024 open pulls in all.
+- An open pull ends when the slice arrives, or after 5 s. A key whose pull ended can be pulled again at once.
 
 ### 7.6 Multipart bodies
 
 Bodies above the frame budget split into shards.
 The reassembly store budgets by bytes, never by shard counts, so a forged total costs the sender shards, not the receiver memory.
 Only new shards refresh the staleness clock, so resends cannot keep a dead group alive.
-Large groups skip the message log and repair through a directed shard-repair request served from a sender-side cache.
+Large groups repair through a directed shard-repair request that a sender-side cache serves.
 
-## 8. Shared state: the CRDT channels
+### 7.7 Member key and nickname
 
-Each mesh carries two automerge documents, the channels `state` and `meta`.
-A local write is an RFC 7386 JSON merge, translated into one automerge change.
-Peers exchange changes as normal signed frames, and automerge merges them without conflict.
-Convergence is the job of automerge.
+A node holds two keys.
+The session key is new at each start. It signs the frames, it names the slice of its node, and it seals the directed frames.
+The member key is stored in `<state>.key` (mode 0600) and does not change. It signs one thing: the proof of a session.
+The proof is a signature over the session key, the nickname, the mesh and the run number. The run number rises by 1 at each start (`<state>.run`).
+A lock file `<state>.key.lock` is an OS lock that the node holds for its whole life. A second start on the same state path fails and names the file. A start that finds a holder that is stopping waits up to 2 s for it. A node that leaves removes its key and run files with its state file. The run counter has its own lock file, `<state>.run.lock`, which a start holds for one read and one write of the counter. A start that finds it held tries again every 50 ms. The wait ends with an error when the counter file has not been written for 2 s, and in any case after 30 s. The write is read from the modification time of the counter file, with no link followed, so a file system with a coarse clock (FAT keeps 2 s) shows a write late, which the cap of 30 s bounds.
+The state folder must be private to the user. If another user owns it (root excepted), or if its group or other users can write it and it has no sticky bit (as `/tmp` has), the start fails and names the folder, because another user could remove the key file, the run file or the lock while they are held. A folder that only the group can write is refused too, because a trusted group cannot be known: a folder at mode 0775 needs `chmod g-w`. The folders above the state folder are not checked. The state folder is checked by its path, and the files in it are opened by their path, so a folder above it that others can write without the sticky bit can swap the checked folder between the check and the open. This is a known limit: the fix would open the files relative to a handle of the folder that is opened with no link followed.
+The `joined` frame carries the proof.
+A node that holds a session with no proof asks the session for it with a `ProofRequest`, addressed to the session key, and the session answers with its `joined` frame.
+The ask goes when the node admits the session: on its `joined` frame that has no proof, on the `PeerInfo` that gives its address, and on its `alive` frame.
+The request needs a warm path to the session: a pooled connection, or a linked neighbour (the send dials it in the background). A node signs no request for an address that has no such path.
+An ask that finds no warm path waits. A bounded map holds the waiting asks (64 at most: a new one takes the place of the oldest, and a session whose ask was dropped is asked again at its next `alive` frame). An ask waits 30 s at most.
+The ask goes when a path comes up: when the gossip link to the endpoint of the session comes up, when a frame arrives from that endpoint on a unicast connection, or at the 10 s sweep tick, which is the fallback. A session that has no gossip link and no connection of ours can still dial us: for a frame that arrives on its unicast connection, the ask goes by a dial back in the background, as for a linked neighbour, and the limits of the retry stay. A node with no waiting ask pays one comparison.
+A session is asked once for each wait (30 s, then 60 s, then 120 s, then every 10 minutes for as long as the session is visible and has no proof), whatever number of frames come. A node sends at most 8 proof requests to one endpoint for each 10 s window, and the count is made before the request is signed: a peer that makes fresh session keys cannot set off a signature and a task for each key. In all, the requests after the first of an endpoint stop when 64 requests were sent in the window. The first request to an endpoint in a window is exempt from that limit, so one peer that uses all of the 64 cannot starve the other endpoints; the first requests have a limit of their own, 256 for each window. So a window holds at most 256 first requests plus the requests after them up to the 64, whatever the number of endpoints that have a path to the node (a link, a warm connection, or the endpoint that just sent a unicast frame). A session that claims OUR nickname (another member with its own key) is asked for its proof too, on any frame that it sends (a claimant that is chatty sends no `alive`, so its `PeerInfo` and its app frames count), by the same path and under the same budgets (its requests count in the 4 open asks for a nickname and in the reserve below): its answer is the frame that tells this node that another member holds the nickname, and the start `joined` of the claimant, which a node that is not yet its neighbor misses, is sent only once. The requests for a session that claims a bound nickname (a restart of the member that holds the name, or an intruder) have a reserve of their own: 64 for each window, outside the shared 256 and the 64, and at most 4 for each nickname, while the endpoint is under its 8 requests; so they go even when an attacker has used the shared budgets and filled the table. When the table holds only live counts, such a request goes out untracked (it counts in the reserve and in the work in all), and no live count is dropped for it. The limit of the reserve: an attacker that claims 16 bound nicknames with 4 fresh sessions each uses the whole reserve in a window, and the restart of another bound nickname waits for the next window (its request comes again then; no nickname is lost). The limit of the shared budget: an attacker that keeps more than 256 endpoints with a path asking in every window delays the requests for new members under free nicknames, which wait in the map below; it costs the attacker a connection for each endpoint. The count of an endpoint is kept for its whole window: the table holds 256 endpoints, drops only a count that is outside its window, and a request from an endpoint that the full table does not track waits in the map below. An ask over the budget waits in the same map as the asks that wait for a path, and goes when the window has moved.
+A member signs its answer once for each run, and every asker gets that same frame. The member holds that frame once, so the answers of a join wave do not spread through the mesh as new frames.
+A calm mesh carries no proof bytes beyond the `joined` frames. A host with no files (the browser) holds no member key and sends no proof.
+
+A nickname is bound to the member key that proved it, while a session of that member is in the roster, live or quiet.
+- A session that claims a bound nickname with no proof of that member is not admitted. Its presence, ping, pong and link-state frames are dropped. Its data frames are stored and relayed and change no roster entry.
+- A second member with another member key gets the join error: its proof is not held, and the node that holds the nickname does not admit its session. The node of that second member shows an error event, once for each session.
+- A nickname that no member key proved is free. A session with no proof is admitted and binds nothing, so two live keys can still use it.
+- When the proof of a member binds the nickname at a node, every session under it that belongs to another member, live or quiet, is ended at that node at once, and before the arrival of the member is shown. A session that was shown ends with a `left` line, so every `joined` that was shown gets its `left`. If the member that proved the name was shown already, its `joined` is shown again once, after all the `left` lines that its proof caused, so a reader that keys by nickname does not take the name for gone. A session that was never shown ends with none. The session said no goodbye, so its later frames are not stale, and the node admits them again.
+- The first proof that a node processes binds the name, so the order of the proofs decides at each node, and the order of the frames does not. The binding is per node and not global: two nodes can bind one nickname to two members.
+- A proof whose sender is not live ends no session, binds no nickname and replaces no run: it is kept pending (see above). So a replay of an old signed `joined` frame, which proves no presence, ends none. When its session is admitted and live, the proof is activated, and then the sessions of other members under the nickname end.
+- A node with no member key (a browser) proves nothing, so any member with a key that proves its nickname ends that node at every observer.
+- An ended session is no goodbye: its later frames go through the admission again, and are admitted when the member that holds the name is gone.
+- A proof that is refused because another member holds the name, and whose signature is valid, does not mark its frame as seen: when the holder has left and the same frame comes again, it is read again. A proof whose signature is not valid keeps its mark, so its copies are dropped as duplicates.
+- A second session of a bound nickname is gone at an observer at most one sweep tick (10 s) after a path to it comes up, and at once when the gossip link comes up.
+
+A member holds one session, the newest. A proof with a higher run replaces the older sessions of the member, in the proof book and in the roster, as a goodbye does, when its sender is live (in the roster after the frame). A proof of a sender that is not live, such as an old copy of a frame that a relay hands out, or the proof of a quiet session, is kept PENDING: valid (its signature was checked, and a forged one is never kept) and inactive. A pending proof binds no nickname, replaces no session and ends none, and it counts only for the admission of its own session (in the gate of our own nickname too, where it also lets a newer run of our own member be reported as superseding this node): when that session is admitted and live, the proof is activated and does what a proof of a live sender does. A quiet peer whose clock stepped back returns after a run of rising frames, and its proof is activated right after the frame that completes the run. The pending proofs have two classes of 32 at most, the oldest dropped when a class is full: the proofs of a member that already holds the nickname, with a run above every run of that member in the book (the sender can only be a restart of that member, and nobody else can sign its proofs: an old copy of the frame of a past run is not above, and goes to the other class), and all the others. In the class of the holders each member has 4 proofs at most and keeps its highest runs, so one member cannot push out the restart proof of another, however many valid proofs it signs for its own nickname; a full class drops the lowest run of the member that has the most. The limit of that isolation: the class holds 32 proofs, so when 32 different members that hold a name have one pending proof each, a proof of one more member takes the place of one of them (they tie, so the victim is any of them) and that member waits for its fresh `joined` frame. An attacker would need 32 members that hold names in the mesh, each with a valid proof, to do it. The limit of that rule: when a member already has 4 pending proofs, a new proof with a run not above the lowest of them is refused. A proof of a lower run cannot be told from an old copy of the frame of a past run, since both are valid signatures of the member, and accepting it would let a replay push out the real newest run. A member that restored an older run counter and has 4 higher pending proofs relies on the fresh `joined` frame that its new session sends at its start: that frame takes the live path, which does not use the pending proofs. So a flood of proofs that an attacker signs for its own nicknames cannot push out the proof of a restart. A dropped proof comes again with a valid `joined` frame of its session (the answer to our request, its arrival, or its re-announce): an `alive` frame carries no proof, and a request that finds no path waits for one. A duplicate `joined` frame gives a proof back to a session that lost it, when the proof passes the acceptance checks: an ACTIVE proof for a live session, and a PENDING proof for any other session (a quiet one, or one that the nickname gate refused). A session that said goodbye gets nothing. A proof with a run that is not higher than a session of the member in the roster is a late copy: the active proof book does not hold it. If its sender is not live it can stay pending, and it admits its session.
+The proof book holds 1024 sessions at most. When it is full, the oldest session that is not in the roster goes first, and a book of sessions in the roster refuses the new proof.
+
+## 8. Shared state: one signed slice for each author
+
+Each mesh carries two channels of shared state, `state` and `meta`.
+A channel holds one slice for each author.
+A slice is the last signed frame of its author.
+Its body is `{"version": <number>, "value": <object or null>}`. A `null` value is the tombstone of a member that leaves (section 8.2).
+The key of a slice is the author key.
+The view of a channel is a JSON object that maps the lowercase hex of each author key to the value of its slice: `{"<hex>": {...}}`.
+
+A member writes only its own slice and reads every slice.
+A local write is an RFC 7386 JSON merge.
+The engine applies the merge to the own value, raises the version by 1, signs the frame, and broadcasts it.
+The store takes the key from the frame and never from the body, so no frame writes the slice of another author.
+A frame with a higher version replaces the slice.
+A frame with a lower version is stale, and the store drops it.
+Two frames can have the same version and other content.
+The frame with the lower content hash wins.
+On a passworded mesh the body is sealed with the channel key, and the store opens it before it reads the slice.
 Authenticity is the job of the engine.
 
-The `state` channel is free-form.
-The `meta` channel carries a **self-write gate**: a per-peer map where one field belongs to the peer the entry names.
-The gate matters because a `meta` card carries the cryptographic identity of a peer.
-Ingest applies each foreign change to a throwaway fork first.
-If the change touches the field of any other peer, the gate rejects it.
-Changes that arrive before their causal dependencies wait in a pending buffer and drain through the same gate.
+The store has three caps:
+- A slice and its frame must fit the wire limit, `MAX_MESSAGE_SIZE` (3840 bytes). The cap of a body is that limit minus the frame overhead of the session, which holds the envelope, the mesh id and the nickname. A larger write is refused with the error `TooLarge`.
+- A channel holds 1024 authors at most. This is the cap of the live roster.
+- An author has a burst of 5 versions, and then 1 version for each write interval (1 s). An arrival has a burst of 10, so the jitter of a network does not refuse an honest version. A write or an arrival past the rate limit is refused with the error `RateLimited`. Every arrival of a key that the store keeps is charged, a replay from the gossip cache too. A frame that answers a pull takes no token. A slice that waits in the pending set is charged when it is applied (section 8.1).
+
+The caps bound the memory.
+In the worst case, a slice takes 3840 bytes.
+A full store of 1024 authors takes 3.75 MiB for each channel, so 7.5 MiB for the two channels.
+The pending set can hold the same, so the worst case is 15 MiB in all.
+A normal slice is about 300 bytes, so a normal full store takes about 600 KiB.
+
+### 8.1 The roster gate
+
+A slice of a key that the store keeps enters the store at once.
+The store keeps the own key, the live peers and the quiet peers.
+The own key is never a stranger: its slice always enters.
+The roster is the live peers, the quiet peers and the lapsed peers.
+A quiet peer past `QUIET_TTL` is lapsed. It stays in the roster and can still return, but the store keeps no slice of it.
+A slice of any other key waits in the **pending set**: a key that is not in the roster, and a lapsed key.
+The pending set holds the newest slice of each key.
+It holds as many keys as the author cap of the channel, 1024 by default.
+When the set is full, the keys that waited for 90 s go first, and then the key that arrived first.
+A pending slice expires after 90 s, the alive timeout. A newer version of the same key restarts the wait.
+The sweep tick expires the pending slices.
+When the key joins the roster or returns to it, the engine applies the pending slice, and the rate limit charges it then.
+So a flood of fresh keys that are not in the roster cannot fill the store.
+A pending slice is in no view and in no backfill.
+A frame of a key that said a signed goodbye is dropped. It does not wait in the pending set.
+
+### 8.2 The end of a session
+
+A member that leaves sends its tombstone before its `Left`.
+The tombstone is a slice with the value `null` at the next version, on each channel.
+It goes once by gossip, and by unicast to each live peer that the member can dial.
+A peer that gets it keeps the key in its slot with the `null` value, and the view leaves the key out.
+A peer that misses the `Left` still removes the slice of that member from its view, by the tombstone.
+A peer that missed the `Left` moves the key to the gone set after the tombstone TTL (10 minutes).
+A peer that gets the `Left` moves the key to the gone set at once.
+
+A key that said a signed goodbye, or whose run a newer run replaced, goes to the **gone set**.
+The engine removes its slice, and the store refuses a slice of that key until the gone TTL ends.
+The gone TTL starts when the key goes to the gone set.
+The default of the gone TTL is 2 hours.
+The gone set holds as many keys as the author cap, 1024 by default. When it is full, the oldest key goes first.
+It must stay above the quiet TTL (1 hour) plus the alive timeout, so a peer that missed the goodbye cannot bring back the old slice.
+A new run of a member replaces the older session of that member after the proof of the new run binds, so the view holds one slice for each member.
+A session that lost its nickname to another member can return.
+The engine parks its slice in the pending set, and it does not add the key to the gone set.
+The pending TTL applies to that slice.
+A lapsed key is not gone, because it can return.
+The sweep releases its slice, and its frames wait in the pending set.
+When the key returns, its pending frame applies, and the digest round pulls the rest.
 
 ## 9. Transports
 
@@ -463,16 +692,17 @@ Transport *policy* is part of the mesh id, beside the lookups.
 By default the relay is lookup only: it carries the bootstrap dial, JSEP signalling, and the NAT-traversal frames of a new connection, and no payload.
 A payload lane (gossip graft, unicast, blob) sends to a peer only after iroh selected a non-relay path to it, or a WebRTC session is attached.
 A gossip graft waits for that proof (`transport::probe`), so a pair never dials a link through the relay.
-The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::path::refuse_unless_direct`).
+The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::payload_path::refuse_unless_direct`).
 The rendezvous link is gated the same way on the beacon, so no gossip frame ever crosses the relay.
+The gate checks the path once, so every gossip connection is watched afterwards, the ones this node accepted and the ones iroh-gossip dials for it (the endpoint hook starts that watch): one whose selected path stays on the relay for `PROBE_DEADLINE`, the wait of the accept gate, is closed with the same coded reason.
 A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
 `transport.relay_transport = true` lets payload fall back to the relay, as before the policy existed.
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
-An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
+An id of version 1, minted before the policy had its own byte, is refused with a request to upgrade: the mesh is created again.
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay,nostr` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
-`transport` (`--transport udp,webrtc,relay`, `transport: ['udp', 'webrtc', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, and `udp,webrtc` is the default.
+`transport` (`--transport udp,webrtc,multihop,gossip,relay`, `transport: ['udp', 'webrtc', 'multihop', 'gossip', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` and `gossip` need one of the two next to them, and `udp,webrtc,multihop,gossip` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `nostr_urls` (`--nostr-url`, `nostrUrls`) says which Nostr relays, and needs `nostr` among the lookups.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
@@ -528,7 +758,7 @@ sequenceDiagram
 Over the authenticated relay stream the receiver ignores the claimed endpoint id and trusts the TLS-proven remote id.
 The lower endpoint id offers, and one shared admission table caps in-flight sessions for both roles.
 TURN is refused by policy: the project relays through its own iroh relay instead.
-A custom path selector ranks direct IP first, then WebRTC, then relay.
+A custom path selector ranks direct IP first, then WebRTC, then multihop, then relay: one ladder (`Rung` in `habilis-network-iroh-transport-util`) that both selectors take, so the order does not depend on the transport list.
 The default iroh selector skips paths with no RTT sample, and a fresh WebRTC path always is one.
 Without the custom selector, the connection settles on the relay for its whole life.
 
@@ -538,6 +768,16 @@ Without the custom selector, the connection settles on the relay for its whole l
 Each node broadcasts a link vector, and every node folds the freshest vectors into one metric-weighted graph.
 Route computation is a local Dijkstra run.
 A route is a **source route**: the sender packs the full hop list into the address.
+
+Every node advertises one cost for the links that leave it, `HandleConfig::link_cost`: 10 for a native node.
+A browser advertises ten times more (`HandleConfig::for_browser`, 100), so a route avoids a browser as a hop.
+The graph is directed: the link into a node carries the cost of its neighbor, and the links out of it carry its own cost.
+A browser therefore costs once as a hop in the middle of a route, and nothing as the source or the destination of a route.
+A route has at most 8 hops, so the longest native route costs 80, and one browser hop costs at least 110 (10 into the browser, 100 out of it).
+A native route wins whenever one exists, and a route through a browser is used when no native route does.
+The cost is part of the signed vector, so another node cannot change it, but a node can advertise any cost for itself.
+The rule holds while all native links cost the same, and the test `a_route_through_a_browser_costs_more_than_any_native_route` fails when a constant breaks it.
+With measured costs that differ, the guard becomes a relation on the measured floor: one browser hop at its lowest measured cost must exceed a native route of 8 hops at its highest.
 
 ```mermaid
 flowchart LR
@@ -552,6 +792,10 @@ The only decision a relay makes is "forward to the next hop" or "deliver".
 QUIC runs end to end, so relays forward opaque, already-encrypted packets.
 The transport owns a dedicated underlay endpoint, because the application endpoint cannot recursively carry itself.
 The reverse route derives from the forward route, so a reply needs no fresh lookup.
+A hop in a route is two ids, the application endpoint and its underlay endpoint, and no address.
+A forwarder dials a hop only at the address of the vector that the hop signed.
+iroh names a path by the bytes of its address, so an address inside the route would make one route two paths as soon as the two ends hold different versions of it.
+A relay also never dials an address that a cell carries.
 
 ### 9.4 Byte streams
 
@@ -633,14 +877,19 @@ The socket module compiles out on wasm32, and a browser binds nothing.
 ### 10.4 The C ABI
 
 `habilis-network-ffi` exposes opaque handles and blocking calls, declared in `include/habilis_network.h`.
-A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages (`habilis_network_msg_send`, `habilis_network_msg_recv`) and reads the shared state as JSON.
+A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages and reads the shared state as JSON.
+A send names a nickname (`habilis_network_msg_send`) or an author key (`habilis_network_msg_send_to_key`).
+A nickname names its one live member, whether or not a member key proved it. If no live member uses the nickname, it names the one quiet member that does, because a quiet member can return.
+A send refuses a nickname that two or more live members use, or that two or more quiet members use when no live member does. An author key names exactly one member, and it is the way to reach a member whose nickname is shared.
+A receive with `habilis_network_msg_recv` gives the key of the author in `habilis_network_msg.key`.
+The struct has 144 bytes on a 64-bit target and no size field, so a caller built with an older header must be rebuilt.
 A stream node (`habilis_network_streams_*`, `habilis_network_stream_*`) creates and opens byte streams (§9.4).
 Panics stop at the boundary through `catch_unwind`.
 For this reason the release profile keeps unwinding and does not set `panic = "abort"`.
 
 ### 10.5 The browser build
 
-A build with `--no-default-features` keeps gossip, the CRDT documents, the protocol types, address lookup, and the whole node runtime.
+A build with `--no-default-features` keeps gossip, the shared state, the protocol types, address lookup, and the whole node runtime.
 It loses the control socket, the state file, process helpers, and the log sink.
 Portability rests on two shims: `web-time` for the clock and `n0-future` for timers and task spawn.
 A dedicated test guards the shims, because `tokio::time` compiles for wasm32 and then panics at run time.
@@ -667,9 +916,9 @@ What the engine is not:
 
 - It is not a general-purpose networking library, and it is not published to crates.io.
 - It is not a bulk-transfer system.
-  Gossip re-broadcasts and logs every frame, so large payloads go over the `blob` channel or not at all.
-- The author identity is not yet durable.
-  A restart mints a new message key.
+  Gossip re-broadcasts every frame, so large payloads go over the `blob` channel or not at all.
+- The identity of a session is not durable.
+  A restart mints a new session key. Only the member key, which signs the proof, survives a restart.
 
 ## 12. References
 
@@ -677,8 +926,8 @@ In this repository:
 
 - `README.md` — workspace overview, build and test commands.
 - `crates/habilis-network/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
-- `FORKED.md` — fork provenance and the pin contract.
 - `crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
+- `AGENTS.md` — the concept glossary, the layer invariants, the logging pins, and the rules for newtypes.
 - Per-crate READMEs under `crates/*/README.md`.
 
-Referenced from code but kept upstream: `AGENTS.md` (concept glossary), `docs/mesh-hash.md`, and `docs/history-integrity.md`.
+Referenced from code but kept upstream: `docs/mesh-hash.md` and `docs/history-integrity.md`.

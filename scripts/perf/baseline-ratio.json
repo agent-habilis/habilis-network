@@ -1,0 +1,18 @@
+{
+  "value": 78.9,
+  "metric": "frame_meta_per_data",
+  "nodes": 16,
+  "host": "nyc-macmini1 (arm64, 8 cores, 8 GiB)",
+  "pairs_used": [2, 3],
+  "pair_values": [79.22, 78.58],
+  "pair_1": "weak: A/B load gate failed twice (1.86); value 67.97, kept on disk, not used",
+  "binary": {
+    "arm": "baseline-counters2",
+    "sha256": "853c14177211e7d727c70d8a18b3332323eb4f3e0a9394c004b79eae5fe41584",
+    "app": "agent-gossip b588fc75827d4f54b86bf23f6cd3dca440f8139b",
+    "engine": "habilis-network 188a27a5ea443c3f0ae90e7a47ced96630e8f594"
+  },
+  "run": "settle 300 s, idle 240 s, loaded 300 s, stagger 0.5 s, loopback",
+  "head_value": 12.57,
+  "head_value_note": "unicast digests only (head 69689473, binary sha256 91d27538d802, app b588fc75), from the RATIO_BIN goal test on nyc-macmini1 at N=16 on 2026-11-03: 12.57. The three pairs of the step measure gave 12.80, 12.97 and 13.04. Each perf commit updates it from its own run."
+}

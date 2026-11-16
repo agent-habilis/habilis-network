@@ -29,7 +29,7 @@ futures-util.workspace = true
 hex = "0.4"
 # BIP-340 Schnorr only. `ecdsa` and `precomputed-tables` stay off: we sign about
 # one event a minute, and the tables cost size, not correctness.
-k256 = { version = "0.13", default-features = false, features = ["schnorr", "std"] }
+k256 = { version = "0.14", default-features = false, features = ["schnorr", "std"] }
 n0-future.workspace = true
 rand.workspace = true
 serde.workspace = true

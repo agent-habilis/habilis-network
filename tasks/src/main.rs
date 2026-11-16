@@ -6,7 +6,7 @@
 //! [`gate::STEPS`] as data, so a contributor can run the gate instead of
 //! transcribing YAML, and can narrow it to one crate with `-p`.
 //!
-//! The second is `e2e`, which is a runner for a different reason: the WebRTC
+//! The second is `e2e`, which is a runner for a different reason: the `WebRTC`
 //! crate's browser tests need a preamble that is four things long, and every one
 //! of them fails in a way that does not name its cause. Homebrew clang or
 //! `ring`'s C core silently does not link; `--release` or the wasm is too big to
@@ -19,11 +19,13 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use xshell::Shell;
 
+use std::error;
 mod bench;
 mod dev;
 mod e2e;
 mod ffi;
 mod gate;
+mod matrix;
 mod scope;
 mod util;
 mod wasm;
@@ -31,7 +33,7 @@ mod wasm;
 use scope::Scope;
 
 /// Task result; any `Err` is printed and turns into a non-zero exit.
-pub(crate) type TaskOutcome = Result<(), Box<dyn std::error::Error>>;
+pub(crate) type TaskOutcome = Result<(), Box<dyn error::Error>>;
 
 /// The workspace's quality gate and its browser test suite.
 #[derive(Parser)]
@@ -87,16 +89,26 @@ enum Task {
     Ffi,
     /// Build habilis-network-wasm and emit its JS glue into packages/habilis-network-wasm/wasm.
     BuildWasm,
-    /// Drive the WebRTC browser tests against real browsers.
+    /// Drive the `WebRTC` browser tests against real browsers.
     ///
     /// The default `matrix` suite sweeps browser × build profile × main-thread
     /// pressure and prints one summary table; `--suite loopback` runs the fast
     /// four-test regression suite against a single browser instead.
     E2e(e2e::Args),
-    /// Measure bulk throughput over the transports: habilis-network over WebRTC
+    /// Measure bulk throughput over the transports: habilis-network over `WebRTC`
     /// (browser↔browser, browser↔native, native↔native) against plain iroh
     /// and a bare data channel.
     Benchmark(bench::Args),
+    /// Run every cell of the send ladder matrix, one at a time: transport list,
+    /// blocked rungs and a third member, each with the rung it must settle on and
+    /// a message that must arrive. Then the D11 gate: the ceiling of direct
+    /// connections and a lane pair, on real members. The gate runs two of the
+    /// cells; the rest are the nightly's.
+    Matrix {
+        /// Only list the tests that would run, and run none.
+        #[arg(long)]
+        list: bool,
+    },
     /// Remove build artifacts.
     Clean,
 }
@@ -135,6 +147,7 @@ fn dispatch(sh: &Shell, task: Task) -> TaskOutcome {
         Task::BuildWasm => wasm::build_peer(sh),
         Task::E2e(args) => e2e::run(&args),
         Task::Benchmark(args) => bench::run(&args),
+        Task::Matrix { list } => matrix::run(sh, list),
         Task::Clean => dev::clean(sh),
     }
 }
