@@ -454,18 +454,19 @@ fn wire_transports(
     }
     state.has_rendezvous = rendezvous_params.has_rendezvous;
     let nostr_rx = transports.nostr.map(|params| {
-        let (signal, hellos) = webrtc::nostr::NostrSignal::start(webrtc::nostr::NostrSignalParts {
-            endpoint: endpoint.clone(),
-            book: state.address_book.clone(),
-            handle: transports.webrtc.clone(),
-            admission: state.webrtc_admission.clone(),
-            ice: state.webrtc_ice,
-            keys: params.keys,
-            relays: params.relays,
-            answers: transports.webrtc_enabled,
-        });
+        let (signal, hellos) =
+            webrtc::nostr_signal::NostrSignal::start(webrtc::nostr_signal::NostrSignalParts {
+                endpoint: endpoint.clone(),
+                book: state.address_book.clone(),
+                handle: transports.webrtc.clone(),
+                admission: state.webrtc_admission.clone(),
+                ice: state.webrtc_ice,
+                keys: params.keys,
+                relays: params.relays,
+                answers: transports.webrtc_enabled,
+            });
         state.nostr = Some(signal);
-        state.nostr_width = webrtc::nostr::JOINING_WIDTH;
+        state.nostr_width = webrtc::nostr_signal::JOINING_WIDTH;
         state.next_hello = Some(TokioInstant::now());
         hellos
     });
@@ -1073,21 +1074,21 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.ext.note_gossip(event.as_ref());
         let context = self.parts.handler_ctx(&self.sender);
         gossip::handle_gossip_event(event, &mut self.state, &mut self.app, &context).await;
-        webrtc::nostr::discovery::update_width(&mut self.state);
+        webrtc::nostr_signal::discovery::update_width(&mut self.state);
     }
 
     /// A `Hello` heard over Nostr.
     fn nostr_hello(&mut self, hello: &NostrHello) {
         self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
-        webrtc::nostr::discovery::on_hello(&mut self.state, &context, hello);
+        webrtc::nostr_signal::discovery::on_hello(&mut self.state, &context, hello);
     }
 
     /// The next `Hello` of this node is due.
     fn nostr_announce(&mut self) {
         self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
-        webrtc::nostr::discovery::announce(&mut self.state, &context);
+        webrtc::nostr_signal::discovery::announce(&mut self.state, &context);
     }
 
     async fn direct_outcome(&mut self, outcome: probe::DirectOutcome) {
@@ -1194,7 +1195,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             context.rendezvous_id,
         );
         probe::nudge_webrtc_riders(&mut self.state, &context);
-        webrtc::nostr::discovery::update_width(&mut self.state);
+        webrtc::nostr_signal::discovery::update_width(&mut self.state);
     }
 
     async fn sweep(&mut self) {

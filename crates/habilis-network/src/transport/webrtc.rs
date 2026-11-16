@@ -38,7 +38,7 @@ pub(crate) mod dial_signal;
 pub(crate) mod ice_profile;
 pub(crate) mod lane_needs;
 pub(crate) mod negotiate_session;
-pub(crate) mod nostr;
+pub(crate) mod nostr_signal;
 pub(crate) mod nudge_acceptor;
 pub(crate) mod offer;
 pub(crate) mod rendezvous;

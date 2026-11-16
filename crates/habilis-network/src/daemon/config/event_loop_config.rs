@@ -121,7 +121,7 @@ pub(crate) struct TransportSet {
     /// also decides `EventLoopState::rendezvous_graft_needs_session`.
     pub(crate) local_udp_transport: UdpTransport,
     /// The Nostr carrier's keys and relays, on a mesh with the Nostr lookup.
-    pub(crate) nostr: Option<transport::webrtc::nostr::NostrParams>,
+    pub(crate) nostr: Option<transport::webrtc::nostr_signal::NostrParams>,
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.
     pub(crate) relay_transport: transport::PayloadPath,

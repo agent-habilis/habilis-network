@@ -42,7 +42,7 @@ use lookup::{
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
-use crate::transport::webrtc::nostr::NostrParams;
+use crate::transport::webrtc::nostr_signal::NostrParams;
 
 use super::config::{
     EndpointOwner, Endpoints, MeshSpec, RendezvousConfig, RuntimeConfig, TransportSet,

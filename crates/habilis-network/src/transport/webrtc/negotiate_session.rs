@@ -1,7 +1,7 @@
 //! Negotiating one `WebRTC` session with a peer.
 
 use super::offer::Offer;
-use super::{nostr, nudge_acceptor, offer, retry, session_policy};
+use super::{nostr_signal, nudge_acceptor, offer, retry, session_policy};
 use crate::daemon::handler_ctx::HandlerCtx;
 
 use iroh::{EndpointAddr, EndpointId};
@@ -114,8 +114,8 @@ pub(crate) fn negotiate_session(
     };
     // With no rendezvous, or a peer heard over Nostr, the ALPN may have no
     // path to ride; the offer goes over Nostr instead.
-    if nostr::discovery::prefer_nostr(state, peer) {
-        nostr::discovery::spawn_offer(state, peer, guard, offer);
+    if nostr_signal::discovery::prefer_nostr(state, peer) {
+        nostr_signal::discovery::spawn_offer(state, peer, guard, offer);
         return;
     }
     offer::spawn_offer_round(state, context, peer, address, handle, guard, offer);

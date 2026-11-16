@@ -611,7 +611,7 @@ pub struct EventLoopState {
     /// one, the signal ALPN has nothing to ride and offers go over Nostr.
     pub(crate) has_rendezvous: bool,
     /// The Nostr carrier, on a mesh with the Nostr lookup.
-    pub(crate) nostr: Option<transport::webrtc::nostr::NostrSignal>,
+    pub(crate) nostr: Option<transport::webrtc::nostr_signal::NostrSignal>,
     /// When each peer was last heard over Nostr.
     pub(crate) nostr_seen: HashMap<EndpointId, Instant>,
     /// When each peer was last woken with a `Hello` on its own tag.
