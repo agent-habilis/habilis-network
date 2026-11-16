@@ -1,0 +1,185 @@
+use std::collections::BTreeSet;
+
+use habilis_network_iroh_multihop_transport::{AppId, MultihopHandle, TopologyView};
+use iroh::EndpointId;
+use serde::Serialize;
+
+use super::{PathLabel, PeerLink};
+use crate::daemon::state::EventLoopState;
+use crate::transport::LedgerView;
+use crate::transport::probe::PathKind;
+
+/// The connections of a node, the cap on them, and the multihop link-state graph, read at one
+/// instant.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+///
+/// # fn demo(state: &EventLoopState) -> usize {
+/// state.topology_snapshot().direct_units
+/// # }
+/// ```
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct TopologySnapshot {
+    /// The endpoint id of this node, in hex.
+    pub self_id: String,
+    /// The cap on the direct connections of the node.
+    pub max_connections: usize,
+    /// The units of the ceiling now: a gossip neighbor, a session and a connection to one peer
+    /// are one unit.
+    pub direct_units: usize,
+    /// How many units the count is over the ceiling by.
+    pub over_ceiling: usize,
+    /// The QUIC connections that the node holds in all.
+    pub quic_connections: usize,
+    /// The cap on the QUIC connections in all.
+    pub quic_cap: usize,
+    /// Every peer that the node holds a connection, a session or a gossip link to.
+    pub peers: Vec<PeerLink>,
+    /// The multihop link-state graph, or `None` when multihop is off.
+    pub graph: Option<TopologyView>,
+}
+
+impl EventLoopState {
+    /// The connections of this node, read at one instant.
+    #[must_use]
+    pub fn topology_snapshot(&self) -> TopologySnapshot {
+        let ledger: LedgerView = self.webrtc_admission.ledger();
+        let mut ids: BTreeSet<EndpointId> = BTreeSet::new();
+        ids.extend(&ledger.quic_peers);
+        ids.extend(&ledger.session_peers);
+        ids.extend(&self.linked_endpoints);
+        let peers: Vec<PeerLink> = ids
+            .into_iter()
+            .map(|id| self.peer_link(id, &ledger))
+            .collect();
+        let self_id: String = ledger.local.map(|id| id.to_string()).unwrap_or_default();
+        TopologySnapshot {
+            self_id,
+            max_connections: ledger.cap,
+            direct_units: ledger.units,
+            over_ceiling: ledger.over_ceiling,
+            quic_connections: ledger.connections,
+            quic_cap: ledger.total_cap,
+            peers,
+            graph: self.multihop().map(MultihopHandle::topology_view),
+        }
+    }
+
+    fn peer_link(&self, peer: EndpointId, ledger: &LedgerView) -> PeerLink {
+        let kind: PathKind = self
+            .path_kinds
+            .get(&peer)
+            .copied()
+            .unwrap_or(PathKind::None);
+        let via: Option<String> = if kind == PathKind::Multihop {
+            self.first_hop(peer)
+        } else {
+            None
+        };
+        PeerLink {
+            endpoint: peer.to_string(),
+            nickname: self.nickname_of_endpoint(peer),
+            path: PathLabel::from(kind),
+            via,
+            neighbor: self.linked_endpoints.contains(&peer),
+            pinned: ledger.pinned.contains(&peer),
+        }
+    }
+
+    /// The nickname that the roster gave the endpoint `peer`, when it did.
+    fn nickname_of_endpoint(&self, peer: EndpointId) -> Option<String> {
+        for (nickname, address) in &self.peer_endpoints {
+            if address.id == peer {
+                return Some(nickname.to_string());
+            }
+        }
+        None
+    }
+
+    /// The first hop of the multihop route to `peer`, in hex.
+    fn first_hop(&self, peer: EndpointId) -> Option<String> {
+        let hops: Vec<AppId> = self.multihop()?.route_hops(AppId::new(peer))?;
+        hops.first().map(|hop| hop.get().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh::EndpointAddr;
+
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::topology::{PathLabel, PeerLink};
+    use crate::transport::probe::PathKind;
+    use crate::util::tuning::MAX_CONNECTIONS;
+
+    /// A peer with a session and a peer with a gossip link are two peers and two units, each with
+    /// the path, the nickname and the neighbor flag that the engine holds for it.
+    #[test]
+    fn a_session_and_a_gossip_link_are_two_peers_and_two_units() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (bob, carol) = (endpoint_id(1), endpoint_id(2));
+        state.webrtc_admission.note_success(bob);
+        state.link(carol);
+        state.path_kinds.insert(bob, PathKind::WebRtc);
+        state.path_kinds.insert(carol, PathKind::Ip);
+        state.note_peer_endpoint(nick("bob"), EndpointAddr::new(bob));
+
+        let snapshot = state.topology_snapshot();
+
+        assert_eq!(snapshot.peers.len(), 2, "two peers: {snapshot:?}");
+        assert_eq!(snapshot.direct_units, 2, "two units: {snapshot:?}");
+        assert_eq!(
+            snapshot.max_connections, MAX_CONNECTIONS,
+            "the cap is the default"
+        );
+        assert_eq!(
+            snapshot.quic_cap,
+            2 * MAX_CONNECTIONS,
+            "the total cap is twice the cap"
+        );
+        assert!(snapshot.graph.is_none(), "multihop is off in this state");
+        let bob_link: &PeerLink = snapshot
+            .peers
+            .iter()
+            .find(|peer| peer.endpoint == bob.to_string())
+            .expect("bob is a peer");
+        assert_eq!(bob_link.path, PathLabel::Webrtc, "bob is on a session");
+        assert_eq!(bob_link.nickname.as_deref(), Some("bob"), "bob is named");
+        assert!(!bob_link.neighbor, "bob has no gossip link");
+        let carol_link: &PeerLink = snapshot
+            .peers
+            .iter()
+            .find(|peer| peer.endpoint == carol.to_string())
+            .expect("carol is a peer");
+        assert_eq!(carol_link.path, PathLabel::Ip, "carol is on an ip path");
+        assert!(carol_link.neighbor, "carol is a gossip neighbor");
+        assert!(carol_link.nickname.is_none(), "carol has no nickname yet");
+        assert!(carol_link.via.is_none(), "an ip path has no first hop");
+        assert!(!carol_link.pinned, "carol is not pinned");
+    }
+
+    #[test]
+    fn a_peer_with_no_reading_has_an_unknown_path() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let dave = endpoint_id(3);
+        state.link(dave);
+
+        let snapshot = state.topology_snapshot();
+
+        assert_eq!(snapshot.peers.len(), 1, "one peer: {snapshot:?}");
+        assert_eq!(
+            snapshot.peers[0].path,
+            PathLabel::Unknown,
+            "no reading is unknown"
+        );
+        assert_eq!(
+            serde_json::to_value(snapshot.peers[0].path).expect("a label serializes"),
+            "unknown",
+            "the label serializes in lowercase"
+        );
+    }
+}

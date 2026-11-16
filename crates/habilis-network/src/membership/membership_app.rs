@@ -17,6 +17,7 @@ use crate::protocol::messages::Authored;
 use crate::protocol::{
     AppFrameParams, AppTag, AuthorKey, Channel, MessageBody, MessageKind, Nickname,
 };
+use crate::topology::TopologySnapshot;
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -379,6 +380,11 @@ pub enum Inspect {
     PeerCount {
         /// Gets the count.
         reply: oneshot::Sender<usize>,
+    },
+    /// The connections of this member, the cap on them, and the multihop graph, at one instant.
+    Topology {
+        /// Gets the snapshot.
+        reply: oneshot::Sender<TopologySnapshot>,
     },
 }
 
@@ -1046,6 +1052,10 @@ impl MembershipApp {
             Inspect::PeerCount { reply } => {
                 // The one count of the engine: see `EventLoopState::member_count`.
                 let _ = reply.send(state.member_count());
+                false
+            }
+            Inspect::Topology { reply } => {
+                let _ = reply.send(state.topology_snapshot());
                 false
             }
         }

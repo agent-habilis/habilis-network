@@ -15,8 +15,8 @@ use crate::util::tuning;
 
 use super::inner::RUNG_CLOSE_MEMORY;
 use super::{
-    AdmissionGuard, BusyGuard, ConnectionHook, Inner, Refusal, RefusalBackoff, Round, Sessions,
-    sampler,
+    AdmissionGuard, BusyGuard, ConnectionHook, Inner, LedgerView, Refusal, RefusalBackoff, Round,
+    Sessions, sampler,
 };
 use tokio::sync::mpsc;
 
@@ -656,6 +656,23 @@ impl SignalAdmission {
                 direct: true,
                 answered: true,
             });
+        }
+    }
+
+    /// The ledger of direct connections, read at one instant.
+    pub(crate) fn ledger(&self) -> LedgerView {
+        let inner = self.lock();
+        let ceiling = &inner.ceiling;
+        LedgerView {
+            local: inner.local,
+            cap: self.cap,
+            units: ceiling.units(),
+            over_ceiling: ceiling.over_ceiling(),
+            connections: ceiling.connections(),
+            total_cap: ceiling.total_cap(),
+            quic_peers: ceiling.quic_peers(),
+            session_peers: ceiling.session_peers(),
+            pinned: ceiling.pinned_connected(),
         }
     }
 

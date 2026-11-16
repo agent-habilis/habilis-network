@@ -55,6 +55,7 @@ pub(crate) type IpcMessage<Cmd> = (Cmd, oneshot::Sender<String>);
 mod mesh_sender;
 mod send;
 
+pub(crate) use admission::LedgerView;
 pub use admission::SignalAdmission;
 pub(crate) use direct_only_gossip::DirectOnlyGossip;
 pub use mesh_sender::MeshSender;

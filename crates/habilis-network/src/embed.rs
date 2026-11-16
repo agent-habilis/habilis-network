@@ -17,4 +17,5 @@ pub use crate::daemon::state::TestDrop;
 pub use crate::daemon::state::{EventLoopState, KeyOfError, Reach, RosterEntry, RosterSnapshot};
 pub use crate::gossip::app::{AppClass, AppFrameError, InboundApp, NodeApp};
 pub use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
+pub use crate::topology::{PathLabel, PeerLink, TopologySnapshot};
 pub use crate::transport::Lane;
