@@ -52,7 +52,7 @@ pub fn best_of<'a>(
 }
 
 /// One rung of the path ladder, best first: a direct IP path, then `WebRTC`, then
-/// multihop, then gossip, then the relay. A node with every rung climbs to the
+/// multihop, then gossip, then the relay, then Nostr. A node with every rung climbs to the
 /// highest one it has, and falls one rung when that path goes away.
 ///
 /// The order is the declaration order, and both selectors take it from here, so
@@ -80,20 +80,24 @@ pub enum Rung {
     /// the relay, which is infrastructure, and below every path between two
     /// members.
     Gossip,
-    /// The relay, the last resort.
+    /// The relay, the last resort of infrastructure.
     Relay,
+    /// QUIC datagrams carried in ephemeral Nostr events. It is the last rung
+    /// before [`Rung::Other`]: a pair that reaches it has no other path.
+    Nostr,
     /// A custom transport that the caller does not name, below every other rung.
     Other,
 }
 
 impl Rung {
     /// Every rung, best first.
-    pub const LADDER: [Self; 6] = [
+    pub const LADDER: [Self; 7] = [
         Self::Ip,
         Self::WebRtc,
         Self::Multihop,
         Self::Gossip,
         Self::Relay,
+        Self::Nostr,
         Self::Other,
     ];
 }
@@ -129,10 +133,12 @@ pub const WEBRTC_TRANSPORT_ID: u64 = 0x5752_5443;
 pub const MULTIHOP_TRANSPORT_ID: u64 = 0x6d68;
 /// Transport id of the gossip custom transport.
 pub const GOSSIP_TRANSPORT_ID: u64 = 0x6773;
+/// Transport id of the Nostr custom transport.
+pub const NOSTR_TRANSPORT_ID: u64 = 0x6e73;
 
 /// The rung of a custom transport id: the one function every selector asks, so
 /// that no selector ranks a transport it does not know below the relay or above
-/// its place. An id that none of the three names is [`Rung::Other`].
+/// its place. An id that none of the four names is [`Rung::Other`].
 ///
 /// The ids live here because this crate is below the transport crates, which
 /// cannot name each other. Each transport crate keeps its own constant, and a
@@ -153,6 +159,7 @@ pub fn custom_rung(id: u64) -> Rung {
         WEBRTC_TRANSPORT_ID => Rung::WebRtc,
         MULTIHOP_TRANSPORT_ID => Rung::Multihop,
         GOSSIP_TRANSPORT_ID => Rung::Gossip,
+        NOSTR_TRANSPORT_ID => Rung::Nostr,
         _ => Rung::Other,
     }
 }

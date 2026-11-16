@@ -27,9 +27,9 @@ mod rung;
 pub use protocol_set::ProtocolSet;
 
 pub use rung::{
-    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, best_of, blocked, climb,
-    custom_rung, datagrams, expected_rung, ip_remote, remote_id, remote_id_of, rung_of,
-    split_segments,
+    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID,
+    best_of, blocked, climb, custom_rung, datagrams, expected_rung, ip_remote, remote_id,
+    remote_id_of, rung_of, split_segments,
 };
 #[cfg(feature = "test-hooks")]
 pub use rung::{block_ip_paths, block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
@@ -39,8 +39,8 @@ pub use rung::{is_blocked, is_blocked_to};
 #[cfg(test)]
 mod tests {
     use super::{
-        GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, custom_rung,
-        expected_rung, remote_id_of, split_segments,
+        GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID,
+        custom_rung, expected_rung, remote_id_of, split_segments,
     };
     #[cfg(feature = "test-hooks")]
     use super::{block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
@@ -61,7 +61,11 @@ mod tests {
         assert!(Rung::WebRtc < Rung::Multihop, "multihop is below WebRTC");
         assert!(Rung::Multihop < Rung::Gossip, "gossip is below multihop");
         assert!(Rung::Gossip < Rung::Relay, "the relay is below gossip");
-        assert!(Rung::Relay < Rung::Other, "a foreign transport is last");
+        assert!(
+            Rung::Relay < Rung::Nostr,
+            "the nostr rung is below the relay"
+        );
+        assert!(Rung::Nostr < Rung::Other, "a foreign transport is last");
     }
 
     /// The pure ladder: over every set of allowed rungs and every set of
@@ -70,24 +74,25 @@ mod tests {
     /// `LADDER` fails this test.
     #[test]
     fn the_expected_rung_is_the_best_rung_that_is_allowed_and_available() {
-        const ORDER: [Rung; 6] = [
+        const ORDER: [Rung; 7] = [
             Rung::Ip,
             Rung::WebRtc,
             Rung::Multihop,
             Rung::Gossip,
             Rung::Relay,
+            Rung::Nostr,
             Rung::Other,
         ];
         let set = |mask: u8| move |rung: Rung| mask >> (rung as u8) & 1 == 1;
-        for allowed in 0..64u8 {
-            for available in 0..64u8 {
+        for allowed in 0..128u8 {
+            for available in 0..128u8 {
                 let expected = ORDER
                     .into_iter()
                     .find(|&rung| set(allowed)(rung) && set(available)(rung));
                 assert_eq!(
                     expected_rung(set(allowed), set(available)),
                     expected,
-                    "allowed {allowed:#08b}, available {available:#08b}"
+                    "allowed {allowed:#09b}, available {available:#09b}"
                 );
             }
         }
@@ -113,6 +118,11 @@ mod tests {
             custom_rung(GOSSIP_TRANSPORT_ID),
             Rung::Gossip,
             "the gossip transport id names the gossip rung"
+        );
+        assert_eq!(
+            custom_rung(NOSTR_TRANSPORT_ID),
+            Rung::Nostr,
+            "the nostr transport id names the nostr rung"
         );
         assert_eq!(custom_rung(0x1234), Rung::Other, "a foreign id is last");
     }
