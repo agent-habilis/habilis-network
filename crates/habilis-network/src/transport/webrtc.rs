@@ -2977,6 +2977,26 @@ mod tests {
         );
     }
 
+    /// The pacing of the lane offers counts a peer that said it needs the lane, though its address
+    /// is empty: otherwise a node with IP would offer to every such peer at once.
+    #[test]
+    fn a_signed_lane_peer_with_an_empty_address_is_paced_as_a_lane_pair() {
+        let peer = SecretKey::from_bytes(&[8u8; 32]).public();
+        let empty = EndpointAddr::new(peer);
+        let mut state = testing::fresh_state();
+
+        assert!(
+            !retry::lane_pair(&state, false, &empty),
+            "an empty address reads as unknown"
+        );
+
+        state.lane_peers.insert(peer);
+        assert!(
+            retry::lane_pair(&state, false, &empty),
+            "the peer's own word puts it in the paced lane set"
+        );
+    }
+
     /// With no relay and no IP, a peer's address is empty, and the shape rule
     /// reads it as unknown. Its own word in `PeerInfo` is what says "browser".
     #[test]
