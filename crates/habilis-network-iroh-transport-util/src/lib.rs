@@ -25,7 +25,7 @@ mod pin_set;
 mod protocol_set;
 mod rung;
 
-pub use pin_set::{is_pinned, multihop_remote_of, pin, pin_allows, pinned_in, unpin};
+pub use pin_set::{climb_pinned, is_pinned, multihop_remote_of, pin, pin_allows, pinned_in, unpin};
 pub use protocol_set::ProtocolSet;
 
 pub use rung::{

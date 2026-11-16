@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use iroh::EndpointId;
 use iroh::endpoint::transports::{Addr, PathSelectionData};
 
-use crate::rung::{MULTIHOP_TRANSPORT_ID, Rung};
+use crate::rung::{MULTIHOP_TRANSPORT_ID, Rung, climb};
 
 type Pins = Mutex<Option<HashMap<EndpointId, HashSet<EndpointId>>>>;
 
@@ -161,6 +161,38 @@ pub fn pinned_in(local: EndpointId, paths: &[PathSelectionData<'_>]) -> bool {
     paths.iter().any(|path| {
         multihop_remote_of(&path.network_path().remote())
             .is_some_and(|remote| is_pinned(local, remote))
+    })
+}
+
+/// [`climb`] for a selector of `local`: when the paths belong to a pinned peer, only a multihop path
+/// is usable. `usable` is the rule of the selector for the rest, such as a path that a test took.
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held the pin table.
+///
+/// # Examples
+///
+/// It reads the path selection of a live connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{climb_pinned, custom_rung};
+/// use iroh::endpoint::transports::PathSelectionData;
+///
+/// # fn demo<'a>(local: iroh::EndpointId, paths: &'a [PathSelectionData<'a>]) -> Option<&'a PathSelectionData<'a>> {
+/// climb_pinned(local, paths, custom_rung, |_rung, _path| true)
+/// # }
+/// ```
+#[must_use]
+pub fn climb_pinned<'a>(
+    local: EndpointId,
+    paths: &'a [PathSelectionData<'a>],
+    custom: impl Fn(u64) -> Rung,
+    usable: impl Fn(Rung, &PathSelectionData<'_>) -> bool,
+) -> Option<&'a PathSelectionData<'a>> {
+    let pinned = pinned_in(local, paths);
+    climb(paths, custom, |rung, path| {
+        pin_allows(pinned, rung) && usable(rung, path)
     })
 }
 
