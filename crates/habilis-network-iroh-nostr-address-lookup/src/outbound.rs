@@ -174,7 +174,11 @@ impl Outbound {
 
 /// A task that owns the sending half and writes what it is given, one frame at a time. Its
 /// channel holds one frame, so the pacer hands it the next frame only when it is free.
-fn spawn_writer(mut sender: ws::Sender, dropped: Arc<AtomicU64>) -> mpsc::Sender<Frame> {
+fn spawn_writer(
+    mut sender: ws::Sender,
+    // Shared with the socket that owns the queue, which adds it to its own count.
+    dropped: Arc<AtomicU64>,
+) -> mpsc::Sender<Frame> {
     let (frames, mut incoming): (mpsc::Sender<Frame>, mpsc::Receiver<Frame>) = mpsc::channel(1);
     task::spawn(async move {
         while let Some(frame) = incoming.recv().await {
@@ -267,8 +271,10 @@ mod tests {
         let mut outbound = Outbound::Paced(Paced {
             queue: DataQueue::new(Instant::now()),
             writer,
+            // Shared with the writer task, which counts what it drops.
             writer_dropped: Arc::new(AtomicU64::new(0)),
         });
+        // The key of a test pool, shared by the datagrams it queues.
         let keys = Arc::new(Keys::generate());
         outbound.datagram(outgoing(&keys, b"first".to_vec()));
         let permit: mpsc::OwnedPermit<Frame> =
@@ -292,8 +298,10 @@ mod tests {
         let mut outbound = Outbound::Paced(Paced {
             queue: DataQueue::new(Instant::now()),
             writer,
+            // Shared with the writer task, which counts what it drops.
             writer_dropped: Arc::new(AtomicU64::new(0)),
         });
+        // The key of a test pool, shared by the datagrams it queues.
         let keys = Arc::new(Keys::generate());
         outbound.datagram(outgoing(&keys, b"the writer takes this".to_vec()));
         let permit: mpsc::OwnedPermit<Frame> = outbound
@@ -321,6 +329,7 @@ mod tests {
         let mut outbound = Outbound::Paced(Paced {
             queue: DataQueue::new(Instant::now()),
             writer,
+            // Shared with the writer task, which counts what it drops.
             writer_dropped: Arc::new(AtomicU64::new(0)),
         });
         // The key of a test pool, shared by the datagrams it queues.

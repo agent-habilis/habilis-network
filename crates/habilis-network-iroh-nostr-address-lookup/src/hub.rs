@@ -1109,6 +1109,7 @@ mod flow_tests {
             .lease(&relay.url(), "one".into(), filter(), events)
             .expect("a lease");
         until("the relay is up", || lease.health() == Health::Up).await;
+        // The key of a test pool, shared by the datagrams it queues.
         let keys = Arc::new(Keys::generate());
         for index in 0..100u8 {
             lease.datagram(Outgoing {
@@ -1143,6 +1144,7 @@ mod flow_tests {
             .lease(&relay.url(), "one".into(), filter(), events)
             .expect("a lease");
         until("the relay is up", || lease.health() == Health::Up).await;
+        // The key of a test pool, shared by the datagrams it queues.
         let keys = Arc::new(Keys::generate());
         let datagram = |index: u8| Outgoing {
             keys: Arc::clone(&keys),
