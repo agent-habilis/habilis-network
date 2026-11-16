@@ -359,9 +359,14 @@ impl Chooser {
         let now = Instant::now();
         self.leases
             .iter()
-            .filter_map(|(_, lease)| match lease.health() {
-                Health::Limited(until) if until > now => Some(until),
-                _ => None,
+            .filter_map(|(_, lease)| {
+                if let Health::Limited(until) = lease.health()
+                    && until > now
+                {
+                    Some(until)
+                } else {
+                    None
+                }
             })
             .min()
     }
