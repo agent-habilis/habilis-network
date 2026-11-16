@@ -13,8 +13,10 @@
 //! A second limit, `2C`, holds all the QUIC connections: the direct units, the pinned
 //! connections, and the inbound connections above `C`. A dial at `C` that has a multihop route
 //! pins its peer and takes no unit (see [`Ceiling::plan_dial`]). An inbound connection above `C`
-//! is accepted and takes no unit. Above `2C` the least recently used of these extra connections
-//! goes.
+//! is accepted and takes no unit. A connection or a session that finds no free unit and no peer
+//! that can go (each is a gossip neighbor or busy) takes no unit either. These are the extras: they
+//! count toward `2C` and close after [`EXTRA_IDLE`] with no use. Above `2C` the least recently used
+//! extra goes.
 //!
 //! **An eviction is triggered only by an admission.** [`Ceiling::admit`] is the only call that
 //! returns victims; touching, closing or marking a peer never evicts.
@@ -37,6 +39,11 @@ use std::time::Duration;
 use iroh::EndpointId;
 
 use crate::util::clock::Instant;
+
+/// How long an extra (a pinned connection, or a connection or a session that took no unit) stays
+/// open with no use. It is shorter than the idle timeout of a direct connection: the node holds it
+/// above its ceiling, and a pinned one costs the members that forward for it.
+pub(crate) const EXTRA_IDLE: Duration = Duration::from_mins(1);
 
 /// A peer idle at least this long is evicted before any other.
 pub(crate) const PREFER_IDLE: Duration = Duration::from_secs(30);
@@ -91,6 +98,8 @@ struct Entry {
     last_use: Option<Instant>,
     quic: Quic,
     session: bool,
+    /// The session took no unit: no unit was free and no peer could go. It counts toward `2C` only.
+    session_extra: bool,
     neighbor: bool,
     busy: u32,
 }
@@ -98,7 +107,20 @@ struct Entry {
 impl Entry {
     /// Whether the peer is one direct unit of the ceiling.
     fn counted(&self) -> bool {
-        self.quic == Quic::Unit || self.session || self.neighbor
+        self.quic == Quic::Unit || (self.session && !self.session_extra) || self.neighbor
+    }
+
+    /// Whether the peer holds a connection or a session that took no unit.
+    fn extra(&self) -> bool {
+        self.quic == Quic::Extra || self.session_extra
+    }
+
+    /// The connection and the session of the peer give up their unit: they count toward `2C` only.
+    fn demote(&mut self) {
+        if self.quic == Quic::Unit {
+            self.quic = Quic::Extra;
+        }
+        self.session_extra = self.session;
     }
 
     /// Whether the peer holds a connection of any kind, which counts toward twice the ceiling.
@@ -213,6 +235,11 @@ impl Ceiling {
             .filter(|(_, entry)| entry.session)
             .map(|(peer, _)| *peer)
             .collect()
+    }
+
+    /// Whether `peer` holds an extra: a connection or a session that took no unit.
+    pub(crate) fn is_extra(&self, peer: EndpointId) -> bool {
+        self.entries.get(&peer).is_some_and(Entry::extra)
     }
 
     /// The units that count against the ceiling now.
@@ -355,7 +382,7 @@ impl Ceiling {
         }
         let held = self.connections().saturating_sub(evicted.len());
         let need = held.saturating_sub(self.total_cap());
-        let mut candidates = self.candidates(now, newcomer, |entry| entry.quic == Quic::Extra);
+        let mut candidates = self.candidates(now, newcomer, Entry::extra);
         candidates.retain(|candidate| !evicted.contains(&candidate.peer));
         candidates
             .iter()
@@ -384,6 +411,9 @@ impl Ceiling {
         let was_counted = self.entries.get(&peer).is_some_and(Entry::counted);
         set(self.entry(peer, now));
         self.reserved.remove(&peer);
+        if !was_counted && self.entries[&peer].counted() {
+            self.demote_without_room(peer, now);
+        }
         let mut admission = if was_counted || !self.entries[&peer].counted() {
             Admission::default()
         } else {
@@ -394,13 +424,31 @@ impl Ceiling {
         admission
     }
 
+    /// A connection or a session of `peer` just took a unit. If the count is over the ceiling and no
+    /// peer can go to make room (each is a gossip neighbor, busy, or the newcomer), the connection
+    /// or session takes no unit: it is an extra, and it counts toward `2C` only.
+    fn demote_without_room(&mut self, peer: EndpointId, now: Instant) {
+        if !self.evicts || self.entries[&peer].neighbor {
+            return;
+        }
+        let need = self.units().saturating_sub(self.cap);
+        let room = self.candidates(now, peer, Entry::counted).len();
+        if room >= need {
+            return;
+        }
+        self.entry(peer, now).demote();
+    }
+
     pub(crate) fn unregister_quic(&mut self, peer: EndpointId) {
         self.pinned.remove(&peer);
         self.unregister(peer, |entry| entry.quic = Quic::Absent);
     }
 
     pub(crate) fn unregister_session(&mut self, peer: EndpointId) {
-        self.unregister(peer, |entry| entry.session = false);
+        self.unregister(peer, |entry| {
+            entry.session = false;
+            entry.session_extra = false;
+        });
     }
 
     fn unregister(&mut self, peer: EndpointId, clear: impl FnOnce(&mut Entry)) {
@@ -460,7 +508,43 @@ impl Ceiling {
             admission.evict.extend(one.evict);
             admission.over_ceiling = admission.over_ceiling.max(one.over_ceiling);
         }
+        self.demote_over_ceiling(&admission.evict);
+        admission.over_ceiling = self
+            .units()
+            .saturating_sub(admission.evict.len())
+            .saturating_sub(self.cap);
         admission
+    }
+
+    /// The neighbors took units that busy peers held. A busy peer is never evicted, so each
+    /// connection or session that no neighbor holds, least recently used first, becomes an extra
+    /// until the count fits the ceiling. `evicted` already go, and `units` still counts them.
+    fn demote_over_ceiling(&mut self, evicted: &[EndpointId]) {
+        if !self.evicts {
+            return;
+        }
+        let staying: usize = self.units().saturating_sub(evicted.len());
+        let over: usize = staying.saturating_sub(self.cap);
+        let units = self.entries.iter();
+        let holding = units
+            .filter(|(peer, entry)| entry.counted() && !entry.neighbor && !evicted.contains(peer));
+        let mut holders: Vec<(Instant, EndpointId)> = Vec::new();
+        for (peer, entry) in holding {
+            holders.push((
+                entry
+                    .last_use
+                    .or(entry.opened_at)
+                    .unwrap_or_else(Instant::now),
+                *peer,
+            ));
+        }
+        holders.sort_unstable();
+        let demoted = holders.into_iter().take(over);
+        for (_, peer) in demoted {
+            if let Some(entry) = self.entries.get_mut(&peer) {
+                entry.demote();
+            }
+        }
     }
 
     /// The peers that `pool` accepts, in the order of rule 3, without a busy peer, a gossip
@@ -710,27 +794,33 @@ mod tests {
     }
 
     #[test]
-    fn a_busy_peer_is_never_evicted_and_a_ceiling_of_busy_peers_is_overrun_by_the_newcomer() {
+    fn a_busy_peer_is_never_evicted_and_a_ceiling_of_busy_peers_makes_the_newcomer_an_extra() {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = full(2, start);
         ceiling.busy_begin(testing::endpoint_id(0));
         ceiling.busy_begin(testing::endpoint_id(1));
-        let admission = ceiling.register_quic(testing::endpoint_id(9), at(start, 200));
+        let newcomer = testing::endpoint_id(9);
+        let admission = ceiling.register_quic(newcomer, at(start, 200));
         assert!(admission.evict.is_empty(), "nobody is idle");
-        assert_eq!(admission.over_ceiling, 1, "a busy peer is never evicted");
-        assert_eq!(
-            ceiling.over_ceiling(),
-            1,
-            "the newcomer overruns a ceiling of busy peers by one"
+        assert_eq!(admission.over_ceiling, 0, "a busy peer is never evicted");
+        assert_eq!(ceiling.units(), 2, "the newcomer takes no unit");
+        assert!(
+            ceiling.is_extra(newcomer),
+            "the newcomer of a ceiling of busy peers is an extra"
         );
-        // The sends end: the next admission evicts down.
+        // The sends end: the next admission evicts one idle peer, and the extra stays.
         ceiling.busy_end(testing::endpoint_id(0), at(start, 201));
         ceiling.busy_end(testing::endpoint_id(1), at(start, 201));
         let later = ceiling.register_quic(testing::endpoint_id(10), at(start, 400));
+        assert_eq!(
+            later.evict.len(),
+            1,
+            "the later newcomer evicts one idle peer"
+        );
         assert!(
-            !later.evict.is_empty(),
-            "the later newcomer evicts nobody once the ceiling is overrun"
+            !later.evict.contains(&newcomer),
+            "an extra is not a candidate of the units"
         );
     }
 
@@ -887,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ceiling_of_neighbors_is_overrun_by_a_newcomer_and_evicts_nobody() {
+    fn a_connection_that_no_peer_can_make_room_for_is_an_extra_and_takes_no_unit() {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
@@ -895,14 +985,96 @@ mod tests {
             &HashSet::from([testing::endpoint_id(1), testing::endpoint_id(2)]),
             start,
         );
-        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 200));
+        let newcomer = testing::endpoint_id(3);
+        let admission = ceiling.register_quic(newcomer, at(start, 200));
         assert!(
             admission.evict.is_empty(),
             "no peer that a ceiling may evict is left"
         );
+        assert_eq!(ceiling.units(), 2, "the newcomer takes no unit");
+        assert_eq!(admission.over_ceiling, 0, "the count stays at the ceiling");
+        assert!(ceiling.is_extra(newcomer), "the newcomer is an extra");
+        assert_eq!(ceiling.connections(), 3, "an extra counts toward 2C");
+    }
+
+    #[test]
+    fn a_session_that_no_peer_can_make_room_for_is_an_extra_and_takes_no_unit() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        ceiling.set_neighbors(
+            &HashSet::from([testing::endpoint_id(1), testing::endpoint_id(2)]),
+            start,
+        );
+        let newcomer = testing::endpoint_id(3);
+        let admission = ceiling.register_session(newcomer, at(start, 200));
+        assert!(admission.evict.is_empty(), "nobody can go");
+        assert_eq!(ceiling.units(), 2, "the session takes no unit");
+        assert!(ceiling.is_extra(newcomer), "the session is an extra");
+        ceiling.unregister_session(newcomer);
+        assert!(
+            !ceiling.is_extra(newcomer),
+            "the extra ends with its session"
+        );
+    }
+
+    #[test]
+    fn a_busy_peer_that_new_neighbors_push_over_the_ceiling_becomes_an_extra() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let cached = testing::endpoint_id(3);
+        ceiling.register_quic(cached, start);
+        ceiling.busy_begin(cached);
+        let admission = ceiling.set_neighbors(
+            &HashSet::from([testing::endpoint_id(1), testing::endpoint_id(2)]),
+            at(start, 200),
+        );
+        assert!(admission.evict.is_empty(), "a busy peer is not evicted");
+        assert_eq!(ceiling.units(), 2, "the two neighbors hold the two units");
+        assert_eq!(admission.over_ceiling, 0, "nothing is over the ceiling");
+        assert!(
+            ceiling.is_extra(cached),
+            "the busy connection that no unit holds is an extra"
+        );
+    }
+
+    #[test]
+    fn a_session_evicts_a_cached_peer_when_one_can_go() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let cached = testing::endpoint_id(2);
+        ceiling.set_neighbors(&HashSet::from([testing::endpoint_id(1)]), start);
+        ceiling.register_quic(cached, at(start, 10));
+        let newcomer = testing::endpoint_id(3);
+        let admission = ceiling.register_session(newcomer, at(start, 200));
+        assert_eq!(admission.evict, vec![cached], "the cached peer goes");
+        assert!(
+            !ceiling.is_extra(newcomer),
+            "the session takes the unit that the eviction frees"
+        );
+    }
+
+    #[test]
+    fn the_extras_are_the_first_to_go_above_twice_the_ceiling() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        ceiling.set_neighbors(&HashSet::from([testing::endpoint_id(1)]), start);
+        let session = testing::endpoint_id(2);
+        assert!(
+            ceiling
+                .register_session(session, at(start, 100))
+                .evict
+                .is_empty(),
+            "the first extra fits in 2C"
+        );
+        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 200));
         assert_eq!(
-            admission.over_ceiling, 1,
-            "the newcomer overruns the ceiling by one"
+            admission.evict,
+            vec![session],
+            "above 2C the least recently used extra goes, and the neighbor stays"
         );
     }
 

@@ -498,7 +498,10 @@ impl UnicastPool {
                             now.saturating_duration_since(ended) >= inner.probe_hold
                         }
                         Hold::Used | Hold::Probing => {
-                            let idle = if pooled.pinned {
+                            let table = inner.admission.get();
+                            let extra: bool = pooled.pinned
+                                || table.is_some_and(|admission| admission.is_extra(*eid));
+                            let idle = if extra {
                                 inner.idle.min(inner.pinned_idle)
                             } else {
                                 inner.idle

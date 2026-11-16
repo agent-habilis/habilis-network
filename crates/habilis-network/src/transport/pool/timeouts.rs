@@ -34,7 +34,7 @@ pub(super) const PATH_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a pinned connection, one that rides multihop for a peer that the node could not dial
 /// directly, stays open with no send. It is shorter than the idle timeout of a direct connection: a
 /// route through other members costs the members that forward for it.
-pub(crate) const PINNED_IDLE: Duration = Duration::from_mins(1);
+pub(crate) const PINNED_IDLE: Duration = super::super::ceiling::EXTRA_IDLE;
 
 /// How long a connection stays busy after a send finished, if the peer has not read the frame. A
 /// reader that is slower than this is not protected: the connection can be evicted under its frame.

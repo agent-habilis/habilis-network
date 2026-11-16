@@ -719,6 +719,43 @@ mod tests {
         );
     }
 
+    /// A session that found no free unit and no peer to evict took no unit. It idles out after
+    /// the extra idle, which is shorter than the window of a direct session.
+    #[test]
+    fn a_session_that_took_no_unit_idles_out_after_the_extra_idle() {
+        use crate::transport::ceiling::EXTRA_IDLE;
+        let _guard = ::habilis_network_test_tracing::init();
+        let admission = SignalAdmission::new(1);
+        let hub = FakeHub::default();
+        drop(admission.try_admit(peer(1), &hub).expect("room"));
+        hub.attach(peer(1));
+        admission.note_success(peer(1));
+        let _busy = admission.busy(peer(1));
+        hub.attach(peer(2));
+        admission.note_success(peer(2));
+        assert!(
+            admission.is_extra(peer(2)),
+            "the second session is an extra"
+        );
+        let start = Instant::now();
+
+        let mut inner = admission.lock();
+        assert!(
+            inner
+                .take_idle(
+                    start + EXTRA_IDLE.saturating_sub(Duration::from_secs(1)),
+                    tuning::DIRECT_IDLE_BACKSTOP
+                )
+                .is_empty(),
+            "one second short of the extra idle"
+        );
+        assert_eq!(
+            inner.take_idle(start + EXTRA_IDLE, tuning::DIRECT_IDLE_BACKSTOP),
+            vec![peer(2)],
+            "the extra goes after the extra idle, and the busy unit stays"
+        );
+    }
+
     /// One source of truth for idle: the ledger's last use. A session goes a window after the last
     /// use of its peer, not a window after the first look of the sweep, and not a window after
     /// its connection closed, which would add a second window to the idle close of the connection.

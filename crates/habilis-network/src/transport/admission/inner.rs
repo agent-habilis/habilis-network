@@ -110,6 +110,11 @@ impl Inner {
             if held || !hub.has_session(&peer) {
                 continue;
             }
+            let window = if self.ceiling.is_extra(peer) {
+                window.min(ceiling::EXTRA_IDLE)
+            } else {
+                window
+            };
             if self
                 .ceiling
                 .unused_for(peer, now)

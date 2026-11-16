@@ -502,6 +502,12 @@ impl SignalAdmission {
         victims.end();
     }
 
+    /// Whether `peer` holds an extra: a connection or a session that took no unit (see
+    /// [`ceiling::Ceiling::is_extra`]).
+    pub(crate) fn is_extra(&self, peer: EndpointId) -> bool {
+        self.lock().ceiling.is_extra(peer)
+    }
+
     /// The pinned peers that hold their connection now.
     pub(crate) fn pinned_peers(&self) -> Vec<EndpointId> {
         self.lock().ceiling.pinned_connected()

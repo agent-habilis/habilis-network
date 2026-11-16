@@ -223,6 +223,40 @@ mod tests {
         });
     }
 
+    /// A connection that took no unit (the ceiling holds only a busy peer) is an extra: it closes
+    /// after the extra idle, as a pinned one does.
+    #[test]
+    fn a_connection_that_took_no_unit_is_closed_after_a_minute_idle() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            let _busy = admission.busy(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            admission.note_connection(&connection);
+            assert!(admission.is_extra(server), "no unit was free or evictable");
+            time::pause();
+
+            advance_secs(55).await;
+            assert!(
+                connection.close_reason().is_none(),
+                "inside the extra idle the connection stays"
+            );
+            advance_secs(10).await;
+            assert!(
+                closed_as_idle(&connection),
+                "an extra idle for a minute is closed as idle"
+            );
+
+            time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
     /// A dial that no send asked for takes a free unit and never the last one at the ceiling: a
     /// probe is refused, a courtesy dial sends nothing, and neither evicts a peer. With a free unit
     /// both dial.

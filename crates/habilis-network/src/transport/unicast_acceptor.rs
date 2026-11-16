@@ -11,6 +11,7 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use tokio::sync::mpsc;
 
+use crate::transport::ceiling::EXTRA_IDLE;
 use crate::util::consts::MAX_MESSAGE_SIZE;
 use crate::util::tuning::DIRECT_IDLE_BACKSTOP;
 
@@ -120,7 +121,17 @@ impl ProtocolHandler for UnicastAcceptor {
         // peer closes the connection (`accept_uni` errors), or nothing arrives
         // for the idle timeout.
         loop {
-            match n0future_time::timeout(self.idle, connection.accept_uni()).await {
+            let peer = connection.remote_id();
+            let extra: bool = self
+                .admission
+                .as_ref()
+                .is_some_and(|table| table.is_extra(peer));
+            let idle = if extra {
+                self.idle.min(EXTRA_IDLE)
+            } else {
+                self.idle
+            };
+            match n0future_time::timeout(idle, connection.accept_uni()).await {
                 Ok(Ok(mut recv)) => {
                     let admission = self.admission.as_ref();
                     let _busy = admission.map(|table| table.busy(connection.remote_id()));
