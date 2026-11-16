@@ -112,9 +112,11 @@ async fn both_ends_use_the_first_relay_of_the_ranking() {
     let mut bob = node(urls(&relays), BOB, BOB_TAG);
     // Each pool dials its relays at once and in no set order. Send only when both hold the first
     // relay, or a datagram can go out while a pool still has another relay as its first.
+    let first = relays[0].url();
     eventually("both pools hold the first relay first", || {
-        alice.pool.connected().next() == Some(relays[0].url())
-            && bob.pool.connected().next() == Some(relays[0].url())
+        let alice_first: Option<Url> = alice.pool.connected().next();
+        let bob_first: Option<Url> = bob.pool.connected().next();
+        alice_first.as_ref() == Some(&first) && bob_first.as_ref() == Some(&first)
     })
     .await;
     warm_up(&alice, &BOB_TAG, &mut bob).await;
