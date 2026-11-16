@@ -839,6 +839,7 @@ impl UnicastPool {
         }
         #[cfg(test)]
         self.inner.dials_started.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "iroh-test-utils")]
         forget_blocked_addresses(&endpoint, eid).await;
         match dial(&endpoint, address).await {
             Ok(connection) => {
@@ -981,9 +982,6 @@ async fn forget_blocked_addresses(endpoint: &Endpoint, peer: EndpointId) {
             .await;
     }
 }
-
-#[cfg(not(feature = "iroh-test-utils"))]
-async fn forget_blocked_addresses(_endpoint: &Endpoint, _peer: EndpointId) {}
 
 async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> {
     match time::timeout(DIAL_TIMEOUT, endpoint.connect(address, UNICAST_ALPN)).await {
