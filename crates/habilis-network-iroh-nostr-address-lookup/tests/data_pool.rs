@@ -224,6 +224,36 @@ async fn data_goes_to_an_up_relay_while_a_limited_one_gets_only_a_probe() {
     .await;
 }
 
+/// With no relay up and two limited past their wait, every one of them gets a probe: a first relay
+/// that never answers must not keep the second from earning its place back.
+#[tokio::test]
+async fn every_limited_relay_gets_a_probe_when_none_is_up() {
+    let relays = relays(2).await;
+    for relay in &relays {
+        relay.refuse_events(Some("rate-limited: slow down"));
+    }
+    let alice = node(urls(&relays), ALICE, ALICE_TAG);
+    for relay in &relays {
+        let before = relay.events();
+        for _ in 0..40 {
+            alice.pool.send(&BOB_TAG, b"limits".to_vec());
+            if relay.events() > before {
+                break;
+            }
+            time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(relay.events() > before, "the relay was reached");
+    }
+    // The first wait is 1 s, and a refusal of the first probe would double only its own wait.
+    time::sleep(Duration::from_millis(1_300)).await;
+    let before_second = relays[1].events();
+    alice.pool.send(&BOB_TAG, b"probe".to_vec());
+    eventually("the second relay got a probe too", || {
+        relays[1].events() > before_second
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_dead_first_relay_moves_the_data_to_the_next() {
     let mut relays = relays(2).await;

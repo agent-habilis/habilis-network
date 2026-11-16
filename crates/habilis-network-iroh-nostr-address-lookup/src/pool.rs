@@ -371,12 +371,12 @@ impl Chooser {
                 lease.datagram(outgoing);
             }
         } else {
-            let first: Option<&(Url, Lease)> = self
-                .leases
-                .iter()
-                .find(|(_, lease)| lease.health().sendable(lane));
-            if let Some((_, lease)) = first {
-                lease.datagram(outgoing);
+            // No relay is up: each limited relay gets the datagram as its own probe, so a first
+            // relay that never answers does not keep the next one from earning its place back.
+            for (_, lease) in &self.leases {
+                if lease.health().sendable(lane) {
+                    lease.datagram(outgoing.clone());
+                }
             }
         }
         for url in due {
