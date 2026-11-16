@@ -6,6 +6,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
+use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -115,14 +116,31 @@ enum Queued {
     Batch {
         // Shared with the datagrams of the pool that queued them.
         keys: Arc<Keys>,
-        tag: [u8; 32],
+        destination: Destination,
         content: String,
     },
     /// An event that the caller signed.
     Signed(String),
 }
 
+/// Where a closed batch joins the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// After every frame that waits: the order of arrival.
+    Back,
+    /// Before every frame that waits: a small flow that the bulk flow must not starve.
+    Front,
+}
+
 impl Queued {
+    /// The sender and tag of a batch.
+    fn destination(&self) -> Option<Destination> {
+        match self {
+            Self::Batch { destination, .. } => Some(*destination),
+            Self::Signed(_) => None,
+        }
+    }
+
     /// The bytes of budget this frame costs. For a batch that is an upper bound of its event.
     fn cost(&self) -> usize {
         match self {
@@ -214,7 +232,7 @@ impl DataQueue {
             .get(&destination)
             .is_some_and(|pending| !pending.batch.fits(&bytes))
         {
-            self.close(now, destination);
+            self.close(now, destination, Place::Back);
         }
         if self.pending.is_empty() {
             self.round_start = Some(now);
@@ -234,7 +252,7 @@ impl DataQueue {
         pending.batch.push(&bytes);
         let full = !pending.batch.fits(&[]);
         if idle || full {
-            self.close(now, destination);
+            self.close(now, destination, Place::Back);
         }
         self.bound_open();
     }
@@ -247,7 +265,7 @@ impl DataQueue {
             tracing::debug!(target: "habilis_network::lookup", bytes = frame.len(), "a data frame over the burst is dropped");
             return;
         }
-        self.queue(now, Queued::Signed(frame));
+        self.queue(now, Queued::Signed(frame), Place::Back);
     }
 
     /// Add a frame that is neither paced nor dropped.
@@ -255,9 +273,10 @@ impl DataQueue {
         self.control.push_back(frame);
     }
 
-    /// Drop the open batches that are too old, and close them all at the tick of the socket if
-    /// nothing waits for the pacer: a batch that is held back grows, and one frame then carries
-    /// more.
+    /// Drop the open batches that are too old, and close at the tick of the socket the batches
+    /// that no frame waits behind. A destination that has a frame in the queue keeps its open
+    /// batch: held back, it grows, and one frame then carries more. A destination with none is
+    /// small or new, and its batch goes before the bulk frames, so a bulk flow cannot starve it.
     pub(crate) fn flush_due(&mut self, now: Instant) {
         let old: Vec<Destination> = self
             .pending
@@ -275,15 +294,22 @@ impl DataQueue {
         let tick_due = self
             .round_start
             .is_some_and(|start| now >= start + FLUSH_TICK);
-        if tick_due && self.ready.is_empty() {
+        if tick_due {
             let mut open: Vec<(Instant, Destination)> = self
                 .pending
                 .iter()
+                .filter(|(destination, _)| !self.is_waiting(destination))
                 .map(|(destination, pending)| (pending.since, *destination))
                 .collect();
             open.sort_unstable_by_key(|(since, _)| *since);
-            for (_, destination) in open {
-                self.close(now, destination);
+            if self.ready.is_empty() {
+                for (_, destination) in open {
+                    self.close(now, destination, Place::Back);
+                }
+            } else {
+                for (_, destination) in open.into_iter().rev() {
+                    self.close(now, destination, Place::Front);
+                }
             }
         }
     }
@@ -315,7 +341,11 @@ impl DataQueue {
     /// When the socket next has something to do: close the open batches, or send a frame.
     pub(crate) fn next_wake(&mut self, now: Instant) -> Option<Instant> {
         self.refill(now);
-        let flush: Option<Instant> = if self.ready.is_empty() {
+        let closable = self
+            .pending
+            .keys()
+            .any(|destination| !self.is_waiting(destination));
+        let flush: Option<Instant> = if closable {
             self.round_start.map(|start| start + FLUSH_TICK)
         } else {
             None
@@ -340,6 +370,13 @@ impl DataQueue {
         Duration::from_secs_f64(bytes.max(frames))
     }
 
+    /// Whether a closed batch of `destination` waits for the pacer.
+    fn is_waiting(&self, destination: &Destination) -> bool {
+        self.ready
+            .iter()
+            .any(|waiting| waiting.queued.destination().as_ref() == Some(destination))
+    }
+
     fn is_idle(&self, now: Instant) -> bool {
         self.pending.is_empty()
             && self.ready.is_empty()
@@ -356,7 +393,7 @@ impl DataQueue {
     }
 
     /// Close the open batch of `destination`: it waits for the pacer as one frame, unsigned.
-    fn close(&mut self, now: Instant, destination: Destination) {
+    fn close(&mut self, now: Instant, destination: Destination, place: Place) {
         let Some(pending) = self.pending.remove(&destination) else {
             return;
         };
@@ -366,33 +403,46 @@ impl DataQueue {
         self.last_flush = Some(now);
         let batch = Queued::Batch {
             keys: pending.keys,
-            tag: destination.tag,
+            destination,
             content: pending.batch.encode(),
         };
-        self.queue(now, batch);
+        self.queue(now, batch, place);
     }
 
-    /// Add to the queue for the pacer, then drop the oldest while it is over its bounds.
-    fn queue(&mut self, now: Instant, queued: Queued) {
+    /// Add to the queue for the pacer, then drop the oldest while it is over its bounds. The
+    /// oldest is the one that joined first, wherever it stands in the queue.
+    fn queue(&mut self, now: Instant, queued: Queued, place: Place) {
         self.ready_bytes += queued.cost();
-        self.ready.push_back(Waiting { since: now, queued });
+        let waiting = Waiting { since: now, queued };
+        match place {
+            Place::Back => self.ready.push_back(waiting),
+            Place::Front => self.ready.push_front(waiting),
+        }
         while self.ready_bytes > QUEUE_BYTES || self.ready.len() > MAX_QUEUED_FRAMES {
-            let Some(oldest) = self.ready.pop_front() else {
+            let oldest: Option<usize> = self
+                .ready
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, waiting)| waiting.since)
+                .map(|(index, _)| index);
+            let Some(lost) = oldest.and_then(|index| self.ready.remove(index)) else {
                 break;
             };
-            self.ready_bytes -= oldest.queued.cost();
+            self.ready_bytes -= lost.queued.cost();
             self.dropped += 1;
         }
     }
 
-    /// Drop the frames at the head of the queue that waited past [`MAX_AGE`].
+    /// Drop the frames that waited past [`MAX_AGE`], wherever they stand in the queue.
     fn drop_aged(&mut self, now: Instant) {
-        while let Some(front) = self.ready.front()
-            && now >= front.since + MAX_AGE
-        {
-            self.ready_bytes -= front.queued.cost();
-            self.ready.pop_front();
-            self.dropped += 1;
+        let waiting = mem::take(&mut self.ready);
+        for frame in waiting {
+            if now >= frame.since + MAX_AGE {
+                self.ready_bytes -= frame.queued.cost();
+                self.dropped += 1;
+            } else {
+                self.ready.push_back(frame);
+            }
         }
     }
 
@@ -417,8 +467,18 @@ impl DataQueue {
 fn sign(queued: Queued) -> String {
     match queued {
         Queued::Signed(frame) => frame,
-        Queued::Batch { keys, tag, content } => {
-            let event = Event::sign(Lane::Data, &keys, crate::unix_now(), &tag, content);
+        Queued::Batch {
+            keys,
+            destination,
+            content,
+        } => {
+            let event = Event::sign(
+                Lane::Data,
+                &keys,
+                crate::unix_now(),
+                &destination.tag,
+                content,
+            );
             wire::event(&event)
         }
     }
@@ -584,6 +644,31 @@ mod tests {
         assert_eq!(queue.dropped(), 1, "and it is counted");
         queue.push_datagram(late, outgoing(&keys, 1, b"new"));
         assert!(queue.pop_ready(late).is_some(), "a new frame goes");
+    }
+
+    /// One bulk flow keeps frames waiting for the pacer all the time. A destination that sends a
+    /// little (a handshake, a keep-alive) must not wait behind it: its batch closes at the tick
+    /// and goes first, as a small frame that the pacer hardly feels.
+    #[test]
+    fn a_quiet_destination_is_not_starved_by_a_bulk_flow() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        let bulk = vec![1u8; 3840];
+        for _ in 0..12 {
+            queue.push_datagram(start, outgoing(&keys, 1, &bulk));
+        }
+        assert!(queue.queued_frames() >= 2, "the bulk flow fills the queue");
+        let soon = start + Duration::from_millis(1);
+        queue.push_datagram(soon, outgoing(&keys, 2, b"quiet"));
+        let tick = soon + FLUSH_TICK;
+        queue.flush_due(tick);
+        let first = queue.pop_ready(tick).expect("a frame is ready");
+        assert_eq!(
+            datagrams(&first),
+            vec![b"quiet".to_vec()],
+            "the quiet destination goes first"
+        );
     }
 
     /// A frame over `from`, as the queue lets it out.
