@@ -15,8 +15,10 @@ use n0_future::time::{Instant, sleep, timeout};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
+use crate::data_queue::Outgoing;
 use crate::event::Event;
 use crate::lane::Lane;
+use crate::outbound::Outbound;
 use crate::wire::{self, Filter, FromRelay, Verdict};
 use crate::{unix_now, ws};
 
@@ -208,6 +210,8 @@ enum Command {
         sub_id: String,
     },
     Publish(String),
+    /// A datagram for the data lane: it joins the batch of its destination.
+    Datagram(Outgoing),
     /// Drop the socket and dial again.
     Reconnect,
 }
@@ -237,6 +241,12 @@ impl Lease {
 
     pub(crate) fn publish(&self, frame: String) {
         let _ = self.connection.commands.send(Command::Publish(frame));
+    }
+
+    /// Queue a datagram on the data socket of this relay. It never blocks: a datagram that does
+    /// not fit is dropped.
+    pub(crate) fn datagram(&self, outgoing: Outgoing) {
+        let _ = self.connection.commands.send(Command::Datagram(outgoing));
     }
 
     /// Drop the socket and dial again. It is shared, so every pool on it
@@ -494,7 +504,8 @@ impl Task {
 
     /// One socket's life: subscribe, then pump commands and frames until the
     /// socket dies, the relay retires us, or every lease is gone.
-    async fn serve(&mut self, mut sender: ws::Sender, mut receiver: ws::Receiver) -> Outcome {
+    async fn serve(&mut self, sender: ws::Sender, mut receiver: ws::Receiver) -> Outcome {
+        let mut sender = Outbound::new(self.hub.lane(), sender);
         self.resubscribe.reset();
         self.resubscribe_at = None;
         self.closed_subs.clear();
@@ -520,6 +531,7 @@ impl Task {
                     None => future::pending().await,
                 }
             };
+            let wake = sender.wake();
             let step = tokio::select! {
                 command = self.commands.recv() => match command {
                     None => Err(Outcome::Idle),
@@ -533,18 +545,29 @@ impl Task {
                     None => Err(Outcome::Dropped),
                     Some(frame) => self.on_frame(&frame),
                 },
+                permit = wake.permit() => match permit {
+                    Ok(permit) => {
+                        sender.pump(permit);
+                        Ok(())
+                    }
+                    Err(_) => Err(Outcome::Dropped),
+                },
             };
             if let Err(outcome) = step {
                 break outcome;
             }
         };
+        let dropped = sender.dropped();
+        if dropped > 0 {
+            tracing::debug!(target: "habilis_network::lookup", url = %self.url, dropped, "data frames dropped for want of room on this socket");
+        }
         if !matches!(outcome, Outcome::Dropped) {
             sender.close().await;
         }
         outcome
     }
 
-    async fn subscribe_all(&self, sender: &mut ws::Sender) -> Result<(), ()> {
+    async fn subscribe_all(&self, sender: &mut Outbound) -> Result<(), ()> {
         for (sub_id, sub) in &self.subs {
             sender
                 .send(wire::request(sub_id, &sub.filter, unix_now()))
@@ -555,7 +578,7 @@ impl Task {
     }
 
     /// Send again only the REQs the relay closed.
-    async fn subscribe_closed(&mut self, sender: &mut ws::Sender) -> Result<(), Outcome> {
+    async fn subscribe_closed(&mut self, sender: &mut Outbound) -> Result<(), Outcome> {
         for sub_id in mem::take(&mut self.closed_subs) {
             if let Some(sub) = self.subs.get(&sub_id) {
                 sender
@@ -571,7 +594,7 @@ impl Task {
     async fn on_command(
         &mut self,
         command: Command,
-        sender: &mut ws::Sender,
+        sender: &mut Outbound,
         queued: bool,
     ) -> Result<(), Outcome> {
         let frame = match command {
@@ -603,7 +626,15 @@ impl Task {
                 if held_back {
                     return Ok(());
                 }
-                frame
+                return sender.publish(frame).await.map_err(|_| Outcome::Dropped);
+            }
+            Command::Datagram(outgoing) => {
+                // Data is dropped while the socket dials, and while it is down or limited.
+                let held_back = queued || !self.health.borrow().sendable(Lane::Data);
+                if !held_back {
+                    sender.datagram(outgoing);
+                }
+                return Ok(());
             }
             Command::Reconnect => return Err(Outcome::Dropped),
         };
@@ -698,7 +729,7 @@ impl Task {
                         self.subs.remove(&sub_id);
                     }
                     // Nowhere to send it, or already reconnecting.
-                    Some(Command::Publish(_) | Command::Reconnect) => {}
+                    Some(Command::Publish(_) | Command::Datagram(_) | Command::Reconnect) => {}
                 },
             }
         }

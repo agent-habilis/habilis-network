@@ -41,6 +41,7 @@ struct State {
     hang_up_on_accept: bool,
     reqs: usize,
     events: usize,
+    event_bytes: usize,
     next_client: u64,
     accepted: usize,
     clients: HashMap<u64, Client>,
@@ -170,6 +171,12 @@ impl TestRelay {
     #[must_use]
     pub fn events(&self) -> usize {
         self.state().events
+    }
+
+    /// The bytes of the text of the valid EVENT frames received since the relay started.
+    #[must_use]
+    pub fn event_bytes(&self) -> usize {
+        self.state().event_bytes
     }
 
     /// Connections open now.
@@ -306,6 +313,7 @@ fn handle(text: &str, id: u64, shared: &Mutex<State>) {
                 return;
             }
             state.events += 1;
+            state.event_bytes += text.len();
             if let Some(reason) = state.refuse_events.clone() {
                 reply(&state, serde_json::json!(["OK", event.id, false, reason]));
                 return;

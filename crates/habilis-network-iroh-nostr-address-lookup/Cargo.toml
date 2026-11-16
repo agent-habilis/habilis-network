@@ -25,6 +25,7 @@ path = "src/lib.rs"
 # its own payload into `content`.
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 futures-util.workspace = true
 hex = "0.4"
 # BIP-340 Schnorr only. `ecdsa` and `precomputed-tables` stay off: we sign about

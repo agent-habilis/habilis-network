@@ -11,12 +11,14 @@
 //! a relay that owes us an echo for too long stops counting toward the width.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use n0_future::time::Instant;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
+use crate::data_queue::Outgoing;
 use crate::event::{Event, Keys, kind_for};
 use crate::hub::{Hub, Lease};
 use crate::lane::Lane;
@@ -58,13 +60,15 @@ enum Command {
         id: String,
         frame: String,
     },
+    Datagram(Outgoing),
 }
 
 /// A subscription to a set of tags on a ranked relay list.
 #[derive(Debug)]
 pub struct Pool {
     lane: Lane,
-    keys: Keys,
+    // Shared with every datagram the pool queues on a socket task: one key signs them all.
+    keys: Arc<Keys>,
     commands: mpsc::UnboundedSender<Command>,
     connected: watch::Receiver<Vec<Url>>,
     _task: task::AbortOnDropHandle<()>,
@@ -107,7 +111,8 @@ impl Pool {
             redialed: HashMap::new(),
             sent: SentIds::default(),
         };
-        let keys = Keys::generate();
+        // The pool signs with this key, and so does every datagram it queues on a socket.
+        let keys = Arc::new(Keys::generate());
         let own = keys.pubkey().to_owned();
         let task = task::spawn(run(chooser, own, command_rx, out_tx, connected_tx));
         let pool = Self {
@@ -128,6 +133,18 @@ impl Pool {
             id: event.id.clone(),
             frame: wire::event(&event),
         });
+    }
+
+    /// Queue `datagram` for the destination whose tag is `tag`, on the first relay that takes it.
+    /// `from` is written in the header of the batch, for the receiver. Nothing blocks: a datagram
+    /// the socket cannot take is dropped. Meant for a pool of [`Lane::Data`].
+    pub fn send_datagram(&self, tag: &[u8; 32], from: &[u8; 32], datagram: Vec<u8>) {
+        let _ = self.commands.send(Command::Datagram(Outgoing {
+            keys: Arc::clone(&self.keys),
+            tag: *tag,
+            from: *from,
+            bytes: datagram,
+        }));
     }
 
     /// The key this pool signs with. Events from it never reach its own
@@ -296,6 +313,19 @@ impl Chooser {
         was_swallowing
     }
 
+    /// Hand a datagram to the first held relay whose socket takes it, in rank order. Both ends
+    /// rank the same list, so they meet on one relay; a relay that is down is passed over.
+    fn datagram(&self, outgoing: Outgoing) {
+        let lane = self.hub.lane();
+        if let Some((_, lease)) = self
+            .leases
+            .iter()
+            .find(|(_, lease)| lease.health().sendable(lane))
+        {
+            lease.datagram(outgoing);
+        }
+    }
+
     fn connected(&self) -> Vec<Url> {
         let mut urls = Vec::new();
         for (url, lease) in &self.leases {
@@ -331,6 +361,7 @@ async fn run(
                     chooser.sent.insert(id);
                     chooser.publish(&tag, &frame);
                 }
+                Some(Command::Datagram(outgoing)) => chooser.datagram(outgoing),
             },
             delivery = events.recv() => {
                 let Some((relay, event)) = delivery else { return };

@@ -11,7 +11,11 @@ use ws_stream_wasm::{WsMessage, WsMeta, WsStream};
 /// dropped all the same.
 const MAX_FRAME: usize = 128 * 1024;
 
-pub(crate) struct Sender(stream::SplitSink<WsStream, WsMessage>);
+pub(crate) struct Sender {
+    sink: stream::SplitSink<WsStream, WsMessage>,
+    // Reads the browser's count of bytes queued and not yet sent: the socket itself is split.
+    buffered: Box<dyn Fn() -> u32>,
+}
 
 pub(crate) struct Receiver {
     stream: stream::SplitStream<WsStream>,
@@ -22,14 +26,21 @@ pub(crate) struct Receiver {
 
 impl Sender {
     pub(crate) async fn send(&mut self, text: String) -> Result<()> {
-        self.0
+        self.sink
             .send(WsMessage::Text(text))
             .await
             .map_err(|error| anyhow!("websocket send: {error}"))
     }
 
+    /// The bytes the browser has queued on this socket and not yet sent. Data frames are
+    /// dropped past a bound ([`crate::data_queue::over_buffer_bound`]), since the browser's own
+    /// queue has none.
+    pub(crate) fn buffered(&self) -> usize {
+        usize::try_from((self.buffered)()).unwrap_or(usize::MAX)
+    }
+
     pub(crate) async fn close(mut self) {
-        let _ = self.0.close().await;
+        let _ = self.sink.close().await;
     }
 }
 
@@ -54,9 +65,13 @@ pub(crate) async fn connect(url: &Url) -> Result<(Sender, Receiver)> {
     let (meta, socket) = WsMeta::connect(url.as_str(), None)
         .await
         .map_err(|error| anyhow!("websocket connect: {error}"))?;
+    let handle = socket.wrapped().clone();
     let (sink, stream) = socket.split();
     Ok((
-        Sender(sink),
+        Sender {
+            sink,
+            buffered: Box::new(move || handle.buffered_amount()),
+        },
         Receiver {
             stream,
             _meta: meta,
