@@ -90,6 +90,7 @@ impl SignalAdmission {
                 proven_sink: None,
                 path_sink: None,
                 gossip: None,
+                nostr: None,
                 closed_on_rung: HashMap::new(),
             })),
             cap,
@@ -482,6 +483,7 @@ impl SignalAdmission {
         }
         inner.slot(peer).conns.push(handle);
         inner.sync_gossip();
+        inner.sync_nostr();
         let evictions = if connection.alpn() == transport::UNICAST_ALPN {
             inner.ceiling.register_quic(peer, Instant::now())
         } else {
@@ -589,6 +591,18 @@ impl SignalAdmission {
     /// which peers are established and which pairs a higher rung carries.
     pub(crate) fn set_gossip(&self, handle: habilis_network_iroh_gossip_transport::GossipHandle) {
         self.lock().gossip = Some(handle);
+    }
+
+    /// The Nostr transport of this endpoint, kept by the table so that it can tell the transport
+    /// which pairs have no other selected path.
+    // TODO(nostr transport): the engine calls this once the endpoint registers the Nostr
+    // transport, which waits for the data sender of the nostr-address-lookup crate (P3).
+    #[expect(
+        dead_code,
+        reason = "the engine registers the Nostr transport after the data sender lands"
+    )]
+    pub(crate) fn set_nostr(&self, handle: habilis_network_iroh_gossip_transport::GossipHandle) {
+        self.lock().nostr = Some(handle);
     }
 
     /// The gossip transport that [`set_gossip`](Self::set_gossip) set, if the mesh has gossip.

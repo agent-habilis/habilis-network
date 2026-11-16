@@ -26,7 +26,9 @@ mod watchers;
 pub(crate) use direct_outcome::DirectOutcome;
 pub(crate) use graft_request::graft_request;
 pub(crate) use grafts::{ensure_direct, on_outcome, request_graft, retry_direct};
-pub(crate) use kinds::{allow_for, any_not_ip, best_kind, pair_kind, selected_kind};
+pub(crate) use kinds::{
+    allow_for, any_not_ip, best_kind, nostr_allow_for, pair_kind, selected_kind,
+};
 pub(crate) use lanes::{lane_pick, plan_lane_offers, top_up_lane_offers};
 pub(crate) use nudge_addrs::NudgeAddrs;
 pub(crate) use path_action::path_action;

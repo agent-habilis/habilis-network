@@ -250,6 +250,29 @@ mod tests {
         }
     }
 
+    // Nostr is the last rung: a proven pair that falls to it has lost its direct path, and a
+    // session replaces it as it replaces the relay.
+    #[test]
+    fn a_proven_pair_on_nostr_is_demoted_and_offered_a_session() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            session_policy::proof_is_stale(Some(PathKind::Nostr), true),
+            "the proof of a pair on Nostr is stale"
+        );
+        assert!(
+            session_policy::reads_below_a_session(Some(PathKind::Nostr), true),
+            "a proven pair on Nostr reads below a session"
+        );
+        assert!(
+            !session_policy::reads_below_a_session(Some(PathKind::Nostr), false),
+            "a pair on Nostr that was never proven is not demoted"
+        );
+        assert!(
+            session_policy::wants_session(false, Some(PathKind::Nostr), true),
+            "a pair on Nostr is offered a session even when proven direct"
+        );
+    }
+
     // A pair on gossip is below a session as a pair on multihop is: its proof of a direct path is
     // stale, and it asks for a session.
     #[test]

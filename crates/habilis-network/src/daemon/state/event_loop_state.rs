@@ -1289,7 +1289,7 @@ impl EventLoopState {
         if self.direct.get(&peer) != Some(&DirectState::Direct)
             || !matches!(
                 self.pair_path_kind(peer),
-                Some(PathKind::Relay | PathKind::Gossip)
+                Some(PathKind::Relay | PathKind::Gossip | PathKind::Nostr)
             )
         {
             return None;
@@ -1314,7 +1314,10 @@ impl EventLoopState {
         spread: f64,
     ) -> bool {
         if self.direct.get(&peer) != Some(&DirectState::Direct)
-            || self.pair_path_kind(peer) == Some(probe::PathKind::Relay)
+            || matches!(
+                self.pair_path_kind(peer),
+                Some(probe::PathKind::Relay | probe::PathKind::Nostr)
+            )
             || self.rides_gossip_rung(peer)
             || self.relink_on_cooldown(peer, now)
         {

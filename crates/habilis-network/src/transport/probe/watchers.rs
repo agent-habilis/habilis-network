@@ -172,8 +172,8 @@ pub(crate) fn nudge_climbing_pairs(
                 state.path_kinds.get(&address.id).copied(),
                 state.webrtc_admission.selected_kind(address.id),
             )?;
-            // The relay and gossip are the two rungs that a route can still climb from.
-            matches!(kind, PathKind::Relay | PathKind::Gossip).then(|| {
+            // The relay, gossip and Nostr are the rungs that a route can still climb from.
+            matches!(kind, PathKind::Relay | PathKind::Gossip | PathKind::Nostr).then(|| {
                 let has_session = state
                     .webrtc
                     .as_ref()
@@ -214,7 +214,7 @@ pub(crate) fn forget_route_unless_climbing(
     peer: EndpointId,
     kind: PathKind,
 ) {
-    if !matches!(kind, PathKind::Relay | PathKind::Gossip) {
+    if !matches!(kind, PathKind::Relay | PathKind::Gossip | PathKind::Nostr) {
         route_dialed.remove(&peer);
     }
 }

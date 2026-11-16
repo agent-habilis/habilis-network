@@ -2313,6 +2313,31 @@ mod tests {
         );
     }
 
+    /// A proven pair that falls to Nostr is raced as one on the relay: Nostr carries no gossip
+    /// link, so a quick re-graft would dial it for nothing.
+    #[test]
+    fn a_proven_pair_that_falls_to_nostr_is_raced_and_not_regrafted() {
+        use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let address = iroh::EndpointAddr::new(bob);
+        let mut node = fresh_state();
+        node.names.insert(test_key("bob"), nick("bob"));
+        node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
+        node.direct.insert(bob, DirectState::Direct);
+        node.path_kinds.insert(bob, PathKind::Nostr);
+
+        assert!(
+            !node.plan_regraft_on_link_loss(bob, now, 0.0),
+            "a pair on Nostr is not grafted again"
+        );
+        assert_eq!(
+            node.relay_race_on_link_loss(bob, now),
+            Some(address),
+            "a pair on Nostr races for a session"
+        );
+    }
+
     /// A pair that reads as the relay is raced again by `relay_race_on_link_loss`, and its graft
     /// follows the attach. A quick re-graft would dial the relay for nothing and arm the backoff.
     #[test]

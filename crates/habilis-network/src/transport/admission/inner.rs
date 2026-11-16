@@ -42,6 +42,9 @@ pub(crate) struct Inner {
     /// connection, so it tells the handle which peers are established and which pairs a higher
     /// rung carries (see [`Inner::sync_gossip`]).
     pub(crate) gossip: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
+    /// The Nostr transport of the endpoint, when the mesh lists it. The table lets it carry only a
+    /// pair that has no other selected path (see [`Inner::sync_nostr`]).
+    pub(crate) nostr: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
     /// The peers that we evicted. A peer whose session we detach has no connection to read the code
     /// on, so we refuse its offer for the same minute instead.
     pub(crate) we_evicted: ceiling::EvictionBackoff,
@@ -182,6 +185,28 @@ impl Inner {
         }
     }
 
+    /// Tell the Nostr transport what the table sees: a peer with a live connection is established,
+    /// and frames go to a peer only when no other path is selected for the pair (see
+    /// `nostr_view`). Like [`Inner::sync_gossip`], it runs when a connection is noted and on every
+    /// sweep. A session that carries a pair with no connection left is another path too.
+    pub(crate) fn sync_nostr(&self) {
+        let Some(nostr) = &self.nostr else {
+            return;
+        };
+        for (peer, slot) in &self.slots {
+            let open = slot.conns.iter().filter_map(WeakConnectionHandle::upgrade);
+            let live = open.filter(|connection| connection.close_reason().is_none());
+            let kinds: Vec<probe::PathKind> = live
+                .map(|connection| probe::selected_kind(&connection))
+                .collect();
+            let (established, allowed) = sampler::nostr_view(&kinds);
+            nostr.set_established(*peer, established);
+            let session_hub = self.hub.as_ref();
+            let carried = kinds.is_empty() && session_hub.is_some_and(|hub| hub.has_session(peer));
+            nostr.allow(*peer, allowed && !carried);
+        }
+    }
+
     /// Drop the connections that are gone, and the slots nothing holds.
     pub(crate) fn sample(&mut self) {
         for slot in self.slots.values_mut() {
@@ -192,6 +217,7 @@ impl Inner {
             });
         }
         self.sync_gossip();
+        self.sync_nostr();
         let now = Instant::now();
         self.closed_on_rung
             .retain(|_, at| now.saturating_duration_since(*at) < RUNG_CLOSE_MEMORY);

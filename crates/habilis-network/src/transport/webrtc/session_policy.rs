@@ -124,23 +124,31 @@ pub(crate) fn detach_sessions_under_udp(
 }
 
 /// Whether the proof of a direct path is stale: the pair was `proven` direct, and its selected
-/// path now reads as the relay, as multihop or as gossip, all below a session. Only a path
+/// path now reads as the relay, as multihop, as gossip or as Nostr, all below a session. Only a path
 /// watcher takes a proof back, and only the lower id has one, so the reading of the admission
 /// table is the only sign of the loss that a pair can have.
 pub(crate) fn proof_is_stale(kind: Option<probe::PathKind>, proven: bool) -> bool {
     proven
         && matches!(
             kind,
-            Some(probe::PathKind::Multihop | probe::PathKind::Gossip | probe::PathKind::Relay)
+            Some(
+                probe::PathKind::Multihop
+                    | probe::PathKind::Gossip
+                    | probe::PathKind::Relay
+                    | probe::PathKind::Nostr
+            )
         )
 }
 
 /// Whether a proven pair reads as a path that a session replaces and that no peer-to-peer
-/// transport carries: the relay, or the gossip rung (the recursion rule closes a gossip link on
+/// transport carries: the relay, Nostr, or the gossip rung (the recursion rule closes a gossip link on
 /// it).
 pub(crate) fn reads_below_a_session(kind: Option<probe::PathKind>, proven: bool) -> bool {
     proof_is_stale(kind, proven)
-        && matches!(kind, Some(probe::PathKind::Relay | probe::PathKind::Gossip))
+        && matches!(
+            kind,
+            Some(probe::PathKind::Relay | probe::PathKind::Gossip | probe::PathKind::Nostr)
+        )
 }
 
 /// Whether this node leaves the offer of a session to its peer. The higher id waits to be

@@ -13,5 +13,8 @@ pub(crate) enum PathKind {
     /// either, and it ranks below multihop and above the relay.
     Gossip,
     Relay,
+    /// The Nostr rung: QUIC datagrams in ephemeral Nostr events. It is the last fallback, below
+    /// the relay. It is not peer to peer, so it never proves a direct path.
+    Nostr,
     None,
 }
