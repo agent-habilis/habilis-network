@@ -299,6 +299,55 @@ mod tests {
         );
     }
 
+    /// The pace decides when the socket may send. A held socket never does, and a limited one
+    /// not before the end of its wait, however long the queue has been due. The clock is
+    /// virtual, so each wait is exact.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_socket_sends_nothing_and_a_limited_one_waits_for_the_end_of_its_wait() {
+        let (writer, _writer_rx): (mpsc::Sender<Frame>, mpsc::Receiver<Frame>) = mpsc::channel(1);
+        let mut outbound = Outbound::Paced(Paced {
+            queue: DataQueue::new(Instant::now()),
+            writer,
+            // Shared with the writer task, which counts what it drops.
+            writer_dropped: Arc::new(AtomicU64::new(0)),
+        });
+        // The key of a test pool, shared by the datagrams it queues.
+        let keys = Arc::new(Keys::generate());
+        outbound.datagram(outgoing(&keys, b"due now".to_vec()));
+
+        assert!(
+            timeout(
+                Duration::from_secs(3_600),
+                outbound.wake(Pace::Held).permit()
+            )
+            .await
+            .is_err(),
+            "a held socket is not ready in an hour"
+        );
+        let wait_ends = Instant::now() + Duration::from_secs(10);
+        assert!(
+            timeout(
+                Duration::from_secs(9),
+                outbound.wake(Pace::After(wait_ends)).permit()
+            )
+            .await
+            .is_err(),
+            "a limited socket is not ready before its wait ends"
+        );
+        let permit: mpsc::OwnedPermit<Frame> = timeout(
+            Duration::from_secs(2),
+            outbound.wake(Pace::After(wait_ends)).permit(),
+        )
+        .await
+        .expect("ready when the wait is over")
+        .expect("the writer is alive");
+        assert!(
+            !outbound.pump(permit),
+            "the frame waited past its age limit, so it is dropped and not sent"
+        );
+        assert_eq!(outbound.dropped(), 1, "and counted");
+    }
+
     /// While the writer is held up the socket gets no permit, and the queue must still age its
     /// batches and drop the old ones: the check runs when a datagram arrives, not when a frame
     /// can go. The clock is virtual.

@@ -27,6 +27,25 @@ planned for this crate.
     toward the width, because it accepts events and forwards none.
   - A relay that is dialing counts as usable for up to 10 s. Until then, a
     pool on dead relays opens no spares.
+- **Data lane.** Signalling uses kinds 20000–24999, and data uses kinds
+  25000–29999. The data lane has its own sockets, health and rate-limit
+  waits, so a relay that limits our data does not stop our signals.
+  - A node holds one data socket on each relay of its custom list, up to 4
+    (`MAX_DATA_RELAYS`), for the life of the node. It holds them only when the
+    mesh lists Nostr. A relay of the pinned list never carries data.
+  - It sends each datagram to the first relay that is `Up`. A relay that
+    limited us and whose wait is over gets one probe copy each 5 s, and gets
+    all the data only when no relay is `Up`.
+  - A receiver listens on every one of those relays, so it hears a sender that
+    fell to a later relay.
+  - Limit: a receiver that cannot reach a relay that the sender can reach does
+    not hear the sender there, and no log shows it.
+  - `DataPool::sendable` tells a transport when a datagram has a relay: one is
+    `Up`, or one is limited with its wait over. The first frame after the wait
+    is the probe.
+  - The `from` field of a batch is the id that the sender wrote. Any member
+    that holds the mesh key can write any id, so nothing proves it. Treat it
+    as a hint.
 
 ## Risks
 

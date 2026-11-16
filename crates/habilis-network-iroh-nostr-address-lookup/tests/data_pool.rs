@@ -133,6 +133,18 @@ async fn a_node_listens_on_every_relay_of_the_list() {
     }
 }
 
+/// The first two relays refuse the sender, which falls to the third. The receiver hears it there.
+#[tokio::test]
+async fn a_datagram_sent_on_the_third_relay_arrives() {
+    let relays = relays(3).await;
+    relays[0].refuse_events(Some("rate-limited: slow down"));
+    relays[1].refuse_events(Some("rate-limited: slow down"));
+    let alice = node(urls(&relays), ALICE, ALICE_TAG);
+    let mut bob = node(urls(&relays), BOB, BOB_TAG);
+    warm_up(&alice, &BOB_TAG, &mut bob).await;
+    assert!(relays[2].data_events() > 0, "the third relay carried it");
+}
+
 /// The list is capped, and both ends cap it the same way: a relay past the cap carries no data.
 #[tokio::test]
 async fn a_relay_past_the_listen_cap_carries_no_data() {

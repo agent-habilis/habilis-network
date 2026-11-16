@@ -876,10 +876,11 @@ mod flow_tests {
     use tokio::sync::{mpsc, watch};
     use url::Url;
 
-    use super::{Health, Hub, Lease, RESUBSCRIBE, Task, rate_limit};
+    use super::{Health, Hub, Lease, PROBE_REPLY, RESUBSCRIBE, Task, rate_limit};
     use crate::data_queue::Outgoing;
     use crate::event::{Event, Keys};
     use crate::lane::Lane;
+    use crate::outbound::Pace;
     use crate::test_relay::TestRelay;
     use crate::wire::{self, Filter};
 
@@ -1182,39 +1183,31 @@ mod flow_tests {
         );
     }
 
-    /// A relay that limits us gets no more queued frames until the wait is over: frames go on
-    /// only as a probe.
-    #[tokio::test]
-    async fn the_data_socket_sends_no_queued_frame_while_limited() {
-        let relay = TestRelay::spawn().await.expect("spawn test relay");
-        relay.refuse_events(Some("rate-limited: slow down"));
-        let (events, _events_rx) = mpsc::unbounded_channel();
-        let lease: Lease = data_hub()
-            .lease(&relay.url(), "one".into(), filter(), events)
-            .expect("a lease");
-        until("the relay is up", || lease.health() == Health::Up).await;
-        // The key of a test pool, shared by the datagrams it queues.
-        let keys = Arc::new(Keys::generate());
-        for index in 0..100u8 {
-            lease.datagram(Outgoing {
-                keys: Arc::clone(&keys),
-                tag: [1u8; 32],
-                from: [2u8; 32],
-                bytes: vec![index; 3_800],
-            });
-        }
-        until("the relay limits the socket", || {
-            matches!(lease.health(), Health::Limited(_))
-        })
-        .await;
-        sleep(Duration::from_millis(100)).await;
-        let sent_by_then = relay.events();
-        sleep(Duration::from_millis(400)).await;
+    /// What a socket may send follows the state of its relay: nothing while it dials or is down,
+    /// nothing until the wait of a limit is over, then one probe and nothing more until the
+    /// probe is answered or `PROBE_REPLY` has passed. The clock is virtual.
+    #[tokio::test(start_paused = true)]
+    async fn what_a_socket_may_send_follows_the_state_of_its_relay() {
+        let mut task = offline_task(data_hub());
+        assert_eq!(task.pace(), Pace::Open, "up: the pacer decides");
+        let wait_ends = Instant::now() + Duration::from_secs(2);
+        task.health.send_replace(Health::Limited(wait_ends));
         assert_eq!(
-            relay.events(),
-            sent_by_then,
-            "no frame went out during the wait"
+            task.pace(),
+            Pace::After(wait_ends),
+            "limited: not before the wait ends"
         );
+        sleep(Duration::from_secs(3)).await;
+        assert_eq!(task.pace(), Pace::Open, "the wait is over: a probe may go");
+        task.note_sent();
+        let probe_at = Instant::now();
+        assert_eq!(
+            task.pace(),
+            Pace::After(probe_at + PROBE_REPLY),
+            "the probe is out: nothing more until it is answered or its time is up"
+        );
+        task.health.send_replace(Health::Down);
+        assert_eq!(task.pace(), Pace::Held, "down: nothing");
     }
 
     /// After the wait the socket sends one frame, the probe, and no more until the relay

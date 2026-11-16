@@ -113,8 +113,8 @@ impl Batch {
 /// A batch read back.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Decoded {
-    /// The endpoint id the sender wrote in the header. Nothing proves it: QUIC refuses a packet
-    /// that is not from that endpoint.
+    /// The endpoint id the sender wrote in the header. Nothing proves it: any member that holds
+    /// the mesh key can write any id. The frame inside each datagram names its sender too.
     pub(crate) from: [u8; ID_LEN],
     /// The datagrams, in the order they were pushed.
     pub(crate) datagrams: Vec<Vec<u8>>,

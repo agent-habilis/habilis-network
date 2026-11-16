@@ -27,8 +27,10 @@ pub const MAX_DATA_RELAYS: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Datagram {
-    /// The endpoint id the sender wrote in the header. Nothing here proves it: QUIC refuses a
-    /// packet that is not from that endpoint.
+    /// The endpoint id the sender wrote in the header. Nothing here proves it: any member that
+    /// holds the mesh key signs the batch and can write any id. QUIC refuses a packet that is
+    /// not from that endpoint, but only after the packet is read. Treat it as a hint, and give
+    /// it no trust.
     pub from: [u8; 32],
     /// The datagram.
     pub bytes: Vec<u8>,
