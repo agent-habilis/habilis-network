@@ -148,9 +148,14 @@ impl LookupOpts {
         self
     }
 
-    /// Set the Nostr lookup.
+    /// Set the Nostr lookup. A custom list is put in ascending order, so one set
+    /// of relays gives one id whatever order the caller names them in. A relay
+    /// named twice is still refused by [`validate`](Self::validate).
     #[must_use]
-    pub fn nostr(mut self, nostr: NostrChoice) -> Self {
+    pub fn nostr(mut self, mut nostr: NostrChoice) -> Self {
+        if let NostrChoice::Custom(urls) = &mut nostr {
+            urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        }
         self.nostr = nostr;
         self
     }
@@ -1738,6 +1743,29 @@ mod lookup_tests {
         })
     }
 
+    /// The `nostr` builder puts a custom list in canonical order, so a caller
+    /// that names two relays in any order gets the same config and the same id.
+    #[test]
+    fn the_nostr_builder_sorts_a_custom_list() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let alpha = relay("wss://a.example/");
+        let beta = relay("wss://b.example/");
+        let config = |urls: Vec<url::Url>| MeshConfig {
+            lookups: LookupOpts::loopback().nostr(NostrChoice::Custom(urls)),
+            ..MeshConfig::loopback()
+        };
+        let forward = config(vec![alpha.clone(), beta.clone()]);
+        let backward = config(vec![beta, alpha]);
+        backward
+            .validate()
+            .expect("the builder put the unsorted pair in order");
+        assert_eq!(
+            forward.to_bytes(),
+            backward.to_bytes(),
+            "one relay set gives one id, whatever the caller order"
+        );
+    }
+
     /// One set of relays gives one id, whatever order the caller names them in.
     #[test]
     fn a_custom_nostr_list_is_sorted_and_has_no_duplicate() {
@@ -1758,10 +1786,9 @@ mod lookup_tests {
         assert!(duplicate.contains("twice"), "{duplicate}");
 
         // A list that skipped the sorting is refused at validate and at decode.
-        let unsorted = LookupOpts::loopback().nostr(NostrChoice::Custom(vec![
-            relay("wss://b.example/"),
-            relay("wss://a.example/"),
-        ]));
+        let mut unsorted = LookupOpts::loopback();
+        unsorted.nostr =
+            NostrChoice::Custom(vec![relay("wss://b.example/"), relay("wss://a.example/")]);
         let refusal = unsorted
             .validate()
             .expect_err("an unsorted list is refused")
