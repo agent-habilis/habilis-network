@@ -19,6 +19,7 @@ use tokio_websockets::{Message, ServerBuilder};
 use url::Url;
 
 use crate::event::{Event, TAG};
+use crate::lane::DATA_KIND_START;
 
 use std::{mem, sync};
 use tokio::net;
@@ -41,6 +42,7 @@ struct State {
     hang_up_on_accept: bool,
     reqs: usize,
     events: usize,
+    data_events: usize,
     event_bytes: usize,
     next_client: u64,
     accepted: usize,
@@ -171,6 +173,13 @@ impl TestRelay {
     #[must_use]
     pub fn events(&self) -> usize {
         self.state().events
+    }
+
+    /// Valid EVENT frames of a data kind (25000 and above) received since the relay started: the
+    /// lookup and the signalling of a mesh do not count, so a test can tell a payload from them.
+    #[must_use]
+    pub fn data_events(&self) -> usize {
+        self.state().data_events
     }
 
     /// The bytes of the text of the valid EVENT frames received since the relay started.
@@ -313,6 +322,9 @@ fn handle(text: &str, id: u64, shared: &Mutex<State>) {
                 return;
             }
             state.events += 1;
+            if event.kind >= DATA_KIND_START {
+                state.data_events += 1;
+            }
             state.event_bytes += text.len();
             if let Some(reason) = state.refuse_events.clone() {
                 reply(&state, serde_json::json!(["OK", event.id, false, reason]));
