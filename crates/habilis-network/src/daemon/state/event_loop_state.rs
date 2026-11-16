@@ -1466,7 +1466,6 @@ impl EventLoopState {
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let address = self.peer_endpoints.remove(nick)?;
-        self.lane_peers.remove(&address.id);
         self.nostr_seen.remove(&address.id);
         self.nostr_poked.remove(&address.id);
         self.hint_owner.remove(nick);
@@ -1576,6 +1575,8 @@ impl EventLoopState {
         self.path_watchers.remove(&endpoint);
         self.path_kinds.remove(&endpoint);
         self.unicast_pool.forget_addr(endpoint);
+        // The lane flag belongs to the endpoint: it goes when the last name of the endpoint goes.
+        self.lane_peers.remove(&endpoint);
     }
 
     /// Drop everything the roster keeps about `key`, which left: its place in the roster, its

@@ -4579,4 +4579,51 @@ mod tests {
             "a departed peer leaves the lane set"
         );
     }
+
+    /// The lane flag belongs to the endpoint: a nickname that forgets its hint leaves the flag
+    /// while another nickname still binds the endpoint, and the last one takes it away.
+    #[test]
+    fn forgetting_one_nickname_keeps_the_lane_flag_while_another_binds_the_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(9);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(shared));
+        state
+            .peer_endpoints
+            .insert(nick("bobby"), iroh::EndpointAddr::new(shared));
+        state.lane_peers.insert(shared);
+
+        state.forget_peer_endpoint("bob");
+        assert!(
+            state.lane_peers.contains(&shared),
+            "another nickname still binds the endpoint, so its lane flag stays"
+        );
+
+        state.forget_peer_endpoint("bobby");
+        assert!(
+            !state.lane_peers.contains(&shared),
+            "no nickname binds the endpoint any more, so its lane flag goes"
+        );
+    }
+
+    /// A nickname that moves to a new endpoint leaves the lane flag of the old one behind unless
+    /// the release of the old endpoint takes it.
+    #[test]
+    fn replacing_the_endpoint_of_a_nickname_drops_the_lane_flag_of_the_old_one() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (old, new) = (endpoint_id(9), endpoint_id(10));
+        let key = test_key("bob");
+        state.place_endpoint(key, &nick("bob"), iroh::EndpointAddr::new(old));
+        state.lane_peers.insert(old);
+
+        state.place_endpoint(key, &nick("bob"), iroh::EndpointAddr::new(new));
+
+        assert!(
+            !state.lane_peers.contains(&old),
+            "the old endpoint has no nickname now, so its lane flag goes"
+        );
+    }
 }

@@ -503,6 +503,14 @@ pub(crate) mod discovery {
         state
             .nostr_poked
             .retain(|_, at| now.duration_since(*at) < SEEN_FRESH);
+        // A `Hello` sets the lane flag of a peer that may never become a member, and no member
+        // release clears it: the flag stays only for a bound endpoint or a peer heard lately.
+        let flagged: Vec<EndpointId> = state.lane_peers.iter().copied().collect();
+        for peer in flagged {
+            if !state.endpoint_is_bound(peer) && !state.nostr_seen.contains_key(&peer) {
+                state.lane_peers.remove(&peer);
+            }
+        }
     }
 
     /// The gates of `negotiate_session` that a `Hello` can meet: the peer did not evict us lately
@@ -1505,6 +1513,40 @@ mod tests {
                 target_width(&state, now, true),
                 LINKED_WIDTH,
                 "a hidden tab holds one relay"
+            );
+        }
+
+        /// A `Hello` sets the lane flag of a peer that may never become a member, and nobody else
+        /// would clear it: the prune drops the flag of an endpoint that no nickname binds and that
+        /// was not heard lately, so the set is bounded by the members and the peers heard.
+        #[test]
+        fn a_lane_flag_with_no_member_and_no_recent_hello_is_forgotten() {
+            let mut state = fresh_state();
+            let (stale, heard, member) = (endpoint_id(7), endpoint_id(8), endpoint_id(9));
+            let then = Instant::now();
+            let later = then + Duration::from_mins(10);
+            state.peer_endpoints.insert(
+                crate::testing::nick("member"),
+                iroh::EndpointAddr::new(member),
+            );
+            state.nostr_seen.insert(heard, later);
+            for endpoint in [stale, heard, member] {
+                state.lane_peers.insert(endpoint);
+            }
+
+            prune(&mut state, later);
+
+            assert!(
+                !state.lane_peers.contains(&stale),
+                "an endpoint with no member and no recent Hello loses its lane flag"
+            );
+            assert!(
+                state.lane_peers.contains(&heard),
+                "a peer heard lately keeps its lane flag"
+            );
+            assert!(
+                state.lane_peers.contains(&member),
+                "a member keeps its lane flag"
             );
         }
 
