@@ -95,13 +95,14 @@ impl Outbound {
         }
     }
 
-    /// Send an event that the caller signed.
-    pub(crate) async fn publish(&mut self, frame: String) -> Result<()> {
+    /// Send an event that the caller signed. `true` if it went to the socket now, so the relay
+    /// owes an answer; `false` if it waits in the queue, where the pump sends it.
+    pub(crate) async fn publish(&mut self, frame: String) -> Result<bool> {
         match self {
-            Self::Direct(sender) => sender.send(frame).await,
+            Self::Direct(sender) => sender.send(frame).await.map(|()| true),
             Self::Paced(paced) => {
                 paced.queue.push_frame(Instant::now(), frame);
-                Ok(())
+                Ok(false)
             }
         }
     }
@@ -139,7 +140,8 @@ impl Outbound {
         }
     }
 
-    /// The writer has room: hand it the next frame that is due, if one is. `true` if it did.
+    /// The writer has room: hand it the next frame that is due, if one is. `true` if it was an
+    /// event, which the relay answers.
     pub(crate) fn pump(&mut self, permit: mpsc::OwnedPermit<Frame>) -> bool {
         let Self::Paced(paced) = self else {
             return false;
@@ -149,8 +151,9 @@ impl Outbound {
         let Some(frame) = paced.queue.pop_ready(now) else {
             return false;
         };
+        let is_event = matches!(frame, Frame::Data(_));
         permit.send(frame);
-        true
+        is_event
     }
 
     /// Datagrams the queue dropped for want of room, as a socket with no queue counts them: none.

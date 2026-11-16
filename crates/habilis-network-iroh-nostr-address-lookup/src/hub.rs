@@ -438,6 +438,11 @@ struct Task {
     /// When the probe of the current rate limit went out. One frame goes after the wait; the
     /// rest of the queue waits for the relay to accept it.
     probe_sent: Option<Instant>,
+    /// The events sent that the relay has not answered yet. It answers each one, in order.
+    unanswered: usize,
+    /// How many of the next answers are for events sent before the current rate limit began.
+    /// They are not new limits: the wait doubles once for a window.
+    stale: usize,
 }
 
 impl Drop for Task {
@@ -471,6 +476,8 @@ async fn run(
         served: false,
         stale_warned: None,
         probe_sent: None,
+        unanswered: 0,
+        stale: 0,
     };
     let mut reconnect = RECONNECT;
     loop {
@@ -519,6 +526,8 @@ impl Task {
         self.closed_subs.clear();
         self.served = false;
         self.probe_sent = None;
+        self.unanswered = 0;
+        self.stale = 0;
         if self.subscribe_all(&mut sender).await.is_err() {
             return Outcome::Dropped;
         }
@@ -556,9 +565,8 @@ impl Task {
                 },
                 permit = wake.permit() => match permit {
                     Ok(permit) => {
-                        let sent = sender.pump(permit);
-                        if sent && matches!(*self.health.borrow(), Health::Limited(_)) {
-                            self.probe_sent = Some(Instant::now());
+                        if sender.pump(permit) {
+                            self.note_sent();
                         }
                         Ok(())
                     }
@@ -638,7 +646,11 @@ impl Task {
                 if held_back {
                     return Ok(());
                 }
-                return sender.publish(frame).await.map_err(|_| Outcome::Dropped);
+                let written = sender.publish(frame).await.map_err(|_| Outcome::Dropped)?;
+                if written {
+                    self.note_sent();
+                }
+                return Ok(());
             }
             Command::Datagram(outgoing) => {
                 // Data is dropped while the socket dials, and while it is down or limited.
@@ -663,6 +675,9 @@ impl Task {
             FromRelay::Eose => self.note_served(),
             FromRelay::Ok { accepted: true, .. } => {
                 self.note_served();
+                if self.answered_a_stale_event() {
+                    return Ok(());
+                }
                 if self
                     .last_limited
                     .is_none_or(|at| at.elapsed() >= RATE_LIMIT_CALM)
@@ -681,9 +696,13 @@ impl Task {
             } => match refusal(&self.url, &reason, &mut self.stale_warned) {
                 Refusal::Retire => return Err(Outcome::Retired),
                 Refusal::Limit => {
-                    self.limit();
+                    if !self.answered_a_stale_event() {
+                        self.limit();
+                    }
                 }
-                Refusal::Ignore => {}
+                Refusal::Ignore => {
+                    self.unanswered = self.unanswered.saturating_sub(1);
+                }
             },
             FromRelay::Closed { sub_id, reason } => {
                 if !self.subs.contains_key(&sub_id) {
@@ -712,6 +731,30 @@ impl Task {
             self.served = true;
             self.hub.forgive(&self.url);
         }
+    }
+
+    /// An event went to the relay: its answer is owed.
+    fn note_sent(&mut self) {
+        if let Health::Limited(until) = *self.health.borrow() {
+            if Instant::now() >= until && self.probe_sent.is_none() {
+                // The probe of a new window. An answer still owed for an older frame is lost:
+                // the relay would have sent it by now.
+                self.unanswered = 0;
+                self.stale = 0;
+            }
+            self.probe_sent = Some(Instant::now());
+        }
+        self.unanswered += 1;
+    }
+
+    /// The relay answered an event. `true` if the event was sent before the current limit began.
+    fn answered_a_stale_event(&mut self) -> bool {
+        self.unanswered = self.unanswered.saturating_sub(1);
+        if self.stale > 0 {
+            self.stale -= 1;
+            return true;
+        }
+        false
     }
 
     /// When the data in the queue may go to the relay. A relay that limited us gets nothing
@@ -745,6 +788,7 @@ impl Task {
             return until;
         }
         self.probe_sent = None;
+        self.stale = self.unanswered;
         let until = now + self.rate_limit.step();
         self.last_limited = Some(now);
         self.limited_until = Some(until);
@@ -1079,6 +1123,8 @@ mod flow_tests {
             served: false,
             stale_warned: None,
             probe_sent: None,
+            unanswered: 0,
+            stale: 0,
         }
     }
 
@@ -1095,6 +1141,44 @@ mod flow_tests {
         assert!(
             next.saturating_duration_since(Instant::now()) > Duration::from_millis(1_500),
             "a refusal after the window waits twice as long"
+        );
+    }
+
+    /// The answer to a frame sent before the limit is not a new limit, even when it comes after
+    /// the wait: the relay answers each frame, and the frames in flight when it first limited us
+    /// are answered one by one. Only the answer to a frame sent after the wait, the probe,
+    /// opens a new window and doubles the wait.
+    #[tokio::test(start_paused = true)]
+    async fn the_late_refusal_of_a_frame_sent_before_the_limit_opens_no_new_window() {
+        let refusal = r#"["OK","00",false,"rate-limited: slow down"]"#;
+        let mut task = offline_task(data_hub());
+        for _ in 0..3 {
+            task.note_sent();
+        }
+        task.on_frame(refusal)
+            .unwrap_or_else(|_| panic!("a refusal is handled"));
+        let Health::Limited(first_end) = *task.health.borrow() else {
+            panic!("the first refusal limits the relay");
+        };
+        sleep(Duration::from_millis(1_100)).await;
+        for _ in 0..2 {
+            task.on_frame(refusal)
+                .unwrap_or_else(|_| panic!("a refusal is handled"));
+        }
+        assert_eq!(
+            *task.health.borrow(),
+            Health::Limited(first_end),
+            "the late refusals of frames sent before the limit change nothing"
+        );
+        task.note_sent();
+        task.on_frame(refusal)
+            .unwrap_or_else(|_| panic!("a refusal is handled"));
+        let Health::Limited(second_end) = *task.health.borrow() else {
+            panic!("the refused probe limits the relay again");
+        };
+        assert!(
+            second_end.saturating_duration_since(Instant::now()) > Duration::from_millis(1_500),
+            "the refusal of the probe doubles the wait"
         );
     }
 
