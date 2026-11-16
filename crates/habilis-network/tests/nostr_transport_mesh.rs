@@ -1,0 +1,279 @@
+//! Two members of a mesh that lists the Nostr transport, with no other path between them, exchange
+//! a message over Nostr. The same mesh without the transport never forms a Nostr path.
+//!
+//! Three real members on a local iroh relay and a local Nostr relay, with the transport list
+//! `udp,relay,nostr`. Carol keeps both of the others linked, so that the mesh stands while alice
+//! and bob lose IP and the relay to each other. The cut comes first and the pooled connection is
+//! dialed again after it, so that the first dial of the pair rides Nostr: a connection that stood
+//! on a path before a cut keeps it selected.
+//!
+//! Run with `cargo test -p habilis-network --test nostr_transport_mesh`.
+
+#![cfg(all(feature = "host", feature = "iroh-test-utils"))]
+
+mod until_known;
+
+use std::time::{Duration, Instant};
+
+use habilis_network::iroh::RelayUrl;
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, InspectTest, Linking, Membership, Messaging, Request, Rung,
+};
+use habilis_network::net;
+use habilis_network::protocol::{Lookup, Transport};
+use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::time;
+
+const STEP_DEADLINE: Duration = Duration::from_mins(2);
+const PAYLOAD_DEADLINE: Duration = Duration::from_secs(30);
+
+struct Member {
+    membership: Membership,
+    _events: UnboundedReceiver<String>,
+    seen_msgs: Vec<Inbound>,
+}
+
+impl Member {
+    async fn open(options: &membership::JoinOptions) -> Self {
+        let (sink, events) = membership::json_sink();
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
+        Self {
+            membership,
+            _events: events,
+            seen_msgs: Vec::new(),
+        }
+    }
+
+    async fn create(
+        nick: &str,
+        relay: &RelayUrl,
+        nostr: &TestRelay,
+        transport: Vec<Transport>,
+    ) -> Self {
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay, Lookup::Nostr]);
+        let relay_url = relay.to_string();
+        let nostr_url = nostr.url().to_string();
+        let options = options.transport(transport);
+        let options = options.relay_urls(vec![relay_url]);
+        let options = options.nostr_urls(vec![nostr_url]);
+        Self::open(&options).await
+    }
+
+    async fn join(nick: &str, creator: &Self) -> Self {
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
+    }
+
+    async fn roster_len(&self) -> usize {
+        let json = self
+            .membership
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
+            .await
+            .unwrap_or_default();
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
+            .and_then(|roster| roster["peers"].as_array().map(Vec::len))
+            .unwrap_or(0)
+    }
+
+    fn ports(&self) -> Vec<u16> {
+        self.membership.node.bound_ports().to_vec()
+    }
+
+    async fn block_ip_to(&self, ports: Vec<u16>) {
+        self.membership
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
+            })
+            .await
+            .expect("the loop answers");
+    }
+
+    async fn block_rung_to(&self, rung: Rung, peer: &str) {
+        until_known::until_peer_known(&self.membership, peer, |reply| {
+            Request::Blocking(Blocking::BlockRungTo {
+                rung,
+                peer: peer.to_owned(),
+                blocked: true,
+                reply,
+            })
+        })
+        .await;
+    }
+
+    /// Drop the pooled connection to `peer`: the next read or send dials a new one, under the
+    /// blocks that stand now.
+    async fn forget_connection(&self, peer: &str) {
+        let answer = self
+            .membership
+            .request(|reply| {
+                Request::Linking(Linking::ForgetUnicast {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
+            .await
+            .expect("the loop answers");
+        answer.expect("the peer is known");
+    }
+
+    async fn rung_to(&self, peer: &str) -> Option<&'static str> {
+        self.membership
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn expect_rung(&self, peer: &str, expected: &str, step: &str) {
+        let started = Instant::now();
+        let mut seen = None;
+        while started.elapsed() < STEP_DEADLINE {
+            seen = self.rung_to(peer).await;
+            if seen == Some(expected) {
+                return;
+            }
+            time::sleep(Duration::from_millis(500)).await;
+        }
+        panic!("{step}: expected the rung {expected}, the last rung read was {seen:?}");
+    }
+
+    async fn send(&self, to: &str, text: &str) -> Result<(), String> {
+        let to = membership::parse_to(Some(to)).expect("a nickname");
+        let body = membership::msg_body(text).expect("fits one frame");
+        self.membership
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
+            .await
+            .expect("the loop answers")
+    }
+
+    fn saw_msg(&mut self, text: &str) -> bool {
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(message);
+        }
+        self.seen_msgs
+            .iter()
+            .any(|message| message.directed && message.text == text)
+    }
+}
+
+async fn all_know_each_other(members: &[&Member], deadline: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        let mut all = true;
+        for member in members {
+            all &= member.roster_len().await == members.len() - 1;
+        }
+        if all {
+            return true;
+        }
+        if started.elapsed() >= deadline {
+            return false;
+        }
+        time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Cut alice and bob from each other on IP and on the relay, and drop their pooled connections.
+async fn cut(alice: &Member, bob: &Member) {
+    alice.block_ip_to(bob.ports()).await;
+    bob.block_ip_to(alice.ports()).await;
+    alice.block_rung_to(Rung::Relay, "bob").await;
+    bob.block_rung_to(Rung::Relay, "alice").await;
+    alice.forget_connection("bob").await;
+    bob.forget_connection("alice").await;
+}
+
+#[test]
+fn two_members_with_no_other_path_exchange_a_message_over_nostr() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
+        let nostr = TestRelay::spawn().await.expect("local Nostr relay");
+        let list = vec![Transport::Udp, Transport::Relay, Transport::Nostr];
+        let alice = Member::create("alice", &relay, &nostr, list).await;
+        let mut bob = Member::join("bob", &alice).await;
+        let carol = Member::join("carol", &alice).await;
+        assert!(
+            all_know_each_other(&[&alice, &bob, &carol], Duration::from_mins(1)).await,
+            "the three members never formed a mesh"
+        );
+
+        cut(&alice, &bob).await;
+        alice
+            .expect_rung("bob", "nostr", "IP and the relay cut between alice and bob")
+            .await;
+        let before = nostr.events();
+
+        let text = "over nostr";
+        alice
+            .send("bob", text)
+            .await
+            .unwrap_or_else(|error| panic!("the send over Nostr was refused: {error}"));
+        let started = Instant::now();
+        while !bob.saw_msg(text) {
+            assert!(
+                started.elapsed() < PAYLOAD_DEADLINE,
+                "the message never reached bob over Nostr"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+        assert!(
+            nostr.events() > before,
+            "the datagrams of the message went through the Nostr relay"
+        );
+
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
+}
+
+#[test]
+fn a_mesh_that_does_not_list_nostr_never_forms_a_nostr_path() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
+        // The Nostr relays are the lookup, and the list names no Nostr transport.
+        let nostr = TestRelay::spawn().await.expect("local Nostr relay");
+        let list = vec![Transport::Udp, Transport::Relay];
+        let alice = Member::create("alice", &relay, &nostr, list).await;
+        let bob = Member::join("bob", &alice).await;
+        let carol = Member::join("carol", &alice).await;
+        assert!(
+            all_know_each_other(&[&alice, &bob, &carol], Duration::from_mins(1)).await,
+            "the three members never formed a mesh"
+        );
+
+        cut(&alice, &bob).await;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(30) {
+            assert_ne!(
+                alice.rung_to("bob").await,
+                Some("nostr"),
+                "a mesh that does not list Nostr never selects it"
+            );
+            time::sleep(Duration::from_millis(500)).await;
+        }
+
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
+}

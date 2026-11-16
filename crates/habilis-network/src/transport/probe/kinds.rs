@@ -2,7 +2,7 @@
 
 use super::path_kind::PathKind;
 
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, Path};
 
 pub(crate) fn path_list(connection: &Connection) -> Vec<String> {
     connection
@@ -22,7 +22,7 @@ pub(crate) fn selected_kind(connection: &Connection) -> PathKind {
     connection
         .paths()
         .iter()
-        .find(iroh::endpoint::Path::is_selected)
+        .find(Path::is_selected)
         .map_or(PathKind::None, |path| {
             if path.is_ip() {
                 PathKind::Ip
@@ -35,6 +35,36 @@ pub(crate) fn selected_kind(connection: &Connection) -> PathKind {
                 PathKind::Multihop
             }
         })
+}
+
+/// Like [`selected_kind`], but a selected path that a test took away from `local` with the block
+/// hooks reads as no path. The selector refuses such a path and iroh may still hold it as the
+/// selected one, so the connection would read as well served while no payload may ride it. Without
+/// the test hooks nothing is blocked, and this is [`selected_kind`].
+pub(crate) fn selected_kind_unblocked(
+    connection: &Connection,
+    local: iroh::EndpointId,
+) -> PathKind {
+    let paths = connection.paths();
+    let selected = paths.iter().find(Path::is_selected);
+    let address: Option<iroh::TransportAddr> = selected.map(|path| path.remote_addr().clone());
+    if address.is_some_and(|address| path_is_blocked(local, &address)) {
+        PathKind::None
+    } else {
+        selected_kind(connection)
+    }
+}
+
+/// Pure: whether a test took the path with `address` away from `local`.
+pub(crate) fn path_is_blocked(local: iroh::EndpointId, address: &iroh::TransportAddr) -> bool {
+    use habilis_network_iroh_transport_util as transport_util;
+    let (rung, ip) = match address {
+        iroh::TransportAddr::Ip(remote) => (transport_util::Rung::Ip, Some(*remote)),
+        iroh::TransportAddr::Relay(_) => (transport_util::Rung::Relay, None),
+        iroh::TransportAddr::Custom(custom) => (transport_util::custom_rung(custom.id()), None),
+        _ => (transport_util::Rung::Other, None),
+    };
+    transport_util::is_blocked_to(local, rung, ip, None)
 }
 
 /// Pure: the kind of a custom path by the id of its transport.
@@ -147,6 +177,36 @@ mod tests {
             Some(PathKind::Nostr),
             "Nostr is a path, and no path is not"
         );
+    }
+
+    /// A path that a test took away from a node reads as no path to that node: the selector
+    /// refuses it, and iroh may still hold it as the selected one. Without the test hooks nothing
+    /// is ever blocked.
+    #[cfg(feature = "iroh-test-utils")]
+    #[test]
+    fn a_path_that_a_test_blocked_reads_as_no_path() {
+        use habilis_network_iroh_transport_util::Rung;
+        let _guard = ::habilis_network_test_tracing::init();
+        let local = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        let ip = iroh::TransportAddr::Ip(([127, 0, 0, 1], 9).into());
+        let relay = iroh::TransportAddr::Relay("https://relay.invalid".parse().expect("relay url"));
+        assert!(!super::path_is_blocked(local, &ip), "nothing blocked");
+        habilis_network_iroh_webrtc_transport::block_rung(local, Rung::Ip, true);
+        assert!(
+            super::path_is_blocked(local, &ip),
+            "the IP rung is blocked for this node"
+        );
+        assert!(
+            !super::path_is_blocked(local, &relay),
+            "the relay rung is not"
+        );
+        let other = iroh::SecretKey::from_bytes(&[9; 32]).public();
+        assert!(
+            !super::path_is_blocked(other, &ip),
+            "another node is not affected"
+        );
+        habilis_network_iroh_webrtc_transport::block_rung(local, Rung::Ip, false);
+        assert!(!super::path_is_blocked(local, &ip), "the block is lifted");
     }
 
     #[test]

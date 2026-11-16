@@ -194,11 +194,12 @@ impl Inner {
             return;
         };
         let nostr = transport.handle();
+        let local = nostr.app_id();
         for (peer, slot) in &self.slots {
             let open = slot.conns.iter().filter_map(WeakConnectionHandle::upgrade);
             let live = open.filter(|connection| connection.close_reason().is_none());
             let kinds: Vec<probe::PathKind> = live
-                .map(|connection| probe::selected_kind(&connection))
+                .map(|connection| probe::selected_kind_unblocked(&connection, local))
                 .collect();
             let (established, allowed) = sampler::nostr_view(&kinds);
             nostr.set_established(*peer, established);
