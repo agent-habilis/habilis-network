@@ -1,5 +1,5 @@
-//! A node's datagram link over the data lane: batches out to the relay it shares with the
-//! destination, datagrams in from the relays it listens on.
+//! A node's datagram link over the data lane: batches out to the first relay that takes them,
+//! datagrams in from every relay of the list.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,9 +17,11 @@ use crate::pool::Pool;
 /// dropped and counted: QUIC recovers the loss, and memory does not grow.
 pub const RECEIVE_CAPACITY: usize = 1024;
 
-/// How many of the best-ranked healthy relays a node listens on. It sends on the first only, so
-/// two nodes that disagree on which relay is healthy still meet.
-const LISTEN_WIDTH: usize = 2;
+/// How many relays of the list the data lane uses. A node listens on all of them and sends to
+/// one, so a receiver hears a sender that the first relays refuse, whatever relay it falls to. A
+/// custom list is short; the cap keeps a long one from costing a socket for each relay. Both ends
+/// take the first relays of the list in the same order, so they use the same set.
+pub const MAX_DATA_RELAYS: usize = 4;
 
 /// A datagram that came in, and the endpoint that sent it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,16 +64,18 @@ pub struct DataPool {
 }
 
 impl DataPool {
-    /// Listen on `self_tag` on the first healthy relays of `ranking`, and send as the endpoint
-    /// `me`. `ranking` is the custom relay list in the order every member computes: the caller
-    /// passes no relay it does not trust with payload.
+    /// Listen on `self_tag` on the first [`MAX_DATA_RELAYS`] relays of `ranking`, and send as the
+    /// endpoint `me` on the first of them that takes it. `ranking` is the custom relay list in
+    /// the order every member computes: the caller passes no relay it does not trust with payload.
     #[must_use]
     pub fn open(
-        ranking: Vec<Url>,
+        mut ranking: Vec<Url>,
         me: [u8; 32],
         self_tag: [u8; 32],
     ) -> (Self, mpsc::Receiver<Datagram>) {
-        let (pool, events) = Pool::open(Lane::Data, ranking, LISTEN_WIDTH, &[self_tag]);
+        ranking.truncate(MAX_DATA_RELAYS);
+        let width = ranking.len();
+        let (pool, events) = Pool::open(Lane::Data, ranking, width, &[self_tag]);
         let (out, datagrams): (mpsc::Sender<Datagram>, mpsc::Receiver<Datagram>) =
             mpsc::channel(RECEIVE_CAPACITY);
         // The pool reads the count, and the receive task adds to it.

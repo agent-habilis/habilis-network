@@ -313,8 +313,9 @@ impl Chooser {
         was_swallowing
     }
 
-    /// Hand a datagram to the first held relay whose socket takes it, in rank order. Both ends
-    /// rank the same list, so they meet on one relay; a relay that is down is passed over.
+    /// Hand a datagram to the first held relay whose socket takes it, in rank order. A data pool
+    /// listens on every relay of its list, so the receiver hears the datagram on whichever relay
+    /// the sender's view of health picks; a relay that is down or limited is passed over.
     fn datagram(&self, outgoing: Outgoing) {
         let lane = self.hub.lane();
         if let Some((_, lease)) = self

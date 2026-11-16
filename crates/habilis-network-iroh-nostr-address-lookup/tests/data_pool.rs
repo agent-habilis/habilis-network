@@ -4,7 +4,9 @@
 use std::time::{Duration, Instant};
 
 use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
-use habilis_network_iroh_nostr_address_lookup::{DataPool, Datagram, RECEIVE_CAPACITY};
+use habilis_network_iroh_nostr_address_lookup::{
+    DataPool, Datagram, MAX_DATA_RELAYS, RECEIVE_CAPACITY,
+};
 use tokio::sync::mpsc::Receiver;
 use tokio::time;
 use url::Url;
@@ -99,6 +101,37 @@ async fn both_ends_use_the_first_relay_of_the_ranking() {
     assert!(relays[0].events() > 0, "the first relay carried the data");
     assert_eq!(relays[1].events(), 0, "the second relay carried none");
     assert_eq!(relays[2].events(), 0, "the third relay carried none");
+}
+
+/// A rate limit is per sender, so two ends can see different relays as healthy, and a sender can
+/// fall to a relay far down the list. The receiver hears it only if it listens there: on every
+/// relay of the list, not on the first two.
+#[tokio::test]
+async fn a_node_listens_on_every_relay_of_the_list() {
+    let relays = relays(3).await;
+    let bob = node(urls(&relays), BOB, BOB_TAG);
+    eventually("bob holds all three relays", || {
+        bob.pool.connected().count() == 3
+    })
+    .await;
+    for relay in &relays {
+        assert_eq!(relay.connections(), 1, "one data socket on each relay");
+    }
+}
+
+/// The list is capped, and both ends cap it the same way: a relay past the cap carries no data.
+#[tokio::test]
+async fn a_relay_past_the_listen_cap_carries_no_data() {
+    let relays = relays(MAX_DATA_RELAYS + 1).await;
+    let alice = node(urls(&relays), ALICE, ALICE_TAG);
+    let mut bob = node(urls(&relays), BOB, BOB_TAG);
+    warm_up(&alice, &BOB_TAG, &mut bob).await;
+    let last = relays.last().expect("a last relay");
+    assert_eq!(
+        last.accepted(),
+        0,
+        "the relay past the cap was never dialed"
+    );
 }
 
 #[tokio::test]

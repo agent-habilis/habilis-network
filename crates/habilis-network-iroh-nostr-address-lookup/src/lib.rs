@@ -44,7 +44,7 @@ mod ws;
 #[cfg(all(feature = "test-relay", not(target_arch = "wasm32")))]
 pub mod test_relay;
 
-pub use data_pool::{DataPool, Datagram, RECEIVE_CAPACITY};
+pub use data_pool::{DataPool, Datagram, MAX_DATA_RELAYS, RECEIVE_CAPACITY};
 pub use event::{Event, Keys, TAG, kind_for};
 pub use event_error::EventError;
 pub use lane::{DATA_KIND_START, LANE_KIND_SPAN, Lane, SIGNAL_KIND_START};
