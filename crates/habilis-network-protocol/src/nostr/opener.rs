@@ -26,7 +26,7 @@ const MAX_SEEN: usize = 4096;
 pub struct Opener {
     keys: NostrKeys,
     me: EndpointId,
-    /// `(sender, nonce)` of every signal opened in the last two windows, with
+    /// `(sender, nonce)` of every signal opened inside the clock window, with
     /// its `ts`, for pruning.
     seen: HashMap<(EndpointId, [u8; 16]), u64>,
 }
@@ -126,22 +126,21 @@ impl Opener {
     }
 
     /// Note the signal as seen, and refuse it if it was seen before. The cache
-    /// is bounded: a member that floods fresh nonces cannot grow it.
+    /// is bounded: a member that floods fresh nonces cannot grow it. A record
+    /// leaves only when its signal is out of the clock window, so a replay it
+    /// would catch is refused as stale anyway. If the cache is full of records
+    /// still in the window, the new signal is refused: it fails closed.
     fn remember(&mut self, from: EndpointId, body: &Body, now: u64) -> Result<(), NostrError> {
         self.seen
-            .retain(|_, ts| ts.abs_diff(now) <= 2 * REPLAY_WINDOW_SECS);
-        if self.seen.len() >= MAX_SEEN {
-            let oldest = self.seen.iter().min_by_key(|(_, ts)| **ts);
-            if let Some((key, _)) = oldest {
-                let key = *key;
-                // A full cache still leaves the clock window, which bounds any
-                // replay of the evicted entry to 120 s.
-                self.seen.remove(&key);
-            }
-        }
-        if self.seen.insert((from, body.nonce), body.ts).is_some() {
+            .retain(|_, ts| ts.abs_diff(now) <= REPLAY_WINDOW_SECS);
+        let key = (from, body.nonce);
+        if self.seen.contains_key(&key) {
             return Err(NostrError::Replayed);
         }
+        if self.seen.len() >= MAX_SEEN {
+            return Err(NostrError::ReplayCacheFull);
+        }
+        self.seen.insert(key, body.ts);
         Ok(())
     }
 }
@@ -368,22 +367,48 @@ mod tests {
         assert!(error.contains("addresses"), "{error}");
     }
 
-    /// A member flooding fresh nonces must not grow the cache without bound.
+    /// A member flooding fresh nonces must not grow the cache without bound:
+    /// past the cap, a new signal is refused.
     #[test]
     fn the_replay_cache_is_bounded() {
         let (alice, bob) = (member(), member());
         let mut opener = Opener::new(keys(), bob.public());
-        for _ in 0..(MAX_SEEN + 100) {
+        for _ in 0..MAX_SEEN {
             let hello = Signal::new(SignalKind::Hello, alice.public(), NOW);
             opener
                 .open(&seal(&keys(), &alice, &hello), NOW)
                 .expect("a fresh nonce opens");
         }
+        let extra = Signal::new(SignalKind::Hello, alice.public(), NOW);
+        let error = refusal(&mut opener, &seal(&keys(), &alice, &extra), NOW);
+        assert!(error.contains("cache is full"), "{error}");
         assert!(
             opener.seen.len() <= MAX_SEEN,
             "the cache holds {} pairs",
             opener.seen.len()
         );
+    }
+
+    /// A full cache must not forget a record whose signal the clock window still
+    /// accepts: the uniquely oldest signal, replayed into a full cache, is refused.
+    #[test]
+    fn a_replay_is_refused_when_the_cache_is_full() {
+        let (alice, bob) = (member(), member());
+        let mut opener = Opener::new(keys(), bob.public());
+        let oldest = Signal::new(SignalKind::Hello, alice.public(), NOW - 1);
+        let sealed_oldest = seal(&keys(), &alice, &oldest);
+        opener
+            .open(&sealed_oldest, NOW)
+            .expect("the oldest signal opens once");
+        for _ in 1..MAX_SEEN {
+            let hello = Signal::new(SignalKind::Hello, alice.public(), NOW);
+            opener
+                .open(&seal(&keys(), &alice, &hello), NOW)
+                .expect("a fresh nonce opens");
+        }
+        assert_eq!(opener.seen.len(), MAX_SEEN, "the cache is full");
+        let error = refusal(&mut opener, &sealed_oldest, NOW);
+        assert!(error.contains("replayed"), "{error}");
     }
 
     /// A field this build does not know is refused rather than dropped: the

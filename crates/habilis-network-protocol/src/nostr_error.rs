@@ -64,6 +64,9 @@ pub enum NostrError {
     AddressedElsewhere,
     /// The signal was already opened within the replay window.
     Replayed,
+    /// The replay cache holds only signals the clock window still accepts, and
+    /// it is full, so a new one cannot be remembered and is refused.
+    ReplayCacheFull,
     /// A custom relay list is empty.
     EmptyRelayList,
     /// A custom relay list has more relays than the wire ceiling.
@@ -116,6 +119,7 @@ impl fmt::Display for NostrError {
             }
             Self::AddressedElsewhere => formatter.write_str("signal addressed to another member"),
             Self::Replayed => formatter.write_str("replayed signal"),
+            Self::ReplayCacheFull => formatter.write_str("replay cache is full"),
             Self::EmptyRelayList => formatter.write_str("custom nostr relay list is empty"),
             Self::RelayListTooLong { count } => {
                 write!(formatter, "nostr relay list too long: {count} relays")
