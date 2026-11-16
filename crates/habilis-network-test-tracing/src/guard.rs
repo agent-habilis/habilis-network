@@ -44,6 +44,15 @@ thread_local! {
 /// The end of the name of a thread that a runtime of this crate starts for a test.
 const WORKER: &str = "/worker";
 
+/// The WARN messages that report the state of the host and not of the code under test: the target,
+/// and the text that the message holds. The resolver of iroh warns about a line of the hosts file
+/// that it cannot parse, such as the line of a CI runner, and no test can fix that line. The layer
+/// drops these events: every other WARN and every ERROR still fails a test.
+const HOST_MESSAGES: [(&str, &str); 1] = [(
+    "hickory_resolver::hosts",
+    "could not parse an IP from hosts file",
+)];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Stderr,
@@ -559,6 +568,12 @@ impl<S: Subscriber> Layer<S> for Catch {
         let metadata = event.metadata();
         let level = *metadata.level();
         let target = metadata.target().to_owned();
+        let of_the_host = HOST_MESSAGES
+            .iter()
+            .any(|(from, text)| target_is_within(&target, from) && fields.text.contains(text));
+        if level == Level::WARN && of_the_host {
+            return;
+        }
         let logged = || Logged {
             level,
             target: target.clone(),
