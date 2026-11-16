@@ -429,6 +429,7 @@ impl SignalAdmission {
     pub(crate) fn close(&self) {
         let mut inner = self.lock();
         inner.closed = true;
+        inner.release_pins();
         for slot in inner.slots.values() {
             if let Some(Round::Running(abort)) = &slot.round {
                 abort.abort();
@@ -633,6 +634,9 @@ impl SignalAdmission {
     pub(crate) fn set_neighbors(&self, neighbors: &HashSet<EndpointId>) {
         let mut inner = self.lock();
         let evictions = inner.ceiling.set_neighbors(neighbors, Instant::now());
+        for peer in neighbors {
+            inner.sync_pin(*peer);
+        }
         let victims = inner.take_victims(&evictions, "a gossip neighbor");
         drop(inner);
         victims.end();

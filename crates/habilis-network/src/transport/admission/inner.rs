@@ -79,6 +79,17 @@ impl Inner {
         }
     }
 
+    /// Release every pin of this table from the path selector.
+    pub(crate) fn release_pins(&mut self) {
+        let Some(local) = self.local else {
+            return;
+        };
+        for peer in self.ceiling.pins() {
+            habilis_network_iroh_transport_util::unpin(local, peer);
+        }
+        self.ceiling.clear_pins();
+    }
+
     pub(crate) fn slot(&mut self, peer: EndpointId) -> &mut Slot {
         self.slots.entry(peer).or_insert_with(Slot::new)
     }

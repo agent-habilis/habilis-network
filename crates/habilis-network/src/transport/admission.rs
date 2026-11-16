@@ -719,6 +719,45 @@ mod tests {
         );
     }
 
+    /// A pin that a closed table leaves would hold a peer on multihop in the path selector of an
+    /// endpoint that the table no longer serves, and the same endpoint id can come back. Closing the
+    /// table releases the pins, and a pin that a neighbor makes void is released too.
+    #[test]
+    fn closing_the_table_and_a_new_neighbor_release_the_pins_of_the_selector() {
+        use crate::transport::ceiling::DialPlan;
+        use habilis_network_iroh_transport_util as selector;
+        let _guard = ::habilis_network_test_tracing::init();
+        let admission = SignalAdmission::new(1);
+        admission.note_success(peer(1));
+        let local = peer(100);
+        admission.set_local(local);
+        let (far, near) = (peer(2), peer(3));
+        assert_eq!(
+            admission.plan_dial(far, true),
+            DialPlan::Multihop,
+            "the far peer is pinned"
+        );
+        assert_eq!(
+            admission.plan_dial(near, true),
+            DialPlan::Multihop,
+            "the near peer is pinned"
+        );
+        assert!(
+            selector::is_pinned(local, far) && selector::is_pinned(local, near),
+            "the selector reads both pins"
+        );
+        admission.set_neighbors(&HashSet::from([near]));
+        assert!(
+            !selector::is_pinned(local, near),
+            "a peer that becomes a gossip neighbor is released from the selector"
+        );
+        admission.close();
+        assert!(
+            !selector::is_pinned(local, far),
+            "closing the table releases the pins of the selector"
+        );
+    }
+
     /// A session that found no free unit and no peer to evict took no unit. It idles out after
     /// the extra idle, which is shorter than the window of a direct session.
     #[test]

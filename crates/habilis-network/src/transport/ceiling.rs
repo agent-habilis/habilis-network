@@ -115,6 +115,14 @@ impl Entry {
         self.quic == Quic::Extra || self.session_extra
     }
 
+    /// The extra connection and the extra session of the peer take a unit.
+    fn promote(&mut self) {
+        if self.quic == Quic::Extra {
+            self.quic = Quic::Unit;
+        }
+        self.session_extra = false;
+    }
+
     /// The connection and the session of the peer give up their unit: they count toward `2C` only.
     fn demote(&mut self) {
         if self.quic == Quic::Unit {
@@ -172,6 +180,9 @@ pub(crate) struct Ceiling {
     pinned: HashSet<EndpointId>,
     /// The peers whose direct dial holds a unit that no connection holds yet.
     reserved: HashSet<EndpointId>,
+    /// The pinned peers whose dial has not opened its connection yet. An inbound connection of such
+    /// a peer that closes does not take the pin, because the dial still needs it.
+    awaiting: HashSet<EndpointId>,
     last_batch: Option<Instant>,
 }
 
@@ -184,6 +195,7 @@ impl Ceiling {
             neighbors: HashSet::new(),
             pinned: HashSet::new(),
             reserved: HashSet::new(),
+            awaiting: HashSet::new(),
             last_batch: None,
         }
     }
@@ -269,6 +281,7 @@ impl Ceiling {
     /// A unicast QUIC connection to `peer` is open. Returns the admission of a peer that
     /// was not a unit before.
     pub(crate) fn register_quic(&mut self, peer: EndpointId, now: Instant) -> Admission {
+        self.awaiting.remove(&peer);
         let extra = self.pinned.contains(&peer);
         self.register_quic_as(peer, now, extra)
     }
@@ -285,6 +298,7 @@ impl Ceiling {
     /// with no route, the dial is direct and evicts when its connection registers.
     pub(crate) fn plan_dial(&mut self, peer: EndpointId, route: bool) -> DialPlan {
         self.pinned.remove(&peer);
+        self.awaiting.remove(&peer);
         self.reserved.remove(&peer);
         if self.holds(peer) || !self.evicts {
             return DialPlan::Direct;
@@ -295,6 +309,7 @@ impl Ceiling {
         }
         if route {
             self.pinned.insert(peer);
+            self.awaiting.insert(peer);
             return DialPlan::Multihop;
         }
         DialPlan::Direct
@@ -324,6 +339,7 @@ impl Ceiling {
     /// The dial that [`Self::plan_dial`] planned ended without a connection.
     pub(crate) fn release_dial(&mut self, peer: EndpointId) {
         self.reserved.remove(&peer);
+        self.awaiting.remove(&peer);
         if !self
             .entries
             .get(&peer)
@@ -331,6 +347,17 @@ impl Ceiling {
         {
             self.pinned.remove(&peer);
         }
+    }
+
+    /// Every pinned peer, planned or connected, in no order.
+    pub(crate) fn pins(&self) -> Vec<EndpointId> {
+        self.pinned.iter().copied().collect()
+    }
+
+    /// Forget every pin: the table closed.
+    pub(crate) fn clear_pins(&mut self) {
+        self.pinned.clear();
+        self.awaiting.clear();
     }
 
     /// Whether `peer` is pinned to multihop.
@@ -342,7 +369,10 @@ impl Ceiling {
     /// ceiling it is accepted and takes no unit, and nobody is evicted for it before `2C`.
     pub(crate) fn register_inbound(&mut self, peer: EndpointId, now: Instant) -> Admission {
         let already = self.entries.get(&peer).is_some_and(Entry::held);
-        let extra = !already && self.units() >= self.cap && self.evicts;
+        let reserved_by_others: usize =
+            self.reserved.iter().filter(|other| **other != peer).count();
+        let full = self.units() + reserved_by_others >= self.cap;
+        let extra = !already && full && self.evicts;
         self.register_quic_as(peer, now, extra)
     }
 
@@ -440,7 +470,9 @@ impl Ceiling {
     }
 
     pub(crate) fn unregister_quic(&mut self, peer: EndpointId) {
-        self.pinned.remove(&peer);
+        if !self.awaiting.contains(&peer) {
+            self.pinned.remove(&peer);
+        }
         self.unregister(peer, |entry| entry.quic = Quic::Absent);
     }
 
@@ -456,6 +488,29 @@ impl Ceiling {
             clear(entry);
             if !entry.held() {
                 self.entries.remove(&peer);
+            }
+        }
+        self.promote_extras();
+    }
+
+    /// While a unit is free, the most recently used extra takes it. A pinned peer rides multihop
+    /// only, so it never becomes a unit.
+    fn promote_extras(&mut self) {
+        if !self.evicts {
+            return;
+        }
+        while self.units() + self.reserved.len() < self.cap {
+            let pinned = &self.pinned;
+            let entries = self.entries.iter();
+            let extras = entries.filter(|(peer, entry)| entry.extra() && !pinned.contains(*peer));
+            let hottest: Option<(&EndpointId, &Entry)> =
+                extras.max_by_key(|(_, entry)| entry.last_use);
+            let Some((peer, _)) = hottest else {
+                return;
+            };
+            let peer = *peer;
+            if let Some(entry) = self.entries.get_mut(&peer) {
+                entry.promote();
             }
         }
     }
@@ -502,12 +557,16 @@ impl Ceiling {
             entry.neighbor = neighbors.contains(peer);
             entry.held()
         });
-        let mut admission = Admission::default();
-        for peer in newly_counted {
-            let one = self.admit(peer, now);
-            admission.evict.extend(one.evict);
-            admission.over_ceiling = admission.over_ceiling.max(one.over_ceiling);
+        for peer in neighbors {
+            self.pinned.remove(peer);
+            self.awaiting.remove(peer);
         }
+        // One admission for all the new neighbors: the neighbors are no candidates, and one pass names
+        // each victim once.
+        let mut admission = match newly_counted.first() {
+            Some(first) => self.admit(*first, now),
+            None => Admission::default(),
+        };
         self.demote_over_ceiling(&admission.evict);
         admission.over_ceiling = self
             .units()
@@ -1036,6 +1095,135 @@ mod tests {
         assert!(
             ceiling.is_extra(cached),
             "the busy connection that no unit holds is an extra"
+        );
+    }
+
+    #[test]
+    fn an_inbound_close_does_not_take_the_pin_of_a_dial_in_flight() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        let peer = testing::endpoint_id(2);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the dial is planned through multihop"
+        );
+        ceiling.register_inbound(peer, at(start, 1));
+        ceiling.unregister_quic(peer);
+        assert!(
+            ceiling.pinned(peer),
+            "the dial in flight still needs its pin when the inbound connection closes"
+        );
+        ceiling.register_quic(peer, at(start, 2));
+        ceiling.unregister_quic(peer);
+        assert!(
+            !ceiling.pinned(peer),
+            "the pin ends with the connection that the dial opened"
+        );
+    }
+
+    #[test]
+    fn an_extra_becomes_a_unit_when_a_unit_frees_up_and_a_pinned_one_does_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        let unit = testing::endpoint_id(1);
+        ceiling.register_quic(unit, start);
+        ceiling.busy_begin(unit);
+        let extra = testing::endpoint_id(2);
+        ceiling.register_quic(extra, at(start, 10));
+        let pinned = testing::endpoint_id(3);
+        assert_eq!(
+            ceiling.plan_dial(pinned, true),
+            DialPlan::Multihop,
+            "the dial is planned through multihop"
+        );
+        ceiling.register_quic(pinned, at(start, 11));
+        assert!(ceiling.is_extra(extra), "the second connection is an extra");
+        ceiling.unregister_quic(unit);
+        assert!(
+            !ceiling.is_extra(extra),
+            "the extra becomes the unit that freed up"
+        );
+        assert_eq!(ceiling.units(), 1, "one unit again, and no more");
+        assert!(
+            ceiling.is_extra(pinned) && ceiling.pinned(pinned),
+            "a pinned connection stays on multihop and never becomes a unit"
+        );
+    }
+
+    #[test]
+    fn an_inbound_connection_does_not_take_the_unit_that_a_dial_reserved() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        assert_eq!(
+            ceiling.plan_dial(testing::endpoint_id(2), false),
+            DialPlan::Direct,
+            "a free unit is reserved for the dial"
+        );
+        let inbound = testing::endpoint_id(3);
+        let admission = ceiling.register_inbound(inbound, at(start, 1));
+        assert!(admission.evict.is_empty(), "nobody is evicted for it");
+        assert!(
+            ceiling.is_extra(inbound),
+            "the last unit belongs to the dial in flight"
+        );
+        let dialed = ceiling.register_quic(testing::endpoint_id(2), at(start, 2));
+        assert!(
+            dialed.evict.is_empty() && ceiling.units() == 2,
+            "the dial takes the unit that it reserved"
+        );
+    }
+
+    #[test]
+    fn a_pinned_peer_that_becomes_a_gossip_neighbor_is_unpinned() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        let peer = testing::endpoint_id(2);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the dial is planned through multihop"
+        );
+        ceiling.register_quic(peer, at(start, 1));
+        ceiling.set_neighbors(&HashSet::from([peer]), at(start, 2));
+        assert!(
+            !ceiling.pinned(peer),
+            "a gossip neighbor is a direct peer, and no pin holds it on multihop"
+        );
+    }
+
+    #[test]
+    fn several_new_neighbors_name_each_victim_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(3);
+        for byte in 1..=3 {
+            ceiling.register_quic(testing::endpoint_id(byte), start);
+        }
+        let admission = ceiling.set_neighbors(
+            &HashSet::from([testing::endpoint_id(10), testing::endpoint_id(11)]),
+            at(start, 200),
+        );
+        let mut victims = admission.evict.clone();
+        victims.sort_unstable();
+        victims.dedup();
+        assert_eq!(
+            victims.len(),
+            admission.evict.len(),
+            "no victim is named twice: {:?}",
+            admission.evict
+        );
+        assert_eq!(
+            admission.evict.len(),
+            2,
+            "two new neighbors take the units of two cached peers"
         );
     }
 
