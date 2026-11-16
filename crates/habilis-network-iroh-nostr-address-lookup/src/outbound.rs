@@ -3,15 +3,15 @@
 //! that task, and nothing else, so the socket keeps reading.
 
 use std::future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, anyhow};
 use n0_future::task;
 use n0_future::time::{Instant, sleep_until};
 use tokio::sync::mpsc;
 
-#[cfg(target_arch = "wasm32")]
-use crate::data_queue;
-use crate::data_queue::{DataQueue, Frame, Outgoing};
+use crate::data_queue::{self, DataQueue, Frame, Outgoing};
 use crate::lane::Lane;
 use crate::ws;
 
@@ -36,6 +36,9 @@ pub(crate) enum Outbound {
 pub(crate) struct Paced {
     queue: DataQueue,
     writer: mpsc::Sender<Frame>,
+    // Added to by the writer task, which drops data a socket that is behind will not take, and
+    // read here with the count of the queue.
+    writer_dropped: Arc<AtomicU64>,
 }
 
 /// What the loop of a socket waits for to send its next frame. It owns what it needs, so it
@@ -69,10 +72,15 @@ impl Outbound {
     pub(crate) fn new(lane: Lane, sender: ws::Sender) -> Self {
         match lane {
             Lane::Signal => Self::Direct(sender),
-            Lane::Data => Self::Paced(Paced {
-                queue: DataQueue::new(Instant::now()),
-                writer: spawn_writer(sender),
-            }),
+            Lane::Data => {
+                // Shared with the writer task, which counts the frames it drops.
+                let writer_dropped = Arc::new(AtomicU64::new(0));
+                Self::Paced(Paced {
+                    queue: DataQueue::new(Instant::now()),
+                    writer: spawn_writer(sender, Arc::clone(&writer_dropped)),
+                    writer_dropped,
+                })
+            }
         }
     }
 
@@ -149,7 +157,9 @@ impl Outbound {
     pub(crate) fn dropped(&self) -> u64 {
         match self {
             Self::Direct(_) => 0,
-            Self::Paced(paced) => paced.queue.dropped(),
+            Self::Paced(paced) => {
+                paced.queue.dropped() + paced.writer_dropped.load(Ordering::Relaxed)
+            }
         }
     }
 
@@ -164,20 +174,17 @@ impl Outbound {
 
 /// A task that owns the sending half and writes what it is given, one frame at a time. Its
 /// channel holds one frame, so the pacer hands it the next frame only when it is free.
-fn spawn_writer(mut sender: ws::Sender) -> mpsc::Sender<Frame> {
+fn spawn_writer(mut sender: ws::Sender, dropped: Arc<AtomicU64>) -> mpsc::Sender<Frame> {
     let (frames, mut incoming): (mpsc::Sender<Frame>, mpsc::Receiver<Frame>) = mpsc::channel(1);
     task::spawn(async move {
         while let Some(frame) = incoming.recv().await {
-            let text = match frame {
-                Frame::Control(text) => text,
-                Frame::Data(text) => {
-                    #[cfg(target_arch = "wasm32")]
-                    if data_queue::over_buffer_bound(sender.buffered()) {
-                        tracing::debug!(target: "habilis_network::lookup", "browser socket is behind; a data frame is dropped");
-                        continue;
-                    }
-                    text
-                }
+            // A native write waits for the socket, and gives up after a time: it needs no count.
+            #[cfg(target_arch = "wasm32")]
+            let buffered = sender.buffered();
+            #[cfg(not(target_arch = "wasm32"))]
+            let buffered = 0;
+            let Some(text) = admit(frame, buffered, &dropped) else {
+                continue;
             };
             if sender.send(text).await.is_err() {
                 return;
@@ -188,16 +195,34 @@ fn spawn_writer(mut sender: ws::Sender) -> mpsc::Sender<Frame> {
     frames
 }
 
+/// The text to write for `frame`, or `None` for a data frame that a socket with `buffered` bytes
+/// unsent does not take: the browser has a queue of its own with no bound, so the frame is
+/// dropped and counted. A control frame is always written.
+fn admit(frame: Frame, buffered: usize, dropped: &AtomicU64) -> Option<String> {
+    match frame {
+        Frame::Control(text) => Some(text),
+        Frame::Data(text) => {
+            if data_queue::over_buffer_bound(buffered) {
+                tracing::debug!(target: "habilis_network::lookup", buffered, "the socket is behind; a data frame is dropped");
+                dropped.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            Some(text)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
-    use n0_future::time::{Instant, timeout};
+    use n0_future::time::{Instant, sleep, timeout};
     use tokio::sync::mpsc;
 
-    use super::{Outbound, Pace, Paced};
-    use crate::data_queue::{DataQueue, Frame, Outgoing};
+    use super::{Outbound, Pace, Paced, admit};
+    use crate::data_queue::{DataQueue, Frame, Outgoing, WEB_BUFFERED_BOUND};
     use crate::event::Keys;
 
     // One key signs every datagram a test queues, as one pool does.
@@ -210,6 +235,59 @@ mod tests {
         }
     }
 
+    /// A socket that is behind takes no data frame, and the count says how many it refused. A
+    /// control frame is not data: a REQ or a CLOSE always goes.
+    #[test]
+    fn a_data_frame_is_dropped_and_counted_when_the_socket_is_behind() {
+        let dropped = AtomicU64::new(0);
+        assert_eq!(
+            admit(Frame::Data("d".into()), WEB_BUFFERED_BOUND, &dropped),
+            Some("d".to_owned()),
+            "at the bound the frame goes"
+        );
+        assert_eq!(
+            admit(Frame::Control("c".into()), usize::MAX, &dropped),
+            Some("c".to_owned()),
+            "a control frame goes whatever the buffer holds"
+        );
+        assert_eq!(dropped.load(Ordering::Relaxed), 0, "nothing dropped yet");
+        assert_eq!(
+            admit(Frame::Data("d".into()), WEB_BUFFERED_BOUND + 1, &dropped),
+            None,
+            "past the bound the frame is dropped"
+        );
+        assert_eq!(dropped.load(Ordering::Relaxed), 1, "and counted");
+    }
+
+    /// While the writer is held up the socket gets no permit, and the queue must still age its
+    /// batches and drop the old ones: the check runs when a datagram arrives, not when a frame
+    /// can go. The clock is virtual.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_writer_does_not_stop_old_batches_from_being_dropped() {
+        let (writer, _stalled): (mpsc::Sender<Frame>, mpsc::Receiver<Frame>) = mpsc::channel(1);
+        let mut outbound = Outbound::Paced(Paced {
+            queue: DataQueue::new(Instant::now()),
+            writer,
+            writer_dropped: Arc::new(AtomicU64::new(0)),
+        });
+        let keys = Arc::new(Keys::generate());
+        outbound.datagram(outgoing(&keys, b"the writer takes this".to_vec()));
+        let permit: mpsc::OwnedPermit<Frame> = outbound
+            .wake(Pace::Open)
+            .permit()
+            .await
+            .expect("the writer is alive");
+        assert!(outbound.pump(permit), "the first frame goes to the writer");
+
+        outbound.datagram(outgoing(&keys, b"waits".to_vec()));
+        sleep(Duration::from_secs(1)).await;
+        outbound.datagram(outgoing(&keys, b"new".to_vec()));
+        assert!(
+            outbound.dropped() >= 1,
+            "the batch that waited a second behind the writer was dropped"
+        );
+    }
+
     /// A relay that stops reading holds up the writer, and only the writer: queueing a datagram
     /// still returns at once, the pacer waits for the writer instead of spinning, and the queue
     /// drops its oldest frames, so nothing grows.
@@ -219,6 +297,7 @@ mod tests {
         let mut outbound = Outbound::Paced(Paced {
             queue: DataQueue::new(Instant::now()),
             writer,
+            writer_dropped: Arc::new(AtomicU64::new(0)),
         });
         // The key of a test pool, shared by the datagrams it queues.
         let keys = Arc::new(Keys::generate());

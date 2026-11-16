@@ -53,7 +53,6 @@ pub(crate) const FRAME_OVERHEAD: usize = 512;
 
 /// A browser socket with more than this many bytes unsent is behind: a data frame is dropped
 /// rather than added to the browser's own queue, which has no bound.
-#[cfg(any(test, target_arch = "wasm32"))]
 pub(crate) const WEB_BUFFERED_BOUND: usize = 256 * 1024;
 
 /// A frame length as a count of bytes of budget. A frame is a few kilobytes: a length that does
@@ -63,7 +62,6 @@ pub(crate) fn weigh(bytes: usize) -> f64 {
 }
 
 /// Whether a socket with `buffered` bytes unsent takes no more data.
-#[cfg(any(test, target_arch = "wasm32"))]
 pub(crate) fn over_buffer_bound(buffered: usize) -> bool {
     buffered > WEB_BUFFERED_BOUND
 }
