@@ -40,7 +40,8 @@ impl DirectOnlyGossip {
     ) -> Self {
         Self {
             inner,
-            relay_transport,
+            // A gossip link never rides Nostr, whatever the mesh lists.
+            relay_transport: relay_transport.without_nostr(),
             session_gate,
         }
     }

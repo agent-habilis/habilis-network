@@ -481,6 +481,9 @@ fn wire_transports(
         transport::UnicastPool::new(endpoint.clone(), transports.relay_transport.relay_allowed());
     state
         .unicast_pool
+        .set_nostr_transport(transports.relay_transport.nostr_allowed());
+    state
+        .unicast_pool
         .set_admission(state.webrtc_admission.clone());
     state.unicast_pool.set_tally(state.idle.wire_out.clone());
     // Before the first write, so the initial advertisement carries a real count.

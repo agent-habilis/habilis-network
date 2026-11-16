@@ -5,6 +5,7 @@
 //! needs an `Endpoint` reaches in here and accepts the coupling.
 
 use crate::gossip::PathSummary;
+use crate::transport::payload_path;
 use iroh::endpoint::TransportAddrUsage;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 
@@ -105,7 +106,7 @@ pub async fn conn_path(
             // relay server. Nostr is not: its relays carry every datagram, so it reads as the
             // relay does.
             TransportAddr::Ip(_) | TransportAddr::Custom(_) => {
-                if crate::transport::payload_path::is_peer_to_peer(address.addr()) {
+                if payload_path::is_peer_to_peer(address.addr()) {
                     has_direct = true;
                 } else {
                     has_relay = true;

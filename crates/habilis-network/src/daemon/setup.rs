@@ -1533,8 +1533,10 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // caller-side and passed back in here as the real port.
     let mesh_config = validated_mesh_config(&kind)?;
     let lookups = mesh_config.lookups.clone();
-    let relay_transport =
-        transport::PayloadPath::from(mesh_config.transport.allows(Transport::Relay));
+    let relay_transport = transport::PayloadPath::from_policy(
+        mesh_config.transport.allows(Transport::Relay),
+        mesh_config.transport.allows(Transport::Nostr),
+    );
     let transports = member_transports(&lookups, transports, &mesh_config.transport)?;
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the

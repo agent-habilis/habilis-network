@@ -23,7 +23,7 @@ use n0_future::time::Instant as PoolInstant;
 use tokio::sync::{Mutex, watch};
 
 use crate::transport::webrtc::close_code::IDLE;
-use crate::transport::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
+use crate::transport::{LOG_TARGET, PayloadPath, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -132,6 +132,9 @@ pub(in crate::transport::pool) struct PoolInner {
     /// path is the relay is refused; the connection stays pooled, since iroh
     /// may still punch a direct path on it.
     pub(in crate::transport::pool) relay_transport: bool,
+    /// `TransportPolicy::nostr_transport`. Off, a send on a connection whose selected path is
+    /// Nostr is refused. Set once by the loop that owns the pool, like the admission table.
+    pub(in crate::transport::pool) nostr_transport: AtomicBool,
     /// The table whose ceiling the connections of this pool count against. Set once the
     /// table exists, which is after the pool.
     pub(in crate::transport::pool) admission: std_OnceLock<SignalAdmission>,
@@ -184,10 +187,25 @@ impl UnicastPool {
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
                 relay_transport,
+                nostr_transport: AtomicBool::new(false),
                 admission: std_OnceLock::new(),
                 tally: std_OnceLock::new(),
             }),
         }
+    }
+
+    /// Let a payload ride a Nostr path: the mesh lists the Nostr transport.
+    pub(crate) fn set_nostr_transport(&self, allowed: bool) {
+        self.inner.nostr_transport.store(allowed, Ordering::Relaxed);
+    }
+
+    /// The transports that this pool lets a payload ride: the relay, as the policy sets it, and
+    /// Nostr, as [`Self::set_nostr_transport`] sets it.
+    pub(crate) fn payload_path(&self) -> PayloadPath {
+        PayloadPath::from_policy(
+            self.inner.relay_transport,
+            self.inner.nostr_transport.load(Ordering::Relaxed),
+        )
     }
 
     /// Report the sends of this pool to `admission`, so that a connection with a send in
@@ -253,6 +271,7 @@ impl UnicastPool {
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
                 relay_transport: false,
+                nostr_transport: AtomicBool::new(false),
                 admission: OnceLock::new(),
                 tally: std_OnceLock::new(),
             }),
@@ -273,7 +292,7 @@ impl UnicastPool {
         let Some(connection) = self.warm(eid).await else {
             return WarmSend::Cold;
         };
-        if !payload_allowed_on(&connection, self.inner.relay_transport) {
+        if !payload_allowed_on(&connection, self.payload_path()) {
             return WarmSend::Refused;
         }
         let pool = self.clone();
@@ -395,7 +414,7 @@ impl UnicastPool {
         let conns = self.inner.conns.lock().await;
         conns.get(&eid).is_some_and(|pooled| {
             pooled.connection.close_reason().is_none()
-                && payload_allowed_on(&pooled.connection, self.inner.relay_transport)
+                && payload_allowed_on(&pooled.connection, self.payload_path())
         })
     }
 
@@ -562,8 +581,13 @@ impl UnicastPool {
         // "no path selected yet" as relay — refusing the *first* directed
         // frame to every peer without a warm connection. Wait like the
         // accept side does, on a dial-sized budget.
-        if !self.inner.relay_transport
-            && !payload_path::wait_direct(&connection, PATH_SELECT_TIMEOUT).await
+        if !self.payload_path().relay_allowed()
+            && !payload_path::wait_payload_path(
+                &connection,
+                PATH_SELECT_TIMEOUT,
+                self.payload_path(),
+            )
+            .await
         {
             bail!("{RELAY_REFUSED}");
         }
