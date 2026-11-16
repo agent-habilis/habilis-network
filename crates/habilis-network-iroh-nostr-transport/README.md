@@ -24,8 +24,20 @@ to it failed.
 
 Fail-over to Nostr is not instant. A connection that loses every path stays selected on the dead
 path until QUIC closes it at the idle timeout. The sweep of the admission table (up to 5 s) then
-reads the pair as unserved, and the pool dials it again with the Nostr address. The pair then
-links over Nostr. Expect about the idle timeout plus the sweep plus one dial.
+reads the pair as unserved. The first dial after the loss names no Nostr address, so it fails. The
+failed dial marks the pair as one that the engine wants Nostr for, and the next dial names the
+Nostr address. The pair then links over Nostr. Expect about the idle timeout, plus the sweep (up
+to 5 s), plus one failed dial, plus one dial.
 
 A gossip link never rides Nostr: the engine closes it with its own code. A pair on Nostr carries
 directed payload, not the mesh topic.
+
+## Reach of the relays
+
+A node listens on every relay of the custom list, up to 4, and sends on the first healthy relay
+of that list. A pair whose two ends cannot both reach the same relay of the list has no Nostr path,
+even when one relay of the list serves both. Nothing logs this. Give both ends the same custom
+list, and choose relays that every member can reach.
+
+The browser data path is proven by compilation and by a case that binds an endpoint and activates
+the transport. No test sends a datagram through the web socket yet.
