@@ -15,13 +15,15 @@ use tokio::time;
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::protocol::meshes::NostrChoice;
+use habilis_network::protocol::meshes::{Mesh, NostrChoice};
 use habilis_network::protocol::messages::Authored;
 use habilis_network::protocol::{LookupOpts, MeshConfig, Nickname, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
+    EventLoopConfig, Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config,
+    setup_mesh,
 };
 use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
+use url::Url;
 
 struct Quiet;
 
@@ -60,30 +62,24 @@ fn a_nostr_only_mesh_binds_no_beacon_and_heals_no_rendezvous() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         // A relay of this machine: a test must not need the internet.
         let relay = TestRelay::spawn().await.expect("test relay");
-        let topic = format!("nostr-only-{}", rand::random::<u64>());
-        let mesh = derive_topic_mesh_config(
-            &topic,
-            MeshConfig::new(
-                LookupOpts::loopback().nostr(NostrChoice::Custom(vec![relay.url()])),
-                None,
-                None,
-                TransportPolicy::default(),
-            ),
-        )
-        .expect("derive a nostr-only mesh");
-        let config = setup_mesh(
-            SetupKind::Topic {
-                mesh,
-                topic_string: topic.clone(),
-            },
-            SetupParams::new(
-                Nickname::try_new("alice").expect("valid nickname"),
-                Arc::new(NoSink),
-            )
-            .max_peers(16),
-        )
-        .await
-        .expect("setup a nostr-only mesh");
+        let nonce: u64 = rand::random();
+        let topic = format!("nostr-only-{nonce}");
+        let urls: Vec<Url> = vec![relay.url()];
+        let lookups = LookupOpts::loopback().nostr(NostrChoice::Custom(urls));
+        let mesh_config = MeshConfig::new(lookups, None, None, TransportPolicy::default());
+        let mesh: Mesh =
+            derive_topic_mesh_config(&topic, mesh_config).expect("derive a nostr-only mesh");
+        let author = Nickname::try_new("alice").expect("valid nickname");
+        // the node keeps the sink for the life of the mesh
+        let sink = Arc::new(NoSink);
+        let params = SetupParams::new(author, sink).max_peers(16);
+        let kind = SetupKind::Topic {
+            mesh,
+            topic_string: topic.clone(),
+        };
+        let config: EventLoopConfig = setup_mesh(kind, params)
+            .await
+            .expect("setup a nostr-only mesh");
         let node = Node::spawn(config, Quiet, None, SignalHandling::Leave);
 
         // Longer than one heal interval (15 s), so a heal tick would have run.

@@ -248,7 +248,8 @@ fn a_webrtc_only_beacon_host_links_its_own_rendezvous() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
-        let topic = format!("scratch-host-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("scratch-host-{nonce}");
         // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
         // each member's sink is shared with the node that writes to it, and the test reads it

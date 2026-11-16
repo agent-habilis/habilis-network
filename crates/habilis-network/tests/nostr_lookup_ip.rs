@@ -14,13 +14,15 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
 use habilis_network::net::TransportOpts;
-use habilis_network::protocol::meshes::NostrChoice;
+use habilis_network::protocol::meshes::{Mesh, NostrChoice};
 use habilis_network::protocol::messages::Authored;
 use habilis_network::protocol::{LookupOpts, MeshConfig, Nickname, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
+    EventLoopConfig, Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config,
+    setup_mesh,
 };
 use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
+use url::Url;
 
 struct Probe;
 
@@ -61,34 +63,29 @@ impl NodeSink for Joined {
     }
 }
 
+// each member's sink is shared with the node that writes to it, and the test reads it
 async fn spawn(topic: &str, nick: &str, relay: &TestRelay, sink: Arc<Joined>) -> Node<Probe> {
-    let mesh = derive_topic_mesh_config(
-        topic,
-        MeshConfig::new(
-            LookupOpts::loopback().nostr(NostrChoice::Custom(vec![relay.url()])),
-            None,
-            None,
-            TransportPolicy::default(),
-        ),
-    )
-    .expect("derive a nostr-only mesh");
-    let config = setup_mesh(
-        SetupKind::Topic {
-            mesh,
-            topic_string: topic.to_owned(),
-        },
-        SetupParams::new(Nickname::try_new(nick).expect("valid nickname"), sink)
-            .max_peers(16)
-            .transports(
-                TransportOpts::default()
-                    .udp(true)
-                    .relay(false)
-                    .webrtc(true)
-                    .gossip(false),
-            ),
-    )
-    .await
-    .expect("setup a nostr-only mesh");
+    let urls: Vec<Url> = vec![relay.url()];
+    let lookups = LookupOpts::loopback().nostr(NostrChoice::Custom(urls));
+    let mesh_config = MeshConfig::new(lookups, None, None, TransportPolicy::default());
+    let mesh: Mesh =
+        derive_topic_mesh_config(topic, mesh_config).expect("derive a nostr-only mesh");
+    let author = Nickname::try_new(nick).expect("valid nickname");
+    let transports: TransportOpts = TransportOpts::default()
+        .udp(true)
+        .relay(false)
+        .webrtc(true)
+        .gossip(false);
+    let params = SetupParams::new(author, sink)
+        .max_peers(16)
+        .transports(transports);
+    let kind = SetupKind::Topic {
+        mesh,
+        topic_string: topic.to_owned(),
+    };
+    let config: EventLoopConfig = setup_mesh(kind, params)
+        .await
+        .expect("setup a nostr-only mesh");
     Node::spawn(config, Probe, None, SignalHandling::Leave)
 }
 
@@ -97,8 +94,11 @@ fn an_ip_pair_found_over_nostr_links_over_ip_with_no_data_channel() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let relay = TestRelay::spawn().await.expect("test relay");
-        let topic = format!("nostr-ip-path-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("nostr-ip-path-{nonce}");
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let alice = spawn(&topic, "alice", &relay, Arc::clone(&alice_saw)).await;
         let bob = spawn(&topic, "bob", &relay, Arc::clone(&bob_saw)).await;

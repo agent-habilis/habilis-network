@@ -14,14 +14,16 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
 use habilis_network::net::TransportOpts;
-use habilis_network::protocol::meshes::NostrChoice;
+use habilis_network::protocol::meshes::{Mesh, NostrChoice};
 use habilis_network::protocol::messages::Authored;
 use habilis_network::protocol::{LookupOpts, MeshConfig, Nickname, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
+    EventLoopConfig, Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config,
+    setup_mesh,
 };
 use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
 use tokio::sync::Notify;
+use url::Url;
 
 struct Probe;
 
@@ -91,6 +93,7 @@ async fn spawn(
     nick: &str,
     relay: &TestRelay,
     ip: bool,
+    // each member's sink is shared with the node that writes to it, and the test reads it
     sink: Arc<Joined>,
 ) -> Node<Probe> {
     spawn_on(topic, nick, &[relay], ip, sink).await
@@ -101,37 +104,30 @@ async fn spawn_on(
     nick: &str,
     relays: &[&TestRelay],
     ip: bool,
+    // each member's sink is shared with the node that writes to it, and the test reads it
     sink: Arc<Joined>,
 ) -> Node<Probe> {
-    let mesh = derive_topic_mesh_config(
-        topic,
-        MeshConfig::new(
-            LookupOpts::loopback().nostr(NostrChoice::Custom(
-                relays.iter().map(|relay| relay.url()).collect(),
-            )),
-            None,
-            None,
-            TransportPolicy::default(),
-        ),
-    )
-    .expect("derive a nostr-only mesh");
-    let config = setup_mesh(
-        SetupKind::Topic {
-            mesh,
-            topic_string: topic.to_owned(),
-        },
-        SetupParams::new(Nickname::try_new(nick).expect("valid nickname"), sink)
-            .max_peers(16)
-            .transports(
-                TransportOpts::default()
-                    .udp(ip)
-                    .relay(false)
-                    .webrtc(true)
-                    .gossip(false),
-            ),
-    )
-    .await
-    .expect("setup a nostr-only mesh");
+    let urls: Vec<Url> = relays.iter().map(|relay| relay.url()).collect();
+    let lookups = LookupOpts::loopback().nostr(NostrChoice::Custom(urls));
+    let mesh_config = MeshConfig::new(lookups, None, None, TransportPolicy::default());
+    let mesh: Mesh =
+        derive_topic_mesh_config(topic, mesh_config).expect("derive a nostr-only mesh");
+    let author = Nickname::try_new(nick).expect("valid nickname");
+    let transports: TransportOpts = TransportOpts::default()
+        .udp(ip)
+        .relay(false)
+        .webrtc(true)
+        .gossip(false);
+    let params = SetupParams::new(author, sink)
+        .max_peers(16)
+        .transports(transports);
+    let kind = SetupKind::Topic {
+        mesh,
+        topic_string: topic.to_owned(),
+    };
+    let config: EventLoopConfig = setup_mesh(kind, params)
+        .await
+        .expect("setup a nostr-only mesh");
     Node::spawn(config, Probe, None, SignalHandling::Leave)
 }
 
@@ -142,8 +138,11 @@ fn two_webrtc_only_nodes_mesh_over_nostr_alone() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let relay = TestRelay::spawn().await.expect("test relay");
-        let topic = format!("nostr-pair-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("nostr-pair-{nonce}");
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let alice = spawn(&topic, "alice", &relay, false, Arc::clone(&alice_saw)).await;
         let bob = spawn(&topic, "bob", &relay, false, Arc::clone(&bob_saw)).await;
@@ -166,9 +165,13 @@ fn a_third_member_joins_a_formed_nostr_mesh() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let relay = TestRelay::spawn().await.expect("test relay");
-        let topic = format!("nostr-trio-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("nostr-trio-{nonce}");
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let carol_saw = Arc::new(Joined::default());
         let alice = spawn(&topic, "alice", &relay, false, Arc::clone(&alice_saw)).await;
         let bob = spawn(&topic, "bob", &relay, false, Arc::clone(&bob_saw)).await;
@@ -193,8 +196,11 @@ fn two_ip_nodes_mesh_over_nostr_by_ip() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let relay = TestRelay::spawn().await.expect("test relay");
-        let topic = format!("nostr-ip-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("nostr-ip-{nonce}");
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let alice = spawn(&topic, "alice", &relay, true, Arc::clone(&alice_saw)).await;
         let bob = spawn(&topic, "bob", &relay, true, Arc::clone(&bob_saw)).await;
@@ -220,12 +226,15 @@ fn a_linked_pair_holds_one_relay_socket() {
             TestRelay::spawn().await.expect("test relay"),
         ];
         let refs: Vec<&TestRelay> = relays.iter().collect();
-        let topic = format!("nostr-width-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("nostr-width-{nonce}");
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let alice = spawn_on(&topic, "alice", &refs, false, Arc::clone(&alice_saw)).await;
         let bob = spawn_on(&topic, "bob", &refs, false, Arc::clone(&bob_saw)).await;
-        let open = || relays.iter().map(TestRelay::connections).sum::<usize>();
+        let open = || -> usize { relays.iter().map(TestRelay::connections).sum() };
         assert!(alice_saw.wait_for("bob", DEADLINE).await, "the pair forms");
 
         let mut narrowed = false;
